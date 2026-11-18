@@ -1036,7 +1036,7 @@ def test_a_storefront_mail_setting_out_of_bounds_is_refused(
 
 def test_filament_settings_round_trip(client: TestClient) -> None:
     body = client.get("/api/v1/settings").json()
-    assert body["filament_sync"] == {"spools": "bb_to_sb", "tags": "off"}
+    assert body["filament_sync"] == {"spools": "bb_to_sb", "tags": "off", "weights": "bb_to_sb"}
     assert body["filament_low_stock_pct"] == 20
     assert body["filament_default_cost_per_kg"] is None
     saved = client.put(
@@ -1049,7 +1049,12 @@ def test_filament_settings_round_trip(client: TestClient) -> None:
     )
     assert saved.status_code == 200, saved.text
     again = client.get("/api/v1/settings").json()
-    assert again["filament_sync"] == {"spools": "off", "tags": "off"}
+    assert again["filament_sync"] == {"spools": "off", "tags": "off", "weights": "bb_to_sb"}
+    saved = client.put(
+        "/api/v1/settings", json={"filament_sync": {"spools": "off", "weights": "off"}}
+    )
+    assert saved.status_code == 200, saved.text
+    assert client.get("/api/v1/settings").json()["filament_sync"]["weights"] == "off"
     assert again["filament_low_stock_pct"] == 35
     assert Decimal(again["filament_default_cost_per_kg"]) == Decimal("24.50")
     assert again["applies"]["filament_low_stock_pct"] == "live"
@@ -1058,7 +1063,12 @@ def test_filament_settings_round_trip(client: TestClient) -> None:
         client.put("/api/v1/settings", json={"filament_default_cost_per_kg": "-1"}).status_code
         == 422
     )
-    for bad in ({"spools": "two_way"}, {"spools": "off", "extra": 1}, {"tags": "bb_to_sb"}):
+    for bad in (
+        {"spools": "two_way"},
+        {"spools": "off", "extra": 1},
+        {"tags": "bb_to_sb"},
+        {"weights": "sb_to_bb"},
+    ):
         assert client.put("/api/v1/settings", json={"filament_sync": bad}).status_code == 422
 
 

@@ -71,7 +71,7 @@ def test_a_spool_is_made_with_a_created_event_and_its_effective_values(pg_pool: 
 
 
 def test_a_backwards_effective_range_is_refused(pg_pool: PgPool) -> None:
-    store = FilamentSpoolStore(pg_pool)
+    store = FilamentSpoolStore(pg_pool, now=lambda: datetime(2026, 11, 18, tzinfo=UTC))
     kind = SpoolTypeStore(pg_pool).create(
         SpoolTypeCreate(
             code="PLA-BLU",

@@ -86,7 +86,7 @@ from scadbuddy.bambuddy.models import Archive, SpoolAssignment, SpoolCatalogEntr
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import bambuddy_usage, ledger
+from scadbuddy.filament import bambuddy_usage, ledger, sensors
 from scadbuddy.filament import models as m
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.component import Filament
@@ -240,6 +240,7 @@ def pull(
     now: datetime,
     actor: str = ACTOR,
     catalog: Sequence[SpoolCatalogEntry] = (),
+    weights: bool = True,
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
     says, after ``catalog`` (BB's spool catalog) is mapped to insert types. ``now`` is the
@@ -256,7 +257,7 @@ def pull(
         try:
             with store.spools.transaction() as conn:
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
-                outcome = _one(conn, store, bb, now, actor)
+                outcome = _one(conn, store, bb, now, actor, weights)
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
@@ -356,7 +357,7 @@ def _core_insert_type(conn: Conn, bb: BbSpool) -> UUID | None:
 
 
 def _one(
-    conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str
+    conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str, weights: bool = True
 ) -> tuple[str, UUID | None, bool] | None:
     """What came of one BB spool. An archived SB spool, linked or named by the BB
     record's link, is left as it is: never restored, never written to (``archived``)."""
@@ -370,10 +371,10 @@ def _one(
         spool_id: UUID = link["spool_id"]
         if link["archived"]:
             return "archived", spool_id, False
-        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor)
+        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor, weights)
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
-        booked = _book(conn, spool_id, bb, actor)
+        booked = _book(conn, spool_id, bb, actor, weights)
         presets = _bb_presets(conn, spool_id, bb, actor)
         return ("updated", spool_id, False) if changed or booked or presets else None
     after = snapshot(bb)
@@ -382,8 +383,8 @@ def _one(
         held_id, archived = held
         if archived:
             return "archived", held_id, False
-        typeless = _link(conn, store, bb, held_id, after, now, actor)
-        _book(conn, held_id, bb, actor)
+        typeless = _link(conn, store, bb, held_id, after, now, actor, weights)
+        _book(conn, held_id, bb, actor, weights)
         _bb_presets(conn, held_id, bb, actor)
         return "linked", held_id, typeless
     linked_holder = _linked_holder(conn, after)
@@ -410,7 +411,7 @@ def _one(
         # shows, but it is still the spool Bambuddy added for a tag SB holds.
         return "duplicate", None, False
     made, typeless = _create(conn, store, bb, after, now, actor)
-    _book(conn, made, bb, actor)
+    _book(conn, made, bb, actor, weights)
     _bb_presets(conn, made, bb, actor)
     return "created", made, typeless
 
@@ -581,6 +582,7 @@ def _link(
     after: dict[str, Any],
     now: datetime,
     actor: str,
+    weights: bool = True,
 ) -> bool:
     """Link the SB spool and keep what it has; a spool with no type takes the one BB's
     values match (dropping its ``migrated`` presets, `presets.drop_migrated`), and one
@@ -608,7 +610,7 @@ def _link(
     if insert is not None:
         changes["insert_type_id"] = insert
     reading = after["remaining_g"]
-    if current["grams_left"] is not None or current["weight_locked"]:
+    if not weights or current["grams_left"] is not None or current["weight_locked"]:
         reading = None
     _insert_link(conn, spool_id, bb, now)
     _synced(conn, spool_id, bb, after, changes, reading, actor, linked=True)
@@ -752,6 +754,7 @@ def _update(
     pulled_at: datetime | None,
     now: datetime,
     actor: str,
+    weights: bool = True,
 ) -> bool:
     """True when the SB spool took anything from BB."""
     unmoved = bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at
@@ -865,7 +868,7 @@ def _update(
     reading = after["remaining_g"]
     locked = bool(changes.get("weight_locked", [None, spool.weight_locked])[1])
     weight: str | None = None
-    if reading is None or reading == before.get("remaining_g"):
+    if not weights or reading is None or reading == before.get("remaining_g"):
         reading = None
     elif locked:
         reading, weight = None, "locked"
@@ -914,7 +917,7 @@ def _core_g(conn: Conn, spool_id: UUID, bb: BbSpool) -> tuple[int | None, str | 
     return None, None
 
 
-def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
+def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = True) -> bool:
     """BB's last weighing as a ``weighed`` event and its last drying as a ``dried`` one,
     each once: ref ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``, at BB's time. The
     weighing has source ``scale`` (it is a scale reading, #6263), the drying ``bb``. The
@@ -922,9 +925,12 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
     (`_core_g`), the gross kept in ``data``; with no core weight known it books no
     reading. A weighing is a physical reading, so it counts under the weight lock, which
     guards against estimates (§5.5). The ledger's rule picks the anchor: the weighing wins
-    when it is the newest reading. True when either is new."""
+    when it is the newest reading. With ``weights`` False (``filament_sync.weights`` off)
+    the weighing is not booked, and `_update` and `_link` book no ``bb`` reading either;
+    `_create` keeps its first one, as a new spool needs a starting weight. True when either
+    is new."""
     booked = False
-    if bb.last_weighed_at is not None and bb.last_scale_weight is not None:
+    if weights and bb.last_weighed_at is not None and bb.last_scale_weight is not None:
         gross = float(bb.last_scale_weight)
         core, came_from = _core_g(conn, spool_id, bb)
         data: dict[str, Any] = {"bb_gross_g": gross}
@@ -1110,7 +1116,7 @@ def parse_rows(rows: Sequence[Any]) -> tuple[list[BbSpool], list[int | None]]:
 
 
 async def read_and_pull(
-    store: Filament, settings: StoredSettings, *, actor: str = ACTOR
+    store: Filament, settings: StoredSettings, *, actor: str = ACTOR, weights: bool = True
 ) -> PullReport:
     """Read BB's unarchived spools and pull them; a malformed row is skipped and counted
     as ``invalid``. Then book BB's usage rows (`bambuddy_usage.py`). BB not configured is
@@ -1143,7 +1149,14 @@ async def read_and_pull(
     spools, bad = parse_rows(rows)
     catalog = await read_catalog(settings)
     report = await asyncio.to_thread(
-        lambda: pull(store, spools, now=datetime.now(UTC), actor=actor, catalog=catalog or ())
+        lambda: pull(
+            store,
+            spools,
+            now=datetime.now(UTC),
+            actor=actor,
+            catalog=catalog or (),
+            weights=weights,
+        )
     )
     report.catalog_failed = report.catalog_failed or catalog is None
     report.invalid = len(bad)
@@ -1275,22 +1288,55 @@ async def try_assignments(settings: StoredSettings) -> list[SpoolAssignment] | N
     return None
 
 
+async def read_ha_sensors(store: Filament, settings: StoredSettings, now: datetime) -> None:
+    """Read Bambuddy's Home Assistant states into the location sensors (#6268): one GET,
+    and none when no Home Assistant sensor is set up. A state is a reading at ``now`` (see
+    `sensors.apply_ha_states_on`). It never fails the pull: a failure is logged with its
+    type only, and every Home Assistant sensor is marked unreachable (it got no number)."""
+    try:
+        if not any(
+            s.source == "home_assistant" for s in await asyncio.to_thread(store.sensors.list, None)
+        ):
+            return
+        async with client_for(settings) as client:
+            entities = await client.ha_entities(None)
+        states = {e.entity_id: e.state for e in entities}
+        await asyncio.to_thread(_apply_ha, store, states, now)
+    except Exception as error:
+        _failed("could not read Bambuddy's Home Assistant sensors", error)
+        try:
+            await asyncio.to_thread(_apply_ha, store, {}, now)
+        except Exception as again:
+            _failed("could not mark the Home Assistant sensors unreachable", again)
+
+
+def _apply_ha(store: Filament, states: dict[str, str | None], now: datetime) -> None:
+    with store.spools.transaction() as conn:
+        sensors.apply_ha_states_on(conn, states, now)
+
+
 async def scheduled_pull(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> Outcome:
     """The Schedule's pull (`SpoolRefresh`): ``skipped`` with ``filament_sync.spools``
     ``off`` (no spool pulled, no usage row booked) or no BB URL,
     ``failed`` when BB or the store fails (logged, never raised),
-    else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13)."""
-    if (await asyncio.to_thread(sync)).spools == "off":
+    else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13). Whenever a
+    BB URL is set, it first reads the Home Assistant sensors (`read_ha_sensors`), before
+    the spools gate and whatever ``sync`` says: sensors are not spool data."""
+    settings = await asyncio.to_thread(load)
+    if settings.bambuddy_url:
+        # Sensors are not spool data: read whatever ``filament_sync`` says.
+        await read_ha_sensors(store, settings, datetime.now(UTC))
+    filament_sync = await asyncio.to_thread(sync)
+    if filament_sync.spools == "off":
         logger.info("Bambuddy's spools are not pulled: the Filament sync is off")
         return "skipped"
-    settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
         logger.info("no Bambuddy configured; its spools are not pulled")
         return "skipped"
     try:
-        report = await read_and_pull(store, settings)
+        report = await read_and_pull(store, settings, weights=filament_sync.weights != "off")
     except Exception as error:
         logger.warning(
             "could not pull Bambuddy's spools",

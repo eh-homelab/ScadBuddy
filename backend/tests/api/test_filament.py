@@ -442,6 +442,27 @@ def test_the_bambuddy_import_needs_bambuddy(client: TestClient) -> None:
 
 
 @respx.mock
+def test_the_bambuddy_import_reads_the_weights_setting(client: TestClient) -> None:
+    configure(client, filament_sync={"weights": "off"})
+    bb = {
+        "id": 41,
+        "material": "PLA",
+        "rgba": "00FF00",
+        "label_weight": 1000,
+        "weight_used": 250.0,
+        "core_weight": 250,
+        "last_scale_weight": 700,
+        "last_weighed_at": "2026-11-14T10:00:00",
+        "updated_at": "2026-11-14T10:00:00",
+    }
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[bb]))
+    respx.get(f"{API}/inventory/catalog").mock(return_value=httpx.Response(200, json=[]))
+    (spool_id,) = client.post(IMPORT_BB).json()["created_ids"]
+    events = client.get(f"/api/v1/filament/spools/{spool_id}/events").json()
+    assert [e for e in events if e["kind"] == "weighed"] == []
+
+
+@respx.mock
 def test_the_bambuddy_import_pulls_once_then_changes_nothing(client: TestClient) -> None:
     configure(client)
     bb = {
@@ -800,6 +821,111 @@ def test_a_retried_import_writes_once(client: TestClient) -> None:
         IMPORT, json=body | {"rows": [{"material": "PETG"}]}, headers={"Idempotency-Key": "k-2"}
     )
     assert other.status_code == 422, other.text
+
+
+# -- location sensors (#6268) ----------------------------------------------------------
+
+SENSORS = "/api/v1/filament/sensors"
+
+
+def _sensor_body(client: TestClient, **over: object) -> dict[str, object]:
+    place = _location(client, f"Box {uuid4().hex[:6]}")
+    return {
+        "location_id": place["id"],
+        "source": "home_assistant",
+        "kind": "humidity",
+        "entity_id": "sensor.box",
+        "name": "Box humidity",
+        "unit": "%",
+        **over,
+    }
+
+
+def test_a_sensor_is_made_listed_changed_and_archived(client: TestClient) -> None:
+    body = _sensor_body(client)
+    made = client.post(SENSORS, json=body)
+    assert made.status_code == 201, made.text
+    sensor = made.json()
+    assert (sensor["name"], sensor["reachable"], sensor["last_value"]) == (
+        "Box humidity",
+        True,
+        None,
+    )
+    assert [s["id"] for s in client.get(SENSORS).json()] == [sensor["id"]]
+    assert client.get(SENSORS, params={"location_id": body["location_id"]}).json()
+    assert client.get(SENSORS, params={"location_id": MISSING}).json() == []
+    changed = client.patch(f"{SENSORS}/{sensor['id']}", json={"name": "Dry box", "alert_above": 55})
+    assert changed.status_code == 200, changed.text
+    assert (changed.json()["name"], changed.json()["alert_above"]) == ("Dry box", 55)
+    assert client.post(f"{SENSORS}/{sensor['id']}/archive").status_code == 204
+    assert client.get(SENSORS).json() == []
+    assert client.post(f"{SENSORS}/{sensor['id']}/archive").status_code == 404
+    assert client.patch(f"{SENSORS}/{sensor['id']}", json={"name": "x"}).status_code == 404
+
+
+def test_a_sensor_by_hand_is_not_an_ams_one(client: TestClient) -> None:
+    refused = client.post(
+        SENSORS,
+        json=_sensor_body(client, source="ams", entity_id=None, printer_id=MISSING, ams_id=0),
+    )
+    assert refused.status_code == 422, refused.text
+    assert "ams" in refused.text.lower()
+
+
+def test_a_bad_sensor_is_refused(client: TestClient) -> None:
+    assert client.post(SENSORS, json=_sensor_body(client, entity_id=None)).status_code == 422
+    nowhere = client.post(SENSORS, json=_sensor_body(client, location_id=MISSING))
+    assert nowhere.status_code == 422, nowhere.text
+    assert client.patch(f"{SENSORS}/{MISSING}", json={"name": ""}).status_code == 422
+
+
+def test_a_sensors_readings_are_read_from_a_time(client: TestClient, pg_conninfo: str) -> None:
+    sensor = client.post(SENSORS, json=_sensor_body(client)).json()
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        for minute, value in ((0, 40.0), (1, 41.0), (2, 42.0)):
+            conn.execute(
+                "INSERT INTO filament_sensor_readings (sensor_id, at, value) VALUES (%s, %s, %s)",
+                (sensor["id"], datetime(2026, 11, 18, 12, minute, tzinfo=UTC), value),
+            )
+    url = f"{SENSORS}/{sensor['id']}/readings"
+    got = client.get(url, params={"since": "2026-11-18T12:01:00Z"})
+    assert got.status_code == 200, got.text
+    assert [r["value"] for r in got.json()] == [41.0, 42.0]
+    limited = client.get(url, params={"since": "2026-11-18T00:00:00Z", "limit": 2}).json()
+    # With more rows than the limit, the newest come, still oldest first.
+    assert [r["value"] for r in limited] == [41.0, 42.0]
+    assert client.get(f"{SENSORS}/{MISSING}/readings").status_code == 404
+    assert client.get(url, params={"limit": 0}).status_code == 422
+
+
+def test_the_ha_entities_need_bambuddy(client: TestClient) -> None:
+    refused = client.get(f"{SENSORS}/entities")
+    assert refused.status_code == 409, refused.text
+    assert "Bambuddy" in refused.text
+
+
+@respx.mock
+def test_the_ha_entities_are_proxied_and_not_taken_for_a_sensor(client: TestClient) -> None:
+    configure(client)
+    route = respx.get(f"{API}/location-ha-sensors/entities").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "entity_id": "sensor.box",
+                    "friendly_name": "Box",
+                    "state": "20",
+                    "domain": "sensor",
+                    "device_class": "humidity",
+                    "unit_of_measurement": "%",
+                }
+            ],
+        )
+    )
+    got = client.get(f"{SENSORS}/entities", params={"search": "box"})
+    assert got.status_code == 200, got.text
+    assert got.json()[0]["entity_id"] == "sensor.box"
+    assert route.calls.last.request.url.params["search"] == "box"
 
 
 def test_the_route_answers_422_for_an_override_on_an_ntag(client: TestClient) -> None:
@@ -1198,3 +1324,10 @@ def test_a_device_id_that_is_not_one_path_segment_is_a_422(
             refused = client.post(path, json=body)
             assert refused.status_code == 422, (path, bad, refused.text)
     assert len(respx.calls) == 0
+
+
+def test_a_patch_that_inverts_the_stored_band_is_refused(client: TestClient) -> None:
+    made = client.post(SENSORS, json=_sensor_body(client, alert_above=60)).json()
+    refused = client.patch(f"{SENSORS}/{made['id']}", json={"alert_below": 80})
+    assert refused.status_code == 422, refused.text
+    assert "alert_below must be under alert_above" in refused.text

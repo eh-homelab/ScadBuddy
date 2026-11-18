@@ -26,6 +26,7 @@ from scadbuddy.filament.bambuddy_pull import (
     read_and_pull,
     read_assignments,
     read_catalog,
+    read_ha_sensors,
     scheduled_pull,
     try_assignments,
 )
@@ -37,7 +38,10 @@ from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
     InsertType,
     InsertTypeCreate,
+    LocationCreate,
+    LocationKind,
     Material,
+    SensorIn,
     SpoolCreate,
     SpoolPatch,
     SpoolTypeCreate,
@@ -46,6 +50,7 @@ from scadbuddy.filament.models import (
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
 from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
@@ -70,6 +75,7 @@ def _filament(pool: PgPool) -> Filament:
         types=types,
         spools=spools,
         locations=LocationStore(pool),
+        sensors=SensorStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
         rfid=RfidModeStore(pool),
@@ -749,6 +755,81 @@ def test_a_bb_weighing_is_a_scale_reading(pg_pool: PgPool, locked: bool, left: f
     spool = f.spools.get(made)
     assert spool is not None
     assert spool.grams_left == left
+
+
+def test_weights_off_books_no_bb_weighing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    (made,) = pull(f, [weighed], now=NOW, weights=False).created_ids
+    pull(f, [weighed], now=NOW, weights=False)
+    assert [e for e in f.spools.events(made) if e.ref_kind == "bb_scale"] == []
+
+
+def _bb_readings(f: Filament, spool: UUID) -> list[float | None]:
+    return [e.grams_after for e in f.spools.events(spool) if e.source == "bb"]
+
+
+def test_weights_off_books_no_bb_reading_on_an_update(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, weights=False)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 900
+    assert _bb_readings(f, made) == [900]
+
+
+def test_weights_off_books_no_bb_reading_on_a_link(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    held = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    pull(f, [bb()], now=NOW, weights=False)
+    spool = f.spools.get(held.id)
+    assert spool is not None
+    assert spool.grams_left is None
+    assert _bb_readings(f, held.id) == []
+
+
+def test_weights_off_still_books_a_new_spools_first_reading(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW, weights=False).created_ids
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.grams_left == 900
+    assert _bb_readings(f, made) == [900]
+
+
+def test_weights_bb_to_sb_books_a_bb_reading_on_an_update(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, weights=True)
+    assert _bb_readings(f, made) == [900, 700]
+
+
+def test_weights_bb_to_sb_books_the_bb_weighing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    (made,) = pull(f, [weighed], now=NOW, weights=True).created_ids
+    assert [e.ref_kind for e in f.spools.events(made) if e.kind == "weighed"] == ["bb_scale"]
+
+
+async def test_a_scheduled_pull_with_weights_off_books_no_bb_weighing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    weighed = bb(
+        core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
+    )
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock() as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[weighed.model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        outcome = await scheduled_pull(f, lambda: settings, lambda: FilamentSync(weights="off"))
+    assert outcome == "pulled"
+    (made,) = [s.id for s in f.spools.list()]
+    assert [e for e in f.spools.events(made) if e.ref_kind == "bb_scale"] == []
 
 
 def test_a_bb_weighing_is_net_of_the_sb_insert_type(pg_pool: PgPool) -> None:
@@ -1542,6 +1623,129 @@ async def test_a_payload_of_another_shape_logs_no_value_from_it(
     assert caplog.text.count("another shape") == 2
     assert "ValidationError" in caplog.text
     assert secret not in caplog.text
+
+
+# -- Home Assistant sensors through Bambuddy (#6268) --------------------------------------
+
+ENTITIES = f"{BB}/api/v1/location-ha-sensors/entities"
+
+
+def _ha_sensor(pool: PgPool, entity: str, **extra: Any) -> UUID:
+    kinds = CatalogStore(pool).list("location-kinds")
+    kind = next(r.id for r in kinds if isinstance(r, LocationKind) and r.name == "Shelf")
+    place = LocationStore(pool).create(LocationCreate(name=f"Box {entity}", kind_id=kind)).id
+    body = SensorIn.model_validate(
+        {
+            "location_id": place,
+            "source": "home_assistant",
+            "kind": "humidity",
+            "entity_id": entity,
+            "name": entity,
+            **extra,
+        }
+    )
+    return SensorStore(pool).create(body, actor="ann").id
+
+
+def _sensor_row(pool: PgPool, sensor: UUID) -> tuple[float | None, bool, int]:
+    (got,) = [s for s in SensorStore(pool).list(None) if s.id == sensor]
+    return got.last_value, got.reachable, len(SensorStore(pool).readings(sensor, NOW - HOUR, 99))
+
+
+HOUR = timedelta(hours=1)
+
+
+def _entity(entity: str, state: str | None) -> dict[str, Any]:
+    return {"entity_id": entity, "friendly_name": entity, "state": state, "domain": "sensor"}
+
+
+async def test_ha_states_become_readings(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    a, b = _ha_sensor(pg_pool, "sensor.a"), _ha_sensor(pg_pool, "sensor.b")
+    other = _ha_sensor(pg_pool, "sensor.not_listed")
+    with respx.mock() as router:
+        route = router.get(ENTITIES).respond(
+            json=[_entity("sensor.a", "18.4"), _entity("sensor.b", "-3"), _entity("sensor.x", "9")]
+        )
+        await read_ha_sensors(f, settings, NOW)
+        assert route.call_count == 1
+    assert _sensor_row(pg_pool, a) == (18.4, True, 1)
+    assert _sensor_row(pg_pool, b) == (-3.0, True, 1)
+    # An entity Bambuddy does not list cannot be read: unreachable, nothing stored.
+    assert _sensor_row(pg_pool, other) == (None, False, 0)
+    got = {s.id: s.last_at for s in SensorStore(pg_pool).list(None)}
+    assert got[a] == NOW
+
+
+@pytest.mark.parametrize(
+    "state", ["unavailable", "unknown", "45.2 %", "", "nan", "inf", "9" * 400, None]
+)
+async def test_a_non_numeric_state_marks_unreachable(pg_pool: PgPool, state: str | None) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    sensor = _ha_sensor(pg_pool, "sensor.a")
+    with respx.mock() as router:
+        router.get(ENTITIES).respond(json=[_entity("sensor.a", "20")])
+        await read_ha_sensors(f, settings, NOW)
+        assert _sensor_row(pg_pool, sensor) == (20.0, True, 1)
+    with respx.mock() as router:
+        router.get(ENTITIES).respond(json=[_entity("sensor.a", state)])
+        await read_ha_sensors(f, settings, NOW + timedelta(minutes=5))
+    # Nothing stored, the last value stays, and the sensor is unreachable.
+    assert _sensor_row(pg_pool, sensor) == (20.0, False, 1)
+    with respx.mock() as router:
+        router.get(ENTITIES).respond(json=[_entity("sensor.a", "21")])
+        await read_ha_sensors(f, settings, NOW + timedelta(minutes=10))
+    assert _sensor_row(pg_pool, sensor) == (21.0, True, 2)
+
+
+async def test_no_ha_sensor_means_no_read(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get(ENTITIES).respond(json=[])
+        await read_ha_sensors(f, settings, NOW)
+        assert not route.called
+
+
+async def test_a_failed_ha_read_never_fails_the_pull(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    sensor = _ha_sensor(pg_pool, "sensor.a")
+    with respx.mock() as router:
+        router.get(ENTITIES).respond(503)
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        assert await scheduled_pull(f, lambda: settings, FilamentSync) == "pulled"
+    assert "could not read Bambuddy's Home Assistant sensors" in caplog.text
+    assert _sensor_row(pg_pool, sensor)[2] == 0
+    # Reachable means the last read gave a number: a failed read says no.
+    assert _sensor_row(pg_pool, sensor)[1] is False
+
+
+async def test_the_ha_read_runs_with_the_spools_off(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    sensor = _ha_sensor(pg_pool, "sensor.a")
+    with respx.mock(assert_all_called=False) as router:
+        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(json=[])
+        router.get(ENTITIES).respond(json=[_entity("sensor.a", "33")])
+        outcome = await scheduled_pull(f, lambda: settings, lambda: FilamentSync(spools="off"))
+        assert outcome == "skipped"
+        assert not spools.called
+    assert _sensor_row(pg_pool, sensor)[0] == 33.0
+
+
+async def test_the_ha_read_needs_bambuddy_configured(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _ha_sensor(pg_pool, "sensor.a")
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get(ENTITIES).respond(json=[])
+        assert await scheduled_pull(f, lambda: StoredSettings(), FilamentSync) == "skipped"
+        assert not route.called
 
 
 def _bound_kind(pool: PgPool, spool: UUID) -> str:

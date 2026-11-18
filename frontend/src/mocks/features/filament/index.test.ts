@@ -188,7 +188,7 @@ describe('the filament mocks', () => {
     expect(await refusal(moveSpool(spoolId(9), NOBODY))).toEqual({
       status: 422,
       title: 'Unprocessable Content',
-      detail: 'the place to move to does not exist or is archived',
+      detail: "the place to move to does not exist, is archived or is an AMS unit's place",
     })
   })
 

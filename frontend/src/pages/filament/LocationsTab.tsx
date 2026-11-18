@@ -5,11 +5,13 @@ import { ApiError } from '../../api/client'
 import {
   listCatalog,
   listLocations,
+  listSensors,
   listSpools,
   upsertLocation,
   type LocationCreate,
   type LocationNode,
   type LocationPatch,
+  type Sensor,
   type Spool,
 } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -74,6 +76,8 @@ export function LocationsTab() {
   const [formError, setFormError] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [saving, setSaving] = useState(false)
+  const [sensors, setSensors] = useState<Sensor[]>([])
+  const [sensorsError, setSensorsError] = useState(false)
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -93,9 +97,27 @@ export function LocationsTab() {
     }
   }, [archived])
 
+  /** The sensors load apart from the places, so a sensors failure leaves the tree usable. */
+  const latestSensors = useRef(0)
+  const loadSensors = useCallback(async () => {
+    const mine = ++latestSensors.current
+    try {
+      const rows = await listSensors()
+      if (mine !== latestSensors.current) return
+      setSensors(rows)
+      setSensorsError(false)
+    } catch {
+      if (mine === latestSensors.current) setSensorsError(true)
+    }
+  }, [])
+
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    void loadSensors()
+  }, [loadSensors])
 
   const kinds = useMemo(() => new Map((data?.kinds ?? []).map((kind) => [kind.id, kind.name])), [data])
   const spoolsAt = useMemo(() => {
@@ -105,6 +127,11 @@ export function LocationsTab() {
     }
     return at
   }, [data])
+  const sensorsAt = useMemo(() => {
+    const at = new Map<string, Sensor[]>()
+    for (const sensor of sensors) at.set(sensor.location_id, [...(at.get(sensor.location_id) ?? []), sensor])
+    return at
+  }, [sensors])
   const places = useMemo(() => flatten(data?.nodes ?? []), [data])
 
   function open(node?: LocationNode) {
@@ -276,7 +303,17 @@ export function LocationsTab() {
           </div>
         </form>
       )}
-      {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
+      {sensorsError && (
+        <div className="flex items-center gap-3 text-[13px]">
+          <p role="alert" className="text-warn">
+            The sensors could not be loaded. The places below are still right.
+          </p>
+          <Button type="button" size="sm" variant="outline" onClick={() => void loadSensors()}>
+            Retry
+          </Button>
+        </div>
+      )}
+      {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} sensorsAt={sensorsAt} onSensorsChanged={() => void loadSensors()} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
     </div>
   )
 }

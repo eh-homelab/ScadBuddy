@@ -1,7 +1,8 @@
 import { ArchiveIcon, ArchiveRestoreIcon, PencilIcon } from 'lucide-react'
 import { Link } from 'react-router'
-import type { LocationNode, Spool } from '../../api/filament'
+import type { LocationNode, Sensor, Spool } from '../../api/filament'
 import { Button } from '@/components/ui/button'
+import { LocationSensors } from './LocationSensors'
 import { spoolPath } from './spoolsQuery'
 
 export interface LocationTreeProps {
@@ -10,6 +11,9 @@ export interface LocationTreeProps {
   kinds: ReadonlyMap<string, string>
   /** The unarchived spools in each place, by place id. */
   spoolsAt: ReadonlyMap<string, Spool[]>
+  /** The unarchived sensors in each place, by place id. */
+  sensorsAt: ReadonlyMap<string, Sensor[]>
+  onSensorsChanged: () => void
   onEdit: (node: LocationNode) => void
   onArchive: (node: LocationNode, archived: boolean) => void
 }
@@ -64,6 +68,15 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
             </li>
           ))}
         </ul>
+      )}
+      {!archived && (
+        <LocationSensors
+          locationId={node.id}
+          locationName={node.name}
+          sensors={tree.sensorsAt.get(node.id) ?? []}
+          canAdd={!tray}
+          onChanged={tree.onSensorsChanged}
+        />
       )}
       {(node.children ?? []).length > 0 && (
         <ul className="ml-4 border-l pl-3">
