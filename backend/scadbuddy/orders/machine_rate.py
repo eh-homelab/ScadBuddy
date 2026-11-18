@@ -87,6 +87,8 @@ Reading = Annotated[str, _places(1, 10**9)]
 #: #5774 §3.3: the window's default and its bounds (``printer_cost_profiles.actuals_window``).
 DEFAULT_WINDOW = 3
 MAX_WINDOW = 20
+#: §3.6: the LAN counter's offset for a new profile, or a printer with none.
+DEFAULT_LAN_OFFSET = "0"
 
 
 class CostProfile(BaseModel):
@@ -103,10 +105,11 @@ class CostProfile(BaseModel):
     labour_rate_per_hour: LabourRate | None = None
     #: #5774 (spec 2026-11-17-machine-rate-actuals §3.3): how many usable gaps or
     #: replacements a row needs before its actual prices. Left out of a `PUT`: kept as
-    #: stored (3 for a new profile), so a client that does not know it never resets it.
+    #: stored (``DEFAULT_WINDOW`` for a new profile), so a client that does not know it
+    #: never resets it.
     actuals_window: int | None = Field(default=None, ge=1, le=MAX_WINDOW)
     #: §3.6: the hours a LAN-linked printer ran before ScadBuddy's counter watched it.
-    #: Left out: kept as stored (0 for a new profile).
+    #: Left out: kept as stored (``DEFAULT_LAN_OFFSET`` for a new profile).
     lan_hours_offset: Reading | None = None
 
     @property
@@ -1020,7 +1023,7 @@ class MachineRateStore:
                 "INSERT INTO printer_cost_profiles (printer, purchase_price, life_hours, watts,"
                 " kwh_price, labour_rate_per_hour, actuals_window, lan_hours_offset)"
                 " VALUES (%s, %s, %s, %s, %s, %s,"
-                " coalesce(%s::integer, 3), coalesce(%s::numeric, 0))"
+                " coalesce(%s::integer, %s), coalesce(%s::numeric, %s::numeric))"
                 " ON CONFLICT (printer) DO UPDATE SET purchase_price = EXCLUDED.purchase_price,"
                 " life_hours = EXCLUDED.life_hours, watts = EXCLUDED.watts,"
                 " kwh_price = EXCLUDED.kwh_price,"
@@ -1036,7 +1039,9 @@ class MachineRateStore:
                     profile.kwh_price,
                     profile.labour_rate_per_hour,
                     profile.actuals_window,
+                    DEFAULT_WINDOW,
                     profile.lan_hours_offset,
+                    DEFAULT_LAN_OFFSET,
                     profile.actuals_window,
                     profile.lan_hours_offset,
                 ),
@@ -1330,11 +1335,11 @@ class MachineRateStore:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT h.run_seconds, h.unseen_seconds, h.counted_to, h.started_at,"
-                " coalesce(c.lan_hours_offset, 0) AS offset_hours"
+                " coalesce(c.lan_hours_offset, %s::numeric) AS offset_hours"
                 " FROM printer_run_hours AS h"
                 " LEFT JOIN printer_cost_profiles AS c ON c.printer = h.printer"
                 " WHERE h.printer = %s",
-                (key,),
+                (DEFAULT_LAN_OFFSET, key),
             ).fetchone()
         if row is None:
             return None
