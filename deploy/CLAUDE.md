@@ -5,7 +5,7 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
 ## Layout
 - `deploy/grafana/` — the ScadBuddy Grafana dashboards (#988, tracing spec §7): the
   overview `scadbuddy.json` (uid `scadbuddy`; never change it) and one `<name>.json` per
-  area (`scadbuddy-api`, `-web`, `-renders`, `-printing`, `-agent`), each with uid
+  area (`scadbuddy-api`, `-web`, `-renders`, `-printing`, `-agent`, `-filament`), each with uid
   `<name>` and its own `configMapGenerator` ConfigMap `<name>-dashboard` in
   `cattle-dashboards` for the rancher-monitoring sidecar, datasources only as the
   `DS_PROMETHEUS`/`DS_TEMPO` variables. A new dashboard is a new file plus its

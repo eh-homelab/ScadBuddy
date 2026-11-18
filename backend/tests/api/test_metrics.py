@@ -10,10 +10,13 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import AppState
+from scadbuddy.api import metrics as api_metrics
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
 from scadbuddy.api.metrics import refresh_asset_metrics
 from scadbuddy.core.metrics import Metrics
+from scadbuddy.filament.component import FILAMENT
+from scadbuddy.filament.metrics_models import Snapshot
 from scadbuddy.library.assets import AssetStore
 from tests.api.conftest import wait_for_job
 from tests.support.operations import press
@@ -140,3 +143,84 @@ def test_a_body_refused_on_its_size_is_counted(client: TestClient) -> None:
 
     text = client.get("/metrics").text
     assert 'method="POST",route="other",status="413"' in text
+
+
+class _Clock:
+    """The filament refresh's clock, moved by hand."""
+
+    def __init__(self) -> None:
+        self.at = 1000.0
+
+    def __call__(self) -> float:
+        return self.at
+
+
+class _Snapshots:
+    """A stand-in for `MetricsStore.snapshot` that counts its calls and can fail."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.fail = False
+
+    def __call__(self) -> Snapshot:
+        self.calls += 1
+        if self.fail:
+            raise psycopg.OperationalError("down")
+        return Snapshot(
+            stock=[("PLA", "Bambu", "Shelf", 2, 1500.0, None)],
+            used={},
+            burn={},
+            days_of_stock={},
+            low_stock={},
+            reorder={},
+            currency="USD",
+        )
+
+
+@pytest.fixture
+def filament_scrape(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> tuple[_Clock, _Snapshots]:
+    """The scrape's filament refresh on a hand-moved clock and a fake snapshot."""
+    clock = _Clock()
+    defaults = api_metrics.refresh_filament_metrics.__kwdefaults__
+    assert defaults is not None
+    monkeypatch.setitem(defaults, "now", clock)
+    snapshots = _Snapshots()
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(state.components.get(FILAMENT).metrics, "snapshot", snapshots)
+    return clock, snapshots
+
+
+STOCK = 'scadbuddy_filament_stock_grams{brand="Bambu",location_kind="Shelf",material="PLA"} 1500.0'
+
+
+def test_a_failed_snapshot_keeps_the_scrape(
+    client: TestClient,
+    filament_scrape: tuple[_Clock, _Snapshots],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock, snapshots = filament_scrape
+    first = client.get("/metrics")
+    assert "scadbuddy_filament_metrics_up 1.0" in first.text
+    assert STOCK in first.text
+    clock.at += 61
+    snapshots.fail = True
+    second = client.get("/metrics")
+    assert second.status_code == 200
+    assert "scadbuddy_filament_metrics_up 0.0" in second.text
+    assert STOCK in second.text
+    assert "could not read the filament metrics" in caplog.text
+
+
+def test_snapshot_is_cached_for_a_minute(
+    client: TestClient, filament_scrape: tuple[_Clock, _Snapshots]
+) -> None:
+    clock, snapshots = filament_scrape
+    client.get("/metrics")
+    clock.at += 59
+    client.get("/metrics")
+    assert snapshots.calls == 1
+    clock.at += 2
+    client.get("/metrics")
+    assert snapshots.calls == 2
