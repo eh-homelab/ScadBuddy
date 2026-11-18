@@ -73,3 +73,33 @@ def test_a_line_with_no_type_has_no_candidates(pg_pool: PgPool) -> None:
     (line,) = shop.invoices.candidates(invoice.id)
     assert line.uncosted == []
     assert line.costed == []
+
+
+def test_a_type_cost_does_not_make_a_spool_costed(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    type_id = shop.types.create(shop.type_body("PLA-PRICED", cost_per_kg="19")).id
+    bare = _spool(shop, type_id)
+    invoice = shop.draft(
+        [InvoiceLineIn(description="PLA white", quantity=1, unit_price=D(40), type_id=type_id)]
+    )
+    (line,) = shop.invoices.candidates(invoice.id)
+    assert [s.number for s in line.uncosted] == [bare]
+    assert line.uncosted[0].cost_per_kg == D("19")
+    assert line.costed == []
+
+
+def test_a_spool_linked_to_an_invoice_line_is_costed(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    type_id = shop.type_id()
+    linked = _spool(shop, type_id)
+    invoice = shop.draft(
+        [InvoiceLineIn(description="PLA white", quantity=1, unit_price=D(40), type_id=type_id)]
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spools SET invoice_line_id = %s WHERE number = %s",
+            (invoice.lines[0].id, linked),
+        )
+    (line,) = shop.invoices.candidates(invoice.id)
+    assert line.uncosted == []
+    assert [s.number for s in line.costed] == [linked]

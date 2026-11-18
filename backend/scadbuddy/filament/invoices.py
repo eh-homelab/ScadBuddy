@@ -239,24 +239,36 @@ class InvoiceStore:
 
     def candidates(self, invoice_id: UUID) -> _Candidates:
         """Per line, the open (unarchived) spools that match its type, or its proposed
-        type, by effective material and exact RGBA, split by whether they have a cost.
-        A line with neither type has none. Empty for no such invoice (#6267)."""
+        type, by effective material and exact RGBA, split by whether the spool's own purchase
+        is known: an own cost or an invoice line. A type's cost is a default, not a
+        purchase. A line with neither type has none. Empty for no such invoice (#6267)."""
         invoice = self.get(invoice_id)
         if invoice is None:
             return []
         open_spools = self._spools.list()
+        with self._pool.connection() as conn:
+            bought = {
+                r["id"]
+                for r in conn.execute(
+                    "SELECT id FROM filament_spools"
+                    " WHERE cost_per_kg IS NOT NULL OR invoice_line_id IS NOT NULL"
+                ).fetchall()
+            }
         found: _Candidates = []
         for line in invoice.lines:
             key = self._line_key(line)
             matching = [
-                pm.SpoolBrief(
-                    id=s.id,
-                    number=s.number,
-                    type_id=s.type_id,
-                    colour_name=s.effective.colour_name,
-                    rgba=s.effective.rgba,
-                    cost_per_kg=s.effective.cost_per_kg,
-                    grams_left=s.grams_left,
+                (
+                    s.id in bought,
+                    pm.SpoolBrief(
+                        id=s.id,
+                        number=s.number,
+                        type_id=s.type_id,
+                        colour_name=s.effective.colour_name,
+                        rgba=s.effective.rgba,
+                        cost_per_kg=s.effective.cost_per_kg,
+                        grams_left=s.grams_left,
+                    ),
                 )
                 for s in open_spools
                 if key is not None and (s.effective.material_id, s.effective.rgba) == key
@@ -264,8 +276,8 @@ class InvoiceStore:
             found.append(
                 pm.LineCandidates(
                     position=line.position,
-                    uncosted=[s for s in matching if s.cost_per_kg is None],
-                    costed=[s for s in matching if s.cost_per_kg is not None],
+                    uncosted=[b for known, b in matching if not known],
+                    costed=[b for known, b in matching if known],
                 )
             )
         return found
