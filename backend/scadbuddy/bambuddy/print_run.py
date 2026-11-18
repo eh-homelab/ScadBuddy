@@ -1712,6 +1712,8 @@ async def _plan_numbers(reading: Awaitable[Inventory], plan: FilamentPlan) -> li
     number."""
     return chosen_numbers(
         (
+            # An SB option's spool id is its number (`filaments.build_options`); if that
+            # changes, change this pair too, or the two reads name different spools.
             (row.spool.number, row.spool.number)
             for row in await reading
             if row.spool.archived_at is None
