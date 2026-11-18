@@ -210,6 +210,8 @@ class UnknownTray(BaseModel):
     label: str
     material: str
     colour: str | None = None
+    #: ``colour`` with the reported alpha, ``#RRGGBBAA`` (#6349): the choice's own ``rgba``.
+    rgba: str | None = None
     #: "black", for "black PLA".
     colour_word: str | None = None
     #: What the tray is now, so a "no" is remembered only until it changes.

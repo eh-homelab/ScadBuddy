@@ -39,7 +39,20 @@ Where it stood: #6243 and #6289 already draw a part see-through from the GLB's
   spool's effective value or the tray's reported colour), which the backend already sent.
   `resolvedColors` reads `rgba ?? colour`. Why: `colour` stays `#RRGGBB` because the
   render splits by it and `colours_match` and the slot match read it; one field carries
-  the alpha, so nothing else changes and no backend code moves.
+  the alpha, so nothing else changes.
+- The Bambuddy path's untagged-tray choices carry `rgba` too: `UnknownTray.rgba` is
+  `tray_rgba(tray_color)`, and `tray_option` and `tray_questions` pass it on. Why: without
+  it `resolvedColors` fell back to the six-digit `colour` and a translucent tray drew solid
+  in the print dialog. `colour` stays six digits.
+- A colour tried in the preview pane (`PreviewPane` `tried`, six digits) replaces a
+  translucent spool's `#RRGGBBAA`, so the part takes the design's alpha, opaque for most.
+  Why: a tried colour is a deliberate pick of one colour, preview only, and carries no
+  alpha of its own; the spool's alpha belongs to the spool.
+- `applyPartOpacity` sets `needsUpdate` only when `transparent` or `side` changed, since
+  an opacity change alone needs no shader recompile. The recolour effect is the function
+  `recolourParts` (`lib/partOpacity.ts`), so a unit test drives it.
+- Light viewer: `clear-light.png` shows the clear part on the white ground. It stays
+  visible: the floor (35 %) and the bounding-box outline both read on white.
 - The preview's bounding-box outline (`Preview.tsx`) is a separate `lineSegments` and is
   unchanged: it stays visible around a clear part.
 - Test hook: `Preview.tsx` sets `data-see-through` on its canvas, a comma list of each
@@ -52,9 +65,9 @@ Where it stood: #6243 and #6289 already draw a part see-through from the GLB's
 
 - `previewOpacity` and the floor: the one rule, and its edge cases (`FF`, `FE`, `20`, `00`,
   six digits, junk).
-- `PlateScene.tsx`: the recolour effect now sets opacity and `side` on every colour
+- `recolourParts` (called by `PlateScene.tsx`'s recolour effect) now sets opacity and `side` on every colour
   change. Check that an opaque part returns to `DoubleSide`, depth write on, order 0.
 - `slotOpacity`: a six-digit spool colour keeps the part's own alpha.
 - The `data-see-through` hook is the only production code added for the test.
 - Screenshots: `2026-11-18-translucent-preview/translucent.png` (alpha `80`) and
-  `clear.png` (alpha `00`, drawn at the floor), from `e2e/translucent-preview.spec.ts`.
+  `clear.png` and `clear-light.png` (alpha `00`, drawn at the floor, dark and light viewer), from `e2e/translucent-preview.spec.ts`.

@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { normalizeHex } from './format'
 import { designOpacityOf } from './glbColor'
 import { previewOpacity } from './rgba'
 
@@ -31,18 +32,40 @@ export function seeThrough(material: THREE.Material, opacity: number): void {
  * and after the opaque meshes.
  */
 export function applyPartOpacity(mesh: THREE.Mesh, material: THREE.Material, opacity: number): void {
+  // A shader recompiles only when the material's transparency or side changes, not its opacity.
+  const before = [material.transparent, material.side]
   if (opacity < 1) {
     material.side = THREE.FrontSide
-    seeThrough(material, opacity)
+    material.transparent = true
+    material.opacity = opacity
+    material.depthWrite = false
     mesh.renderOrder = 1
-    return
+  } else {
+    material.side = THREE.DoubleSide
+    material.transparent = false
+    material.opacity = 1
+    material.depthWrite = true
+    mesh.renderOrder = 0
   }
-  material.side = THREE.DoubleSide
-  material.transparent = false
-  material.opacity = 1
-  material.depthWrite = true
-  material.needsUpdate = true
-  mesh.renderOrder = 0
+  if (material.transparent !== before[0] || material.side !== before[1]) material.needsUpdate = true
+}
+
+/**
+ * #6349 — the print dialog's recolour: each part's material takes the colour its slot's
+ * spool gives it (`colors`, by design colour) and its opacity (`slotOpacity`). A colour
+ * with no entry is the design's own.
+ */
+export function recolourParts(scene: THREE.Object3D, colors: ReadonlyMap<string, string>): void {
+  scene.traverse((node) => {
+    const mesh = node as THREE.Mesh
+    if (!mesh.isMesh) return
+    for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      const own = material as THREE.MeshStandardMaterial
+      const printed = colors.get(own.userData.designColor as string)
+      own.color.set(normalizeHex(printed ?? (own.userData.designColor as string)))
+      applyPartOpacity(mesh, own, slotOpacity(printed, own.userData.designOpacity as number))
+    }
+  })
 }
 
 /**

@@ -31,6 +31,13 @@ test('the preview draws a translucent colour see-through and a clear one at the 
   await settled(canvas)
   await page.getByTestId('preview').screenshot({ path: resolve(SHOTS, 'clear.png') })
 
+  // The light viewer (`prefers-color-scheme: light`): the same clear part on a white ground.
+  await page.emulateMedia({ colorScheme: 'light' })
+  await expect(canvas).toHaveAttribute('data-see-through', '0.35')
+  await settled(canvas)
+  await page.getByTestId('preview').screenshot({ path: resolve(SHOTS, 'clear-light.png') })
+  await page.emulateMedia({ colorScheme: 'dark' })
+
   // Opaque again.
   await text.fill('#E8532F')
   await text.blur()

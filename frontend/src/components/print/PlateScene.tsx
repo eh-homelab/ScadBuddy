@@ -4,8 +4,7 @@ import { OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import { designColorOf, designOpacityOf } from '../../lib/glbColor'
-import { normalizeHex } from '../../lib/format'
-import { applyPartOpacity, seeThrough, slotOpacity } from '../../lib/partOpacity'
+import { recolourParts, seeThrough } from '../../lib/partOpacity'
 import { cameraFraming } from '../../lib/previewFrame'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Button } from '@/components/ui/button'
@@ -160,17 +159,7 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
   )
 
   useEffect(() => {
-    scene.traverse((node) => {
-      const mesh = node as THREE.Mesh
-      if (!mesh.isMesh) return
-      for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-        const own = material as THREE.MeshStandardMaterial
-        const printed = colors.get(own.userData.designColor as string)
-        own.color.set(normalizeHex(printed ?? (own.userData.designColor as string)))
-        // #6349 — a spool colour that spells an alpha draws the part see-through at it.
-        applyPartOpacity(mesh, own, slotOpacity(printed, own.userData.designOpacity as number))
-      }
-    })
+    recolourParts(scene, colors)
     invalidate()
   }, [scene, colors, invalidate])
 
