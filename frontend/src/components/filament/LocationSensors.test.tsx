@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { listSensors } from '../../api/filament'
 import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
@@ -15,6 +15,10 @@ async function show(location: string, canAdd = true) {
 }
 
 describe('the sensors of a place', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('shows each sensor with its value and unit', async () => {
     await show(L.DRY_BOX)
     const humidity = screen.getByRole('listitem', { name: 'Dry box humidity' })
@@ -41,6 +45,8 @@ describe('the sensors of a place', () => {
   })
 
   it('opens a sensor history chart from the readings', async () => {
+    // The mock's readings end at the sensor's `last_at`; the component keeps the last 24 h from now.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.parse('2026-11-18T09:45:00Z') })
     const { user } = await show(L.SHELF_A)
     const row = screen.getByRole('listitem', { name: 'Shelf A humidity' })
     await user.click(within(row).getByRole('button', { name: 'Show history of Shelf A humidity' }))
