@@ -551,7 +551,8 @@ def test_a_locked_spool_takes_no_bb_reading(pg_pool: PgPool) -> None:
     (made,) = pull(f, [bb()], now=NOW).created_ids
     f.spools.update(made, SpoolPatch(weight_locked=True), actor="ann")
     report = pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW)
-    assert report.updated == 1
+    # No field changed, so it is no update (#6265 concern 4); BB's reading is recorded.
+    assert report.updated == 0
     spool = f.spools.get(made)
     assert spool is not None
     assert spool.grams_left == 900
@@ -1459,8 +1460,13 @@ def test_a_reading_with_no_catalog_id_is_read_once_with_no_catalog_at_all(
     f = _filament(pg_pool)
     made = _linked_untyped(f)
     _strip_key(f, made)
-    assert pull(f, [_row(None)], now=NOW).updated_ids == [made]
+    events = len(_synced_events(f, made))
+    # The reading is booked again with the key, but no field changed: no update (#6265
+    # concern 4).
     assert pull(f, [_row(None)], now=NOW).updated_ids == []
+    assert len(_synced_events(f, made)) == events + 1
+    assert pull(f, [_row(None)], now=NOW).updated_ids == []
+    assert len(_synced_events(f, made)) == events + 1
 
 
 def test_a_reading_with_no_catalog_id_keeps_a_persons_insert_type(pg_pool: PgPool) -> None:
@@ -2021,3 +2027,89 @@ def test_weights_two_way_books_bb_readings(pg_pool: PgPool) -> None:
     pull(f, [weighed], now=NOW, pulls=both)
     assert _bb_readings(f, made) == [900, 700]
     assert [e.ref_kind for e in f.spools.events(made) if e.kind == "weighed"] == ["bb_scale"]
+
+
+def test_a_tag_bb_set_while_tags_did_not_pull_is_bound_once_they_do(pg_pool: PgPool) -> None:
+    """#6265 concern 3: BB's values are recorded as seen only for the data types that pull,
+    so a type switched on later takes what BB changed meanwhile, with BB's row unmoved."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(tray_uuid=None, tag_uid=None)], now=NOW).created_ids
+    # BB moves a spools field with the tag, so the gated pull records a reading.
+    tagged = bb(
+        tray_uuid=None, tag_uid="04AABB", color_name="Blue", updated_at="2026-11-14T11:00:00"
+    )
+    pull(f, [tagged], now=NOW, pulls=Pulls(tags=False))
+    assert f.spools.open_binding(made) is None
+    report = pull(f, [tagged], now=NOW, pulls=Pulls.of(FilamentSync(tags="bb_to_sb")))
+    assert report.updated_ids == [made]
+    assert f.spools.open_binding(made) is not None
+    (last, *_) = reversed(_synced_events(f, made))
+    assert last.data["bb"]["tag_uid"] == "04AABB"
+    # Seen now: the next pull reads nothing again.
+    events = len(f.spools.events(made))
+    assert pull(f, [tagged], now=NOW).updated_ids == []
+    assert len(f.spools.events(made)) == events
+
+
+def test_a_weight_bb_moved_while_weights_did_not_pull_is_booked_once_they_do(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    used = bb(weight_used=300.0, updated_at=_bb_time(1))
+    pull(f, [used], now=NOW, pulls=Pulls(weights=False))
+    assert _bb_readings(f, made) == [900]
+    pull(f, [used], now=NOW)
+    assert _bb_readings(f, made) == [900, 700]
+
+
+def test_a_preset_bb_moved_while_presets_did_not_pull_is_taken_once_they_do(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(
+        f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW
+    ).created_ids
+    silk = bb(
+        slicer_filament="GFA05",
+        slicer_filament_name="Bambu PLA Silk",
+        updated_at="2026-11-14T11:00:00",
+    )
+    pull(f, [silk], now=NOW, pulls=Pulls(presets=False))
+    assert {p[1] for p in _own_presets(pg_pool, made)} == {"GFA00"}
+    pull(f, [silk], now=NOW)
+    assert {p[1] for p in _own_presets(pg_pool, made)} == {"GFA05"}
+
+
+def test_a_moved_bb_row_with_spools_off_counts_no_update(pg_pool: PgPool) -> None:
+    """#6265 concern 4: a BB row counts as ``updated`` only when a field of the SB spool
+    changed, not because BB moved it."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    before = len(f.spools.events(made))
+    report = pull(
+        f,
+        [bb(color_name="Blue", rgba="0000FFFF", updated_at="2026-11-14T11:00:00")],
+        now=NOW,
+        pulls=Pulls(spools=False),
+    )
+    assert (report.updated, report.updated_ids) == (0, [])
+    assert len(f.spools.events(made)) == before
+
+
+def test_weights_gates_the_lock_and_the_drying(pg_pool: PgPool) -> None:
+    """#6265 concern 5, Decision 14: ``weight_locked`` and ``last_dried_at`` are
+    ``weights`` data: they move with ``weights`` pulling, ``spools`` off or not."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    moved = bb(weight_locked=True, last_dried_at=_bb_time(-1), updated_at=_bb_time(1))
+    pull(f, [moved], now=NOW, pulls=Pulls(weights=False))
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert not spool.weight_locked
+    assert [e for e in f.spools.events(made) if e.kind == "dried"] == []
+    pull(f, [moved], now=NOW, pulls=Pulls(spools=False))
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.weight_locked
+    assert [e.kind for e in f.spools.events(made) if e.kind == "dried"] == ["dried"]

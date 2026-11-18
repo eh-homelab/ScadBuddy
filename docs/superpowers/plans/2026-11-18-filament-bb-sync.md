@@ -664,6 +664,38 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
    keys and maps every `tags` value but `sb_to_bb` to `off`, so a save there writes `tags`
    `off` (now: no tag pulled) and puts `presets`, `suppliers` and `locations` back to their
    defaults. Task 11 must land in the same release.
+9. Task 1 (controller ruling, review I1): the Task 1 migration also rewrites a stored
+   `filament_sync` row whose `spools` is `off`: `weights` and `presets` become `off`, and
+   `tags` stays `sb_to_bb` when it was, else becomes `off`. The `tags` rewrite (`off` to
+   `bb_to_sb`, `sb_to_bb` to `two_way`) applies only to rows whose `spools` is not `off`.
+   Why: before #6265 a `spools` `off` skipped the whole pull, and the tag push ran only on
+   `tags` `sb_to_bb`; Decision 4 says an upgrade changes no behaviour. Cost: a row stored
+   with `spools` `off` and the never-valid `tags` `two_way` would take `tags` `off`; #6264
+   wrote no such value.
+10. Task 1 (controller ruling, review M1): `frontend/src/mocks/fixtures.ts`'s default `tags`
+    is `bb_to_sb` now, as the API's default is. Why: a mock that sends a value the backend
+    never defaults to tests a state no install has. Cost: none known; the two pre-save
+    expectations in `filament.test.tsx` read it.
+11. Task 1 (controller ruling, concern 3; replaces item 3): the pull records BB's values as
+    seen only for the data types that pull (`bambuddy_pull._seen`); a field of a type that
+    does not pull keeps its last recorded value. A linked row BB has not moved is read in
+    full when one of its pulled fields differs from the last recorded reading. Why: an
+    owner who switches a type on expects BB's current values, not only the ones BB changes
+    after the switch. Cost: the first pull after a switch reads such a row in full once.
+    The presets already worked this way: the link keeps BB's last `slicer_filament` only
+    when presets pull.
+12. Task 1 (controller ruling, concern 4): a BB row counts as `updated` in the PullReport
+    only when a field of the SB spool changed (a column, its type or insert type, a retag,
+    a `bb` reading), a weighing or drying was booked, or a preset changed. Why: a row BB
+    moved with no change SB took is no update, and a `synced_from_bb` event with no
+    changes said one happened. Cost: a moved row whose BB values SB's later edits all
+    outrank records its reading but is not counted.
+13. Task 1 (controller ruling, concern 5; replaces item 6): `last_dried_at` (the `dried`
+    event) and `weight_locked` are `weights` data, as Decision 14 lists them. With `weights`
+    not pulling, `_book` books no drying (on a new spool too), and a linked spool takes no
+    lock change from BB; with `weights` pulling they move whatever `spools` says. A new
+    spool still takes BB's lock with its first reading. Why: Decision 14. Cost: #6268's
+    `weights` `off` now also stops the `dried` events, which it left booked.
 
 ## Self-review
 

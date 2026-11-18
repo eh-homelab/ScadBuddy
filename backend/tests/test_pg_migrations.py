@@ -830,8 +830,19 @@ def test_the_old_spool_tables_are_dropped(pg_conninfo: str) -> None:
             {"spools": "bb_to_sb", "tags": "bb_to_sb"},
         ),
         ({"tags": "sb_to_bb"}, {"tags": "two_way"}),
-        ({"spools": "off", "tags": "two_way"}, {"spools": "off", "tags": "two_way"}),
-        ({"spools": "off"}, {"spools": "off"}),
+        ({"spools": "bb_to_sb", "tags": "two_way"}, {"spools": "bb_to_sb", "tags": "two_way"}),
+        (
+            {"spools": "off"},
+            {"spools": "off", "weights": "off", "tags": "off", "presets": "off"},
+        ),
+        (
+            {"spools": "off", "tags": "off", "weights": "bb_to_sb"},
+            {"spools": "off", "weights": "off", "tags": "off", "presets": "off"},
+        ),
+        (
+            {"spools": "off", "tags": "sb_to_bb"},
+            {"spools": "off", "weights": "off", "tags": "sb_to_bb", "presets": "off"},
+        ),
         (None, None),
     ],
 )
@@ -839,7 +850,10 @@ def test_the_tags_migration_rewrites_the_old_values(
     pg_conninfo: str, before: dict[str, str] | None, after: dict[str, str] | None
 ) -> None:
     """#6265 Decision 4: #6264's ``off`` (the pull binds BB's tags, nothing is pushed) is
-    now ``bb_to_sb``, its ``sb_to_bb`` (pull and push) ``two_way``; anything else stays."""
+    now ``bb_to_sb``, its ``sb_to_bb`` (pull and push) ``two_way``; anything else stays.
+    A row whose ``spools`` is ``off`` skipped the whole pull before #6265, so it pulls
+    nothing after: ``weights``, ``presets`` and ``tags`` are ``off``, but a ``tags``
+    ``sb_to_bb`` (the push) stays. A second run changes nothing."""
     at = _index("filament_sync_tags_values")
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, MIGRATIONS[:at])
@@ -850,4 +864,7 @@ def test_the_tags_migration_rewrites_the_old_values(
             )
         assert MIGRATIONS[at].id in migrate(conn)
         row = conn.execute("SELECT value FROM settings WHERE name = 'filament_sync'").fetchone()
-    assert (None if row is None else row[0]) == after
+        assert (None if row is None else row[0]) == after
+        conn.execute(MIGRATIONS[at].sql.encode("utf-8"))
+        again = conn.execute("SELECT value FROM settings WHERE name = 'filament_sync'").fetchone()
+    assert (None if again is None else again[0]) == after

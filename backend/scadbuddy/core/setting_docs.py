@@ -383,13 +383,15 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " suppliers and locations. Each one is off, sb_to_bb (ScadBuddy \u2192 Bambuddy),"
             " bb_to_sb (Bambuddy \u2192 ScadBuddy, on the schedule below) or two_way."
             " Spools moves a spool's own fields, new spools and the spool catalog. Weights"
-            " moves Bambuddy's weight readings and scale weighings on spools ScadBuddy"
-            " already tracks; a new spool still gets its first Bambuddy weight reading."
+            " moves Bambuddy's weight readings, scale weighings, dryings and weight lock on"
+            " spools ScadBuddy already tracks; a new spool still gets its first Bambuddy"
+            " weight reading."
             " Bambuddy's usage rows are booked while spools or weights pulls."
             " Tags moves tag bindings; a new Bambuddy spool takes its tags whatever this says."
             " Presets moves Bambuddy's filament preset into a spool's presets."
             " With spools off, no spool is created or linked, so weights, presets, suppliers"
             " per spool and a spool's location move only on spools linked earlier."
+            " A kind switched to pull later takes what Bambuddy changed while it was off."
             " Override mode and the AMS slots of override tags are written to Bambuddy"
             " whatever this says.",
         ),

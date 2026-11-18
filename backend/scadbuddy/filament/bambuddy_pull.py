@@ -136,6 +136,14 @@ _PLAIN = (
 _NOT_COLUMNS = frozenset(
     {"remaining_g", "tag_uid", "tray_uuid", "material_number", "core_weight_catalog_id"}
 )
+#: The snapshot fields of a data type other than ``spools`` (#6265 Decision 14): each is
+#: taken, and recorded as seen, only while its type pulls.
+_TYPE_FIELDS: dict[str, str] = {
+    "remaining_g": "weights",
+    "weight_locked": "weights",
+    "tag_uid": "tags",
+    "tray_uuid": "tags",
+}
 #: The catalog entries already warned about as skipped, so a clash is told once a process.
 _WARNED_SKIPS: set[tuple[int, str]] = set()
 _WARNED_SKIPS_MAX = 1000
@@ -151,12 +159,17 @@ class Pulls:
     linked spool's own fields, new SB spools (made or linked) and the spool catalog; with
     it False an unlinked BB spool is left alone. ``weights``: ``bb`` readings and scale
     weighings on a spool SB already tracks (a new spool keeps its first reading, #6268).
+    ``weight_locked`` and BB's last drying are ``weights`` data too (Decision 14).
     ``tags``: a linked spool's binding to a tag BB names (a new spool takes its tags
     whatever this says, Decision 6). ``presets``: BB's ``slicer_filament`` as the spool's
     ``migrated`` presets. A child type acts only on a linked spool (Decision 16).
 
-    BB's row is recorded as seen whatever these say, so a field BB changed while its type
-    was not pulled is pulled only when BB changes it again."""
+    BB's values are recorded as seen only for the types that pull, so a type switched on
+    later takes what BB changed while it was off, even when BB's row has not moved since."""
+
+    def of_field(self, field: str) -> bool:
+        """True when the snapshot field ``field`` is of a data type this pull takes."""
+        return bool(getattr(self, _TYPE_FIELDS.get(field, "spools")))
 
     spools: bool = True
     weights: bool = True
@@ -796,13 +809,16 @@ def _update(
     actor: str,
     pulls: Pulls,
 ) -> bool:
-    """True when the SB spool took anything from BB. With ``pulls.spools`` False no field,
+    """True when a field of the SB spool changed: a column, its type or insert type, its
+    tag binding or its weight (a ``bb`` reading). With ``pulls.spools`` False no field,
     type or insert type moves; ``pulls.weights`` gates the ``bb`` reading and
-    ``pulls.tags`` the binding of a tag BB names."""
+    ``weight_locked``, ``pulls.tags`` the binding of a tag BB names. A field of a type
+    that does not pull keeps its last value in the recorded reading (`_seen`), so the pull
+    after the type is switched on reads it, BB's row moved or not."""
     unmoved = bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at
-    if unmoved and not pulls.spools:
-        # Only the insert type is read again on a row BB did not move.
-        return False
+    # A row BB did not move is read again: its event takes no ref, which the same stamp
+    # would otherwise share with the one it replaces (`ledger.record` drops a repeat).
+    ref = not unmoved
     last = conn.execute(
         "SELECT data -> 'bb' AS bb FROM filament_spool_events"
         " WHERE spool_id = %s AND kind = 'synced_from_bb' AND data ? 'bb'"
@@ -810,6 +826,16 @@ def _update(
         (spool_id,),
     ).fetchone()
     before: dict[str, Any] = (last["bb"] if last is not None else None) or {}
+    if unmoved:
+        # A value BB changed while its type did not pull is read once the type does.
+        current = snapshot(bb)
+        unmoved = not any(
+            pulls.of_field(k) and current[k] != before.get(k)
+            for k in current.keys() - {"core_weight_catalog_id"}
+        )
+    if unmoved and not pulls.spools:
+        # Only the insert type is read again on a row BB did not move.
+        return False
     insert_id = _core_insert_type(conn, bb)
     # A row BB did not move is read in full only when its last reading has no catalog id
     # (a pull before it was kept) or BB's id is mapped now and differs from the last one.
@@ -860,7 +886,8 @@ def _update(
         "UPDATE filament_bb_links SET bb_updated_at = %s WHERE spool_id = %s",
         (bb.updated_at or now, spool_id),
     )
-    if after == before:
+    seen = _seen(after, before, pulls)
+    if seen == before:
         return False
     # The newer change wins per field: what SB edited after BB's change stays SB's.
     edited = {
@@ -875,9 +902,7 @@ def _update(
     moved = {
         f for f in after.keys() - _NOT_COLUMNS if after[f] != before.get(f) and after[f] is not None
     }
-    wanted = (
-        {f for f in moved if _CATALOGS.get(f, (f,))[0] not in edited} if pulls.spools else set()
-    )
+    wanted = {f for f in moved if pulls.of_field(f) and _CATALOGS.get(f, (f,))[0] not in edited}
     material = spool.effective.material_id
     if "material" in wanted:
         material = _catalog_id(conn, "filament_materials", after["material"], None)
@@ -925,11 +950,16 @@ def _update(
         reading = None
     elif locked:
         reading, weight = None, "locked"
-    # A row BB did not move is read again: its event takes no ref, which the same stamp
-    # would otherwise share with the one it replaces (`ledger.record` drops a repeat).
-    _synced(conn, spool_id, bb, after, changes, reading, actor, weight=weight, ref=not unmoved)
+    _synced(conn, spool_id, bb, seen, changes, reading, actor, weight=weight, ref=ref)
     FilamentSpoolStore.read(conn, spool_id, check=True)
-    return True
+    return bool(changes) or retag or reading is not None
+
+
+def _seen(after: dict[str, Any], before: dict[str, Any], pulls: Pulls) -> dict[str, Any]:
+    """BB's reading as the pull records it: ``after`` for the fields of a type that pulls,
+    the last recorded value (or none) for the rest."""
+    seen = {k: v for k, v in after.items() if pulls.of_field(k)}
+    return seen | {k: before[k] for k in after.keys() - seen.keys() if k in before}
 
 
 def _lock_from_bb(conn: Conn, spool_id: UUID) -> bool:
@@ -980,8 +1010,9 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = T
     guards against estimates (§5.5). The ledger's rule picks the anchor: the weighing wins
     when it is the newest reading. With ``weights`` False (``filament_sync.weights`` does
     not pull) the weighing is not booked, and `_update` and `_link` book no ``bb`` reading
-    either; `_create` keeps its first one, as a new spool needs a starting weight. True
-    when either is new."""
+    either; `_create` keeps its first one, as a new spool needs a starting weight. The
+    drying is ``weights`` data too (Decision 14), so it is not booked either. True when
+    either is new."""
     booked = False
     if weights and bb.last_weighed_at is not None and bb.last_scale_weight is not None:
         gross = float(bb.last_scale_weight)
@@ -1008,7 +1039,7 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = T
             )
             is not None
         )
-    if bb.last_dried_at is not None:
+    if weights and bb.last_dried_at is not None:
         booked |= (
             ledger.record(
                 conn,

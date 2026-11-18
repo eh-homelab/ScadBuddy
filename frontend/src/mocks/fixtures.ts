@@ -1084,7 +1084,7 @@ export const settingsDefaults = {
   flow_approval_timeout_seconds: 0,
   spool_overlay_refresh_seconds: 300,
   // #6262 Task 13 — the Filament section's settings.
-  filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'off', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
+  filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
   filament_low_stock_pct: 20,
   filament_default_cost_per_kg: null,
   event_log_retention_rows: 100_000,

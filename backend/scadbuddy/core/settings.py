@@ -121,16 +121,18 @@ class FilamentSync(BaseModel, extra="forbid"):
     ``weights``, ``tags`` and ``presets`` pull, ``suppliers`` and ``locations`` are off.
 
     ``spools``: the pull of a spool's own fields, of new BB spools (made or linked) and of
-    the spool catalog (insert types). ``weights``: BB's ``bb`` weight readings and scale
-    weighings on a spool ScadBuddy already tracks (a new spool always keeps its first
-    reading, as it needs a starting weight, #6268). BB's usage rows book while ``spools``
-    or ``weights`` pulls, on linked spools only. ``tags``: the pull binds a linked spool to
-    a tag BB names (a new BB spool takes its tags whatever this says: they are what it
-    is); the push drains the tags a binding change queued (#6264). It does not gate the
-    override mode or the AMS slot configure, which write Bambuddy whatever it says.
+    the spool catalog (insert types). ``weights``: BB's ``bb`` weight readings, scale
+    weighings, dryings and weight lock on a spool ScadBuddy already tracks (a new spool
+    always keeps its first reading, as it needs a starting weight, #6268). BB's usage rows
+    book while ``spools`` or ``weights`` pulls, on linked spools only. ``tags``: the pull
+    binds a linked spool to a tag BB names (a new BB spool takes its tags whatever this
+    says: they are what it is); the push drains the tags a binding change queued (#6264).
+    It does not gate the override mode or the AMS slot configure, which write Bambuddy
+    whatever it says.
     ``presets``: the pull of BB's ``slicer_filament`` into a spool's ``migrated`` presets.
     ``suppliers`` and ``locations`` move their own rows. Child data types act only on
-    spools linked already (Decision 16)."""
+    spools linked already (Decision 16). A data type switched to pull later takes what BB
+    changed while it did not pull."""
 
     spools: SyncDirection = "bb_to_sb"
     weights: SyncDirection = "bb_to_sb"
