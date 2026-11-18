@@ -5,11 +5,17 @@ description: Print a ScadBuddy output through Bambuddy - read the dialog's choic
 
 # Printing a ScadBuddy output through Bambuddy
 
-ScadBuddy renders, and Bambuddy prints. Bambuddy owns printers, spools, presets,
-the queue and projects. ScadBuddy "stores no second copy of printer, spool,
-preset or project state" and "reimplements no decision Bambuddy already makes"
-(`docs/superpowers/specs/2026-09-24-print-flow-design.md`, introduction). Follow
-the same rule: report Bambuddy's answers, and don't second-guess them.
+ScadBuddy renders, and Bambuddy prints. Bambuddy owns printers, presets, the
+queue and projects. ScadBuddy owns the spools: it keeps its own inventory, types
+and ledger, and pulls Bambuddy's copy (filament spec,
+`docs/superpowers/specs/2026-11-14-filament-management-design.md` §5.3 and §8; the
+`filament` skill). The print flow's first rule still stands for the rest: ScadBuddy
+"stores no second copy of printer, spool, preset or project state" and
+"reimplements no decision Bambuddy already makes"
+(`docs/superpowers/specs/2026-09-24-print-flow-design.md`, introduction). That
+sentence predates the filament spec. Where it says "spool", read it as the spools
+ScadBuddy owns now. Report Bambuddy's answers for printers, presets, the queue
+and projects, and don't second-guess them.
 
 Sources, relative to the root of
 [eh-homelab/ScadBuddy](https://github.com/eh-homelab/ScadBuddy):

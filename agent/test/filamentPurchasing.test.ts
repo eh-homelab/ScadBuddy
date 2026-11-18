@@ -45,6 +45,8 @@ describe('filament purchasing tools', () => {
     ['filament_price_sheet', 'read'],
     ['filament_invoice_list', 'read'],
     ['filament_invoice_get', 'read'],
+    ['filament_bambu_colour', 'read'],
+    ['filament_invoice_candidates', 'read'],
     ['filament_invoice_upsert', 'write'],
     ['filament_invoice_delete', 'write'],
     ['filament_shopping_list', 'read'],
@@ -174,6 +176,29 @@ describe('filament purchasing tools', () => {
     ])
     const nothing = await runTool(tool('filament_invoice_upsert'), { invoice_id: INVOICE }, ctx())
     expect(nothing.isError).toBe(true)
+  })
+
+  it('never lets the model set the import link (#6267)', async () => {
+    const INVOICE = '8d6f3c1e-0000-4000-8000-000000006605'
+    const seen: unknown[] = []
+    server.use(
+      http.post(`${FILAMENT}/invoices`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: INVOICE })
+      }),
+      http.patch(`${FILAMENT}/invoices/${INVOICE}`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: INVOICE })
+      }),
+    )
+    for (const fields of [{ import_run_id: 's-9' }, { if_import_run_id: null, note: 'x' }]) {
+      const edit = await runTool(tool('filament_invoice_upsert'), { invoice_id: INVOICE, fields }, ctx())
+      expect(edit.isError).toBe(true)
+      const add = await runTool(tool('filament_invoice_upsert'), { fields: { supplier_id: SUPPLIER, ...fields } }, ctx())
+      expect(add.isError).toBe(true)
+    }
+    expect(seen).toEqual([])
+    expect(tool('filament_invoice_upsert').description).not.toContain('`import_run_id`')
   })
 
   it('deletes an invoice draft and answers its id', async () => {
@@ -335,5 +360,35 @@ describe('filament purchasing tools', () => {
     )
     await runTool(tool('filament_supplier_upsert'), { supplier_id: SUPPLIER, fields: { note: 'x' }, archived: true }, ctx())
     expect(seen).toEqual([{ name: 'Acme', website: 'https://acme.test', note: null }, { note: 'x', archived: true }])
+  })
+
+  it('looks a Bambu colour code up by the `code` query', async () => {
+    let seen: string | null = null
+    server.use(
+      http.get(`${FILAMENT}/bambu-colour-codes`, ({ request }) => {
+        seen = new URL(request.url).searchParams.get('code')
+        return HttpResponse.json({ code: '10100', name: 'Jade White', rgba: ['#FFFFFFFF'], fila_type: 'PLA', fila_id: 'GFA00' })
+      }),
+    )
+    const result = await runTool(tool('filament_bambu_colour'), { code: '10100' }, ctx())
+    expect(seen).toBe('10100')
+    expect(firstText(result)).toMatchObject({ name: 'Jade White', fila_id: 'GFA00' })
+    expect((await runTool(tool('filament_bambu_colour'), {}, ctx())).isError).toBe(true)
+  })
+
+  it('explains a colour code the table does not have', async () => {
+    server.use(http.get(`${FILAMENT}/bambu-colour-codes`, () => HttpResponse.json({ detail: 'no such code' }, { status: 404 })))
+    const result = await runTool(tool('filament_bambu_colour'), { code: '99999' }, ctx())
+    expect(result.isError).toBe(true)
+  })
+
+  it("reads an invoice's line candidates from its candidates route", async () => {
+    const INVOICE = '8d6f3c1e-0000-4000-8000-000000006610'
+    server.use(
+      http.get(`${FILAMENT}/invoices/${INVOICE}/candidates`, () => HttpResponse.json([{ position: 1, uncosted: [], costed: [] }])),
+    )
+    const result = await runTool(tool('filament_invoice_candidates'), { invoice_id: INVOICE }, ctx())
+    expect(firstText(result)).toMatchObject([{ position: 1 }])
+    expect((await runTool(tool('filament_invoice_candidates'), { invoice_id: 'nope' }, ctx())).isError).toBe(true)
   })
 })

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
-import { IMAGE_DATA_MAX, type ImageMediaType, IMAGE_MEDIA_TYPES, sniff, type UserImage } from './images.js'
+import { type BlobMediaType, IMAGE_DATA_MAX, type ImageMediaType, IMAGE_MEDIA_TYPES, sniff, type UserAttachment } from './images.js'
 import { forkChain } from './eventLog.js'
 import type { ImageRef, SentImage, ServerEvent } from './protocol.js'
 
@@ -45,20 +45,23 @@ import type { ImageRef, SentImage, ServerEvent } from './protocol.js'
 /** The most images one tool result keeps; any past it stay `[image]` in the summary. */
 export const RESULT_IMAGES_MAX = 8
 
-const EXTENSION: Record<ImageMediaType, string> = {
+const EXTENSION: Record<BlobMediaType, string> = {
+  'application/pdf': 'pdf',
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/gif': 'gif',
   'image/webp': 'webp',
 }
 
-/** What a blob's name must be: lowercase sha256 hex, a dot, one of the four extensions. */
-export const BLOB_NAME = /^[0-9a-f]{64}\.(png|jpg|gif|webp)$/
+/** What a blob's name must be: lowercase sha256 hex, a dot, one of the four image extensions or `pdf` (#6267). */
+export const BLOB_NAME = /^[0-9a-f]{64}\.(png|jpg|gif|webp|pdf)$/
 
 // As images.ts: a plain class, never a group repeated per quartet.
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 
-/** An image with its bytes, on its way to the store. */
+/** An image or a PDF with its bytes, on its way to the session's store (#6267). */
+export type SessionBlob = { name: string; mediaType: BlobMediaType; bytes: Buffer }
+/** An image with its bytes: what a tool result carries. */
 export type SessionImage = ImageRef & { bytes: Buffer }
 
 /**
@@ -81,7 +84,9 @@ export function imageOfBlock(block: unknown): SessionImage | undefined {
 }
 
 /** `bytes` as a session image, named by their sha256 and the type's extension. */
-export function sessionImage(mediaType: ImageMediaType, bytes: Buffer): SessionImage {
+export function sessionImage(mediaType: ImageMediaType, bytes: Buffer): SessionImage
+export function sessionImage(mediaType: BlobMediaType, bytes: Buffer): SessionBlob
+export function sessionImage(mediaType: BlobMediaType, bytes: Buffer): SessionBlob {
   return { name: `${createHash('sha256').update(bytes).digest('hex')}.${EXTENSION[mediaType]}`, mediaType, bytes }
 }
 
@@ -89,10 +94,21 @@ export function sessionImage(mediaType: ImageMediaType, bytes: Buffer): SessionI
  * A turn's images as the blobs to store (each full image, then its preview) and
  * what `user.turn` names them by (#2479).
  */
-export function sentImageBlobs(images: readonly UserImage[]): { blobs: SessionImage[]; sent: SentImage[] } {
-  const blobs: SessionImage[] = []
-  const sent = images.map((image) => {
+export function sentImageBlobs(images: readonly UserAttachment[]): { blobs: SessionBlob[]; sent: SentImage[] } {
+  const blobs: SessionBlob[] = []
+  const sent = images.map((image): SentImage => {
+    if (image.mediaType === 'application/pdf') {
+      // A PDF has no preview (#6267): the turn names the document only.
+      const doc = sessionImage(image.mediaType, image.bytes)
+      blobs.push(doc)
+      return { name: doc.name, mediaType: image.mediaType, ...(image.fileName ? { fileName: image.fileName } : {}) }
+    }
     const full = sessionImage(image.mediaType, image.bytes)
+    if (!image.preview) {
+      // A server-built turn (#6267) has no preview: the turn names the full image only.
+      blobs.push(full)
+      return { name: full.name, mediaType: image.mediaType }
+    }
     const small = sessionImage(image.preview.mediaType, image.preview.bytes)
     blobs.push(full, small)
     return {
@@ -105,6 +121,8 @@ export function sentImageBlobs(images: readonly UserImage[]): { blobs: SessionIm
 }
 
 export type StoredBlob = { mediaType: ImageMediaType; bytes: Buffer }
+/** One of a session's blobs: an image, or a PDF (#6267). */
+export type StoredSessionBlob = { mediaType: BlobMediaType; bytes: Buffer }
 
 /**
  * An AgentSession placement's hold on its turn (turnHost.ts): the session's row still names
@@ -120,20 +138,20 @@ export type MadeImages = { names: string[]; at: string }
 
 /** A session's images: `SessionBlobs` over SQL, `CrudSessionBlobs` over the API's routes. */
 export interface SessionImages {
-  put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void>
+  put(sessionId: string, images: readonly SessionBlob[], toolUseId?: string): Promise<void>
   /**
    * `put`, answering what it made, one entry per write (transaction) that made a name: a queued
    * message's images, which `delete` takes back once it leaves the queue unrun.
    */
-  putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]>
+  putMade(sessionId: string, images: readonly SessionBlob[]): Promise<MadeImages[]>
   /**
    * Deletes the images one write made, unless a write stored one again since or a tool call names
    * it; the names deleted. With `fence`, nothing unless the fence holds.
    */
   delete(sessionId: string, made: MadeImages, fence?: TurnFence): Promise<string[]>
   /** False when the fence refuses; over the API's routes a batch stored before the refusal stays (crudBlobs.ts). */
-  putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean>
-  get(sessionId: string, name: string): Promise<StoredBlob | undefined>
+  putIf(sessionId: string, images: readonly SessionBlob[], fence: TurnFence): Promise<boolean>
+  get(sessionId: string, name: string): Promise<StoredSessionBlob | undefined>
 }
 
 export class SessionBlobs implements SessionImages {
@@ -150,7 +168,7 @@ export class SessionBlobs implements SessionImages {
    * that call produced, in order, replacing what an earlier attempt of it recorded, so
    * follow_session can name them on its `tool.result`.
    */
-  async put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void> {
+  async put(sessionId: string, images: readonly SessionBlob[], toolUseId?: string): Promise<void> {
     if (toolUseId === undefined) {
       await this.putMade(sessionId, images)
       return
@@ -170,7 +188,7 @@ export class SessionBlobs implements SessionImages {
    * `put` under a fence checked in the same transaction (an AgentSession placement's hold on its
    * turn, turnHost.ts): false, and nothing stored, when the fence refuses.
    */
-  async putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean> {
+  async putIf(sessionId: string, images: readonly SessionBlob[], fence: TurnFence): Promise<boolean> {
     return this.sql.begin(async (tx) => {
       if (!(await held(tx, sessionId, fence))) return false
       await this.insert(tx, sessionId, images)
@@ -179,7 +197,7 @@ export class SessionBlobs implements SessionImages {
   }
 
   /** One transaction, so a later write of a name waits for it and sets a time past `at`. */
-  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]> {
+  async putMade(sessionId: string, images: readonly SessionBlob[]): Promise<MadeImages[]> {
     const made = await this.sql.begin((tx) => this.insert(tx, sessionId, images))
     return made.names.length && made.at !== undefined ? [{ names: made.names, at: made.at }] : []
   }
@@ -203,7 +221,7 @@ export class SessionBlobs implements SessionImages {
    * Stores each image, or sets the time of one already there (its bytes stay): the names made,
    * and the latest time set (backend api/crud_agent_blobs.py `_insert_blobs`).
    */
-  private async insert(tx: TransactionSql, sessionId: string, images: readonly SessionImage[]): Promise<{ names: string[]; at?: string }> {
+  private async insert(tx: TransactionSql, sessionId: string, images: readonly SessionBlob[]): Promise<{ names: string[]; at?: string }> {
     const names: string[] = []
     let at: string | undefined
     for (const image of images) {
@@ -224,7 +242,7 @@ export class SessionBlobs implements SessionImages {
    * (#4212) is its own, else an ancestor's that an event it reads through its chain names
    * (eventLog.ts), so a fork reads no image of its parent's turns past the cut.
    */
-  async get(sessionId: string, name: string): Promise<StoredBlob | undefined> {
+  async get(sessionId: string, name: string): Promise<StoredSessionBlob | undefined> {
     if (!BLOB_NAME.test(name)) return undefined
     return getThroughChain(this.sql, sessionId, name)
   }
@@ -241,8 +259,8 @@ async function held(tx: TransactionSql, sessionId: string, fence: TurnFence): Pr
 /** The events a fork takes that can name an image (forkPoint.ts `blobNames`), all among eventLog.ts `FORK_EVENT_TYPES`. */
 const IMAGE_EVENT_TYPES: readonly ServerEvent['type'][] = ['tool.result', 'user.turn']
 
-async function getThroughChain(sql: Sql | TransactionSql, sessionId: string, name: string): Promise<StoredBlob | undefined> {
-  const [row] = await sql<{ media_type: ImageMediaType; data: Buffer }[]>`
+async function getThroughChain(sql: Sql | TransactionSql, sessionId: string, name: string): Promise<StoredSessionBlob | undefined> {
+  const [row] = await sql<{ media_type: BlobMediaType; data: Buffer }[]>`
     ${forkChain(sql, sessionId)}
     SELECT b.media_type, b.data FROM chain c JOIN ai_session_blobs b ON b.session_id = c.id AND b.name = ${name}
      WHERE c.depth = 0 OR EXISTS (

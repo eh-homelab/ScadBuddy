@@ -303,6 +303,29 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
       expect(Buffer.from(await res.arrayBuffer()).equals(JPEG)).toBe(true)
     })
 
+    it('stores a PDF as a blob, names it without a preview, and serves it (#6267)', async () => {
+      const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.from('invoice')])
+      const NAME_PDF = `${createHash('sha256').update(PDF).digest('hex')}.pdf`
+      next = { reply: 'I read it.' }
+      const { session, turn } = await m.start(browser, {
+        origin: 'chat',
+        prompt: 'import',
+        images: [{ mediaType: 'application/pdf', bytes: PDF }],
+      })
+      await turn!.done
+      const events = await logged(session.id)
+      expect(events.find((e) => e.type === 'user.turn')).toMatchObject({ images: [{ name: NAME_PDF, mediaType: 'application/pdf' }] })
+      const res = await get(`/api/v1/ai/sessions/${session.id}/blobs/${NAME_PDF}`)
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toBe('application/pdf')
+      // Untrusted bytes on the app's origin: downloaded, never rendered in the page (#6267).
+      expect(res.headers.get('content-disposition')).toMatch(/^attachment;/)
+      expect(res.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox")
+      // The panel's own schema accepts the PDF turn.
+      await expectPanelAccepts(events)
+      expect(Buffer.from(await res.arrayBuffer()).equals(PDF)).toBe(true)
+    })
+
     it('serves it to the UI only, under its own session, and not to another principal', async () => {
       const id = await withSent()
       const path = `/api/v1/ai/sessions/${id}/blobs/${SENT}`

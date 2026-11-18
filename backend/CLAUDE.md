@@ -761,6 +761,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `CheckViolation` or `DataError` (`_LINE_BOUNDS`); `Quantity` is at most 1,000. Confirm locks
   every line's spools in one sorted query before it writes, so two confirms cannot deadlock. The agent's tools are
   `agent/src/tools/filamentPurchasing.ts` (an invoice edit is a PATCH then a PUT, not atomic).
+  The invoice import (#6267, plan `docs/superpowers/plans/2026-11-18-filament-invoice-import.md`):
+  `colour_codes.py` (`ColourCodes`, Bambu Studio's `filaments_color_codes.json` read from
+  `slicer_profiles_dir`/`BBL/filament/`, cached per process; `GET /filament/bambu-colour-codes?code=`
+  answers 404 for an unknown code and 503 for a missing table), `InvoiceStore.candidates` (`GET
+  /filament/invoices/{id}/candidates`: per line, the open spools whose own `cost_per_kg` is NULL and
+  which have no invoice line, and the costed ones, matched by effective material and RGBA), and
+  `InvoicePatch.import_run_id` with the conditional `if_import_run_id` (one UPDATE under the invoice's
+  row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
+  The agent's session blobs accept `application/pdf` (6 MiB, migration
+  `20261118T0811Z_session_blobs_pdf.sql`) and store it (`crud_agent_blobs.py` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

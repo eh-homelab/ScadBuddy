@@ -25,6 +25,13 @@ import { z } from 'zod'
 export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
 export type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number]
 
+/** What the Messages API takes as a document block: an invoice's PDF (#6267). */
+export const DOCUMENT_MEDIA_TYPES = ['application/pdf'] as const
+export type DocumentMediaType = (typeof DOCUMENT_MEDIA_TYPES)[number]
+
+/** What a session's blobs keep: an image, or a PDF. */
+export type BlobMediaType = ImageMediaType | DocumentMediaType
+
 /** What a preview may be: a still the panel drew. */
 export const PREVIEW_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const
 export type PreviewMediaType = (typeof PREVIEW_MEDIA_TYPES)[number]
@@ -37,6 +44,8 @@ export const IMAGE_DATA_MAX = 5 * 1024 * 1024
 export const IMAGE_BYTES_MAX = (IMAGE_DATA_MAX / 4) * 3
 /** All of a message's images together, in bytes (what 8 MiB of base64 holds). */
 export const IMAGES_BYTES_TOTAL_MAX = ((8 * 1024 * 1024) / 4) * 3
+/** One PDF's bytes: all that a message's attachments may hold together. */
+export const PDF_BYTES_MAX = IMAGES_BYTES_TOTAL_MAX
 /** One preview's bytes; the panel draws them at most 256 px on a side. */
 export const PREVIEW_BYTES_MAX = 48 * 1024
 
@@ -51,6 +60,11 @@ export function sniff(bytes: Uint8Array): ImageMediaType | undefined {
   if (ascii(0, 'GIF87a') || ascii(0, 'GIF89a')) return 'image/gif'
   if (ascii(0, 'RIFF') && ascii(8, 'WEBP')) return 'image/webp'
   return undefined
+}
+
+/** Whether `bytes` start as a PDF: `%PDF-`. */
+export function sniffPdf(bytes: Uint8Array): boolean {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength, 5)).toString('latin1') === '%PDF-'
 }
 
 function stored<T extends readonly [string, ...string[]]>(types: T, max: number) {
@@ -73,9 +87,34 @@ function stored<T extends readonly [string, ...string[]]>(types: T, max: number)
 export type ImagePreview = { mediaType: PreviewMediaType; bytes: Buffer }
 export const ImagePreviewSchema = stored(PREVIEW_MEDIA_TYPES, PREVIEW_BYTES_MAX)
 
-/** An image the user sends, and its preview, as bytes. */
+/** An image the user sends, and its preview, as bytes: what the panel uploads. */
 export type UserImage = { mediaType: ImageMediaType; bytes: Buffer; preview: ImagePreview }
 export const UserImageSchema = stored(IMAGE_MEDIA_TYPES, IMAGE_BYTES_MAX).and(z.object({ preview: ImagePreviewSchema }))
+
+/**
+ * An image a server builds a turn from (#6267: an invoice image the API read from a file).
+ * The agent has no image library to draw a preview with (the panel draws the panel's own),
+ * so this one has none, and its turn names the full image only: the panel shows that.
+ */
+export type ServerImage = { mediaType: ImageMediaType; bytes: Buffer; preview?: ImagePreview }
+const ServerImageSchema = stored(IMAGE_MEDIA_TYPES, IMAGE_BYTES_MAX).and(z.object({ preview: ImagePreviewSchema.optional() }))
+
+/** A PDF the user sends, as bytes. It has no preview: the panel draws none. */
+export type UserDocument = { mediaType: DocumentMediaType; bytes: Buffer; fileName?: string }
+export const UserDocumentSchema = z
+  .object({
+    mediaType: z.enum(DOCUMENT_MEDIA_TYPES),
+    // The file's own name, for the panel's chip (#6267): a name the person gave it, never the bytes. The cap matches the backend's 255.
+    fileName: z.string().min(1).max(255).optional(),
+    bytes: z
+      .instanceof(Buffer, { message: 'not bytes' })
+      .refine((bytes) => bytes.length > 0, { message: 'empty' })
+      .refine((bytes) => bytes.length <= PDF_BYTES_MAX, { message: `at most ${PDF_BYTES_MAX} bytes` }),
+  })
+  .refine((doc) => sniffPdf(doc.bytes), { message: 'the bytes are not a PDF', path: ['bytes'] })
+
+/** What a message carries for the model: an image, or a PDF. */
+export type UserAttachment = ServerImage | UserDocument
 
 export const UserImagesSchema = z
   .array(UserImageSchema)
@@ -93,6 +132,57 @@ export function checkedImages(images: unknown): { ok: true; images: UserImage[] 
   return { ok: false, error: parsed.error.issues.map((i) => `${i.path.join('.') || 'images'}: ${i.message}`).join('; ') }
 }
 
+/** Plain names for the kinds of file people upload that ScadBuddy cannot read. */
+const KINDS: Record<string, string> = {
+  'image/heic': 'a HEIC photo',
+  'image/heif': 'a HEIF photo',
+  'image/tiff': 'a TIFF photo',
+  'image/bmp': 'a BMP photo',
+  'image/svg+xml': 'an SVG drawing',
+  'text/plain': 'a text file',
+  'text/html': 'a web page',
+  'text/csv': 'a spreadsheet file',
+  'application/zip': 'a ZIP file',
+}
+
+/** A refusal for a file type ScadBuddy cannot read, worded for the person. */
+export function unsupported(mediaType: unknown): string {
+  const type = typeof mediaType === 'string' ? mediaType.toLowerCase() : ''
+  const kind = KINDS[type] ?? (type.startsWith('text/') ? 'a text file' : undefined)
+  const reads = 'ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.'
+  return kind ? `This file is ${kind}. ${reads}` : `ScadBuddy cannot read this kind of file. It ${reads.slice('ScadBuddy '.length)}`
+}
+
+/**
+ * The checked attachments of a message that may carry a PDF (#6267): images, and PDFs. Any
+ * other type (text, HEIC) is refused; a message names fields and caps, never the bytes.
+ */
+export function checkedAttachments(
+  attachments: unknown,
+): { ok: true; attachments: UserAttachment[] } | { ok: false; error: string } {
+  if (!Array.isArray(attachments) || attachments.length < 1 || attachments.length > IMAGES_MAX) {
+    return { ok: false, error: `attachments: between 1 and ${IMAGES_MAX} are required` }
+  }
+  const types: readonly unknown[] = [...IMAGE_MEDIA_TYPES, ...DOCUMENT_MEDIA_TYPES]
+  const problems: string[] = []
+  const checked: UserAttachment[] = []
+  for (const [index, attachment] of attachments.entries()) {
+    const mediaType = (attachment as { mediaType?: unknown } | null)?.mediaType
+    if (!types.includes(mediaType)) {
+      problems.push(`attachments.${index}.mediaType: ${unsupported(mediaType)}`)
+      continue
+    }
+    const parsed = (mediaType === 'application/pdf' ? UserDocumentSchema : ServerImageSchema).safeParse(attachment)
+    if (parsed.success) checked.push(parsed.data as UserAttachment)
+    else problems.push(...parsed.error.issues.map((i) => `attachments.${index}.${i.path.join('.') || 'attachment'}: ${i.message}`))
+  }
+  if (problems.length) return { ok: false, error: problems.join('; ') }
+  if (checked.reduce((n, a) => n + a.bytes.length, 0) > IMAGES_BYTES_TOTAL_MAX) {
+    return { ok: false, error: `attachments: more than ${IMAGES_BYTES_TOTAL_MAX} bytes together` }
+  }
+  return { ok: true, attachments: checked }
+}
+
 /**
  * The turn's prompt as one SDK user message: the images first, as the Messages
  * API advises, then the text (the user's words and the page context). Each
@@ -101,7 +191,7 @@ export function checkedImages(images: unknown): { ok: true; images: UserImage[] 
  * The SDK boundary (#2479): the SDK takes an image in a user message only as a
  * base64 source, which Claude Code puts in the Messages API request.
  */
-export function userPrompt(text: string, images: readonly Pick<UserImage, 'mediaType' | 'bytes'>[]): AsyncIterable<SDKUserMessage> {
+export function userPrompt(text: string, images: readonly Pick<UserAttachment, 'mediaType' | 'bytes'>[]): AsyncIterable<SDKUserMessage> {
   const message: SDKUserMessage = {
     type: 'user',
     session_id: '',
@@ -109,10 +199,17 @@ export function userPrompt(text: string, images: readonly Pick<UserImage, 'media
     message: {
       role: 'user',
       content: [
-        ...images.map((i) => ({
-          type: 'image' as const,
-          source: { type: 'base64' as const, media_type: i.mediaType, data: i.bytes.toString('base64') },
-        })),
+        ...images.map((i) =>
+          i.mediaType === 'application/pdf'
+            ? {
+                type: 'document' as const,
+                source: { type: 'base64' as const, media_type: i.mediaType, data: i.bytes.toString('base64') },
+              }
+            : {
+                type: 'image' as const,
+                source: { type: 'base64' as const, media_type: i.mediaType, data: i.bytes.toString('base64') },
+              },
+        ),
         { type: 'text' as const, text },
       ],
     },

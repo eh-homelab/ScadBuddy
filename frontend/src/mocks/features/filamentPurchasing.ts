@@ -5,6 +5,7 @@ import type { components } from '../../api/schema'
 import { addDecimals, cmpDecimals, divDecimal, fromScaled, mulDecimal, subDecimals, toScaled } from '../../lib/decimal'
 // Two cycles (`filament/index.ts` imports `invoiceRefOf` and `typeSuppliersOf` from here): use them only inside functions.
 import { addInvoicedSpools, checkTypeProposal, createType, spoolClaimRefusal, spoolLabelWeight, spoolUsage, typeCodeTaken, typeInfo, updateInvoicedSpool } from './filament'
+import { isSessionLive, startImportSession } from './assistantSessions'
 import { seedInput, SHOP_CURRENCY, type SeedInvoice } from './filamentPurchasingSeed'
 
 type S = components['schemas']
@@ -840,6 +841,25 @@ export const handlers = [
     return new HttpResponse(bytes, {
       headers: { 'Content-Type': row.file.media_type, 'Content-Disposition': `inline; filename="${row.file.name}"`, 'Cache-Control': 'private, no-cache' },
     })
+  }),
+  // #6267 — the agent's start route (`agent/src/routes/invoiceImport.ts`): its refusals, its answers, and the link it writes.
+  http.post('/api/v1/ai/filament/invoice-import', async ({ request }) => {
+    const { invoice_id } = (await request.json()) as { invoice_id: string }
+    const row = invoiceOf(invoice_id)
+    const refuse = (status: number, body: Record<string, unknown>) => HttpResponse.json(body, { status })
+    if (!row) return refuse(404, { detail: 'the backend refused to read the invoice', type: 'backend_refused' })
+    if (row.status === 'confirmed') return refuse(409, { detail: 'This invoice is confirmed. There is nothing left to import.', type: 'confirmed' })
+    if (!row.file) return refuse(422, { detail: 'This invoice has no file. Add its PDF or photo first, then import it.' })
+    const kind = row.file.media_type.toLowerCase()
+    if (kind !== 'application/pdf' && !/^image\/(png|jpeg|gif|webp)$/.test(kind)) {
+      return refuse(422, { detail: `This file is a ${kind}. ScadBuddy reads invoices as PDF, PNG, JPEG, GIF or WebP.` })
+    }
+    if (row.import_run_id && isSessionLive(row.import_run_id)) {
+      return refuse(409, { detail: 'This invoice is already being imported. Open its session.', type: 'import_running', session_id: row.import_run_id })
+    }
+    row.import_run_id = startImportSession(`Import invoice ${row.number ?? row.file.name}`)
+    row.updated_at = now()
+    return HttpResponse.json({ session_id: row.import_run_id })
   }),
   // -- the shopping list
   http.get(`${BASE}/shopping-list`, ({ request }) => {

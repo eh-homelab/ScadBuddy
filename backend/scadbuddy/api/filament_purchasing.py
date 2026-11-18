@@ -19,10 +19,12 @@ from scadbuddy.api.order_attachments import INERT, NOSNIFF
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import purchasing_models as pm
+from scadbuddy.filament.colour_codes import ColourCode, ColourTableMissingError, colour_codes
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.invoice_money import InvoiceMathError, MixedLineTaxError
 from scadbuddy.filament.invoices import (
     DuplicateInvoiceError,
+    ImportRunChangedError,
     InvoiceConfirmedError,
     InvoiceCurrencyError,
     InvoiceLineError,
@@ -324,7 +326,7 @@ def _invoice_error(exc: ValueError) -> ApiError:
         return ApiError(
             status.HTTP_409_CONFLICT, str(exc), existing_invoice_id=str(exc.existing_id)
         )
-    if isinstance(exc, InvoiceConfirmedError):
+    if isinstance(exc, InvoiceConfirmedError | ImportRunChangedError):
         return _conflict(exc)
     return _unprocessable(exc)
 
@@ -389,6 +391,46 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     return found
 
 
+@router.get(
+    "/invoices/{invoice_id}/candidates",
+    response_model=list[pm.LineCandidates],
+    summary="List the spools each invoice line could update",
+    description=(
+        "Per line (by `position`), the open spools whose effective material and exact RGBA "
+        "match the line's type, or its proposed type when it has no type yet: `uncosted` "
+        "(no cost per kg yet) and `costed`. A line with neither type has none. 404 for no "
+        "such invoice."
+    ),
+)
+async def invoice_candidates(filament: FilamentDep, invoice_id: UUID) -> list[pm.LineCandidates]:
+    found = await asyncio.to_thread(filament.invoices.candidates, invoice_id)
+    if found is None:
+        raise _no_invoice(invoice_id)
+    return found
+
+
+@router.get(
+    "/bambu-colour-codes",
+    response_model=ColourCode,
+    summary="Look up a Bambu colour code",
+    description=(
+        "Bambu Studio's colour table, by the `code` digits of a Bambu spool's SKU: its "
+        "`name`, its `rgba` list (`#RRGGBBAA`, one per colour; a translucent colour keeps "
+        "its alpha, e.g. `80`), `fila_type` and `fila_id`. 404 for a code the table does "
+        "not have, 503 when the image has no table (the body names the path)."
+    ),
+)
+async def bambu_colour_code(state: StateDep, code: str) -> ColourCode:
+    table = colour_codes(state.settings.slicer_profiles_dir)
+    try:
+        found = await asyncio.to_thread(table.lookup, code)
+    except ColourTableMissingError as exc:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no Bambu colour code {code}")
+    return found
+
+
 @router.patch(
     "/invoices/{invoice_id}",
     response_model=pm.InvoiceDetail,
@@ -396,7 +438,10 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     summary="Change an invoice",
     description=(
         "Only the fields sent change; the lines' tax and cost are worked out again. A "
-        "confirmed invoice accepts only `note` (409 otherwise). A draft's `supplier_id` moves "
+        "confirmed invoice accepts only `note` (409 otherwise). `import_run_id` is the "
+        "assistant session that imports the invoice; `if_import_run_id` makes the write "
+        "apply only while the invoice's `import_run_id` is that value (`null` for none), "
+        "else 409. A draft's `supplier_id` moves "
         "it to another unarchived supplier (its lines drop their supplier product). 404 for "
         "no such invoice, 409 for a number the supplier has (with `existing_invoice_id`), 422 "
         "for a bad field, a missing or archived supplier or a tax that cannot be spread."
@@ -407,7 +452,12 @@ async def patch_invoice(
 ) -> pm.InvoiceDetail:
     try:
         changed = await asyncio.to_thread(filament.invoices.update, invoice_id, body)
-    except (DuplicateInvoiceError, InvoiceConfirmedError, *_INVOICE_ERRORS) as exc:
+    except (
+        DuplicateInvoiceError,
+        InvoiceConfirmedError,
+        ImportRunChangedError,
+        *_INVOICE_ERRORS,
+    ) as exc:
         raise _invoice_error(exc) from None
     if changed is None:
         raise _no_invoice(invoice_id)
