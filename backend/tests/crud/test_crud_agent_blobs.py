@@ -133,7 +133,12 @@ class Agent:
         names: list[str] | None = None,
         **meta: Any,
     ) -> Any:
-        ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "application/pdf": "pdf"}
+        ext = {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/webp": "webp",
+            "application/pdf": "pdf",
+        }
         body = {
             "session_id": session,
             "images": [
@@ -284,6 +289,18 @@ def test_a_pdf_is_stored_by_name_checked_and_read_back(agent: Agent, tables: PgP
     big = PDF + b"\x00" * crud_agent_blobs.PDF_BYTES_MAX
     assert agent.blobs(sid, [("application/pdf", big)]).status_code == 413
     assert agent.blobs(sid, [("image/png", PDF)], names=[_name(PDF, "png")]).status_code == 422
+
+
+def test_a_write_is_refused_past_the_multipart_total_before_it_is_stored(
+    agent: Agent, tables: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = _session(tables)
+    one, two = PNG + b"1" * 100, PNG + b"2" * 100
+    monkeypatch.setattr(crud_agent_blobs, "WRITE_BYTES_MAX", len(one) + len(two) - 1)
+    assert agent.blobs(sid, [("image/png", one), ("image/png", two)]).status_code == 413
+    assert _sql(tables, "SELECT 1 FROM ai_session_blobs") == []
+    monkeypatch.setattr(crud_agent_blobs, "WRITE_BYTES_MAX", len(one) + len(two))
+    assert agent.blobs(sid, [("image/png", one), ("image/png", two)]).status_code == 200
 
 
 def test_a_tool_calls_images_replace_its_earlier_attempts(agent: Agent, tables: PgPool) -> None:

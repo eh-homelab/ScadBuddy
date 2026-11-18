@@ -75,6 +75,9 @@ PREVIEW_BYTES_MAX = 48 * 1024
 #: The most images one ``session-blobs`` write stores: a tool result's
 #: (``RESULT_IMAGES_MAX``, 8) or a turn's images and their previews (``IMAGES_MAX`` 4, twice).
 IMAGES_PER_WRITE = 8
+#: The most bytes one ``session-blobs`` write carries in all: one PDF and the rest images
+#: (a turn names one invoice, #6267), not every part at the PDF's cap.
+WRITE_BYTES_MAX = PDF_BYTES_MAX + (IMAGES_PER_WRITE - 1) * IMAGE_BYTES_MAX
 #: A tool call's id (``ai_session_tool_images.tool_use_id``).
 TOOL_USE_ID_MAX = 256
 #: The attachments policy (``attachments/store.ts``).
@@ -124,7 +127,8 @@ async def _in_tx[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) -> T
 
 
 def sniff(data: bytes) -> str | None:
-    """The image type ``data``'s signature names (``sessions/images.ts`` ``sniff``)."""
+    """The media type, an image or a PDF, ``data``'s signature names (``sessions/images.ts``
+    ``sniff``)."""
     if data[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"
     if data[:3] == b"\xff\xd8\xff":
@@ -264,9 +268,7 @@ def _insert_blobs(
 
 @router.post("/session-blobs", name="crud_agent_session_blobs_put")
 async def session_blobs_put(request: Request, state: StateDep) -> BlobsStored:
-    raw, files = await _multipart(
-        request, IMAGES_PER_WRITE, IMAGES_PER_WRITE * max(IMAGE_BYTES_MAX, PDF_BYTES_MAX)
-    )
+    raw, files = await _multipart(request, IMAGES_PER_WRITE, WRITE_BYTES_MAX)
     meta = _meta(BlobsMeta, raw)
     if meta.tool_use_id is not None and meta.fence is not None:
         raise _unprocessable("a write names a tool_use_id or a fence, not both")
