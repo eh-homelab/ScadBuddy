@@ -1290,9 +1290,11 @@ async def try_assignments(settings: StoredSettings) -> list[SpoolAssignment] | N
 
 async def read_ha_sensors(store: Filament, settings: StoredSettings, now: datetime) -> None:
     """Read Bambuddy's Home Assistant states into the location sensors (#6268): one GET,
-    and none when no Home Assistant sensor is set up. A state is a reading at ``now`` (see
+    and none when no Home Assistant sensor is set up. The GET reads every entity, because
+    Bambuddy 1.3.1's route takes no list of ids (#6679, plan Decision 26). A state is a reading at ``now`` (see
     `sensors.apply_ha_states_on`). It never fails the pull: a failure is logged with its
-    type only, and every Home Assistant sensor is marked unreachable (it got no number)."""
+    type only, and every Home Assistant sensor on a live place is marked unreachable (it
+    got no number)."""
     try:
         if not any(
             s.source == "home_assistant" for s in await asyncio.to_thread(store.sensors.list, None)
