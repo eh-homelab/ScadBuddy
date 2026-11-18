@@ -4,7 +4,8 @@ the profile-fetch worker's queue. The API starts it per run (`fetch_workflow_id`
 The export activity signs in, exports each target and PUTs each file as it comes; then the
 import activity asks the API to import the run. A step that cannot finish (its attempts
 spent, a non-retryable failure, or no worker to take it within `EXPORT_SCHEDULE_TO_START`)
-posts ``failed`` with why, and the workflow returns a ``failed`` outcome. A CRUD call that
+posts ``failed`` with why (a run no worker serves at all is ended by the API, which
+reads the queue's pollers), and the workflow returns a ``failed`` outcome. A CRUD call that
 answers that the run is not running (`NOT_RUNNING`: the API ended it, Decision 25) ends the
 workflow at once with None: no retry, and no ``failed``, which would be refused too. The
 worker is not versioned: a change to this workflow's commands goes behind
@@ -37,8 +38,10 @@ with workflow.unsafe.imports_passed_through():
 EXPORT_TIMEOUT: Final = timedelta(minutes=20)
 #: The activity heartbeats every `core.heartbeat.HEARTBEAT_EVERY` (10 s).
 EXPORT_HEARTBEAT: Final = timedelta(minutes=2)
-#: No worker took the export: none is deployed, it is down, or it is busy with others.
-EXPORT_SCHEDULE_TO_START = timedelta(minutes=30)
+#: Caps how long an export may wait in the queue: one worker exports one run at a time, so
+#: an invoice confirm's many runs queue behind each other (Decision 16). A worker that is
+#: not there is found sooner by the API, from the queue's pollers (build Decision 62).
+EXPORT_SCHEDULE_TO_START = timedelta(hours=6)
 #: The activity marks `site.SiteError`'s kinds that are not worth another try as
 #: non-retryable (`activities.RETRYABLE_KINDS`).
 EXPORT_RETRY: Final = RetryPolicy(
@@ -52,6 +55,14 @@ IMPORT_RETRY: Final = RetryPolicy(
     maximum_interval=timedelta(minutes=2),
     maximum_attempts=5,
 )
+#: The longest each step's attempts take once a worker holds them (their schedule-to-close
+#: without the queue): every attempt's timeout plus the retry backoffs between them.
+EXPORT_SCHEDULE_TO_CLOSE: Final = 3 * EXPORT_TIMEOUT + timedelta(minutes=1 + 2)
+IMPORT_SCHEDULE_TO_CLOSE: Final = 5 * IMPORT_TIMEOUT + timedelta(seconds=10 + 20 + 40 + 80)
+#: A run still ``running`` this long after it started has no workflow that will end it:
+#: the API ends it ``failed`` (`filament.profile_fetch.end_unserved`, the last resort).
+LONGEST_RUN: Final = EXPORT_SCHEDULE_TO_START + EXPORT_SCHEDULE_TO_CLOSE + IMPORT_SCHEDULE_TO_CLOSE
+
 #: Posting ``failed`` waits out a CRUD service that does not answer.
 FAILED_TIMEOUT: Final = timedelta(minutes=2)
 FAILED_RETRY: Final = RetryPolicy(

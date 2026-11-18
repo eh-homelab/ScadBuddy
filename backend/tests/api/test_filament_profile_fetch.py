@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from scadbuddy.api import filament as filament_api
 from scadbuddy.filament import profile_fetch
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.profile_fetch.wire import FETCH_WORKFLOW, FetchAsk
+from scadbuddy.profile_fetch.workflow import LONGEST_RUN
 from tests.api.test_crud_profile_fetch import _state
 
 pytestmark = pytest.mark.requires_postgres
@@ -63,6 +65,29 @@ class FakeTemporal:
         else:
             self.started.append((workflow, workflow_id, kwargs.pop("task_queue"), ask))
         assert kwargs == {}
+
+
+class FakeProbe:
+    """`profile_fetch.QueueProbe`: whether the profile-fetch queue has pollers. ``fail``
+    makes the read raise, as a Temporal that does not answer; ``reads`` counts them."""
+
+    def __init__(self) -> None:
+        self.pollers = True
+        self.fail = False
+        self.reads = 0
+
+    async def has_pollers(self) -> bool:
+        self.reads += 1
+        if self.fail:
+            raise RuntimeError("Temporal is down")
+        return self.pollers
+
+
+@pytest.fixture(autouse=True)
+def probe(monkeypatch: pytest.MonkeyPatch) -> FakeProbe:
+    fake = FakeProbe()
+    monkeypatch.setattr(profile_fetch, "probe", lambda state: fake)
+    return fake
 
 
 @pytest.fixture(autouse=True)
@@ -386,3 +411,115 @@ def test_no_printer_model_is_logged_once_per_confirm(
     assert done.status_code == 200, done.text
     [warning] = caplog.records
     assert "no printer has a model" in warning.getMessage()
+
+
+# -- a run no worker serves (build Decision 62) ------------------------------------------
+
+
+def _started_ago(client: TestClient, run_id: str, age: timedelta) -> None:
+    with _state(client).settings_store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_profile_fetches SET started_at = now() - %s WHERE id = %s",
+            (age, run_id),
+        )
+
+
+def _read(client: TestClient, type_id: str) -> Any:
+    r = client.get(f"{URL}/types/{type_id}/profile-fetch")
+    assert r.status_code == 200, r.text
+    return r.json()["run"]
+
+
+@pytest.mark.parametrize(
+    ("pollers", "age", "status"),
+    [
+        (False, timedelta(minutes=11), "failed"),
+        (True, timedelta(minutes=11), "running"),
+        (False, timedelta(minutes=5), "running"),
+    ],
+)
+def test_a_run_no_worker_polls_for_ends_failed(
+    client: TestClient, probe: FakeProbe, pollers: bool, age: timedelta, status: str
+) -> None:
+    """A run still ``running`` 10 minutes after it started, while no worker polls the
+    profile-fetch queue, ends ``failed``: none would ever take its workflow. A busy
+    worker (pollers present) never fails a queued run, and a young run is left alone."""
+    _printer(client)
+    type_id = _type(client)
+    run = _start(client, type_id).json()["run"]
+    _started_ago(client, run["id"], age)
+    probe.pollers = pollers
+    read = _read(client, type_id)
+    assert read["id"] == run["id"]
+    assert read["status"] == status
+    if status == "failed":
+        assert read["error"] == "no profile-fetch worker picked the fetch up"
+        assert read["finished_at"] is not None
+    else:
+        assert read["error"] is None
+
+
+def test_a_run_past_the_longest_run_ends_failed_with_pollers(
+    client: TestClient, probe: FakeProbe
+) -> None:
+    """The last resort: a run older than the export's queue wait plus both steps'
+    schedule-to-close (Decision 13) ends ``failed`` even while a worker polls."""
+    _printer(client)
+    type_id = _type(client)
+    run = _start(client, type_id).json()["run"]
+    _started_ago(client, run["id"], LONGEST_RUN + timedelta(minutes=1))
+    probe.pollers = True
+    read = _read(client, type_id)
+    assert read["status"] == "failed"
+    assert read["error"] == "no profile-fetch worker picked the fetch up"
+
+
+def test_a_temporal_error_leaves_the_run_running(
+    client: TestClient, probe: FakeProbe, caplog: pytest.LogCaptureFixture
+) -> None:
+    _printer(client)
+    type_id = _type(client)
+    run = _start(client, type_id).json()["run"]
+    _started_ago(client, run["id"], timedelta(minutes=11))
+    probe.pollers = False
+    probe.fail = True
+    caplog.set_level(logging.WARNING)
+    assert _read(client, type_id)["status"] == "running"
+    assert probe.reads == 1
+
+
+def test_a_start_that_would_join_an_unserved_run_opens_a_new_one(
+    client: TestClient, starter: FakeTemporal, probe: FakeProbe
+) -> None:
+    """A start that would join a run no worker serves ends that run ``failed`` and opens
+    and starts a new one, rather than joining a run that never ends."""
+    _printer(client)
+    type_id = _type(client)
+    first = _start(client, type_id).json()["run"]
+    _started_ago(client, first["id"], timedelta(minutes=11))
+    probe.pollers = False
+    again = _start(client, type_id)
+    assert again.status_code == 202, again.text
+    assert again.json()["joined"] is False
+    assert again.json()["run"]["id"] != first["id"]
+    assert [ask.run_id for (_, _, _, ask) in starter.started] == [
+        first["id"],
+        again.json()["run"]["id"],
+    ]
+    ended = profile_fetch.fetches(_state(client)).get(UUID(first["id"]))
+    assert ended is not None and ended.status == "failed"
+    assert ended.error == "no profile-fetch worker picked the fetch up"
+
+
+def test_a_start_joins_a_run_a_busy_worker_will_take(
+    client: TestClient, starter: FakeTemporal, probe: FakeProbe
+) -> None:
+    _printer(client)
+    type_id = _type(client)
+    first = _start(client, type_id).json()["run"]
+    _started_ago(client, first["id"], timedelta(minutes=11))
+    probe.pollers = True
+    again = _start(client, type_id)
+    assert again.json()["joined"] is True
+    assert again.json()["run"]["id"] == first["id"]
+    assert len(starter.started) == 1

@@ -64,6 +64,7 @@ from scadbuddy.filament.profile_fetch import (
     FetchRefusedError,
     ProfileFetchStarted,
     ProfileFetchStatus,
+    end_unserved,
     fetches,
     start_fetch,
 )
@@ -360,10 +361,11 @@ async def put_type_k_values(
         "setting, and the API imports them into Bambuddy's local presets and makes them the "
         "type's presets for those keys. It answers 202 at once with the run (`running`); "
         "read its progress with `GET` on this path. A start while a fetch of the type runs "
-        "joins it (`joined: true`, the same run) and starts nothing new. 404 for no such "
-        "type, 422 `no_tdfp_id` for a type without a 3DFP id, 422 `no_printer_models` when "
-        "no printer has a model, 503 when Temporal did not take the start within 10 s (the "
-        "run ends `failed`)."
+        "joins it (`joined: true`, the same run) and starts nothing new, unless no "
+        "profile-fetch worker serves that run: it then ends `failed` and a new run starts. "
+        "404 for no such type, 422 `no_tdfp_id` for a type without a 3DFP id, 422 "
+        "`no_printer_models` when no printer has a model, 503 when Temporal did not take the "
+        "start within 10 s (the run ends `failed`)."
     ),
 )
 async def start_type_profile_fetch(
@@ -393,7 +395,9 @@ async def start_type_profile_fetch(
         "had one): its `status` (`running`, `imported`, `partial`, `failed`), the keys it "
         "could not set (`missing`), its notes and error. `gaps` lists each printer model "
         "and nozzle a fetch would export now that the type has no preset for, with the "
-        "reason its last fetch gave. 404 for no such type."
+        "reason its last fetch gave. A run that no profile-fetch worker serves (none polls "
+        "its queue 10 min after it started, or it outlived every timeout) is ended `failed` "
+        "on this read. 404 for no such type."
     ),
 )
 async def get_type_profile_fetch(
@@ -403,6 +407,8 @@ async def get_type_profile_fetch(
         raise _no_type(type_id)
     runs = fetches(state)
     run = await asyncio.to_thread(runs.latest, type_id)
+    if run is not None:
+        run = await end_unserved(state, run)
     gaps = await asyncio.to_thread(runs.gaps, type_id)
     return ProfileFetchStatus(run=run, gaps=gaps)
 

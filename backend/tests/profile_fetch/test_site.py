@@ -7,14 +7,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 import time
 import traceback
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+from playwright.async_api import BrowserType, Page, async_playwright
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Page
 from pydantic import SecretStr
 
 from scadbuddy.profile_fetch import site
@@ -369,3 +371,90 @@ async def test_a_list_that_fills_within_the_option_wait_is_used(
     await browser.ensure_in_my_spools(30173)
     exported = await browser.export(30173, "H2C", "0.4")
     assert exported.name == EXPORT_NAME
+
+
+def _dumping(script: Path, dumps: Path, role: str, then: str) -> Path:
+    """A shell script that writes its environment (NUL-separated) to
+    ``dumps/<role>-<pid>``, then execs ``then`` with its arguments."""
+    script.write_text(f"#!/bin/sh\n/usr/bin/env -0 > '{dumps}/{role}-'$$\nexec {then} \"$@\"\n")
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux's Chromium and /bin/sh")
+async def test_the_browser_gets_no_scadbuddy_environment(
+    replica: ReplicaServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chromium is launched with an allowlisted environment (`site.browser_env`): neither
+    the browser process nor a renderer it starts holds the 3DFP login or any other
+    ``SCADBUDDY_`` variable, which a renderer exploit could read from its own memory
+    (Task 6 review, I1).
+
+    ``/proc/<pid>/environ`` cannot show it: Chromium writes its process title over that
+    memory (measured with Playwright 1.64.1's Chromium: every browser and renderer read
+    empty or as the tail of its command line, with or without the fix). So the browser
+    is launched through a script that writes the environment it is given, and its
+    renderers through ``--renderer-cmd-prefix`` with another."""
+    monkeypatch.setenv("SCADBUDDY_TDFP_EMAIL", EMAIL)
+    monkeypatch.setenv("SCADBUDDY_TDFP_PASSWORD", PASSWORD)
+    monkeypatch.setenv("SCADBUDDY_X", "another")
+    dumps = tmp_path / "environ"
+    dumps.mkdir()
+    async with async_playwright() as playwright:
+        chromium = playwright.chromium.executable_path
+    wrapped = _dumping(tmp_path / "chrome", dumps, "browser", f"'{chromium}'")
+    renderer = _dumping(tmp_path / "renderer", dumps, "renderer", "")
+    launch = BrowserType.launch_persistent_context
+
+    async def launching(self: BrowserType, user_data_dir: str, **kwargs: Any) -> Any:
+        kwargs["executable_path"] = str(wrapped)
+        kwargs["args"] = [f"--renderer-cmd-prefix={renderer}"]
+        return await launch(self, user_data_dir, **kwargs)
+
+    monkeypatch.setattr(BrowserType, "launch_persistent_context", launching)
+    async with _site(replica, tmp_path) as driver:
+        await driver.login()
+    written = {path.name.split("-")[0]: path for path in dumps.iterdir()}
+    assert set(written) == {"browser", "renderer"}, sorted(p.name for p in dumps.iterdir())
+    for path in dumps.iterdir():
+        env = [item.decode() for item in path.read_bytes().split(b"\0") if item]
+        assert any(item.startswith("PATH=") for item in env), path.name
+        leaked = [item.split("=", 1)[0] for item in env if item.startswith("SCADBUDDY_")]
+        assert leaked == [], (path.name, leaked)
+        for item in env:
+            _no_secret(item)
+
+
+def test_the_browser_env_keeps_only_the_allowlist() -> None:
+    environ = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/w",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C",
+        "LC_CTYPE": "C",
+        "TZ": "UTC",
+        "TMPDIR": "/tmp/w",
+        "XDG_RUNTIME_DIR": "/run/w",
+        "FONTCONFIG_PATH": "/etc/fonts",
+        "DISPLAY": ":99",
+        "XAUTHORITY": "/tmp/xvfb-run.x/Xauthority",
+        "SCADBUDDY_TDFP_EMAIL": EMAIL,
+        "SCADBUDDY_TDFP_PASSWORD": PASSWORD,
+        "SCADBUDDY_SERVICE_TOKEN_FILE": "/var/run/secrets/token",
+        "SCADBUDDY_X": "x",
+        "AWS_SECRET_ACCESS_KEY": "k",
+        "LD_PRELOAD": "/evil.so",
+    }
+    assert site.browser_env(environ) == {
+        "PATH": "/usr/bin",
+        "HOME": "/home/w",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C",
+        "LC_CTYPE": "C",
+        "TZ": "UTC",
+        "TMPDIR": "/tmp/w",
+        "XDG_RUNTIME_DIR": "/run/w",
+        "FONTCONFIG_PATH": "/etc/fonts",
+        "DISPLAY": ":99",
+        "XAUTHORITY": "/tmp/xvfb-run.x/Xauthority",
+    }

@@ -3,8 +3,9 @@
 It holds no database secret, no KEK, no store credential and no Bambuddy key, and refuses
 to start with one (`settings.check_environment`). It exchanges its proof for a
 ``profile-fetch`` service credential (`exchange_source`), waits until the CRUD service
-serves its areas, signs in to 3dfilamentprofiles.com once (a refused login ends the start,
-plan Decision 5), then polls `DEFAULT_QUEUE` for `ProfileFetch` runs, one activity at a
+serves its areas, signs in to 3dfilamentprofiles.com once (a refused login or a browser
+that does not launch ends the start; any other sign-in failure is logged, and the first
+fetch signs in again), then polls `DEFAULT_QUEUE` for `ProfileFetch` runs, one activity at a
 time (Decision 16). It imports no database code (`tests/profile_fetch/test_worker.py`).
 It is not versioned (no worker deployment), so a change to the workflow goes behind
 `workflow.patched`. ``/healthz`` on `HEALTH_PORT` answers 200 while it runs, and
@@ -18,6 +19,7 @@ import logging
 import signal
 from collections.abc import Callable
 from contextlib import suppress
+from typing import Final
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from temporalio.client import Client
@@ -59,7 +61,39 @@ async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -
 
 
 class StartRefusedError(Exception):
-    """The worker cannot start: the 3DFP sign-in failed. Its text holds no secret."""
+    """The worker cannot start: the 3DFP login was refused, or the browser did not
+    launch. Its text is fixed and holds no secret."""
+
+
+BROWSER_DID_NOT_START: Final = "the browser did not start"
+
+
+async def _sign_in_at_start(sites: SiteHolder) -> None:
+    """Sign in once before polling. A refused login, or a browser that does not launch
+    (Chromium's sandbox cannot start, Decision 6), refuses the start: every fetch would
+    fail the same way. A bot check, a timeout or a browser failure after the launch is
+    logged and the worker starts anyway: the first export signs in again under its
+    retries, and a Vercel check that does not clear yet does not crash-loop the pod."""
+    refused: str | None = None
+    try:
+        await sites.get()
+    except SiteError as error:
+        if error.kind == "login_failed":
+            refused = "3DFP login failed"
+        else:
+            # The driver's own text, which never holds the login.
+            logger.warning(
+                "3DFP sign-in at start failed (%s): %s; the first fetch signs in again",
+                error.kind,
+                error,
+            )
+    except Exception as error:
+        # Logged by its class only: a launch error's text can quote the environment.
+        logger.error("the browser did not start (%s)", type(error).__name__)
+        refused = BROWSER_DID_NOT_START
+    if refused is not None:
+        # Raised outside the handler: the text is fixed, and no chain rides along.
+        raise StartRefusedError(refused)
 
 
 async def run(
@@ -92,16 +126,7 @@ async def run(
         if not await wait_for_areas(crud, "profile-fetch", AREAS, stop, poll=areas_poll):
             logger.info("stopped before the CRUD service served the profile-fetch areas")
             return
-        failed: SiteError | None = None
-        try:
-            await sites.get()
-        except SiteError as error:
-            failed = error
-        if failed is not None:
-            # Raised outside the handler: the text is fixed, and no chain rides along.
-            if failed.kind == "login_failed":
-                raise StartRefusedError("3DFP login failed")
-            raise StartRefusedError(f"3DFP sign-in at start failed ({failed.kind}): {failed}")
+        await _sign_in_at_start(sites)
         client = await Client.connect(
             settings.temporal_address,
             namespace=settings.temporal_namespace,

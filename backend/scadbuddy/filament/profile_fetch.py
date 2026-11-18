@@ -29,7 +29,7 @@ import math
 import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 from uuid import UUID
@@ -40,6 +40,9 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
+from temporalio.api.enums.v1 import TaskQueueKind, TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
@@ -60,6 +63,7 @@ from scadbuddy.profile_fetch.wire import (
     MissingKey,
     fetch_workflow_id,
 )
+from scadbuddy.profile_fetch.workflow import LONGEST_RUN, NO_WORKER
 from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
 
 if TYPE_CHECKING:
@@ -90,6 +94,11 @@ NOT_STARTED: Final = "the fetch could not be started"
 #: The longest a start (the route's, or one of an invoice confirm's) waits for Temporal
 #: to take a fetch's workflow.
 START_TIMEOUT_SECONDS: Final = 10.0
+#: How long a run may wait for a worker before the API asks Temporal whether one polls
+#: the profile-fetch queue (`end_unserved`).
+NO_POLLER_GRACE: Final = timedelta(minutes=10)
+#: The longest that read may take; a slower Temporal leaves the run alone.
+PROBE_TIMEOUT_SECONDS: Final = 5.0
 #: The keys only a printer or a process preset has.
 SETTINGS_IDS: Final = frozenset({"printer_settings_id", "print_settings_id"})
 
@@ -237,6 +246,25 @@ class ProfileFetches:
                 (NOT_STARTED, run_id),
             )
 
+    def running_age(self, run_id: UUID) -> timedelta | None:
+        """How long ago the run started, by the database's clock; None once it ended."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT now() - started_at AS age FROM filament_profile_fetches"
+                " WHERE id = %s AND status = 'running'",
+                (run_id,),
+            ).fetchone()
+        return None if row is None else row["age"]
+
+    def fail_unserved(self, run_id: UUID) -> None:
+        """The run ends ``failed`` with `NO_WORKER` when it still runs (`end_unserved`)."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE filament_profile_fetches SET status = 'failed', error = %s,"
+                " finished_at = now() WHERE id = %s AND status = 'running'",
+                (NO_WORKER, run_id),
+            )
+
     @staticmethod
     def _targets(conn: Conn, nozzles: list[str]) -> list[ExportTarget]:
         rows = conn.execute(
@@ -281,12 +309,83 @@ class FetchStarter:
         )
 
 
+class QueueProbe(Protocol):
+    """Whether any worker polls the profile-fetch queue (`TemporalQueueProbe`; a test's
+    fake)."""
+
+    async def has_pollers(self) -> bool: ...
+
+
+class TemporalQueueProbe:
+    """Temporal's DescribeTaskQueue for the queue's workflow and its activity task
+    queues: a poller on either is a worker that will take the run."""
+
+    def __init__(self, client: Client, task_queue: str) -> None:
+        self.client = client
+        self.task_queue = task_queue
+
+    async def has_pollers(self) -> bool:
+        for kind in (
+            TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+            TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
+        ):
+            described = await self.client.workflow_service.describe_task_queue(
+                DescribeTaskQueueRequest(
+                    namespace=self.client.namespace,
+                    task_queue=TaskQueue(
+                        name=self.task_queue, kind=TaskQueueKind.TASK_QUEUE_KIND_NORMAL
+                    ),
+                    task_queue_type=kind,
+                )
+            )
+            if described.pollers:
+                return True
+        return False
+
+
 def starter(state: AppState) -> Starter:
     """The app's starter: the operations' client, on the profile-fetch worker's queue."""
     from scadbuddy.operations.component import OPERATIONS
 
     ops = state.components.get(OPERATIONS)
     return FetchStarter(ops.client, state.settings.temporal_task_queue_profile_fetch)
+
+
+def probe(state: AppState) -> QueueProbe:
+    """The app's probe: the operations' client, on the profile-fetch worker's queue."""
+    from scadbuddy.operations.component import OPERATIONS
+
+    ops = state.components.get(OPERATIONS)
+    return TemporalQueueProbe(ops.client, state.settings.temporal_task_queue_profile_fetch)
+
+
+async def end_unserved(state: AppState, run: ProfileFetch) -> ProfileFetch:
+    """The run, ended ``failed`` with `NO_WORKER` when no worker will serve it: it has
+    run longer than `NO_POLLER_GRACE` and no worker polls the profile-fetch queue, or,
+    as a last resort, it has run longer than `workflow.LONGEST_RUN` (Decision 13's
+    bounds). The workflow runs on that queue too, so with no worker deployed nothing
+    else would ever end it. A worker that polls (a busy one) never fails a queued run,
+    and a Temporal that does not answer leaves the run as it is."""
+    if run.status != "running":
+        return run
+    runs = fetches(state)
+    age = await asyncio.to_thread(runs.running_age, run.id)
+    if age is None:
+        return await asyncio.to_thread(runs.get, run.id) or run
+    if age < NO_POLLER_GRACE:
+        return run
+    if age <= LONGEST_RUN:
+        try:
+            async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+                served = await probe(state).has_pollers()
+        except Exception:
+            logger.warning("could not read the pollers of the profile-fetch queue", exc_info=True)
+            return run
+        if served:
+            return run
+    await asyncio.to_thread(runs.fail_unserved, run.id)
+    logger.warning("profile fetch %s ended failed: %s", run.id, NO_WORKER)
+    return await asyncio.to_thread(runs.get, run.id) or run
 
 
 def fetches(state: AppState) -> ProfileFetches:
@@ -308,11 +407,16 @@ async def start_fetch(
     state: AppState, type_id: UUID, *, actor: str, timeout: float | None = None
 ) -> ProfileFetchStarted:
     """Open the type's run (`ProfileFetches.open`) and start its workflow. A run already
-    running is joined, and its workflow is not started again. `FetchRefusedError` when
+    running is joined, and its workflow is not started again, unless no worker serves it
+    (`end_unserved` ends it, and a new run is opened). `FetchRefusedError` when
     the type cannot be fetched; `FetchNotStartedError` when Temporal did not take the
     start (or not within ``timeout`` seconds), after the run is ended ``failed``."""
     runs = fetches(state)
     run, joined = await asyncio.to_thread(runs.open, type_id, actor=actor)
+    if joined and (await end_unserved(state, run)).status != "running":
+        # No worker serves the run it would join: that run ended, and this start opens
+        # a new one.
+        run, joined = await asyncio.to_thread(runs.open, type_id, actor=actor)
     if not joined:
         ask = FetchAsk(
             run_id=str(run.id), type_id=str(type_id), tdfp_id=run.tdfp_id, targets=run.targets

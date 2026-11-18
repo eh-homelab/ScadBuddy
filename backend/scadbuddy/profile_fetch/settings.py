@@ -5,7 +5,7 @@ Bambuddy field: it reaches the CRUD service, Temporal and 3dfilamentprofiles.com
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
@@ -22,12 +22,17 @@ HEALTH_PORT: Final = 9090
 #: entry that would turn one on refuses the start.
 PLAYWRIGHT_CHANNELS: Final = ("pw:api", "pw:protocol", "pw:browser", "pw:channel")
 
+#: The 3DFP login's variables. `forget_login` removes them once the settings hold it.
+LOGIN_ENV: Final = ("SCADBUDDY_TDFP_EMAIL", "SCADBUDDY_TDFP_PASSWORD")
+
 __all__ = [
     "FORBIDDEN_ENV",
     "HEALTH_PORT",
+    "LOGIN_ENV",
     "ProfileFetchRefusal",
     "ProfileFetchSettings",
     "check_environment",
+    "forget_login",
 ]
 
 
@@ -63,6 +68,14 @@ def check_environment(environ: Mapping[str, str]) -> None:
         )
     if reasons:
         raise ProfileFetchRefusal(reasons)
+
+
+def forget_login(environ: MutableMapping[str, str]) -> None:
+    """Remove the 3DFP login from ``environ`` (``os.environ``) once the settings read it,
+    so no process the worker starts (Playwright's driver, the browser) inherits it
+    (Task 6 review, I1)."""
+    for name in LOGIN_ENV:
+        environ.pop(name, None)
 
 
 class ProfileFetchSettings(BaseSettings):

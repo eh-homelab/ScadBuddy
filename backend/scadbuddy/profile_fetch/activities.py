@@ -53,6 +53,10 @@ BASE: Final = f"/api/v1{PREFIX}/profile-fetch/runs"
 #: Decision 13: worth another attempt. A refused login, an unknown 3DFP id and a missing
 #: option are not: they would fail the same way.
 RETRYABLE_KINDS: Final[frozenset[Kind]] = frozenset({"browser", "timeout", "bot_check"})
+#: A failure after which the browser is closed and the next attempt launches a new one: a
+#: crash, and a timeout, which may be a page wedged with its renderer alive (Task 6
+#: review, M1). A bot check keeps the browser, and with it the check's cookie.
+FRESH_BROWSER_KINDS: Final[frozenset[Kind]] = frozenset({"browser", "timeout"})
 TOO_LARGE: Final = "the exported file is larger than 512 KiB"
 #: The generic text of a failure the driver did not map: its own text might quote what the
 #: browser was given.
@@ -88,7 +92,7 @@ class Site(Protocol):
 class SiteHolder:
     """One signed-in browser for the worker's life (one export at a time, Decision 16).
     `get` opens it and signs in when there is none; `drop` closes it, so the next `get`
-    starts afresh (after a crash)."""
+    starts afresh (after a crash or a timeout, `FRESH_BROWSER_KINDS`)."""
 
     def __init__(self, open_site: Callable[[], Site]) -> None:
         self._open = open_site
@@ -185,8 +189,8 @@ class ProfileFetchActivities:
         except Exception as error:
             failure, name = site_failure(error), type(error).__name__
         EXPORTS.labels(outcome=failure.type or "browser").inc()
-        if failure.type == "browser":
-            # A crashed or broken browser: the next attempt opens a fresh one.
+        if failure.type in FRESH_BROWSER_KINDS:
+            # A crashed, broken or wedged browser: the next attempt launches a fresh one.
             await self._sites.drop()
         # The type's name only: the error's own text might quote the login.
         logger.warning("export of run %s failed: %s (%s)", ask.run_id, failure.type, name)

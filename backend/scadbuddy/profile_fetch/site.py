@@ -16,8 +16,10 @@ a failure inside the login is raised as a `SiteError` of a fixed text, its cause
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -80,6 +82,25 @@ _MESSAGES: Final[dict[str, str]] = {
 }
 
 
+#: The variables Chromium is launched with (`browser_env`): the locale, the time zone, the
+#: home and temp dirs, fontconfig's, and the X display that ``xvfb-run`` sets for the
+#: headed browser (Decision 5). Nothing else: not the 3DFP login, not the service
+#: credential's file, no ``SCADBUDDY_`` variable.
+BROWSER_ENV: Final = frozenset({"PATH", "HOME", "LANG", "TZ", "TMPDIR", "DISPLAY", "XAUTHORITY"})
+BROWSER_ENV_PREFIXES: Final = ("LC_", "XDG_", "FONTCONFIG_")
+
+
+def browser_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """The allowlisted part of ``environ`` that Chromium gets. Playwright's default is the
+    driver's whole environment, which the browser and every renderer it forks would hold
+    in their memory (Task 6 review, I1)."""
+    return {
+        name: value
+        for name, value in environ.items()
+        if name in BROWSER_ENV or name.startswith(BROWSER_ENV_PREFIXES)
+    }
+
+
 class SiteError(Exception):
     """A step on the site that failed. ``kind`` says how; the message never holds the
     email or the password."""
@@ -123,6 +144,7 @@ class ThreeDfpSite:
     async def __aenter__(self) -> Self:
         self._profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._playwright = await async_playwright().start()
+        env: dict[str, str | float | bool] = dict(browser_env(os.environ))
         try:
             # No record_har_path and no tracing: both would keep the login form's body.
             self._context = await self._playwright.chromium.launch_persistent_context(
@@ -133,6 +155,7 @@ class ThreeDfpSite:
                 # The blob hook reads the export in the page; any other download is refused
                 # rather than saved to Playwright's temp dir, outside `profile_dir`.
                 accept_downloads=False,
+                env=env,
             )
             self._context.set_default_timeout(STEP_TIMEOUT_MS)
             await self._context.add_init_script(script=f"({BLOB_HOOK})()")

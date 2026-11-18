@@ -16,6 +16,7 @@ from scadbuddy.profile_fetch.settings import (
     ProfileFetchRefusal,
     ProfileFetchSettings,
     check_environment,
+    forget_login,
 )
 from scadbuddy.profile_fetch.worker import StartRefusedError, install_stop, run
 
@@ -42,6 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = ProfileFetchSettings()  # type: ignore[call-arg]  # read from the environment
     except ValidationError as invalid:
+        forget_login(os.environ)
         configure_logging()
         # Each refused setting by its name and why, never the value: pydantic's own text
         # quotes the input, which could be the login.
@@ -49,6 +51,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             name = ".".join(str(part) for part in error["loc"]) or "settings"
             logger.error("setting %s: %s", name, error["msg"])
         return 2
+    # The settings hold the login now: no child process may inherit it.
+    forget_login(os.environ)
     configure_logging(settings.log_level)
     try:
         asyncio.run(_main(settings))

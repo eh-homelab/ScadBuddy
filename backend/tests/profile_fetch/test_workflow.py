@@ -17,7 +17,7 @@ from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
-from scadbuddy.filament.profile_fetch import FetchStarter
+from scadbuddy.filament.profile_fetch import FetchStarter, TemporalQueueProbe
 from scadbuddy.profile_fetch import workflow as fetch_workflow
 from scadbuddy.profile_fetch.wire import (
     EXPORT_ACTIVITY,
@@ -138,6 +138,15 @@ async def test_the_workflow_imports_after_export(client: Client, queue: str) -> 
     assert info.retry_policy is not None
     assert info.retry_policy.maximum_attempts == EXPORT_RETRY.maximum_attempts == 3
     assert info.retry_policy.initial_interval == timedelta(minutes=1)
+    # The queue wait caps queued work, not a missing worker (build Decision 62).
+    history = await client.get_workflow_handle(fetch_workflow_id(ask.run_id)).fetch_history()
+    [scheduled] = [
+        event.activity_task_scheduled_event_attributes
+        for event in history.events
+        if event.HasField("activity_task_scheduled_event_attributes")
+        and event.activity_task_scheduled_event_attributes.activity_type.name == EXPORT_ACTIVITY
+    ]
+    assert scheduled.schedule_to_start_timeout.ToTimedelta() == timedelta(hours=6)
 
 
 async def test_a_non_retryable_failure_posts_failed(client: Client, queue: str) -> None:
@@ -211,3 +220,15 @@ async def test_no_worker_fails_the_run(
     assert fakes.exports == []
     assert fakes.failed == [(ask.run_id, NO_WORKER)]
     assert NO_WORKER == "no profile-fetch worker picked the fetch up"
+
+
+async def test_the_queue_probe_sees_a_polling_worker(client: Client, queue: str) -> None:
+    """`TemporalQueueProbe` reads DescribeTaskQueue for the workflow and activity task
+    queues: none polled a new queue, and a running worker does (build Decision 62)."""
+    probe = TemporalQueueProbe(client, queue)
+    assert await probe.has_pollers() is False
+    async with Worker(client, task_queue=queue, workflows=[ProfileFetch], activities=[]):
+        deadline = asyncio.get_running_loop().time() + 10
+        while not await probe.has_pollers():
+            assert asyncio.get_running_loop().time() < deadline, "no poller seen in 10 s"
+            await asyncio.sleep(0.2)

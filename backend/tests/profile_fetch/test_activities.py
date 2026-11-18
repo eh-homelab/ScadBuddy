@@ -301,12 +301,17 @@ def test_failed_reason_carries_no_secret(where: str) -> None:
         assert PASSWORD not in text
 
 
-def test_a_browser_failure_opens_a_fresh_browser() -> None:
-    """A crashed browser is closed, and the next attempt opens and signs in again."""
+@pytest.mark.parametrize(("kind", "launches"), [("browser", 2), ("timeout", 2), ("bot_check", 1)])
+def test_a_browser_or_timeout_failure_opens_a_fresh_browser(kind: Kind, launches: int) -> None:
+    """A crashed or wedged browser (``browser``, ``timeout``) is closed, and the next
+    attempt launches and signs in again; a page wedged after the login would otherwise
+    time out every later export (Task 6 review, M1). A bot check keeps the browser, and
+    the check's cookie in it."""
     made: list[FakeSite] = []
+    first = FakeSite(fail=SiteError(kind))
 
     def make() -> FakeSite:
-        made.append(FakeSite(fail=SiteError("browser") if not made else None))
+        made.append(first if not made else FakeSite())
         return made[-1]
 
     crud = FakeCrud()
@@ -316,19 +321,22 @@ def test_a_browser_failure_opens_a_fresh_browser() -> None:
     sites = SiteHolder(make)
     activities = ProfileFetchActivities(client, sites)
 
-    async def go() -> ExportReport:
+    async def go() -> None:
         env = ActivityEnvironment()
         try:
             with pytest.raises(ApplicationError):
                 await env.run(activities.export, ASK)
-            return await env.run(activities.export, ASK)
+            first.fail = None
+            await env.run(activities.export, ASK)
         finally:
             await sites.aclose()
             await client.aclose()
 
-    report = asyncio.run(go())
-    assert report.exported == 4
-    assert [(s.opened, s.closed, s.logins) for s in made] == [(1, 1, 1), (1, 1, 1)]
+    asyncio.run(go())
+    assert len(made) == launches
+    assert made[0].closed == 1
+    assert all((s.opened, s.closed, s.logins) == (1, 1, 1) for s in made)
+    assert len(crud.puts) == 4
 
 
 @pytest.mark.parametrize(("status", "code"), [(409, "not_running"), (404, "run_not_found")])
