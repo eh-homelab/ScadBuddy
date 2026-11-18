@@ -116,6 +116,40 @@ def test_a_report_after_the_watch_clock_steps_back_moves_the_counter_back(
     assert (counter.run_seconds, counter.counted_to) == (Decimal(20), _at(10))
 
 
+def test_a_late_write_while_the_watch_clock_is_ahead_counts_nothing_twice(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A watch host 60 s ahead: the stored ``seen_at`` guards nothing (`reports.stale`), so
+    a late write is written, but the counter neither moves back nor counts it again."""
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    base = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60)
+    reports.advance(pid, _running(), base)
+    reports.advance(pid, _running(), base + timedelta(seconds=10))
+
+    reports.advance(pid, _running("PAUSE"), base + timedelta(seconds=5))  # the late write
+    reports.advance(pid, _running(), base + timedelta(seconds=20))
+
+    counter = _counter(pg_pool, pid)
+    assert counter is not None
+    assert (counter.run_seconds, counter.state) == (Decimal(20), "RUNNING")
+    assert counter.counted_to == base + timedelta(seconds=20)
+
+
+def test_the_counter_keeps_every_microsecond(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """Each write adds its gap to the stored total, so a total rounded on each write would
+    drift: 50 gaps of 0.123456 s are 6.1728 s exactly."""
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    reports.advance(pid, _running(), _at(0))
+    for step in range(1, 51):
+        reports.advance(pid, _running(), _at(0) + step * timedelta(microseconds=123456))
+    counter = _counter(pg_pool, pid)
+    assert counter is not None and counter.run_seconds == Decimal("6.1728")
+
+
 def test_a_printer_not_lan_linked_gets_no_row(
     printers_with_kek: PrinterStore, pg_pool: PgPool
 ) -> None:
@@ -204,6 +238,31 @@ def test_a_merge_keeps_the_kept_printers_counter(printers: PrinterStore, pg_pool
     counter = _counter(pg_pool, kept)
     assert counter is not None and counter.run_seconds == 60
     assert _counter(pg_pool, gone) is None
+
+
+def test_after_a_merge_a_report_before_the_moved_counter_changes_nothing(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """The gone printer's counter moves under a kept printer whose reports are older. A
+    report before its ``counted_to`` counts nothing and keeps it; a later one counts on."""
+    gone, kept = _two_rows(printers_with_kek)
+    printers_with_kek.link_lan(kept, LanLink(host="10.0.0.9", access_code=CODE), cert_sha256=CERT)
+    reports = PrinterReportStore(pg_pool)
+    reports.advance(kept, _running(), _at(-100))
+    with pg_pool.connection() as conn:  # a kept printer reported before the counter existed
+        conn.execute("DELETE FROM printer_run_hours WHERE printer = %s", (kept,))
+    _put_counter(pg_pool, gone, 3600)  # counted to T0
+
+    printers_with_kek.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    reports.advance(kept, _running(), _at(-50))
+    before = _counter(pg_pool, kept)
+    reports.advance(kept, _running(), _at(10))
+
+    assert before is not None
+    assert (before.run_seconds, before.counted_to) == (Decimal(3600), T0)
+    after = _counter(pg_pool, kept)
+    assert after is not None
+    assert (after.run_seconds, after.counted_to) == (Decimal(3610), _at(10))
 
 
 def test_the_reading_rounds_half_up_to_a_tenth(
