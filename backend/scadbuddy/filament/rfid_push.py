@@ -47,7 +47,9 @@ def error_label(exc: ApiError) -> str:
 
 
 def _label(exc: Exception) -> str:
-    return error_label(exc) if isinstance(exc, ApiError) else type(exc).__name__
+    """`error_label` for a Bambuddy problem, else one fixed word: an exception's class
+    would leak what failed inside (a database driver's error, say)."""
+    return error_label(exc) if isinstance(exc, ApiError) else "internal"
 
 
 def _read(store: Filament, tag_id: UUID) -> tuple[dict[str, Any], int | None] | None:
@@ -94,12 +96,13 @@ def _done(store: Filament, tag_id: UUID, queued_at: datetime) -> None:
         )
 
 
-def _failed(store: Filament, tag_id: UUID, label: str) -> None:
+def _failed(store: Filament, tag_id: UUID, queued_at: datetime, label: str) -> None:
+    """Count the failure, unless the tag was queued again since it was listed."""
     with store.spools.transaction() as conn:
         conn.execute(
             "UPDATE filament_bb_tag_pending SET attempts = attempts + 1,"
-            " last_attempt_at = now(), last_error = %s WHERE tag_id = %s",
-            (label, tag_id),
+            " last_attempt_at = now(), last_error = %s WHERE tag_id = %s AND queued_at = %s",
+            (label, tag_id, queued_at),
         )
 
 
@@ -148,14 +151,15 @@ async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50
     (``attempts``, ``last_error``) and the next tag goes on."""
     report = TagPushReport()
     with store.spools.transaction() as conn:
-        ids = [
-            row["tag_id"]
+        queued = [
+            (row["tag_id"], row["queued_at"])
             for row in conn.execute(
-                "SELECT tag_id FROM filament_bb_tag_pending ORDER BY queued_at, tag_id LIMIT %s",
+                "SELECT tag_id, queued_at FROM filament_bb_tag_pending"
+                " ORDER BY queued_at, tag_id LIMIT %s",
                 (limit,),
             )
         ]
-    for tag_id in ids:
+    for tag_id, queued_at in queued:
         try:
             await _push_one(store, client, tag_id, report)
         except Exception as error:
@@ -164,7 +168,7 @@ async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50
                 "could not push a tag to Bambuddy",
                 extra={"tag_id": str(tag_id), "error": label},
             )
-            await asyncio.to_thread(_failed, store, tag_id, label)
+            await asyncio.to_thread(_failed, store, tag_id, queued_at, label)
             report.failed += 1
     return report
 

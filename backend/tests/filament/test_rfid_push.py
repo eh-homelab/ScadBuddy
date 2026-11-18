@@ -321,12 +321,59 @@ async def test_the_drain_is_off_unless_tags_is_sb_to_bb(pg_pool: PgPool) -> None
     assert _pending(pg_pool) == []
 
 
-async def test_the_pull_after_a_push_changes_nothing(pg_pool: PgPool) -> None:
+@respx.mock
+async def test_a_failure_that_is_not_bambuddys_is_labelled_internal(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    _bind(f, _spool(f, pg_pool, 11), uid=UID)
+    _by_tag(None)
+    respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
+        side_effect=RuntimeError("password=hunter2")
+    )
+
+    report = await drain_tags(f, client)
+
+    assert report.failed == 1
+    (row,) = _pending(pg_pool)
+    assert row["last_error"] == "internal"
+
+
+@respx.mock
+async def test_a_failure_does_not_count_against_a_requeued_tag(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
+    f = _filament(pg_pool)
+    _bind(f, _spool(f, pg_pool, 11), uid=UID)
+    _by_tag(None)
+
+    def requeue_then_fail(request: httpx.Request) -> httpx.Response:
+        with pg_pool.connection() as conn:
+            conn.execute("UPDATE filament_bb_tag_pending SET queued_at = now() + interval '1 s'")
+        raise httpx.ConnectError("down")
+
+    respx.patch(f"{API}/inventory/spools/11/link-tag").mock(side_effect=requeue_then_fail)
+
+    await drain_tags(f, client)
+
+    (row,) = _pending(pg_pool)
+    assert (row["attempts"], row["last_error"]) == (0, None)
+
+
+@respx.mock
+async def test_the_pull_after_a_push_changes_nothing(
+    pg_pool: PgPool, client: BambuddyClient
+) -> None:
     f = _filament(pg_pool)
     spool = _spool(f, pg_pool, 11)
     _bind(f, spool, uid=UID)
     before = f.spools.open_binding(spool)
     assert before is not None
+    _by_tag(None)
+    respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
+        return_value=httpx.Response(200, json=_bb(11, tag_uid=UID))
+    )
+    assert (await drain_tags(f, client)).pushed == 1
 
     rows = [BbSpool.model_validate(_bb(11, tag_uid=UID, updated_at="2026-11-17T10:00:00"))]
     now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
