@@ -61,6 +61,8 @@ function fakeBackend(over: Partial<Invoice> = {}, file: Buffer = PDF) {
   return { backend, invoice, patches, authors, patchRefusal, beforePatch }
 }
 
+const STRANGER = 'someone-else'
+
 type Started = { title?: string; origin: string; prompt?: string }
 type Sent = { id: string; prompt: string; images?: readonly { mediaType: string; bytes: Buffer }[] }
 
@@ -72,7 +74,7 @@ function fakeSessions() {
   const archived: string[] = []
   /** Set to make `get` fail with this error for every id. */
   const getFails: { error: Error | null } = { error: null }
-  /** Ids of sessions that exist but belong to somebody else. */
+  /** Ids of sessions that exist but belong to somebody else (the principal `STRANGER`). */
   const strangers = new Set<string>()
   let next = 0
   const sessions = {
@@ -82,10 +84,11 @@ function fakeSessions() {
       if (!row) throw new SessionError('not_found', `no session ${id}`)
       return { id, ...row }
     },
-    async lookup(id: string) {
+    async lookup(id: string, principal: { id: string }) {
       if (getFails.error) throw getFails.error
       const row = rows.get(id)
-      return row ? { record: { id, ...row }, visible: !strangers.has(id) } : undefined
+      // A stranger's session is visible to its own owner only.
+      return row ? { record: { id, ...row }, visible: !strangers.has(id) || principal.id === STRANGER } : undefined
     },
     async start(_owner: unknown, options: Started) {
       started.push(options)
@@ -292,6 +295,22 @@ describe('starting an invoice import (#6267)', () => {
     const body = await res.json()
     expect(body).toMatchObject({ type: 'import_running' })
     expect(body).not.toHaveProperty('session_id')
+  })
+
+  it('does not name a rival session that is gone when it wins the race: answers 502 and no session_id', async () => {
+    const b = fakeBackend()
+    const fake = fakeSessions()
+    fake.rows.set('s-rival', { status: 'done', archivedAt: null })
+    b.beforePatch.run = () => {
+      b.invoice.import_run_id = 's-rival'
+    }
+    const { hono, sent } = app(b.backend, fake)
+    const res = await post(hono)
+    expect(res.status).toBe(502)
+    const body = await res.json()
+    expect(body).toMatchObject({ type: 'upstream_error', detail: 'The import could not start. Try again.' })
+    expect(body).not.toHaveProperty('session_id')
+    expect(sent).toEqual([])
   })
 
   it('answers 409 with the live session’s id, so the page opens it (Review Focus 2)', async () => {

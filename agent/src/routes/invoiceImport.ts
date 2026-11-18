@@ -189,7 +189,10 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
       const winner = now.data?.import_run_id
       if (now.data?.status === 'confirmed') return answer(409, { detail: 'This invoice is confirmed. There is nothing left to import.', type: 'confirmed' })
       if (winner) {
-        if ((await live(sessions, winner, owner)) === 'other') return answer(409, { detail: SOMEONE_ELSE, type: 'import_running' })
+        const state = await live(sessions, winner, owner)
+        if (state === 'other') return answer(409, { detail: SOMEONE_ELSE, type: 'import_running' })
+        // A closed rival is not handed to the page: it would open a dead session.
+        if (state === 'gone') return answer(502, { detail: 'The import could not start. Try again.', type: 'upstream_error' })
         return answer(409, { detail: 'This invoice is already being imported. Open its session.', type: 'import_running', session_id: winner })
       }
     }
