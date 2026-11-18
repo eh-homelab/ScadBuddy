@@ -628,6 +628,43 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 
 (Filled in by the controller during the build: each ruling with what it costs if wrong.)
 
+1. Task 1: the pull takes a `bambuddy_pull.Pulls` (four booleans: `spools`, `weights`,
+   `tags`, `presets`, built by `Pulls.of(sync)`) in place of #6268's `weights: bool`. Why:
+   four flags through `_one`, `_update` and `read_and_pull` read better as one value, and
+   `pull`'s first positional argument is already named `spools`. Cost: #6268's tests call
+   `pull(..., pulls=Pulls(weights=False))`; their assertions are unchanged.
+2. Task 1: `scheduled_pull` skips when none of the six data types pulls, `suppliers` and
+   `locations` included. Why: F1 says "skipped only when no data type pulls", and Task 9 adds
+   their pull to this same pass. Cost: until Task 9, `suppliers` or `locations` alone at
+   `bb_to_sb` reads BB's spools and changes nothing.
+3. Task 1: BB's row is recorded as seen (the `synced_from_bb` event's `bb`) whatever the
+   gates say, so a field BB changed while its data type did not pull is pulled only when BB
+   changes it again. Why: recording a partial snapshot would make every later pull see a
+   change and write an event each time. Cost: switching `spools` back to `bb_to_sb` does not
+   catch up on BB edits made while it was off; under `sb_to_bb` the push (Task 4) makes BB
+   match SB anyway.
+4. Task 1: with `pulls.spools` False the catalog (insert types) is neither read nor mapped,
+   and an unlinked BB spool is left alone (no new spool, no link by tag, no
+   `filament_bb_ignored` row). Why: Decision 14 puts insert types under `spools`, and
+   Decision 16 says no spool is created or linked. Cost: none known.
+5. Task 1: `POST /filament/bambuddy/import` pulls the spools whatever `filament_sync.spools`
+   says; weights, tags and presets follow the setting. Why: the import is a person's explicit
+   request, and before #6265 it ignored `spools` too. Cost: an import under `spools`
+   `sb_to_bb` takes BB's newer field values into SB.
+6. Task 1: `last_dried_at` stays booked by `_book` whatever `weights` says (as #6268 left it),
+   and `weight_locked` stays a `spools` field on the pull. Why: the brief does not move them,
+   and moving them changes #6268's tested behaviour. Cost: Decision 14 lists both under
+   `weights`; Task 9 may move them.
+7. Task 1: the environment's `SCADBUDDY_FILAMENT_SYNC` is not rewritten (only the stored row
+   is). Why: a migration cannot reach the environment. Cost: an install that sets `tags`
+   `off` in the environment and has no stored row now binds no BB tag on a linked spool.
+8. Task 1: in the frontend only `mocks/fixtures.ts` (the six keys) and two pre-save
+   expectations in `filament.test.tsx` change, so `pnpm typecheck` and that file pass. Why:
+   the Settings UI is Task 11. Cost: until Task 11, the Filament section still sends three
+   keys and maps every `tags` value but `sb_to_bb` to `off`, so a save there writes `tags`
+   `off` (now: no tag pulled) and puts `presets`, `suppliers` and `locations` back to their
+   defaults. Task 11 must land in the same release.
+
 ## Self-review
 
 - Spec coverage: §8 "one setting per data type" → Task 1; §8.1 rows: types on spools with

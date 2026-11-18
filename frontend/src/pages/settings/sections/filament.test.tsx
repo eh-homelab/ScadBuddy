@@ -45,7 +45,7 @@ describe('Filament (#6262)', () => {
     await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
     // Each choice keeps the other: both parts are one setting until it is saved.
     expect(within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' })).toHaveTextContent("Send ScadBuddy's bindings")
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'bb_to_sb' })
+    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'off', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' })
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb', weights: 'bb_to_sb' }))
   })
@@ -56,7 +56,7 @@ describe('Filament (#6262)', () => {
     const filament = region('Filament')
     expect(within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' })).toHaveTextContent('Bambuddy → ScadBuddy')
     await choose(user, within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' }), 'Off')
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'bb_to_sb' })
+    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'off', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' })
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
     await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'off' }))
   })

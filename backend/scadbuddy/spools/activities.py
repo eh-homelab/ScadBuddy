@@ -63,11 +63,11 @@ def filament_pull_activity(
 ) -> Callable[[], Any]:
     """``filament_bambuddy_pull``: Bambuddy's spools into ScadBuddy's own
     (`filament/bambuddy_pull.py`). It runs on the ``library`` worker, in the API process,
-    which holds the store (`main._run_library_worker`), so it writes it directly. With
-    ``filament_sync.spools`` off (``sync`` reads it), no Bambuddy, or Bambuddy down, it
-    pulls no spool: it logs and returns, so the run never fails on it. Before that gate,
-    whenever Bambuddy is configured, it reads the Home Assistant sensors and writes their
-    readings, even with spools off."""
+    which holds the store (`main._run_library_worker`), so it writes it directly. When no
+    data type of ``filament_sync`` pulls (``sync`` reads it), with no Bambuddy, or with
+    Bambuddy down, it pulls nothing: it logs and returns, so the run never fails on it.
+    Before that gate, whenever Bambuddy is configured, it reads the Home Assistant sensors
+    and writes their readings, even when nothing pulls."""
 
     @activity.defn(name=FILAMENT_PULL_ACTIVITY)
     async def filament_bambuddy_pull() -> str:

@@ -7,7 +7,8 @@ Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`,
 (`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
 Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind,
 and the NTAG confirm,
-`filament/rfid_push.py`, #6264) tells Bambuddy only with ``filament_sync.tags`` ``sb_to_bb``;
+`filament/rfid_push.py`, #6264) tells Bambuddy only while ``filament_sync.tags`` pushes
+(``sb_to_bb`` or ``two_way``);
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
@@ -16,6 +17,7 @@ tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cance
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
@@ -39,7 +41,7 @@ from scadbuddy.crud.idempotency import (
 from scadbuddy.filament import capture, ntag, rfid_mode
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
-from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
+from scadbuddy.filament.bambuddy_pull import PullReport, Pulls, read_and_pull, try_assignments
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
@@ -579,7 +581,8 @@ async def archive_spool(
         "had to another tag, is closed, with a `tag_unbound` ledger event on that spool and "
         "`tag_bound` on this one. 404 for no such spool, 409 when the two keys name two "
         "tags, 422 when neither key is left once cleaned. With `filament_sync.tags` set to "
-        "`sb_to_bb` the change is also told to Bambuddy, for at most 2.5 seconds; what is not "
+        "`sb_to_bb` or `two_way` the change is also told to Bambuddy, for at most 2.5 seconds; "
+        "what is not "
         "done by then is finished by the spool refresh, and a Bambuddy that is down never "
         "fails the request."
     ),
@@ -1143,8 +1146,11 @@ async def move_spool(
         "refresh Schedule does the same). A BB spool already linked takes the fields BB changed "
         "since the last pull, unless ScadBuddy changed that field later; a change of what is "
         "left is a `bb` reading unless the spool's weight is locked. "
-        "With `filament_sync.weights` off, no Bambuddy scale weighing and no `bb` weight reading "
-        "is booked on a spool ScadBuddy already tracks; a new spool still gets its first weight. "
+        "It pulls the spools whatever `filament_sync.spools` says. With `filament_sync.weights` "
+        "`off` or `sb_to_bb`, no Bambuddy scale weighing and no `bb` weight reading is booked "
+        "on a spool ScadBuddy already tracks; a new spool still gets its first weight. With "
+        "`filament_sync.tags` or `presets` `off` or `sb_to_bb`, a linked spool takes no tag "
+        "and no preset from Bambuddy. Usage rows are booked on linked spools. "
         "A BB spool whose tag a "
         "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
         "other becomes a new spool, typed by `material_number`, else by brand, material, "
@@ -1163,9 +1169,9 @@ async def import_bambuddy(
 ) -> PullReport:
     settings = await asyncio.to_thread(store.load)
     sync = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
-    return await read_and_pull(
-        filament, settings, actor=actor(caller), weights=sync.weights != "off"
-    )
+    # A person's import pulls the spools whatever `spools` says; the rest follow the setting.
+    pulls = dataclasses.replace(Pulls.of(sync), spools=True)
+    return await read_and_pull(filament, settings, actor=actor(caller), pulls=pulls)
 
 
 @router.get(
@@ -1215,7 +1221,7 @@ async def set_rfid_override_mode(
     description=(
         "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
         "is brought to the override mode, then the queued tag changes are pushed (only with "
-        "`filament_sync.tags` `sb_to_bb`), then the AMS slot of each override tag is "
+        "`filament_sync.tags` `sb_to_bb` or `two_way`), then the AMS slot of each override tag is "
         "configured with its type's preset. Answers the mode's status and the tag push "
         "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
     ),

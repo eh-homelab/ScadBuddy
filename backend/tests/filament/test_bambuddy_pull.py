@@ -22,6 +22,7 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
     _WARNED_DUPLICATES,
+    Pulls,
     pull,
     read_and_pull,
     read_assignments,
@@ -590,6 +591,10 @@ async def test_a_scheduled_pull_with_no_bambuddy_is_skipped(pg_pool: PgPool) -> 
     assert f.spools.list() == []
 
 
+#: Every data type off: the pull has nothing to do.
+NOTHING_PULLS = FilamentSync(spools="off", weights="off", tags="off", presets="off")
+
+
 async def test_off_skips_the_pull(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
@@ -597,26 +602,25 @@ async def test_off_skips_the_pull(pg_pool: PgPool) -> None:
         spools = router.get(f"{BB}/api/v1/inventory/spools").respond(
             json=[bb().model_dump(mode="json")]
         )
-        assert (
-            await scheduled_pull(f, lambda: settings, lambda: FilamentSync(spools="off"))
-            == "skipped"
-        )
+        assert await scheduled_pull(f, lambda: settings, lambda: NOTHING_PULLS) == "skipped"
         assert not spools.called
     assert f.spools.list() == []
 
 
-async def test_usage_is_not_booked_with_the_pull_off(pg_pool: PgPool) -> None:
+async def test_usage_is_not_booked_with_the_spools_and_weights_off(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
     with respx.mock(assert_all_called=False) as router:
         usage = router.get(f"{BB}/api/v1/inventory/usage").respond(json=[])
-        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(json=[])
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         assert (
-            await scheduled_pull(f, lambda: settings, lambda: FilamentSync(spools="off"))
-            == "skipped"
+            await scheduled_pull(
+                f, lambda: settings, lambda: FilamentSync(spools="off", weights="off")
+            )
+            == "pulled"
         )
         assert not usage.called
-        assert not spools.called
     assert f.spools.list() == []
 
 
@@ -762,8 +766,8 @@ def test_weights_off_books_no_bb_weighing(pg_pool: PgPool) -> None:
     weighed = bb(
         core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
     )
-    (made,) = pull(f, [weighed], now=NOW, weights=False).created_ids
-    pull(f, [weighed], now=NOW, weights=False)
+    (made,) = pull(f, [weighed], now=NOW, pulls=Pulls(weights=False)).created_ids
+    pull(f, [weighed], now=NOW, pulls=Pulls(weights=False))
     assert [e for e in f.spools.events(made) if e.ref_kind == "bb_scale"] == []
 
 
@@ -774,7 +778,7 @@ def _bb_readings(f: Filament, spool: UUID) -> list[float | None]:
 def test_weights_off_books_no_bb_reading_on_an_update(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     (made,) = pull(f, [bb()], now=NOW).created_ids
-    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, weights=False)
+    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, pulls=Pulls(weights=False))
     spool = f.spools.get(made)
     assert spool is not None
     assert spool.grams_left == 900
@@ -785,7 +789,7 @@ def test_weights_off_books_no_bb_reading_on_a_link(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     held = f.spools.create(SpoolCreate(material_id=_pla(pg_pool)), actor="ann")
     f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
-    pull(f, [bb()], now=NOW, weights=False)
+    pull(f, [bb()], now=NOW, pulls=Pulls(weights=False))
     spool = f.spools.get(held.id)
     assert spool is not None
     assert spool.grams_left is None
@@ -794,7 +798,7 @@ def test_weights_off_books_no_bb_reading_on_a_link(pg_pool: PgPool) -> None:
 
 def test_weights_off_still_books_a_new_spools_first_reading(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
-    (made,) = pull(f, [bb()], now=NOW, weights=False).created_ids
+    (made,) = pull(f, [bb()], now=NOW, pulls=Pulls(weights=False)).created_ids
     spool = f.spools.get(made)
     assert spool is not None
     assert spool.grams_left == 900
@@ -804,7 +808,7 @@ def test_weights_off_still_books_a_new_spools_first_reading(pg_pool: PgPool) -> 
 def test_weights_bb_to_sb_books_a_bb_reading_on_an_update(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     (made,) = pull(f, [bb()], now=NOW).created_ids
-    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, weights=True)
+    pull(f, [bb(weight_used=300.0, updated_at=_bb_time(1))], now=NOW, pulls=Pulls(weights=True))
     assert _bb_readings(f, made) == [900, 700]
 
 
@@ -813,7 +817,7 @@ def test_weights_bb_to_sb_books_the_bb_weighing(pg_pool: PgPool) -> None:
     weighed = bb(
         core_weight=250, last_scale_weight=700, last_weighed_at=_bb_time(1), updated_at=_bb_time(1)
     )
-    (made,) = pull(f, [weighed], now=NOW, weights=True).created_ids
+    (made,) = pull(f, [weighed], now=NOW, pulls=Pulls(weights=True)).created_ids
     assert [e.ref_kind for e in f.spools.events(made) if e.kind == "weighed"] == ["bb_scale"]
 
 
@@ -1733,7 +1737,7 @@ async def test_the_ha_read_runs_with_the_spools_off(pg_pool: PgPool) -> None:
     with respx.mock(assert_all_called=False) as router:
         spools = router.get(f"{BB}/api/v1/inventory/spools").respond(json=[])
         router.get(ENTITIES).respond(json=[_entity("sensor.a", "33")])
-        outcome = await scheduled_pull(f, lambda: settings, lambda: FilamentSync(spools="off"))
+        outcome = await scheduled_pull(f, lambda: settings, lambda: NOTHING_PULLS)
         assert outcome == "skipped"
         assert not spools.called
     assert _sensor_row(pg_pool, sensor)[0] == 33.0
@@ -1885,3 +1889,135 @@ def test_a_skipped_duplicate_stays_skipped_after_the_push_cleared_its_tag(
     assert [s.id for s in f.spools.list()] == [a]
     # Still skipped on every later pull.
     assert pull(f, [cleared], now=NOW).created == 0
+
+
+# -- #6265: a direction per data type ----------------------------------------------------
+
+
+def test_spools_sb_to_bb_pulls_no_spool_fields(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    pushed_only = Pulls.of(FilamentSync(spools="sb_to_bb"))
+    report = pull(
+        f,
+        [
+            bb(color_name="Blue", rgba="0000FFFF", updated_at="2026-11-14T11:00:00"),
+            bb(id=8, tray_uuid=None, tag_uid=None),
+        ],
+        now=NOW,
+        pulls=pushed_only,
+    )
+    assert (report.created, report.linked) == (0, 0)
+    (spool,) = f.spools.list()
+    assert spool.id == made
+    assert (spool.colour_name, spool.rgba) == ("Red", "#FF0000FF")
+
+
+async def test_weights_alone_books_usage_rows(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    row = {
+        "id": 457,
+        "spool_id": 7,
+        "printer_id": 1,
+        "print_name": "scadbuddy-ac13ac3c-p1",
+        "weight_used": 75.1,
+        "percent_used": 7.5,
+        "status": "completed",
+        "created_at": "2026-11-14T11:00:00",
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        usage = router.get(f"{BB}/api/v1/inventory/usage").respond(json=[row])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        outcome = await scheduled_pull(
+            f, lambda: settings, lambda: FilamentSync(spools="sb_to_bb", weights="bb_to_sb")
+        )
+        assert usage.called
+    assert outcome == "pulled"
+    assert [e.ref_kind for e in f.spools.events(made) if e.ref_kind == ledger.BB_USAGE] == [
+        ledger.BB_USAGE
+    ]
+
+
+async def test_nothing_pulls_skips(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    pushed_only = FilamentSync(
+        spools="sb_to_bb",
+        weights="off",
+        tags="sb_to_bb",
+        presets="off",
+        suppliers="sb_to_bb",
+        locations="off",
+    )
+    with respx.mock(assert_all_called=False) as router:
+        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(json=[])
+        assert await scheduled_pull(f, lambda: settings, lambda: pushed_only) == "skipped"
+        assert not spools.called
+
+
+def test_presets_off_leaves_sb_presets_alone(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    no_presets = Pulls.of(FilamentSync(presets="off"))
+    report = pull(
+        f,
+        [bb(id=8, tray_uuid=None, tag_uid=None, slicer_filament="GFA00")],
+        now=NOW,
+        pulls=no_presets,
+    )
+    assert _own_presets(pg_pool, report.created_ids[0]) == []
+    (made,) = pull(
+        f, [bb(slicer_filament="GFA00", slicer_filament_name="Bambu PLA Basic")], now=NOW
+    ).created_ids
+    before = _own_presets(pg_pool, made)
+    pull(
+        f,
+        [
+            bb(
+                slicer_filament="GFA05",
+                slicer_filament_name="Bambu PLA Silk",
+                updated_at="2026-11-14T11:00:00",
+            )
+        ],
+        now=NOW,
+        pulls=no_presets,
+    )
+    assert _own_presets(pg_pool, made) == before
+
+
+def test_tags_off_binds_no_bb_tag_on_a_linked_spool(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(tray_uuid=None, tag_uid=None)], now=NOW).created_ids
+    no_tags = Pulls.of(FilamentSync(tags="off"))
+    report = pull(
+        f,
+        [
+            bb(tray_uuid=None, tag_uid="04AABB", updated_at="2026-11-14T11:00:00"),
+            bb(id=8, tray_uuid=TRAY, tag_uid=None),
+        ],
+        now=NOW,
+        pulls=no_tags,
+    )
+    assert f.spools.open_binding(made) is None
+    # A new BB spool still takes its tags: they are what it is (Decision 6).
+    (new,) = report.created_ids
+    assert f.spools.open_binding(new) is not None
+
+
+def test_weights_two_way_books_bb_readings(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    both = Pulls.of(FilamentSync(weights="two_way"))
+    (made,) = pull(f, [bb()], now=NOW, pulls=both).created_ids
+    weighed = bb(
+        weight_used=300.0,
+        core_weight=250,
+        last_scale_weight=700,
+        last_weighed_at=_bb_time(1),
+        updated_at=_bb_time(1),
+    )
+    pull(f, [weighed], now=NOW, pulls=both)
+    assert _bb_readings(f, made) == [900, 700]
+    assert [e.ref_kind for e in f.spools.events(made) if e.kind == "weighed"] == ["bb_scale"]

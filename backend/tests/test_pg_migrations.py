@@ -9,6 +9,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.render.pg_store import (
     LEGACY_VERSIONS,
@@ -818,3 +819,35 @@ def test_the_old_spool_tables_are_dropped(pg_conninfo: str) -> None:
             )
         }
     assert present == {"filament_spools"}
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            {"spools": "bb_to_sb", "tags": "off"},
+            {"spools": "bb_to_sb", "tags": "bb_to_sb"},
+        ),
+        ({"tags": "sb_to_bb"}, {"tags": "two_way"}),
+        ({"spools": "off", "tags": "two_way"}, {"spools": "off", "tags": "two_way"}),
+        ({"spools": "off"}, {"spools": "off"}),
+        (None, None),
+    ],
+)
+def test_the_tags_migration_rewrites_the_old_values(
+    pg_conninfo: str, before: dict[str, str] | None, after: dict[str, str] | None
+) -> None:
+    """#6265 Decision 4: #6264's ``off`` (the pull binds BB's tags, nothing is pushed) is
+    now ``bb_to_sb``, its ``sb_to_bb`` (pull and push) ``two_way``; anything else stays."""
+    at = _index("filament_sync_tags_values")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:at])
+        if before is not None:
+            conn.execute(
+                "INSERT INTO settings (name, value) VALUES ('filament_sync', %s)",
+                (Jsonb(before),),
+            )
+        assert MIGRATIONS[at].id in migrate(conn)
+        row = conn.execute("SELECT value FROM settings WHERE name = 'filament_sync'").fetchone()
+    assert (None if row is None else row[0]) == after

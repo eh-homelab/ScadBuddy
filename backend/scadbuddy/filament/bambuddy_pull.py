@@ -71,6 +71,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
@@ -84,6 +85,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.linking import ARCHIVE_OVERLAP, ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import Archive, SpoolAssignment, SpoolCatalogEntry, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.core import settings as core_settings
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, ledger, sensors
@@ -141,6 +143,38 @@ _WARNED_SKIPS_MAX = 1000
 _WARNED_DUPLICATES: set[int] = set()
 
 Outcome = Literal["pulled", "skipped", "failed"]
+
+
+@dataclass(frozen=True)
+class Pulls:
+    """Which data types a pull takes from Bambuddy (#6265, `FilamentSync`). ``spools``: a
+    linked spool's own fields, new SB spools (made or linked) and the spool catalog; with
+    it False an unlinked BB spool is left alone. ``weights``: ``bb`` readings and scale
+    weighings on a spool SB already tracks (a new spool keeps its first reading, #6268).
+    ``tags``: a linked spool's binding to a tag BB names (a new spool takes its tags
+    whatever this says, Decision 6). ``presets``: BB's ``slicer_filament`` as the spool's
+    ``migrated`` presets. A child type acts only on a linked spool (Decision 16).
+
+    BB's row is recorded as seen whatever these say, so a field BB changed while its type
+    was not pulled is pulled only when BB changes it again."""
+
+    spools: bool = True
+    weights: bool = True
+    tags: bool = True
+    presets: bool = True
+
+    @classmethod
+    def of(cls, sync: FilamentSync) -> Pulls:
+        return cls(
+            spools=core_settings.pulls(sync.spools),
+            weights=core_settings.pulls(sync.weights),
+            tags=core_settings.pulls(sync.tags),
+            presets=core_settings.pulls(sync.presets),
+        )
+
+
+#: Every data type pulled: the default of `pull` and `read_and_pull`.
+EVERY = Pulls()
 
 
 class PullReport(BaseModel):
@@ -240,16 +274,17 @@ def pull(
     now: datetime,
     actor: str = ACTOR,
     catalog: Sequence[SpoolCatalogEntry] = (),
-    weights: bool = True,
+    pulls: Pulls = EVERY,
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
     says, after ``catalog`` (BB's spool catalog) is mapped to insert types. ``now`` is the
     link's time, and its ``bb_updated_at`` when BB sends none; ``actor`` is who the events
-    name (a person's import, else ``bambuddy``). One BB spool that fails is rolled back,
-    logged and listed; the rest go on, as when the catalog fails."""
+    name (a person's import, else ``bambuddy``); ``pulls`` the data types it takes. One BB
+    spool that fails is rolled back, logged and listed; the rest go on, as when the
+    catalog fails."""
     report = PullReport()
     try:
-        report.catalog_skipped = _insert_types(store, catalog)
+        report.catalog_skipped = _insert_types(store, catalog if pulls.spools else ())
     except Exception:
         logger.warning("could not map Bambuddy's spool catalog", exc_info=True)
         report.catalog_failed = True
@@ -257,7 +292,7 @@ def pull(
         try:
             with store.spools.transaction() as conn:
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
-                outcome = _one(conn, store, bb, now, actor, weights)
+                outcome = _one(conn, store, bb, now, actor, pulls)
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
@@ -357,10 +392,11 @@ def _core_insert_type(conn: Conn, bb: BbSpool) -> UUID | None:
 
 
 def _one(
-    conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str, weights: bool = True
+    conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str, pulls: Pulls
 ) -> tuple[str, UUID | None, bool] | None:
     """What came of one BB spool. An archived SB spool, linked or named by the BB
-    record's link, is left as it is: never restored, never written to (``archived``)."""
+    record's link, is left as it is: never restored, never written to (``archived``).
+    With ``pulls.spools`` False an unlinked BB spool is left alone (``None``)."""
     link = conn.execute(
         "SELECT l.spool_id, l.bb_updated_at, s.archived_at IS NOT NULL AS archived"
         " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
@@ -371,21 +407,24 @@ def _one(
         spool_id: UUID = link["spool_id"]
         if link["archived"]:
             return "archived", spool_id, False
-        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor, weights)
+        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor, pulls)
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
-        booked = _book(conn, spool_id, bb, actor, weights)
-        presets = _bb_presets(conn, spool_id, bb, actor)
+        booked = _book(conn, spool_id, bb, actor, pulls.weights)
+        presets = pulls.presets and _bb_presets(conn, spool_id, bb, actor)
         return ("updated", spool_id, False) if changed or booked or presets else None
+    if not pulls.spools:
+        return None
     after = snapshot(bb)
     held = _holder(conn, after, bb.id)
     if held is not None:
         held_id, archived = held
         if archived:
             return "archived", held_id, False
-        typeless = _link(conn, store, bb, held_id, after, now, actor, weights)
-        _book(conn, held_id, bb, actor, weights)
-        _bb_presets(conn, held_id, bb, actor)
+        typeless = _link(conn, store, bb, held_id, after, now, actor, pulls.weights)
+        _book(conn, held_id, bb, actor, pulls.weights)
+        if pulls.presets:
+            _bb_presets(conn, held_id, bb, actor)
         return "linked", held_id, typeless
     linked_holder = _linked_holder(conn, after)
     if linked_holder is not None:
@@ -411,8 +450,9 @@ def _one(
         # shows, but it is still the spool Bambuddy added for a tag SB holds.
         return "duplicate", None, False
     made, typeless = _create(conn, store, bb, after, now, actor)
-    _book(conn, made, bb, actor, weights)
-    _bb_presets(conn, made, bb, actor)
+    _book(conn, made, bb, actor, pulls.weights)
+    if pulls.presets:
+        _bb_presets(conn, made, bb, actor)
     return "created", made, typeless
 
 
@@ -754,10 +794,15 @@ def _update(
     pulled_at: datetime | None,
     now: datetime,
     actor: str,
-    weights: bool = True,
+    pulls: Pulls,
 ) -> bool:
-    """True when the SB spool took anything from BB."""
+    """True when the SB spool took anything from BB. With ``pulls.spools`` False no field,
+    type or insert type moves; ``pulls.weights`` gates the ``bb`` reading and
+    ``pulls.tags`` the binding of a tag BB names."""
     unmoved = bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at
+    if unmoved and not pulls.spools:
+        # Only the insert type is read again on a row BB did not move.
+        return False
     last = conn.execute(
         "SELECT data -> 'bb' AS bb FROM filament_spool_events"
         " WHERE spool_id = %s AND kind = 'synced_from_bb' AND data ? 'bb'"
@@ -796,7 +841,11 @@ def _update(
         else:
             del after["core_weight_catalog_id"]
     keys = (after["tag_uid"], after["tray_uuid"])
-    retag = keys != (before.get("tag_uid"), before.get("tray_uuid")) and keys != (None, None)
+    retag = (
+        pulls.tags
+        and keys != (before.get("tag_uid"), before.get("tray_uuid"))
+        and keys != (None, None)
+    )
     if retag:
         # The tags before the spool, as every writer of bindings takes them (`bind_tag`).
         conn.execute(
@@ -826,7 +875,9 @@ def _update(
     moved = {
         f for f in after.keys() - _NOT_COLUMNS if after[f] != before.get(f) and after[f] is not None
     }
-    wanted = {f for f in moved if _CATALOGS.get(f, (f,))[0] not in edited}
+    wanted = (
+        {f for f in moved if _CATALOGS.get(f, (f,))[0] not in edited} if pulls.spools else set()
+    )
     material = spool.effective.material_id
     if "material" in wanted:
         material = _catalog_id(conn, "filament_materials", after["material"], None)
@@ -836,12 +887,14 @@ def _update(
     if changes.get("weight_locked") == [True, False] and not _lock_from_bb(conn, spool_id):
         # A BB unlock never clears a lock SB set.
         del changes["weight_locked"]
-    if spool.type_id is None:
+    if pulls.spools and spool.type_id is None:
         kind = _match(conn, store, after)
         if kind is not None:
             changes["type_id"] = [None, kind.id]
-    if insert_id is not None and after["core_weight_catalog_id"] != before.get(
-        "core_weight_catalog_id"
+    if (
+        pulls.spools
+        and insert_id is not None
+        and after["core_weight_catalog_id"] != before.get("core_weight_catalog_id")
     ):
         own, typed = _insert_state(conn, spool_id)
         # A key the last reading does not have is read for the first time: only where the
@@ -868,7 +921,7 @@ def _update(
     reading = after["remaining_g"]
     locked = bool(changes.get("weight_locked", [None, spool.weight_locked])[1])
     weight: str | None = None
-    if not weights or reading is None or reading == before.get("remaining_g"):
+    if not pulls.weights or reading is None or reading == before.get("remaining_g"):
         reading = None
     elif locked:
         reading, weight = None, "locked"
@@ -925,10 +978,10 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = T
     (`_core_g`), the gross kept in ``data``; with no core weight known it books no
     reading. A weighing is a physical reading, so it counts under the weight lock, which
     guards against estimates (§5.5). The ledger's rule picks the anchor: the weighing wins
-    when it is the newest reading. With ``weights`` False (``filament_sync.weights`` off)
-    the weighing is not booked, and `_update` and `_link` book no ``bb`` reading either;
-    `_create` keeps its first one, as a new spool needs a starting weight. True when either
-    is new."""
+    when it is the newest reading. With ``weights`` False (``filament_sync.weights`` does
+    not pull) the weighing is not booked, and `_update` and `_link` book no ``bb`` reading
+    either; `_create` keeps its first one, as a new spool needs a starting weight. True
+    when either is new."""
     booked = False
     if weights and bb.last_weighed_at is not None and bb.last_scale_weight is not None:
         gross = float(bb.last_scale_weight)
@@ -1116,11 +1169,13 @@ def parse_rows(rows: Sequence[Any]) -> tuple[list[BbSpool], list[int | None]]:
 
 
 async def read_and_pull(
-    store: Filament, settings: StoredSettings, *, actor: str = ACTOR, weights: bool = True
+    store: Filament, settings: StoredSettings, *, actor: str = ACTOR, pulls: Pulls = EVERY
 ) -> PullReport:
-    """Read BB's unarchived spools and pull them; a malformed row is skipped and counted
-    as ``invalid``. Then book BB's usage rows (`bambuddy_usage.py`). BB not configured is
-    `client_for`'s 409; BB's own errors on the spools are its client's.
+    """Read BB's unarchived spools and pull them (``pulls`` the data types taken); a
+    malformed row is skipped and counted as ``invalid``. Then book BB's usage rows
+    (`bambuddy_usage.py`) on linked spools, while ``pulls.spools`` or ``pulls.weights``
+    (#6265 F1). BB not configured is `client_for`'s 409; BB's own errors on the spools are
+    its client's.
 
     The usage rows are read right after the spools, so a deduction BB writes between the
     two reads shows in the usage rows, never only in a spool's value. The archives are
@@ -1132,7 +1187,8 @@ async def read_and_pull(
     async with client_for(settings) as client:
         rows = await client.spool_rows()
         try:
-            usage = await client.spool_usage()
+            if pulls.spools or pulls.weights:
+                usage = await client.spool_usage()
         except Exception as error:
             _failed("could not read Bambuddy's usage rows", error)
         pending: set[int] = set()
@@ -1147,7 +1203,7 @@ async def read_and_pull(
             except Exception as error:
                 _failed("could not read Bambuddy's archives", error)
     spools, bad = parse_rows(rows)
-    catalog = await read_catalog(settings)
+    catalog = await read_catalog(settings) if pulls.spools else []
     report = await asyncio.to_thread(
         lambda: pull(
             store,
@@ -1155,7 +1211,7 @@ async def read_and_pull(
             now=datetime.now(UTC),
             actor=actor,
             catalog=catalog or (),
-            weights=weights,
+            pulls=pulls,
         )
     )
     report.catalog_failed = report.catalog_failed or catalog is None
@@ -1318,8 +1374,8 @@ def _apply_ha(store: Filament, states: dict[str, str | None], now: datetime) -> 
 async def scheduled_pull(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> Outcome:
-    """The Schedule's pull (`SpoolRefresh`): ``skipped`` with ``filament_sync.spools``
-    ``off`` (no spool pulled, no usage row booked) or no BB URL,
+    """The Schedule's pull (`SpoolRefresh`): ``skipped`` when no data type of
+    ``filament_sync`` pulls (#6265 F1) or no BB URL,
     ``failed`` when BB or the store fails (logged, never raised),
     else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13). Whenever a
     BB URL is set, it first reads the Home Assistant sensors (`read_ha_sensors`), before
@@ -1329,14 +1385,14 @@ async def scheduled_pull(
         # Sensors are not spool data: read whatever ``filament_sync`` says.
         await read_ha_sensors(store, settings, datetime.now(UTC))
     filament_sync = await asyncio.to_thread(sync)
-    if filament_sync.spools == "off":
-        logger.info("Bambuddy's spools are not pulled: the Filament sync is off")
+    if not any(core_settings.pulls(d) for d in filament_sync.model_dump().values()):
+        logger.info("Bambuddy's spools are not pulled: no Filament sync pulls")
         return "skipped"
     if not settings.bambuddy_url:
         logger.info("no Bambuddy configured; its spools are not pulled")
         return "skipped"
     try:
-        report = await read_and_pull(store, settings, weights=filament_sync.weights != "off")
+        report = await read_and_pull(store, settings, pulls=Pulls.of(filament_sync))
     except Exception as error:
         logger.warning(
             "could not pull Bambuddy's spools",

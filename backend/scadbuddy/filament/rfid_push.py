@@ -17,7 +17,7 @@ from psycopg.rows import DictRow
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import TagAlreadyLinkedError
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.settings import FilamentSync
+from scadbuddy.core.settings import FilamentSync, pushes
 from scadbuddy.filament.models import TagPushReport
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -183,9 +183,9 @@ async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50
 async def push_pending(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> TagPushReport:
-    """`drain_tags` when ``filament_sync.tags`` is ``sb_to_bb`` and a Bambuddy is
-    configured; otherwise nothing, and the rows stay queued."""
-    if (await asyncio.to_thread(sync)).tags != "sb_to_bb":
+    """`drain_tags` when ``filament_sync.tags`` pushes (``sb_to_bb`` or ``two_way``) and a
+    Bambuddy is configured; otherwise nothing, and the rows stay queued."""
+    if not pushes((await asyncio.to_thread(sync)).tags):
         return TagPushReport()
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:
