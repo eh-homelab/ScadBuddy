@@ -158,8 +158,9 @@ def _clear_baseline(store: Filament, spool_id: UUID) -> None:
 def _clear_device(store: Filament, spool_id: UUID, device_id: str) -> None:
     with store.spools.transaction() as conn:
         conn.execute(
-            "DELETE FROM filament_ntag_writes WHERE spool_id = %s OR device_id = %s",
-            (spool_id, device_id),
+            "DELETE FROM filament_ntag_writes WHERE device_id = %s"
+            " OR (spool_id = %s AND (device_id = %s OR device_id IS NULL))",
+            (device_id, spool_id, device_id),
         )
 
 
@@ -206,7 +207,8 @@ async def confirm(
 
 
 async def cancel(store: Filament, client: BambuddyClient, spool_id: UUID, device_id: str) -> None:
-    """Drop the write the device has queued, and the record of every write queued on that
-    device (and the spool's), so a later `confirm` binds nothing."""
+    """Drop the write the device has queued, the record of every write queued on that
+    device, and the spool's own record if it names no device, so a later `confirm` binds
+    nothing for them. The spool's write queued on another device is kept."""
     await client.cancel_tag_write(device_id)
     await asyncio.to_thread(_clear_device, store, spool_id, device_id)
