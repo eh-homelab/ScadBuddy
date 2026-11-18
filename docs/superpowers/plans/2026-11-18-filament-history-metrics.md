@@ -748,6 +748,8 @@ Load `frontend-design` and `dataviz` first.
 7. Task 2: `SpoolTypeStore.archive` also takes `actor`, because it calls `update`, which now needs one; archiving writes no spool event, as `archived` is not in `OVERRIDABLE`.
 8. Task 2: The two API provenance tests build their own app with `tests/api/test_authorship_session.py`'s setup (a `secret_key_file`, `public_url` and `auth_mode` `observe`), because the module's `client` has no key to seal a service credential with, and `observe` is where that file tests that only the agent's credential may name an author.
 9. Task 2: `test_presets.py`'s `test_setting_an_empty_list_resets_to_the_type` and `test_a_spool_k_value_overrides_its_types_and_resets` now count only the spool's own `edited` events (no `data.type_id`), because the type's preset or K-value save before them now writes a fan-out event on the spool, which had no rows of its own yet.
+10. Task 3 (Task 2 review): The type fan-out of presets and K values works key by key, because `presets.py` merges them per key: a spool gets an `edited` event when the save added, removed or changed a key (a printer model and nozzle; a printer, extruder and nozzle) that the spool has no own row for, and none when it sets every changed key. This replaces the first clause of build decision 6 (any own row was an override).
+11. Task 3 (Task 2 review): `test_types.py` `test_type_k_value_edit_writes_edited_on_an_inheriting_spool` covers the K-value fan-out on a spool with no K values of its own. It passed when it was written, because Task 2's code already fanned K values out; it guards that path, which no test reached before.
 
 ## Pre-flight rulings (2026-11-18)
 

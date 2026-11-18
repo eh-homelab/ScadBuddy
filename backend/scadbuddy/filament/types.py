@@ -198,7 +198,7 @@ class SpoolTypeStore:
     def set_presets(self, type_id: UUID, rows: _Presets, *, actor: str) -> _Presets | None:
         """The type's presets, replaced by ``rows``; ``None`` for no such type. A change
         writes one ``edited`` event (``changes.presets``), as ``actor``, on each
-        unarchived spool of the type with no presets of its own."""
+        unarchived spool of the type that does not set every changed key itself."""
         try:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
@@ -401,8 +401,8 @@ _K_VALUES: _ChildTable = (
     _K_COLUMNS,
     "printer_id, extruder, nozzle_diameter",
 )
-#: The spool's own rows that stand in for a type's list (`_fan_out`).
-_OWN_LISTS = {"presets": _PRESETS[1], "k_values": _K_VALUES[1]}
+#: The spool's own list that stands in for a type's list, row by row (`_fan_out`).
+_OWN_LISTS = {"presets": _PRESETS, "k_values": _K_VALUES}
 
 
 def _child_rows(conn: Conn, table: _ChildTable, type_id: UUID) -> list[dict[str, Any]]:
@@ -417,22 +417,25 @@ def _fan_out(conn: Conn, type_id: UUID, changes: dict[str, list[Any]], actor: st
     """One ``edited`` event, on the type edit's transaction, on each unarchived spool of
     the type that takes a changed value from it (plan Decision 11): ``data.changes`` the
     changes it does not override, ``data.type_id`` the type. A spool overrides an
-    `OVERRIDABLE` field by setting it, and ``presets`` or ``k_values`` by having rows of
-    its own. The spools are locked in id order, as `ledger.record` locks each."""
+    `OVERRIDABLE` field by setting it. Presets and K values merge key by key
+    (`presets.py`), so a spool overrides a ``presets`` or ``k_values`` change only when it
+    has its own row for every key the change touched. The spools are locked in id order,
+    as `ledger.record` locks each."""
     if not changes:
         return
-    own = [
-        f"EXISTS (SELECT 1 FROM {table} o WHERE o.spool_id = s.id) AS own_{key}"
-        for key, table in _OWN_LISTS.items()
-    ]
     fields = ", ".join(f"s.{f}" for f in OVERRIDABLE)
     rows = conn.execute(
-        f"SELECT s.id, {fields}, {', '.join(own)} FROM filament_spools s"
+        f"SELECT s.id, {fields} FROM filament_spools s"
         " WHERE s.type_id = %s AND s.archived_at IS NULL ORDER BY s.id FOR UPDATE OF s",
         (type_id,),
     ).fetchall()
+    ids = [row["id"] for row in rows]
+    touched = {k: _changed_keys(_OWN_LISTS[k], *changes[k]) for k in _OWN_LISTS if k in changes}
+    own = {k: _own_keys(conn, _OWN_LISTS[k], ids) for k in touched}
     for row in rows:
-        kept = set(overridden(row)) | {k for k in _OWN_LISTS if row[f"own_{k}"]}
+        kept = set(overridden(row)) | {
+            k for k, keys in touched.items() if keys <= own[k].get(row["id"], set())
+        }
         inherited = {f: pair for f, pair in changes.items() if f not in kept}
         if inherited:
             ledger.record(
@@ -442,6 +445,35 @@ def _fan_out(conn: Conn, type_id: UUID, changes: dict[str, list[Any]], actor: st
                 actor=actor,
                 data={"changes": inherited, "type_id": str(type_id)},
             )
+
+
+def _key_columns(table: _ChildTable) -> list[str]:
+    """The columns that key one row of a child list: its order."""
+    return [c.strip() for c in table[3].split(",")]
+
+
+def _changed_keys(
+    table: _ChildTable, before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> set[tuple[Any, ...]]:
+    """The keys whose row a type's list save added, removed or changed."""
+    columns = _key_columns(table)
+    old = {tuple(r[c] for c in columns): r for r in before}
+    new = {tuple(r[c] for c in columns): r for r in after}
+    return {k for k in old.keys() | new.keys() if old.get(k) != new.get(k)}
+
+
+def _own_keys(
+    conn: Conn, table: _ChildTable, spool_ids: list[UUID]
+) -> dict[UUID, set[tuple[Any, ...]]]:
+    """The keys each spool sets in its own list of ``table``."""
+    columns = _key_columns(table)
+    found: dict[UUID, set[tuple[Any, ...]]] = {}
+    for r in conn.execute(
+        f"SELECT spool_id, {', '.join(columns)} FROM {table[1]} WHERE spool_id = ANY(%s)",
+        (spool_ids,),
+    ).fetchall():
+        found.setdefault(r["spool_id"], set()).add(tuple(r[c] for c in columns))
+    return found
 
 
 def _book_effect(name: str | None) -> FilamentEffect | None:

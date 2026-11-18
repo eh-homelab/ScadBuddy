@@ -398,3 +398,70 @@ def test_type_presets_and_k_values_edit_writes_edited_on_spools_without_their_ow
     assert _edits(spools, b, before[b]) == []
     store.set_k_values(made.id, [], actor="user:bo")
     assert _edits(spools, a, before[a] + 1) == []
+
+
+def _printer(pool: PgPool) -> UUID:
+    printer = UUID(int=0x6269)
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, 'S6269', 'Garage')", (printer,)
+        )
+    return printer
+
+
+def _preset(type_id: UUID, nozzle: str, slicer: str) -> TypePreset:
+    return TypePreset(
+        type_id=type_id,
+        printer_model="H2C",
+        nozzle_diameter=nozzle,
+        slicer_filament=slicer,
+        slicer_filament_name=None,
+    )
+
+
+@pg
+def test_type_preset_edit_reaches_a_spool_that_sets_another_key(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    made = store.create(_body(pg_pool))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    own = SpoolPresetCreate(printer_model="H2C", nozzle_diameter="0.4", slicer_filament="MINE")
+    spools.set_presets(a, [own], actor="ann")
+    before = len(_edits(spools, a))
+    store.set_presets(made.id, [_preset(made.id, "0.6", "GFA06")], actor="user:bo")
+    [event] = _edits(spools, a, before)
+    assert event.data["type_id"] == str(made.id)
+    store.set_presets(
+        made.id,
+        [_preset(made.id, "0.4", "GFA04"), _preset(made.id, "0.6", "GFA06")],
+        actor="user:bo",
+    )
+    assert _edits(spools, a, before + 1) == []
+
+
+@pg
+def test_type_k_value_edit_writes_edited_on_an_inheriting_spool(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    printer = _printer(pg_pool)
+    made = store.create(_body(pg_pool))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    before = len(_edits(spools, a))
+    row = TypeKValue(
+        type_id=made.id,
+        printer_id=printer,
+        extruder=0,
+        nozzle_diameter="0.4",
+        nozzle_type=None,
+        k_value=Decimal("0.02"),
+        name=None,
+        cali_idx=None,
+        setting_id=None,
+    )
+    store.set_k_values(made.id, [row], actor="user:bo")
+    [event] = _edits(spools, a, before)
+    old, new = event.data["changes"]["k_values"]
+    assert old == []
+    assert [Decimal(r["k_value"]) for r in new] == [Decimal("0.02")]
+    assert event.data["type_id"] == str(made.id)
+    assert event.actor == "user:bo"
