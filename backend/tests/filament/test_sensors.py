@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from psycopg.errors import CheckViolation
 
 from scadbuddy.filament import prints, sensors
 from scadbuddy.filament.catalog import CatalogRefError, CatalogStore
@@ -448,3 +449,41 @@ def test_a_max_hours_value_fits_its_column() -> None:
     assert MaterialCreate(name="x", max_hours_outside_dry=Decimal("99999.9"))
     with pytest.raises(ValueError):
         MaterialCreate(name="x", max_hours_outside_dry=Decimal("99999.95"))
+
+
+def test_a_patch_cannot_invert_the_stored_band(pg_pool: PgPool) -> None:
+    sensor = _sensor(pg_pool, alert_above=60)
+    store = SensorStore(pg_pool)
+    with pytest.raises(sensors.SensorBandError, match="alert_below must be under alert_above"):
+        store.update(sensor, SensorPatch.model_validate({"alert_below": 80}), actor="ann")
+    kept = store.list(None)[0]
+    assert (kept.alert_below, kept.alert_above) == (None, 60)
+    fixed = store.update(sensor, SensorPatch.model_validate({"alert_below": 40}), actor="ann")
+    assert (fixed.alert_below, fixed.alert_above) == (40, 60)
+    cleared = store.update(
+        sensor, SensorPatch.model_validate({"alert_below": 80, "alert_above": None}), actor="ann"
+    )
+    assert (cleared.alert_below, cleared.alert_above) == (80, None)
+
+
+def test_the_table_refuses_an_inverted_band(pg_pool: PgPool) -> None:
+    sensor = _sensor(pg_pool)
+    with pytest.raises(CheckViolation), pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_location_sensors SET alert_below = 80, alert_above = 60 WHERE id = %s",
+            (sensor,),
+        )
+
+
+def test_an_ams_tray_place_is_found_when_every_ams_kind_is_archived(pg_pool: PgPool) -> None:
+    printer = _printer(pg_pool)
+    store = LocationStore(pg_pool)
+    tray = store.ensure_ams(printer, 0, 2, label="T")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET archived_at = now() WHERE id = %s", (tray.parent_id,)
+        )
+        conn.execute("UPDATE filament_locations SET parent_id = NULL WHERE id = %s", (tray.id,))
+        conn.execute("UPDATE filament_location_kinds SET archived_at = now() WHERE ams")
+        again = LocationStore.ensure_ams_on(conn, printer, 0, 2, label="T")
+    assert again.id == tray.id

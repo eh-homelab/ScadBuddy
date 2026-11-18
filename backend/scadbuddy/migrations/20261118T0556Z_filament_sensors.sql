@@ -20,6 +20,7 @@ CREATE TABLE filament_location_sensors (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     archived_at timestamptz,
+    CHECK (alert_below IS NULL OR alert_above IS NULL OR alert_below < alert_above),
     CHECK (source <> 'home_assistant' OR entity_id IS NOT NULL),
     CHECK (source <> 'ams' OR (printer_id IS NOT NULL AND ams_id IS NOT NULL))
 );
@@ -37,6 +38,18 @@ CREATE TABLE filament_sensor_readings (
 
 -- Hours a spool of the material may sit outside dry storage; null is no limit.
 ALTER TABLE filament_materials ADD COLUMN max_hours_outside_dry numeric(6,1);
+
+-- Hand-made places for one AMS unit were allowed until now: keep the oldest of each
+-- unarchived set (created_at, then id) and archive the rest, so the index can be made.
+UPDATE filament_locations l SET archived_at = now(), updated_at = now()
+FROM (
+    SELECT id, row_number() OVER (
+        PARTITION BY printer_id, ams_id ORDER BY created_at, id
+    ) AS n
+    FROM filament_locations
+    WHERE tray_id IS NULL AND printer_id IS NOT NULL AND archived_at IS NULL
+) d
+WHERE l.id = d.id AND d.n > 1;
 
 -- One place per AMS unit (a tray place has a tray_id; Postgres treats a NULL tray_id as
 -- distinct in `filament_locations_tray`).

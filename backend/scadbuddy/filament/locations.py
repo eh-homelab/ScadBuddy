@@ -179,11 +179,16 @@ class LocationStore:
             found = conn.execute(select, key).fetchone()
             if found is not None and found["parent_id"] is not None:
                 return m.Location.model_validate(found)
-            unit = (
-                None
-                if ams_id == EXTERNAL
-                else LocationStore.ensure_ams_unit_on(conn, printer_id, ams_id)
-            )
+            try:
+                unit = (
+                    None
+                    if ams_id == EXTERNAL
+                    else LocationStore.ensure_ams_unit_on(conn, printer_id, ams_id)
+                )
+            except NoAmsKindError:
+                if found is None:
+                    raise
+                return m.Location.model_validate(found)  # the tray never needs its unit's place
             if found is None:
                 kind = conn.execute(
                     "SELECT id FROM filament_location_kinds WHERE ams AND archived_at IS NULL"

@@ -38,6 +38,13 @@ class SensorExistsError(ValueError):
         super().__init__("a sensor of that kind already exists on that AMS unit")
 
 
+class SensorBandError(ValueError):
+    """A patch would leave the sensor's alert band inverted."""
+
+    def __init__(self) -> None:
+        super().__init__("alert_below must be under alert_above")
+
+
 class SensorStore:
     """The sensor tables over a pool whose connections autocommit and return dict rows
     (the settings store's). Synchronous: callers run it in a thread."""
@@ -83,9 +90,20 @@ class SensorStore:
         sets = ", ".join([*(f"{n} = %s" for n in sent), "updated_at = now()"])
         values: list[Any] = [getattr(patch, n) for n in sent]
         try:
-            with self._pool.connection() as conn:
+            with self._pool.connection() as conn, conn.transaction():
                 if patch.location_id is not None:
                     self._live_place(conn, patch.location_id)
+                stored = conn.execute(
+                    "SELECT alert_below, alert_above FROM filament_location_sensors"
+                    " WHERE id = %s AND archived_at IS NULL FOR UPDATE",
+                    (sensor_id,),
+                ).fetchone()
+                if stored is None:
+                    raise LookupError(f"no sensor {sensor_id}")
+                merged = {**stored, **{n: getattr(patch, n) for n in sent}}
+                below, above = merged["alert_below"], merged["alert_above"]
+                if below is not None and above is not None and below >= above:
+                    raise SensorBandError()
                 row = conn.execute(
                     f"UPDATE filament_location_sensors SET {sets}"
                     f" WHERE id = %s AND archived_at IS NULL RETURNING {_COLUMNS}",

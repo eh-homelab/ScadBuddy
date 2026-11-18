@@ -1324,3 +1324,10 @@ def test_a_device_id_that_is_not_one_path_segment_is_a_422(
             refused = client.post(path, json=body)
             assert refused.status_code == 422, (path, bad, refused.text)
     assert len(respx.calls) == 0
+
+
+def test_a_patch_that_inverts_the_stored_band_is_refused(client: TestClient) -> None:
+    made = client.post(SENSORS, json=_sensor_body(client, alert_above=60)).json()
+    refused = client.patch(f"{SENSORS}/{made['id']}", json={"alert_below": 80})
+    assert refused.status_code == 422, refused.text
+    assert "alert_below must be under alert_above" in refused.text

@@ -83,8 +83,8 @@ Settings "weight-sync policy"), §12 row #6268. Earlier plans whose rulings bind
    Reports older than `reports.is_fresh` are counted as `stale`, not read.
 3. **`filament_sync.weights`** (`"off" | "bb_to_sb"`, default `"bb_to_sb"`) is the
    "weight-sync policy" of §10 and the "BB→SB sync of weights" of §6. With `off`, the pull
-   books no `bb_scale` weighing and no `bb` weight reading on a spool SB already tracks
-   (an update or a link); a create keeps its first reading (see "Decisions made while
+   books no `bb_scale` weighing for any spool (a create too) and no `bb` weight reading on a
+   spool SB already tracks (an update or a link); only a create keeps its first `bb` reading (see "Decisions made while
    building"). Everything else in the pull is unchanged. #6265 widens the values; it keeps the field name.
 4. **Sensors are SB's own** (`filament_location_sensors`): location, `source`
    (`home_assistant` | `ams`), `kind` (`humidity` | `temperature`), `entity_id` (HA) or
@@ -179,7 +179,7 @@ Settings "weight-sync policy"), §12 row #6268. Earlier plans whose rulings bind
 
 **Interfaces:** `FilamentSync.weights: Literal["off", "bb_to_sb"] = "bb_to_sb"`.
 `read_and_pull` passes it to `_book`; with `off` no `bb_scale` and no `bb` weight
-reading is booked. The settings mapping that today names only `spools` takes both fields.
+reading is booked for a tracked spool, and no `bb_scale` for any. The settings mapping that today names only `spools` takes both fields.
 
 - [ ] **Step 1: Failing tests:** `test_weights_off_books_no_bb_weighing` (and its `bb_to_sb` twin), a settings round-trip test for `weights`, and a frontend test that the row saves `filament_sync.weights` without touching `spools`.
 - [ ] **Step 2-4:** Run → FAIL, implement, run → PASS.
@@ -270,7 +270,7 @@ Load `frontend-design` first.
 
 - **`weights: off` and a new spool (Task 3 fix round 1).** With `off`, `_update` and `_link`
   book no `bb` weight reading (reading = None) for a spool SB already tracks, and `_book`
-  books no `bb_scale` weighing. `_create` keeps its first `bb` reading: a spool SB has never
+  books no `bb_scale` weighing for any spool, `_create`'s too. `_create` keeps its first `bb` reading: a spool SB has never
   seen needs a starting weight, and there is no SB weight to protect. The ruling of the
   controller. `bb_dried` is not a weight and stays booked.
 
@@ -314,3 +314,14 @@ Load `frontend-design` first.
 12. **A sensor under `alert_below` says "Below the limit" (final review).** `Sensor.alerting`
     is true above `alert_above` and below `alert_below`, so `LocationSensors` says "Above
     the limit" or "Below the limit" by which band the value left.
+13. **A patch cannot invert the stored band (review).** `SensorStore.update` checks the
+    merged band (stored values with the patch laid over) under a row lock and raises
+    `SensorBandError`, a 422 with "alert_below must be under alert_above". The table has the
+    same CHECK. `SensorPatch` still checks a band sent whole.
+14. **Tray capture does not need the unit's place (review).** `ensure_ams_on` returns an
+    existing tray place whose unit place cannot be made (every `ams` kind is archived). A
+    tray place that does not exist yet still raises `NoAmsKindError`.
+15. **The sensors migration archives duplicate unit places (review).** Until now a hand-made
+    place with a printer and an AMS id and no tray was allowed twice. Before the unit index
+    is made, the migration keeps the oldest unarchived one per unit (`created_at`, then
+    `id`) and sets `archived_at` on the rest.

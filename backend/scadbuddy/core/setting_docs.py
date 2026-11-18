@@ -382,9 +382,10 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Off, Bambuddy's spools are never pulled, its usage rows are never booked and"
             " ScadBuddy's own spools are the only ones."
             " Bambuddy \u2192 ScadBuddy copies Bambuddy's spools in on the schedule below."
-            " Weights is off or bb_to_sb. Off stops Bambuddy scale weighings and Bambuddy weight"
-            " readings on spools ScadBuddy already tracks. A new spool still gets its first"
-            " weight. Tags is sb_to_bb: each tag binding is sent to Bambuddy. Override mode and the"
+            " Weights is off or bb_to_sb. Off stops every Bambuddy scale weighing, also for a"
+            " new spool, and Bambuddy weight readings on spools ScadBuddy already tracks."
+            " Only a new spool still gets its first Bambuddy weight reading. Tags is sb_to_bb:"
+            " each tag binding is sent to Bambuddy. Override mode and the"
             " AMS slots of override tags are written to Bambuddy whatever this says.",
         ),
         "spool_overlay_refresh_seconds": SettingDoc(

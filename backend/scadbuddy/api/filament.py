@@ -63,6 +63,7 @@ from scadbuddy.filament.locations import (
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     OverrideKindError,
     SpoolBambuddyLinkedError,
@@ -1056,7 +1057,7 @@ async def patch_sensor(
         return await asyncio.to_thread(filament.sensors.update, sensor_id, body, actor(caller))
     except LookupError:
         raise _no_sensor(sensor_id) from None
-    except CatalogRefError as exc:
+    except (CatalogRefError, SensorBandError) as exc:
         raise _refused(exc) from None
 
 

@@ -106,8 +106,9 @@ class FilamentSync(BaseModel, extra="forbid"):
     writes no tag to Bambuddy; ``sb_to_bb`` pushes the tags queued by a binding change
     (#6264). It does not gate the override mode or the AMS slot configure, which write
     Bambuddy whatever it says. ``weights``: ``off`` books no Bambuddy scale weighing
-    (``bb_scale``) and no ``bb`` weight reading on a spool ScadBuddy already tracks; a new
-    spool still gets its first weight. ``bb_to_sb`` books them all (#6268). #6265
+    (``bb_scale``) for any spool, a new one too, and no ``bb`` weight reading on a spool
+    ScadBuddy already tracks (an update or a link). Only a new spool keeps its first ``bb``
+    reading, as it needs a starting weight. ``bb_to_sb`` books them all (#6268). #6265
     adds data types and the values ``sb_to_bb`` and ``two_way``."""
 
     spools: Literal["off", "bb_to_sb"] = "bb_to_sb"

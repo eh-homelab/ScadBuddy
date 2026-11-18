@@ -90,7 +90,7 @@ function SyncRows({ form }: { form: BackendSettings }) {
       <FieldRow
         id="setting-filament-weights"
         label="Weights from Bambuddy"
-        help="Book Bambuddy's scale weighings and weight readings on the spools ScadBuddy tracks. Off, it ignores them; a new spool still gets its first weight."
+        help="Book Bambuddy's scale weighings and weight readings. Off, no scale weighing is booked for any spool and no weight reading for a spool ScadBuddy already tracks; only a new spool still gets its first Bambuddy weight reading."
       >
         <ChoiceSelect id="setting-filament-weights" value={weights} onValueChange={(next) => form.setField('filament_sync', `${spools}|${tags}|${next}`)} choices={WEIGHT_CHOICES} />
       </FieldRow>

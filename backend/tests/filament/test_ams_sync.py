@@ -184,3 +184,21 @@ def test_a_spool_on_a_printer_with_no_report_counts_as_stale(pg_pool: PgPool) ->
     result = _sync(pg_pool)
     assert (result.booked, result.stale) == (0, 1)
     assert len(_events(pg_pool, spool, "ams_reading")) == 1
+
+
+def test_sync_skips_a_spool_locked_between_the_holder_read_and_its_lock(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, _ = _printer(pg_pool)
+    spool = _loaded(pg_pool, pid)
+    real_lock = capture.lock
+
+    def lock_after_a_person_locks_the_weight(conn: capture.Conn, spool_ids: Sequence[UUID]) -> None:
+        with pg_pool.connection() as other:
+            other.execute("UPDATE filament_spools SET weight_locked = true WHERE id = %s", (spool,))
+        real_lock(conn, spool_ids)
+
+    monkeypatch.setattr(capture, "lock", lock_after_a_person_locks_the_weight)
+    result = _sync(pg_pool)
+    assert (result.booked, result.locked, result.spools) == (0, 1, [])
+    assert len(_events(pg_pool, spool, "ams_reading")) == 1
