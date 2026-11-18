@@ -550,3 +550,26 @@ def test_record_without_an_author_adds_nothing(pg_pool: PgPool) -> None:
         event = record(conn, spool, "weighed", source="person", absolute_g=700)
     assert event is not None
     assert "author" not in event.data
+
+
+def test_pairs_are_jobs_with_a_bb_usage_end_and_an_sb_plate_event() -> None:
+    events = [
+        _event(1, "print_started", "print_estimate", ref_kind="print_run", data={"job": "a"}),
+        _event(2, "print_ended", "print_actual", ref_kind="bb_usage", data={"job": "a"}),
+        _event(3, "print_started", "print_estimate", ref_kind="print_run", data={"job": "b"}),
+        _event(4, "print_ended", "print_actual", ref_kind="bb_usage", data={"job": "c"}),
+    ]
+    assert ledger.pairs(events) == {"a"}
+
+
+def test_is_anchor_takes_a_reading_but_not_a_locked_or_printing_ams_one() -> None:
+    scale = _event(1, "weighed", "scale", grams_after=500)
+    ams = _event(2, "ams_reading", "ams_remain", data={"remain_pct": 50})
+    printing = _event(3, "ams_reading", "ams_remain", grams_after=400, data={"printing": True})
+    plate = _event(4, "print_ended", "print_actual", delta_g=-5)
+    assert ledger.is_anchor(scale, weight_locked=True, label_weight_g=None)
+    assert ledger.is_anchor(ams, weight_locked=False, label_weight_g=1000)
+    assert not ledger.is_anchor(ams, weight_locked=False, label_weight_g=None)
+    assert not ledger.is_anchor(ams, weight_locked=True, label_weight_g=1000)
+    assert not ledger.is_anchor(printing, weight_locked=False, label_weight_g=1000)
+    assert not ledger.is_anchor(plate, weight_locked=False, label_weight_g=1000)

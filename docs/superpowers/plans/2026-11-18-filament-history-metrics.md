@@ -750,6 +750,13 @@ Load `frontend-design` and `dataviz` first.
 9. Task 2: `test_presets.py`'s `test_setting_an_empty_list_resets_to_the_type` and `test_a_spool_k_value_overrides_its_types_and_resets` now count only the spool's own `edited` events (no `data.type_id`), because the type's preset or K-value save before them now writes a fan-out event on the spool, which had no rows of its own yet.
 10. Task 3 (Task 2 review): The type fan-out of presets and K values works key by key, because `presets.py` merges them per key: a spool gets an `edited` event when the save added, removed or changed a key (a printer model and nozzle; a printer, extruder and nozzle) that the spool has no own row for, and none when it sets every changed key. This replaces the first clause of build decision 6 (any own row was an override).
 11. Task 3 (Task 2 review): `test_types.py` `test_type_k_value_edit_writes_edited_on_an_inheriting_spool` covers the K-value fan-out on a spool with no K values of its own. It passed when it was written, because Task 2's code already fanned K values out; it guards that path, which no test reached before.
+12. Task 3: `ledger._reading` is now the public `ledger.reading`, because `metrics.ams_pairs` needs an AMS reading's grams from `data.remain_pct` and `metrics` reads no private name of the ledger. `_book_on_top` now calls `is_anchor` too, so rule 2 is written once.
+13. Task 3: `metrics` orders events by `(at, seq)`, not by `basis`'s deltas-first order, because neither plates nor the AMS pairing needs that tie-break. A plate event at the same instant as a scale reading and booked before it counts as between, so that pair is dropped (the safe side).
+14. Task 3: For the AMS error, "a plate between them" is any `print_started` or `print_ended` event on the spool (an open or a covered one too), because each one means the spool may have moved. A scale reading pairs only with the newest usable AMS reading; it never falls back to an older one past a plate.
+15. Task 3: `prints` counts every plate, failed and cancelled ones too, and `burn` counts their grams, because those grams left the spool.
+16. Task 3: `days_since_last_use` reads the caller's `last_used_at` (the spool column), as the brief's signature passes it; `metrics` does not derive it from the plates.
+17. Task 3: `series` sorts the points by `(at, seq)`; "the last point" is the last by time. When the kept points alone pass `limit - 1`, they thin every k-th too, so the result never passes `limit`.
+18. Task 3: `Plate.printer_id` is the plate event's `printer_id`. BB usage events carry it. SB `print_ended` events carry none today, so an SB-only plate has `None`.
 
 ## Pre-flight rulings (2026-11-18)
 
