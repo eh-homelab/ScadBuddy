@@ -26,7 +26,7 @@ backend="^(backend/|models/|deploy/grafana/|test-fixtures/|e2e-stack/|workers/ru
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
 rust="^(workers/rust/|$wiring)"
-image_extra='^(frontend/|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
+image_extra='^(frontend/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 
 paths=$(cat)
 pick() { if grep -qE "$1" <<<"$paths"; then echo true; else echo false; fi; }
