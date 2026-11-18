@@ -276,6 +276,7 @@ async def test_a_transport_failure_reaches_each_waiter_as_the_clients_api_error(
     for waiter in waiters:
         assert (waiter.status, waiter.detail) == (leader.status, leader.detail)
         assert waiter.upstream == leader.upstream
+        assert waiter.upstream is not leader.upstream
         assert waiter.__cause__ is leader
 
 
