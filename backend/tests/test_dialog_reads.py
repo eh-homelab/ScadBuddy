@@ -195,6 +195,38 @@ async def test_waiters_on_a_failed_read_get_its_error_and_read_no_more() -> None
     assert calls == 1
 
 
+async def test_each_waiter_raises_its_own_copy_of_the_shared_error() -> None:
+    """No two callers share one exception object, so no traceback holds another caller's
+    frames; each copy keeps the error's class and fields, and names the shared read's
+    error as its cause (#6627)."""
+    gate = asyncio.Event()
+
+    async def read() -> LibraryFile:
+        await gate.wait()
+        raise ApiError(503, "Bambuddy did not answer", headers={"Retry-After": "5"})
+
+    reads = DialogReads(clock=Clock())
+    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
+    await asyncio.sleep(0)
+    gate.set()
+    errors = []
+    for caller in callers:
+        with pytest.raises(ApiError) as raised:
+            await caller
+        errors.append(raised.value)
+    leader, *waiters = errors
+    assert len({id(error) for error in errors}) == 3
+    for waiter in waiters:
+        assert (waiter.status, waiter.detail, waiter.headers) == (
+            503,
+            leader.detail,
+            leader.headers,
+        )
+        assert waiter.__cause__ is leader
+    tracebacks = [error.__traceback__ for error in errors]
+    assert len({id(tb) for tb in tracebacks}) == 3
+
+
 async def test_waiters_on_a_cancelled_read_share_one_new_read() -> None:
     """A shared read whose own caller left ends with no answer; the callers that waited on
     it share one new read (#6622)."""

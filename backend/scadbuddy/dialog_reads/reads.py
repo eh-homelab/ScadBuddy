@@ -71,7 +71,7 @@ class DialogReads:
             shared = await asyncio.shield(under_way)
             if isinstance(shared, Exception):
                 # The same Bambuddy and key: a read of its own would fail the same way.
-                raise shared
+                raise _own_copy(shared) from shared
             if shared is not None:
                 return _copy(shared)  # type: ignore[return-value]
         reading: asyncio.Future[_Value | Exception | None] = (
@@ -110,6 +110,17 @@ def _scope(api_key: str | None) -> str:
     """The key's scope as a digest: two keys never share a read, and the key itself is
     not kept a second time."""
     return hashlib.sha256((api_key or "").encode()).hexdigest()
+
+
+def _own_copy(error: Exception) -> Exception:
+    """A new ``error`` of the same class, args and fields, for one waiter to raise: a
+    shared object would collect every waiter's frames in one traceback (#6627).
+    ``copy.copy`` cannot do it, because it calls ``__init__`` with ``args`` alone, which
+    `ApiError` refuses."""
+    own = type(error).__new__(type(error), *error.args)
+    own.args = error.args
+    own.__dict__.update(error.__dict__)
+    return own
 
 
 def _copy[T: BaseModel | list[Printer]](value: T) -> T:
