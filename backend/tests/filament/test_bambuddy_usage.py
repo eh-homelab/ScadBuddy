@@ -384,3 +384,94 @@ def test_the_spools_are_locked_in_id_order_before_any_booking(
     monkeypatch.setattr(capture, "lock", spy)
     assert _book(f, rows).booked == 3
     assert locked == [sorted(by_bb.values())]
+
+
+def _printer_1(pool: PgPool) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000000001', 'H2C', 1)"
+        )
+
+
+def _second_spool(f: Filament) -> UUID:
+    (made,) = pull(f, [bb(id=8)], now=NOW).created_ids
+    return made
+
+
+def _estimate(f: Filament, spool: UUID, slot: int = 0, run: str = "run-1") -> str:
+    ref = f"{run}/{JOB}/{slot}"
+    with f.spools.transaction() as conn:
+        ledger.record(
+            conn,
+            spool,
+            "print_started",
+            source="print_estimate",
+            delta_g=-70.0,
+            ref_kind=ledger.PRINT_RUN,
+            ref_id=ref,
+            at=T0 + timedelta(minutes=10),
+            data={"job": JOB},
+        )
+    return ref
+
+
+def test_a_usage_row_on_another_spool_than_the_estimate_covers_the_estimate(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    ref = _estimate(f, y)
+    assert _left(f, y) == pytest.approx(900 - 70.0)
+    assert _book(f, [usage()]).booked == 1
+    (zevent,) = _usage_events(f, z)
+    (cover,) = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert (cover.source, cover.delta_g) == ("print_actual", 0)
+    assert (cover.ref_kind, cover.ref_id) == (ledger.PRINT_RUN, ref)
+    assert cover.data["covered_by"] == str(zevent.id)
+    assert _left(f, z) == pytest.approx(900 - 75.1)
+    assert _left(f, y) == pytest.approx(900)
+
+
+def test_a_two_slot_job_with_two_open_estimates_is_left_alone_and_logged(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    (other,) = pull(f, [bb(id=9)], now=NOW).created_ids
+    _estimate(f, y, slot=0)
+    _estimate(f, other, slot=1)
+    with caplog.at_level("WARNING"):
+        assert _book(f, [usage()]).booked == 1
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert not [e for e in f.spools.events(other) if e.kind == "print_ended"]
+    assert _left(f, y) == pytest.approx(900 - 70.0)
+    assert _left(f, z) == pytest.approx(900 - 75.1)
+    assert "filament.usage.unpaired" in caplog.text
+
+
+def test_two_unpaired_usage_rows_of_one_job_cover_nothing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    (third,) = pull(f, [bb(id=9)], now=NOW).created_ids
+    _estimate(f, y)
+    _book(f, [usage(), usage(id=458, spool_id=9)])
+    assert not [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert _left(f, third) == pytest.approx(900 - 75.1)
+
+
+def test_a_retried_booking_covers_once(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    _linked(f)
+    y = _second_spool(f)
+    _estimate(f, y)
+    _book(f, [usage()])
+    assert _book(f, [usage()]).booked == 0
+    assert len([e for e in f.spools.events(y) if e.kind == "print_ended"]) == 1

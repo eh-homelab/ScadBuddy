@@ -32,8 +32,9 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from scadbuddy.bambuddy.models import Archive, SpoolUsage, as_utc
-from scadbuddy.filament import capture, ledger
+from scadbuddy.filament import capture, ledger, prints
 from scadbuddy.filament.ledger import Conn
+from scadbuddy.filament.models import SpoolEvent
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ def book_usage(
     }
     if spools:
         capture.lock(conn, sorted(spools))
+    events: list[tuple[SpoolEvent, UUID]] = []
     for row in rows:
         link = links.get(row.spool_id)
         if row.weight_used > 0 and link is None:
@@ -141,6 +143,8 @@ def book_usage(
         try:
             with conn.transaction():
                 booked = _book(conn, row, link.spool_id, archives, actor)
+                if booked is not None:
+                    events.append((booked, link.spool_id))
         except Exception as error:
             logger.warning(
                 "could not book a Bambuddy usage row; skipped",
@@ -148,15 +152,26 @@ def book_usage(
                 exc_info=True,
             )
             continue
-        if booked:
+        if booked is not None:
             report.booked += 1
+    # After every row is booked, so a job's other unpaired rows of this batch count.
+    for event, spool_id in events:
+        try:
+            with conn.transaction():
+                _cover(conn, event, spool_id, actor)
+        except Exception as error:
+            logger.warning(
+                "could not cover an SB estimate for a Bambuddy usage row; skipped",
+                extra={"bb_usage_id": event.data.get("bb_usage_id"), "error": type(error).__name__},
+                exc_info=True,
+            )
     return report
 
 
 def _book(
     conn: Conn, row: SpoolUsage, spool_id: UUID, archives: Sequence[Archive], actor: str
-) -> bool:
-    """One row's ``print_ended`` event; ``False`` when it is booked already."""
+) -> SpoolEvent | None:
+    """One row's ``print_ended`` event; ``None`` when it is booked already."""
     event = ledger.record(
         conn,
         spool_id,
@@ -177,7 +192,81 @@ def _book(
             "bb_archive_id": match_archive(row, archives),
         },
     )
-    return event is not None
+    return event
+
+
+def _cover(conn: Conn, event: SpoolEvent, spool_id: UUID, actor: str) -> None:
+    """Pair a usage row with an SB estimate on another spool (#6598). Bambuddy's tray
+    assignment can book a plate on a different SB spool than the one SB's estimate names;
+    the pair is then on two spools, and the plate counts on both. When the row's spool has
+    no SB estimate of the job, and on the row's printer exactly one other spool has an
+    open estimate of it, and no other usage row of the job is unpaired, book on that
+    spool a ``print_ended`` of source ``print_actual`` and 0 g with the estimate's ref and
+    ``data.covered_by`` the row's event: the estimate drops by `ledger.basis`'s own rule,
+    which stays per spool. Any other shape changes nothing and is logged as
+    ``filament.usage.unpaired`` when an estimate was a candidate. A retried booking books
+    nothing twice: the covering event's key is the estimate's."""
+    job = event.data.get("job")
+    if not isinstance(job, str) or event.printer_id is None:
+        return
+    if _has_estimate(conn, spool_id, job):
+        return
+    printer = str(event.printer_id)
+    candidates = [u for u in prints.open_for_job(conn, printer, job) if u.spool_id != spool_id]
+    if not candidates:
+        return
+    others = conn.execute(
+        "SELECT e.spool_id FROM filament_spool_events e WHERE e.ref_kind = %s AND e.kind = %s"
+        " AND e.printer_id = %s AND e.data ->> 'job' = %s AND e.id <> %s AND NOT EXISTS"
+        " (SELECT 1 FROM filament_spool_events s WHERE s.spool_id = e.spool_id"
+        " AND s.ref_kind = %s AND s.kind = %s AND s.data ->> 'job' = %s)",
+        (
+            ledger.BB_USAGE,
+            ledger.PRINT_ENDED,
+            event.printer_id,
+            job,
+            event.id,
+            ledger.PRINT_RUN,
+            ledger.PRINT_STARTED,
+            job,
+        ),
+    ).fetchall()
+    if len(candidates) != 1 or others:
+        logger.warning(
+            "filament.usage.unpaired",
+            extra={
+                "printer": printer,
+                "job": job,
+                "spool_ids": sorted(
+                    {str(spool_id), *(str(u.spool_id) for u in candidates)}
+                    | {str(r["spool_id"]) for r in others}
+                ),
+            },
+        )
+        return
+    (use,) = candidates
+    ledger.record(
+        conn,
+        use.spool_id,
+        ledger.PRINT_ENDED,
+        source=ledger.PRINT_ACTUAL,
+        delta_g=0.0,
+        ref_kind=ledger.PRINT_RUN,
+        ref_id=use.ref_id,
+        at=event.at,
+        actor=actor,
+        data={"basis": "covered", "job": job, "covered_by": str(event.id)},
+    )
+
+
+def _has_estimate(conn: Conn, spool_id: UUID, job: str) -> bool:
+    """Whether the spool has an SB ``print_started`` of the job (open or ended)."""
+    found = conn.execute(
+        "SELECT 1 FROM filament_spool_events WHERE spool_id = %s AND ref_kind = %s"
+        " AND kind = %s AND data ->> 'job' = %s LIMIT 1",
+        (spool_id, ledger.PRINT_RUN, ledger.PRINT_STARTED, job),
+    ).fetchone()
+    return found is not None
 
 
 def _printer(conn: Conn, bb_printer_id: int | None) -> UUID | None:
