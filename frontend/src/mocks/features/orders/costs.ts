@@ -127,12 +127,22 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
       filament = perGram === null ? null : g * perGram
     }
     let machine: number | null = null
+    // #5774 (machine-rate actuals spec §6): which rate priced the seconds. The mock prices
+    // today's machine time at the book's rate only.
+    let basis: AttemptCost['machine_rate_basis'] = null
+    let confidence: number | null = null
     if (s !== null) {
       let perSecond = unit?.perSecond ?? null
       if (perSecond === null && today) {
         perSecond = (Number(settings.pricing_machine_rate_per_hour) * exp) / 3600
         estimated.push('machine')
-      } else if (perSecond !== null && estimated.includes('seconds')) estimated.push('machine')
+        basis = 'price_book'
+      } else if (perSecond !== null) {
+        if (estimated.includes('seconds')) estimated.push('machine')
+        const breakdown = quote?.machine_rate_breakdown ?? null
+        basis = breakdown?.actuals ? 'quote_actuals' : 'quote_estimate'
+        confidence = breakdown?.confidence ?? null
+      }
       machine = perSecond === null ? null : s * perSecond
     }
     const filamentMinor = round(filament)
@@ -150,6 +160,8 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
       seconds: s,
       filament_minor: filamentMinor,
       machine_minor: machineMinor,
+      machine_rate_basis: machineMinor === null ? null : basis,
+      machine_rate_confidence: machineMinor === null ? null : confidence,
       cost_minor: (filamentMinor ?? 0) + (machineMinor ?? 0),
       estimated,
       unknown: filamentMinor === null || machineMinor === null,
@@ -274,6 +286,7 @@ export function costsOf(orderId: string): OrderCosts | null {
       estimated: parts.filter((p) => items.some((i) => (i.estimated ?? []).includes(p))),
       unknown,
       bambuddy_unavailable: false,
+      machine_rate_bases: [...new Set(items.flatMap((i) => i.attempts.flatMap((a) => (a.machine_rate_basis ? [a.machine_rate_basis] : []))))].sort(),
     },
     thin,
   )

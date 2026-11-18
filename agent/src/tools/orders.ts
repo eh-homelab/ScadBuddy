@@ -2771,7 +2771,15 @@ export const orderTools: Tool[] = [
       'the price of a kWh) and the purchase price over the life, in the shop\'s currency. A printer linked to Bambuddy ' +
       'takes its tasks and intervals from Bambuddy (`intervals` `bambuddy`, or `stored` when Bambuddy did not ' +
       "answer). A printer with no inputs is the price book's machine rate (`source` `price_book`). A slice quote " +
-      'for the printer is priced at this rate and records each part.',
+      'for the printer is priced at this rate and records each part. Actuals (#5774): each wear part and task ' +
+      'row has `priced_by` (`estimate` or `actual`), `basis` (the figure that priced it), `estimate_per_hour`, ' +
+      '`actual_per_hour` from the logged events, `have` of `need` (the printer\'s window, `actuals_window`) usable ' +
+      'gaps or replacements, `confidence` (0 to 100, floor(100 x have / need)) and `actual_why` (`too_few`, ' +
+      '`no_events`) when the actual does not price; the breakdown\'s `actuals` and `confidence` (the lowest of the ' +
+      'rows set to `actual`). `actuals` lists each row\'s events in its window with `skipped_gaps`, ' +
+      '`events_read_at` and `orphaned` names. `counter` is the print-hour counter events read: `source` ' +
+      '(`bambuddy`, `lan_watch` or `typed`), `hours` (null with none) and `lan_watch`, ScadBuddy\'s own count. ' +
+      'Every event: machine_rate_events_list.',
     input: z.object({ printer: ID.describe("The registry printer (list_printers' `id`)") }),
     risk: 'read',
     routes: ['GET /api/v1/printers/{printer_id}/machine-rate'],
@@ -2850,6 +2858,132 @@ export const orderTools: Tool[] = [
             body: sent as components['schemas']['MachineRateInputs'],
           }),
           `set printer ${printer}'s machine rate`,
+        ),
+      )
+    },
+  }),
+  // #5774 (spec 2026-11-17-machine-rate-actuals §5): a printer's logged maintenance and
+  // replaced parts. `write`: they change the shop's records and reach no printer and no
+  // customer. No delete tool: deleting an event is a person's correction in Settings.
+  defineTool({
+    name: 'machine_rate_events_list',
+    label: "List a printer's maintenance events",
+    description:
+      "A registry printer's logged events, newest first, a page at a time (`next` is the cursor of the page " +
+      'after, null at the end): each maintenance task done (`kind` `task`, imported from Bambuddy\'s log on a ' +
+      'linked printer, `origin` `bambuddy`) and each wear part replaced (`part`, logged in ScadBuddy). Each has ' +
+      '`at`, `hours_at` (the print-hour counter then) on `hours_source`\'s scale, a task\'s `minutes` and ' +
+      '`consumables` (null: the typed ones price it), a part\'s `cost` and `hours_used` (typed, else derived), ' +
+      'and `notes`. machine_rate_get shows the events in each row\'s window and the actuals they give.',
+    input: z
+      .object({
+        printer: ID.describe("The registry printer (list_printers' `id`)"),
+        kind: z.enum(['task', 'part']).optional(),
+        name: z.string().min(1).max(100).optional().describe('One task or wear part, by name'),
+        cursor: z.string().min(1).optional().describe("The previous page's `next`"),
+        limit: z.number().int().min(1).max(200).optional(),
+      })
+      .strict(),
+    risk: 'read',
+    routes: ['GET /api/v1/printers/{printer_id}/machine-rate/events'],
+    handler: async ({ printer, ...query }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/printers/{printer_id}/machine-rate/events', {
+            params: { path: { printer_id: printer }, query },
+          }),
+          `list printer ${printer}'s maintenance events`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'machine_rate_event_add',
+    label: 'Log maintenance or a replaced part',
+    description:
+      "Log on a registry printer a wear part replaced (`kind` `part`, with `cost`, what the new part cost) or a " +
+      "maintenance task done (`task`, with its real `minutes` and `consumables`; left out, the task's typed " +
+      'figures price it). `name` is one of the printer\'s wear parts or tasks (machine_rate_get). Leave `hours_at` ' +
+      "out: it is read from the printer's counter (Bambuddy's on a linked printer, ScadBuddy's LAN count on a " +
+      'LAN-only one) and its source recorded; give it only to correct the reading of an event logged late. A ' +
+      'printer with no counter needs `hours_at`, or for a part `hours_used` (the hours the removed part ran, for ' +
+      'one fitted before the counter): 422 `counter_reading_required`. A task on a printer linked to Bambuddy is ' +
+      '409 `maintenance_from_bambuddy`: it is marked done in Bambuddy and read from there. 503 ' +
+      '`counter_unavailable` when the counter cannot be read now. A second call with the same `source` (one is ' +
+      "made from the call's key when left out) returns the first event and writes nothing.",
+    input: z
+      .object({
+        printer: ID.describe("The registry printer (list_printers' `id`)"),
+        kind: z.enum(['task', 'part']),
+        name: z.string().min(1).max(100),
+        at: datetime.optional().describe('When it was done; now when left out'),
+        hours_at: decimal.optional().describe("A correction of the counter reading; read from the printer's counter when left out"),
+        hours_used: decimal.optional().describe('A part only: the hours the removed part ran'),
+        minutes: decimal.optional().describe('A task only'),
+        consumables: decimal.optional().describe('A task only, in the shop\'s currency'),
+        cost: decimal.optional().describe("A part only: what the new part cost, in the shop's currency"),
+        notes: z.string().max(1000).optional(),
+        source: z.string().min(1).max(200).optional().describe('What wrote it, so a retry writes once'),
+      })
+      .strict(),
+    risk: 'write',
+    routes: ['POST /api/v1/printers/{printer_id}/machine-rate/events'],
+    title: ({ printer, kind, name }) => (kind === 'part' ? `Log a replaced ${name} on printer ${printer}` : `Log ${name} done on printer ${printer}`),
+    handler: async ({ printer, source, ...fields }, ctx) => {
+      if (fields.kind === 'part') {
+        if (fields.cost === undefined) throw new ToolError('a replaced part needs its cost')
+        if (fields.minutes !== undefined || fields.consumables !== undefined) {
+          throw new ToolError('a replaced part takes no minutes or consumables')
+        }
+      } else if (fields.cost !== undefined || fields.hours_used !== undefined) {
+        throw new ToolError('a task takes no cost or hours_used')
+      }
+      const given = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      const body = { ...given, source: source ?? `agent:${idempotencyKey(ctx)}` }
+      return json(
+        await ok(
+          ctx.backend.POST('/api/v1/printers/{printer_id}/machine-rate/events', {
+            params: { path: { printer_id: printer } },
+            body: body as components['schemas']['MachineRateEventCreate'],
+          }),
+          `log an event on printer ${printer}`,
+        ),
+      )
+    },
+  }),
+  defineTool({
+    name: 'machine_rate_event_update',
+    label: 'Correct a maintenance event',
+    description:
+      "Correct a printer's logged event (machine_rate_events_list): the fields given are set, a null clears one. " +
+      "A task's `minutes` and `consumables` (null: the task's typed figures price it, as for an event read from " +
+      "Bambuddy with none), a part's `cost` and `hours_used`, `hours_at` (a correction on the event's own " +
+      'counter) and `notes`. An event read from Bambuddy keeps its time, counter source and Bambuddy id, and its ' +
+      'reading cannot be cleared (422 `imported_event`). 422 for a field the event\'s kind has not.',
+    input: z
+      .object({
+        printer: ID.describe("The registry printer (list_printers' `id`)"),
+        event_id: ID,
+        minutes: decimal.nullable().optional(),
+        consumables: decimal.nullable().optional(),
+        cost: decimal.optional(),
+        hours_at: decimal.nullable().optional(),
+        hours_used: decimal.nullable().optional(),
+        notes: z.string().max(1000).nullable().optional(),
+      })
+      .strict(),
+    risk: 'write',
+    routes: ['PATCH /api/v1/printers/{printer_id}/machine-rate/events/{event_id}'],
+    title: ({ printer, event_id }) => `Correct event ${event_id} on printer ${printer}`,
+    handler: async ({ printer, event_id, ...fields }, { backend }) => {
+      const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      if (Object.keys(body).length === 0) throw new ToolError('nothing to change: give the fields to set')
+      return json(
+        await ok(
+          backend.PATCH('/api/v1/printers/{printer_id}/machine-rate/events/{event_id}', {
+            params: { path: { printer_id: printer, event_id } },
+            body: body as components['schemas']['MachineRateEventPatch'],
+          }),
+          `correct event ${event_id} on printer ${printer}`,
         ),
       )
     },

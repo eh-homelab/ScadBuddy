@@ -362,6 +362,9 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   price_book_fill_densities: () => [],
   // A printer's machine rate (#4625) is a record of its own, edited on the Settings page.
   machine_rate_set: () => [],
+  // Its events (#5774) are part of the same record.
+  machine_rate_event_add: () => [],
+  machine_rate_event_update: () => [],
   // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's
   // analyzer panel and list_analyzer_decisions show them, and an apply sends nothing.
   apply_analyzer_fix: () => [],

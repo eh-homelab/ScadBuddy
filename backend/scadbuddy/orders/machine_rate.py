@@ -1562,6 +1562,24 @@ def actuals_view(breakdown: MachineRateBreakdown, stored: Stored) -> ActualsView
     )
 
 
+@dataclass
+class MoneyRates:
+    """:meth:`MachineRates.money_rates`: the machine-rate fields of ``costs.CostRates``,
+    named as they are there."""
+
+    #: The fallback for an attempt naming no registry printer.
+    machine_rate_per_hour: str
+    printer_rates: dict[str, str]
+    serial_rates: dict[str, str]
+    #: #5774 (§6): profiled printers only; one missing is priced at the book's rate.
+    printer_actuals: dict[str, bool]
+    serial_actuals: dict[str, bool]
+    printer_confidence: dict[str, int | None]
+    serial_confidence: dict[str, int | None]
+    #: The default printer whose rate the fallback is; None: the fallback is the book's.
+    default_printer: str | None = None
+
+
 class MachineRates:
     """The rate of a registry printer, as a quote, Settings and the money view read it."""
 
@@ -1651,24 +1669,31 @@ class MachineRates:
     def stored_rates(self) -> dict[str, str]:
         """Every profiled printer's rate from its stored intervals, by registry id: no
         Bambuddy call, for the money view (job cost spec §4.1). Blocking."""
-        return self._stored_rates()[0]
+        return {printer: rate.rate_per_hour for printer, rate in self._stored_rates()[0].items()}
 
-    def _stored_rates(self) -> tuple[dict[str, str], dict[str, str]]:
-        """:meth:`stored_rates`, and the same rates by each printer's serial."""
+    def _stored_rates(
+        self,
+    ) -> tuple[dict[str, MachineRateBreakdown], dict[str, MachineRateBreakdown]]:
+        """Each profiled printer's stored breakdown (:meth:`stored_rates`), by registry id
+        and by serial."""
         runtime = self.settings.snapshot().runtime
-        by_id: dict[str, str] = {}
-        by_serial: dict[str, str] = {}
+        by_id: dict[str, MachineRateBreakdown] = {}
+        by_serial: dict[str, MachineRateBreakdown] = {}
         for printer, stored in self.store.stored_all().items():
             if stored.profile is None:
                 continue
-            rate = self._stored_rate(stored, runtime.pricing_labour_rate_per_hour)
+            rate = self._stored_breakdown(stored, runtime.pricing_labour_rate_per_hour)
             by_id[printer] = rate
             if stored.serial is not None:
                 by_serial[stored.serial] = rate
         return by_id, by_serial
 
+    @classmethod
+    def _stored_rate(cls, stored: Stored, default_labour: str) -> str:
+        return cls._stored_breakdown(stored, default_labour).rate_per_hour
+
     @staticmethod
-    def _stored_rate(stored: Stored, default_labour: str) -> str:
+    def _stored_breakdown(stored: Stored, default_labour: str) -> MachineRateBreakdown:
         assert stored.profile is not None
         return compute(
             stored.profile,
@@ -1680,7 +1705,7 @@ class MachineRates:
             intervals="stored",
             read_tasks=stored.stored_reads,
             events=stored.events,
-        ).rate_per_hour
+        )
 
     def check_rate(self, printer: str | None, printer_id: int | None) -> str | None:
         """The stored rate of the printer a quote names (:meth:`resolve`), with no
@@ -1695,23 +1720,36 @@ class MachineRates:
         labour = self.settings.snapshot().runtime.pricing_labour_rate_per_hour
         return self._stored_rate(stored, labour)
 
-    def money_rates(self) -> tuple[str, dict[str, str], dict[str, str]]:
+    def money_rates(self) -> MoneyRates:
         """The money view's machine rates (job cost spec §4.1), for an attempt with no
         quote's rate: every registry printer's, by id and by serial (a printer merged
         away is found by the serial it kept), its stored rate (:meth:`stored_rates`) or,
         with no profile, the book's ``machine_rate_per_hour`` (§6.2); and the fallback for
         an attempt naming no registry printer: the configured default printer's rate,
-        else the book's. The fallback, by registry id, by serial. Blocking."""
-        rates, by_serial = self._stored_rates()
+        else the book's. #5774 (§6): each profiled printer's ``actuals`` and
+        ``confidence`` beside its rate. Blocking."""
+        stored, stored_by_serial = self._stored_rates()
         book = self.settings.snapshot().runtime.pricing_machine_rate_per_hour
+        money = MoneyRates(
+            machine_rate_per_hour=book,
+            printer_rates={p: r.rate_per_hour for p, r in stored.items()},
+            serial_rates={s: r.rate_per_hour for s, r in stored_by_serial.items()},
+            printer_actuals={p: r.actuals for p, r in stored.items()},
+            serial_actuals={s: r.actuals for s, r in stored_by_serial.items()},
+            printer_confidence={p: r.confidence for p, r in stored.items()},
+            serial_confidence={s: r.confidence for s, r in stored_by_serial.items()},
+        )
         for row in self.printers.list():
-            rates.setdefault(row.id, book)
-            by_serial.setdefault(row.serial, rates[row.id])
-        fallback = book
+            money.printer_rates.setdefault(row.id, book)
+            money.serial_rates.setdefault(row.serial, money.printer_rates[row.id])
+            if row.id in stored and row.serial not in stored_by_serial:
+                money.serial_actuals[row.serial] = stored[row.id].actuals
+                money.serial_confidence[row.serial] = stored[row.id].confidence
         default = self.resolve(None, None)
-        if default is not None:
-            fallback = rates.get(default.id, book)
-        return fallback, rates, by_serial
+        if default is not None and default.id in stored:
+            money.machine_rate_per_hour = money.printer_rates[default.id]
+            money.default_printer = default.id
+        return money
 
     def resolve(self, printer: str | None, printer_id: int | None) -> PrinterRow | None:
         """The registry printer a quote is priced for (§6.2): the one it names, else the
