@@ -74,6 +74,9 @@ class DialogReads:
                 # The same Bambuddy and key: a read of its own would fail the same way.
                 own = _own_copy(shared)
                 if own is None:
+                    # This waiter shares the error object, and so its traceback, with
+                    # the others (#6635): the case #6627 fixes only for an error that
+                    # can be rebuilt.
                     raise shared
                 raise own from shared
             if shared is not None:

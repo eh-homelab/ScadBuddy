@@ -4,6 +4,7 @@ moves only by hand, so no result depends on how fast the runner is."""
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 import httpx
 import pytest
@@ -196,25 +197,40 @@ async def test_waiters_on_a_failed_read_get_its_error_and_read_no_more() -> None
     assert calls == 1
 
 
+async def _raised[E: Exception](
+    read: Callable[[], Awaitable[LibraryFile]], kind: type[E], callers: int = 3
+) -> list[E]:
+    """What each of ``callers`` raised when they all asked for one key whose read fails:
+    the first is the read's own caller, the rest waited on it."""
+    gate = asyncio.Event()
+
+    async def gated() -> LibraryFile:
+        await gate.wait()
+        return await read()
+
+    reads = DialogReads(clock=Clock())
+    tasks = [
+        asyncio.create_task(reads.get(CONFIG, "library_file", 89, gated)) for _ in range(callers)
+    ]
+    await asyncio.sleep(0)
+    gate.set()
+    errors = []
+    for task in tasks:
+        with pytest.raises(kind) as raised:
+            await task
+        errors.append(raised.value)
+    return errors
+
+
+async def _unavailable() -> LibraryFile:
+    raise ApiError(503, "Bambuddy did not answer", headers={"Retry-After": "5"})
+
+
 async def test_each_waiter_raises_its_own_copy_of_the_shared_error() -> None:
     """No two callers share one exception object, so no traceback holds another caller's
     frames; each copy keeps the error's class and fields, and names the shared read's
     error as its cause (#6627)."""
-    gate = asyncio.Event()
-
-    async def read() -> LibraryFile:
-        await gate.wait()
-        raise ApiError(503, "Bambuddy did not answer", headers={"Retry-After": "5"})
-
-    reads = DialogReads(clock=Clock())
-    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
-    await asyncio.sleep(0)
-    gate.set()
-    errors = []
-    for caller in callers:
-        with pytest.raises(ApiError) as raised:
-            await caller
-        errors.append(raised.value)
+    errors = await _raised(_unavailable, ApiError)
     leader, *waiters = errors
     assert len({id(error) for error in errors}) == 3
     for waiter in waiters:
@@ -232,39 +248,35 @@ async def test_an_error_that_cannot_be_copied_reaches_each_waiter_as_itself() ->
     """A pydantic ``ValidationError`` (Bambuddy sent a row that does not fit the model)
     cannot be rebuilt from its args, so each waiter raises the shared error itself, never
     a ``TypeError`` from the copy."""
-    gate = asyncio.Event()
 
-    async def read() -> LibraryFile:
-        await gate.wait()
+    async def misfit() -> LibraryFile:
         return LibraryFile.model_validate({})
 
-    reads = DialogReads(clock=Clock())
-    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
-    await asyncio.sleep(0)
-    gate.set()
-    for caller in callers:
-        with pytest.raises(ValidationError):
-            await caller
+    await _raised(misfit, ValidationError)
 
 
 async def test_a_waiters_change_to_its_errors_fields_reaches_no_other_waiter() -> None:
-    gate = asyncio.Event()
-
-    async def read() -> LibraryFile:
-        await gate.wait()
-        raise ApiError(503, "Bambuddy did not answer", headers={"Retry-After": "5"})
-
-    reads = DialogReads(clock=Clock())
-    callers = [asyncio.create_task(reads.get(CONFIG, "library_file", 89, read)) for _ in range(3)]
-    await asyncio.sleep(0)
-    gate.set()
-    errors = []
-    for caller in callers:
-        with pytest.raises(ApiError) as raised:
-            await caller
-        errors.append(raised.value)
+    errors = await _raised(_unavailable, ApiError)
     errors[1].headers["Retry-After"] = "60"
     assert [error.headers["Retry-After"] for error in errors] == ["5", "60", "5"]
+
+
+@respx.mock
+async def test_a_transport_failure_reaches_each_waiter_as_the_clients_api_error() -> None:
+    """The client maps an httpx failure to an `ApiError` inside the read (#6634), so a
+    waiter never sees a raw httpx error: each gets the leader's status, its detail (which
+    names the transport error's class) and its ``upstream`` (which holds the transport
+    reason, such as "could not connect")."""
+    respx.get(f"{API}/library/files/89").mock(side_effect=httpx.ConnectError("refused"))
+    async with _client(DialogReads(clock=Clock())) as client:
+        errors = await _raised(lambda: client.library_file(89), ApiError)
+    leader, *waiters = errors
+    assert isinstance(leader.__cause__, httpx.ConnectError)
+    assert leader.upstream is not None
+    for waiter in waiters:
+        assert (waiter.status, waiter.detail) == (leader.status, leader.detail)
+        assert waiter.upstream == leader.upstream
+        assert waiter.__cause__ is leader
 
 
 async def test_waiters_on_a_cancelled_read_share_one_new_read() -> None:
