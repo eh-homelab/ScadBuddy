@@ -264,15 +264,18 @@ async def test_a_waiters_change_to_its_errors_fields_reaches_no_other_waiter() -
 @respx.mock
 async def test_a_transport_failure_reaches_each_waiter_as_the_clients_api_error() -> None:
     """The client maps an httpx failure to an `ApiError` inside the read (#6634), so a
-    waiter never sees a raw httpx error: each gets the leader's status and detail, which
-    already name the transport reason."""
+    waiter never sees a raw httpx error: each gets the leader's status, its detail (which
+    names the transport error's class) and its ``upstream`` (which holds the transport
+    reason, such as "could not connect")."""
     respx.get(f"{API}/library/files/89").mock(side_effect=httpx.ConnectError("refused"))
     async with _client(DialogReads(clock=Clock())) as client:
         errors = await _raised(lambda: client.library_file(89), ApiError)
     leader, *waiters = errors
     assert isinstance(leader.__cause__, httpx.ConnectError)
+    assert leader.upstream is not None
     for waiter in waiters:
         assert (waiter.status, waiter.detail) == (leader.status, leader.detail)
+        assert waiter.upstream == leader.upstream
         assert waiter.__cause__ is leader
 
 
