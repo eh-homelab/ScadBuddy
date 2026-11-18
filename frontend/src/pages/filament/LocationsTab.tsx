@@ -5,11 +5,13 @@ import { ApiError } from '../../api/client'
 import {
   listCatalog,
   listLocations,
+  listSensors,
   listSpools,
   upsertLocation,
   type LocationCreate,
   type LocationNode,
   type LocationPatch,
+  type Sensor,
   type Spool,
 } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -22,6 +24,7 @@ interface Loaded {
   nodes: LocationNode[]
   kinds: { id: string; name: string }[]
   spools: Spool[]
+  sensors: Sensor[]
 }
 
 interface Draft {
@@ -80,13 +83,14 @@ export function LocationsTab() {
   const load = useCallback(async () => {
     const mine = ++latest.current
     try {
-      const [nodes, kinds, spools] = await Promise.all([
+      const [nodes, kinds, spools, sensors] = await Promise.all([
         listLocations({ includeArchived: archived }),
         listCatalog('location-kinds'),
         listSpools({ includeArchived: false }),
+        listSensors(),
       ])
       if (mine !== latest.current) return
-      setData({ nodes, kinds, spools })
+      setData({ nodes, kinds, spools, sensors })
       setError(null)
     } catch (cause) {
       if (mine === latest.current) setError(message(cause, 'The places could not be loaded. Try again.'))
@@ -103,6 +107,11 @@ export function LocationsTab() {
     for (const spool of data?.spools ?? []) {
       if (spool.location_id) at.set(spool.location_id, [...(at.get(spool.location_id) ?? []), spool])
     }
+    return at
+  }, [data])
+  const sensorsAt = useMemo(() => {
+    const at = new Map<string, Sensor[]>()
+    for (const sensor of data?.sensors ?? []) at.set(sensor.location_id, [...(at.get(sensor.location_id) ?? []), sensor])
     return at
   }, [data])
   const places = useMemo(() => flatten(data?.nodes ?? []), [data])
@@ -276,7 +285,7 @@ export function LocationsTab() {
           </div>
         </form>
       )}
-      {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
+      {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} sensorsAt={sensorsAt} onSensorsChanged={() => void load()} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
     </div>
   )
 }

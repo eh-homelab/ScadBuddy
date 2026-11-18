@@ -224,6 +224,8 @@ function shelfSpool(): FilamentSpool {
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
+    hours_outside_dry: 0,
+    needs_drying: false,
     last_used_at: null,
     archived_at: null,
     created_at: '2026-11-15T07:00:00Z',

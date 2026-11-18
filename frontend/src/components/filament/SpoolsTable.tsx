@@ -1,5 +1,6 @@
 import { ArrowDownIcon, ArrowUpIcon } from 'lucide-react'
 import { Fragment } from 'react'
+import { NeedsDrying } from './NeedsDrying'
 import { SpoolLink } from './SpoolLink'
 import type { Spool } from '../../api/filament'
 import { Badge } from '@/components/ui/badge'
@@ -40,6 +41,7 @@ function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, str
             #{spool.number}
           </SpoolLink>
           <NeedsType spool={spool} />
+          <NeedsDrying spool={spool} />
         </span>
       )
     case 'colour':

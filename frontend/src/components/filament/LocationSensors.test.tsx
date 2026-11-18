@@ -1,0 +1,106 @@
+import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
+import { describe, expect, it, vi } from 'vitest'
+import { listSensors } from '../../api/filament'
+import { L } from '../../mocks/features/filament/seed'
+import { server } from '../../mocks/server'
+import { renderPage } from '../../test/utils'
+import { LocationSensors } from './LocationSensors'
+
+async function show(location: string, canAdd = true) {
+  const sensors = await listSensors(location)
+  const changed = vi.fn()
+  const view = renderPage(<LocationSensors locationId={location} locationName="Place" sensors={sensors} canAdd={canAdd} onChanged={changed} />)
+  return { ...view, changed }
+}
+
+describe('the sensors of a place', () => {
+  it('shows each sensor with its value and unit', async () => {
+    await show(L.DRY_BOX)
+    const humidity = screen.getByRole('listitem', { name: 'Dry box humidity' })
+    expect(within(humidity).getByText('11 %')).toBeInTheDocument()
+    expect(within(humidity).getByText('Humidity')).toBeInTheDocument()
+  })
+
+  it('says a sensor is over its limit, with the limit', async () => {
+    await show(L.SHELF_A)
+    const row = screen.getByRole('listitem', { name: 'Shelf A humidity' })
+    expect(within(row).getByText('Over the limit')).toBeInTheDocument()
+    expect(within(row).getByText('Alert above 55 %')).toBeInTheDocument()
+  })
+
+  it('says a sensor cannot be reached', async () => {
+    await show(L.DRY_BOX)
+    const row = screen.getByRole('listitem', { name: 'Dry box temperature' })
+    expect(within(row).getByText('Not reachable')).toBeInTheDocument()
+  })
+
+  it('does not promise a notification', async () => {
+    await show(L.SHELF_A)
+    expect(screen.queryByText(/notif|email|push/i)).toBeNull()
+  })
+
+  it('opens a sensor history chart from the readings', async () => {
+    const { user } = await show(L.SHELF_A)
+    const row = screen.getByRole('listitem', { name: 'Shelf A humidity' })
+    await user.click(within(row).getByRole('button', { name: 'Show history of Shelf A humidity' }))
+    expect(await within(row).findByRole('img', { name: /Shelf A humidity: .* %, 96 readings/ })).toBeInTheDocument()
+    await user.click(within(row).getByRole('button', { name: 'Hide history of Shelf A humidity' }))
+    expect(within(row).queryByRole('img')).toBeNull()
+  })
+
+  it('shows the error when the history cannot be read', async () => {
+    server.use(http.get('/api/v1/filament/sensors/:id/readings', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    const { user } = await show(L.SHELF_A)
+    await user.click(screen.getByRole('button', { name: 'Show history of Shelf A humidity' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The history could not be loaded. Try again.')
+  })
+
+  it('edits the limit of a sensor and tells the place to reload', async () => {
+    const { user, changed } = await show(L.SHELF_A)
+    await user.click(screen.getByRole('button', { name: 'Edit Shelf A humidity' }))
+    const above = screen.getByLabelText('Alert above')
+    await user.clear(above)
+    await user.type(above, '70')
+    await user.click(screen.getByRole('button', { name: 'Save sensor' }))
+    await waitFor(() => expect(changed).toHaveBeenCalled())
+    expect((await listSensors(L.SHELF_A))[0]).toMatchObject({ alert_above: 70, alerting: false })
+  })
+
+  it('offers no archive for an AMS sensor, and says who made it', async () => {
+    await show(L.AMS_A)
+    expect(screen.queryByRole('button', { name: /^Archive/ })).toBeNull()
+    expect(screen.getByText('Made by ScadBuddy from the printer')).toBeInTheDocument()
+  })
+
+  it('archives a Home Assistant sensor', async () => {
+    const { user, changed } = await show(L.SHELF_A)
+    await user.click(screen.getByRole('button', { name: 'Archive Shelf A humidity' }))
+    await waitFor(() => expect(changed).toHaveBeenCalled())
+    expect(await listSensors(L.SHELF_A)).toEqual([])
+  })
+
+  it('adds a sensor by choosing a Home Assistant entity, which fills its name and unit', async () => {
+    const { user, changed } = await show(L.WORKSHOP)
+    await user.click(screen.getByRole('button', { name: 'Add a sensor to Place' }))
+    await user.type(screen.getByLabelText('Search Home Assistant'), 'garage')
+    await user.click(await screen.findByRole('button', { name: /Garage humidity/ }))
+    expect(screen.getByLabelText('Name')).toHaveValue('Garage humidity')
+    expect(screen.getByLabelText('Unit')).toHaveValue('%')
+    await user.click(screen.getByRole('button', { name: 'Save sensor' }))
+    await waitFor(() => expect(changed).toHaveBeenCalled())
+    expect(await listSensors(L.WORKSHOP)).toMatchObject([{ name: 'Garage humidity', entity_id: 'sensor.garage_humidity', kind: 'humidity', source: 'home_assistant' }])
+  })
+
+  it('says Home Assistant cannot be listed when Bambuddy is not set up', async () => {
+    server.use(http.get('/api/v1/filament/sensors/entities', () => HttpResponse.json({ detail: 'No Bambuddy is configured.' }, { status: 409 })))
+    const { user } = await show(L.WORKSHOP)
+    await user.click(screen.getByRole('button', { name: 'Add a sensor to Place' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Home Assistant sensors need Bambuddy. Connect Bambuddy in Settings first.')
+  })
+
+  it('offers no add button where a sensor cannot be added', async () => {
+    await show(L.AMS_A, false)
+    expect(screen.queryByRole('button', { name: /Add a sensor/ })).toBeNull()
+  })
+})

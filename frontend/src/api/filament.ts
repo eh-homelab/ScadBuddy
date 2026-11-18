@@ -31,6 +31,12 @@ export type Location = Schemas['Location']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
 export type LocationPatch = Schemas['LocationPatch']
+export type Sensor = Schemas['Sensor']
+export type SensorIn = Schemas['SensorIn']
+export type SensorPatch = Schemas['SensorPatch']
+export type SensorReading = Schemas['SensorReading']
+export type HaEntity = Schemas['HaEntity']
+export type AmsSyncResult = Schemas['AmsSyncResult']
 export type TagRow = Schemas['TagRow']
 export type TagDetail = Schemas['TagDetail']
 export type EventPage = Schemas['EventPage']
@@ -131,6 +137,9 @@ export const addSpoolEvent = (id: string, body: SpoolEventAdd) => request<SpoolE
 export const moveSpool = (id: string, locationId: string | null) =>
   request<Spool>(`${BASE}/spools/${seg(id)}/move`, json('POST', { location_id: locationId }))
 
+/** Books each loaded spool's AMS remaining percent (#6268); the answer counts what it did and what it skipped. */
+export const syncAmsWeights = () => request<AmsSyncResult>(`${BASE}/spools/sync-ams-weights`, { method: 'POST' })
+
 // -- spool types ----------------------------------------------------------------------
 
 export const listTypes = (options: { includeArchived?: boolean } = {}) =>
@@ -191,3 +200,23 @@ export const getSummary = () => request<InventorySummary>(`${BASE}/summary`)
 /** Every spool with the tray it is in, and each registry printer's trays (Task 9). */
 export const getInventory = (options: { includeArchived?: boolean } = {}) =>
   request<FilamentInventoryView>(`${BASE}/inventory${query({ include_archived: options.includeArchived || undefined })}`)
+
+// -- location sensors (#6268) -------------------------------------------------------------
+
+export const listSensors = (locationId?: string) => request<Sensor[]>(`${BASE}/sensors${query({ location_id: locationId })}`)
+
+/** A Home Assistant sensor; the AMS ones are made by ScadBuddy and cannot be added by hand. */
+export const createSensor = (body: SensorIn) => request<Sensor>(`${BASE}/sensors`, json('POST', body))
+
+/** Only the fields sent change; the source, kind and entity stay as made. */
+export const patchSensor = (id: string, body: SensorPatch) => request<Sensor>(`${BASE}/sensors/${seg(id)}`, json('PATCH', body))
+
+/** Takes the sensor off the lists; its readings are kept. */
+export const archiveSensor = (id: string) => request<void>(`${BASE}/sensors/${seg(id)}/archive`, { method: 'POST' })
+
+/** The newest `limit` readings since `since`, oldest first. */
+export const listSensorReadings = (id: string, options: { since?: string; limit?: number } = {}) =>
+  request<SensorReading[]>(`${BASE}/sensors/${seg(id)}/readings${query({ since: options.since, limit: options.limit })}`)
+
+/** The Home Assistant entities Bambuddy can read (409 when no Bambuddy is set up). */
+export const listHaEntities = (search?: string) => request<HaEntity[]>(`${BASE}/sensors/entities${query({ search: search || undefined })}`)
