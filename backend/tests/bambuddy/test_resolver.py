@@ -9,8 +9,8 @@ inventing one.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
-from typing import cast
+from collections.abc import Generator, Sequence
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -575,6 +575,38 @@ async def test_a_bb_preset_is_read_only_without_an_sb_one(
     assert errors == [] and reads.asked == [[7]]
     assert bambuddy.asked == asked
     assert resolved.filament_presets == [PresetRef(source="cloud", id=preset)]
+
+
+class _Unused:
+    """An early read of presets that fails the test if it is awaited."""
+
+    def __await__(self) -> Generator[Any, None, dict[int, list[EffectivePreset]]]:
+        raise AssertionError("the early read of other spools was used")
+        yield
+
+
+@pytest.mark.parametrize("early_numbers", [[7, 9], []])
+async def test_early_presets_of_other_spools_are_not_used(early_numbers: list[int]) -> None:
+    """#6611: the check's early read named other spools than the options (``[7, 9]``: a
+    spool the options lack; ``[]``: the inventory row was archived), so `resolve_plates`
+    reads the presets of its own spools and does not await the early read."""
+
+    async def numbering() -> list[int]:
+        return early_numbers
+
+    reads = _Reads({7: [_preset("0.4", "GFSA00_22")]})
+    (resolved,), errors = await resolve_plates(
+        None,
+        [1],
+        [_sb_row(7)],
+        plan(7),
+        PrintChoices(nozzles=[NozzleChoice(size="0.4")]),
+        recorded(),
+        presets=reads,
+        early=(numbering(), _Unused()),
+    )
+    assert errors == [] and reads.asked == [[7]]
+    assert resolved.filament_presets == [PresetRef(source="cloud", id="GFSA00_22")]
 
 
 async def test_native_options_read_no_bambuddy() -> None:

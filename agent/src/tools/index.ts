@@ -10,6 +10,7 @@ import { farmTools } from './farm.js'
 import { printerTools } from './printers.js'
 import { fileTools } from './files.js'
 import { filamentTools } from './filament.js'
+import { filamentPurchasingTools } from './filamentPurchasing.js'
 import { flowTools } from './flows.js'
 import { flowTriggerTools } from './flowTriggers.js'
 import { guideTools } from './guide.js'
@@ -69,6 +70,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...analyzerTools,
   ...traySpoolTools,
   ...filamentTools,
+  ...filamentPurchasingTools,
   ...printerTools,
   ...browserTools,
   ...delegationTools,

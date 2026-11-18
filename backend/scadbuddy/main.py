@@ -52,6 +52,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import (
     ATTACHMENT_UPLOAD_PATH,
     BODY_LIMITS,
+    INVOICE_FILE_UPLOAD_PATH,
     LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
     MESH_UPLOAD_PATH,
@@ -2357,6 +2358,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 ORDER_ATTACHMENT_UPLOAD_PATH,
                 lambda: state.settings.media_upload_max_bytes,
                 "an order's attachment",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
+                INVOICE_FILE_UPLOAD_PATH,
+                lambda: state.settings.media_upload_max_bytes,
+                "an invoice's file",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
             ),
             RouteLimit(

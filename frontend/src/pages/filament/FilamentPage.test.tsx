@@ -31,29 +31,28 @@ describe('the Filament section', () => {
       'shopping-list',
       'ledger',
     ])
-    expect(FILAMENT_TABS.filter((tab) => !tab.available).map((tab) => tab.id)).toEqual([
-      'suppliers',
-      'invoices',
-      'metrics',
-      'shopping-list',
-    ])
+    expect(FILAMENT_TABS.filter((tab) => !tab.available).map((tab) => tab.id)).toEqual(['metrics'])
     for (const tab of FILAMENT_TABS) expect(tab.path).toBe(`/filament/${tab.id}`)
   })
 
-  it('shows six tabs in spec order and no "Invoices"', () => {
+  it('shows nine tabs in spec order, with "Invoices" and no "Metrics"', () => {
     render('/filament/spools')
     const tabs = screen.getByRole('navigation', { name: 'Filament' })
     const links = within(tabs).getAllByRole('link')
-    expect(links.map((link) => link.textContent)).toEqual(['Spools', 'Types', 'Tags', 'Locations', 'Catalog', 'Ledger'])
+    expect(links.map((link) => link.textContent)).toEqual(['Spools', 'Types', 'Tags', 'Suppliers', 'Invoices', 'Locations', 'Catalog', 'Shopping list', 'Ledger'])
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
       '/filament/spools',
       '/filament/types',
       '/filament/tags',
+      '/filament/suppliers',
+      '/filament/invoices',
       '/filament/locations',
       '/filament/catalog',
+      '/filament/shopping-list',
       '/filament/ledger',
     ])
-    expect(within(tabs).queryByRole('link', { name: 'Invoices' })).toBeNull()
+    expect(within(tabs).getByRole('link', { name: 'Invoices' })).toBeInTheDocument()
+    expect(within(tabs).queryByRole('link', { name: 'Metrics' })).toBeNull()
   })
 
   it('opens /filament on Spools, and marks the open tab', () => {

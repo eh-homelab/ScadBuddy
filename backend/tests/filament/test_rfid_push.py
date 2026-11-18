@@ -27,12 +27,15 @@ from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import Material, SpoolCreate, TagKind, TagPushReport
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.rfid_mode import RfidModeStore
 from scadbuddy.filament.rfid_push import PUSH_LOCK, drain_tags, error_label, push_pending
+from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
@@ -51,14 +54,19 @@ UID2 = "0102030405060708"
 
 
 def _filament(pool: PgPool) -> Filament:
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool)
     return Filament(
         catalog=CatalogStore(pool),
-        types=SpoolTypeStore(pool),
-        spools=FilamentSpoolStore(pool),
+        types=types,
+        spools=spools,
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
         rfid=RfidModeStore(pool),
+        suppliers=SuppliersStore(pool, lambda: "USD"),
+        invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
     )
 
 

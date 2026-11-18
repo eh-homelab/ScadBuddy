@@ -14,7 +14,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -1229,6 +1229,17 @@ async def read_spool_presets(
     return spool_presets
 
 
+def chosen_numbers(spools: Iterable[tuple[int, int | None]], plan: FilamentPlan) -> list[int]:
+    """The SB numbers of the spools ``plan`` names, sorted. ``spools`` are (spool id, SB
+    number) pairs; a pair whose spool id ``plan.slots`` names gives its number, and the
+    last pair for a spool id wins. `resolve_plates` passes its options and
+    `_plan_numbers` the unarchived inventory rows, so the check's early read and the
+    read it replaces name the same spools (#6611)."""
+    wanted = {slot.spool_id for slot in plan.slots}
+    chosen = {spool_id: number for spool_id, number in spools if spool_id in wanted}
+    return sorted({number for number in chosen.values() if number is not None})
+
+
 async def resolve_plates(
     client: BambuddyClient | None,
     plate_ids: list[int],
@@ -1256,18 +1267,11 @@ async def resolve_plates(
     read of the chosen spools' presets, started once the inventory was read (#4196):
     awaited here in place of a new read when it read the same spools, so it fails where
     a new read would."""
-    wanted = {slot.spool_id for slot in plan.slots}
-    chosen = [
-        spool
-        for spool in {
-            spool.spool_id: spool
-            for options in per_plate
-            for spool in options.spools
-            if spool.spool_id in wanted
-        }.values()
-    ]
     # Read once for every plate: the plan's spools are the same on every plate.
-    numbers = sorted({spool.sb_number for spool in chosen if spool.sb_number is not None})
+    numbers = chosen_numbers(
+        ((spool.spool_id, spool.sb_number) for options in per_plate for spool in options.spools),
+        plan,
+    )
     spool_presets = await (
         early[1]
         if early is not None and await early[0] == numbers
@@ -1706,13 +1710,15 @@ async def _plan_numbers(reading: Awaitable[Inventory], plan: FilamentPlan) -> li
     """The SB spools of the read inventory that ``plan`` names, as `resolve_plates` finds
     them in the options built from it: each unarchived row is an option under its
     number."""
-    wanted = {slot.spool_id for slot in plan.slots}
-    return sorted(
-        {
-            row.spool.number
+    return chosen_numbers(
+        (
+            # An SB option's spool id is its number (`filaments.build_options`); if that
+            # changes, change this pair too, or the two reads name different spools.
+            (row.spool.number, row.spool.number)
             for row in await reading
-            if row.spool.archived_at is None and row.spool.number in wanted
-        }
+            if row.spool.archived_at is None
+        ),
+        plan,
     )
 
 

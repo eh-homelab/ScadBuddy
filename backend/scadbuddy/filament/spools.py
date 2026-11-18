@@ -26,6 +26,7 @@ from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.rfid_push import enqueue_tag
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError, effective, overridden
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
@@ -297,9 +298,52 @@ class FilamentSpoolStore:
                 " ORDER BY b.unbound_at DESC, b.bound_at DESC LIMIT 1",
                 (spool_id,),
             ).fetchone()
+            line = conn.execute(
+                "SELECT i.id AS invoice_id, i.number, i.invoice_date, i.supplier_id,"
+                " sup.name AS supplier_name, l.id AS line_id, l.position AS line_position,"
+                " l.allocated_cost, l.quantity"
+                " FROM filament_spools s JOIN filament_invoice_lines l ON l.id = s.invoice_line_id"
+                " JOIN filament_invoices i ON i.id = l.invoice_id"
+                " JOIN filament_suppliers sup ON sup.id = i.supplier_id WHERE s.id = %s",
+                (spool_id,),
+            ).fetchone()
+            products = conn.execute(
+                "SELECT p.supplier_id, sup.name AS supplier_name, p.sku, p.product_url,"
+                " p.pack_size, t.label_weight_g, n.price AS newest_price"
+                " FROM filament_supplier_products p"
+                " JOIN filament_suppliers sup ON sup.id = p.supplier_id"
+                " JOIN filament_spool_types t ON t.id = p.type_id"
+                " LEFT JOIN LATERAL (SELECT pp.price FROM filament_price_points pp"
+                "  WHERE pp.product_id = p.id"
+                "  ORDER BY pp.on_date DESC, pp.created_at DESC, pp.id LIMIT 1) n ON true"
+                " WHERE p.type_id = (SELECT type_id FROM filament_spools WHERE id = %s)"
+                " AND p.archived_at IS NULL AND sup.archived_at IS NULL"
+                " ORDER BY upper(sup.name), upper(p.sku), p.id",
+                (spool_id,),
+            ).fetchall()
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
+                    "invoice": None
+                    if line is None
+                    else m.SpoolInvoiceRef.model_validate(
+                        {**line, "unit_cost": unit_cost(line["allocated_cost"], line["quantity"])}
+                    ),
+                    "type_suppliers": [
+                        m.SpoolTypeSupplier(
+                            supplier_id=r["supplier_id"],
+                            supplier_name=r["supplier_name"],
+                            sku=r["sku"],
+                            product_url=r["product_url"],
+                            newest_price=r["newest_price"],
+                            price_per_kg=None
+                            if r["newest_price"] is None
+                            else price_per_kg(
+                                r["newest_price"], r["pack_size"], r["label_weight_g"]
+                            ),
+                        )
+                        for r in products
+                    ],
                     "tag": None if tag_row is None else m.Tag.model_validate(tag_row),
                     "last_tag": None
                     if last is None
@@ -433,10 +477,19 @@ class FilamentSpoolStore:
         assert made is not None
         return made
 
-    def create_on(self, conn: Conn, body: m.SpoolCreate, *, actor: str) -> UUID:
+    def create_on(
+        self,
+        conn: Conn,
+        body: m.SpoolCreate,
+        *,
+        actor: str,
+        ref_kind: str | None = None,
+        ref_id: UUID | None = None,
+    ) -> UUID:
         """`create` on ``conn``, in the caller's transaction (`filament/csv_import.py`):
         the new spool's id. A row it names that does not exist is the driver's
-        `ForeignKeyViolation`."""
+        `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``created`` event
+        (an invoice line's, #6266); a retry of one pair books nothing twice."""
         data = body.model_dump(exclude={"grams_left"})
         names = list(data)
         row = conn.execute(
@@ -453,6 +506,8 @@ class FilamentSpoolStore:
             "created",
             source="person" if body.grams_left is not None else None,
             absolute_g=body.grams_left,
+            ref_kind=ref_kind,
+            ref_id=None if ref_id is None else str(ref_id),
             actor=actor,
         )
         return spool_id
@@ -476,10 +531,20 @@ class FilamentSpoolStore:
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
 
-    def update_on(self, conn: Conn, spool_id: UUID, patch: m.SpoolPatch, *, actor: str) -> bool:
+    def update_on(
+        self,
+        conn: Conn,
+        spool_id: UUID,
+        patch: m.SpoolPatch,
+        *,
+        actor: str,
+        ref_kind: str | None = None,
+        ref_id: UUID | None = None,
+    ) -> bool:
         """`update` on ``conn``, in the caller's transaction (`filament/csv_import.py`);
         false for no such spool. A row it names that does not exist is the driver's
-        `ForeignKeyViolation`."""
+        `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``edited`` event
+        (an invoice line's, #6266); a retry of one pair books nothing twice."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -516,7 +581,15 @@ class FilamentSpoolStore:
                 dropped = p.drop_migrated(conn, spool_id)
                 if dropped is not None:
                     changes["presets"] = dropped
-            ledger.record(conn, spool_id, "edited", actor=actor, data={"changes": changes})
+            ledger.record(
+                conn,
+                spool_id,
+                "edited",
+                ref_kind=ref_kind,
+                ref_id=None if ref_id is None else str(ref_id),
+                actor=actor,
+                data={"changes": changes},
+            )
         if patch.archived is not None:
             self._archive(conn, current, patch.archived, actor)
         return True

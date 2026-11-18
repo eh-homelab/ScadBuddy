@@ -28,6 +28,7 @@ from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
     Material,
@@ -46,7 +47,9 @@ from scadbuddy.filament.rfid_slots import (
     reconcile_slots,
     reconcile_slots_now,
 )
+from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.models import PrinterRow
@@ -64,14 +67,19 @@ FIXTURES = Path(__file__).parent.parent / "printers" / "fixtures"
 
 
 def _filament(pool: PgPool) -> Filament:
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool)
     return Filament(
         catalog=CatalogStore(pool),
-        types=SpoolTypeStore(pool),
-        spools=FilamentSpoolStore(pool),
+        types=types,
+        spools=spools,
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
         rfid=RfidModeStore(pool),
+        suppliers=SuppliersStore(pool, lambda: "USD"),
+        invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
     )
 
 

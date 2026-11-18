@@ -32,6 +32,7 @@ from scadbuddy.filament.bambuddy_pull import (
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
     InsertType,
@@ -45,7 +46,9 @@ from scadbuddy.filament.models import (
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
 from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY
@@ -60,14 +63,19 @@ TRAY = "0123456789ABCDEF0123456789ABCDEF"
 
 
 def _filament(pool: PgPool) -> Filament:
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool)
     return Filament(
         catalog=CatalogStore(pool),
-        types=SpoolTypeStore(pool),
-        spools=FilamentSpoolStore(pool),
+        types=types,
+        spools=spools,
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
         rfid=RfidModeStore(pool),
+        suppliers=SuppliersStore(pool, lambda: "USD"),
+        invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
     )
 
 

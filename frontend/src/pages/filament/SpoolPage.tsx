@@ -36,6 +36,7 @@ import { makeTypeFromSpool } from '../../components/filament/makeType'
 import { OverrideField } from '../../components/filament/OverrideField'
 import { PresetTable } from '../../components/filament/PresetTable'
 import { keyOf as presetKey, presetRowsError } from '../../components/filament/presetRows'
+import { SpoolPurchasing } from '../../components/filament/purchasing/SpoolPurchasing'
 import { RgbaColourField } from '../../components/filament/RgbaColourField'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { HistoryList, Section, SectionIndex } from '../../components/filament/SpoolSections'
@@ -426,7 +427,7 @@ export function SpoolPage() {
         spoolId = made.id
         // From here the page is an edit of this spool: a later failure retries as one.
         setMadeId(made.id)
-        setSaved({ ...made, effective: made.effective ?? {}, overridden: made.overridden ?? [], names: made.names ?? {}, low_stock: made.low_stock ?? false, presets: [], k_values: [], tag: null, last_tag: null, basis: { anchor: null, deltas: [] }, in_use: false })
+        setSaved({ ...made, effective: made.effective ?? {}, overridden: made.overridden ?? [], names: made.names ?? {}, low_stock: made.low_stock ?? false, presets: [], k_values: [], tag: null, last_tag: null, basis: { anchor: null, deltas: [] }, in_use: false, invoice: null, type_suppliers: [] })
         presetsWere = []
         kWere = []
         placeWas = ''
@@ -739,6 +740,7 @@ export function SpoolPage() {
               {field('extra_colours', 'Extra colours', { hint: 'For multi-colour filament: #RRGGBB or #RRGGBBAA, separated by commas.' })}
               {field('cost_per_kg', 'Cost per kg', { mode: 'decimal' })}
             </div>
+            <SpoolPurchasing invoice={saved?.invoice} suppliers={saved?.type_suppliers} />
           </Section>
 
           <Section id="printers" title="Printers">

@@ -740,6 +740,27 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tile, with `spool_id`, `kind`, `source` and a cursor. The price book (the `filaments` rows
   that `orders/pricebook.py` prices) is edited on Filament → Types (`components/orders/FilamentsEditor.tsx`),
   not in Settings.
+  Purchasing (#6266, spec §5.8; plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`,
+  which holds the decisions): `suppliers.py` (`SuppliersStore`: suppliers, products by
+  `upper(sku)`, price points; a price point is the price of one pack, tax in, shipping out, and
+  `price_per_kg` is derived on read; stats and `type_prices` keep archived suppliers, marked),
+  `invoices.py` (`InvoiceStore`: drafts, their lines, the file blob, and `confirm`, one
+  transaction under `FOR UPDATE`, idempotent by state: it makes or fills the spools, the types
+  and products a line names, and the price points; a confirmed invoice is frozen but for its
+  note and file), `invoice_money.py` (tax, shipping and cost per kg, largest-remainder at four
+  places; `RECONCILE_TOLERANCE` 0.05; tax on a zero subtotal is `InvoiceMathError`, a 422) and
+  `shopping.py` (`ShoppingStore`; `type_id` is optional and the text identity stays). Every
+  store sets `updated_at` itself. Routes: `api/filament_purchasing.py`; a repeated
+  `import_run_id` returns the invoice (200), a number that collides is a 409 whose body has
+  `existing_invoice_id`, and confirm refuses (409) a foreign currency, a difference over the
+  tolerance, an archived named product, a line with no SKU and a description over 128
+  characters, an invoice with no lines and an invoice whose supplier is archived. Confirm turns
+  only a client conflict into a 409 naming the line; any other error is a 500. A draft write
+  (create, PATCH, PUT lines) answers 422 for an archived supplier, for a line with more
+  `update_spool_ids` than its `quantity` or a total past `numeric(12,4)`, and for a database
+  `CheckViolation` or `DataError` (`_LINE_BOUNDS`); `Quantity` is at most 1,000. Confirm locks
+  every line's spools in one sorted query before it writes, so two confirms cannot deadlock. The agent's tools are
+  `agent/src/tools/filamentPurchasing.ts` (an invoice edit is a PATCH then a PUT, not atomic).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -1035,6 +1056,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   open. This lives in the activity: `FollowPrint`'s commands are unchanged, and its
   histories replay from `tests/fixtures/follow_print_histories/`, so a change to them
   goes behind `workflow.patched`.
+- `backend/scadbuddy/dialog_reads/` — the print dialog's kept Bambuddy reads (#4196, the
+  `DIALOG_READS` component): the printer list, a printer, a library file and its plates
+  are kept for `DIALOG_TTL` (5 s) per Bambuddy and key, so a check uses what `choices`
+  read. So a printer renamed in Bambuddy can show in a check up to 5 s late. Status, AMS,
+  inventory, spool assignments and the download are always read. The run never uses it.
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per

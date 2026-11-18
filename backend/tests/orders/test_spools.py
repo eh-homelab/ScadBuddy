@@ -22,6 +22,7 @@ import respx
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import SlotChoice, SpoolAssignment
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayPlace
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.bambuddy import BambuddyIntegrations
@@ -38,7 +39,9 @@ from scadbuddy.orders.spools import (
     shelf_spools,
 )
 from scadbuddy.orders.store import OrderStore, SpoolLink
+from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop
+from tests.support.purchasing import Shop as _PurchasingShop
 from tests.support.sb_rows import sb_spool
 
 NOW = datetime(2026, 11, 3, tzinfo=UTC)
@@ -757,3 +760,19 @@ def test_the_newest_priced_spool_prices_the_group(rows: OrderStore) -> None:
         [41, 43, 45],
     )
     assert (imported["min_cost_per_kg"], imported["max_cost_per_kg"]) == ("24", "26.5")
+
+
+@pytest.mark.requires_postgres
+def test_an_invoiced_spools_cost_reaches_the_price_book(pool: PgPool, rows: OrderStore) -> None:
+    """#6266: confirming an invoice costs its spools; the price book's import (no orders
+    code changed) then takes that cost for the spools' record."""
+    shop = _PurchasingShop(pool)
+    shop.confirmed(shop.type_id())
+
+    groups = spool_groups(FilamentInventory(pool).rows())
+    [imported] = [r.model_dump() for r in import_spools(rows, groups).rows]
+
+    assert imported["action"] == "created"
+    record = rows.filament(imported["filament_id"])
+    assert record is not None
+    assert Decimal(record.cost_per_kg) == Decimal("21.4000")

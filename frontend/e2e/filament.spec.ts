@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { spoolId } from '../src/mocks/features/filament/seed'
+import { SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
 
 // #6262 — the Filament section against the msw API (`src/mocks/features/filament/`): the
 // spools list and its filter, the CSV import, the spool page's colour presets and "Reset to
@@ -81,6 +82,27 @@ test('restores the archived spool and moves its old tag back from the spool that
   await expect(tag.getByRole('button', { name: 'Take off' })).toBeVisible()
   await expect(tag).toContainText('04A1B2C3D4E5F6')
   await expect(tag).not.toContainText('No tag is on this spool.')
+})
+
+test.describe('suppliers (#6266)', () => {
+  test('the Suppliers tab opens a supplier whose price sheet shows the rise', async ({ page }) => {
+    await page.goto('/filament/suppliers')
+    await page.getByRole('table', { name: 'Suppliers' }).getByRole('link', { name: 'Bambu Lab' }).click()
+    await expect(page).toHaveURL(new RegExp(`/filament/suppliers/${SUPPLIER.BAMBU}$`))
+    await expect(page.getByRole('heading', { level: 1, name: 'Bambu Lab' })).toBeVisible()
+    await expect(page.getByRole('table', { name: 'Price sheet' }).getByText('+8.2 %')).toBeVisible()
+  })
+
+  test.describe('at 390 px', () => {
+    test.use({ viewport: { width: 390, height: 844 } })
+
+    test('the supplier page has no horizontal scroll', async ({ page }) => {
+      await page.goto(`/filament/suppliers/${SUPPLIER.BAMBU}`)
+      await expect(page.getByRole('heading', { level: 1, name: 'Bambu Lab' })).toBeVisible()
+      const [scroll, client] = (await page.evaluate('[document.documentElement.scrollWidth, document.documentElement.clientWidth]')) as [number, number]
+      expect(scroll).toBeLessThanOrEqual(client)
+    })
+  })
 })
 
 test.describe('the spool page at 390 px', () => {
