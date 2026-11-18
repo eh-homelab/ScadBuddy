@@ -25,8 +25,8 @@ interface Shared {
 
 interface EditableProps extends Shared {
   rows: LineDraft[]
-  /** The server's lines from the last save, by position: their cost, tax and basis are shown read-only. */
-  computed: InvoiceLine[]
+  /** The server's line for each row, by the row's key: its cost, tax and basis are shown read-only. */
+  computed: ReadonlyMap<string, InvoiceLine>
   errors: LineErrors
   products: SupplierProduct[]
   onChange: (rows: LineDraft[]) => void
@@ -83,7 +83,7 @@ function Editable({ rows, computed, errors, products, types, spools, money, onCh
             {rows.map((row, at) => {
               const n = at + 1
               const problems = errors[row.key] ?? {}
-              const server = computed[at]
+              const server = computed.get(row.key)
               const type = typeOf(row.typeId)
               const candidates = fillable(spools, row.typeId, taken(at))
               const ticked = row.updateSpoolIds.map((id) => spools.find((one) => one.id === id)).filter((one): one is Spool => !!one)

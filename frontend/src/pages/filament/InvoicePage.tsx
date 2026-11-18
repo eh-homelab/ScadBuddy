@@ -12,6 +12,7 @@ import {
   listSuppliers,
   putInvoiceLines,
   type InvoiceDetail,
+  type InvoiceLine,
   type InvoicePatch,
   type Supplier,
   type SupplierProduct,
@@ -67,6 +68,8 @@ export function InvoicePage() {
   const [saveError, setSaveError] = useState<string | null>(null)
   // The last lines save failed: the lines stay unsaved until a retry or a later edit saves them.
   const [failed, setFailed] = useState(false)
+  // The keys of the rows the invoice's lines answer, by position: a row keeps its server figures (cost, tax) by key.
+  const [savedKeys, setSavedKeys] = useState<string[]>([])
   const [types, setTypes] = useState<SpoolType[]>([])
   const [products, setProducts] = useState<SupplierProduct[]>([])
   const [spools, setSpools] = useState<Spool[]>([])
@@ -84,6 +87,12 @@ export function InvoicePage() {
   // answer that is not the newest would bring back a header the newer save has changed.
   const here = useLatest(id)
   const sent = useRef(0)
+  // Saves in flight, and whether the newest one to finish failed: the server then holds what
+  // the page cannot know, so the invoice is read again once nothing is in flight.
+  const inflight = useRef(0)
+  // Edits no save has taken yet: a field left with nothing changed sends nothing.
+  const unsent = useRef(false)
+  const stale = useRef(false)
 
   const guard = useLeaveGuard(dirty)
 
@@ -100,6 +109,8 @@ export function InvoicePage() {
         const next = found.lines.map(draftOfLine)
         rowsRef.current = next
         version.current = 0
+        setSavedKeys(next.map((row) => row.key))
+        unsent.current = false
         setRows(next)
         setErrors({})
         setDirty(false)
@@ -148,16 +159,42 @@ export function InvoicePage() {
   function edit(next: LineDraft[]) {
     rowsRef.current = next
     version.current += 1
+    unsent.current = true
     setRows(next)
     setDirty(true)
+  }
+
+  /** The invoice as the server holds it, unless a save was sent since. */
+  function refetch(page: string) {
+    const seq = ++sent.current
+    getInvoice(page).then(
+      (found) => {
+        if (here.current !== page || seq !== sent.current) return
+        setInvoice(found)
+        const keys = rowsRef.current.map((row) => row.key)
+        setSavedKeys(keys.length === found.lines.length ? keys : [])
+      },
+      () => undefined,
+    )
+  }
+
+  /** A save is over: when it was the last in flight after a failure, read the invoice again. */
+  function settle(page: string) {
+    inflight.current -= 1
+    if (inflight.current === 0 && stale.current) {
+      stale.current = false
+      if (here.current === page) refetch(page)
+    }
   }
 
   async function saveOnce() {
     const at = version.current
     const sending = rowsRef.current
-    if (Object.keys(lineErrors(sending)).length > 0) return
+    if (!unsent.current || Object.keys(lineErrors(sending)).length > 0) return
+    unsent.current = false
     const page = id
     const seq = ++sent.current
+    inflight.current += 1
     setSaving(true)
     setSaveError(null)
     setFailed(false)
@@ -165,14 +202,20 @@ export function InvoicePage() {
       const saved = await putInvoiceLines(page, bodyOfLines(sending))
       if (here.current !== page) return
       // An older answer is dropped: the newer save's answer is the truth.
-      if (seq === sent.current) setInvoice(saved)
+      if (seq === sent.current) {
+        setInvoice(saved)
+        setSavedKeys(sending.map((row) => row.key))
+      }
       // An edit made while this was in flight is saved by the commit that follows it.
       if (version.current === at) setDirty(false)
     } catch (cause) {
       if (here.current !== page) return
+      unsent.current = true
+      if (seq === sent.current) stale.current = true
       setFailed(true)
       setSaveError(message(cause, 'The lines could not be saved. Try again.'))
     } finally {
+      settle(page)
       if (here.current === page) setSaving(false)
     }
   }
@@ -180,15 +223,32 @@ export function InvoicePage() {
   /** One header change (the form sends them): its answer replaces the invoice only if no later save was sent. */
   async function saveHeader(patch: InvoicePatch) {
     const page = id
-    const seq = ++sent.current
-    const saved = await patchInvoice(page, patch)
-    if (here.current !== page) return
-    if (seq === sent.current) setInvoice(saved)
-    // The server dropped the old supplier's products from the lines.
-    if (patch.supplier_id && rowsRef.current.some((row) => row.productId)) {
-      const next = rowsRef.current.map((row) => ({ ...row, productId: '' }))
+    // A move drops the old supplier's products from the lines, here before any save can send them.
+    const before = rowsRef.current
+    if (patch.supplier_id && before.some((row) => row.productId)) {
+      const next = before.map((row) => ({ ...row, productId: '' }))
       rowsRef.current = next
       setRows(next)
+    }
+    const seq = ++sent.current
+    inflight.current += 1
+    try {
+      const saved = await patchInvoice(page, patch)
+      if (here.current !== page) return
+      if (seq === sent.current) setInvoice(saved)
+    } catch (cause) {
+      if (here.current === page) {
+        if (seq === sent.current) stale.current = true
+        // Refused: the lines keep the products they had.
+        if (patch.supplier_id && before !== rowsRef.current) {
+          const next = rowsRef.current.map((row) => ({ ...row, productId: before.find((one) => one.key === row.key)?.productId ?? row.productId }))
+          rowsRef.current = next
+          setRows(next)
+        }
+      }
+      throw cause
+    } finally {
+      settle(page)
     }
   }
 
@@ -239,19 +299,20 @@ export function InvoicePage() {
   async function remove() {
     setBusy(true)
     setRefusal(null)
+    const page = id
     try {
-      await deleteInvoice(id)
+      await deleteInvoice(page)
+      if (here.current !== page) return
       setDirty(false)
       navigate('/filament/invoices')
     } catch (cause) {
+      if (here.current !== page) return
       setRefusal(message(cause, 'The draft could not be deleted. Try again.'))
       setBusy(false)
     }
   }
 
-  const reload = useCallback(() => {
-    getInvoice(id).then(setInvoice, () => undefined)
-  }, [id])
+  const reload = () => refetch(id)
 
   if (loadError) {
     return (
@@ -272,6 +333,8 @@ export function InvoicePage() {
   }
 
   const draft = invoice.status === 'draft'
+  const computed = new Map<string, InvoiceLine>()
+  if (savedKeys.length === invoice.lines.length) savedKeys.forEach((key, at) => computed.set(key, invoice.lines[at]!))
   const format = (amount: string) => formatCost(amount, invoice.currency, invoice.minor_exponent)
   const lineSum = invoice.lines.map((line) => line.line_total).reduce(addDecimals, '0')
 
@@ -351,7 +414,7 @@ export function InvoicePage() {
               Lines
             </h2>
             {draft ? (
-              <InvoiceLinesTable editable rows={rows} computed={invoice.lines} errors={errors} products={products} types={types} spools={spools} money={format} onChange={edit} onCommit={commit} />
+              <InvoiceLinesTable editable rows={rows} computed={computed} errors={errors} products={products} types={types} spools={spools} money={format} onChange={edit} onCommit={commit} />
             ) : (
               <InvoiceLinesTable editable={false} lines={invoice.lines} types={types} spools={spools} money={format} />
             )}

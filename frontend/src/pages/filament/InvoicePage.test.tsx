@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createInvoice, getInvoice } from '../../api/filamentPurchasing'
-import { cmpDecimals } from '../../lib/decimal'
+import { cmpDecimals, formatCost } from '../../lib/decimal'
 import { spoolId, T } from '../../mocks/features/filament/seed'
 import { INVOICE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
@@ -280,5 +280,131 @@ describe('the invoice page', () => {
     await heading()
     expect(await screen.findByRole('link', { name: 'Bambu Lab' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.BAMBU}`)
     expect(screen.queryByRole('combobox', { name: 'Supplier' })).not.toBeInTheDocument()
+  })
+
+  describe('after a save that fails', () => {
+    const problem = (status: number, detail: string) => HttpResponse.json({ type: 'about:blank', title: 'Refused', status, detail }, { status, headers: { 'Content-Type': 'application/problem+json' } })
+    const held = () => {
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return { gate, release }
+    }
+
+    it('shows the server\'s numbers when a header change is refused while a lines save is in flight', async () => {
+      const { gate, release } = held()
+      let started = false
+      server.use(
+        // Held, then answered by the mock: the server applies it only when it is released.
+        http.put('*/api/v1/filament/invoices/:id/lines', async () => {
+          started = true
+          await gate
+        }),
+        http.patch('*/api/v1/filament/invoices/:id', () => problem(422, 'the note is refused')),
+      )
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      const price = await screen.findByLabelText('Unit price, line 1')
+      await user.clear(price)
+      await user.type(price, '30')
+      await user.tab()
+      await waitFor(() => expect(started).toBe(true))
+      await user.type(screen.getByLabelText('Note'), 'x')
+      await user.tab()
+      expect(await screen.findByRole('alert')).toHaveTextContent('the note is refused')
+      release()
+      const status = await screen.findByText(/The total does not match the lines/)
+      expect(status).toBeInTheDocument()
+      const now = await getInvoice(INVOICE.DRAFT_A)
+      expect(now.reconciles).toBe(false)
+      expect(screen.getByText('Difference').nextElementSibling).toHaveTextContent(formatCost(now.difference!, 'USD', 2).replace('-', ''))
+    })
+
+    it('shows the server\'s numbers when a lines save fails while a header change is in flight', async () => {
+      const { gate, release } = held()
+      let started = false
+      server.use(
+        http.patch('*/api/v1/filament/invoices/:id', async () => {
+          started = true
+          await gate
+        }),
+        http.put('*/api/v1/filament/invoices/:id/lines', () => problem(500, 'The database is busy')),
+      )
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      const total = await screen.findByLabelText('Total')
+      await user.clear(total)
+      await user.type(total, '90')
+      await user.tab()
+      await waitFor(() => expect(started).toBe(true))
+      const description = screen.getByLabelText('Description, line 1')
+      await user.type(description, ' again')
+      await user.tab()
+      expect(await screen.findByText('The database is busy')).toBeInTheDocument()
+      release()
+      expect(await screen.findByText(/The total does not match the lines/)).toBeInTheDocument()
+      expect(screen.getByText('Total typed').nextElementSibling).toHaveTextContent('90.00')
+    })
+  })
+
+  it('sends no product of the old supplier in a lines save right after a move', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let started = false
+    server.use(
+      http.patch('*/api/v1/filament/invoices/:id', async () => {
+        started = true
+        await gate
+      }),
+    )
+    const bodies: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PUT' && /\/lines$/.test(new URL(request.url).pathname)) void request.clone().json().then((body) => bodies.push(body))
+    })
+    const { user } = render(INVOICE.DRAFT_A)
+    await heading()
+    await choose(user, await screen.findByRole('combobox', { name: 'Supplier' }), 'Micro Center')
+    await waitFor(() => expect(started).toBe(true))
+    const description = screen.getByLabelText('Description, line 1')
+    await user.type(description, ' again')
+    await user.tab()
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect((bodies[0] as { supplier_product_id: string | null }[]).map((line) => line.supplier_product_id)).toEqual([null, null])
+    release()
+  })
+
+  it('keeps the server cost of the lines left when a middle line is removed, until the save answers', async () => {
+    const draft = await createInvoice({
+      supplier_id: SUPPLIER.BAMBU,
+      invoice_date: '2026-11-16',
+      currency: 'USD',
+      subtotal: '60',
+      total: '60',
+      lines: [10, 20, 30].map((price) => ({ description: `Line at ${price}`, quantity: 1, unit_price: String(price), type_id: T.JADE })),
+    })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.put('*/api/v1/filament/invoices/:id/lines', async () => {
+        await gate
+      }),
+    )
+    const { user } = render(draft.id)
+    await heading()
+    const lines = await screen.findByRole('table', { name: 'Invoice lines' })
+    const cost = (n: number) => within(lines.querySelector(`tr[data-line="${n}"]`) as HTMLElement).getByText(/\$\d/, { selector: 'td:nth-last-child(2)' })
+    await waitFor(() => expect(cost(3)).toHaveTextContent('30.00'))
+    expect(cost(1)).toHaveTextContent('10.00')
+    await user.click(screen.getByRole('button', { name: 'Remove line 2' }))
+    expect(cost(1)).toHaveTextContent('10.00')
+    expect(cost(2)).toHaveTextContent('30.00')
+    release()
+    await waitFor(() => expect(screen.queryByText('Saving the lines…')).not.toBeInTheDocument())
+    expect(cost(2)).toHaveTextContent('30.00')
   })
 })
