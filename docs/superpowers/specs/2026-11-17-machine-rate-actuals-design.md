@@ -338,7 +338,10 @@ gets from the watch, in the same transaction:
 - `PrinterReportStore.advance_in` (each report write), after the `stale` check and only
   when the report row is written. It locks the counter row `FOR UPDATE` after the report
   row, so writes for one printer are in order.
-- `PrinterReportStore.touch` (each quiet tick), as one `UPDATE` statement.
+- `PrinterReportStore.touch` (each quiet tick). Today `touch` is one autocommit `UPDATE`
+  with no transaction (`printers/reports.py` `PrinterReportStore.touch`). PR 1 wraps the
+  report's `UPDATE` and the counter's `UPDATE` in one transaction, and locks in the same
+  order as `advance_in`: the report row first, then the counter row.
 
 Each step is a pure function, `run_hours.accrue(row, t, report, now=)`, where `t` is the
 write's or touch's `seen_at`, `report` is the merged report (none for a touch) and `now`

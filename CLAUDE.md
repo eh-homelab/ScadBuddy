@@ -100,8 +100,8 @@ The Go client's generator and checks: `tools/go/CLAUDE.md`.
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
-kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
-repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as
+kustomize v5.8.1, which the job downloads and checks by sha256 because ArgoCD's
+repo-server runs that version, measured 2026-11-18 after eh-homelab/clusters#3740), `lint-base64-images.sh` (#2479: no image is built as
 base64 in JSON or text outside its allowlisted Messages API boundaries; images move as
 blobs and `{name, mediaType}` pointers), and the `.github/scripts/*.test.sh` suites. Every
 `docker run` in a `verify.sh` must carry
