@@ -639,6 +639,60 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_rfid_status',
+    label: 'Read the RFID override mode',
+    description:
+      "Whether the RFID override mode is on and where Bambuddy's auto-add of unknown RFID spools stands: " +
+      '`applied` (mode on, Bambuddy\'s value is false), `pending` (a write has not landed or Bambuddy is down; ' +
+      '`detail` names the error), `blocked` (Bambuddy refused the write because its auth is on) or `off`. ' +
+      'Lists the SpoolBuddy devices. Reads Bambuddy; writes nothing.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/rfid/status'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/rfid/status'), 'read the RFID override mode')),
+  }),
+
+  defineTool({
+    name: 'filament_rfid_override_mode',
+    label: 'Turn the RFID override mode on or off',
+    description:
+      "Only what the user says; this turns Bambuddy's auto-add of unknown RFID spools off while on. The value " +
+      'Bambuddy had is saved first and put back when the mode turns off. Answers the status: `blocked` when ' +
+      "Bambuddy's auth is on (it refuses the change; the mode stays as asked), `pending` when Bambuddy cannot " +
+      'be reached (the spool refresh retries).',
+    input: z.object({ enabled: z.boolean().describe('true turns the mode on, false turns it off') }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['PUT /api/v1/filament/rfid/override-mode'],
+    summarize: ({ enabled }) => `Turn the RFID override mode ${enabled ? 'on' : 'off'}`,
+    handler: async ({ enabled }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/filament/rfid/override-mode', { body: { enabled } }),
+          'change the RFID override mode',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_rfid_reconcile',
+    label: 'Reconcile RFID with Bambuddy now',
+    description:
+      "Run once what the spool refresh runs: bring Bambuddy's auto-add of unknown RFID spools to the override " +
+      'mode, then push the queued tag changes (only with `filament_sync.tags` `sb_to_bb`). Answers the mode ' +
+      'status and the tag push counts. Writes Bambuddy only to match ScadBuddy.',
+    input: z.object({}),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/rfid/reconcile'],
+    summarize: () => 'Reconcile RFID with Bambuddy',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/rfid/reconcile'), 'reconcile RFID with Bambuddy')),
+  }),
+
+  defineTool({
     name: 'filament_spool_add_event',
     label: 'Record a weighing or a drying',
     description:

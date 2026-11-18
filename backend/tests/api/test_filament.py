@@ -848,3 +848,107 @@ def test_the_route_calls_bambuddy_not_at_all_with_tags_off(
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT attempts FROM filament_bb_tag_pending").fetchone()
     assert row == (0,)
+
+
+RFID = "/api/v1/filament/rfid"
+SETTINGS_URL = f"{API}/settings/"
+
+
+def _auto_add(*values: bool) -> respx.Route:
+    return respx.get(SETTINGS_URL).mock(
+        side_effect=[httpx.Response(200, json={"auto_add_unknown_rfid": v}) for v in values]
+    )
+
+
+@respx.mock
+def test_the_mode_route_writes_the_row_then_turns_auto_add_off(client: TestClient) -> None:
+    configure(client)
+    _auto_add(True, False)
+    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[]))
+    patch = respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(200, json={}))
+
+    on = client.put(f"{RFID}/override-mode", json={"enabled": True})
+
+    assert on.status_code == 200, on.text
+    body = on.json()
+    assert (body["override_mode"], body["state"]) == (True, "applied")
+    assert body["saved_auto_add"] is True
+    assert patch.call_count == 1
+
+
+@respx.mock
+def test_a_blocked_write_is_still_a_200(client: TestClient) -> None:
+    configure(client)
+    _auto_add(True)
+    respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(403, json={"detail": "Forbidden"}))
+
+    blocked = client.put(f"{RFID}/override-mode", json={"enabled": True})
+
+    assert blocked.status_code == 200, blocked.text
+    body = blocked.json()
+    assert body["state"] == "blocked"
+    assert "auth is on" in body["detail"]
+    assert body["override_mode"] is True
+    assert body["saved_auto_add"] is True
+
+
+@respx.mock
+def test_bambuddy_down_leaves_the_mode_on_and_pending(client: TestClient) -> None:
+    configure(client)
+    respx.get(SETTINGS_URL).mock(side_effect=httpx.ConnectError("down"))
+
+    pending = client.put(f"{RFID}/override-mode", json={"enabled": True})
+
+    assert pending.status_code == 200, pending.text
+    assert pending.json()["state"] == "pending"
+    assert pending.json()["override_mode"] is True
+    assert pending.json()["detail"]
+
+
+@respx.mock
+def test_the_status_route_reads_without_writing(client: TestClient) -> None:
+    configure(client)
+    _auto_add(True)
+    respx.get(f"{API}/spoolbuddy/devices").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 1, "device_id": "sb-1", "hostname": "spoolbuddy", "online": True}]
+        )
+    )
+    patch = respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(200, json={}))
+
+    status = client.get(f"{RFID}/status")
+
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert (body["state"], body["bambuddy_auto_add"]) == ("off", True)
+    assert [d["device_id"] for d in body["devices"]] == ["sb-1"]
+    assert patch.call_count == 0
+
+
+@respx.mock
+def test_the_status_route_leaves_fields_empty_when_bambuddy_is_down(client: TestClient) -> None:
+    configure(client)
+    respx.get(SETTINGS_URL).mock(side_effect=httpx.ConnectError("down"))
+
+    status = client.get(f"{RFID}/status")
+
+    assert status.status_code == 200, status.text
+    assert status.json()["bambuddy_auto_add"] is None
+    assert status.json()["devices"] == []
+
+
+@respx.mock
+def test_the_reconcile_route_runs_the_mode_and_the_tags(client: TestClient) -> None:
+    configure(client, filament_sync={"tags": "sb_to_bb"})
+    respx.get(SETTINGS_URL).mock(side_effect=httpx.ConnectError("down"))
+    client.put(f"{RFID}/override-mode", json={"enabled": True})
+    _auto_add(True, False)
+    respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(200, json={}))
+
+    done = client.post(f"{RFID}/reconcile")
+
+    assert done.status_code == 200, done.text
+    body = done.json()
+    assert body["mode"]["state"] == "applied"
+    assert body["tags"] == {"pushed": 0, "moved": 0, "cleared": 0, "unchanged": 0, "failed": 0}
+    assert body["slots"] is None

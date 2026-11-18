@@ -26,6 +26,7 @@ from pydantic import (
     model_validator,
 )
 
+from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.filament.colour import Rgba
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
@@ -1232,3 +1233,43 @@ class SlotReport(BaseModel):
     no_preset: int = 0
     no_nozzle: int = 0
     failed: int = 0
+
+
+class RfidState(BaseModel):
+    """The ``filament_rfid_state`` row (`filament/rfid_mode.py`, #6264)."""
+
+    override_mode: bool
+    #: Bambuddy's ``auto_add_unknown_rfid`` as found when the mode turned it off; ``None``
+    #: when nothing is saved.
+    saved_auto_add: bool | None
+    changed_at: AwareDatetime
+
+
+class RfidStatus(BaseModel):
+    """The answer on the RFID override mode (#6264). ``state`` is ``applied`` when the
+    mode is on and Bambuddy reads ``false``; ``pending`` when a write has not landed or
+    Bambuddy could not be reached (``detail`` then names the error); ``blocked`` when
+    Bambuddy refused the write because its auth is on; ``off`` when the mode is off and
+    nothing is saved."""
+
+    override_mode: bool
+    state: Literal["off", "applied", "pending", "blocked"]
+    bambuddy_auto_add: bool | None = None
+    saved_auto_add: bool | None = None
+    detail: str | None = None
+    devices: list[SpoolBuddyDevice] = Field(default_factory=list)
+
+
+class RfidModeSet(BaseModel):
+    """The body of ``PUT /filament/rfid/override-mode``."""
+
+    enabled: bool
+
+
+class RfidReconcileReport(BaseModel):
+    """What one reconcile did: the mode, the tags and the override slots (``None`` until
+    the slots step exists)."""
+
+    mode: RfidStatus
+    tags: TagPushReport
+    slots: SlotReport | None = None

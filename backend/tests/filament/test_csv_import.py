@@ -29,6 +29,7 @@ from scadbuddy.filament.models import (
     SpoolTypeCreate,
 )
 from scadbuddy.filament.presets import PoolSpoolPresets
+from scadbuddy.filament.rfid_mode import RfidModeStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
@@ -44,6 +45,7 @@ def _filament(pool: PgPool) -> Filament:
         locations=LocationStore(pool),
         inventory=FilamentInventory(pool),
         presets=PoolSpoolPresets(pool),
+        rfid=RfidModeStore(pool),
     )
 
 

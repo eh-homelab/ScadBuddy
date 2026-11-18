@@ -51,6 +51,7 @@ from scadbuddy.filament.locations import (
     LocationExistsError,
     MoveTargetError,
 )
+from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.filament.spools import (
     OverrideKindError,
@@ -995,3 +996,59 @@ async def import_bambuddy(
 ) -> PullReport:
     settings = await asyncio.to_thread(store.load)
     return await read_and_pull(filament, settings, actor=actor(caller))
+
+
+@router.get(
+    "/rfid/status",
+    response_model=m.RfidStatus,
+    summary="Read the RFID override mode",
+    description=(
+        "Whether the RFID override mode is on, and where Bambuddy's `auto_add_unknown_rfid` "
+        "stands: `applied` (mode on, Bambuddy's value is false), `pending` (a write has not "
+        "landed, or Bambuddy could not be reached; `detail` names the error), `blocked` "
+        "(Bambuddy refused the write because its auth is on) or `off`. Also lists the "
+        "SpoolBuddy devices. Reads Bambuddy and writes nothing; when Bambuddy fails, "
+        "`bambuddy_auto_add` is null and `devices` is empty."
+    ),
+)
+async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.RfidStatus:
+    return await read_status(filament.rfid, store.load)
+
+
+@router.put(
+    "/rfid/override-mode",
+    response_model=m.RfidStatus,
+    summary="Turn the RFID override mode on or off",
+    description=(
+        "While the mode is on, Bambuddy's auto-add of unknown RFID spools is turned off; "
+        "the value Bambuddy had is saved first and put back when the mode turns off. The "
+        "mode is written first, then Bambuddy is reconciled once, and the answer is the "
+        "status. It is 200 even when Bambuddy refuses the write (`blocked`: its auth is "
+        "on) or cannot be reached (`pending`); the mode then stays as asked and the "
+        "refresh retries."
+    ),
+)
+async def set_rfid_override_mode(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.RfidModeSet
+) -> m.RfidStatus:
+    await asyncio.to_thread(filament.rfid.set_mode, body.enabled)
+    return await reconcile_mode_now(filament.rfid, store.load)
+
+
+@router.post(
+    "/rfid/reconcile",
+    response_model=m.RfidReconcileReport,
+    summary="Reconcile RFID with Bambuddy now",
+    description=(
+        "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
+        "is brought to the override mode, then the queued tag changes are pushed (only with "
+        "`filament_sync.tags` `sb_to_bb`). Answers the mode's status and the tag push "
+        "counts; `slots` is null."
+    ),
+)
+async def reconcile_rfid(filament: FilamentDep, store: SettingsStoreDep) -> m.RfidReconcileReport:
+    mode = await reconcile_mode_now(filament.rfid, store.load)
+    tags = await push_pending(
+        filament, store.load, lambda: store.read({"filament_sync"})["filament_sync"]
+    )
+    return m.RfidReconcileReport(mode=mode, tags=tags)

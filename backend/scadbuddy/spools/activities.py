@@ -21,6 +21,7 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import capture
 from scadbuddy.filament.bambuddy_pull import scheduled_pull
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.rfid_mode import reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
@@ -100,19 +101,32 @@ def filament_rfid_activity(
     load: Callable[[], StoredSettings],
     sync: Callable[[], FilamentSync],
 ) -> Callable[[], Any]:
-    """``filament_rfid_reconcile``: ScadBuddy's tag bindings told to Bambuddy
-    (`filament/rfid_push.drain_tags`, #6264). Each step fails alone; the activity returns
-    ``done`` or ``failed`` and never raises, so the run never fails on it."""
+    """``filament_rfid_reconcile``: Bambuddy's auto-add of unknown RFID spools brought to
+    the override mode (`filament/rfid_mode.reconcile_mode`), then ScadBuddy's tag bindings
+    told to Bambuddy (`filament/rfid_push.drain_tags`, #6264). Each step fails alone; the
+    activity returns ``done`` or ``failed`` and never raises, so the run never fails on it.
+    A mode left ``pending`` is a failure; ``blocked`` is shown on the status, not one."""
 
     @activity.defn(name=FILAMENT_RFID_ACTIVITY)
     async def filament_rfid_reconcile() -> str:
+        failed = False
+        try:
+            mode = await reconcile_mode_now(filament.rfid, load)
+            failed = mode.state == "pending"
+        except Exception as error:
+            activity.logger.warning(
+                "could not reconcile Bambuddy's RFID auto-add",
+                extra={"error": type(error).__name__},
+            )
+            failed = True
         try:
             report = await push_pending(filament, load, sync)
+            failed = failed or report.failed > 0
         except Exception as error:
             activity.logger.warning(
                 "could not push the tags to Bambuddy", extra={"error": type(error).__name__}
             )
-            return "failed"
-        return "failed" if report.failed else "done"
+            failed = True
+        return "failed" if failed else "done"
 
     return filament_rfid_reconcile

@@ -452,3 +452,41 @@ describe('filament location tools', () => {
     expect(refused.isError).toBe(true)
   })
 })
+
+const RFID = `${BACKEND}/api/v1/filament/rfid`
+const STATUS = { override_mode: true, state: 'applied', devices: [] }
+
+describe('filament RFID tools (#6264)', () => {
+  it.each([
+    ['filament_rfid_status', 'read'],
+    ['filament_rfid_override_mode', 'write'],
+    ['filament_rfid_reconcile', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('reads the status', async () => {
+    server.use(http.get(`${RFID}/status`, () => HttpResponse.json(STATUS)))
+    expect(firstText(await runTool(tool('filament_rfid_status'), {}, ctx()))).toEqual(STATUS)
+  })
+
+  it('turns the mode on with PUT and {enabled: true}', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(`${RFID}/override-mode`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(STATUS)
+      }),
+    )
+    const result = await runTool(tool('filament_rfid_override_mode'), { enabled: true }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ enabled: true }])
+  })
+
+  it('reconciles once', async () => {
+    const report = { mode: STATUS, tags: { pushed: 1, moved: 0, cleared: 0, unchanged: 0, failed: 0 }, slots: null }
+    server.use(http.post(`${RFID}/reconcile`, () => HttpResponse.json(report)))
+    expect(firstText(await runTool(tool('filament_rfid_reconcile'), {}, ctx()))).toEqual(report)
+  })
+})
