@@ -77,7 +77,15 @@ FAILED_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=5), maximum_interval=timedelta(minutes=10)
 )
 
+#: The run's ``error`` when the API ends a run no worker serves (`filament.profile_fetch.
+#: end_unserved`: no poller on the queue, or the last resort `LONGEST_RUN`).
 NO_WORKER: Final = "no profile-fetch worker picked the fetch up"
+#: The ``failed`` reason when the export waited out `EXPORT_SCHEDULE_TO_START`: the worker
+#: may be down, or alive and busy with an invoice's other fetches (R-F6).
+NOT_STARTED_IN_TIME: Final = (
+    "no profile-fetch worker started the fetch within 6 h:"
+    " none is running, or it is busy with other fetches"
+)
 
 
 class _RunEndedError(Exception):
@@ -96,7 +104,7 @@ def failure_reason(error: ActivityError, step: str) -> str:
     cause = error.cause
     if isinstance(cause, TimeoutError):
         if cause.type == TimeoutType.SCHEDULE_TO_START:
-            return NO_WORKER
+            return NOT_STARTED_IN_TIME
         return f"the {step} did not finish in time"
     if isinstance(cause, ApplicationError) and cause.message:
         return cause.message[:MAX_FAILED_REASON]

@@ -35,7 +35,7 @@ from scadbuddy.profile_fetch.workflow import (
     EXPORT_HEARTBEAT,
     EXPORT_RETRY,
     EXPORT_TIMEOUT,
-    NO_WORKER,
+    NOT_STARTED_IN_TIME,
     ProfileFetch,
 )
 from tests.support.temporal import temporal_client, terminate_open_workflows
@@ -218,8 +218,12 @@ async def test_no_worker_fails_the_run(
         await terminate_open_workflows(client, queue)
     assert outcome is not None and outcome.status == "failed"
     assert fakes.exports == []
-    assert fakes.failed == [(ask.run_id, NO_WORKER)]
-    assert NO_WORKER == "no profile-fetch worker picked the fetch up"
+    assert fakes.failed == [(ask.run_id, NOT_STARTED_IN_TIME)]
+    # R-F6: the worker may be down, or alive and busy with other fetches; both are named.
+    assert NOT_STARTED_IN_TIME == (
+        "no profile-fetch worker started the fetch within 6 h:"
+        " none is running, or it is busy with other fetches"
+    )
 
 
 async def test_the_queue_probe_sees_a_polling_worker(client: Client, queue: str) -> None:

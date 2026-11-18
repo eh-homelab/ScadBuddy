@@ -136,8 +136,9 @@ check, so the worker drives a real Chromium. It exports one Bambu Studio preset 
 printer model that SB's printers have and per nozzle in the setting
 `profile_fetch_nozzles` (default 0.2, 0.4, 0.6, 0.8). SB imports them into BB's
 local presets, sets them as the type's presets for those keys, and sets K values
-from the printers' K tables where one matches exactly. The fetched keys replace the
-type's presets for those keys. The type's other presets stay. A spool's own presets
+from the printers' K tables where one matches exactly. An old K value of a fetched
+key that the new preset does not match is removed, and the run's `notes` name it.
+The fetched keys replace the type's presets for those keys. The type's other presets stay. A spool's own presets
 still win.
 
 1. **Set the id.** The fetch needs the type's `tdfp_id`: a positive integer below
@@ -162,13 +163,19 @@ still win.
    (no printer has a model: tell the person to set one in Settings → Printing →
    Printers), 503 (the fetch could not be started: say so, and try again later).
    A run that no worker serves ends `failed` with "no profile-fetch worker picked
-   the fetch up". Tell the person; the worker is a Deployment they run.
+   the fetch up". Tell the person; the worker is a Deployment they run. A run
+   whose export waited 6 h in the queue ends `failed` with "no profile-fetch
+   worker started the fetch within 6 h: none is running, or it is busy with other
+   fetches". Tell the person to check both: whether the worker's Deployment runs,
+   and whether other fetches (an invoice's many types) kept it busy. Do not start
+   the fetch again until they know which.
 6. **Preset names.** BB keeps a preset it already has (plan Decision 22, #6625; it
    rests on the plan's reading of Bambuddy's `POST /local-presets/import`, which
    answers `skipped`, and no test of #6625 ran against a live Bambuddy). A fetched preset binds only
    to a BB preset that this fetch made or that an earlier fetch of the type made. A
-   hand-made BB preset of the same name leaves the key missing, and the run is
-   `partial`. Tell the person; do not delete their preset.
+   BB preset of the same name that no fetch of this type made (a hand-made one, or
+   one another type's fetch made) leaves the key missing, and the run is `partial`.
+   Tell the person; do not delete their preset.
 
 The fetch only reads 3DFP and writes SB and BB's local presets. Never start a
 fetch to test a change, and never write a preset to BB by hand to fill a gap.
