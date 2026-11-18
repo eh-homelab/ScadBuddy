@@ -14,6 +14,7 @@ callers that miss one key at once share one read.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -71,7 +72,10 @@ class DialogReads:
             shared = await asyncio.shield(under_way)
             if isinstance(shared, Exception):
                 # The same Bambuddy and key: a read of its own would fail the same way.
-                raise _own_copy(shared) from shared
+                own = _own_copy(shared)
+                if own is None:
+                    raise shared
+                raise own from shared
             if shared is not None:
                 return _copy(shared)  # type: ignore[return-value]
         reading: asyncio.Future[_Value | Exception | None] = (
@@ -112,14 +116,20 @@ def _scope(api_key: str | None) -> str:
     return hashlib.sha256((api_key or "").encode()).hexdigest()
 
 
-def _own_copy(error: Exception) -> Exception:
-    """A new ``error`` of the same class, args and fields, for one waiter to raise: a
-    shared object would collect every waiter's frames in one traceback (#6627).
+def _own_copy(error: Exception) -> Exception | None:
+    """A new ``error`` of the same class and args, with a shallow copy of each field, for
+    one waiter to raise: a shared object would collect every waiter's frames in one
+    traceback (#6627), and a shared field would carry one waiter's change to the others.
     ``copy.copy`` cannot do it, because it calls ``__init__`` with ``args`` alone, which
-    `ApiError` refuses."""
-    own = type(error).__new__(type(error), *error.args)
-    own.args = error.args
-    own.__dict__.update(error.__dict__)
+    `ApiError` refuses. ``None`` when the class cannot be rebuilt this way (a pydantic
+    ``ValidationError``'s ``__new__`` needs more than its args, and it has no
+    ``__dict__``): the waiter then raises the shared error itself."""
+    try:
+        own = type(error).__new__(type(error), *error.args)
+        own.args = error.args
+        own.__dict__.update({name: copy.copy(field) for name, field in vars(error).items()})
+    except Exception:
+        return None
     return own
 
 
