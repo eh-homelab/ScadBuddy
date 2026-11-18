@@ -22,6 +22,7 @@ from scadbuddy.bambuddy.models import AmsTray, AmsUnit, PrinterStatus, SlotChoic
 from scadbuddy.bambuddy.trays import (
     colour_word,
     loaded_trays,
+    loading_trays,
     seen_trays,
     tray_label,
     tray_material_colour,
@@ -223,3 +224,15 @@ def test_an_opaque_slot_does_not_suggest_a_translucent_spool() -> None:
     ]
     assert not colours_match("#FFFFFF", translucent.colour, spool_rgba=translucent.rgba)
     assert colours_match("#FFFFFF", opaque.colour, spool_rgba=opaque.rgba)
+
+
+@pytest.mark.parametrize(
+    ("state", "loading"),
+    [(0, False), (1, True), (2, False), (3, False), (5, True), (11, False), (27, False)],
+)
+def test_loading_trays_reads_the_legacy_and_the_bitfield_states(state: int, loading: bool) -> None:
+    """A state up to ``TRAY_STATE_LEGACY_MAX`` (3) is an older firmware's: SPOOL set and
+    not that max is loading (1), the max is loaded (3), no SPOOL bit is empty (0, 2).
+    Above it, SPOOL set and STEADY clear is loading (5)."""
+    tray = _filled(1, "FF0000FF", state=state)
+    assert loading_trays(_native_status(tray)) == ({(0, 1)} if loading else set())

@@ -159,6 +159,19 @@ async def test_a_bambuddy_queue_run_in_use_grants_no_slice_of_its_subject(
     assert not await store.transferable(FILE)
 
 
+async def test_a_bambuddy_path_result_with_prints_to_start_grants_no_slice(
+    jobs: JobProjection, store: PrintRunStore
+) -> None:
+    """#6588: a succeeded run whose result says ``path`` ``bambuddy`` grants no slice of
+    its subject, even with a stray ``lan_waiting``. Today no Bambuddy-queue run writes
+    one, so `_in_use` alone keeps it out; the path check keeps it out if one ever does."""
+    await _sliced(jobs, OUTPUT, FILE)
+    run = await _run(store)
+    stray = WAITING.model_copy(update={"path": "bambuddy"})
+    await store.succeed(run.id, "demo", stray)
+    assert not await store.transferable(FILE)
+
+
 async def test_a_hold_an_ended_run_left_grants_nothing(
     jobs: JobProjection, store: PrintRunStore
 ) -> None:

@@ -379,14 +379,17 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         # -- Filament (#6262) -----------------------------------------------------------
         "filament_sync": SettingDoc(
             "Spools",
-            "Off, Bambuddy's spools are never pulled and ScadBuddy's own are the only ones."
+            "Off, Bambuddy's spools are never pulled, its usage rows are never booked and"
+            " ScadBuddy's own spools are the only ones."
             " Bambuddy \u2192 ScadBuddy copies Bambuddy's spools in on the schedule below;"
             " ScadBuddy never writes to Bambuddy.",
         ),
         "spool_overlay_refresh_seconds": SettingDoc(
             "Pull from Bambuddy every",
             "How often Bambuddy's spools are pulled and its local presets kept, on a schedule"
-            " of their own so a print never waits on Bambuddy. 0 turns both off. A change"
+            " of their own so a print never waits on Bambuddy. The same run reconciles each"
+            " printer's report with the filament ledger (the capture backstop). 0 turns all"
+            " three off. A change"
             " applies at the next start.",
         ),
         "filament_low_stock_pct": SettingDoc(
@@ -570,7 +573,8 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "storefront_slice_profile": SettingDoc(
             "Shop slice profile",
-            "The printer, and a spool per material, a storefront variant is sliced with."
+            "The printer, and a filament type per material, a storefront variant is"
+            " sliced with (#6574)."
             " None set: nothing is sliced, so no visitor sees a price.",
         ),
         # -- Storefront mail -----------------------------------------------------------

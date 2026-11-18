@@ -38,6 +38,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotPresets,
     ensure_output,
     operation_output_id,
     output_matches,
@@ -158,11 +159,19 @@ class FakeSlicer:
     def __init__(self, files: Mapping[int, bytes]) -> None:
         self.files = dict(files)
         self.subjects: list[str] = []
+        #: Each start's ``slot_presets`` (#6574).
+        self.slot_presets: list[SlotPresets | None] = []
 
     async def start(
-        self, output_id: str, request: SliceQuoteRequest, subject: str
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
         self.subjects.append(subject)
+        self.slot_presets.append(slot_presets)
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
     async def start_library(

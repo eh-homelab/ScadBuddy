@@ -34,6 +34,8 @@ type ChoicesView struct {
 	model_choices ModelPrintChoicesable
 	// The nozzle_sizes property
 	nozzle_sizes []string
+	// The opening_choices property
+	opening_choices PrintChoicesable
 	// The printer_id property
 	printer_id ChoicesView_ChoicesView_printer_idable
 	// The printers property
@@ -443,6 +445,16 @@ func (m *ChoicesView) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		return nil
 	}
+	res["opening_choices"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrintChoicesFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetOpeningChoices(val.(PrintChoicesable))
+		}
+		return nil
+	}
 	res["printer_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateChoicesView_ChoicesView_printer_idFromDiscriminatorValue)
 		if err != nil {
@@ -558,6 +570,12 @@ func (m *ChoicesView) GetModelChoices() ModelPrintChoicesable {
 // returns a []string when successful
 func (m *ChoicesView) GetNozzleSizes() []string {
 	return m.nozzle_sizes
+}
+
+// GetOpeningChoices gets the opening_choices property value. The opening_choices property
+// returns a PrintChoicesable when successful
+func (m *ChoicesView) GetOpeningChoices() PrintChoicesable {
+	return m.opening_choices
 }
 
 // GetPrinterId gets the printer_id property value. The printer_id property
@@ -688,6 +706,12 @@ func (m *ChoicesView) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 			return err
 		}
 	}
+	{
+		err := writer.WriteObjectValue("opening_choices", m.GetOpeningChoices())
+		if err != nil {
+			return err
+		}
+	}
 	if m.GetPrinters() != nil {
 		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetPrinters()))
 		for i, v := range m.GetPrinters() {
@@ -805,6 +829,11 @@ func (m *ChoicesView) SetNozzleSizes(value []string) {
 	m.nozzle_sizes = value
 }
 
+// SetOpeningChoices sets the opening_choices property value. The opening_choices property
+func (m *ChoicesView) SetOpeningChoices(value PrintChoicesable) {
+	m.opening_choices = value
+}
+
 // SetPrinterId sets the printer_id property value. The printer_id property
 func (m *ChoicesView) SetPrinterId(value ChoicesView_ChoicesView_printer_idable) {
 	m.printer_id = value
@@ -850,6 +879,7 @@ type ChoicesViewable interface {
 	GetLastBedType() ChoicesView_ChoicesView_last_bed_typeable
 	GetModelChoices() ModelPrintChoicesable
 	GetNozzleSizes() []string
+	GetOpeningChoices() PrintChoicesable
 	GetPrinterId() ChoicesView_ChoicesView_printer_idable
 	GetPrinters() []Printerable
 	GetProcesses() ChoicesView_processesable
@@ -868,6 +898,7 @@ type ChoicesViewable interface {
 	SetLastBedType(value ChoicesView_ChoicesView_last_bed_typeable)
 	SetModelChoices(value ModelPrintChoicesable)
 	SetNozzleSizes(value []string)
+	SetOpeningChoices(value PrintChoicesable)
 	SetPrinterId(value ChoicesView_ChoicesView_printer_idable)
 	SetPrinters(value []Printerable)
 	SetProcesses(value ChoicesView_processesable)
