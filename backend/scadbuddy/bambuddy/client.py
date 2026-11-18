@@ -20,6 +20,7 @@ optional is omitted rather than sent as an explicit ``null``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
@@ -33,6 +34,8 @@ import httpx
 from fastapi import status
 from opentelemetry.trace import Span, SpanKind
 from pydantic import BaseModel, ValidationError
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from scadbuddy.bambuddy.errors import (
     REJECTED_PROBLEM,
@@ -89,6 +92,7 @@ from scadbuddy.bambuddy.models import (
     SpoolCatalogEntry,
     SpoolFilamentPreset,
     SpoolUsage,
+    TagScan,
     TimelapseInfo,
     TimelapseThumbnails,
     TrashedLibraryFile,
@@ -167,6 +171,7 @@ Operation = Literal[
     "archives.timelapse.thumbnails",
     "auth.me",
     "auth.status",
+    "auth.ws_token",
     "external_links.create",
     "external_links.list",
     "external_links.update",
@@ -245,6 +250,7 @@ Operation = Literal[
     "spools.usage",
     "spoolbuddy.cancel_write",
     "spoolbuddy.devices",
+    "spoolbuddy.scan",
     "spoolbuddy.write_tag",
     "version",
     "virtual_printers.create",
@@ -254,6 +260,32 @@ Operation = Literal[
     "virtual_printers.read",
     "virtual_printers.update",
 ]
+
+
+#: The close code Bambuddy's WebSocket gives a join with no valid token
+#: (``_WS_CLOSE_UNAUTHORIZED`` in ``routes/websocket.py``, v1.3.1).
+_WS_UNAUTHORISED = 4401
+_SCAN_FRAMES = frozenset({"spoolbuddy_tag_matched", "spoolbuddy_unknown_tag"})
+
+
+def _tag_scan(raw: str | bytes, device_id: str | None) -> TagScan | None:
+    """The scan a WebSocket frame carries, or ``None`` for any other frame, one of
+    another device or one that is not JSON."""
+    try:
+        frame = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(frame, dict) or frame.get("type") not in _SCAN_FRAMES:
+        return None
+    if device_id is not None and frame.get("device_id") != device_id:
+        return None
+    spool = frame.get("spool")
+    matched = frame["type"] == "spoolbuddy_tag_matched" and isinstance(spool, dict)
+    bb_spool_id = spool.get("id") if isinstance(spool, dict) and matched else None
+    try:
+        return TagScan.model_validate({**frame, "bb_spool_id": bb_spool_id})
+    except ValidationError:
+        return None
 
 
 def _call_span(
@@ -561,6 +593,67 @@ class BambuddyClient:
             return None
         enabled = body.get("auth_enabled") if isinstance(body, dict) else None
         return enabled if isinstance(enabled, bool) else None
+
+    async def ws_token(self) -> str | None:
+        """A token for Bambuddy's WebSocket, or ``None`` when its auth is off (the socket
+        then takes no token: ``routes/websocket.py`` lines 101-135, v1.3.1).
+        ``POST /api/v1/auth/ws-token`` (``WEBSOCKET_CONNECT``, which ``can_read_status``
+        covers: Read Status; ``routes/auth.py`` line 670, v1.3.1) answers ``{"token": ...}``,
+        valid for 60 minutes. An unreadable auth status counts as on."""
+        if await self.auth_enabled() is False:
+            return None
+        what = "mint a WebSocket token"
+        response = await self._send(
+            "POST",
+            "/auth/ws-token",
+            scope=Scope.READ_STATUS,
+            operation="auth.ws_token",
+            what=what,
+        )
+        body = response.json()
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no token when asked to {what}",
+            )
+        return token
+
+    def _ws_url(self, token: str | None) -> str:
+        scheme, _, rest = self.config.base_url.partition("://")
+        url = f"{'wss' if scheme == 'https' else 'ws'}://{rest}{API_PREFIX}/ws"
+        return url if token is None else f"{url}?token={token}"
+
+    async def next_tag_scan(
+        self, *, timeout: float, device_id: str | None = None
+    ) -> TagScan | None:
+        """Wait up to ``timeout`` seconds for a SpoolBuddy reader to read a tag, on
+        ``WS /api/v1/ws`` (``?token=`` from :meth:`ws_token` with Bambuddy's auth on). The
+        socket is sent nothing; every frame is read and all but ``spoolbuddy_tag_matched``
+        and ``spoolbuddy_unknown_tag`` (of ``device_id``, when given) are ignored. ``None``
+        on timeout. A refused join is the scope 409 of ``map_response`` (Read Status)."""
+        what = "listen for a SpoolBuddy tag scan"
+        token = await self.ws_token()
+        with _call_span("spoolbuddy.scan", "GET", Scope.READ_STATUS):
+            try:
+                async with asyncio.timeout(timeout), ws_connect(self._ws_url(token)) as socket:
+                    async for raw in socket:
+                        scan = _tag_scan(raw, device_id)
+                        if scan is not None:
+                            return scan
+            except TimeoutError:
+                return None
+            except InvalidStatus as error:
+                refused = httpx.Response(error.response.status_code)
+                raise map_response(refused, scope=Scope.READ_STATUS, what=what) from error
+            except ConnectionClosed as error:
+                if error.rcvd is not None and error.rcvd.code == _WS_UNAUTHORISED:
+                    unauthorised = httpx.Response(status.HTTP_401_UNAUTHORIZED)
+                    raise map_response(unauthorised, scope=Scope.READ_STATUS, what=what) from error
+                raise map_transport(httpx.ReadError(type(error).__name__), what=what) from error
+            except (OSError, WebSocketException) as error:
+                raise map_transport(httpx.ConnectError(type(error).__name__), what=what) from error
+        return None
 
     async def printer_status(self, printer_id: int) -> PrinterStatus:
         """Live MQTT state: nozzles, AMS trays and the inlet each AMS is switched to."""

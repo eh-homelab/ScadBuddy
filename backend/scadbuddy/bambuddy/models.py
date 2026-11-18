@@ -1470,6 +1470,20 @@ class QueueItemCreate(BambuddyModel):
     cleanup_library_after_dispatch: bool = False
 
 
+class TagScan(BambuddyModel):
+    """One tag a SpoolBuddy reader read, from Bambuddy's WebSocket frame
+    ``spoolbuddy_tag_matched`` (``bb_spool_id`` is ``spool.id``) or
+    ``spoolbuddy_unknown_tag`` (``bb_spool_id`` is ``None``; it alone carries ``tag_type``).
+    The frames are in ``ws_events`` of ``tests/bambuddy/recordings/openapi/rfid-routes.json``
+    (``routes/spoolbuddy.py`` lines 667-690 and 788-797, v1.3.1)."""
+
+    device_id: str
+    tag_uid: str
+    tray_uuid: str | None = None
+    tag_type: str | None = None
+    bb_spool_id: int | None = None
+
+
 class SpoolBuddyDevice(BambuddyModel):
     """A row of ``GET /api/v1/spoolbuddy/devices`` (``DeviceResponse`` in
     ``tests/bambuddy/recordings/openapi/rfid-routes.json``, v1.3.1): the fields ScadBuddy

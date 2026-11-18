@@ -693,6 +693,108 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_rfid_scan',
+    label: 'Wait for a tag at a SpoolBuddy reader',
+    description:
+      'Wait up to `timeout_s` seconds (1 to 60, default 30) while the user holds a tag to a SpoolBuddy reader, ' +
+      'then answer what it is: `status: tag` with `tag_uid`, `tray_uuid`, `tag_type`, its `kind`, the Bambuddy ' +
+      'spool it matched (`bambuddy_spool_id`) and the ScadBuddy spool that holds it (`sb_spool`, or null), or ' +
+      '`status: timeout`. Ask the user to hold the tag first, then call this. `device_id` (from ' +
+      'filament_rfid_status) limits it to one reader. Writes nothing.',
+    input: z.object({
+      timeout_s: z.number().int().min(1).max(60).default(30),
+      device_id: z.string().optional().describe("A SpoolBuddy device's `device_id`"),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/rfid/scan'],
+    handler: async ({ timeout_s, device_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/rfid/scan', { body: { timeout_s, device_id } }),
+          'wait for a tag at a SpoolBuddy reader',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_ntag_write',
+    label: 'Queue an NTAG write for a spool',
+    description:
+      "Ask the SpoolBuddy `device_id` (from filament_rfid_status) to write an OpenTag3D tag for the spool's " +
+      'Bambuddy record; the user then holds a blank tag to the reader. It changes no tag binding: call ' +
+      'filament_spool_ntag_confirm afterwards. `warnings` lists what Bambuddy says is missing from the record. ' +
+      '409 `no_bambuddy_spool` when the spool is not linked to a Bambuddy spool; `override_tag_open` when its ' +
+      'tag was bound with override (send `replace: true` only when the user agrees to replace it). Only what ' +
+      'the user says. Writes a tag through Bambuddy.',
+    input: z.object({
+      spool_id: z.string().uuid(),
+      device_id: z.string(),
+      replace: z.boolean().default(false),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/ntag/write'],
+    summarize: ({ spool_id, device_id }) => `Write an NTAG for spool ${spool_id} on ${device_id}`,
+    handler: async ({ spool_id, device_id, replace }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/ntag/write', {
+            params: { path: { spool_id } },
+            body: { device_id, replace },
+          }),
+          `queue an NTAG write for spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_ntag_confirm',
+    label: 'Bind the NTAG written for a spool',
+    description:
+      "Read the spool's Bambuddy record after a write. When it holds a new OpenTag3D tag, bind it to the spool " +
+      '(`bound: true`, `tag_uid`); otherwise `bound: false` and nothing changes, so call it again once the ' +
+      'write has finished. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({ spool_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/ntag/confirm'],
+    summarize: ({ spool_id }) => `Bind the written NTAG to spool ${spool_id}`,
+    handler: async ({ spool_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/ntag/confirm', {
+            params: { path: { spool_id } },
+          }),
+          `confirm the NTAG of spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_ntag_cancel',
+    label: 'Cancel a queued NTAG write',
+    description:
+      'Drop the write a SpoolBuddy `device_id` has queued for the spool. Only what the user says. Writes ' +
+      'Bambuddy only.',
+    input: z.object({ spool_id: z.string().uuid(), device_id: z.string() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/ntag/cancel'],
+    summarize: ({ spool_id, device_id }) => `Cancel the NTAG write on ${device_id} for spool ${spool_id}`,
+    handler: async ({ spool_id, device_id }, { backend }) => {
+      await ok(
+        backend.POST('/api/v1/filament/spools/{spool_id}/ntag/cancel', {
+          params: { path: { spool_id } },
+          body: { device_id },
+        }),
+        `cancel the NTAG write for spool ${spool_id}`,
+      )
+      return json({ cancelled: device_id })
+    },
+  }),
+
+  defineTool({
     name: 'filament_spool_add_event',
     label: 'Record a weighing or a drying',
     description:

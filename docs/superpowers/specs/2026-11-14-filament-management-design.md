@@ -508,6 +508,13 @@ Low-cardinality labels only: material, brand, location, not the spool id.
   ([`spoolbuddy.py` lines 826-957](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L826-L957),
   v1.3.1). SB identifies the tag by its UID through its binding (kind `ntag_opentag`, §5.4).
   A direct reader in SB is out of scope until the BB path proves too limited.
+  The flow has four calls. A scan listens on BB's `WS /api/v1/ws` for the frames
+  `spoolbuddy_tag_matched` and `spoolbuddy_unknown_tag`
+  ([`spoolbuddy.py` lines 667-690 and 788-797](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L667-L690),
+  v1.3.1); the socket takes a `?token=` from `POST /auth/ws-token` only while BB's auth is on
+  ([`websocket.py` lines 101-135](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/websocket.py#L101-L135),
+  v1.3.1). A write queues `nfc/write-tag` and binds nothing; confirm reads the BB spool and binds its
+  new `tag_uid` when `data_origin` is `opentag3d`; cancel posts `devices/{id}/cancel-write`.
 - **Labels.** Print labels with the spool number and a QR code of the spool id.
   BB parity with `/inventory/labels`.
 

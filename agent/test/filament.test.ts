@@ -484,6 +484,61 @@ describe('filament RFID tools (#6264)', () => {
     expect(bodies).toEqual([{ enabled: true }])
   })
 
+  it.each([
+    ['filament_rfid_scan', 'read'],
+    ['filament_spool_ntag_write', 'write'],
+    ['filament_spool_ntag_confirm', 'write'],
+    ['filament_spool_ntag_cancel', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('scans with the timeout and the device', async () => {
+    const bodies: unknown[] = []
+    const found = { status: 'tag', tag_uid: '04AABBCC', kind: 'ntag_opentag', sb_spool: null }
+    server.use(
+      http.post(`${RFID}/scan`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(found)
+      }),
+    )
+    const result = await runTool(tool('filament_rfid_scan'), { device_id: 'sb-1' }, ctx())
+    expect(firstText(result)).toEqual(found)
+    expect(bodies).toEqual([{ timeout_s: 30, device_id: 'sb-1' }])
+  })
+
+  it('writes an NTAG with {device_id, replace: false}', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOL}/ntag/write`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ status: 'queued', warnings: [] })
+      }),
+    )
+    const result = await runTool(tool('filament_spool_ntag_write'), { spool_id: ROW, device_id: 'sb-1' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ device_id: 'sb-1', replace: false }])
+  })
+
+  it('confirms and cancels', async () => {
+    const cancelled: unknown[] = []
+    server.use(
+      http.post(`${SPOOL}/ntag/confirm`, () =>
+        HttpResponse.json({ bound: true, tag_uid: '04AABBCC' }),
+      ),
+      http.post(`${SPOOL}/ntag/cancel`, async ({ request }) => {
+        cancelled.push(await request.json())
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const confirmed = await runTool(tool('filament_spool_ntag_confirm'), { spool_id: ROW }, ctx())
+    expect(firstText(confirmed)).toEqual({ bound: true, tag_uid: '04AABBCC' })
+    const result = await runTool(tool('filament_spool_ntag_cancel'), { spool_id: ROW, device_id: 'sb-1' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(cancelled).toEqual([{ device_id: 'sb-1' }])
+  })
+
   it('reconciles once', async () => {
     const report = { mode: STATUS, tags: { pushed: 1, moved: 0, cleared: 0, unchanged: 0, failed: 0 }, slots: null }
     server.use(http.post(`${RFID}/reconcile`, () => HttpResponse.json(report)))
