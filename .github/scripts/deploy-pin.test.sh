@@ -518,7 +518,7 @@ fi
 # The vendored dashboards (eh-homelab/clusters#3734). $work/src stands for
 # deploy/grafana at REVISION as the fetch step leaves it; `vendored` (set by a
 # case) makes `run` write clusters' copy at an old revision, with a dashboard
-# the new revision dropped and a file that is not one of deploy/grafana's.
+# the new revision dropped.
 api_and_agent="$(deployment scadbuddy "$IMAGE:$old" "$agent")"
 src_files() { # dir
   mkdir -p "$1"
@@ -534,7 +534,6 @@ vendor_dir() { # writes clusters' copy into $work/repo
   printf '%s\n' 'configMapGenerator:' '  - name: old' > "$d/kustomization.yaml"
   printf '%s\n' '{"uid": "scadbuddy", "v": 1}' > "$d/scadbuddy.json"
   printf '%s\n' '{"uid": "scadbuddy-dropped", "v": 1}' > "$d/scadbuddy-dropped.json"
-  printf '%s\n' 'notes' > "$d/NOTES.txt"
   printf '%s\n' "$old_ref" > "$d/.revision"
 }
 grafana_entry="  - grafana/"
@@ -578,22 +577,26 @@ else
 fi
 
 # 9. A refresh: the copy's kustomization.yaml and *.json are replaced with the
-#    revision's, byte for byte, a dashboard the revision dropped is gone, any
-#    other file stays, and .revision is the revision and a newline. Every
-#    changed path is among the files, and the PR step's `git add` of them
-#    stages the whole change, the deletion included.
+#    revision's, byte for byte, a dashboard the revision dropped is gone, the
+#    directory holds those files and .revision and nothing else, and .revision
+#    is the revision and a newline. Every changed path is among the files, the
+#    overlay is not (clusters' deploy-PR classifier allows only grafana/ to
+#    change for the dashboards), and the PR step's `git add` of them stages the
+#    whole change, the deletion included.
 if run_vendored; then
   d="$work/repo/$DASHBOARD_DIR"
   same_as_src "refresh"
   [ ! -e "$d/scadbuddy-dropped.json" ] || fail "refresh: a dashboard the revision dropped survived"
-  [ -f "$d/NOTES.txt" ] || fail "refresh: a file that is not a dashboard was deleted"
+  [ "$(cd "$d" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$( (cd "$work/src" && find . -mindepth 1 -maxdepth 1 -printf '%f\n'; echo .revision) | sort)" ] \
+    || fail "refresh: the copy holds more or less than deploy/grafana's files and .revision: $(ls -A "$d")"
   [ "$(od -An -v -c "$d/.revision" | tr -d ' \n')" = "${REVISION}\\n" ] \
     || fail "refresh: .revision is not exactly the revision and a newline: $(od -c "$d/.revision")"
   grep -qx 'dashboard=vendored' "$work/out" || fail "refresh: dashboard output is not vendored"
   for f in scadbuddy.json scadbuddy-added.json scadbuddy-dropped.json kustomization.yaml .revision; do
     grep -q "^files=.*$DASHBOARD_DIR/$f" "$work/out" || fail "refresh: $f not among the files"
   done
-  grep -q "^files=.*NOTES.txt" "$work/out" && fail "refresh: an untouched file listed in files"
+  grep -q "^files=.*$KUSTOMIZATION" "$work/out" && fail "refresh: the overlay listed in files"
+  (cd "$work/repo" && git diff --quiet -- "$KUSTOMIZATION") || fail "refresh: the overlay changed"
   has_line "$pinned" "$MANIFEST" || fail "refresh: api image not pinned"
   (
     cd "$work/repo"
@@ -652,6 +655,12 @@ dashboard_fails "remote line beside the copy" "$remote" "$(overlay_ns "$grafana_
 dashboard_fails "remote line with a timeout" "$remote" "$(overlay_ns "${old_line}&timeout=180s")"
 dashboard_fails "remote .git form, lower case" "$remote" \
   "$(overlay_ns "  - https://github.com/eh-homelab/scadbuddy.git//deploy/grafana?ref=main")"
+# A comment that names the old source is not the remote line.
+if run_vendored "$(overlay_ns "  # A copy of https://github.com/eh-homelab/ScadBuddy//deploy/grafana" "$grafana_entry  # was eh-homelab/ScadBuddy//deploy/grafana?ref=x")"; then
+  grep -qx 'dashboard=vendored' "$work/out" || fail "comment naming the remote: not vendored"
+else
+  fail "comment naming the remote: step failed: $(grep '::error' "$work/log")"
+fi
 overlay=$(overlay_ns "$old_line")
 if run "$api_and_agent"; then
   fail "remote line, no copy: step passed, expected an error"
@@ -671,6 +680,29 @@ mkdir "$work/src/panels"
 dashboard_fails "subdirectory" "deploy/grafana/panels at ${REVISION} is not a regular file" "$(overlay_ns "$grafana_entry")"
 rmdir "$work/src/panels"
 
+# 12b. clusters' copy holds something other than deploy/grafana's files and
+#      .revision (a README, a subdirectory): an error, never left beside the
+#      refreshed copy.
+for extra in NOTES.txt panels; do
+  overlay=$(overlay_ns "$grafana_entry")
+  rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
+  printf '%s\n' "$api_and_agent" > "$work/repo/$MANIFEST"
+  printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
+  vendor_dir
+  if [ "$extra" = panels ]; then
+    mkdir "$work/repo/$DASHBOARD_DIR/panels" && printf 'x\n' > "$work/repo/$DASHBOARD_DIR/panels/a.json"
+  else
+    printf 'notes\n' > "$work/repo/$DASHBOARD_DIR/$extra"
+  fi
+  (cd "$work/repo" && git init -q)
+  if rerun; then
+    fail "extra $extra in the copy: step passed, expected an error"
+  else
+    grep -qF "$DASHBOARD_DIR/$extra::is not kustomization.yaml, a [a-z0-9-]+.json dashboard or .revision" "$work/log" \
+      || fail "extra $extra in the copy: wrong error: $(grep '::error' "$work/log")"
+  fi
+done
+
 # 13. A grafana/ that is not the vendored copy, or one the overlay does not list.
 rm_revision() { rm "$work/repo/$DASHBOARD_DIR/.revision"; }
 overlay=$(overlay_ns "$grafana_entry")
@@ -684,14 +716,16 @@ if rerun; then
 else
   grep -qF "has no .revision" "$work/log" || fail "no .revision: wrong error: $(grep '::error' "$work/log")"
 fi
-dashboard_fails "copy not listed" "lists grafana/ 0 time(s)" "$(overlay_ns)"
-dashboard_fails "copy listed twice" "lists grafana/ 2 time(s)" "$(overlay_ns "$grafana_entry" "  - grafana")"
-# `grafana` without the slash is the same directory.
-if run_vendored "$(overlay_ns "  - grafana")"; then
-  grep -qx 'dashboard=vendored' "$work/out" || fail "listed without a slash: not vendored"
-else
-  fail "listed without a slash: step failed: $(grep '::error' "$work/log")"
-fi
+dashboard_fails "copy not listed" "lists grafana/ (or grafana, ./grafana/) 0 time(s)" "$(overlay_ns)"
+dashboard_fails "copy listed twice" "lists grafana/ (or grafana, ./grafana/) 2 time(s)" "$(overlay_ns "$grafana_entry" "  - grafana")"
+# `grafana`, `./grafana/` and `./grafana` are the same directory.
+for entry in grafana ./grafana/ ./grafana; do
+  if run_vendored "$(overlay_ns "  - $entry")"; then
+    grep -qx 'dashboard=vendored' "$work/out" || fail "listed as $entry: not vendored"
+  else
+    fail "listed as $entry: step failed: $(grep '::error' "$work/log")"
+  fi
+done
 
 # 14. The namespace guard (clusters#1596 Phase 5): the vendored ConfigMaps
 #     keep cattle-dashboards only through an unsetOnly NamespaceTransformer.
@@ -870,6 +904,11 @@ else
   grep -qE "deploy/grafana/(panels|README\.md) at ${REVISION} is not" "$work/log" \
     || fail "fetch then edit, odd entries: wrong error: $(grep '::error' "$work/log")"
 fi
+# A name with a tab is refused up front, by name, before any file is read.
+listing "file:$(printf 'a\tb.json')"
+got=$(presence ok)
+[ "$got" = 0:unknown:2 ] || fail "fetch: tab in a name: got $got, expected 0:unknown:2"
+grep -qF 'with a tab, newline or slash' "$work/log" || fail "fetch: tab in a name: no warning: $(cat "$work/log")"
 # ...and a clean fetch feeds a refresh end to end.
 listing
 presence ok > /dev/null
