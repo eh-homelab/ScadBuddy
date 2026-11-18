@@ -1617,7 +1617,9 @@ async def test_ha_states_become_readings(pg_pool: PgPool) -> None:
     assert got[a] == NOW
 
 
-@pytest.mark.parametrize("state", ["unavailable", "unknown", "45.2 %", "", "nan", "inf", None])
+@pytest.mark.parametrize(
+    "state", ["unavailable", "unknown", "45.2 %", "", "nan", "inf", "9" * 400, None]
+)
 async def test_a_non_numeric_state_marks_unreachable(pg_pool: PgPool, state: str | None) -> None:
     f = _filament(pg_pool)
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
@@ -1659,6 +1661,8 @@ async def test_a_failed_ha_read_never_fails_the_pull(
         assert await scheduled_pull(f, lambda: settings, FilamentSync) == "pulled"
     assert "could not read Bambuddy's Home Assistant sensors" in caplog.text
     assert _sensor_row(pg_pool, sensor)[2] == 0
+    # Reachable means the last read gave a number: a failed read says no.
+    assert _sensor_row(pg_pool, sensor)[1] is False
 
 
 async def test_the_ha_read_runs_with_the_spools_off(pg_pool: PgPool) -> None:

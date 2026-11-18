@@ -1,9 +1,10 @@
 """`/api/v1/filament` (#6261, epic #6260): ScadBuddy's own filament inventory. This
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
-their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Only the import
-(`POST /filament/bambuddy/import`, `filament/bambuddy_pull.py`) reaches Bambuddy, and it
-only reads."""
+their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Only two
+routes reach Bambuddy, and both only read it: the import
+(`POST /filament/bambuddy/import`, `filament/bambuddy_pull.py`) and the list of Home
+Assistant entities (`GET /filament/sensors/entities`, #6268)."""
 
 from __future__ import annotations
 
@@ -1035,7 +1036,8 @@ async def archive_sensor(filament: FilamentDep, caller: CallerDep, sensor_id: UU
     summary="A sensor's readings",
     description=(
         "The stored readings (`at`, `value`) from `since` (default: the last 24 hours) on, "
-        "oldest first, at most `limit` (default 500, at most 5000). A reading is stored "
+        "oldest first; with more than `limit` (default 500, at most 5000) in the window, the "
+        "newest `limit`. A reading is stored "
         "when the value changed, or 15 minutes after the last stored one. 404 for no such "
         "sensor (an archived one still answers)."
     ),

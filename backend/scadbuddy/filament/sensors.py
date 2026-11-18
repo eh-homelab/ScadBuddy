@@ -120,11 +120,13 @@ class SensorStore:
             )
 
     def readings(self, sensor_id: UUID, since: datetime, limit: int) -> _Readings:
-        """The stored readings from ``since`` on, oldest first, at most ``limit``."""
+        """The newest ``limit`` stored readings from ``since`` on, oldest first."""
         with self._pool.connection() as conn:
             rows = conn.execute(
+                "SELECT at, value FROM ("
                 "SELECT at, value FROM filament_sensor_readings"
-                " WHERE sensor_id = %s AND at >= %s ORDER BY at LIMIT %s",
+                " WHERE sensor_id = %s AND at >= %s ORDER BY at DESC LIMIT %s"
+                ") newest ORDER BY at",
                 (sensor_id, since, limit),
             ).fetchall()
         return [m.SensorReading.model_validate(row) for row in rows]
@@ -185,8 +187,9 @@ _PLAIN_NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)")
 def apply_ha_states_on(conn: Conn, states: dict[str, str | None], at: datetime) -> tuple[int, int]:
     """Read ``states`` (Home Assistant's entity ids and their states) into each
     unarchived Home Assistant sensor, on ``conn`` and in the caller's transaction. A plain
-    number is `SensorStore.record_on`'s at ``at``. A state that is not one (``unavailable``,
-    ``unknown``, ``45.2 %``, empty, none), or an entity ``states`` lacks, stores nothing
+    finite number is `SensorStore.record_on`'s at ``at``. A state that is not one
+    (``unavailable``, ``unknown``, ``45.2 %``, empty, none, or digits too many for a
+    float), or an entity ``states`` lacks, stores nothing
     and marks the sensor unreachable. Answers how many sensors read and how many did not."""
     rows = conn.execute(
         "SELECT id, entity_id FROM filament_location_sensors"
@@ -195,8 +198,13 @@ def apply_ha_states_on(conn: Conn, states: dict[str, str | None], at: datetime) 
     read = unreachable = 0
     for row in rows:
         state = states.get(row["entity_id"])
-        if state is not None and _PLAIN_NUMBER.fullmatch(state):
-            SensorStore.record_on(conn, row["id"], float(state), at)
+        # A huge digit string passes the pattern and floats to ``inf``: not a reading.
+        if (
+            state is not None
+            and _PLAIN_NUMBER.fullmatch(state)
+            and math.isfinite(value := float(state))
+        ):
+            SensorStore.record_on(conn, row["id"], value, at)
             read += 1
         else:
             conn.execute(

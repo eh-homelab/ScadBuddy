@@ -1211,7 +1211,7 @@ async def read_ha_sensors(store: Filament, settings: StoredSettings, now: dateti
     """Read Bambuddy's Home Assistant states into the location sensors (#6268): one GET,
     and none when no Home Assistant sensor is set up. A state is a reading at ``now`` (see
     `sensors.apply_ha_states_on`). It never fails the pull: a failure is logged with its
-    type only, and the sensors stay as they were."""
+    type only, and every Home Assistant sensor is marked unreachable (it got no number)."""
     try:
         if not any(
             s.source == "home_assistant" for s in await asyncio.to_thread(store.sensors.list, None)
@@ -1223,6 +1223,10 @@ async def read_ha_sensors(store: Filament, settings: StoredSettings, now: dateti
         await asyncio.to_thread(_apply_ha, store, states, now)
     except Exception as error:
         _failed("could not read Bambuddy's Home Assistant sensors", error)
+        try:
+            await asyncio.to_thread(_apply_ha, store, {}, now)
+        except Exception as again:
+            _failed("could not mark the Home Assistant sensors unreachable", again)
 
 
 def _apply_ha(store: Filament, states: dict[str, str | None], now: datetime) -> None:
@@ -1236,7 +1240,9 @@ async def scheduled_pull(
     """The Schedule's pull (`SpoolRefresh`): ``skipped`` with ``filament_sync.spools``
     ``off`` (no spool pulled, no usage row booked) or no BB URL,
     ``failed`` when BB or the store fails (logged, never raised),
-    else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13)."""
+    else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13). Whenever a
+    BB URL is set, it first reads the Home Assistant sensors (`read_ha_sensors`), before
+    the spools gate and whatever ``sync`` says: sensors are not spool data."""
     settings = await asyncio.to_thread(load)
     if settings.bambuddy_url:
         # Sensors are not spool data: read whatever ``filament_sync`` says.

@@ -790,7 +790,10 @@ class BambuddyClient:
     async def ha_entities(self, search: str | None) -> list[HaEntity]:
         """``GET /api/v1/location-ha-sensors/entities`` (#6268): Home Assistant's entities
         and their states as Bambuddy reads them, matched by ``search`` (none: all). Each
-        row is validated on its own: one that is not an entity is logged and left out."""
+        row is validated on its own: one that is not an entity is logged and left out.
+        Scope: Bambuddy has no key scope for storage locations or their sensors, and no
+        read-only inventory scope; every other read of its inventory here uses
+        ``READ_STATUS``, the one read scope, so this does too (not measured live)."""
         what = "list the Home Assistant entities"
         response = await self._send(
             "GET",

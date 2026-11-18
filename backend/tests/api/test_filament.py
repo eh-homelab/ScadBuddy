@@ -868,7 +868,8 @@ def test_a_sensors_readings_are_read_from_a_time(client: TestClient, pg_conninfo
     assert got.status_code == 200, got.text
     assert [r["value"] for r in got.json()] == [41.0, 42.0]
     limited = client.get(url, params={"since": "2026-11-18T00:00:00Z", "limit": 2}).json()
-    assert [r["value"] for r in limited] == [40.0, 41.0]
+    # With more rows than the limit, the newest come, still oldest first.
+    assert [r["value"] for r in limited] == [41.0, 42.0]
     assert client.get(f"{SENSORS}/{MISSING}/readings").status_code == 404
     assert client.get(url, params={"limit": 0}).status_code == 422
 
