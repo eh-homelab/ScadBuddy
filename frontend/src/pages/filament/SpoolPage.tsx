@@ -425,7 +425,7 @@ export function SpoolPage() {
         spoolId = made.id
         // From here the page is an edit of this spool: a later failure retries as one.
         setMadeId(made.id)
-        setSaved({ ...made, effective: made.effective ?? {}, overridden: made.overridden ?? [], names: made.names ?? {}, low_stock: made.low_stock ?? false, presets: [], k_values: [], tag: null, last_tag: null, basis: { anchor: null, deltas: [] }, in_use: false })
+        setSaved({ ...made, effective: made.effective ?? {}, overridden: made.overridden ?? [], names: made.names ?? {}, low_stock: made.low_stock ?? false, presets: [], k_values: [], tag: null, last_tag: null, basis: { anchor: null, deltas: [] }, in_use: false, invoice: null, type_suppliers: [] })
         presetsWere = []
         kWere = []
         placeWas = ''

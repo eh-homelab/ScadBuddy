@@ -226,9 +226,11 @@ same way, `vite.config.ts`).
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
-  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Locations, Catalog and
-  Ledger (`tabs.ts` lists Suppliers, Invoices, Metrics and Shopping list as not available until
-  #6266 and #6269). `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
+  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
+  Catalog, Shopping list and Ledger (`tabs.ts` lists Metrics as not available until #6269).
+  Purchasing (#6266): `api/filamentPurchasing.ts`, the exact decimal strings of `lib/decimal.ts`
+  (money never goes through `Number`), and the mocks `src/mocks/features/filamentPurchasing.ts`.
+  `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
   Clear presets, `TagPanel` with "Tag is on spool #N — Move it here") and `/filament/types/:id`
   (`TypePage`). The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any

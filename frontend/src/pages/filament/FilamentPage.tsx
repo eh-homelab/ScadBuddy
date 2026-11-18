@@ -18,6 +18,9 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
       : 'text-foreground/60 hover:text-foreground dark:text-muted-foreground dark:hover:text-foreground',
   )
 
+/** #6266's tabs, whose pages come after this frame (Tasks 10-13). */
+const PURCHASING_TABS: ReadonlySet<TabId> = new Set(['suppliers', 'invoices', 'shopping-list'])
+
 /** What each tab holds, under the heading. */
 const INTRO: Record<TabId, string> = {
   spools: 'Every spool on the shelf and in the printers: its colour, what is left, and where it is.',
@@ -57,6 +60,7 @@ export function FilamentPage({ tab }: { tab: TabId }) {
         {tab === 'locations' && <LocationsTab />}
         {tab === 'catalog' && <CatalogTab />}
         {tab === 'ledger' && <LedgerTab />}
+        {PURCHASING_TABS.has(tab) && <p className="text-sm text-muted-foreground">This tab is being built.</p>}
       </div>
     </div>
   )

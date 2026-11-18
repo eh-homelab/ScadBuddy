@@ -116,12 +116,17 @@ export function App() {
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
         <Route path="filament/types/:id" element={<TypePage />} />
+        <Route path="filament/suppliers/:id" element={<FilamentPage tab="suppliers" />} />
+        <Route path="filament/invoices/:id" element={<FilamentPage tab="invoices" />} />
         {/* One literal path per available tab (`pages/filament/tabs.ts`): e2e/page-titles.spec.ts reads these. */}
         <Route path="filament/spools" element={<FilamentPage tab="spools" />} />
         <Route path="filament/types" element={<FilamentPage tab="types" />} />
         <Route path="filament/tags" element={<FilamentPage tab="tags" />} />
+        <Route path="filament/suppliers" element={<FilamentPage tab="suppliers" />} />
+        <Route path="filament/invoices" element={<FilamentPage tab="invoices" />} />
         <Route path="filament/locations" element={<FilamentPage tab="locations" />} />
         <Route path="filament/catalog" element={<FilamentPage tab="catalog" />} />
+        <Route path="filament/shopping-list" element={<FilamentPage tab="shopping-list" />} />
         <Route path="filament/ledger" element={<FilamentPage tab="ledger" />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />

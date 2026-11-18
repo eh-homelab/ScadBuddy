@@ -10,7 +10,7 @@ type Query<Op extends keyof operations> = NonNullable<operations[Op]['parameters
 
 export type Spool = Schemas['Spool']
 /** The spec lists a field the server always sends (it has a default) as optional; here it is required. */
-export type SpoolDetail = Schemas['SpoolDetail'] & Required<Pick<Schemas['SpoolDetail'], 'effective' | 'overridden' | 'names' | 'presets' | 'k_values' | 'low_stock' | 'in_use'>>
+export type SpoolDetail = Schemas['SpoolDetail'] & Required<Pick<Schemas['SpoolDetail'], 'effective' | 'overridden' | 'names' | 'presets' | 'k_values' | 'low_stock' | 'in_use' | 'type_suppliers'>>
 export type SpoolCreate = Schemas['SpoolCreate']
 export type SpoolPatch = Schemas['SpoolPatch']
 export type TagBind = Schemas['TagBind']
