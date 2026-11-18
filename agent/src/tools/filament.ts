@@ -195,7 +195,9 @@ export const filamentTools: Tool[] = [
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
-      '`archived: true` takes a type off the lists and frees its code. 409 when an unarchived type has the ' +
+      '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer, `null` ' +
+      "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
+      'fetches its slicer presets by. 409 when an unarchived type has the ' +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
@@ -253,6 +255,55 @@ export const filamentTools: Tool[] = [
             body: presets,
           }),
           `set the presets of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_type_fetch_profiles',
+    label: "Fetch a spool type's 3DFP presets",
+    description:
+      "Start a fetch of a spool type's slicer presets from 3dfilamentprofiles.com by its `tdfp_id`: " +
+      "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
+      'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
+      "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
+      'where a printer has an exact match. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
+      '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
+      'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
+      '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
+      'fetch could not be started. Only what the user says. Writes ScadBuddy and Bambuddy\'s local presets.',
+    input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/types/{type_id}/profile-fetch'],
+    summarize: ({ type_id }) => `Fetch the 3DFP presets of spool type ${type_id}`,
+    handler: async ({ type_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/types/{type_id}/profile-fetch', { params: { path: { type_id } } }),
+          `start the 3DFP preset fetch of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_type_profile_fetch',
+    label: "Read a spool type's 3DFP preset fetch",
+    description:
+      "A spool type's last preset fetch from 3dfilamentprofiles.com (`run`, null when it never had one): its " +
+      '`status` (`running`, `imported`, `partial`, `failed`), the keys it could not set (`missing`, each with ' +
+      'its reason), its notes, K values set and `error`. `gaps` lists each printer model and nozzle a fetch ' +
+      'would export now that the type has no preset for, with the reason its last fetch gave. A run no ' +
+      'profile-fetch worker serves is ended `failed` on this read.',
+    input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/types/{type_id}/profile-fetch'],
+    handler: async ({ type_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/types/{type_id}/profile-fetch', { params: { path: { type_id } } }),
+          `read the 3DFP preset fetch of spool type ${type_id}`,
         ),
       ),
   }),

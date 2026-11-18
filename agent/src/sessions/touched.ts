@@ -717,6 +717,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_type_upsert',
   'filament_type_set_presets',
   'filament_type_set_k_values',
+  // #6625: a 3DFP preset fetch sets the type's presets and K values (and imports Bambuddy
+  // local presets, no recorded kind either); its run is the type's, read with
+  // filament_type_profile_fetch.
+  'filament_type_fetch_profiles',
   'filament_spool_upsert',
   'filament_spool_set_presets',
   'filament_spool_set_k_values',

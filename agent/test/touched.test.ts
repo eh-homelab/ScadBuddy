@@ -585,6 +585,12 @@ describe('extractors', () => {
     expect(touches('remove_analyzer_decision', { decision_id: 'd'.repeat(32) }, { removed: 'd'.repeat(32) })).toEqual([])
   })
 
+  it("records no resource for a type's 3DFP preset fetch (#6625): the inventory is no recorded kind", () => {
+    expect(TOUCHES_NOTHING.has('filament_type_fetch_profiles')).toBe(true)
+    const started = { run: { id: 'r1', type_id: 't1', status: 'running' }, joined: false }
+    expect(touches('filament_type_fetch_profiles', { type_id: 't1' }, started)).toEqual([])
+  })
+
   it('leaves only the browser click and fill unclassified', () => {
     const open = ALL_TOOLS.filter((t) => t.risk !== 'read' && !EXTRACTORS[t.name] && !TOUCHES_NOTHING.has(t.name))
     expect(open.map((t) => t.name).sort()).toEqual(['browser_click', 'browser_fill'])

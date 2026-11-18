@@ -165,6 +165,90 @@ describe('filament type tools', () => {
   })
 })
 
+describe('filament type 3DFP preset fetch tools (#6625)', () => {
+  const FETCH = `${TYPE}/profile-fetch`
+  const RUN = {
+    id: '8d6f3c1e-0000-4000-8000-0000000066a1',
+    type_id: ROW,
+    tdfp_id: 1234,
+    targets: [{ printer_model: 'H2C', nozzles: ['0.4'] }],
+    status: 'running',
+    missing: [],
+    k_values: 0,
+    notes: [],
+    error: null,
+    started_at: '2026-11-18T00:00:00Z',
+    finished_at: null,
+  }
+
+  it.each([
+    ['filament_type_fetch_profiles', 'write', ['POST /api/v1/filament/types/{type_id}/profile-fetch']],
+    ['filament_type_profile_fetch', 'read', ['GET /api/v1/filament/types/{type_id}/profile-fetch']],
+  ])('%s is %s tier, never gated, on its route', (name, risk, routes) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+    expect(tool(name).routes).toEqual(routes)
+  })
+
+  it.each(['filament_type_fetch_profiles', 'filament_type_profile_fetch'])('%s takes a uuid type_id', (name) => {
+    expect(() => tool(name).parse({ type_id: 'not-a-uuid' })).toThrow()
+    expect(() => tool(name).parse({})).toThrow()
+    expect(() => tool(name).parse({ type_id: ROW })).not.toThrow()
+  })
+
+  it('says the start reaches 3DFP and Bambuddy, and the upsert takes a tdfp_id', () => {
+    const start = tool('filament_type_fetch_profiles').description
+    expect(start).not.toContain('Writes ScadBuddy only')
+    expect(start).toContain('Bambuddy')
+    expect(start).toContain('3dfilamentprofiles.com')
+    expect(tool('filament_type_upsert').description).toContain('tdfp_id')
+  })
+
+  it('starts a fetch with POST and answers the run, its status and whether it joined', async () => {
+    const calls: string[] = []
+    server.use(
+      http.post(FETCH, ({ request }) => {
+        calls.push(request.method)
+        return HttpResponse.json({ run: RUN, joined: true }, { status: 202 })
+      }),
+    )
+    const started = await runTool(tool('filament_type_fetch_profiles'), { type_id: ROW }, ctx())
+    expect(started.isError).toBeFalsy()
+    expect(calls).toEqual(['POST'])
+    const answer = firstText(started) as { run: { id: string; status: string }; joined: boolean }
+    expect(answer.run.id).toBe(RUN.id)
+    expect(answer.run.status).toBe('running')
+    expect(answer.joined).toBe(true)
+  })
+
+  it("passes the backend's reason when a fetch cannot start", async () => {
+    server.use(
+      http.post(FETCH, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/no_tdfp_id', title: 'No 3DFP id', detail: 'the type has no tdfp_id' },
+          { status: 422 },
+        ),
+      ),
+    )
+    const refused = await runTool(tool('filament_type_fetch_profiles'), { type_id: ROW }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused.content)).toContain('no tdfp_id')
+  })
+
+  it('reads the last fetch and the gaps', async () => {
+    const gaps = [{ printer_model: 'H2C', nozzle_diameter: '0.2', reason: 'the dialog offers no 0.2 mm nozzle' }]
+    server.use(http.get(FETCH, () => HttpResponse.json({ run: RUN, gaps })))
+    const read = await runTool(tool('filament_type_profile_fetch'), { type_id: ROW }, ctx())
+    expect(firstText(read)).toEqual({ run: RUN, gaps })
+  })
+
+  it('reads a type that never had a fetch', async () => {
+    server.use(http.get(FETCH, () => HttpResponse.json({ run: null, gaps: [] })))
+    const read = await runTool(tool('filament_type_profile_fetch'), { type_id: ROW }, ctx())
+    expect(firstText(read)).toEqual({ run: null, gaps: [] })
+  })
+})
+
 const SPOOLS = `${BACKEND}/api/v1/filament/spools`
 const SPOOL = `${SPOOLS}/${ROW}`
 
