@@ -616,6 +616,8 @@ const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int(
 
 /** A decimal string, as the price book keeps every rate (§3.6: never a float). */
 const decimal = z.string().regex(/^\d+(\.\d+)?$/).describe('A decimal string, such as "25.50"')
+/** #5774 §3.5: which figure prices a machine-rate row. */
+const PRICED_BY = z.enum(['estimate', 'actual']).describe('`estimate` (the typed figures) or `actual` (the logged events)')
 const policyFields = z
   .object({
     machine_rate_per_hour: decimal.optional(),
@@ -2797,10 +2799,14 @@ export const orderTools: Tool[] = [
     description:
       "Keep a registry printer's machine rate inputs (machine_rate_get): `inputs` replaces them whole: `profile` " +
       '(purchase_price, life_hours (null: no depreciation), watts, kwh_price, labour_rate_per_hour (null: the ' +
-      "shop's labour rate)), `wear_parts` ({name, cost, life_hours}) and `maintenance` ({task, minutes, " +
-      'consumables, interval_hours}; a printer linked to Bambuddy names its Bambuddy tasks and keeps Bambuddy\'s ' +
-      "intervals). `remove: true` drops them, so the printer is priced at the price book's machine rate again. " +
-      'Decimals are strings. A recorded quote keeps the rate it was priced at.',
+      "shop's labour rate), actuals_window (1 to 20: the usable gaps or replacements a row set to `actual` " +
+      'needs before its actual prices), lan_hours_offset (the hours a LAN-only printer ran before ScadBuddy ' +
+      "counted it)), `wear_parts` ({name, cost, life_hours, priced_by}) and `maintenance` ({task, minutes, " +
+      'consumables, interval_hours, priced_by}; a printer linked to Bambuddy names its Bambuddy tasks and keeps ' +
+      "Bambuddy's intervals). `priced_by` is `estimate` (the typed figures) or `actual` (the logged events, once " +
+      'the window has enough). actuals_window, lan_hours_offset and a row\'s priced_by left out keep the stored ' +
+      "values (a new row starts at `estimate`). `remove: true` drops them, so the printer is priced at the price " +
+      "book's machine rate again. Decimals are strings. A recorded quote keeps the rate it was priced at.",
     input: z.object({
       printer: ID.describe("The registry printer (list_printers' `id`)"),
       inputs: z
@@ -2812,10 +2818,12 @@ export const orderTools: Tool[] = [
               watts: decimal.optional(),
               kwh_price: decimal.optional(),
               labour_rate_per_hour: decimal.nullable().optional(),
+              actuals_window: z.number().int().min(1).max(20).optional(),
+              lan_hours_offset: decimal.optional(),
             })
             .strict(),
           wear_parts: z
-            .array(z.object({ name: z.string().min(1).max(100), cost: decimal, life_hours: decimal }).strict())
+            .array(z.object({ name: z.string().min(1).max(100), cost: decimal, life_hours: decimal, priced_by: PRICED_BY.optional() }).strict())
             .max(50)
             .default([]),
           maintenance: z
@@ -2826,6 +2834,7 @@ export const orderTools: Tool[] = [
                   minutes: decimal.optional(),
                   consumables: decimal.optional(),
                   interval_hours: decimal.nullable().optional(),
+                  priced_by: PRICED_BY.optional(),
                 })
                 .strict(),
             )

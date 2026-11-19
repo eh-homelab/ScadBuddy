@@ -18,6 +18,7 @@ import { AcceptForCustomerButton } from './AcceptForCustomer'
 import { ArchiveQuote } from './ArchiveQuote'
 import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
+import { leastBacked, rateTag } from './machineRateTag'
 import type { SliceQuoteRun } from './useSliceQuotes'
 import { elapsed, useNow } from './useNow'
 import { When } from './When'
@@ -64,6 +65,11 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
       <CollapsibleTrigger className="cursor-pointer text-left">
         Machine rate {rate.rate_per_hour} per hour for {printer}
         {INTERVALS[rate.intervals] ? `, ${INTERVALS[rate.intervals]}` : ''}
+        {' · '}
+        {/* #6665 (machine-rate actuals spec §6): the job cost's tag, and the least-backed part on hover. */}
+        <span data-testid="quote-machine-tag" title={leastBacked(rate) ? `Least backed: ${leastBacked(rate)}` : undefined}>
+          {rateTag(rate.actuals, rate.confidence)}
+        </span>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <ul className="ml-3" aria-label="Machine rate parts">

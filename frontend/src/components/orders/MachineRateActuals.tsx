@@ -1,13 +1,25 @@
-import { useId, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useId, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { ApiError, api, newRequestId } from '../../api/client'
-import type { CounterView, MachineRateEvent, MachineRateEventPatch, RowActuals } from '../../api/types'
+import type { CounterView, MachineRateEvent, MachineRateEventPatch, MachineRateView, RowActuals } from '../../api/types'
+import { formatFullTime, formatLocalTime, timeAgo } from '../../lib/format'
 import { toast } from '../../lib/toast'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Spinner } from '@/components/ui/spinner'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { AMOUNT, decimal, placesText, TENTHS } from './machineRateNumbers'
 import { refusalText } from './refusal'
+import { useNow } from './useNow'
 
 /**
  * #5774 (machine-rate actuals spec 2026-11-17 §9) — the parts of a printer's machine-rate
@@ -119,8 +131,9 @@ const TASK_EMPTY = { linked: 'None read from Bambuddy yet. Mark it done in Bambu
 /**
  * A row's events in its window, newest first, opened in place: when, the counter and its
  * source, the gap or hours used (or why it was skipped), the cost or minutes, and where it
- * came from. A ScadBuddy event can be edited or deleted; one read from Bambuddy takes its
- * minutes and consumables only.
+ * came from. A ScadBuddy event can be edited or deleted (after a confirm); one read from
+ * Bambuddy takes its minutes and consumables only. "Show older events" pages back through
+ * every event past the window (#6665), listed under a line that says the rate does not use them.
  */
 export function EventList({
   printerId,
@@ -141,10 +154,36 @@ export function EventList({
   action?: ReactNode
 }) {
   const [open, setOpen] = useState(false)
+  // #6665: every event, paged back past the window (`GET …/machine-rate/events`).
+  const [older, setOlder] = useState<{ events: MachineRateEvent[]; next: string | null } | null>(null)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [olderError, setOlderError] = useState<string | null>(null)
   const events = row?.events ?? []
+  const inWindow = new Set(events.map((event) => event.id))
+  const past = (older?.events ?? []).filter((event) => !inWindow.has(event.id))
+  const shown = [...events, ...past]
   const skipped = new Map((row?.skipped_gaps ?? []).map((gap) => [gap.event, gap.reason]))
   const title = kind === 'part' ? 'Replacements' : 'Done'
   const listId = `events-${useId()}`
+  const changed = () => {
+    setOlder(null)
+    onChanged()
+  }
+
+  async function loadOlder() {
+    setLoadingOlder(true)
+    setOlderError(null)
+    try {
+      const page = await api.machineRateEvents(printerId, { kind, name, cursor: older?.next })
+      setOlder((was) => ({ events: [...(was?.events ?? []), ...page.events], next: page.next ?? null }))
+    } catch (err) {
+      setOlderError(refusalText(err))
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
+  const more = older == null || older.next != null
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
@@ -155,17 +194,40 @@ export function EventList({
         {action}
       </div>
       {open &&
-        (events.length === 0 ? (
+        (shown.length === 0 ? (
           <p id={listId} className="text-xs text-muted-foreground">
             {kind === 'part' ? 'No replacements logged. Log one when you change this part.' : linked ? TASK_EMPTY.linked : TASK_EMPTY.here}
           </p>
         ) : (
           <ul id={listId} aria-label={`${title}: ${name}`} className="flex flex-col divide-y rounded-md border text-xs">
-            {events.map((event, index) => (
-              <EventItem key={event.id} printerId={printerId} event={event} before={events[index + 1]} skipped={skipped.get(event.id)} onChanged={onChanged} />
+            {shown.map((event, index) => (
+              <Fragment key={event.id}>
+                {index === events.length && (
+                  <li role="separator" className="bg-muted/40 px-2 py-1 text-muted-foreground">
+                    Older events, not in the rate (it uses the last {row?.need ?? events.length} {UNIT[kind]})
+                  </li>
+                )}
+                <EventItem printerId={printerId} event={event} before={shown[index + 1]} skipped={skipped.get(event.id)} onChanged={changed} />
+              </Fragment>
             ))}
           </ul>
         ))}
+      {open && (shown.length > 0 || older != null) && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {more ? (
+            <Button type="button" size="xs" variant="ghost" disabled={loadingOlder} onClick={() => void loadOlder()}>
+              {older == null ? 'Show older events' : 'Show more'}
+            </Button>
+          ) : (
+            <span className="text-muted-foreground">That is every event.</span>
+          )}
+          {olderError && (
+            <span role="alert" className="text-warn">
+              The older events could not be read: {olderError}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -199,6 +261,7 @@ function EventItem({
 }) {
   const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const imported = event.origin === 'bambuddy'
   const counter = event.hours_at == null ? 'no reading' : `${event.hours_at} h, ${event.hours_source ? COUNTER_NAME[event.hours_source] : 'typed'}`
@@ -209,6 +272,7 @@ function EventItem({
     setError(null)
     try {
       await api.deleteMachineRateEvent(printerId, event.id)
+      setConfirming(false)
       onChanged()
     } catch (err) {
       setError(refusalText(err))
@@ -237,7 +301,16 @@ function EventItem({
                 <Button type="button" size="xs" variant="ghost" onClick={() => setEditing(true)}>
                   Edit
                 </Button>
-                <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => void remove()}>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setError(null)
+                    setConfirming(true)
+                  }}
+                >
                   Delete
                 </Button>
               </>
@@ -260,11 +333,34 @@ function EventItem({
           }}
         />
       )}
-      {error && (
+      {error && !confirming && (
         <p role="alert" className="text-warn">
           {error}
         </p>
       )}
+      {/* #6665: a delete asks first, as the other deletes on the Orders pages do. */}
+      <AlertDialog open={confirming} onOpenChange={(next) => !next && !busy && setConfirming(false)}>
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{event.kind === 'part' ? `Delete this replacement of ${event.name}?` : `Delete this time ${event.name} was done?`}</AlertDialogTitle>
+            <AlertDialogDescription>
+              Logged on {day(event.at)}. The rate stops counting it, and it cannot be brought back.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {error && (
+            <p role="alert" className="text-sm text-destructive">
+              {error}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <Button variant="destructive" disabled={busy} onClick={() => void remove()}>
+              {busy && <Spinner />}
+              Delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </li>
   )
 }
@@ -530,6 +626,96 @@ export function PrintHours({ counter, offset, onOffset }: { counter: CounterView
         </>
       )}
       {counter.source === 'typed' && <p className="text-muted-foreground">No counter: enter the reading when you log an event.</p>}
+    </div>
+  )
+}
+
+/** §9: a failed read names what the rate uses now. */
+function unansweredText(readAt: string | null | undefined, now: number): string {
+  return readAt
+    ? `Bambuddy did not answer. The rate uses the events last read at ${formatLocalTime(Date.parse(readAt), now)}.`
+    : 'Bambuddy did not answer. No maintenance has been read from it yet, so the rate uses only the events logged here.'
+}
+
+const READ_REFUSALS: Record<string, string> = {
+  not_linked: 'This printer is no longer linked to Bambuddy, so there is no maintenance log to read.',
+  no_machine_rate: 'Save the machine rate first, then read its maintenance from Bambuddy.',
+}
+
+type ReadFailure = { kind: 'unanswered' } | { kind: 'refused'; text: string }
+
+/**
+ * #6665 (spec §5, §9) — "Read from Bambuddy" beside the window field on a linked printer:
+ * reads the printer's maintenance log now and shows the answer's view (`onRead`), and says
+ * when it was last read. A read that fails says why in plain words; one Bambuddy did not
+ * answer names the read the rate still uses. `stale`: the page's own read of Bambuddy failed.
+ */
+export function BambuddyRead({
+  printerId,
+  readAt,
+  stale,
+  onRead,
+  onUnanswered,
+}: {
+  printerId: string
+  readAt: string | null | undefined
+  stale: boolean
+  onRead: (view: MachineRateView) => void
+  /** Bambuddy did not answer: read the view again for the stored events and their time. */
+  onUnanswered: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<ReadFailure | null>(null)
+  const now = useNow(true, 30_000)
+
+  async function read() {
+    setBusy(true)
+    setFailure(null)
+    try {
+      onRead(await api.importMachineRate(printerId))
+      toast({ title: 'Maintenance read from Bambuddy' })
+    } catch (err) {
+      const code = err instanceof ApiError ? ((err.problem.type ?? '').split('/').pop() ?? '') : ''
+      if (code === 'log_unavailable') {
+        setFailure({ kind: 'unanswered' })
+        onUnanswered()
+      } else setFailure({ kind: 'refused', text: READ_REFUSALS[code] ?? refusalText(err) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const readMs = readAt ? Date.parse(readAt) : NaN
+  return (
+    <div className="flex flex-col gap-1 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" size="xs" variant="outline" disabled={busy} onClick={() => void read()}>
+          {busy && <Spinner />}
+          Read from Bambuddy
+        </Button>
+        <span data-testid="events-read" className="text-muted-foreground">
+          {readAt && !Number.isNaN(readMs) ? (
+            <>
+              Last read{' '}
+              <time dateTime={readAt} title={formatFullTime(readMs)}>
+                {now - readMs < 60_000 ? 'just now' : timeAgo(readAt, now)}
+              </time>
+            </>
+          ) : (
+            'Not read from Bambuddy yet'
+          )}
+        </span>
+      </div>
+      {failure?.kind === 'refused' && (
+        <p role="alert" className="text-[13px] text-warn">
+          {failure.text}
+        </p>
+      )}
+      {(failure?.kind === 'unanswered' || (stale && !failure)) && (
+        <p role={failure ? 'alert' : undefined} className="text-[13px] text-warn">
+          {unansweredText(readAt, now)}
+        </p>
+      )}
     </div>
   )
 }
