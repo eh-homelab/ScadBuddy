@@ -101,6 +101,14 @@
   --sb-needs: #f0abfc;
   --sb-needs-ink: #3b0764;
   --sb-focus: #9ec5ff;
+  /* #6269 — the categorical chart series (the dataviz palette's blue, orange, aqua and
+     violet, stepped for each surface; validated as an adjacent set in both themes), and
+     the grey every folded value ("Other") takes. */
+  --sb-series-1: #3987e5;
+  --sb-series-2: #d95926;
+  --sb-series-3: #199e70;
+  --sb-series-4: #9085e9;
+  --sb-series-other: #737373;
   /* Bambuddy's own nozzle-side badge (#469). */
   --sb-side-bg: #1a4d2e;
   --sb-side-ink: #00ae42;
@@ -168,6 +176,11 @@
     --sb-needs: #a21caf;
     --sb-needs-ink: #ffffff;
     --sb-focus: #1d4ed8;
+    --sb-series-1: #2a78d6;
+    --sb-series-2: #eb6834;
+    --sb-series-3: #1baf7a;
+    --sb-series-4: #6250d6;
+    --sb-series-other: #a3a3a3;
     --sb-side-bg: #e7f5e9;
     --sb-side-ink: #00ae42;
     --sb-inlet-bg: #e3f0fb;
@@ -236,6 +249,11 @@
   --color-warn: var(--sb-warn);
   --color-needs: var(--sb-needs);
   --color-needs-ink: var(--sb-needs-ink);
+  --color-series-1: var(--sb-series-1);
+  --color-series-2: var(--sb-series-2);
+  --color-series-3: var(--sb-series-3);
+  --color-series-4: var(--sb-series-4);
+  --color-series-other: var(--sb-series-other);
 
   --font-sans:
     'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,

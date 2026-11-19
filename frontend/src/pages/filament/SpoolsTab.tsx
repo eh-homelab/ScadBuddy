@@ -1,10 +1,11 @@
-import { Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
+import { CalendarClockIcon, Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
 import { SpoolCards } from '../../components/filament/SpoolCards'
+import { SpoolForecast } from '../../components/filament/SpoolForecast'
 import { SpoolImport } from '../../components/filament/SpoolImport'
 import { SpoolsTable } from '../../components/filament/SpoolsTable'
 import { SpoolTiles, type TileFilter } from '../../components/filament/SpoolTiles'
@@ -115,8 +116,8 @@ function flatten(nodes: LocationNode[], trail: string[] = []): { places: Place[]
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The spools could not be loaded. Try again.')
 
 /**
- * #6262 — the Spools tab: the inventory in tiles, then every spool as a dense table or as
- * cards, filtered, grouped and sorted from the URL (`spoolsQuery.ts`). Select spools to
+ * #6262 — the Spools tab: the inventory in tiles, then every spool as a dense table, as
+ * cards or as a forecast (#6269: when each runs out, and the types to reorder), filtered, grouped and sorted from the URL (`spoolsQuery.ts`). Select spools to
  * archive, restore, delete, move or type them; export what is shown as CSV, or import a
  * CSV (`SpoolImport`).
  */
@@ -243,6 +244,15 @@ export function SpoolsTab() {
             className={cn('rounded-sm p-1 text-muted-foreground hover:text-foreground', q.view === 'cards' && 'bg-muted text-foreground')}
           >
             <LayoutGridIcon className="size-4" />
+          </button>
+          <button
+            type="button"
+            aria-pressed={q.view === 'forecast'}
+            aria-label="Forecast"
+            onClick={() => update({ view: 'forecast' })}
+            className={cn('rounded-sm p-1 text-muted-foreground hover:text-foreground', q.view === 'forecast' && 'bg-muted text-foreground')}
+          >
+            <CalendarClockIcon className="size-4" />
           </button>
         </div>
         <DropdownMenu>
@@ -405,6 +415,7 @@ export function SpoolsTab() {
         />
       )}
       {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} />}
+      {data && shown.length > 0 && q.view === 'forecast' && <SpoolForecast spools={shown} />}
 
       <SpoolImport
         open={importing}

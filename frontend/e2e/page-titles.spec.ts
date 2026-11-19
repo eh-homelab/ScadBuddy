@@ -60,6 +60,7 @@ const PAGES = [
   `/filament/invoices/${INVOICE.CONFIRMED_A}`,
   '/filament/locations',
   '/filament/catalog',
+  '/filament/metrics',
   '/filament/shopping-list',
   '/filament/ledger',
   // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.

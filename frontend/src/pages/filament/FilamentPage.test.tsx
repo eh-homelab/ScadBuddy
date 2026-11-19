@@ -18,7 +18,7 @@ function render(route: string) {
 }
 
 describe('the Filament section', () => {
-  it('lists every tab of spec §10 in order, with only the built ones available', () => {
+  it('lists every tab of spec §10 in order, all of them built (#6269 built Metrics)', () => {
     expect(FILAMENT_TABS.map((tab) => tab.id)).toEqual([
       'spools',
       'types',
@@ -31,15 +31,15 @@ describe('the Filament section', () => {
       'shopping-list',
       'ledger',
     ])
-    expect(FILAMENT_TABS.filter((tab) => !tab.available).map((tab) => tab.id)).toEqual(['metrics'])
+    expect(FILAMENT_TABS.filter((tab) => !tab.available).map((tab) => tab.id)).toEqual([])
     for (const tab of FILAMENT_TABS) expect(tab.path).toBe(`/filament/${tab.id}`)
   })
 
-  it('shows nine tabs in spec order, with "Invoices" and no "Metrics"', () => {
+  it('shows the ten tabs in spec order, with "Invoices" and "Metrics"', () => {
     render('/filament/spools')
     const tabs = screen.getByRole('navigation', { name: 'Filament' })
     const links = within(tabs).getAllByRole('link')
-    expect(links.map((link) => link.textContent)).toEqual(['Spools', 'Types', 'Tags', 'Suppliers', 'Invoices', 'Locations', 'Catalog', 'Shopping list', 'Ledger'])
+    expect(links.map((link) => link.textContent)).toEqual(['Spools', 'Types', 'Tags', 'Suppliers', 'Invoices', 'Locations', 'Catalog', 'Metrics', 'Shopping list', 'Ledger'])
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
       '/filament/spools',
       '/filament/types',
@@ -48,11 +48,12 @@ describe('the Filament section', () => {
       '/filament/invoices',
       '/filament/locations',
       '/filament/catalog',
+      '/filament/metrics',
       '/filament/shopping-list',
       '/filament/ledger',
     ])
     expect(within(tabs).getByRole('link', { name: 'Invoices' })).toBeInTheDocument()
-    expect(within(tabs).queryByRole('link', { name: 'Metrics' })).toBeNull()
+    expect(within(tabs).getByRole('link', { name: 'Metrics' })).toBeInTheDocument()
   })
 
   it('opens /filament on Spools, and marks the open tab', () => {

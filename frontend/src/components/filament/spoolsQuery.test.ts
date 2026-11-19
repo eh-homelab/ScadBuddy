@@ -38,6 +38,12 @@ describe('the spools query', () => {
     expect(readQuery(writeQuery(q))).toEqual(q)
   })
 
+  it('reads ?view=forecast (#6269), and an unknown view as the table', () => {
+    expect(readQuery(new URLSearchParams('view=forecast')).view).toBe('forecast')
+    expect(writeQuery({ ...DEFAULT_SPOOLS_QUERY, view: 'forecast' }).toString()).toBe('view=forecast')
+    expect(readQuery(new URLSearchParams('view=chart')).view).toBe('table')
+  })
+
   it('leaves the defaults out of the URL and reads an empty one as the defaults', () => {
     expect(writeQuery(DEFAULT_SPOOLS_QUERY).toString()).toBe('')
     expect(readQuery(new URLSearchParams())).toEqual(DEFAULT_SPOOLS_QUERY)

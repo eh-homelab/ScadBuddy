@@ -130,6 +130,7 @@ export function App() {
         <Route path="filament/invoices" element={<FilamentPage tab="invoices" />} />
         <Route path="filament/locations" element={<FilamentPage tab="locations" />} />
         <Route path="filament/catalog" element={<FilamentPage tab="catalog" />} />
+        <Route path="filament/metrics" element={<FilamentPage tab="metrics" />} />
         <Route path="filament/shopping-list" element={<FilamentPage tab="shopping-list" />} />
         <Route path="filament/ledger" element={<FilamentPage tab="ledger" />} />
         <Route path="orders" element={<OrdersPage />} />

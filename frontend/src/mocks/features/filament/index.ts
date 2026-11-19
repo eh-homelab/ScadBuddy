@@ -669,24 +669,34 @@ const BB_OUTCOMES = new Set(['completed', 'failed', 'cancelled'])
 const byTime = (a: S['SpoolEvent'], b: S['SpoolEvent']) => a.at.localeCompare(b.at) || a.seq - b.seq
 const PLATE_KINDS = new Set<S['SpoolEvent']['kind']>(['print_started', 'print_ended'])
 
+/** A plate as `metrics.Plate` has it, with the fields the mock reads. */
+export interface MockPlate {
+  at: string
+  grams: number
+  // `metrics_models.Outcome`.
+  outcome: 'completed' | 'failed' | 'cancelled' | 'unknown'
+  printer_id: string | null
+}
+
 /**
  * One spool's plates, oldest first, as `metrics.plates` counts them: an ended BB usage row,
  * and an ended SB print run that BB did not book too (a `covered` one is none, a
  * `not_applied` one a failed 0 g plate). An open `print_started` estimate and a `print`
  * ref are no plate. The one plate rule of the mock: the history and `consumed_g` use it.
  */
-function platesOf(events: readonly S['SpoolEvent'][]): { at: string; grams: number; outcome: string }[] {
+function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
   return [...events].sort(byTime).flatMap((event) => {
     if (event.kind !== 'print_ended') return []
     const grams = event.delta_g ? -event.delta_g : 0
     if (event.ref_kind === 'bb_usage') {
       const status = event.data?.bb_status
-      return [{ at: event.at, grams, outcome: typeof status === 'string' && BB_OUTCOMES.has(status) ? status : 'unknown' }]
+      const outcome = typeof status === 'string' && BB_OUTCOMES.has(status) ? (status as MockPlate['outcome']) : 'unknown'
+      return [{ at: event.at, grams, outcome, printer_id: event.printer_id }]
     }
     if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
     const failed = event.data?.basis === 'not_applied'
-    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed' }]
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id }]
   })
 }
 
@@ -694,6 +704,27 @@ function platesOf(events: readonly S['SpoolEvent'][]): { at: string; grams: numb
 function plateGrams(events: readonly S['SpoolEvent'][]): number {
   const spools = new Set(events.map((event) => event.spool_id))
   return [...spools].reduce((sum, id) => sum + platesOf(events.filter((event) => event.spool_id === id)).reduce((total, plate) => total + plate.grams, 0), 0)
+}
+
+/**
+ * `metrics.burn`: the grams of the plates that ended in the last `windowDays`, over the
+ * window, or over the age since `born` when that is shorter (never less than a day);
+ * `null` when no plate ended in the window.
+ */
+export function burnOf(plates: readonly MockPlate[], windowDays: number, born: string, nowMs: number): number | null {
+  const inside = plates.filter((plate) => nowMs - Date.parse(plate.at) < windowDays * DAY_MS && Date.parse(plate.at) <= nowMs)
+  if (inside.length === 0) return null
+  return inside.reduce((sum, plate) => sum + plate.grams, 0) / Math.max(1, Math.min(windowDays, (nowMs - Date.parse(born)) / DAY_MS))
+}
+
+/** `metrics.MAX_FORECAST_DAYS`: no forecast further out than this. */
+export const MAX_FORECAST_DAYS = 3650
+
+/** `metrics.empty_on`: the UTC day the grams run out at `burn`; `null` with no grams, no burn above 0, or past `MAX_FORECAST_DAYS`. */
+export function emptyOn(grams: number | null | undefined, burn: number | null, nowMs: number): string | null {
+  if (grams == null || burn == null || !Number.isFinite(grams) || !Number.isFinite(burn) || burn <= 0) return null
+  const days = Math.max(grams, 0) / burn
+  return days > MAX_FORECAST_DAYS ? null : new Date(nowMs + days * DAY_MS).toISOString().slice(0, 10)
 }
 
 /** `ledger.reading`: the grams an absolute reading gives (with an AMS reading's `remain_pct` × the label weight when it has none), or `null`. */
@@ -753,11 +784,8 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const plates = platesOf(events)
   const used = plates.reduce((sum, plate) => sum + plate.grams, 0)
   const wasted = plates.filter((plate) => plate.outcome === 'failed' || plate.outcome === 'cancelled').reduce((sum, plate) => sum + plate.grams, 0)
-  const born = Date.parse(row.created_at)
-  const inside = plates.filter((plate) => nowMs - Date.parse(plate.at) < windowDays * DAY_MS && Date.parse(plate.at) <= nowMs)
-  const burn = inside.length === 0 ? null : inside.reduce((sum, plate) => sum + plate.grams, 0) / Math.max(1, Math.min(windowDays, (nowMs - born) / DAY_MS))
+  const burn = burnOf(plates, windowDays, row.created_at, nowMs)
   const left = row.grams_left
-  const emptyDays = burn && burn > 0 && left != null ? left / burn : null
   const opened = events.find((event) => event.kind === 'loaded')?.at ?? plates[0]?.at ?? null
   const effective = view(row).effective
   const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
@@ -786,7 +814,7 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
       cost_used: perKg != null ? costOf(perKg, used) : null,
       value_left: perKg != null && left != null ? costOf(perKg, left) : null,
       burn_g_per_day: burn,
-      empty_on: emptyDays != null && emptyDays <= 3650 ? new Date(nowMs + emptyDays * DAY_MS).toISOString().slice(0, 10) : null,
+      empty_on: emptyOn(left, burn, nowMs),
       opened_at: opened,
       days_since_opened: opened ? (nowMs - Date.parse(opened)) / DAY_MS : null,
       days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
@@ -808,6 +836,28 @@ export function spoolUsage(ids: readonly string[]): { count: number; remaining_g
     count: rows.length,
     remaining_g: rows.filter((row) => !row.archived_at).reduce((sum, row) => sum + (row.grams_left ?? 0), 0),
     consumed_g: plateGrams(state.events.filter((event) => ids.includes(event.spool_id))),
+  }
+}
+
+/**
+ * #6269 — what the metrics routes (`metrics.ts`) read, as `metrics_store._read` does: every
+ * spool (archived too) as the API lists it, its plates by the one plate rule (`platesOf`),
+ * its supplier (its invoice line's confirmed invoice's), the types with their material's
+ * name, and the printers' names.
+ */
+export function metricsInput() {
+  const spools = listed(true).map(view)
+  const suppliers = new Map<string, { id: string; name: string }>()
+  for (const row of state.spools) {
+    const ref = invoiceRefOf(row.id, invoicedLine.get(row.id))
+    if (ref) suppliers.set(row.id, { id: ref.supplier_id, name: ref.supplier_name })
+  }
+  return {
+    spools,
+    plates: new Map(spools.map((spool) => [spool.id, platesOf(state.events.filter((event) => event.spool_id === spool.id))])),
+    suppliers,
+    types: state.types.map((type) => ({ ...type, material: nameOf('materials', type.material_id) })),
+    printers: new Map([[H2C.printer_id, H2C.printer_name]]),
   }
 }
 

@@ -115,4 +115,20 @@ describe('the Spools tab', () => {
     await user.click(await screen.findByRole('menuitemradio', { name: /^Used/ }))
     expect(await screen.findByRole('button', { name: 'Clear filter Used' })).toBeInTheDocument()
   })
+
+  it('shows the grams every plate used in the Consumed tile (#6269): 140 g by the one plate rule', async () => {
+    render()
+    const tiles = await screen.findByRole('group', { name: 'Inventory' })
+    await waitFor(() => expect(within(tiles).getByText('Consumed').parentElement).toHaveTextContent('Consumed140g'))
+  })
+
+  it('shows the forecast view from its button, with the types to reorder', async () => {
+    const { user } = render()
+    await table()
+    await user.click(screen.getByRole('button', { name: 'Forecast' }))
+    expect(screen.getByRole('button', { name: 'Forecast' })).toHaveAttribute('aria-pressed', 'true')
+    expect(await screen.findByRole('table', { name: 'Spool forecast' })).toBeInTheDocument()
+    expect(await screen.findByRole('table', { name: 'Days of stock by type' })).toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: 'Spools' })).toBeNull()
+  })
 })

@@ -50,6 +50,15 @@ export type TimelineRow = Schemas['TimelineRow']
 export type GramsPoint = Schemas['GramsPoint']
 export type SpoolMetrics = Schemas['SpoolMetrics']
 export type AmsError = Schemas['AmsError']
+export type Forecast = Schemas['Forecast']
+export type SpoolForecast = Schemas['SpoolForecast']
+export type TypeForecast = Schemas['TypeForecast']
+export type InventoryMetrics = Schemas['InventoryMetrics']
+export type PurchasingMetrics = Schemas['PurchasingMetrics']
+export type PriceSeries = Schemas['PriceSeries']
+export type SpendRow = Schemas['SpendRow']
+export type MetricsQueryParams = Query<'get_metrics_api_v1_filament_metrics_get'>
+export type PurchasingQueryParams = Query<'get_purchasing_metrics_api_v1_filament_metrics_purchasing_get'>
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
@@ -244,6 +253,16 @@ export const getTag = (id: string) => request<TagDetail>(`${BASE}/tags/${seg(id)
 export const listEvents = (filters: EventQuery = {}) => request<EventPage>(`${BASE}/events${query(filters)}`)
 
 export const getSummary = () => request<InventorySummary>(`${BASE}/summary`)
+
+/** #6269 — each unarchived spool's burn and empty day, and each type's days of stock and reorder day. */
+export const getForecast = () => request<Forecast>(`${BASE}/forecast`)
+
+/** #6269 — stock now, and the consumption and waste from `since` to `until` (both days included). */
+export const getMetrics = (params: MetricsQueryParams = {}) => request<InventoryMetrics>(`${BASE}/metrics${query(params)}`)
+
+/** #6269 — price per kg over time and confirmed invoice spend, each in its own currency. */
+export const getPurchasingMetrics = (params: PurchasingQueryParams = {}) =>
+  request<PurchasingMetrics>(`${BASE}/metrics/purchasing${query(params)}`)
 
 /** Every spool with the tray it is in, and each registry printer's trays (Task 9). */
 export const getInventory = (options: { includeArchived?: boolean } = {}) =>

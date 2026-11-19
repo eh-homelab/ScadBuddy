@@ -257,6 +257,8 @@ type TypeLook = {
   label_weight_g?: number
   cost_per_kg?: string | null
   insert?: string | null
+  lead_time_days?: number | null
+  safety_margin_days?: number | null
 }
 
 function spoolType(look: TypeLook): S['SpoolType'] {
@@ -281,8 +283,8 @@ function spoolType(look: TypeLook): S['SpoolType'] {
     insert_type_id: look.insert ?? IT.BAMBU_REUSABLE,
     low_stock_pct: null,
     cost_per_kg: look.cost_per_kg ?? null,
-    lead_time_days: null,
-    safety_margin_days: null,
+    lead_time_days: look.lead_time_days ?? null,
+    safety_margin_days: look.safety_margin_days ?? null,
     filament_id: null,
     note: null,
     archived_at: null,
@@ -307,7 +309,8 @@ export const T = {
 function types(): S['SpoolType'][] {
   return [
     spoolType({ n: 1, code: 'BL-PLA-BASIC-JADE-WHITE', brand: B.BAMBU, material: M.PLA, subtype: ST.BASIC, colour_name: 'Jade White', rgba: '#FFFFFFFF', cost_per_kg: '15.91' }),
-    spoolType({ n: 2, code: 'BL-PETG-HF-TRANSLUCENT-ORANGE', brand: B.BAMBU, material: M.PETG, subtype: ST.HF, effect: E.TRANSLUCENT, colour_name: 'Translucent Orange', rgba: '#FF6A1380', cost_per_kg: '19.99' }),
+    // #6269 — its own lead time and safety margin: at #2's burn on 2026-11-18 it runs out on 2027-03-15, so its reorder day (120 days before) is past and it says "Reorder now".
+    spoolType({ n: 2, code: 'BL-PETG-HF-TRANSLUCENT-ORANGE', brand: B.BAMBU, material: M.PETG, subtype: ST.HF, effect: E.TRANSLUCENT, colour_name: 'Translucent Orange', rgba: '#FF6A1380', cost_per_kg: '19.99', lead_time_days: 30, safety_margin_days: 90 }),
     spoolType({ n: 3, code: 'BL-PLA-BASIC-HOT-PINK', brand: B.BAMBU, material: M.PLA, subtype: ST.BASIC, colour_name: 'Hot Pink', rgba: '#F5547CFF', cost_per_kg: '15.91' }),
     spoolType({ n: 4, code: 'BL-PLA-BASIC-BLACK', brand: B.BAMBU, material: M.PLA, subtype: ST.BASIC, colour_name: 'Black', rgba: '#000000FF', cost_per_kg: '15.91' }),
     spoolType({ n: 5, code: 'PM-PETG-CLEAR', brand: B.POLYMAKER, material: M.PETG, effect: E.CLEAR, colour_name: 'Clear', rgba: '#FFFFFF10', cost_per_kg: '21.99', insert: IT.CARDBOARD }),

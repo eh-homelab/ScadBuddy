@@ -7,7 +7,8 @@
  */
 import type { Spool } from '../../api/filament'
 
-export type SpoolsView = 'table' | 'cards'
+/** `forecast` (#6269): each shown spool's burn and empty day, then the types to reorder. */
+export type SpoolsView = 'table' | 'cards' | 'forecast'
 export type SpoolsStatus = 'active' | 'archived' | 'all'
 export type SpoolsGroup = 'none' | 'material' | 'brand' | 'type' | 'location'
 
@@ -80,6 +81,7 @@ const NAMES = [
   ['location', 'location'],
 ] as const
 const GROUPS: readonly SpoolsGroup[] = ['material', 'brand', 'type', 'location']
+const VIEWS: readonly SpoolsView[] = ['table', 'cards', 'forecast']
 
 function isColumn(value: string): value is ColumnId {
   return (COLUMN_IDS as readonly string[]).includes(value)
@@ -97,7 +99,7 @@ export function readQuery(params: URLSearchParams, columns: ColumnId[] = DEFAULT
   const group = params.get('group') as SpoolsGroup | null
   const cols = params.get('cols')
   const q: SpoolsQuery = {
-    view: params.get('view') === 'cards' ? 'cards' : 'table',
+    view: VIEWS.find((one) => one === params.get('view')) ?? 'table',
     status: status === 'archived' || status === 'all' ? status : 'active',
     columns: cols === null ? columns : cols.split(',').filter(isColumn),
     sort: validSort(params.get('sort')) ?? 'number',
