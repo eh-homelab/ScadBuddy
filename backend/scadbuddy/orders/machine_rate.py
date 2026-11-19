@@ -33,13 +33,15 @@ import asyncio
 import json
 import logging
 import math
+import time
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal, Self
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
@@ -223,6 +225,32 @@ IMPORTED_BY = "bambuddy"
 INT32_MIN, INT32_MAX = -(2**31), 2**31 - 1
 #: The least ``hours_at_maintenance`` that rounds to 1e9, past ``numeric(10, 1)``.
 HOURS_AT_LIMIT = 999_999_999.95
+#: #6663 review: the seconds the housekeeping sweep (:meth:`MachineRates.read_logs`) may
+#: spend reading logs, well inside its activity's start-to-close
+#: (`workflows.housekeeping.MAINTENANCE_IMPORT_TIMEOUT`, 10 min). It starts no printer
+#: past it and cuts a read that runs past it; the printers left wait for the next tick.
+READ_LOGS_BUDGET = 7 * 60.0
+
+
+def storable_task(name: str) -> bool:
+    """Whether a Bambuddy task name fits ``printer_maintenance_events.task`` (``CHECK
+    (length(task) BETWEEN 1 AND 100)``) and can be sent as text: no NUL, and UTF-8 (a
+    JSON reply can hold a lone surrogate). A row of any other name is skipped."""
+    if not 1 <= len(name) <= 100 or "\x00" in name:
+        return False
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def storable_notes(notes: str | None) -> str | None:
+    """A Bambuddy note as ``notes`` can keep it: its NULs dropped, a lone surrogate as
+    ``?``, then cut to `NOTES_MAX` (``CHECK (length(notes) <= 1000)``)."""
+    if notes is None:
+        return None
+    return notes.replace("\x00", "").encode(errors="replace").decode()[:NOTES_MAX]
 
 
 class MachineRateEvent(BaseModel):
@@ -1252,7 +1280,8 @@ class MachineRateStore:
         its ``bambuddy:<history id>`` source (§3.7, §4), and the read stamped
         (``events_read_at``), in one transaction under the printer's event lock. A row
         read again, or whose source a ScadBuddy event holds, writes nothing, and one past
-        the columns' bounds (its history id or its counter) is skipped. How many it
+        the columns' bounds (its history id, its counter or its task name,
+        `storable_task`) is skipped; a note is kept as `storable_notes` gives it. How many it
         wrote; None, writing nothing, once the printer no longer links
         ``bambuddy_printer_id`` (unlinked, or linked to another since the read began)."""
         key = printer_uuid(printer)
@@ -1273,12 +1302,13 @@ class MachineRateStore:
                 return None
             for task, row in done:
                 if (
-                    not INT32_MIN <= row.history_id <= INT32_MAX
+                    not storable_task(task)
+                    or not INT32_MIN <= row.history_id <= INT32_MAX
                     or not math.isfinite(row.hours_at)
                     or row.hours_at >= HOURS_AT_LIMIT
                 ):
-                    # Past the columns' bounds (`bambuddy_history_id integer`, `hours_at
-                    # numeric(10, 1)`), or no number: skipped, as a long task name is.
+                    # Past the columns' bounds (`task`'s length, `bambuddy_history_id
+                    # integer`, `hours_at numeric(10, 1)`), or no number or text: skipped.
                     continue
                 hours: Decimal | None = None
                 if row.hours_at >= 0:
@@ -1299,7 +1329,7 @@ class MachineRateStore:
                         row.at,
                         hours,
                         None if hours is None else "bambuddy",
-                        None if row.notes is None else row.notes[:NOTES_MAX],
+                        storable_notes(row.notes),
                         row.history_id,
                         source,
                         IMPORTED_BY,
@@ -1680,8 +1710,8 @@ UNANSWERED = (ApiError, NotLinkedError, ValidationError, json.JSONDecodeError, U
 
 
 #: How a read of a printer's Bambuddy log ended: ``read`` and kept; ``unanswered`` (the
-#: task list or the log could not be read); ``unlinked`` (the printer no longer links the
-#: Bambuddy printer read, so nothing was kept).
+#: task list or the log could not be read, or the store refused the log); ``unlinked``
+#: (the printer no longer links the Bambuddy printer read, so nothing was kept).
 LogRead = Literal["read", "unanswered", "unlinked"]
 
 
@@ -1805,7 +1835,7 @@ class MachineRates:
         assert row.bambuddy_printer_id is not None
         items: dict[int, str] = {}
         for task in tasks:
-            if task.item_id is not None and len(items) < MAX_ROWS and len(task.task) <= 100:
+            if task.item_id is not None and len(items) < MAX_ROWS and storable_task(task.task):
                 items[task.item_id] = task.task
         try:
             logs = await self.integrations.maintenance_history(list(items))
@@ -1822,9 +1852,19 @@ class MachineRates:
             if item in items
             for entry in entries
         ]
-        written = await asyncio.to_thread(
-            self.store.import_events, row.id, row.bambuddy_printer_id, done
-        )
+        try:
+            written = await asyncio.to_thread(
+                self.store.import_events, row.id, row.bambuddy_printer_id, done
+            )
+        except (psycopg.DataError, psycopg.IntegrityError):
+            # A row the bounds checks in `import_events` miss: the stored events price the
+            # rate, and the view, the button and the sweep never fail on it.
+            logger.exception(
+                "Bambuddy's maintenance log could not be kept; the stored events price the"
+                " machine rate",
+                extra={"printer": row.id},
+            )
+            return "unanswered"
         if written is None:
             return "unlinked"
         if written:
@@ -1840,19 +1880,31 @@ class MachineRates:
         :meth:`view`, through the same :meth:`_priced`."""
         return (await self._priced(row, live=True, read_log=True)).log
 
-    async def read_logs(self) -> tuple[int, int]:
+    async def read_logs(self, *, clock: Callable[[], float] = time.monotonic) -> tuple[int, int]:
         """The housekeeping sweep (§3.7): the log of every printer linked to Bambuddy
         with a profile, one after another through :meth:`read_log`. Each fails alone: any
         error is logged and counted, and the next printer is read. How many were read and
-        how many failed; a printer unlinked during its read is neither."""
+        how many failed; a printer unlinked during its read is neither. Bounded by
+        `READ_LOGS_BUDGET` on ``clock``: no printer starts past it, and a read still
+        running then is cut (a write already sent still commits); those printers are
+        neither read nor failed, logged, and left for the next tick."""
         if not self.integrations.linked:
             return 0, 0
         read = failed = 0
-        for row in await asyncio.to_thread(self.printers.list):
-            if row.bambuddy_printer_id is None:
-                continue
+        rows = await asyncio.to_thread(self.printers.list)
+        linked = [row for row in rows if row.bambuddy_printer_id is not None]
+        deadline = clock() + READ_LOGS_BUDGET
+        for index, row in enumerate(linked):
+            left = deadline - clock()
+            if left <= 0:
+                self._past_deadline(len(linked) - index)
+                break
             try:
-                log = await self.read_log(row)
+                async with asyncio.timeout(left):
+                    log = await self.read_log(row)
+            except TimeoutError:
+                self._past_deadline(len(linked) - index)
+                break
             except Exception:
                 logger.exception(
                     "a printer's maintenance log could not be imported",
@@ -1865,6 +1917,14 @@ class MachineRates:
             elif log == "unanswered":
                 failed += 1
         return read, failed
+
+    @staticmethod
+    def _past_deadline(skipped: int) -> None:
+        logger.warning(
+            "the maintenance log sweep reached its deadline; the printers left are read on"
+            " the next tick",
+            extra={"skipped": skipped, "budget_s": READ_LOGS_BUDGET},
+        )
 
     def stored_rates(self) -> dict[str, str]:
         """Every profiled printer's rate from its stored intervals, by registry id: no
@@ -1941,6 +2001,10 @@ class MachineRates:
         )
         for row in self.printers.list():
             money.printer_rates.setdefault(row.id, book)
+            # A serial already in the maps (`_stored_rates`, read before this list: after a
+            # merge or a serial change between the two reads, another row's) keeps that
+            # profiled row's rate, actuals and confidence; this row adds none of its own.
+            # So a serial's basis and confidence are always those of the rate it reads.
             money.serial_rates.setdefault(row.serial, money.printer_rates[row.id])
             if row.id in stored and row.serial not in stored_by_serial:
                 money.serial_actuals[row.serial] = stored[row.id].actuals
@@ -1986,11 +2050,14 @@ class MachineRates:
         reads its Bambuddy log after the live task read (§3.7); one that cannot be read
         keeps the stored events, unless ``require_log`` (the "Read from Bambuddy" button):
         then a refusal says why (409 ``not_linked``, also for a printer unlinked during the
-        read, 409 ``no_machine_rate``, 503 ``log_unavailable``)."""
+        read or with no Bambuddy configured, 409 ``no_machine_rate``, 503
+        ``log_unavailable``, also for a log the store refused)."""
         row = await asyncio.to_thread(self.printers.get, printer)
         if row is None:
             return None
-        if require_log and row.bambuddy_printer_id is None:
+        if require_log and (row.bambuddy_printer_id is None or not self.integrations.linked):
+            # A row that still names a Bambuddy printer while no Bambuddy is configured
+            # has no log to read either: 409, not 503 ``log_unavailable``.
             raise refusal(
                 409, "not_linked", "The printer is not linked to Bambuddy: it has no log to read."
             )

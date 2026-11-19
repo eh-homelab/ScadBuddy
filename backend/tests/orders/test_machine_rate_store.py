@@ -4,6 +4,7 @@ not answer, and the printer a quote is priced for."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import uuid
@@ -13,14 +14,21 @@ from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
+import psycopg
 import pytest
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
-from scadbuddy.orders.integrations import MaintenanceDone, MaintenanceTask, OrderIntegrations
+from scadbuddy.orders.integrations import (
+    NOT_LINKED,
+    MaintenanceDone,
+    MaintenanceTask,
+    OrderIntegrations,
+)
 from scadbuddy.orders.machine_rate import (
     PROBLEM,
+    READ_LOGS_BUDGET,
     CostProfile,
     EventFieldError,
     Events,
@@ -1402,7 +1410,8 @@ def test_a_row_past_the_columns_bounds_is_skipped(
     store: MachineRateStore, printers: PrinterStore
 ) -> None:
     """#6663 review: a counter of 1e9 h or more (past ``numeric(10,1)``), a history id
-    past ``integer``, or a counter that is no number is skipped, as a long task name is,
+    past ``integer``, a counter that is no number, or a task name that is empty, too long,
+    holds a NUL or is not UTF-8 is skipped; a note's NULs and lone surrogates are dropped;
     and the rest of the log is kept."""
     printer = linked_printer(printers)
     store.replace(printer.id, PLATE_INPUTS)
@@ -1416,14 +1425,22 @@ def test_a_row_past_the_columns_bounds_is_skipped(
             PLATE_LOG[4].model_copy(update={"history_id": 2**31}),
             PLATE_LOG[4].model_copy(update={"history_id": -(2**31) - 1}),
             PLATE_LOG[4].model_copy(update={"hours_at": 999_999_999.9}),
+            PLATE_LOG[0].model_copy(update={"history_id": 41, "notes": "wiped\x00 dry"}),
+            PLATE_LOG[0].model_copy(update={"history_id": 42, "notes": "odd \ud800 byte"}),
         )
     ]
-    assert store.import_events(printer.id, 7, rows) == 2
+    rows += [
+        (task, PLATE_LOG[0].model_copy(update={"history_id": hid}))
+        for hid, task in ((43, ""), (44, "x" * 101), (45, "Clean\x00Plate"), (46, "\udc80"))
+    ]
+    assert store.import_events(printer.id, 7, rows) == 4
     by_id = {e.bambuddy_history_id: e for e in store.list_events(printer.id).events}
-    assert set(by_id) == {36, 1}
+    assert set(by_id) == {36, 1, 41, 42}
     # A counter below 0 is no reading, however far below.
     assert (by_id[36].hours_at, by_id[36].hours_source) == (None, None)
     assert by_id[1].hours_at == "999999999.9"
+    assert by_id[41].notes == "wiped dry"
+    assert by_id[42].notes == "odd ? byte"
     assert store.stored(printer.id).events_read_at is not None
 
 
@@ -1460,3 +1477,123 @@ async def test_an_unlink_during_the_read_is_not_linked(
     assert (raised.value.status, raised.value.type) == (409, PROBLEM + "not_linked")
     stored = store.stored(printer.id)
     assert (stored.logged, stored.events_read_at) == ([], None)
+
+
+async def test_a_store_error_while_keeping_the_log_keeps_the_stored_events(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6663 review: a row the guards miss that the database refuses is no 500. The read
+    is ``unanswered``, the stored events and ``events_read_at`` stay, and it is logged."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    bambuddy = FakeBambuddy([PLATE], history={5: PLATE_LOG[2:]})
+    assert await rates(store, printers, settings_store, bambuddy).read_log(printer) == "read"
+    read_at = store.stored(printer.id).events_read_at
+
+    def refused(*_: object) -> int | None:
+        raise psycopg.errors.CheckViolation("a row past a column's CHECK")
+
+    monkeypatch.setattr(store, "import_events", refused)
+    machine = rates(store, printers, settings_store, FakeBambuddy([PLATE], history={5: PLATE_LOG}))
+    with caplog.at_level("ERROR", logger="scadbuddy.orders.machine_rate"):
+        assert await machine.read_log(printer) == "unanswered"
+    assert any("could not be kept" in r.getMessage() for r in caplog.records)
+    view = await machine.view(printer.id)
+    assert view is not None
+    assert view.actuals.events_read_at == read_at
+    with pytest.raises(ApiError) as raised:
+        await machine.view(printer.id, require_log=True)
+    assert (raised.value.status, raised.value.type) == (503, PROBLEM + "log_unavailable")
+    kept = store.stored(printer.id)
+    assert kept.counts == {("task", "Clean Build Plate"): 3}
+    assert kept.events_read_at == read_at
+
+
+async def test_the_button_with_no_bambuddy_is_not_linked(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """#6663 review: a printer row that still links a Bambuddy printer while Bambuddy is
+    not configured answers 409 ``not_linked``, not 503 ``log_unavailable``."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    machine = MachineRates(store, printers, NOT_LINKED, settings_store)
+    with pytest.raises(ApiError) as raised:
+        await machine.view(printer.id, require_log=True)
+    assert (raised.value.status, raised.value.type) == (409, PROBLEM + "not_linked")
+    # The plain view still answers, from the stored events.
+    assert await machine.view(printer.id) is not None
+
+
+class Clock:
+    """A clock only the fake Bambuddy's reads move."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_the_sweep_stops_at_its_deadline_and_leaves_the_rest_for_the_next_tick(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6663 review: the sweep starts no printer past `READ_LOGS_BUDGET`, so a slow
+    Bambuddy cannot push the activity past its start-to-close; the printers left are
+    logged and read on the next tick."""
+    for bid, serial in ((7, "01P00A000000007"), (8, "01P00A000000008"), (9, "01P00A000000009")):
+        row = printers.ensure_bambuddy(bid, serial=serial, name=f"P{bid}", model="P1S")
+        store.replace(row.id, PLATE_INPUTS)
+    clock = Clock()
+
+    class Slow(FakeBambuddy):
+        async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+            clock.now += READ_LOGS_BUDGET * 0.6
+            return await super().maintenance_tasks(printer_id)
+
+    slow = Slow([PLATE], history={5: PLATE_LOG})
+    with caplog.at_level("WARNING", logger="scadbuddy.orders.machine_rate"):
+        assert await rates(store, printers, settings_store, slow).read_logs(clock=clock) == (2, 0)
+    assert len(slow.asked) == 2
+    skipped = [r for r in caplog.records if "deadline" in r.getMessage()]
+    assert [getattr(r, "skipped", None) for r in skipped] == [1]
+
+    # The next tick reads them all.
+    fast = FakeBambuddy([PLATE], history={5: PLATE_LOG})
+    assert await rates(store, printers, settings_store, fast).read_logs(clock=Clock()) == (3, 0)
+
+
+async def test_a_printer_whose_read_runs_past_the_deadline_is_cut_and_left(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6663 review: one printer's read is bounded by what is left of the budget too, so
+    a Bambuddy that never answers ends the sweep at the deadline, not the activity's
+    limit. The printer keeps its stored events."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    # The sweep starts at 0 and reaches the printer with a hundredth of a second left.
+    readings = iter([0.0, READ_LOGS_BUDGET - 0.01])
+
+    class Hung(FakeBambuddy):
+        async def maintenance_history(
+            self, item_ids: Sequence[int]
+        ) -> dict[int, list[MaintenanceDone]]:
+            await asyncio.Event().wait()
+            raise AssertionError("never answers")
+
+    hung = Hung([PLATE], history={5: PLATE_LOG})
+    machine = rates(store, printers, settings_store, hung)
+    with caplog.at_level("WARNING", logger="scadbuddy.orders.machine_rate"):
+        assert await machine.read_logs(clock=lambda: next(readings)) == (0, 0)
+    skipped = [r for r in caplog.records if "deadline" in r.getMessage()]
+    assert [getattr(r, "skipped", None) for r in skipped] == [1]
+    assert store.stored(printer.id).events_read_at is None

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { z } from 'zod'
 import { setupServer } from 'msw/node'
@@ -1623,6 +1624,57 @@ describe('machine rate event tools (#5774)', () => {
       'minutes',
     )
     await expect(add.execute({ printer: PRINTER, kind: 'task', name: 'Lubricate rods', cost: '1' }, ctx())).rejects.toThrow('cost')
+  })
+
+  it('refuses exactly the shapes the backend rule refuses, in its words (#6667 review)', async () => {
+    // The tool's kind checks copy `MachineRateEventCreate._fields`. The rule as it reads
+    // now is pinned here, so a change to it fails this test until the tool's copy (and
+    // the shapes below) change with it.
+    const source = readFileSync(new URL('../../backend/scadbuddy/orders/machine_rate.py', import.meta.url), 'utf8')
+    const model = source.slice(source.indexOf('class MachineRateEventCreate('))
+    const rule = / {4}def _fields\(self\) -> Self:\n([\s\S]*?)\n {8}return self\n/.exec(model)?.[1]
+    expect(rule?.split('\n').map((line) => line.trim())).toEqual([
+      'if self.kind == "part":',
+      'if self.cost is None:',
+      'raise ValueError("a replaced part needs its cost")',
+      'if self.minutes is not None or self.consumables is not None:',
+      'raise ValueError("a replaced part takes no minutes or consumables")',
+      'elif self.cost is not None or self.hours_used is not None:',
+      'raise ValueError("a task takes no cost or hours_used")',
+    ])
+    const sent: unknown[] = []
+    server.use(
+      http.post(events, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(LOGGED, { status: 201 })
+      }),
+    )
+    const part = { printer: PRINTER, kind: 'part', name: 'Nozzle' } as const
+    const task = { printer: PRINTER, kind: 'task', name: 'Lubricate rods' } as const
+    // Each shape the rule refuses, with the rule's own message: the tool refuses it too,
+    // with the same words, and sends nothing.
+    const refused: [Record<string, unknown>, string][] = [
+      [part, 'a replaced part needs its cost'],
+      [{ ...part, hours_used: '640' }, 'a replaced part needs its cost'],
+      [{ ...part, cost: '20', minutes: '5' }, 'a replaced part takes no minutes or consumables'],
+      [{ ...part, cost: '20', consumables: '1' }, 'a replaced part takes no minutes or consumables'],
+      [{ ...task, cost: '1' }, 'a task takes no cost or hours_used'],
+      [{ ...task, hours_used: '640' }, 'a task takes no cost or hours_used'],
+    ]
+    const add = tool('machine_rate_event_add')
+    for (const [args, message] of refused) {
+      await expect(add.execute(args, ctx())).rejects.toThrow(new ToolError(message))
+    }
+    expect(sent).toEqual([])
+    // Each shape the rule lets through reaches the backend.
+    const allowed: Record<string, unknown>[] = [
+      { ...part, cost: '20' },
+      { ...part, cost: '20', hours_used: '640' },
+      task,
+      { ...task, minutes: '15', consumables: '0.5' },
+    ]
+    for (const args of allowed) await add.execute(args, ctx())
+    expect(sent).toHaveLength(allowed.length)
   })
 
   it('corrects the fields given, a null clearing one', async () => {
