@@ -595,8 +595,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `support_interface_filament` among them; the supports option passes only enable, type and
   build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
   `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
-  and scale, and its tower unless the target's extruders cannot reach it
-  (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  and scale, and its tower unless the target's extruders cannot reach it or it stands on
+  its plate's objects' box, #3770 (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
   slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
   draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in

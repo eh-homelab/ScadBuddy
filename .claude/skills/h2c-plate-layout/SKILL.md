@@ -9,7 +9,8 @@ ScadBuddy renders a model on a generic 256x256 plate unless the output came thro
 an arranged, printer-aware pipeline. Those files carry `print_settings_id: ScadBuddy`,
 a 256x256 `printable_area`, the prime tower wherever the default put it (often
 `98, 5`, under the objects), and every build item translated to the plate centre
-`128, 128`. ScadBuddy's send step relocates a tower only when a nozzle cannot reach it;
+`128, 128`. ScadBuddy's send step relocates a tower only when a nozzle cannot reach it or it
+stands on its plate's objects' box (#3770);
 it keeps an author layout, one whose `print_settings_id` names the H2C process, exactly
 as written. So for the H2C the layout is yours to make, and `scripts/layout_h2c.py` is
 the tool: `report` measures a file, `move` rewrites it.
