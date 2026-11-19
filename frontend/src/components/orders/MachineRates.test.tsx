@@ -557,6 +557,25 @@ describe('MachineRates actuals follow-up (#6665)', () => {
     expect(await within(panel).findByText('This printer is no longer linked to Bambuddy, so there is no maintenance log to read.')).toBeInTheDocument()
   })
 
+  it('drops "did not answer" once the page reads Bambuddy again', async () => {
+    await linkedNozzle()
+    setEventsReadAt(LINKED, '2026-11-18T14:02:00')
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    // The import times out, and the view read right after it gets an answer.
+    server.use(
+      http.post('/api/v1/printers/:id/machine-rate/import', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/machine-rate/log_unavailable', title: 'log_unavailable', status: 503, detail: 'Bambuddy did not answer.' },
+          { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    await waitFor(() => expect(within(panel).getByTestId('events-read')).toHaveTextContent('Last read just now'))
+    expect(within(panel).queryByText(/Bambuddy did not answer\. The rate uses/)).not.toBeInTheDocument()
+  })
+
   it('says when the page could not read Bambuddy, and which read the rate uses', async () => {
     await linkedNozzle()
     const real = await api.machineRate(LINKED)

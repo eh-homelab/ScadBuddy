@@ -159,6 +159,13 @@ export function EventList({
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderError, setOlderError] = useState<string | null>(null)
   const events = row?.events ?? []
+  // An event logged or read from Bambuddy changes the window: the pages read before it may miss it.
+  const windowKey = events.map((event) => event.id).join(',')
+  const [pagedFor, setPagedFor] = useState(windowKey)
+  if (pagedFor !== windowKey) {
+    setPagedFor(windowKey)
+    setOlder(null)
+  }
   const inWindow = new Set(events.map((event) => event.id))
   const past = (older?.events ?? []).filter((event) => !inWindow.has(event.id))
   const shown = [...events, ...past]
@@ -642,7 +649,8 @@ const READ_REFUSALS: Record<string, string> = {
   no_machine_rate: 'Save the machine rate first, then read its maintenance from Bambuddy.',
 }
 
-type ReadFailure = { kind: 'unanswered' } | { kind: 'refused'; text: string }
+/** `unanswered` keeps when the failed read started: a log read the view shows after that time means Bambuddy answered since. */
+type ReadFailure = { kind: 'unanswered'; since: number } | { kind: 'refused'; text: string }
 
 /**
  * #6665 (spec §5, §9) — "Read from Bambuddy" beside the window field on a linked printer:
@@ -669,6 +677,7 @@ export function BambuddyRead({
   const now = useNow(true, 30_000)
 
   async function read() {
+    const started = Date.now()
     setBusy(true)
     setFailure(null)
     try {
@@ -677,7 +686,7 @@ export function BambuddyRead({
     } catch (err) {
       const code = err instanceof ApiError ? ((err.problem.type ?? '').split('/').pop() ?? '') : ''
       if (code === 'log_unavailable') {
-        setFailure({ kind: 'unanswered' })
+        setFailure({ kind: 'unanswered', since: started })
         onUnanswered()
       } else setFailure({ kind: 'refused', text: READ_REFUSALS[code] ?? refusalText(err) })
     } finally {
@@ -686,6 +695,9 @@ export function BambuddyRead({
   }
 
   const readMs = readAt ? Date.parse(readAt) : NaN
+  // The view read after a failed import reads the log too: a read time after the failed one
+  // started means Bambuddy answered it, so the warning goes.
+  const unanswered = failure?.kind === 'unanswered' && (Number.isNaN(readMs) || readMs < failure.since)
   return (
     <div className="flex flex-col gap-1 text-xs">
       <div className="flex flex-wrap items-center gap-2">
@@ -711,8 +723,8 @@ export function BambuddyRead({
           {failure.text}
         </p>
       )}
-      {(failure?.kind === 'unanswered' || (stale && !failure)) && (
-        <p role={failure ? 'alert' : undefined} className="text-[13px] text-warn">
+      {(unanswered || (stale && !failure)) && (
+        <p role={unanswered ? 'alert' : undefined} className="text-[13px] text-warn">
           {unansweredText(readAt, now)}
         </p>
       )}

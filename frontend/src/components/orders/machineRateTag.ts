@@ -39,6 +39,12 @@ export function leastBacked(rate: MachineRateBreakdown): string | null {
     ...(rate.maintenance ?? []).filter((m) => m.priced_by === 'actual' && m.counted).map((m) => ({ name: m.task, have: m.have, need: m.need, confidence: m.confidence, unit: 'gaps' })),
   ]
   if (rows.length === 0) return null
-  const least = rows.reduce((low, row) => ((row.confidence ?? 0) < (low.confidence ?? 0) ? row : low))
+  // Least backed: the lowest confidence, then the smallest share of its window logged.
+  const share = (row: { have: number; need?: number | null }) => (row.need ? row.have / row.need : 1)
+  const least = rows.reduce((low, row) => {
+    const a = row.confidence ?? 0
+    const b = low.confidence ?? 0
+    return a < b || (a === b && share(row) < share(low)) ? row : low
+  })
   return `${least.name}: ${Math.min(least.have, least.need ?? least.have)} of ${least.need ?? rate.actuals_window ?? least.have} ${least.unit} logged`
 }

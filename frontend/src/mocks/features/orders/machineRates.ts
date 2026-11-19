@@ -516,7 +516,8 @@ export const handlers = [
     const url = new URL(request.url)
     const kind = url.searchParams.get('kind')
     const name = url.searchParams.get('name')
-    // Newest first by time, then id, a page at a time (`MachineRateStore.list_events`).
+    // Newest first by time, then id, a page at a time (`MachineRateStore.list_events`). The ids are
+    // zero-padded (`evt-0001`), so comparing them as text orders them as numbers.
     const order = (e: MachineRateEvent) => `${e.at}|${e.id}`
     const cursor = url.searchParams.get('cursor')
     const limit = Number(url.searchParams.get('limit') ?? 50)
