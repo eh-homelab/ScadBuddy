@@ -38,7 +38,7 @@ export function SpoolMetricsPanel({ history, gramsLeft, createdAt }: { history: 
   const [now] = useState(() => Date.now())
   const age = (now - Date.parse(createdAt)) / DAY_MS
   const aged = Math.max(1, Math.floor(age))
-  const burnOver = age < window ? `Since it was opened ${aged} ${aged === 1 ? 'day' : 'days'} ago` : `Over the last ${window} days`
+  const burnOver = age < window ? `Since it was added ${aged} ${aged === 1 ? 'day' : 'days'} ago` : `Over the last ${window} days`
   const tiles: Tile[] = [
     {
       label: 'Used',

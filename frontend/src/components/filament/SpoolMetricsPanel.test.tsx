@@ -51,7 +51,7 @@ describe('the spool metrics panel', () => {
 
   it('says the burn is since it was opened for a spool younger than the window, as metrics.burn divides by its age', () => {
     renderPage(<SpoolMetricsPanel history={history()} gramsLeft={820} createdAt="2026-11-01T09:00:00Z" />)
-    expect(tile('Burn rate')).toHaveTextContent('Since it was opened 17 days ago')
+    expect(tile('Burn rate')).toHaveTextContent('Since it was added 17 days ago')
     expect(tile('Burn rate')).not.toHaveTextContent('Over the last')
   })
 })

@@ -459,7 +459,7 @@ describe('the spool page\'s history (#6269)', () => {
     const metrics = within(history).getByLabelText('Spool metrics')
     for (const name of ['Burn rate', 'Empty around', 'Waste', 'AMS error']) expect(within(metrics).getByText(name)).toBeInTheDocument()
     expect(within(metrics).getByText('Burn rate').parentElement).toHaveTextContent('7 g a day')
-    expect(within(metrics).getByText('Burn rate').parentElement).toHaveTextContent('Since it was opened 17 days ago')
+    expect(within(metrics).getByText('Burn rate').parentElement).toHaveTextContent('Since it was added 17 days ago')
     expect(within(metrics).getByText('Empty around').parentElement).toHaveTextContent(new Date('2027-03-15T00:00:00Z').toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' }))
     expect(within(metrics).getByText('30 g')).toBeInTheDocument()
     expect(within(metrics).getByText('±20 g')).toBeInTheDocument()
