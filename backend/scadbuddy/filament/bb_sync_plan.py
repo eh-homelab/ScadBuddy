@@ -5,9 +5,10 @@ the field hashes, "newer change wins", and `plan`, which turns one `BbSnapshot` 
 
 The print worker reads Bambuddy and posts the snapshot to the plan route (Task 6), which
 calls `plan`. `plan` reads SB, compares each item with what Bambuddy holds, and writes
-nothing to SB but the create intents (Decision 10) and the error row of a rename onto a
-name Bambuddy already holds (R-T4-8): the writes' answers reach SB through ``results``
-(Task 5) only.
+nothing to SB but sync bookkeeping: the create intents (Decision 10) and their expiry
+(R-T4-20), the error row of a rename onto a name Bambuddy already holds (R-T4-8), and the
+seen copy of a link that has none (R-T4-22). The writes' answers reach SB through
+``results`` (Task 5) only.
 
 Every compare and every hash of a Bambuddy value goes through `seen_row`/`seen_value`
 (Task 3, R-T3-11), so both sides are in one JSON form; the archive state compares as
@@ -26,6 +27,7 @@ from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.models import as_utc
@@ -454,19 +456,24 @@ def decide(
     sb_at: datetime,
     bb_at: datetime | None,
     direction: SyncDirection,
+    seen_at: datetime | None = None,
 ) -> bool:
     """Whether to push one field (Decision 8), all values in the compare form: never
     when SB's value is Bambuddy's; under ``sb_to_bb`` always otherwise; under ``two_way``
     when Bambuddy's value is still what SB last saw there, or SB's change is strictly
     after BB's ``updated_at`` (a tie goes to Bambuddy, as on the pull). A BB row with no
     ``updated_at`` has no change time, so SB's wins, unless SB never saw BB's value
-    (`UNSEEN`): then only a BB time SB's change is strictly after lets it win (R-T4-4)."""
+    (`UNSEEN`): then only a BB time SB's change is strictly after lets it win (R-T4-4).
+    With no BB time, a field a seeded seen copy left out (``seen_at`` is that copy's
+    ``bb_seen_at``) waits for an SB change strictly after ``seen_at`` (R-T4-22)."""
     if sb == bb_now or not pushes(direction):
         return False
     if direction == "sb_to_bb":
         return True
     if bb_seen is UNSEEN:
-        return bb_at is not None and sb_at > bb_at
+        if bb_at is not None:
+            return sb_at > bb_at
+        return seen_at is not None and sb_at > seen_at
     if bb_now == bb_seen or bb_at is None:
         return True
     return sb_at > bb_at
@@ -582,6 +589,8 @@ class _Planner:
     unmapped_k: int = 0
     #: The rows whose create (or adopt) is planned in this round.
     creating: set[tuple[str, UUID]] = field(default_factory=set)
+    #: The archived rows of the kinds `rows` plans (R-T4-19).
+    archived: set[tuple[str, UUID]] = field(default_factory=set)
 
     @property
     def full(self) -> bool:
@@ -650,6 +659,22 @@ class _Planner:
         key = (ref.kind, ref.sb_id)
         return key not in self.errors and (key in self.creating or key in self.intents)
 
+    def expire(self, kind: Kind, sb_id: UUID) -> None:
+        """R-T4-20: close an intent that can no longer be answered (its row is archived,
+        or a full pass newer than it found no row it made). The item is planned again as
+        a fresh create when it is eligible. The plan keeps the intent in memory for this
+        round, so a spool naming an archived row counts ``blocked`` once (R-T4-19)."""
+        self.conn.execute(
+            "DELETE FROM filament_bb_creates WHERE kind = %s AND sb_id = %s", (kind, sb_id)
+        )
+
+    def seed(self, table: str, sb_id: UUID, seen: dict[str, Any]) -> None:
+        """R-T4-22: store the seen copy of a linked row that has none, at ``snap.read_at``."""
+        self.conn.execute(
+            f"UPDATE {table} SET bb_seen = %s, bb_seen_at = %s WHERE id = %s AND bb_seen IS NULL",
+            (Jsonb(seen), self.snap.read_at, sb_id),
+        )
+
     # -- fields ----------------------------------------------------------------------
 
     def changed(
@@ -661,12 +686,14 @@ class _Planner:
         direction: Any,
         sb_at: Any,
         bb_at: datetime | None,
+        seen_at: datetime | None = None,
     ) -> list[str]:
         """The fields to push of one linked item, ``desired`` in the compare form.
         ``direction`` and ``sb_at`` are a field's direction and SB change time, each a
         callable of the field (the change time only asked for when ``two_way`` needs
-        it). A field ``bb_now`` does not carry is compared by its hash alone; an
-        event-driven pass skips a field whose hash matches what was pushed (Decision 7)."""
+        it). ``seen_at`` is ``bb_seen_at`` when ``bb_seen`` is set. A field ``bb_now``
+        does not carry is compared by its hash alone; an event-driven pass skips a field
+        whose hash matches what was pushed (Decision 7)."""
         out = []
         for name, value in desired.items():
             digest = field_hash(value)
@@ -679,14 +706,23 @@ class _Planner:
             now = bb_now[name]
             seen = UNSEEN if bb_seen is None else bb_seen.get(name, UNSEEN)
             way: SyncDirection = direction(name)
+            seeded = None if bb_seen is None else seen_at
             needs_time = (
                 way == "two_way"
                 and value != now
                 and (seen is UNSEEN or now != seen)
-                and bb_at is not None
+                and (bb_at is not None or (seen is UNSEEN and seeded is not None))
             )
             when = sb_at(name) if needs_time else datetime.min.replace(tzinfo=UTC)
-            if decide(sb=value, bb_now=now, bb_seen=seen, sb_at=when, bb_at=bb_at, direction=way):
+            if decide(
+                sb=value,
+                bb_now=now,
+                bb_seen=seen,
+                sb_at=when,
+                bb_at=bb_at,
+                direction=way,
+                seen_at=seeded,
+            ):
                 out.append(name)
         return out
 
@@ -704,7 +740,10 @@ class _Planner:
         BB's listing carries; the rest compare by hash), an unlinked unarchived one's
         create, or the adoption of BB's unlinked row of the same upper case name (a lost
         answer's, Decision 10, or one made in Bambuddy, which a create would clash with:
-        its 409). With the listing not read (``None``) nothing is written."""
+        its 409). With the listing not read (``None``) nothing is written. A full pass
+        seeds a linked item's missing seen copy (R-T4-22), and closes the intent of an
+        archived item or of a create no row matches (R-T4-20)."""
+        self.archived |= {(kind, item.sb_id) for item in items if item.archived}
         if bb_rows is None or not pushes(direction):
             return
         by_id = {row.id: row for row in bb_rows}
@@ -718,15 +757,23 @@ class _Planner:
                 row = by_id.get(item.bb_id)
                 if row is None or self.refused(kind, item.sb_id, create=False):
                     continue
-                now, at = self.bb_now(row, readable, item.seen, item.seen_at)
+                seen, seen_at = item.seen, item.seen_at
+                table = _SEEN_TABLES.get(kind)
+                if seen is None and table is not None and self.full:
+                    current, _ = self.bb_now(row, readable, None, None)
+                    seen = {n: v for n, v in current.items() if item.desired.get(n, UNSEEN) == v}
+                    seen_at = self.snap.read_at
+                    self.seed(table, item.sb_id, seen)
+                now, at = self.bb_now(row, readable, seen, seen_at)
                 names = self.changed(
                     item.desired,
                     now,
-                    item.seen,
+                    seen,
                     item.pushed,
                     lambda _f: direction,
                     lambda _f, at_=item.sb_at: at_,
                     at,
+                    seen_at,
                 )
                 if "name" in names and str(item.desired["name"]).strip().upper() in by_name:
                     self.name_taken(kind, item.sb_id)
@@ -742,15 +789,23 @@ class _Planner:
                         {n: field_hash(item.desired[n]) for n in names},
                     )
                 continue
-            if item.archived or self.refused(kind, item.sb_id, create=False):
+            if item.archived:
+                if (kind, item.sb_id) in self.intents:
+                    self.expire(kind, item.sb_id)
                 continue
-            if self.intent_state(kind, item.sb_id) == "young":
+            if self.refused(kind, item.sb_id, create=False):
+                continue
+            state = self.intent_state(kind, item.sb_id)
+            if state == "young":
                 self.deferred.add((kind, item.sb_id))
                 continue
             if self.refused(kind, item.sb_id, create=True):
                 continue
             hashes = {n: field_hash(v) for n, v in item.desired.items()}
             found = by_name.pop(item.name.strip().upper(), None)
+            if found is None and state == "old" and self.full:
+                self.expire(kind, item.sb_id)
+                del self.intents[kind, item.sb_id]
             self.creating.add((kind, item.sb_id))
             if found is not None:
                 now, _ = self.bb_now(found, readable, None, None)
@@ -819,8 +874,9 @@ class _Planner:
         """The spool's desired values with their `Pending` references settled: ``None``
         when one names a row whose create is in flight (the spool waits; ``deferred``
         when this pass read that row's listing, so a later round can clear it, else
-        ``blocked``, R-T4-1); else the fields naming a row Bambuddy will not have this
-        pass are left out (Decision 35)."""
+        ``blocked``, R-T4-1; ``blocked`` too when that row is archived, as no round plans
+        it, R-T4-19); else the fields naming a row Bambuddy will not have this pass are
+        left out (Decision 35)."""
         desired, unmapped = desired_and_unmapped(self.conn, sb_id, self.refs, self.sync)
         self.unmapped_k += unmapped
         out = {}
@@ -828,7 +884,9 @@ class _Planner:
             refs = list(_pendings(value))
             waiting = [r for r in refs if self.in_flight(r)]
             if waiting:
-                read = all(self.read(r.kind) for r in waiting)
+                read = all(
+                    self.read(r.kind) and (r.kind, r.sb_id) not in self.archived for r in waiting
+                )
                 (self.deferred if read else self.blocked).add(("spool", sb_id))
                 return None
             if not refs:
@@ -873,7 +931,12 @@ class _Planner:
         else:
             return
         now = {n: _bb_form(n, current, current_k) for n in compare if n != "filament_presets"}
-        before = None if seen is None else {n: _bb_form(n, seen, seen_k) for n in compare}
+        seen_at: datetime | None = row["bb_seen_at"]
+        if seen is None and self.full:
+            seen, seeded_k = self.seed_spool(sb_id, compare, now, current, current_k)
+            seen_k = seeded_k if seen_k is None else seen_k
+            seen_at = self.snap.read_at
+        before = None if seen is None else {n: _seen_form(n, seen, seen_k) for n in compare}
         pushed: dict[str, str] = row["pushed_fields"] or {}
         names = self.changed(
             compare,
@@ -883,6 +946,7 @@ class _Planner:
             lambda f: getattr(self.sync, _FIELD_TYPE.get(f, "spools")),
             lambda f: sb_changed_at(self.conn, sb_id, f),
             bb_at,
+            seen_at,
         )
         if "archived_at" in names:
             op: Op = "archive" if desired["archived_at"] is not None else "restore"
@@ -924,6 +988,33 @@ class _Planner:
                     cast("list[Any]", body_value(name, desired[name])),
                     {name: field_hash(compare[name])},
                 )
+
+    def seed_spool(
+        self,
+        sb_id: UUID,
+        compare: Mapping[str, Any],
+        now: Mapping[str, Any],
+        current: Mapping[str, Any],
+        current_k: Any,
+    ) -> tuple[dict[str, Any], Any]:
+        """R-T4-22: a link with no ``bb_seen`` takes Bambuddy's row from this full
+        snapshot as its seen copy, at ``snap.read_at``, in the fields whose value is SB's
+        (the K-profiles too when they agree). A field that differs stays out of it, so it
+        is `UNSEEN` and no push goes blind."""
+        seen = {
+            n: current[n]
+            for n, v in compare.items()
+            if n in current and n in now and now[n] == v and n != "k_profiles"
+        }
+        agree_k = "k_profiles" in now and now["k_profiles"] == compare["k_profiles"]
+        seen_k = json_form([k.model_dump() for k in current_k or ()]) if agree_k else None
+        self.conn.execute(
+            "UPDATE filament_bb_links SET bb_seen = %s, bb_seen_at = %s,"
+            " bb_k_profiles = coalesce(bb_k_profiles, %s)"
+            " WHERE spool_id = %s AND bb_seen IS NULL",
+            (Jsonb(seen), self.snap.read_at, None if seen_k is None else Jsonb(seen_k), sb_id),
+        )
+        return seen, seen_k
 
     def new_spool(
         self, sb_id: UUID, unlinked_bb: list[BbSpool], raw: Mapping[Any, dict[str, Any]]
@@ -968,6 +1059,9 @@ class _Planner:
                     {n: field_hash(v) for n, v in compare.items()},
                 )
                 return
+            if self.full:
+                # R-T4-20: a full pass newer than the intent found no row it made.
+                self.expire("spool", sb_id)
         hashes = {n: field_hash(compare[n]) for n in body}
         self.add(1, "spool", sb_id, "create", None, body, hashes, intent=True)
 
@@ -1018,6 +1112,14 @@ class _Planner:
         return writes
 
 
+def _seen_form(name: str, seen: Mapping[str, Any], k_profiles: Any) -> Any:
+    """What SB last saw of ``name`` in a seen copy: `UNSEEN` for a field a seeded copy left
+    out (R-T4-22), else `_bb_form`."""
+    if name != "k_profiles" and name not in seen:
+        return UNSEEN
+    return _bb_form(name, seen, k_profiles)
+
+
 def _row_form(name: str, value: Any) -> Any:
     """A BB row's value as the plan compares it: a hex colour upper case."""
     if name == "color_hex" and isinstance(value, str):
@@ -1042,6 +1144,12 @@ def _pendings(value: Any) -> Iterator[Pending]:
 
 # -- the items of their own -----------------------------------------------------------
 
+#: The tables whose rows keep a seen copy (R-T4-22); filament catalog entries keep none.
+_SEEN_TABLES: dict[str, str] = {
+    "supplier": "filament_suppliers",
+    "location": "filament_locations",
+    "insert_type": "filament_insert_types",
+}
 _SUPPLIER_FIELDS = frozenset({"name", "website", "customer_number", "note"})
 _LOCATION_FIELDS = frozenset({"name", "identifier"})
 _CATALOG_FIELDS = frozenset({"name", "weight"})

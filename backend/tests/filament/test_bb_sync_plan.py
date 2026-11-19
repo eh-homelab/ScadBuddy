@@ -33,6 +33,7 @@ from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
     LocationCreate,
     LocationKind,
+    LocationPatch,
     Material,
     SpoolCreate,
     SpoolKValueCreate,
@@ -897,3 +898,167 @@ def test_a_rename_onto_a_bambuddy_name_is_not_sent(pg_pool: PgPool) -> None:
             "SELECT kind, sb_id, error, attempts FROM filament_bb_push_errors"
         ).fetchall()
     assert [tuple(r.values()) for r in rows] == [("location", shelf.id, "name_taken", 1)]
+
+
+# -- intents that close, and seen copies that are seeded (R-T4-19, R-T4-20, R-T4-22) ------
+
+
+def _seen(pool: PgPool, table: str, key: str, sb_id: UUID) -> tuple[Any, datetime | None]:
+    with pool.connection() as conn:
+        row = conn.execute(
+            f"SELECT bb_seen, bb_seen_at FROM {table} WHERE {key} = %s",
+            (sb_id,),
+        ).fetchone()
+    assert row is not None
+    return row["bb_seen"], row["bb_seen_at"]
+
+
+@pytest.mark.parametrize("ref_kind", ["location", "insert_type"])
+def test_an_archived_reference_with_an_open_intent_stops_waiting(
+    pg_pool: PgPool, ref_kind: str
+) -> None:
+    """Re-review I-1: a pass made the reference's create and its intent, and died before
+    ``results``. Then the owner archived the reference, while a spool still names it.
+    ``rows`` never plans an archived row, so its intent never closed, and the spool was
+    ``deferred`` on every pass. Now the spool counts ``blocked`` (R-T4-19), the intent
+    expires (R-T4-20), and later passes write the spool's other fields without it."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    if ref_kind == "location":
+        ref = _place(pg_pool, f, "Shelf A")
+        _put(pg_pool, spool, ref)
+        sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+        lists: dict[str, Any] = {"locations": []}
+        table = "filament_locations"
+    else:
+        ref = uuid4()
+        with pg_pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO filament_insert_types (id, name, empty_weight_g)"
+                " VALUES (%s, 'Core X', 250)",
+                (ref,),
+            )
+            conn.execute(
+                "UPDATE filament_spools SET insert_type_id = %s WHERE id = %s", (ref, spool)
+            )
+        sync = SPOOLS
+        lists = {"catalog": []}
+        table = "filament_insert_types"
+    desired = _matching(pg_pool, spool, 50, sync)
+    row = desired | {"core_weight_catalog_id": None, "location_id": None, "color_name": "Other"}
+    _link(pg_pool, spool, 50)
+    start = datetime.now(UTC)
+    first = _plan(f, _snap([row], read_at=start - timedelta(minutes=1), **lists), sync)
+    assert first.deferred == 1
+    assert (ref_kind, ref) in _intents(pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute(f"UPDATE {table} SET archived_at = now() WHERE id = %s", (ref,))
+    passes = [
+        _plan(f, _snap([row], read_at=start + timedelta(minutes=n), **lists), sync)
+        for n in (1, 2, 3)
+    ]
+    assert [(p.deferred, p.blocked) for p in passes] == [(0, 1), (0, 0), (0, 0)]
+    assert (ref_kind, ref) not in _intents(pg_pool)
+    for later in passes[1:]:
+        (update,) = later.writes
+        assert (update.sb_id, update.op, update.body) == (spool, "update", {"color_name": None})
+
+
+def test_an_intent_that_matches_nothing_expires(pg_pool: PgPool) -> None:
+    """R-T4-20: a full pass newer than an intent finds no Bambuddy row it made: the intent
+    closes, and the item is planned again as a fresh create. An event pass keeps it."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf")))
+    spool = _spool(f, _type(f))
+    old = datetime.now(UTC) - timedelta(hours=1)
+    with pg_pool.connection() as conn:
+        for kind, sb_id in (("location", shelf.id), ("spool", spool)):
+            conn.execute(
+                "INSERT INTO filament_bb_creates (kind, sb_id, started_at) VALUES (%s, %s, %s)",
+                (kind, sb_id, old),
+            )
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    now = datetime.now(UTC)
+    event = _plan(f, _snap([], locations=[], full=False, read_at=now), sync, limit=0)
+    assert (event.writes, event.deferred) == ([], 2)
+    assert len(_intents(pg_pool)) == 2
+    full = _plan(f, _snap([], locations=[], read_at=now), sync, limit=0)
+    assert (full.writes, full.deferred) == ([], 2)
+    assert _intents(pg_pool) == []
+    again = _plan(f, _snap([], locations=[], read_at=now), sync)
+    assert [(w.kind, w.op) for w in again.writes] == [("location", "create"), ("spool", "create")]
+    with pg_pool.connection() as conn:
+        starts = [
+            r["started_at"] for r in conn.execute("SELECT started_at FROM filament_bb_creates")
+        ]
+    assert len(starts) == 2 and all(s > old for s in starts)
+
+
+def test_seeding_records_what_bambuddy_holds(pg_pool: PgPool) -> None:
+    """R-T4-22: a legacy link (no ``bb_seen``) gets its seen copy from a full pass's
+    snapshot, at ``snap.read_at``. A field that differs from SB's value is left out of
+    it, so SB's older note is not pushed over Bambuddy's; a field that agrees is in it,
+    so a later SB change of that field is pushed."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    f.spools.update(spool, SpoolPatch(note="SB's note"), actor="person")
+    two_way = SPOOLS.model_copy(update={"spools": "two_way"})
+    later = (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat()
+    row = _matching(pg_pool, spool, 50, two_way) | {"note": "BB's note", "updated_at": later}
+    _link(pg_pool, spool, 50)
+    read_at = datetime.now(UTC)
+    assert _plan(f, _snap([row], read_at=read_at), two_way).writes == []
+    seen, seen_at = _seen(pg_pool, "filament_bb_links", "spool_id", spool)
+    assert seen_at == read_at
+    assert "note" not in seen
+    assert seen["material_number"] == "GFA00-RED" and seen["color_name"] is None
+    f.spools.update(spool, SpoolPatch(colour_name="Brick"), actor="person")
+    (update,) = _plan(f, _snap([row]), two_way).writes
+    assert update.body == {"color_name": "Brick"}
+
+
+@pytest.mark.parametrize("direction", ["two_way", "sb_to_bb"])
+def test_a_field_that_differs_at_seeding_waits_for_an_sb_change(
+    pg_pool: PgPool, direction: SyncDirection
+) -> None:
+    """R-T4-22 on a row with no Bambuddy time (a location): under ``two_way`` a field
+    that differs when the seen copy is seeded is not pushed until SB changes it after
+    ``bb_seen_at``. Under ``sb_to_bb`` the direction's rule pushes every difference, so it
+    goes at once (decision 73). The seen copy holds only the fields that agree."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1")
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = 4,"
+            " updated_at = now() - interval '1 hour' WHERE id = %s",
+            (shelf.id,),
+        )
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": direction})
+    bb = [{"id": 4, "name": "Shelf A", "identifier": "B7"}]
+    read_at = datetime.now(UTC) - timedelta(minutes=10)
+    first = _plan(f, _snap([], locations=bb, read_at=read_at), sync)
+    assert _seen(pg_pool, "filament_locations", "id", shelf.id) == ({"name": "Shelf A"}, read_at)
+    if direction == "two_way":
+        assert first.writes == []
+        assert _plan(f, _snap([], locations=bb), sync).writes == []
+    else:
+        (update,) = first.writes
+        assert update.body == {"identifier": "A1"}
+    f.locations.update(shelf.id, LocationPatch(identifier="C3"))
+    (update,) = _plan(f, _snap([], locations=bb), sync).writes
+    assert (update.op, update.bb_id, update.body) == ("update", 4, {"identifier": "C3"})
+
+
+def test_an_unseen_field_with_a_seeding_time_waits_for_a_later_sb_change() -> None:
+    """R-T4-22 in `decide`: with no Bambuddy time, a field missing from a seeded copy
+    pushes only when SB changed it after ``bb_seen_at``; a Bambuddy time still decides
+    when there is one (R-T4-4)."""
+    late = _T0 + timedelta(seconds=1)
+    kw: dict[str, Any] = {"sb": "Red", "bb_now": "Blue", "bb_seen": UNSEEN, "direction": "two_way"}
+    assert not decide(**kw, sb_at=_T0, bb_at=None, seen_at=late)
+    assert not decide(**kw, sb_at=_T0, bb_at=None, seen_at=_T0)
+    assert decide(**kw, sb_at=late, bb_at=None, seen_at=_T0)
+    assert decide(**kw, sb_at=late, bb_at=_T0, seen_at=late)
+    assert not decide(**kw, sb_at=_T0, bb_at=late, seen_at=None)

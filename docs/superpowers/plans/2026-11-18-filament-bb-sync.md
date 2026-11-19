@@ -476,10 +476,8 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
 - From R-T4-1's build (decision 50): the error upsert sets `at = now()` on every failure,
   and keeps the intent of a refused create. The plan reads an error row newer than
   `snap.read_at` as "refused in this pass".
-- R-T4-16: a linked row with a NULL `bb_seen` gets `bb_seen` seeded from the full
-  snapshot's current Bambuddy value by the bookkeeping of `results` (no Bambuddy write), so
-  later SB changes push by the hash rule. Catalog and filament rows have no Bambuddy time,
-  and R-T4-4 would freeze them (decision 65).
+- R-T4-16 is replaced by R-T4-22 (decision 71): `plan` seeds a missing `bb_seen` in Task 4.
+  Task 5 has nothing to build for it.
 
 ### Task 6: CRUD routes for the print worker
 
@@ -529,6 +527,9 @@ that wait for a write planned earlier in the pass, and the items whose non-retry
 cap cut (decision 64); a retry the cap cut is not counted, so retries alone never set `more`.
 `SyncPlan.failed` and `SyncPlan.blocked` never set it (decision 50). Add
 `SyncPlan.unmapped_k` to the pass counts (decision 58).
+R-T4-21 (decision 70): Task 7 runs at most 3 passes back to back on `more`. It then waits
+for the normal interval, whatever `deferred` says, and logs once that it hit the limit.
+Test: a fake `FilamentSyncApi` whose `plan` always defers gives 3 passes, then the wait.
 
 ### Task 8: The workflow, the nudge and the boot start
 
@@ -815,7 +816,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     of the Task 3 re-review 2. Cost: none; the table test now uses SB's real forms
     (`extra_colors` as upper-case `#RRGGBBAA` strings, an int price).
 
-35. (changed by 50) Task 4: `desired_spool` gives a `Pending(kind, sb_id)` for a row Bambuddy has no id for
+35. (changed by 50 and 68) Task 4: `desired_spool` gives a `Pending(kind, sb_id)` for a row Bambuddy has no id for
     (`BbRefs` holds the ids). The spool waits (`deferred`) only while that row's create is
     planned in this round, or it has an open intent and no `filament_bb_push_errors` row;
     otherwise the field is left out (the supplier list as a whole). Why: a reference that
@@ -890,7 +891,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     linked alone with no SKU and price when it sells no product of the type. Why: Bambuddy
     refuses a supplier twice in one `PUT`. Cost: a second product of one supplier is not
     shown in Bambuddy.
-47. (changed by 58) Task 4: the limit cuts in the plan's order; an item any of whose writes is cut counts
+47. (changed by 58 and 69) Task 4: the limit cuts in the plan's order; an item any of whose writes is cut counts
     `deferred` once, and only a kept create (or adoption) writes its intent. A create made
     again over an old intent moves its `started_at` to now. The count of K values left out
     for an unmapped printer (Decision 14's `unmapped_k`) is not in `SyncPlan` (Task 3's
@@ -922,19 +923,23 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `filament_bb_push_errors` row from an earlier pass goes in a last phase, after the
     spools' lists. Why: failing catalog creates must not spend the cap ahead of spools.
     Cost: a supplier or location that failed once reaches Bambuddy after the spools that
-    name it, so those spools take its id one pass later.
+    name it. A spool goes without the reference in round 1 (an item with an error row is
+    not in flight), so it takes the id one round later when the pass has a round left,
+    else one pass later (R-T4-23).
 52. Task 4 (R-T4-3, review I-1): `linked_spool` checks for a fresh `bb_seen` (`bb_seen_at`
     after `snap.read_at`) before it probes. A spool written earlier in this pass is planned
     from that answer and never probed, so decision 37's "one round later" holds. Why: the
     probe of every new spool in every later round spent the cap. Cost: none known.
-53. Task 4 (R-T4-4, review M-1): a link with `bb_seen` NULL (a legacy link) treats "last
+53. (changed by 65, which 71 replaces) Task 4 (R-T4-4, review M-1): a link with `bb_seen` NULL (a legacy link) treats "last
     seen" as unknown (`bb_sync_plan.UNSEEN`, which equals no value). Under `two_way` the
     newer side wins by time: SB's change time against Bambuddy's row time. When Bambuddy's
     time is unknown, Bambuddy wins and nothing is pushed. The same holds for a supplier,
     location, insert type or filament entry with no `bb_seen`. Why: SB must never
     overwrite a value without knowing it is newer. Cost: under `two_way`, a linked catalog
     or filament entry with no `bb_seen` (Bambuddy gives those rows no time) takes no SB
-    change until a write stores `bb_seen`.
+    change until a write stores `bb_seen`. Decision 71 seeds `bb_seen` for spool links,
+    suppliers, locations and insert types. Filament entries have no `bb_seen` column and
+    keep this cost.
 54. Task 4 (R-T4-5, review M-2): a fresh `bb_k_profiles` of NULL is unknown, not an empty
     list. No K write is planned for that spool until a full read gives the list; the
     `before` value of a NULL `bb_k_profiles` is `UNSEEN`. Why: F11. Cost: none known.
@@ -947,7 +952,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     decision 35's refused reference. Both after-the-code tests were seen to fail with
     their rule removed. The link-count assertion that could not fail is replaced by
     `blocked == 1`. Why: an untested rule can break unseen. Cost: none.
-57. Task 4 (R-T4-8, review M-6): a renamed linked location, supplier or insert type whose
+57. (changed by 69 and 71) Task 4 (R-T4-8, review M-6): a renamed linked location, supplier or insert type whose
     new name an unlinked Bambuddy row already holds gets no `update`. The plan inserts one
     `filament_bb_push_errors` row with error `name_taken` (`bb_sync_plan.NAME_TAKEN`) and
     leaves an existing row as it is, so `attempts` does not grow and no 409s repeat. The
@@ -980,9 +985,12 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 64. Task 4 (R-T4-15, fix round 2): `more` counts only non-retry work the cap cut. `take` does
     not add a retry (an item with a `filament_bb_push_errors` row from an earlier pass) to
     `deferred` when the cap cuts it. Retries alone never set `more`. Why: more than 200
-    refused creates made every pass run the next at once. Cost: a retry the cap cut waits
-    for the next timer or event pass.
-65. Task 4 (R-T4-16; carried to Task 5): a linked row with a NULL `bb_seen` gets `bb_seen`
+    refused creates made every pass run the next at once. Cost (R-T4-23): phase 4 keeps a
+    fixed order (kinds, then the upper-case name or the spool number). A retry the cap cut
+    waits for a pass in which fewer than `limit` writes come before it. While the first
+    `limit` retries keep failing, the retries after them get no request, and their error
+    rows keep their old reasons.
+65. (replaced by 71) Task 4 (R-T4-16; carried to Task 5): a linked row with a NULL `bb_seen` gets `bb_seen`
     seeded from the full snapshot's current Bambuddy value by the bookkeeping of `results`,
     with no Bambuddy write. SB changes then push by the hash rule. Why: catalog and filament
     rows have no Bambuddy time, and R-T4-4 would freeze them. Cost: none.
@@ -990,6 +998,51 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     intents, not SB domain data. Task 11 labels it "a Bambuddy row already has this name".
 67. Task 4 (R-T4-18): "refused in this pass, no more writes this pass" applies to every
     write type. Task 5 sets `filament_bb_push_errors.at = now()` on every failure (carried).
+68. Task 4 (R-T4-19, re-review I-1): a spool whose reference (a place or an insert type) is
+    archived and still has an open intent counts `blocked`, not `deferred`. `rows` records
+    the archived items of each kind it reads. Archived suppliers never become a reference
+    (`_supplier_links` leaves them out). Why: `rows` never plans an archived row, so the
+    intent never closed and the spool was `deferred` on every pass, which kept `more` set.
+    Cost: the spool gets no write in the pass that closes the intent (decision 69), and
+    goes without that field from the next pass on (decision 35).
+69. Task 4 (R-T4-20, re-review I-1): `plan` closes an open intent (`filament_bb_creates`)
+    in two cases. First, `rows` meets the intent's item archived, whatever the intent's
+    age. Second, a full pass newer than the intent finds no Bambuddy row it made: for a
+    supplier, location or insert type no unlinked row of the same upper-case name, for a
+    spool no adoptable row in a complete listing. The item is then planned again as a fresh
+    create when it is eligible, and a kept create writes a new intent. An event pass keeps
+    the intent. The planner keeps a closed archived intent in memory for the rest of the
+    plan, so decision 68 applies in that pass. Why: an intent that no write can answer must
+    not hold a spool, and a stale `started_at` would widen the adoption window of decision
+    44. Cost: a lost answer of an archived row is found again by name (decision 41) when
+    the row is restored, not by its intent.
+70. Task 4 (R-T4-21; carried to Task 7): Task 7 runs at most 3 passes back to back on
+    `more`. It then waits for the normal interval, whatever `deferred` says, and logs once
+    that it hit the limit. Why: decisions 68 and 69 close the known loops, and this bound
+    closes the unknown ones. Cost: work left over after 3 passes waits one interval.
+71. Task 4 (R-T4-22, re-review I-2; replaces 65): on a full pass, `plan` seeds the missing
+    seen copy of a linked row whose `bb_seen` is NULL: a spool link (`filament_bb_links`),
+    a supplier, a location or an insert type. It sets `bb_seen` from the snapshot's current
+    Bambuddy value and `bb_seen_at = snap.read_at`. This is sync bookkeeping, like the
+    intents, and no Bambuddy write. The copy holds only the fields whose Bambuddy value is
+    SB's value (and a link's `bb_k_profiles` only when the K-profiles agree). A field that
+    differs stays out of the copy, so it is `UNSEEN`. Under `two_way` an `UNSEEN` field
+    keeps decision 53's rule when Bambuddy's row has a time. With no time, it pushes only
+    when SB changed it after `bb_seen_at` (`sb_changed_at > bb_seen_at`; `decide` takes
+    `seen_at`). A field that agrees at seeding is pushed by the seen rule after a later SB
+    change. Why: Task 5's `results` has no snapshot, and a blind push would break R-T4-4.
+    Cost: filament catalog entries have no `bb_seen` column (Task 3), so they are not
+    seeded and keep decision 53's cost; an event pass does not seed.
+72. Task 4 (R-T4-23): decisions 51, 53 and 64 are corrected. 51 says "one round later",
+    53 is marked as changed by 65 (which 71 replaces), and 64 states what a cut retry
+    waits for.
+73. Task 4 (R-T4-22, build reading): under `sb_to_bb` the direction's rule (decision 8)
+    pushes every difference, whatever was seen. So a field that differs at seeding is
+    pushed in the seeding pass, and seeding changes no `sb_to_bb` push. Under `two_way`, a
+    field that differs at seeding is pushed in that pass only when Bambuddy's row has a
+    time and SB's change is strictly after it (decision 53): that push is not blind. Why:
+    the ruling's reason is R-T4-4 ("never overwrite a value without knowing it is newer"),
+    and both cases know. Cost: none known.
 
 ## Self-review
 
