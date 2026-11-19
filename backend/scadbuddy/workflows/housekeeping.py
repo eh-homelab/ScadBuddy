@@ -381,8 +381,10 @@ PAYMENT_CAPTURES_TIMEOUT = timedelta(minutes=15)
 #: each call at most 20 s (`plaid.TIMEOUT`): 10 minutes, then the matches, and a margin.
 BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)
 #: Per linked printer with a profile, one after another: its task list, then up to
-#: `MAX_ROWS` (50) task logs, each a Bambuddy read; one printer today. Not imported, as
-#: `GIT_TIMEOUT`'s is not.
+#: `MAX_ROWS` (50) task logs, each a Bambuddy read of up to 30 s; one printer today. The
+#: sweep stops at `orders.machine_rate.READ_LOGS_BUDGET` (7 min) and leaves the printers
+#: left for the next tick (#6663 review), so a slow Bambuddy never reaches this limit; the
+#: rest is a margin. Not imported, as `GIT_TIMEOUT`'s is not.
 MAINTENANCE_IMPORT_TIMEOUT = timedelta(minutes=10)
 #: Up to 200 carts (`Lifecycle.sweep_drafts`'s limit), each a short transaction of a few
 #: deletes, then two deletes, then the staged files' backstop (a listing of the staging
