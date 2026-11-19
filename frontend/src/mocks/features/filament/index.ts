@@ -11,6 +11,7 @@ import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
+import { jobOf } from '../../../components/filament/eventText'
 
 type S = components['schemas']
 
@@ -667,14 +668,6 @@ const DAY_MS = 86_400_000
 const BB_OUTCOMES = new Set(['completed', 'failed', 'cancelled'])
 const byTime = (a: S['SpoolEvent'], b: S['SpoolEvent']) => a.at.localeCompare(b.at) || a.seq - b.seq
 const PLATE_KINDS = new Set<S['SpoolEvent']['kind']>(['print_started', 'print_ended'])
-
-/** `ledger.job_of`: `data.job`, else a print run's subtask in its `ref_id` (`run/subtask/slot`). */
-function jobOf(event: S['SpoolEvent']): string | null {
-  const job = event.data?.job
-  if (typeof job === 'string') return job
-  const parts = event.ref_kind === 'print_run' ? event.ref_id?.split('/') : undefined
-  return parts && parts.length >= 3 ? parts.slice(1, -1).join('/') : null
-}
 
 /**
  * One spool's plates, oldest first, as `metrics.plates` counts them: an ended BB usage row,

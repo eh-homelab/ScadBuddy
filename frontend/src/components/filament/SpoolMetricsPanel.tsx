@@ -37,7 +37,7 @@ export function SpoolMetricsPanel({ history, gramsLeft, createdAt }: { history: 
   // `metrics.burn` divides by the spool's age from `created_at` when that is shorter than the window (at least a day).
   const [now] = useState(() => Date.now())
   const age = (now - Date.parse(createdAt)) / DAY_MS
-  const aged = Math.max(1, Math.floor(age))
+  const aged = Math.max(1, Math.round(age))
   const burnOver = age < window ? `Since it was added ${aged} ${aged === 1 ? 'day' : 'days'} ago` : `Over the last ${window} days`
   const tiles: Tile[] = [
     {

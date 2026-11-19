@@ -139,8 +139,8 @@ export function fromTypeText(event: SpoolEvent, names: EventNames): string | nul
   return code ? `from its type ${code}` : 'from its type'
 }
 
-/** `ledger.job_of`: `data.job`, else a print run's subtask in its `ref_id` (`run/subtask/slot`). */
-function jobOf(event: SpoolEvent): string | null {
+/** `ledger.job_of`: `data.job`, else a print run's subtask in its `ref_id` (`run/subtask/slot`). The mock uses it too. */
+export function jobOf(event: SpoolEvent): string | null {
   const job = (event.data as { job?: unknown }).job
   if (typeof job === 'string') return job
   const parts = event.ref_kind === 'print_run' ? event.ref_id?.split('/') : undefined
