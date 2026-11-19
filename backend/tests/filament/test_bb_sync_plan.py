@@ -674,6 +674,33 @@ def test_a_refused_row_is_retried_after_the_spools(pg_pool: PgPool) -> None:
     assert [(w.kind, w.sb_id) for w in writes] == [("spool", spool), ("location", shelf.id)]
 
 
+def test_retries_cut_by_the_cap_do_not_count_deferred(pg_pool: PgPool) -> None:
+    """R-T4-15: 250 creates Bambuddy refused earlier fill the cap but are not new work, so
+    the plan does not count them ``deferred`` (which would set ``more`` and run the next
+    pass at once, for ever)."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    old = datetime.now(UTC) - timedelta(hours=1)
+    for _ in range(250):
+        _refuse(pg_pool, "spool", _spool(f, kind), old)
+    result = _plan(f, _snap([]))
+    assert (len(result.writes), result.deferred) == (200, 0)
+
+
+def test_new_work_cut_by_the_cap_counts_deferred_beside_retries(pg_pool: PgPool) -> None:
+    """R-T4-15: only the new spools the cap cut count; the retries it cut do not."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    old = datetime.now(UTC) - timedelta(hours=1)
+    for _ in range(3):
+        _refuse(pg_pool, "spool", _spool(f, kind), old)
+    for _ in range(3):
+        _spool(f, kind)
+    result = _plan(f, _snap([]), limit=2)
+    assert len(result.writes) == 2
+    assert result.deferred == 1
+
+
 def test_an_old_intent_on_a_partial_listing_is_blocked(pg_pool: PgPool) -> None:
     """C-1 case 2: the row to adopt may be the unparsed one, so the spool waits, but as
     ``blocked``: a partial listing does not clear in a later round."""

@@ -206,7 +206,9 @@ class BbWriteResult(BaseModel, extra="forbid"):
 class SyncPlan(BaseModel, extra="forbid"):
     """The writes of one plan round, and the items it wrote nothing for. ``deferred``: they
     wait for a write planned earlier in this pass, which a later round of it can clear
-    (Decisions 10 and 11); only these (and the write cap) set the pass's ``more``.
+    (Decisions 10 and 11), or the write cap cut their write; only these set the pass's
+    ``more``. A retry the cap cut (an item refused in an earlier pass) is not counted
+    (R-T4-15).
     ``failed``: Bambuddy refused the item's last write; it is tried again in a later pass,
     a create only on a full one. ``blocked``: a read this pass did not get holds it (a
     partial spool listing, a listing not read). Neither sets ``more`` (R-T4-1).

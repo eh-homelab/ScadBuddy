@@ -476,6 +476,10 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
 - From R-T4-1's build (decision 50): the error upsert sets `at = now()` on every failure,
   and keeps the intent of a refused create. The plan reads an error row newer than
   `snap.read_at` as "refused in this pass".
+- R-T4-16: a linked row with a NULL `bb_seen` gets `bb_seen` seeded from the full
+  snapshot's current Bambuddy value by the bookkeeping of `results` (no Bambuddy write), so
+  later SB changes push by the hash rule. Catalog and filament rows have no Bambuddy time,
+  and R-T4-4 would freeze them (decision 65).
 
 ### Task 6: CRUD routes for the print worker
 
@@ -520,7 +524,9 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
 - [ ] **Step 2-4:** Run, implement, run.
 - [ ] **Step 5: Commit** `feat(filament): a sync pass on the print worker (#6265)`.
 
-**Carried from Task 4 (#6265):** `more` reads `SyncPlan.deferred` only (and the write cap);
+**Carried from Task 4 (#6265):** `more` reads `SyncPlan.deferred` only. It counts the items
+that wait for a write planned earlier in the pass, and the items whose non-retry write the
+cap cut (decision 64); a retry the cap cut is not counted, so retries alone never set `more`.
 `SyncPlan.failed` and `SyncPlan.blocked` never set it (decision 50). Add
 `SyncPlan.unmapped_k` to the pass counts (decision 58).
 
@@ -971,6 +977,19 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 63. Task 4 (R-T4-14, concerns 6 and 7): the one-time `PUT []` per linked spool with no
     preset is accepted. Tests written after the code are accepted, given decision 56. The
     commit title stays, because the squash title decides.
+64. Task 4 (R-T4-15, fix round 2): `more` counts only non-retry work the cap cut. `take` does
+    not add a retry (an item with a `filament_bb_push_errors` row from an earlier pass) to
+    `deferred` when the cap cuts it. Retries alone never set `more`. Why: more than 200
+    refused creates made every pass run the next at once. Cost: a retry the cap cut waits
+    for the next timer or event pass.
+65. Task 4 (R-T4-16; carried to Task 5): a linked row with a NULL `bb_seen` gets `bb_seen`
+    seeded from the full snapshot's current Bambuddy value by the bookkeeping of `results`,
+    with no Bambuddy write. SB changes then push by the hash rule. Why: catalog and filament
+    rows have no Bambuddy time, and R-T4-4 would freeze them. Cost: none.
+66. Task 4 (R-T4-17): the error row of `name_taken` is sync bookkeeping, like the create
+    intents, not SB domain data. Task 11 labels it "a Bambuddy row already has this name".
+67. Task 4 (R-T4-18): "refused in this pass, no more writes this pass" applies to every
+    write type. Task 5 sets `filament_bb_push_errors.at = now()` on every failure (carried).
 
 ## Self-review
 

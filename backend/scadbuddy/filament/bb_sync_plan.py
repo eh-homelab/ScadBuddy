@@ -997,13 +997,16 @@ class _Planner:
 
     def take(self, limit: int) -> list[BbWrite]:
         """The writes in Decision 10's order, at most ``limit``: an item whose write does
-        not fit counts ``deferred``; a kept create (or adoption) records its intent."""
+        not fit counts ``deferred``, except a retry (R-T4-15: an item Bambuddy refused in
+        an earlier pass), which the cap cuts without setting ``more``; a kept create (or
+        adoption) records its intent."""
         writes: list[BbWrite] = []
         for phase in (0, 1, 2, 3, 4):
             for candidate in self.phases[phase]:
                 write = candidate.write
                 if len(writes) >= limit:
-                    self.deferred.add((write.kind, write.sb_id))
+                    if phase != _RETRY:
+                        self.deferred.add((write.kind, write.sb_id))
                     continue
                 writes.append(write)
                 if candidate.intent:
