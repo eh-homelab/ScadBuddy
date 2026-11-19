@@ -15,6 +15,7 @@ from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync, SyncDirection
 from scadbuddy.filament.bb_sync_models import BbSnapshot, BbWrite, SyncPlan, seen_row
 from scadbuddy.filament.bb_sync_plan import (
+    UNSEEN,
     BbRefs,
     body_value,
     compare_form,
@@ -167,11 +168,12 @@ def _link(
     pushed: dict[str, str] | None = None,
     seen: dict[str, Any] | None = None,
     seen_at: datetime | None = None,
+    k: list[dict[str, Any]] | None = None,
 ) -> None:
     with pool.connection() as conn:
         conn.execute(
             "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, pushed_fields,"
-            " bb_seen, bb_seen_at) VALUES (%s, %s, %s, %s, %s, %s)",
+            " bb_seen, bb_seen_at, bb_k_profiles) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (
                 spool,
                 bb_id,
@@ -179,7 +181,18 @@ def _link(
                 Jsonb(pushed or {}),
                 None if seen is None else Jsonb(seen),
                 seen_at,
+                None if k is None else Jsonb(k),
             ),
+        )
+
+
+def _refuse(pool: PgPool, kind: str, sb_id: UUID, at: datetime | None = None) -> None:
+    """What Task 5 stores for a write Bambuddy refused: an error row; the intent stays."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_push_errors (kind, sb_id, error, at)"
+            " VALUES (%s, %s, 'bambuddy-refused:422', %s)",
+            (kind, sb_id, at or datetime.now(UTC)),
         )
 
 
@@ -340,12 +353,11 @@ def test_k_values_of_an_unmapped_printer_are_left_out(pg_pool: PgPool) -> None:
     )
     presets = SPOOLS.model_copy(update={"spools": "off", "presets": "sb_to_bb"})
     _link(pg_pool, spool, 50)
-    writes = _plan(
-        f, _snap([_row(50, slicer_filament=None, slicer_filament_name=None)]), presets
-    ).writes
-    k = _only(writes, "k_profiles")
+    writes = _plan(f, _snap([_row(50, slicer_filament=None, slicer_filament_name=None)]), presets)
+    k = _only(writes.writes, "k_profiles")
     assert [(r["printer_id"], r["k_value"]) for r in k.body] == [(3, 0.02)]  # type: ignore[index]
-    assert {w.op for w in writes} == {"k_profiles", "presets"}
+    assert {w.op for w in writes.writes} == {"k_profiles", "presets"}
+    assert writes.unmapped_k == 1
 
 
 # -- creates ---------------------------------------------------------------------------
@@ -541,9 +553,9 @@ def test_a_spool_missing_from_the_listing_keeps_its_link(pg_pool: PgPool) -> Non
     f = _filament(pg_pool)
     spool = _spool(f, _type(f))
     _link(pg_pool, spool, 50)
-    assert _plan(f, _snap([], complete=False)).writes == []
-    with pg_pool.connection() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM filament_bb_links").fetchone() == {"n": 1}
+    result = _plan(f, _snap([], complete=False))
+    assert result.writes == []
+    assert (result.blocked, result.deferred) == (1, 0)
 
 
 def test_a_spool_missing_from_a_complete_listing_is_probed(pg_pool: PgPool) -> None:
@@ -625,3 +637,236 @@ def test_supplier_links_carry_the_sku_and_the_price(pg_pool: PgPool) -> None:
             "is_purchase_source": False,
         }
     ]
+
+
+# -- deferrals that clear, and those that do not (R-T4-1, R-T4-2) -----------------------
+
+
+def test_a_refused_create_waits_for_the_next_full_pass(pg_pool: PgPool) -> None:
+    """C-1 case 1: round 1 creates, Bambuddy refuses, Task 5 keeps the intent and stores
+    an error row. Round 2 neither creates again nor counts it ``deferred`` (which would
+    set ``more`` and start the next pass at once); an event pass leaves it; the next
+    full pass tries once more."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    _only(_plan(f, _snap([], read_at=read_at)).writes, "create")
+    _refuse(pg_pool, "spool", spool)
+    again = _plan(f, _snap([], read_at=read_at))
+    assert (again.writes, again.deferred, again.failed) == ([], 0, 1)
+    later = datetime.now(UTC) + timedelta(minutes=1)
+    event = _plan(f, _snap([], read_at=later, full=False))
+    assert (event.writes, event.deferred, event.failed) == ([], 0, 1)
+    full = _plan(f, _snap([], read_at=later))
+    assert [w.op for w in full.writes] == ["create"]
+    assert (full.deferred, full.failed) == (0, 0)
+
+
+def test_a_refused_row_is_retried_after_the_spools(pg_pool: PgPool) -> None:
+    """R-T4-2: a create Bambuddy refused in an earlier pass goes after the spool writes,
+    so failing catalog creates cannot spend the cap ahead of spools."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf")))
+    spool = _spool(f, _type(f))
+    _refuse(pg_pool, "location", shelf.id, datetime.now(UTC) - timedelta(hours=1))
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    writes = _plan(f, _snap([], locations=[]), sync).writes
+    assert [(w.kind, w.sb_id) for w in writes] == [("spool", spool), ("location", shelf.id)]
+
+
+def test_an_old_intent_on_a_partial_listing_is_blocked(pg_pool: PgPool) -> None:
+    """C-1 case 2: the row to adopt may be the unparsed one, so the spool waits, but as
+    ``blocked``: a partial listing does not clear in a later round."""
+    f = _filament(pg_pool)
+    _spool(f, _type(f))
+    _plan(f, _snap([]))
+    later = _plan(f, _snap([], complete=False, read_at=datetime.now(UTC) + timedelta(minutes=1)))
+    assert (later.writes, later.deferred, later.blocked) == ([], 0, 1)
+
+
+def test_a_reference_whose_listing_was_not_read_blocks(pg_pool: PgPool) -> None:
+    """C-1 case 3: the spool's place has an old intent and no error row, and this pass
+    did not read the locations: the spool waits as ``blocked``, not ``deferred``."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _place(pg_pool, f, "Shelf A")
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    row = _matching(pg_pool, spool, 50, sync) | {"color_name": "Other"}
+    _put(pg_pool, spool, shelf)
+    _link(pg_pool, spool, 50)
+    _plan(f, _snap([row], locations=[]), sync)
+    assert ("location", shelf) in _intents(pg_pool)
+    later = datetime.now(UTC) + timedelta(minutes=1)
+    result = _plan(f, _snap([row], read_at=later), sync)
+    assert (result.writes, result.deferred, result.blocked) == ([], 0, 1)
+
+
+def test_failed_and_blocked_items_alone_report_no_deferral(pg_pool: PgPool) -> None:
+    """A round whose only items are ``failed`` or ``blocked`` has ``deferred == 0``, so
+    Task 7 sets no ``more``."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    refused = _spool(f, kind)
+    _spool(f, kind)
+    _plan(f, _snap([]))
+    _refuse(pg_pool, "spool", refused)
+    later = datetime.now(UTC) + timedelta(minutes=1)
+    result = _plan(f, _snap([], full=False, complete=False, read_at=later))
+    assert result.writes == []
+    assert (result.deferred, result.failed, result.blocked) == (0, 1, 1)
+
+
+def test_a_refused_reference_is_left_out(pg_pool: PgPool) -> None:
+    """Decision 35: the spool's place has an intent and an error row: Bambuddy refused it,
+    so the spool goes without ``location_id`` and does not wait."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _place(pg_pool, f, "Shelf A")
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    row = _matching(pg_pool, spool, 50, sync) | {"color_name": "Other"}
+    _put(pg_pool, spool, shelf)
+    _link(pg_pool, spool, 50)
+    _plan(f, _snap([row], locations=[]), sync)
+    _refuse(pg_pool, "location", shelf)
+    result = _plan(f, _snap([row], locations=[], full=False), sync)
+    (update,) = result.writes
+    assert (update.kind, update.op, update.body) == ("spool", "update", {"color_name": None})
+    assert (result.deferred, result.failed) == (0, 1)
+
+
+# -- a spool written earlier in this pass (R-T4-3, R-T4-5) ------------------------------
+
+
+def test_a_spool_linked_this_pass_is_not_probed(pg_pool: PgPool) -> None:
+    """I-1: round 1 created the spool and ``results`` stored the answer; the snapshot
+    has no row for it. Round 2 plans from the answer, probes nothing, and sends the
+    lists."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    sync = SPOOLS.model_copy(update={"presets": "sb_to_bb"})
+    answer = seen_row(BbSpool.model_validate(_matching(pg_pool, spool, 70, sync)))
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    _link(pg_pool, spool, 70, seen=answer, seen_at=datetime.now(UTC), k=[])
+    result = _plan(f, _snap([], read_at=read_at), sync)
+    assert [(w.op, w.bb_id) for w in result.writes] == [("presets", 70)]
+
+
+def test_unknown_k_profiles_are_not_written(pg_pool: PgPool) -> None:
+    """R-T4-5: ``results`` stored the answer but not its K-profiles: unknown is no empty
+    list, so no K write until a full read gives the list."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    printer = _printer(pg_pool, bb_id=3)
+    f.spools.set_k_values(
+        spool,
+        [
+            SpoolKValueCreate(
+                printer_id=printer, extruder=0, nozzle_diameter="0.4", k_value=Decimal("0.02")
+            )
+        ],
+        actor="person",
+    )
+    sync = SPOOLS.model_copy(update={"presets": "sb_to_bb"})
+    row = _matching(pg_pool, spool, 70, sync)
+    answer = seen_row(BbSpool.model_validate(row))
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    _link(pg_pool, spool, 70, seen=answer, seen_at=datetime.now(UTC))
+    ops = [w.op for w in _plan(f, _snap([row], read_at=read_at), sync).writes]
+    assert "k_profiles" not in ops and "presets" in ops
+
+
+# -- the smaller rulings (R-T4-4, R-T4-6, R-T4-7, R-T4-8) -------------------------------
+
+
+def test_an_unseen_value_is_never_pushed_without_a_newer_sb_change() -> None:
+    """R-T4-4: with nothing seen, only time decides, and an unknown BB time keeps BB's."""
+    late = _T0 + timedelta(seconds=1)
+    for bb_now in (None, "Blue"):
+        assert not decide(
+            sb="Red", bb_now=bb_now, bb_seen=UNSEEN, sb_at=late, bb_at=None, direction="two_way"
+        )
+        assert not decide(
+            sb="Red", bb_now=bb_now, bb_seen=UNSEEN, sb_at=_T0, bb_at=late, direction="two_way"
+        )
+        assert decide(
+            sb="Red", bb_now=bb_now, bb_seen=UNSEEN, sb_at=late, bb_at=_T0, direction="two_way"
+        )
+    assert decide(
+        sb="Red", bb_now=None, bb_seen=UNSEEN, sb_at=_T0, bb_at=late, direction="sb_to_bb"
+    )
+
+
+def test_a_legacy_link_keeps_a_value_bambuddy_cleared_later(pg_pool: PgPool) -> None:
+    """M-1: a link made before Task 3 has no ``bb_seen``. Bambuddy cleared the note after
+    SB's last edit: under ``two_way`` SB's older note is not pushed back."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    f.spools.update(spool, SpoolPatch(note="SB's note"), actor="person")
+    two_way = SPOOLS.model_copy(update={"spools": "two_way"})
+    later = (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat()
+    row = _matching(pg_pool, spool, 50, two_way) | {"note": None, "updated_at": later}
+    _link(pg_pool, spool, 50)
+    assert _plan(f, _snap([row]), two_way).writes == []
+    older = row | {"updated_at": "2026-01-01T00:00:00"}
+    (update,) = _plan(f, _snap([older]), two_way).writes
+    assert update.body == {"note": "SB's note"}
+
+
+def test_an_archived_spool_takes_no_field_writes(pg_pool: PgPool) -> None:
+    """M-3: with ``spools`` not pushing, an archived SB spool still gets no weight write
+    (Decision 40)."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f), 500.0)
+    weights = SPOOLS.model_copy(update={"spools": "off", "weights": "sb_to_bb"})
+    row = _row(50, weight_used=0, weight_locked=False)
+    _link(pg_pool, spool, 50)
+    assert [w.op for w in _plan(f, _snap([row]), weights).writes] == ["update"]
+    f.spools.archive(spool, True, actor="person")
+    assert _plan(f, _snap([row]), weights).writes == []
+
+
+def test_a_weight_write_carries_the_lock(pg_pool: PgPool) -> None:
+    """Decision 38: Bambuddy locks the weight on a ``PATCH`` of ``weight_used`` unless
+    ``weight_locked`` goes with it, even when the lock itself has not changed."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f), 500.0)
+    weights = SPOOLS.model_copy(update={"spools": "off", "weights": "sb_to_bb"})
+    row = _matching(pg_pool, spool, 50, weights) | {"weight_used": 0}
+    _link(pg_pool, spool, 50)
+    (update,) = _plan(f, _snap([row]), weights).writes
+    assert update.body == {"weight_used": 500.0, "weight_locked": False}
+    assert set(update.hashes) == {"weight_used", "weight_locked"}
+
+
+def test_adoption_skips_a_row_made_before_the_intent(pg_pool: PgPool) -> None:
+    """Decision 44: a BB row with the create's values but made before the intent (less
+    the clocks' skew) is someone else's; the one made after it is adopted."""
+    f = _filament(pg_pool)
+    _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    before = (datetime.now(UTC) - timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+    after = (datetime.now(UTC) + timedelta(seconds=1)).replace(tzinfo=None).isoformat()
+    decoy = _row(61, **create.body, created_at=before)  # type: ignore[arg-type]
+    made = _row(60, **create.body, created_at=after)  # type: ignore[arg-type]
+    later = _plan(f, _snap([decoy, made], read_at=datetime.now(UTC) + timedelta(minutes=1)))
+    (write,) = later.writes
+    assert (write.op, write.bb_id) == ("update", 60)
+
+
+def test_a_rename_onto_a_bambuddy_name_is_not_sent(pg_pool: PgPool) -> None:
+    """R-T4-8: a linked place renamed in SB to the name of an unlinked Bambuddy place
+    would get a 409 on every pass: no ``update``, and one error row."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(LocationCreate(name="Shelf B", kind_id=_kind(f, "Shelf")))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET bb_location_id = 4 WHERE id = %s", (shelf.id,))
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "sb_to_bb"})
+    bb = [{"id": 4, "name": "Shelf A", "identifier": None}, {"id": 5, "name": "shelf b"}]
+    for _ in range(2):
+        result = _plan(f, _snap([], locations=bb), sync)
+        assert (result.writes, result.failed) == ([], 1)
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT kind, sb_id, error, attempts FROM filament_bb_push_errors"
+        ).fetchall()
+    assert [tuple(r.values()) for r in rows] == [("location", shelf.id, "name_taken", 1)]

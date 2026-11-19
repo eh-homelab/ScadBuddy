@@ -462,6 +462,21 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
 - [ ] **Step 2-4:** Run, implement, run.
 - [ ] **Step 5: Commit** `feat(filament): record what Bambuddy answered (#6265)`.
 
+**Rulings carried from Task 4 (#6265)** (build decisions 59-61):
+- R-T4-10: a non-create write on an unlinked item is valid only when the item has an open
+  intent and no other SB row links that `bb_id`. On `ok` it links the item, as a create
+  does, and closes the intent.
+- R-T4-11: store `bb_k_profiles` whenever `bb_seen` is stored, from the same full answer
+  (`[]` when the answer has none; a GET when the answer is not a full row, R-T3-6). Store
+  `bb_seen` for suppliers, locations and insert types as `json_form` of their readable
+  fields.
+- R-T4-12: check the recordings for how Bambuddy stores `last_dried_at` (microseconds),
+  `quoted_price_per_kg` (rounding) and an empty `note`, `subtype` and `color_name` (`""` or
+  null), so that `seen_value` takes Bambuddy's form for each and no field flaps.
+- From R-T4-1's build (decision 50): the error upsert sets `at = now()` on every failure,
+  and keeps the intent of a refused create. The plan reads an error row newer than
+  `snap.read_at` as "refused in this pass".
+
 ### Task 6: CRUD routes for the print worker
 
 **Files:**
@@ -504,6 +519,10 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
   - `test_every_write_heartbeats`.
 - [ ] **Step 2-4:** Run, implement, run.
 - [ ] **Step 5: Commit** `feat(filament): a sync pass on the print worker (#6265)`.
+
+**Carried from Task 4 (#6265):** `more` reads `SyncPlan.deferred` only (and the write cap);
+`SyncPlan.failed` and `SyncPlan.blocked` never set it (decision 50). Add
+`SyncPlan.unmapped_k` to the pass counts (decision 58).
 
 ### Task 8: The workflow, the nudge and the boot start
 
@@ -790,7 +809,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     of the Task 3 re-review 2. Cost: none; the table test now uses SB's real forms
     (`extra_colors` as upper-case `#RRGGBBAA` strings, an int price).
 
-35. Task 4: `desired_spool` gives a `Pending(kind, sb_id)` for a row Bambuddy has no id for
+35. (changed by 50) Task 4: `desired_spool` gives a `Pending(kind, sb_id)` for a row Bambuddy has no id for
     (`BbRefs` holds the ids). The spool waits (`deferred`) only while that row's create is
     planned in this round, or it has an open intent and no `filament_bb_push_errors` row;
     otherwise the field is left out (the supplier list as a whole). Why: a reference that
@@ -802,7 +821,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     insert type, `low_stock_threshold_pct` outside 1-99 (SB allows 0-100; `SpoolUpdate`
     1-99), `weight_used` with no label weight or no grams left. Why: the recorded schema.
     Cost: Bambuddy keeps its own value then; SB's 0 % and 100 % never reach it.
-37. Task 4: a create carries the fields of every data type that pushes, not only
+37. (changed by 52) Task 4: a create carries the fields of every data type that pushes, not only
     `spools`', except `last_dried_at` (`SpoolCreate` has none) and the three lists (they
     need the BB id). Why: a new BB spool starts with SB's weight and place, not full and
     nowhere. Cost: the drying time and the lists arrive one round later.
@@ -817,7 +836,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     and the recorded `SpoolResponse`. Cost: a preset list edited in Bambuddy is not
     repaired, and the first pass under `pushes(presets)` puts `[]` once for every linked
     spool with no preset.
-40. Task 4: an archived SB spool gets its archive write only (phase "archive/restore"), no
+40. (changed by 53 and 55) Task 4: an archived SB spool gets its archive write only (phase "archive/restore"), no
     field or list write. `decide` with no BB `updated_at` (catalog and filament entries, or
     a row `results` stored this pass) lets SB's change win. Why: an archived spool is off
     the lists; there is no BB time to compare. Cost: a field edited on an archived spool
@@ -832,7 +851,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     409 for a second supplier or location of one name, so a create would fail on every
     pass. Cost: a BB row of the same name that a person made becomes SB's. Task 5 must take
     an `update` on an unlinked item with an open intent as an adoption, for spools too.
-42. Task 4: a linked supplier, location, catalog or filament entry missing from BB's
+42. (changed by 62) Task 4: a linked supplier, location, catalog or filament entry missing from BB's
     listing gets no write; only spools are probed (Decision 13). Why: the brief's probe is
     `spool_row`. Cost: such a row stays linked to a row Bambuddy deleted until a later
     task handles it.
@@ -842,7 +861,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     in SB), `type` its material, `color_hex` the first 7 of `rgba`, temperatures the type's
     own, `cost_per_kg` only when set. Why: Decision 14 names the rows, not their bodies.
     Cost: a filament entry's name is a product code, not a display name.
-44. Task 4: a spool's adoption matches `bambuddy_pull.snapshot` (tags left out, SB sends
+44. (changed by 50) Task 4: a spool's adoption matches `bambuddy_pull.snapshot` (tags left out, SB sends
     none) of BB's row with that of a `BbSpool` built from the create body, and BB's raw
     `created_at` (which `BbSpool` drops) must be no earlier than the intent less 5 s when
     the row has one. An old intent while the listing is partial waits (`deferred`). The
@@ -865,7 +884,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     linked alone with no SKU and price when it sells no product of the type. Why: Bambuddy
     refuses a supplier twice in one `PUT`. Cost: a second product of one supplier is not
     shown in Bambuddy.
-47. Task 4: the limit cuts in the plan's order; an item any of whose writes is cut counts
+47. (changed by 58) Task 4: the limit cuts in the plan's order; an item any of whose writes is cut counts
     `deferred` once, and only a kept create (or adoption) writes its intent. A create made
     again over an old intent moves its `started_at` to now. The count of K values left out
     for an unmapped printer (Decision 14's `unmapped_k`) is not in `SyncPlan` (Task 3's
@@ -878,6 +897,80 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Decision 7, Decision 6. Cost: none known.
 49. Task 4 (R-T3-11): `test_bb_sync_models.py` uses `bb_sync_plan.field_hash` in place of its
     test-local `_hash`. Why: one hash, tested where it is made. Cost: none.
+
+50. Task 4 (R-T4-1, review C-1): `deferred` means only "this item waits for a write
+    planned earlier in this same pass", which a later round of this pass can clear. Three
+    cases are not `deferred`. A create that Bambuddy refused (it has a
+    `filament_bb_push_errors` row) counts `failed`: an error row newer than `snap.read_at`
+    (refused in this pass) gets no write for the rest of the pass, whatever the op, and a
+    create refused in an earlier pass is tried once on a full pass only. A spool held by a
+    partial listing counts `blocked`: an old intent, or a linked spool that is missing
+    from the listing and has no fresh `bb_seen`. A spool whose reference has an open
+    intent while this pass did not read that reference's listing counts `blocked`, and
+    gets no write. `SyncPlan` gains `failed` and `blocked` (defaults 0). Neither sets
+    `more`. A young intent with an error row from an earlier pass is a lost answer and
+    stays `deferred`. Why: a deferral that never clears made the sync run passes back to
+    back with no wait. Cost: a refused create waits for the next full pass (the timer or
+    "Sync now"), not the next event pass.
+51. Task 4 (R-T4-2, concern 8): every write of an item that holds a
+    `filament_bb_push_errors` row from an earlier pass goes in a last phase, after the
+    spools' lists. Why: failing catalog creates must not spend the cap ahead of spools.
+    Cost: a supplier or location that failed once reaches Bambuddy after the spools that
+    name it, so those spools take its id one pass later.
+52. Task 4 (R-T4-3, review I-1): `linked_spool` checks for a fresh `bb_seen` (`bb_seen_at`
+    after `snap.read_at`) before it probes. A spool written earlier in this pass is planned
+    from that answer and never probed, so decision 37's "one round later" holds. Why: the
+    probe of every new spool in every later round spent the cap. Cost: none known.
+53. Task 4 (R-T4-4, review M-1): a link with `bb_seen` NULL (a legacy link) treats "last
+    seen" as unknown (`bb_sync_plan.UNSEEN`, which equals no value). Under `two_way` the
+    newer side wins by time: SB's change time against Bambuddy's row time. When Bambuddy's
+    time is unknown, Bambuddy wins and nothing is pushed. The same holds for a supplier,
+    location, insert type or filament entry with no `bb_seen`. Why: SB must never
+    overwrite a value without knowing it is newer. Cost: under `two_way`, a linked catalog
+    or filament entry with no `bb_seen` (Bambuddy gives those rows no time) takes no SB
+    change until a write stores `bb_seen`.
+54. Task 4 (R-T4-5, review M-2): a fresh `bb_k_profiles` of NULL is unknown, not an empty
+    list. No K write is planned for that spool until a full read gives the list; the
+    `before` value of a NULL `bb_k_profiles` is `UNSEEN`. Why: F11. Cost: none known.
+55. Task 4 (R-T4-6, review M-3): the archive state is read from the spool row whatever
+    `spools` pushes. An archived SB spool gets no field or list write (decision 40). Why:
+    the old check read it from the desired values, which hold it only under
+    `pushes(spools)`. Cost: none known.
+56. Task 4 (R-T4-7, reviews M-4 and M-5): new tests cover decision 44's `created_at`
+    window (a decoy that differs only by time), decision 38's `weight_locked` partner and
+    decision 35's refused reference. Both after-the-code tests were seen to fail with
+    their rule removed. The link-count assertion that could not fail is replaced by
+    `blocked == 1`. Why: an untested rule can break unseen. Cost: none.
+57. Task 4 (R-T4-8, review M-6): a renamed linked location, supplier or insert type whose
+    new name an unlinked Bambuddy row already holds gets no `update`. The plan inserts one
+    `filament_bb_push_errors` row with error `name_taken` (`bb_sync_plan.NAME_TAKEN`) and
+    leaves an existing row as it is, so `attempts` does not grow and no 409s repeat. The
+    item counts `failed`. This is the one write `plan` makes besides the create intents.
+    Why: a 409 on every full pass. Cost: the item's other changed fields wait until the
+    name no longer clashes; the Settings UI (Task 11) shows the label as "a Bambuddy row
+    already has this name".
+58. Task 4 (R-T4-9, concern 4): `SyncPlan` gains `unmapped_k: int = 0`, the number of K
+    values that `desired_spool` left out because their printer has no
+    `bambuddy_printer_id` (decision 14), summed over the spools that the round planned.
+    `desired_and_unmapped` returns the values and the count; `desired_spool` keeps its
+    signature. Task 7 adds the count to the pass counts. Why: decision 14 requires the
+    count. Cost: none.
+59. Task 4 (R-T4-10, concern 1; carried to Task 5): a non-create write on an unlinked item
+    is valid only when the item has an open intent and no other SB row links that
+    `bb_id`. On `ok` it links the item, as a create does, and closes the intent.
+60. Task 4 (R-T4-11, concern 3; carried to Task 5): Task 5 stores `bb_k_profiles` whenever
+    it stores `bb_seen`, from the same full answer (`[]` when the answer has none; a GET
+    when the answer is not a full row, R-T3-6). It stores `bb_seen` for suppliers,
+    locations and insert types as `json_form` of their readable fields.
+61. Task 4 (R-T4-12, precision; carried to Task 5): Task 5 checks the recordings for how
+    Bambuddy stores `last_dried_at` (microseconds), `quoted_price_per_kg` (rounding) and an
+    empty `note`, `subtype` and `color_name` (`""` or null). `seen_value` then takes
+    Bambuddy's form for each, so no field flaps.
+62. Task 4 (R-T4-13, concern 5): linked non-spool rows that Bambuddy deleted are follow-up
+    #6688. Task 5 drops a link on any 404 on a linked item.
+63. Task 4 (R-T4-14, concerns 6 and 7): the one-time `PUT []` per linked spool with no
+    preset is accepted. Tests written after the code are accepted, given decision 56. The
+    commit title stays, because the squash title decides.
 
 ## Self-review
 

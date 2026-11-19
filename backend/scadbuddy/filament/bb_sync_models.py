@@ -204,12 +204,21 @@ class BbWriteResult(BaseModel, extra="forbid"):
 
 
 class SyncPlan(BaseModel, extra="forbid"):
-    """The writes of one plan round, how many items it left for later (``deferred``,
-    Decisions 10 and 11), whether the snapshot's instance is not the links' one
-    (Decision 12), and the directions and timer interval the plan read."""
+    """The writes of one plan round, and the items it wrote nothing for. ``deferred``: they
+    wait for a write planned earlier in this pass, which a later round of it can clear
+    (Decisions 10 and 11); only these (and the write cap) set the pass's ``more``.
+    ``failed``: Bambuddy refused the item's last write; it is tried again in a later pass,
+    a create only on a full one. ``blocked``: a read this pass did not get holds it (a
+    partial spool listing, a listing not read). Neither sets ``more`` (R-T4-1).
+    ``unmapped_k``: K values left out for a printer with no Bambuddy id (Decision 14).
+    Also whether the snapshot's instance is not the links' one (Decision 12), and the
+    directions and timer interval the plan read."""
 
     writes: list[BbWrite]
     deferred: int
+    failed: int = 0
+    blocked: int = 0
+    unmapped_k: int = 0
     instance_changed: bool = False
     directions: FilamentSync
     interval_s: float

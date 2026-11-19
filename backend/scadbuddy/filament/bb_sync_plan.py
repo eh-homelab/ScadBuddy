@@ -5,8 +5,9 @@ the field hashes, "newer change wins", and `plan`, which turns one `BbSnapshot` 
 
 The print worker reads Bambuddy and posts the snapshot to the plan route (Task 6), which
 calls `plan`. `plan` reads SB, compares each item with what Bambuddy holds, and writes
-nothing to SB but the create intents (Decision 10): the writes' answers reach SB through
-``results`` (Task 5) only.
+nothing to SB but the create intents (Decision 10) and the error row of a rename onto a
+name Bambuddy already holds (R-T4-8): the writes' answers reach SB through ``results``
+(Task 5) only.
 
 Every compare and every hash of a Bambuddy value goes through `seen_row`/`seen_value`
 (Task 3, R-T3-11), so both sides are in one JSON form; the archive state compares as
@@ -81,6 +82,10 @@ _NOT_ON_CREATE = frozenset({"last_dried_at"})
 #: ``inventory.py`` lines 1701-1716), so the lock always goes with it.
 _GOES_WITH = {"weight_used": "weight_locked"}
 
+#: The error label of a linked row whose new SB name an unlinked Bambuddy row holds
+#: (R-T4-8); Bambuddy would answer 409.
+NAME_TAKEN = "name_taken"
+
 #: A Bambuddy row made after an intent may carry a time a little before it: the two
 #: clocks agree within about 0.25 s (spec §8.2, measured 2026-11-15).
 _CLOCK_SKEW = timedelta(seconds=5)
@@ -126,11 +131,24 @@ _FROM_TYPE = frozenset(
 )  # fmt: skip
 
 
+class _Unseen:
+    """The type of `UNSEEN`."""
+
+    def __repr__(self) -> str:
+        return "UNSEEN"
+
+
+#: What SB last saw in Bambuddy when it saw nothing (a link made before Task 3, with no
+#: ``bb_seen``): it equals no value, so only the change times decide (R-T4-4).
+UNSEEN: Any = _Unseen()
+
+
 @dataclass(frozen=True)
 class Pending:
     """A reference to an SB row Bambuddy has no id for yet: a spool that names it waits
-    for it (`plan` counts it ``deferred``) while its create is planned or in flight, and
-    else leaves the field out."""
+    for it while its create is planned or in flight (`plan` counts it ``deferred``, or
+    ``blocked`` when this pass did not read that row's listing), and else leaves the
+    field out."""
 
     kind: Kind
     sb_id: UUID
@@ -192,18 +210,27 @@ def is_printer_place(location: m.Location | Mapping[str, Any]) -> bool:
 
 
 def desired_spool(conn: Conn, spool_id: UUID, refs: BbRefs, sync: FilamentSync) -> dict[str, Any]:
+    """The spool as Bambuddy should hold it: `desired_and_unmapped`'s values."""
+    return desired_and_unmapped(conn, spool_id, refs, sync)[0]
+
+
+def desired_and_unmapped(
+    conn: Conn, spool_id: UUID, refs: BbRefs, sync: FilamentSync
+) -> tuple[dict[str, Any], int]:
     """The spool as Bambuddy should hold it, by BB's names, for the data types that push
     (Decision 14), in SB's own forms (`compare_form` and `body_value` turn them into the
     compare and the body form). A row Bambuddy has no id for is a `Pending`. A field SB
     has no value for that Bambuddy cannot take empty is left out: ``label_weight`` with no
     label weight, ``core_weight`` and ``core_weight_catalog_id`` with no insert type,
     ``low_stock_threshold_pct`` outside Bambuddy's 1-99, ``weight_used`` with no label
-    weight or no grams left. ``archived_at`` is the archive state."""
+    weight or no grams left. ``archived_at`` is the archive state. Also the number of K
+    values left out for a printer with no Bambuddy id (``unmapped_k``, Decision 14)."""
     spool = FilamentSpoolStore.read(conn, spool_id)
     if spool is None:
         raise LookupError(f"no spool {spool_id}")
     values = spool.effective
     out: dict[str, Any] = {}
+    unmapped = 0
     if pushes(sync.spools):
         code = None
         if spool.type_id is not None:
@@ -263,6 +290,8 @@ def desired_spool(conn: Conn, spool_id: UUID, refs: BbRefs, sync: FilamentSync) 
             }
             for p in presets
         ]
+        k_values = effective_k_values(conn, spool_id)
+        unmapped = sum(1 for k in k_values if k.printer_id not in refs.printers)
         out["k_profiles"] = [
             {
                 "printer_id": refs.printers[k.printer_id],
@@ -274,7 +303,7 @@ def desired_spool(conn: Conn, spool_id: UUID, refs: BbRefs, sync: FilamentSync) 
                 "cali_idx": k.cali_idx,
                 "setting_id": k.setting_id,
             }
-            for k in effective_k_values(conn, spool_id)
+            for k in k_values
             if k.printer_id in refs.printers
         ]
     if pushes(sync.suppliers):
@@ -285,7 +314,7 @@ def desired_spool(conn: Conn, spool_id: UUID, refs: BbRefs, sync: FilamentSync) 
             if place is None
             else refs.locations.get(place["id"]) or Pending("location", place["id"])
         )
-    return out
+    return out, unmapped
 
 
 def _place(conn: Conn, location_id: UUID | None) -> dict[str, Any] | None:
@@ -410,7 +439,7 @@ def _bb_form(field: str, seen: Mapping[str, Any], k_profiles: Any) -> Any:
     if field == "archived_at":
         return seen.get("archived_at") is None
     if field == "k_profiles":
-        return None if k_profiles is None else k_form(k_profiles)
+        return UNSEEN if k_profiles is None else k_form(k_profiles)
     return seen.get(field)
 
 
@@ -430,10 +459,15 @@ def decide(
     when SB's value is Bambuddy's; under ``sb_to_bb`` always otherwise; under ``two_way``
     when Bambuddy's value is still what SB last saw there, or SB's change is strictly
     after BB's ``updated_at`` (a tie goes to Bambuddy, as on the pull). A BB row with no
-    ``updated_at`` has no change time, so SB's wins."""
+    ``updated_at`` has no change time, so SB's wins, unless SB never saw BB's value
+    (`UNSEEN`): then only a BB time SB's change is strictly after lets it win (R-T4-4)."""
     if sb == bb_now or not pushes(direction):
         return False
-    if direction == "sb_to_bb" or bb_now == bb_seen or bb_at is None:
+    if direction == "sb_to_bb":
+        return True
+    if bb_seen is UNSEEN:
+        return bb_at is not None and sb_at > bb_at
+    if bb_now == bb_seen or bb_at is None:
         return True
     return sb_at > bb_at
 
@@ -498,8 +532,10 @@ def sb_changed_at(conn: Conn, spool_id: UUID, field: str) -> datetime:
 
 # -- the plan -------------------------------------------------------------------------
 
-#: A write and whether `plan` records its create intent when the write is kept.
-_Phase = Literal[0, 1, 2, 3]
+#: The plan's phases (Decision 10's order), and last the items Bambuddy refused in an
+#: earlier pass (R-T4-2).
+_Phase = Literal[0, 1, 2, 3, 4]
+_RETRY: _Phase = 4
 
 
 @dataclass
@@ -532,11 +568,18 @@ class _Planner:
     sync: FilamentSync
     refs: BbRefs
     intents: dict[tuple[str, UUID], datetime]
-    failed: set[tuple[str, UUID]]
+    #: The items whose last write failed (`filament_bb_push_errors`), by when.
+    errors: dict[tuple[str, UUID], datetime]
     phases: dict[_Phase, list[_Candidate]] = field(
-        default_factory=lambda: {0: [], 1: [], 2: [], 3: []}
+        default_factory=lambda: {0: [], 1: [], 2: [], 3: [], 4: []}
     )
+    #: R-T4-1: waits for a write planned earlier in this pass (sets ``more``).
     deferred: set[tuple[str, UUID]] = field(default_factory=set)
+    #: Refused by Bambuddy, not tried again in this round.
+    failed: set[tuple[str, UUID]] = field(default_factory=set)
+    #: Held by a read this pass did not get.
+    blocked: set[tuple[str, UUID]] = field(default_factory=set)
+    unmapped_k: int = 0
     #: The rows whose create (or adopt) is planned in this round.
     creating: set[tuple[str, UUID]] = field(default_factory=set)
 
@@ -556,6 +599,8 @@ class _Planner:
         *,
         intent: bool = False,
     ) -> None:
+        if (kind, sb_id) in self.errors:
+            phase = _RETRY
         write = BbWrite(
             key=f"{kind}:{sb_id}:{op}",
             kind=kind,
@@ -575,12 +620,35 @@ class _Planner:
             return "none"
         return "young" if started > self.snap.read_at else "old"
 
+    def refused(self, kind: Kind, sb_id: UUID, *, create: bool) -> bool:
+        """R-T4-1: whether an item Bambuddy refused gets no write in this round (it is
+        counted ``failed``): one refused in this pass (its error row is newer than the
+        snapshot) waits for the next pass, and a create refused earlier is tried again
+        on a full pass only. The others go last (`add`, R-T4-2)."""
+        at = self.errors.get((kind, sb_id))
+        if at is None:
+            return False
+        if at > self.snap.read_at or (create and not self.full):
+            self.failed.add((kind, sb_id))
+            return True
+        return False
+
+    def read(self, kind: Kind) -> bool:
+        """Whether this pass read Bambuddy's listing of ``kind``."""
+        listing = {
+            "supplier": self.snap.suppliers,
+            "location": self.snap.locations,
+            "insert_type": self.snap.catalog,
+            "filament": self.snap.filaments,
+        }.get(kind)
+        return listing is not None
+
     def in_flight(self, ref: Pending) -> bool:
         """True while a row's create is planned in this round, or has an open intent and
         no failed write: a row Bambuddy refused is no reason to wait, or a spool naming it
         would wait every pass."""
         key = (ref.kind, ref.sb_id)
-        return key not in self.failed and (key in self.creating or key in self.intents)
+        return key not in self.errors and (key in self.creating or key in self.intents)
 
     # -- fields ----------------------------------------------------------------------
 
@@ -609,9 +677,14 @@ class _Planner:
             if not self.full and pushed.get(name) == digest:
                 continue
             now = bb_now[name]
-            seen = None if bb_seen is None else bb_seen.get(name)
+            seen = UNSEEN if bb_seen is None else bb_seen.get(name, UNSEEN)
             way: SyncDirection = direction(name)
-            needs_time = way == "two_way" and value != now and now != seen and bb_at is not None
+            needs_time = (
+                way == "two_way"
+                and value != now
+                and (seen is UNSEEN or now != seen)
+                and bb_at is not None
+            )
             when = sb_at(name) if needs_time else datetime.min.replace(tzinfo=UTC)
             if decide(sb=value, bb_now=now, bb_seen=seen, sb_at=when, bb_at=bb_at, direction=way):
                 out.append(name)
@@ -643,7 +716,7 @@ class _Planner:
         for item in items:
             if item.bb_id is not None:
                 row = by_id.get(item.bb_id)
-                if row is None:
+                if row is None or self.refused(kind, item.sb_id, create=False):
                     continue
                 now, at = self.bb_now(row, readable, item.seen, item.seen_at)
                 names = self.changed(
@@ -655,6 +728,9 @@ class _Planner:
                     lambda _f, at_=item.sb_at: at_,
                     at,
                 )
+                if "name" in names and str(item.desired["name"]).strip().upper() in by_name:
+                    self.name_taken(kind, item.sb_id)
+                    continue
                 if names:
                     self.add(
                         0,
@@ -666,10 +742,12 @@ class _Planner:
                         {n: field_hash(item.desired[n]) for n in names},
                     )
                 continue
-            if item.archived:
+            if item.archived or self.refused(kind, item.sb_id, create=False):
                 continue
             if self.intent_state(kind, item.sb_id) == "young":
                 self.deferred.add((kind, item.sb_id))
+                continue
+            if self.refused(kind, item.sb_id, create=True):
                 continue
             hashes = {n: field_hash(v) for n, v in item.desired.items()}
             found = by_name.pop(item.name.strip().upper(), None)
@@ -689,6 +767,17 @@ class _Planner:
                 )
                 continue
             self.add(0, kind, item.sb_id, "create", None, item.body, hashes, intent=True)
+
+    def name_taken(self, kind: Kind, sb_id: UUID) -> None:
+        """R-T4-8: a linked row renamed in SB to the name of an unlinked Bambuddy row would
+        get a 409 on every pass. It gets no write, and one error row (kept as it is when
+        one is there, so ``attempts`` does not grow)."""
+        self.conn.execute(
+            "INSERT INTO filament_bb_push_errors (kind, sb_id, error) VALUES (%s, %s, %s)"
+            " ON CONFLICT (kind, sb_id) DO NOTHING",
+            (kind, sb_id, NAME_TAKEN),
+        )
+        self.failed.add((kind, sb_id))
 
     def bb_now(
         self,
@@ -726,15 +815,21 @@ class _Planner:
             elif pushes(self.sync.spools) and row["archived_at"] is None:
                 self.new_spool(row["id"], unlinked_bb, raw)
 
-    def resolve(self, sb_id: UUID, desired: dict[str, Any]) -> dict[str, Any] | None:
-        """``desired`` with its `Pending` references settled: ``None`` (the spool waits,
-        counted ``deferred``) when one names a row whose create is in flight; else the
-        fields naming a row Bambuddy will not have this pass are left out."""
+    def desired(self, sb_id: UUID) -> dict[str, Any] | None:
+        """The spool's desired values with their `Pending` references settled: ``None``
+        when one names a row whose create is in flight (the spool waits; ``deferred``
+        when this pass read that row's listing, so a later round can clear it, else
+        ``blocked``, R-T4-1); else the fields naming a row Bambuddy will not have this
+        pass are left out (Decision 35)."""
+        desired, unmapped = desired_and_unmapped(self.conn, sb_id, self.refs, self.sync)
+        self.unmapped_k += unmapped
         out = {}
         for name, value in desired.items():
             refs = list(_pendings(value))
-            if any(self.in_flight(r) for r in refs):
-                self.deferred.add(("spool", sb_id))
+            waiting = [r for r in refs if self.in_flight(r)]
+            if waiting:
+                read = all(self.read(r.kind) for r in waiting)
+                (self.deferred if read else self.blocked).add(("spool", sb_id))
                 return None
             if not refs:
                 out[name] = value
@@ -743,23 +838,40 @@ class _Planner:
     def linked_spool(self, row: Mapping[str, Any], bb: BbSpool | None) -> None:
         sb_id: UUID = row["id"]
         bb_id: int = row["bb_spool_id"]
-        if bb is None:
-            # Decision 13, F16: missing from a complete listing, it gets one probe; a
-            # partial listing never unlinks, so it gets nothing.
-            if self.snap.spools_complete:
-                self.add(1, "spool", sb_id, "probe", bb_id, {}, {})
+        if self.refused("spool", sb_id, create=False):
             return
-        desired = self.resolve(sb_id, desired_spool(self.conn, sb_id, self.refs, self.sync))
-        if desired is None:
-            return
-        compare = {n: compare_form(n, v) for n, v in desired.items()}
         seen: dict[str, Any] | None = row["bb_seen"]
         seen_k = row["bb_k_profiles"]
-        fresh = row["bb_seen_at"] is not None and row["bb_seen_at"] > self.snap.read_at
-        if fresh and seen is not None:
+        # F11, R-T4-3: what `results` stored after this snapshot was read comes first, so
+        # a spool written earlier in this pass (absent from the snapshot when it was
+        # created) is planned from the answer, never probed.
+        fresh = (
+            seen is not None
+            and row["bb_seen_at"] is not None
+            and row["bb_seen_at"] > self.snap.read_at
+        )
+        if bb is None and not fresh:
+            # Decision 13, F16: missing from a complete listing, it gets one probe; a
+            # partial listing never unlinks, so it waits (``blocked``).
+            if self.snap.spools_complete:
+                self.add(1, "spool", sb_id, "probe", bb_id, {}, {})
+            else:
+                self.blocked.add(("spool", sb_id))
+            return
+        desired = self.desired(sb_id)
+        if desired is None:
+            return
+        if fresh and seen_k is None:
+            # R-T4-5: the answer's K-profiles are unknown, not an empty list.
+            desired.pop("k_profiles", None)
+        compare = {n: compare_form(n, v) for n, v in desired.items()}
+        current: dict[str, Any]
+        if seen is not None and fresh:
             current, current_k, bb_at = seen, seen_k, row["bb_updated_at"]
-        else:
+        elif bb is not None:
             current, current_k, bb_at = seen_row(bb), bb.k_profiles, bb.updated_at
+        else:
+            return
         now = {n: _bb_form(n, current, current_k) for n in compare if n != "filament_presets"}
         before = None if seen is None else {n: _bb_form(n, seen, seen_k) for n in compare}
         pushed: dict[str, str] = row["pushed_fields"] or {}
@@ -783,8 +895,9 @@ class _Planner:
                 {},
                 {"archived_at": field_hash(compare["archived_at"])},
             )
-        if desired.get("archived_at") is not None:
-            # An archived spool takes its archive only (Decision 13).
+        if row["archived_at"] is not None:
+            # An archived spool takes its archive only, whatever pushes (Decision 40,
+            # R-T4-6).
             return
         fields = [n for n in names if n not in _LISTS and n != "archived_at"]
         for name, partner in _GOES_WITH.items():
@@ -815,12 +928,21 @@ class _Planner:
     def new_spool(
         self, sb_id: UUID, unlinked_bb: list[BbSpool], raw: Mapping[Any, dict[str, Any]]
     ) -> None:
+        if self.refused("spool", sb_id, create=False):
+            return
         state = self.intent_state("spool", sb_id)
-        if state == "young" or (state == "old" and not self.snap.spools_complete):
-            # A create whose answer was lost is adopted only from a whole listing.
+        if state == "young":
+            # A create whose answer this pass lost: the next pass reads Bambuddy again.
             self.deferred.add(("spool", sb_id))
             return
-        desired = self.resolve(sb_id, desired_spool(self.conn, sb_id, self.refs, self.sync))
+        if self.refused("spool", sb_id, create=True):
+            return
+        if state == "old" and not self.snap.spools_complete:
+            # A create whose answer was lost is adopted only from a whole listing, and a
+            # partial one does not clear in a later round (R-T4-1).
+            self.blocked.add(("spool", sb_id))
+            return
+        desired = self.desired(sb_id)
         if desired is None:
             return
         fields = [n for n in desired if n not in _LISTS and n != "archived_at"]
@@ -877,7 +999,7 @@ class _Planner:
         """The writes in Decision 10's order, at most ``limit``: an item whose write does
         not fit counts ``deferred``; a kept create (or adoption) records its intent."""
         writes: list[BbWrite] = []
-        for phase in (0, 1, 2, 3):
+        for phase in (0, 1, 2, 3, 4):
             for candidate in self.phases[phase]:
                 write = candidate.write
                 if len(writes) >= limit:
@@ -1040,11 +1162,13 @@ def plan(
     """The writes SB wants Bambuddy to take next, from what ``snap`` read, at most
     ``limit`` (Decision 11), in this order: suppliers, locations, insert types and
     filament catalog entries; then spool creates, updates and probes whose references
-    are known (the others count ``deferred``); then archive and restore; then each
-    spool's lists (K-profiles, presets, suppliers). Each write's ``key`` is
-    ``kind:sb_id:op``. A kept create records its intent here, in this transaction
-    (Decision 10). Nothing is planned when no data type pushes, or when the links belong
-    to another Bambuddy (``instance_changed``, Decision 12)."""
+    are known (the others count ``deferred`` or ``blocked``); then archive and restore;
+    then each spool's lists (K-profiles, presets, suppliers); last the writes of items
+    Bambuddy refused in an earlier pass (R-T4-2). An item refused in this pass, or a
+    create refused earlier on an event pass, counts ``failed`` (R-T4-1). Each write's
+    ``key`` is ``kind:sb_id:op``. A kept create records its intent here, in this
+    transaction (Decision 10). Nothing is planned when no data type pushes, or when the
+    links belong to another Bambuddy (``instance_changed``, Decision 12)."""
     empty = SyncPlan(writes=[], deferred=0, directions=sync, interval_s=interval_s)
     if not any(pushes(getattr(sync, t)) for t in _PUSHED_TYPES):
         return empty
@@ -1058,11 +1182,13 @@ def plan(
                 "SELECT kind, sb_id, started_at FROM filament_bb_creates"
             ).fetchall()
         }
-        failed = {
-            (row["kind"], row["sb_id"])
-            for row in conn.execute("SELECT kind, sb_id FROM filament_bb_push_errors").fetchall()
+        errors = {
+            (row["kind"], row["sb_id"]): row["at"]
+            for row in conn.execute(
+                "SELECT kind, sb_id, at FROM filament_bb_push_errors"
+            ).fetchall()
         }
-        planner = _Planner(conn, snap, sync, BbRefs.read(conn), intents, failed)
+        planner = _Planner(conn, snap, sync, BbRefs.read(conn), intents, errors)
         planner.rows("supplier", _suppliers(conn), snap.suppliers, sync.suppliers, _SUPPLIER_FIELDS)
         planner.rows("location", _locations(conn), snap.locations, sync.locations, _LOCATION_FIELDS)
         planner.rows("insert_type", _insert_types(conn), snap.catalog, sync.spools, _CATALOG_FIELDS)
@@ -1072,6 +1198,9 @@ def plan(
     return SyncPlan(
         writes=writes,
         deferred=len(planner.deferred),
+        failed=len(planner.failed),
+        blocked=len(planner.blocked),
+        unmapped_k=planner.unmapped_k,
         directions=sync,
         interval_s=interval_s,
     )
