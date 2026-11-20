@@ -99,7 +99,7 @@ with workflow.unsafe.imports_passed_through():
         SucceedInput,
         lan_sequence_id,
     )
-    from scadbuddy.workflows.problems import problem_of, setting_refused
+    from scadbuddy.workflows.problems import object_conflict, problem_of, setting_refused
     from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_ROUND, SLICE_TIMEOUT
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
@@ -723,19 +723,30 @@ class PrintRunWorkflow(_PlateStarts):
         """:meth:`_slice_plate`, with a slicer's failure whose text names one of the
         request's own process overrides answered as a 422 naming that key (#2998,
         ``problems.setting_refused``). The template's settings, the filament profiles'
-        and the shorthands' keys are not matched: the user did not type them. Only the
-        failure's problem changes; the commands are the same, so a history replays as
-        before."""
+        and the shorthands' keys are not matched: the user did not type them. A failure
+        that is Bambu Studio's "Object conflicts were detected" also carries one
+        ``object-conflict`` warning for the plate (#6732, ``problems.object_conflict``),
+        also when it is a refused setting's 422 (#6736).
+        Only the failure's problem changes; the commands are the same, so a history
+        replays as before."""
         try:
             return await self._slice_plate(planned, plate, subject)
         except (ActivityError, ApplicationError) as error:
-            if is_cancelled_exception(error) or not self.requested_overrides:
+            if is_cancelled_exception(error):
                 raise
-            refused = setting_refused(problem_of(error), self.requested_overrides)
-            if refused is None:
+            problem = problem_of(error)
+            refused = (
+                setting_refused(problem, self.requested_overrides)
+                if self.requested_overrides
+                else None
+            )
+            # The 422 keeps the slicer's words, so a refusal that is also an object
+            # conflict carries the warning too (#6736).
+            changed = object_conflict(refused or problem, plate.plate_id) or refused
+            if changed is None:
                 raise
             raise ApplicationError(
-                refused.detail, refused, type=FAILED, non_retryable=True
+                changed.detail, changed, type=FAILED, non_retryable=True
             ) from None
 
     async def _slice_plate(

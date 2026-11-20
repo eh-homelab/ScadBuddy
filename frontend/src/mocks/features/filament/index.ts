@@ -26,6 +26,54 @@ type S = components['schemas']
 
 const BASE = '/api/v1/filament'
 
+/** #6714 — the slicer profiles the mock fills a type from, by preset id. */
+const PROFILES: Record<string, { name: string; values: Partial<Record<FillField, number | string>>; cost_hint: string }> = {
+  GFA00: { name: 'Bambu PLA Basic @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 190, nozzle_temp_max: 230, bed_temp_min: 35, bed_temp_max: 65, density_g_cm3: '1.26', diameter_mm: '1.75' }, cost_hint: '24.99' },
+  GFG02: { name: 'Bambu PETG HF @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 230, nozzle_temp_max: 260, bed_temp_min: 70, bed_temp_max: 80, density_g_cm3: '1.25', diameter_mm: '1.75' }, cost_hint: '19.99' },
+}
+
+const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+type FillField = (typeof FILL_FIELDS)[number]
+
+/** The type's H2C 0.4 mm preset, else any 0.4 mm one, else the first, and its profile (R-6714-1). */
+function profileOf(type: S['SpoolType']) {
+  const presets = state.typePresets.filter((one) => one.type_id === type.id)
+  const at04 = presets.filter((one) => Number(one.nozzle_diameter) === 0.4)
+  const preset = at04.find((one) => one.printer_model.toUpperCase() === 'H2C') ?? at04[0] ?? presets[0]
+  if (!preset) return null
+  const profile = PROFILES[preset.slicer_filament]
+  return { preset, values: profile?.values ?? null, profile }
+}
+
+/** `TypeFiller.fill` (and `apply`) over the mock's types: empty fields only, a refresh compares. */
+function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Partial<Record<FillField, number | string>>; kValues?: boolean }): S['TypeFill'] {
+  const result: S['TypeFill'] = { type_id: type.id, code: type.code, filled: {}, previous: {}, skipped: {}, k_values: [], written: false }
+  const found = profileOf(type)
+  if (!found) return { ...result, reason: 'the type has no slicer preset' }
+  if (!found.profile) return { ...result, reason: `Bambu Studio 02.08.02.61 has no filament preset ${found.preset.slicer_filament}` }
+  result.source = { preset_id: found.preset.slicer_filament, name: found.profile.name, origin: 'system', printer_model: found.preset.printer_model, nozzle_diameter: found.preset.nozzle_diameter }
+  result.cost_hint = found.profile.cost_hint
+  const at = state.types.findIndex((one) => one.id === type.id)
+  const current = type as unknown as Record<FillField, number | string | null>
+  if (options.apply) {
+    for (const field of Object.keys(options.apply)) result.previous[field] = current[field as FillField]
+    state.types[at] = { ...type, ...options.apply } as S['SpoolType']
+    return { ...result, filled: options.apply, written: Object.keys(options.apply).length > 0 }
+  }
+  for (const [field, value] of Object.entries(found.profile.values)) {
+    const now = current[field as FillField]
+    if (options.refresh ? String(now) !== String(value) : now === null) {
+      result.filled[field] = value
+      if (options.refresh) result.previous[field] = now
+    }
+  }
+  if (!options.refresh && Object.keys(result.filled).length > 0) {
+    state.types[at] = { ...type, ...result.filled } as S['SpoolType']
+    result.written = true
+  }
+  return result
+}
+
 let state: Seed = seed()
 
 export function reset() {
@@ -46,9 +94,9 @@ const now = () => new Date().toISOString()
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
 
 /** A refusal as `core/problems.py` `problem_response` writes it: every error here. */
-const problem = (status: keyof typeof TITLES, detail: string) =>
+const problem = (status: keyof typeof TITLES, detail: string, extensions: object = {}) =>
   HttpResponse.json(
-    { type: 'about:blank', title: TITLES[status], status, detail },
+    { type: 'about:blank', title: TITLES[status], status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 
@@ -463,9 +511,45 @@ function cleared(body: Record<string, unknown>, fields: readonly string[]): stri
 const CATALOG_FIELDS = Object.fromEntries(
   Object.entries(seed().catalogs).map(([kind, rows]) => [
     kind,
-    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id'].includes(field))),
+    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases'].includes(field))),
   ]),
 ) as Record<keyof Catalogs, Set<string>>
+
+/**
+ * #6706 — the catalogs with aliases (`filament/catalog.py` `NameTable`) and the noun a
+ * clash names (`<noun>_id`, `<noun>_name`). Their names and aliases share one key space
+ * per catalog (a subtype's within its material), archived rows included.
+ */
+const ALIASED = { materials: 'material', subtypes: 'subtype', brands: 'brand', categories: 'category', effects: 'effect' } as const
+type Aliased = keyof typeof ALIASED
+const isAliased = (kind: string): kind is Aliased => kind in ALIASED
+type AliasedRow = { id: string; name: string; aliases: string[]; material_id?: string | null }
+
+/** `catalog_key`: `+` read as `PLUS` (R-6706-17), then the letters and digits, upper case. */
+export const catalogKey = (name: string) =>
+  name
+    .replace(/\+/g, 'PLUS')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .toUpperCase()
+
+/** The row of `kind` that holds `name`'s key in `scope` (a subtype's material), but `self`'s own names. */
+function keyHolder(kind: Aliased, name: string, scope: string | null, self?: string, skipSelf = true): AliasedRow | undefined {
+  const key = catalogKey(name)
+  return (state.catalogs[kind] as AliasedRow[]).find(
+    (row) =>
+      !(skipSelf && row.id === self) &&
+      (kind !== 'subtypes' || (row.material_id ?? null) === scope) &&
+      [row.name, ...row.aliases].some((one) => catalogKey(one) === key),
+  )
+}
+
+function keyClash(kind: Aliased, holder: AliasedRow, name: string): Response {
+  const noun = ALIASED[kind]
+  return problem(409, `the ${noun} '${holder.name}' already has a name or alias that matches '${name}'`, {
+    [`${noun}_id`]: holder.id,
+    [`${noun}_name`]: holder.name,
+  })
+}
 
 const sameName = (a: string, b: unknown) => typeof b === 'string' && a.trim().toUpperCase() === b.trim().toUpperCase()
 
@@ -478,6 +562,12 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
   if (badRef(values, CATALOG_REFS[kind] ?? {})) return problem(422, REFUSED.catalogRef)
   const temps = kind === 'materials' || kind === 'subtypes' ? badTemps(values) : null
   if (temps) return problem(422, temps)
+  if (isAliased(kind)) {
+    // A name takes its key; an archived row keeps its keys (#6706).
+    const holder = typeof values.name === 'string' ? keyHolder(kind, values.name, (values.material_id as string | null | undefined) ?? null, self) : undefined
+    // A rename to one of its own aliases takes that alias's key.
+    return holder ? keyClash(kind, holder, values.name as string) : null
+  }
   // The name indexes are `WHERE archived_at IS NULL`: an archived row holds no name, and
   // restoring one whose name a live row took since is refused.
   if (values.archived_at) return null
@@ -485,7 +575,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
     id: string
     name: string
     archived_at: string | null
-    material_id?: string | null
     manufacturer?: string | null
   }[]
   const taken = rows.some(
@@ -493,8 +582,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
       row.id !== self &&
       !row.archived_at &&
       sameName(row.name, values.name) &&
-      // `filament_subtypes_name`: a subtype's name is unique within its material.
-      (kind !== 'subtypes' || (row.material_id ?? null) === (values.material_id ?? null)) &&
       // `filament_colours_name`: a colour's name is unique per manufacturer (none is one).
       (kind !== 'colours' || sameName(row.manufacturer ?? '', values.manufacturer ?? '')),
   )
@@ -766,6 +853,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
   if (codes.some((code, at) => codes.indexOf(code) !== at || (live.includes(code) && !matchingType(normalised(picks[at]!)))))
     return problem(409, 'a spool type already has one of these codes; choose another name')
   const done: S['ConfirmedProposal'][] = []
+  const madeHere = new Set<string>()
   for (const raw of picks) {
     const pick = normalised(raw)
     const want = proposalKey(pick)
@@ -778,7 +866,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
       else eligible.push(row!)
     }
     if (!eligible.length) {
-      done.push({ code: pick.code, type_id: null, made: false, typed: [], skipped })
+      done.push({ code: pick.code, type_id: null, made: false, new: false, typed: [], skipped })
       continue
     }
     let kind = matchingType(eligible[0]!)
@@ -795,6 +883,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
       })
       if (created instanceof Response) return created
       kind = created
+      madeHere.add(kind.id)
     }
     for (const row of eligible) {
       const changes: Record<string, unknown[]> = { type_id: [null, kind.id] }
@@ -808,7 +897,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
       state.spools[state.spools.indexOf(row)] = next
       addEvent(row.id, 'edited', { data: { changes } })
     }
-    done.push({ code: kind.code, type_id: kind.id, made, typed: eligible.map((row) => row.id), skipped })
+    done.push({ code: kind.code, type_id: kind.id, made, new: madeHere.has(kind.id), typed: eligible.map((row) => row.id), skipped })
   }
   return { groups: done }
 }
@@ -1015,7 +1104,6 @@ function csvValue(field: (typeof CSV_PLAIN)[number], text: string): unknown {
   return text
 }
 
-type Named = { id: string; name: string; archived_at: string | null; material_id?: string | null }
 const liveNamed = <T extends { name: string; archived_at: string | null }>(rows: T[], name: string) =>
   rows.filter((row) => !row.archived_at && sameName(row.name, name))
 
@@ -1060,10 +1148,15 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
     if (name === null) continue
     const before = shown?.names?.[column] ?? null
     if (before !== null && sameName(before, name)) continue
-    const found = liveNamed(state.catalogs[kind] as Named[], name)
-      .filter((one) => kind !== 'subtypes' || one.material_id === material || one.material_id == null)
-      .sort((a, b) => Number(a.material_id == null) - Number(b.material_id == null))[0]
+    // No letter or digit, so no key: the cell is skipped and the row goes on (R-6706-18).
+    if (catalogKey(name) === '') {
+      changes[column] = [before, name, { skipped: 'no letter or digit' }]
+      continue
+    }
+    // By key, against every name and alias, archived rows too (#6706).
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
     if (column === 'material') material = found?.id ?? null
+    if (found && before !== null && found.name === before) continue
     if (found) {
       changes[column] = [before, found.name]
       values[`${column}_id`] = found.id
@@ -1106,7 +1199,7 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
   for (const [column, name] of fresh) {
     const kind = CSV_CATALOGS[column]
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, name, sort_order: 1000, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, name, sort_order: 1000, aliases: [], id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     if (kind === 'subtypes') Object.assign(made, { material_id: (values.material_id as string | undefined) ?? material })
     ;(state.catalogs[kind] as unknown[]).push(made)
     values[`${column}_id`] = made.id
@@ -1184,7 +1277,7 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, sort_order: 0, ...body, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),
@@ -1200,8 +1293,44 @@ export const handlers = [
     const next = patched(rows[at]!, body)
     const refused = catalogRefusal(kind, next, body, rows[at]!.id)
     if (refused) return refused
+    if (isAliased(kind) && typeof body.name === 'string') {
+      const key = catalogKey(body.name)
+      const own = next as unknown as AliasedRow
+      own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
+    }
     rows[at] = next
     return HttpResponse.json(next)
+  }),
+  http.get(`${BASE}/catalog/:kind/resolve`, ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const url = new URL(request.url)
+    const name = url.searchParams.get('name') ?? ''
+    const material = url.searchParams.get('material_id')
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
+    return found ? HttpResponse.json(found) : problem(404, `no ${kind} row is named '${name}'`)
+  }),
+  http.put(`${BASE}/catalog/:kind/:id/aliases`, async ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const row = (state.catalogs[kind] as AliasedRow[]).find((one) => one.id === params.id)
+    if (!row) return problem(404, `no ${kind} row ${String(params.id)}`)
+    const body = (await request.json()) as { aliases?: unknown }
+    if (!Array.isArray(body.aliases)) return problem(422, 'aliases: Field required')
+    const aliases = body.aliases.map((one) => String(one).trim())
+    if (aliases.some((one) => one === '')) return problem(422, 'aliases: String should have at least 1 character')
+    const empty = aliases.find((one) => catalogKey(one) === '')
+    if (empty !== undefined) return problem(422, `the alias '${empty}' has no letter or digit`)
+    const scope = row.material_id ?? null
+    const taken: string[] = [catalogKey(row.name)]
+    for (const alias of aliases) {
+      const holder = keyHolder(kind, alias, scope, row.id)
+      if (holder) return keyClash(kind, holder, alias)
+      if (taken.includes(catalogKey(alias))) return keyClash(kind, row, alias)
+      taken.push(catalogKey(alias))
+    }
+    row.aliases = [...aliases].sort((a, b) => a.toUpperCase().localeCompare(b.toUpperCase()))
+    return HttpResponse.json(row)
   }),
 
   // -- spool types --
@@ -1235,6 +1364,26 @@ export const handlers = [
     if (refused) return refused
     state.types[at] = PRICED.some((field) => field in body) ? linkPriceBook(next) : next
     return HttpResponse.json(state.types[at])
+  }),
+  // #6714: the fill from a type's slicer profile, over `PROFILES` (`fillType`).
+  http.post(`${BASE}/types/fill-from-profile`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { refresh?: boolean }
+    return HttpResponse.json(state.types.filter((type) => !type.archived_at).map((type) => fillType(type, { refresh: body.refresh === true })))
+  }),
+  http.post(`${BASE}/types/:id/fill-from-profile`, async ({ params, request }) => {
+    const type = state.types.find((one) => one.id === params.id)
+    if (!type) return problem(404, `no spool type ${String(params.id)}`)
+    const body = (await request.json().catch(() => ({}))) as S['FillRequest']
+    if (body.apply) {
+      const unknown = Object.keys(body.apply).find((field) => !(FILL_FIELDS as readonly string[]).includes(field))
+      if (unknown) return problem(422, `apply.${unknown}: Input should be ${FILL_FIELDS.join(', ')}`)
+      const given = profileOf(type)?.values ?? {}
+      for (const [field, value] of Object.entries(body.apply)) {
+        if (String(given[field as FillField]) !== String(value)) return problem(409, `the profile now gives ${field} ${String(given[field as FillField] ?? 'None')}, not ${String(value)}: refresh again`)
+      }
+      return HttpResponse.json(fillType(type, { apply: body.apply as Partial<Record<FillField, number | string>>, kValues: body.k_values === true }))
+    }
+    return HttpResponse.json(fillType(type, { refresh: body.refresh === true }))
   }),
   http.put(`${BASE}/types/:id/presets`, async ({ params, request }) => {
     const typeId = String(params.id)
@@ -1708,6 +1857,7 @@ export const handlers = [
       invalid: 0,
       catalog_failed: false,
       catalog_skipped: 0,
+      names_skipped: 0,
       created_ids: [],
       linked_ids: [],
       updated_ids: [],

@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from psycopg import errors
 
 from scadbuddy.filament import type_proposals
 from scadbuddy.filament.bambuddy_pull import pull
@@ -17,11 +18,13 @@ from scadbuddy.filament.models import (
     SpoolCreate,
     SpoolPatch,
     SpoolTypeCreate,
+    SubtypeCreate,
     TypeProposal,
     TypeProposalConfirm,
 )
 from tests.conftest import PgPool
 from tests.filament.test_bambuddy_pull import NOW, _filament, _ids, _pla, bb
+from tests.filament.test_catalog_names import _keyless
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -71,14 +74,16 @@ def test_spools_group_by_brand_material_subtype_colour_weight_and_number(
     )
     found = type_proposals.proposals(f)
     by_count = sorted((g.count, g.code) for g in found.groups)
+    # The two with no number fold into the one group of their key that has one (R-6729-1).
     assert by_count == [
         (1, "BAMBU-LAB-PLA-BASIC-FF000080"),
-        (1, "BAMBU-LAB-PLA-BASIC-RED-250G"),
-        (1, "GFA00"),
-        (2, "BAMBU-LAB-PLA-BASIC-RED"),
+        (1, "BAMBU-LAB-PLA-BASIC-RED"),
+        (3, "GFA00"),
     ]
     first = found.groups[0]
-    assert first.count == 2 and len(first.spool_ids) == 2 and len(first.numbers) == 2
+    assert first.count == 3 and len(first.spool_ids) == 3 and len(first.numbers) == 3
+    assert first.numbers == sorted(first.numbers)
+    assert first.material_number == "GFA00"
     assert (first.brand, first.material, first.subtype) == ("Bambu Lab", "PLA", "Basic")
     assert (first.rgba, first.label_weight_g, first.colour_name) == ("#FF0000FF", 1000, "Red")
     assert first.type_id is None
@@ -116,6 +121,46 @@ def test_a_proposal_names_a_type_that_already_matches(pg_pool: PgPool) -> None:
     _spool(f)
     kind = f.types.create(
         SpoolTypeCreate(code="MINE", material_id=_pla(pg_pool), rgba="#FF0000", label_weight_g=1000)
+    )
+    (group,) = type_proposals.proposals(f).groups
+    assert (group.type_id, group.code) == (kind.id, "MINE")
+
+
+def test_a_proposal_matches_its_type_by_id_not_by_a_subtypes_name(pg_pool: PgPool) -> None:
+    """R-6706-22: a group whose subtype is one for every material finds its type, though
+    the material has its own subtype of the same key."""
+    f = _filament(pg_pool)
+    pla = _pla(pg_pool)
+    anyone: Any = f.catalog.create("subtypes", SubtypeCreate(name="Glossy"))
+    f.catalog.create("subtypes", SubtypeCreate(name="glossy", material_id=pla))
+    _spool(f, subtype_id=anyone.id)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="MINE",
+            material_id=pla,
+            subtype_id=anyone.id,
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
+    )
+    (group,) = type_proposals.proposals(f).groups
+    assert (group.type_id, group.code) == (kind.id, "MINE")
+
+
+def test_a_proposal_with_a_keyless_catalog_row_finds_its_type(pg_pool: PgPool) -> None:
+    """R-6706-22: a brand the fill left without a key (R-6706-14) still matches by id."""
+    f = _filament(pg_pool)
+    with pg_pool.connection() as conn:
+        brand = _keyless(conn, "filament_brands", "filament_brands_claim_name", "!!!")
+    _spool(f, brand_id=brand)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="MINE",
+            material_id=_pla(pg_pool),
+            brand_id=brand,
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
     )
     (group,) = type_proposals.proposals(f).groups
     assert (group.type_id, group.code) == (kind.id, "MINE")
@@ -350,3 +395,122 @@ def test_a_clashing_code_writes_nothing(pg_pool: PgPool) -> None:
     assert [t.code for t in f.types.list()] == ["TAKEN"]
     spool = f.spools.get(red)
     assert spool is not None and spool.type_id is None
+
+
+def test_a_group_with_no_number_folds_into_the_one_numbered_group_of_its_key(
+    pg_pool: PgPool,
+) -> None:
+    """R-6729-1: a hand-added spool and a Bambuddy one of one key share one type."""
+    f = _filament(pg_pool)
+    pull(f, [bb(id=1, tray_uuid=None, tag_uid=None, material_number="GFA00")], now=NOW)
+    (linked,) = type_proposals.proposals(f).groups
+    hand = _spool(
+        f,
+        brand_id=linked.brand_id,
+        subtype_id=linked.subtype_id,
+        rgba="#FF0000FF",
+        colour_name="Red",
+    )
+    (group,) = type_proposals.proposals(f).groups
+    assert (group.code, group.material_number, group.count) == ("GFA00", "GFA00", 2)
+    assert hand in group.spool_ids
+    (result,) = _confirm(f, _pick(group)).groups
+    assert (result.code, result.made, result.new, result.skipped) == ("GFA00", True, True, [])
+    assert sorted(result.typed) == sorted(group.spool_ids)
+
+
+def _two_numbers_and_none(f: Filament) -> list[TypeProposal]:
+    pull(
+        f,
+        [
+            bb(id=1, tray_uuid=None, tag_uid=None, material_number="N1"),
+            bb(id=2, tray_uuid=None, tag_uid=None, material_number="N2"),
+            bb(id=3, tray_uuid=None, tag_uid=None),
+        ],
+        now=NOW,
+    )
+    return type_proposals.proposals(f).groups
+
+
+def test_a_group_with_no_number_stays_apart_when_two_numbered_groups_match(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    groups = _two_numbers_and_none(f)
+    assert sorted((g.material_number or "", g.count) for g in groups) == [
+        ("", 1),
+        ("N1", 1),
+        ("N2", 1),
+    ]
+
+
+def test_confirm_says_when_a_group_joined_a_type_another_group_just_made(
+    pg_pool: PgPool,
+) -> None:
+    """R-6729-1: the second and third groups land on the first one's new type."""
+    f = _filament(pg_pool)
+    groups = sorted(_two_numbers_and_none(f), key=lambda g: g.material_number or "~")
+    picks = [_pick(g, code=f"MINE-{at}") for at, g in enumerate(groups)]
+    done = _confirm(f, *picks).groups
+    assert [(r.code, r.made, r.new) for r in done] == [
+        ("MINE-0", True, True),
+        ("MINE-0", False, True),
+        ("MINE-0", False, True),
+    ]
+    assert len({r.type_id for r in done}) == 1
+
+
+def test_a_type_that_existed_is_not_new(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _spool(f)
+    f.types.create(
+        SpoolTypeCreate(code="MINE", material_id=_pla(pg_pool), rgba="#FF0000", label_weight_g=1000)
+    )
+    (group,) = type_proposals.proposals(f).groups
+    (result,) = _confirm(f, _pick(group)).groups
+    assert (result.code, result.made, result.new) == ("MINE", False, False)
+
+
+def test_a_material_number_over_128_characters_is_proposed_with_no_number(
+    pg_pool: PgPool,
+) -> None:
+    """R-6729-3: a cut code could collide, so a long one is not proposed at all."""
+    f = _filament(pg_pool)
+    pull(f, [bb(id=1, tray_uuid=None, tag_uid=None, material_number="X" * 129)], now=NOW)
+    (group,) = type_proposals.proposals(f).groups
+    assert (group.material_number, group.code) == (None, "BAMBU-LAB-PLA-BASIC-RED")
+    (result,) = _confirm(f, _pick(group)).groups
+    assert (result.made, result.skipped) == (True, [])
+
+
+def test_another_unique_violation_is_not_a_code_clash(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-6729-2: only the code's unique index is the 409."""
+    f = _filament(pg_pool)
+    _spool(f)
+    (group,) = type_proposals.proposals(f).groups
+    create_on = f.types.create_on
+
+    def clash(conn: Any, body: Any) -> Any:
+        conn.execute("INSERT INTO filament_materials (name) VALUES ('pla')")
+        return create_on(conn, body)
+
+    monkeypatch.setattr(f.types, "create_on", clash)
+    with pytest.raises(errors.UniqueViolation):
+        _confirm(f, _pick(group))
+    assert f.types.list() == []
+
+
+def test_a_spool_with_no_number_in_a_numbered_pick_is_changed_when_two_groups_match(
+    pg_pool: PgPool,
+) -> None:
+    """R-6729-5: the confirm takes a spool with no number into a numbered pick only under
+    the fold's rule, exactly one numbered group of its other key fields."""
+    f = _filament(pg_pool)
+    groups = _two_numbers_and_none(f)
+    n1 = next(g for g in groups if g.material_number == "N1")
+    (bare,) = next(g for g in groups if g.material_number is None).spool_ids
+    (result,) = _confirm(f, _pick(n1, spool_ids=[*n1.spool_ids, bare])).groups
+    assert result.typed == n1.spool_ids
+    assert [(s.spool_id, s.reason) for s in result.skipped] == [(bare, "changed")]

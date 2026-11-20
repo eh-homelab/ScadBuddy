@@ -528,8 +528,8 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
         "shop's currency, one whose total is more than 0.05 from its lines plus shipping, or a "
         "line that cannot be confirmed (the message names the line). After the commit it "
         "starts a 3DFP preset fetch for each new type that has a `tdfp_id` (`POST "
-        "/filament/types/{type_id}/profile-fetch`); a fetch that cannot start never fails "
-        "the confirm."
+        "/filament/types/{type_id}/profile-fetch`); a fetch that cannot start never "
+        "fails the confirm."
     ),
 )
 async def confirm_invoice(

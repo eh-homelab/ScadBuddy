@@ -92,6 +92,19 @@ class _Catalog(_Row):
     archived_at: datetime | None
 
 
+class _Aliased(_Catalog):
+    """A row of a catalog with aliases (#6706): its other names, canonical name aside,
+    each a key no other name or alias of the catalog has (`filament/catalog.py`)."""
+
+    aliases: list[str] = Field(default_factory=list)
+
+
+class AliasesPut(_In):
+    """The whole alias list of a row: trimmed, none empty (#6706, R-6706-6)."""
+
+    aliases: Annotated[list[Name], Field(max_length=64)]
+
+
 # -- the plain catalogs: brand, category, effect, insert material --------------------
 
 
@@ -113,7 +126,7 @@ class BrandCreate(_NamedCreate): ...
 class BrandPatch(_NamedPatch): ...
 
 
-class Brand(_Catalog): ...
+class Brand(_Aliased): ...
 
 
 class CategoryCreate(_NamedCreate): ...
@@ -122,7 +135,7 @@ class CategoryCreate(_NamedCreate): ...
 class CategoryPatch(_NamedPatch): ...
 
 
-class Category(_Catalog): ...
+class Category(_Aliased): ...
 
 
 class EffectCreate(_NamedCreate): ...
@@ -131,7 +144,7 @@ class EffectCreate(_NamedCreate): ...
 class EffectPatch(_NamedPatch): ...
 
 
-class Effect(_Catalog): ...
+class Effect(_Aliased): ...
 
 
 class InsertMaterialCreate(_NamedCreate): ...
@@ -198,7 +211,7 @@ class MaterialPatch(_Patch):
     archived: bool | None = None
 
 
-class Material(_Catalog):
+class Material(_Aliased):
     family: str | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -244,7 +257,7 @@ class SubtypePatch(_Patch):
     archived: bool | None = None
 
 
-class Subtype(_Catalog):
+class Subtype(_Aliased):
     material_id: UUID | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -687,8 +700,10 @@ class EffectiveKValue(BaseModel):
 class TypeProposal(BaseModel):
     """A type proposed for the open spools that need one and share its key: brand,
     material, subtype, RGBA, label weight and the ``material_number`` of their last
-    Bambuddy reading. ``code`` is the proposed name; ``type_id`` names a type that matches
-    the key now (the confirm uses it, and makes none). The names are the catalog rows'."""
+    Bambuddy reading (none when it is longer than 128 characters; spools with none fold into
+    the one group of their other fields that has one). ``code`` is the proposed name;
+    ``type_id`` names a type that matches the key now (the confirm uses it, and makes none).
+    The names are the catalog rows'."""
 
     code: str
     type_id: UUID | None
@@ -697,7 +712,7 @@ class TypeProposal(BaseModel):
     subtype_id: UUID | None
     rgba: Rgba
     label_weight_g: int
-    material_number: str | None
+    material_number: Text | None
     brand: str | None
     material: str
     subtype: str | None
@@ -753,12 +768,16 @@ class SkippedSpool(BaseModel):
 
 
 class ConfirmedProposal(BaseModel):
-    """What a confirm did with one proposal: the type it used (``made`` when it made it;
-    ``None`` when no spool was left to type), the spools it typed and those it skipped."""
+    """What a confirm did with one proposal: the type it used (``None`` when no spool was
+    left to type), ``made`` when this group made it, ``new`` when this request made it (by
+    this group or an earlier one: ``new`` and not ``made`` means the group joined another
+    group's new type, and its own code was not used), the spools it typed and those it
+    skipped."""
 
     code: str
     type_id: UUID | None
     made: bool
+    new: bool
     typed: list[UUID]
     skipped: list[SkippedSpool]
 

@@ -77,8 +77,8 @@ describe('the Create types panel (#6701)', () => {
       http.post(`${PROPOSALS}/confirm`, () =>
         HttpResponse.json({
           groups: [
-            { code: 'PLA-RED', type_id: 'a', made: true, typed: groups[0]!.spool_ids, skipped: [] },
-            { code: 'PLA-BLUE', type_id: null, made: false, typed: [], skipped: [{ spool_id: groups[1]!.spool_ids[0], reason: 'typed' }] },
+            { code: 'PLA-RED', type_id: 'a', made: true, new: true, typed: groups[0]!.spool_ids, skipped: [] },
+            { code: 'PLA-BLUE', type_id: null, made: false, new: false, typed: [], skipped: [{ spool_id: groups[1]!.spool_ids[0], reason: 'typed' }] },
           ],
         }),
       ),
@@ -88,6 +88,31 @@ describe('the Create types panel (#6701)', () => {
     await user.click(await screen.findByRole('button', { name: 'Create all 2 types' }))
     await waitFor(() => expect(onDone).toHaveBeenCalledWith('Created PLA-RED for 1 spool. Skipped #32: it has a type now.'))
     expect(sent[0]!.map((pick) => pick.code)).toEqual(['PLA-RED', 'PLA-BLUE'])
+  })
+
+  it('says when a row joined the type another row just created, and the name it did not use (R-6729-1)', async () => {
+    const groups = [
+      group({ code: 'GFA00', material_number: 'GFA00' }),
+      group({ code: 'GFA01', material_number: 'GFA01', spool_ids: ['00000000-0000-4000-8000-0000000000b2'], numbers: [32] }),
+    ]
+    server.use(
+      http.get(PROPOSALS, () => HttpResponse.json({ groups, ungrouped: [] })),
+      http.post(`${PROPOSALS}/confirm`, () =>
+        HttpResponse.json({
+          groups: [
+            { code: 'GFA00', type_id: 'a', made: true, new: true, typed: groups[0]!.spool_ids, skipped: [] },
+            { code: 'GFA00', type_id: 'a', made: false, new: true, typed: groups[1]!.spool_ids, skipped: [] },
+          ],
+        }),
+      ),
+    )
+    const { user, onDone } = open()
+    await user.click(await screen.findByRole('button', { name: 'Create all 2 types' }))
+    await waitFor(() =>
+      expect(onDone).toHaveBeenCalledWith(
+        'Created GFA00 for 1 spool. Typed 1 spool as GFA00, which another row created; the name GFA01 was not used.',
+      ),
+    )
   })
 
   it('says why a create was refused', async () => {

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,6 +38,7 @@ from scadbuddy.bambuddy.filaments import colour_distance
 from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
 from scadbuddy.bambuddy.trays import CLOSE_COLOUR, place_label, seen_trays, tray_label
 from scadbuddy.filament import models as m
+from scadbuddy.filament.catalog import catalog_key
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
@@ -70,6 +70,7 @@ __all__ = [
     "TrayTagClashError",
     "TrayView",
     "material_key",
+    "material_names",
     "read_sb_spools",
     "route_trays",
     "tray_agreement",
@@ -86,28 +87,41 @@ _Placed = Mapping[tuple[UUID, int, int], list[tuple[UUID, str]]]
 
 #: Who a tray reconcile's moves name (#6713).
 RECONCILE_ACTOR: Final = "system:tray-reconcile"
-_NOT_ALNUM = re.compile(r"[^A-Z0-9]")
 
 
 def material_key(name: str | None) -> str:
-    """A material name as a tray's ``tray_type`` is compared with it (#6713): upper case,
-    every character that is not a letter or a digit removed, so ``PETG-CF`` and
-    ``petg cf`` are one key. Nothing in ScadBuddy maps a ``tray_type`` to another
-    material's name, so the key is the whole comparison."""
-    return _NOT_ALNUM.sub("", (name or "").upper())
+    """A material name as a tray's ``tray_type`` is compared with it (#6713): its catalog
+    key (`catalog.catalog_key`, R-6706-23), so ``PETG-CF`` and ``petg cf`` are one key and
+    ``PLA+`` is not ``PLA``. Bambu's ``tray_type`` values are ASCII, where the Python key
+    is the SQL one (R-6706-14)."""
+    return catalog_key(name or "")
 
 
-def tray_agreement(spool: m.Spool, tray: SeenTray) -> bool | None:
-    """Whether ``spool`` agrees with what ``tray`` reports (#6713): its effective
-    material's `material_key` is the tray's, and its colour is within `CLOSE_COLOUR` of
-    the tray's (CIEDE2000, the cut-off an untagged tray's spools are matched by,
-    `bambuddy/trays.py` `close_spools`), alpha ignored (`colour_distance` drops it).
-    ``None`` when either side has no material, or the materials match and either side
-    has no colour: unknown, which is never a disagreement."""
-    reported, own = material_key(tray.material), material_key(spool.names.material)
+def material_names(conn: Conn) -> dict[UUID, frozenset[str]]:
+    """Every material's stored keys, its name's and its aliases' (#6706), by id."""
+    keys: dict[UUID, set[str]] = {}
+    for row in conn.execute("SELECT material_id, key FROM filament_material_names"):
+        keys.setdefault(row["material_id"], set()).add(row["key"])
+    return {material: frozenset(found) for material, found in keys.items()}
+
+
+def tray_agreement(
+    spool: m.Spool, tray: SeenTray, keys: Mapping[UUID, frozenset[str]]
+) -> bool | None:
+    """Whether ``spool`` agrees with what ``tray`` reports (#6713): the tray's
+    `material_key` is a key of the spool's effective material, its name's or an
+    alias's (``keys``, `material_names`, R-6706-23), and its colour is within
+    `CLOSE_COLOUR` of the tray's (CIEDE2000, the cut-off an untagged tray's spools are
+    matched by, `bambuddy/trays.py` `close_spools`), alpha ignored (`colour_distance`
+    drops it). ``None`` when either side has no material (or the material's name has no
+    key), or the materials match and either side has no colour: unknown, which is never
+    a disagreement."""
+    reported = material_key(tray.material)
+    material = spool.effective.material_id
+    own = keys.get(material, frozenset()) if material is not None else frozenset()
     if not reported or not own:
         return None
-    if reported != own:
+    if reported not in own:
         return False
     distance = colour_distance(spool.effective.rgba, tray.rgba or tray.colour)
     return None if distance is None else distance <= CLOSE_COLOUR
@@ -130,7 +144,11 @@ def _untagged(tray: SeenTray) -> bool:
 
 
 def _verdict(
-    tray: SeenTray, holder: m.Spool | None, found_by: FoundBy | None, assigned: m.Spool | None
+    tray: SeenTray,
+    holder: m.Spool | None,
+    found_by: FoundBy | None,
+    assigned: m.Spool | None,
+    keys: Mapping[UUID, frozenset[str]],
 ) -> Literal["move", "mismatch"] | None:
     """What an untagged tray's placed spool (``found_by`` ``"link"``) needs (#6713):
     ``"move"`` when it disagrees with the tray and ``assigned`` (Bambuddy's assignment's
@@ -139,9 +157,9 @@ def _verdict(
     its tag, need nothing."""
     if holder is None or found_by != "link" or not _untagged(tray):
         return None
-    if tray_agreement(holder, tray) is not False:
+    if tray_agreement(holder, tray, keys) is not False:
         return None
-    if assigned is not None and assigned.id != holder.id and tray_agreement(assigned, tray):
+    if assigned is not None and assigned.id != holder.id and tray_agreement(assigned, tray, keys):
         return "move"
     return "mismatch"
 
@@ -442,6 +460,7 @@ class FilamentInventory:
         spools = {spool.id: spool for spool in self._spools.list()}
         with self._pool.connection() as conn:
             keys = _Keys(conn)
+            materials = material_names(conn)
             links: dict[int, UUID] = {
                 row["bb_spool_id"]: row["spool_id"]
                 for row in conn.execute("SELECT spool_id, bb_spool_id FROM filament_bb_links")
@@ -459,7 +478,7 @@ class FilamentInventory:
             sb_id = None if bb_id is None else links.get(bb_id)
             candidate = None if sb_id is None or sb_id in held else spools.get(sb_id)
             holder = None if holder_id is None else spools.get(holder_id)
-            if _verdict(tray, holder, found_by, candidate) != "move":
+            if _verdict(tray, holder, found_by, candidate, materials) != "move":
                 continue
             assert holder is not None and candidate is not None
             row = printers[str(printer_id)]
@@ -508,6 +527,7 @@ class FilamentInventory:
         }
         with self._pool.connection() as conn:
             keys = _Keys(conn)
+            materials = material_names(conn)
         printers = {row.id: row for row in PrinterStore(self._pool, None).list()}
         assigned = _assigned_trays(bb_assignments, printers)
         reported = self._reported(printers)
@@ -535,6 +555,7 @@ class FilamentInventory:
                     None if spool_id is None else own[spool_id],
                     found_by,
                     None if candidate is None or candidate.id in held else candidate,
+                    materials,
                 )
                 trays.append(
                     m.InventoryTray(

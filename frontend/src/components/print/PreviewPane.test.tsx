@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
-import type { NozzlePlan, SlicePreview, SlotNeed } from '../../api/types'
+import type { FilamentWarning, NozzlePlan, SlicePreview, SlotNeed } from '../../api/types'
 import { PreviewPane } from './PreviewPane'
 
 const plan: NozzlePlan = {
@@ -254,6 +254,49 @@ describe('PreviewPane: the native slicer (plan 2026-10-16 Task 14)', () => {
   it('shows a refused plate the native slicer failed as it said it (spec §5.5)', () => {
     slicing(null, 'The slicer refused the plate: plate 99 is empty', false)
     expect(screen.getByRole('alert')).toHaveTextContent(/^The slicer refused the plate: plate 99 is empty$/)
+  })
+})
+
+describe('PreviewPane: a plate the slicer found objects in conflict on (#6737)', () => {
+  const conflict: FilamentWarning = {
+    kind: 'object-conflict',
+    plate_id: 2,
+    message: 'Plate 2: the slicer found the prime tower stands on an object, or objects overlap.',
+  }
+
+  function failed(sliceWarnings?: FilamentWarning[]) {
+    render(
+      <PreviewPane
+        url={null}
+        thumbnailUrl={null}
+        slots={slots}
+        spools={[]}
+        plan={[]}
+        colors={new Map()}
+        slice={null}
+        stale={false}
+        slicing={false}
+        sliceError="Object conflicts were detected"
+        sliceWarnings={sliceWarnings}
+      />,
+    )
+  }
+
+  it("says in plain words which plate cannot slice, above the slicer's own text", () => {
+    failed([conflict])
+    expect(screen.getByRole('alert')).toHaveTextContent(conflict.message)
+    expect(screen.getByTestId('slice-warnings')).toHaveTextContent(conflict.message)
+    expect(screen.getByTestId('slice-error')).toHaveTextContent('Object conflicts were detected')
+    expect(
+      screen.getByTestId('slice-warnings').compareDocumentPosition(screen.getByTestId('slice-error')) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it("shows the slicer's text alone when no warning came with it", () => {
+    failed()
+    expect(screen.queryByTestId('slice-warnings')).toBeNull()
+    expect(screen.getByRole('alert')).toHaveTextContent(/^Object conflicts were detected$/)
   })
 })
 

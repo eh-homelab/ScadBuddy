@@ -131,6 +131,9 @@ WarningKind = Literal[
     "mixed-materials",
     # #4272 — a Track Switch inlet feeds both extruders, by a side chosen by hand.
     "inlet-shared",
+    # #6732 — the slicer refused a plate with "Object conflicts were detected": the
+    # prime tower stands on an object, or objects overlap. Names the plate.
+    "object-conflict",
 ]
 
 
@@ -242,6 +245,9 @@ class FilamentWarning(BaseModel):
 
     kind: WarningKind
     slot_id: int | None = None
+    #: The plate the warning is about, for a warning of one plate (#6732). Left out of
+    #: the answer when ``None``, so every other warning reads as before.
+    plate_id: int | None = Field(default=None, exclude_if=lambda value: value is None)
     message: str
 
 

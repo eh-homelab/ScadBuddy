@@ -21,9 +21,17 @@ from scadbuddy.filament.inventory import (
     RECONCILE_ACTOR,
     FilamentInventory,
     material_key,
+    material_names,
     tray_agreement,
 )
-from scadbuddy.filament.models import InventoryTray, Material, Spool, SpoolCreate, TrayMismatch
+from scadbuddy.filament.models import (
+    InventoryTray,
+    Material,
+    MaterialCreate,
+    Spool,
+    SpoolCreate,
+    TrayMismatch,
+)
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.reports import PrinterReportStore
@@ -107,6 +115,11 @@ def _assigned(bb_spool_id: int, *, ams_id: int = HT_A, tray_id: int = 0) -> Spoo
     )
 
 
+def _keys(pool: PgPool) -> dict[UUID, frozenset[str]]:
+    with pool.connection() as conn:
+        return material_names(conn)
+
+
 def _get(pool: PgPool, spool_id: UUID) -> Spool:
     spool = FilamentSpoolStore(pool).get(spool_id)
     assert spool is not None
@@ -149,21 +162,59 @@ def test_a_material_key_is_upper_case_alphanumerics() -> None:
     assert material_key(" petg cf ") == "PETGCF"
     assert material_key("PLA") == "PLA"
     assert material_key(None) == ""
+    assert material_key("PLA+") == "PLAPLUS"
 
 
 def test_agreement_reads_the_material_key_and_the_colour_without_alpha(pg_pool: PgPool) -> None:
     grey = _get(pg_pool, _spool(pg_pool, "PETG", GREY))
     cf = _get(pg_pool, _spool(pg_pool, "PETG-CF", GREY))
-    assert tray_agreement(grey, _seen("PETG", GREY)) is True
+    keys = _keys(pg_pool)
+    assert tray_agreement(grey, _seen("PETG", GREY), keys) is True
     # Alpha is ignored; a near colour is within the tolerance.
-    assert tray_agreement(grey, _seen("PETG", "#A7AEB200")) is True
-    assert tray_agreement(grey, _seen("PETG", "#A9AFB4FF")) is True
-    assert tray_agreement(grey, _seen("PETG", PINK)) is False
-    assert tray_agreement(grey, _seen("PLA", GREY)) is False
-    assert tray_agreement(cf, _seen("PETG-CF", GREY)) is True
-    assert tray_agreement(cf, _seen("PETG", GREY)) is False
+    assert tray_agreement(grey, _seen("PETG", "#A7AEB200"), keys) is True
+    assert tray_agreement(grey, _seen("PETG", "#A9AFB4FF"), keys) is True
+    assert tray_agreement(grey, _seen("PETG", PINK), keys) is False
+    assert tray_agreement(grey, _seen("PLA", GREY), keys) is False
+    assert tray_agreement(cf, _seen("PETG-CF", GREY), keys) is True
+    assert tray_agreement(cf, _seen("PETG", GREY), keys) is False
     # No colour on the tray: unknown, never a disagreement.
-    assert tray_agreement(grey, SeenTray(ams_id=HT_A, tray_id=0, material="PETG")) is None
+    assert tray_agreement(grey, SeenTray(ams_id=HT_A, tray_id=0, material="PETG"), keys) is None
+
+
+def test_a_tray_agrees_by_any_key_of_the_spools_material(pg_pool: PgPool) -> None:
+    """R-6706-23: a tray's ``tray_type`` is compared by catalog key with the material's
+    name and every alias, so an alias or a merged loser's spelling agrees; ``PLA+`` is
+    not ``PLA`` (R-6706-17)."""
+    catalog: Any = CatalogStore(pg_pool)
+    high_flow = catalog.create("materials", MaterialCreate(name="PETG High Flow"))
+    catalog.set_aliases("materials", high_flow.id, ["PETG-HF"])
+    # `ASA-Aero` merged into `ASA Aero`: the migration keeps no alias for a shared key.
+    catalog.create("materials", MaterialCreate(name="ASA Aero"))
+    hf = _get(pg_pool, _spool(pg_pool, "PETG High Flow", GREY))
+    merged = _get(pg_pool, _spool(pg_pool, "ASA Aero", GREY))
+    pla = _get(pg_pool, _spool(pg_pool, "PLA", GREY))
+    keys = _keys(pg_pool)
+    assert tray_agreement(hf, _seen("PETG-HF", GREY), keys) is True
+    assert tray_agreement(hf, _seen("petg high-flow", GREY), keys) is True
+    assert tray_agreement(hf, _seen("PETG", GREY), keys) is False
+    assert tray_agreement(merged, _seen("ASA-Aero", GREY), keys) is True
+    assert tray_agreement(pla, _seen("PLA+", GREY), keys) is False
+
+
+def test_a_tray_reporting_an_alias_is_no_mismatch(pg_pool: PgPool) -> None:
+    """R-6706-23: the placed spool's material holds the tray's spelling as an alias."""
+    catalog: Any = CatalogStore(pg_pool)
+    made = catalog.create("materials", MaterialCreate(name="PETG High Flow"))
+    catalog.set_aliases("materials", made.id, ["PETG-HF"])
+    printer = _printer(pg_pool)
+    held = _spool(pg_pool, "PETG High Flow", GREY)
+    inventory = FilamentInventory(pg_pool)
+    inventory.link(printer, HT_A, 0, held, _seen("PETG-HF", GREY), actor="ann")
+    _report(pg_pool, printer, _tray("PETG-HF", GREY))
+
+    assert inventory.reconcile_trays([]) == []
+    tray = _view_tray(inventory, [])
+    assert (tray.spool_id, tray.mismatch) == (held, None)
 
 
 # -- the moves (R-6713-3, R-6713-7) ---------------------------------------------------
