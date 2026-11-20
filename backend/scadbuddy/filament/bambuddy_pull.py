@@ -1384,7 +1384,8 @@ async def scheduled_pull(
     ``failed`` when BB or the store fails (logged, never raised),
     else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13). Whenever a
     BB URL is set, it first reads the Home Assistant sensors (`read_ha_sensors`), before
-    the spools gate and whatever ``sync`` says: sensors are not spool data."""
+    the spools gate and whatever ``sync`` says: sensors are not spool data. After a pull
+    it reconciles the untagged trays with Bambuddy's assignments (`reconcile_trays`)."""
     settings = await asyncio.to_thread(load)
     if settings.bambuddy_url:
         # Sensors are not spool data: read whatever ``filament_sync`` says.
@@ -1410,4 +1411,25 @@ async def scheduled_pull(
             "some Bambuddy spools were not pulled",
             extra={"bb_spool_ids": report.failed_bb_ids, "invalid": report.invalid},
         )
+    await reconcile_trays(store, settings)
     return "pulled"
+
+
+async def reconcile_trays(store: Filament, settings: StoredSettings) -> None:
+    """Set right each untagged tray whose placed spool disagrees with what the printer
+    reports, by Bambuddy's assignments (`FilamentInventory.reconcile_trays`, #6713). The
+    pull runs it: it is the one place that reads Bambuddy's assignments and has the
+    printers' stored reports (the capture backstop holds no Bambuddy settings). A failed
+    assignment read (`try_assignments`) reconciles nothing this pass. It never fails the
+    pull: a failure is logged with its type only."""
+    try:
+        assignments = await try_assignments(settings)
+        if assignments is None:
+            logger.info("no tray reconcile: Bambuddy's assignments could not be read")
+            return
+        moved = await asyncio.to_thread(store.inventory.reconcile_trays, assignments)
+    except Exception as error:
+        _failed("could not reconcile the trays with Bambuddy's assignments", error)
+        return
+    if moved:
+        logger.info("reconciled trays with Bambuddy's assignments", extra={"moved": len(moved)})

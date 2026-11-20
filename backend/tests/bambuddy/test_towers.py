@@ -273,8 +273,9 @@ def test_a_reachable_tower_on_top_of_the_objects_is_moved_beside_them(tmp_path: 
     payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "140"))
     assert tower_reaches((160, 140), H2C, height=20.0)
     # The tower overlaps the objects, not only their clearance: the case _tower_on moves.
-    low, high = plate_boxes(payload).boxes[1]
-    objects = Rect(float(low[0]), float(low[1]), float(high[0]), float(high[1]))
+    read = plate_boxes(payload)
+    (low, high), (ox, oy) = read.boxes[1], plate_origin(1, read.count, H2C)
+    objects = Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
     assert _tower_on((160, 140), PRIME_TOWER_SIDE, 20.0, objects)
 
     moved = towers_within_reach(payload, H2C)

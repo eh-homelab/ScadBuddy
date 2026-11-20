@@ -5,13 +5,14 @@ import { AppLink } from '../../../components/AppLink'
 import { ChoiceSelect } from '../../../components/settings/form'
 import { useAsync } from '../../../lib/useAsync'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
 import { FieldRow } from '../controls'
 import { docOf } from '../fields'
 import { FieldBadge, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings, type BackendSettings } from '../useBackendSettings'
-import { fieldsOf, syncParts } from '../values'
+import { FETCH_NOZZLES, fieldsOf, nozzlesValue, syncParts } from '../values'
 
 export const id = 'filament'
 export const area: AreaId = 'printing'
@@ -99,6 +100,36 @@ function SyncRows({ form }: { form: BackendSettings }) {
         <ChoiceSelect id="setting-filament-weights" value={weights} onValueChange={(next) => form.setField('filament_sync', `${spools}|${tags}|${next}`)} choices={WEIGHT_CHOICES} />
       </FieldRow>
     </>
+  )
+}
+
+/**
+ * #6625 — the nozzles a 3DFP preset fetch exports for each printer model, one checkbox
+ * each. `profile_fetch_nozzles` is held in the form comma-joined and saved with "Save
+ * Filament"; none ticked is refused before the save.
+ */
+function FetchNozzlesRow({ form }: { form: BackendSettings }) {
+  const raw = form.value('profile_fetch_nozzles')
+  const ticked = raw === '' ? [] : raw.split(',')
+  const toggle = (nozzle: string, checked: boolean) =>
+    form.setField('profile_fetch_nozzles', nozzlesValue(checked ? [...ticked, nozzle] : ticked.filter((one) => one !== nozzle)))
+  const doc = docOf(form.settings, 'profile_fetch_nozzles')
+  return (
+    <FieldRow
+      id="setting-profile_fetch_nozzles"
+      {...doc}
+      badge={<FieldBadge form={form} name="profile_fetch_nozzles" />}
+      error={form.errors.profile_fetch_nozzles}
+    >
+      <fieldset id="setting-profile_fetch_nozzles" aria-label={doc.label} className="flex flex-wrap gap-x-5 gap-y-2">
+        {FETCH_NOZZLES.map((nozzle) => (
+          <label key={nozzle} className="flex items-center gap-2 text-sm">
+            <Checkbox aria-label={`${nozzle} mm`} checked={ticked.includes(nozzle)} onCheckedChange={(checked) => toggle(nozzle, checked === true)} />
+            <span className="sb-num">{nozzle} mm</span>
+          </label>
+        ))}
+      </fieldset>
+    </FieldRow>
   )
 }
 
@@ -194,6 +225,7 @@ export function Component() {
       <RuntimeRows form={form} section="filament" />
       <SyncRows form={form} />
       <OverrideRow />
+      <FetchNozzlesRow form={form} />
       <FieldRow
         id="filament-currency"
         label="Currency"

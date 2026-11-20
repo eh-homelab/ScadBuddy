@@ -52,6 +52,8 @@ def test_candidates_split_uncosted_and_costed(pg_pool: PgPool) -> None:
     assert [(s.number, s.archived) for s in line.uncosted] == [(bare, False), (gone.number, True)]
     assert [s.number for s in line.costed] == [priced]
     assert line.costed[0].cost_per_kg == D("21.5")
+    # A costed spool with no invoice line may still be filled (#6700, R-6700-1).
+    assert line.costed[0].invoice_line_id is None
 
 
 def test_a_missing_invoice_has_no_candidates_answer(pg_pool: PgPool) -> None:
@@ -115,3 +117,5 @@ def test_a_spool_linked_to_an_invoice_line_is_costed(pg_pool: PgPool) -> None:
     (line,) = _candidates(shop, invoice.id)
     assert line.uncosted == []
     assert [s.number for s in line.costed] == [linked]
+    # It is refused at confirm (#6700, R-6700-3): the session tells it by its line.
+    assert line.costed[0].invoice_line_id == invoice.lines[0].id

@@ -1082,6 +1082,38 @@ class SliceJob(BambuddyModel):
         return "Bambuddy did not say why"
 
 
+class PresetImport(BambuddyModel):
+    """``POST /api/v1/local-presets/import``'s answer (``ImportResponse``): how many
+    presets of the zip Bambuddy took (#6625)."""
+
+    success: bool
+    imported: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class KProfile(BambuddyModel):
+    """A row of a printer's K table, ``GET /api/v1/printers/{id}/kprofiles/`` (``KProfile``
+    in Bambuddy's schema): the flow-dynamics value the printer holds for one filament and
+    nozzle. ``k_value`` stays a string, as Bambuddy sends it (#6625)."""
+
+    slot_id: int
+    extruder_id: int = 0
+    nozzle_id: str
+    nozzle_diameter: str
+    filament_id: str
+    name: str
+    k_value: str
+    setting_id: str | None = None
+
+
+class KProfileTable(BambuddyModel):
+    """``GET /api/v1/printers/{id}/kprofiles/``'s answer: the rows for one nozzle."""
+
+    profiles: list[KProfile] = Field(default_factory=list)
+    nozzle_diameter: str | None = None
+
+
 class SpoolKProfile(BambuddyModel):
     """A spool's K-profile, as ``GET /inventory/spools`` nests it: only the preset it
     names (#6136)."""

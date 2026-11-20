@@ -20,6 +20,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.bambuddy.library_objects import piece_key, publish_library_pieces
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
 from scadbuddy.render.bambu3mf import (
@@ -36,6 +37,7 @@ from scadbuddy.render.split import ColourPart
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.template import Part
 from scadbuddy.workflows import outputs
 from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import (
@@ -233,6 +235,67 @@ async def test_one_object_arranged_alone_still_takes_the_planned_order(tmp_path:
     with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
         settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
     assert [c.upper() for c in settings["filament_colour"][:2]] == planned
+
+
+def test_the_pack_step_keeps_no_tower_room_when_the_print_turns_it_off() -> None:
+    """#3770: Arrange's `prime_tower` reaches the packer through the pack activity."""
+    two = Part(
+        piece_key="two",
+        file="model.scad",
+        bbox=BoundingBox(min=(0, 0, 0), max=(60, 60, 5), size=(60, 60, 5)),
+        colours=["#FF0000", "#00FF00"],
+    )
+
+    def plates(choice: PrimeTowerChoice | None) -> int:
+        return len(
+            pack_layout(
+                PackRequest(
+                    items=[PackItem(part=two, count=16)],
+                    plate=PlateSize(key="default", width=256.0, depth=256.0),
+                    allow_own=False,
+                    prime_tower=choice,
+                )
+            ).plates
+        )
+
+    assert plates(None) == 2
+    assert plates(PrimeTowerChoice(enabled=True)) == 2
+    assert plates(PrimeTowerChoice(enabled=False)) == 1
+
+
+async def test_an_arranged_output_with_the_tower_off_states_it_and_places_none(
+    tmp_path: Path,
+) -> None:
+    deps, paths = _deps(tmp_path)
+    part = await _render(deps, "model.scad", {"width": 12})
+
+    async def settings_of(job: str, choice: PrimeTowerChoice | None) -> dict[str, Any]:
+        req = OutputRequest(
+            job_id=job,
+            index=0,
+            slug="demo",
+            layout=Layout(plates=[LayoutPlate(items=[Placed(piece_key=part.piece_key, x=0, y=0)])]),
+            parts=[part],
+            name=None,
+            bom=[],
+            files={},
+            record=_record([part.piece_key]),
+            colours=["#123456", part.colours[0]],
+            prime_tower=choice,
+        )
+        out = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+        with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
+            settings: dict[str, Any] = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+        return settings
+
+    off = await settings_of("t-off", PrimeTowerChoice(enabled=False, no_sparse_layers=True))
+    assert off["enable_prime_tower"] == "0" and "wipe_tower_x" not in off
+    # Off drops "No sparse layers" (PrimeTowerChoice), so it is not stated.
+    assert "wipe_tower_no_sparse_layers" not in off
+    on = await settings_of("t-on", PrimeTowerChoice(enabled=True, no_sparse_layers=True))
+    assert (on["enable_prime_tower"], on["wipe_tower_no_sparse_layers"]) == ("1", "1")
+    omitted = await settings_of("t-none", None)
+    assert "enable_prime_tower" not in omitted
 
 
 async def test_a_colour_planned_twice_in_two_cases_takes_one_slot(tmp_path: Path) -> None:

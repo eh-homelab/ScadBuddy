@@ -193,11 +193,24 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
                         candidates={[...ticked.filter((one) => !candidates.some((c) => c.id === one.id)), ...candidates]}
                         quantity={quantity}
                         value={row.updateSpoolIds}
+                        money={money}
                         onChange={(next) => {
                           change(at, { updateSpoolIds: next })
                           onCommit()
                         }}
                       />
+                      {/* #6700: the line's cost replaces a filled spool's own at confirm. */}
+                      {ticked.some((one) => one.cost_per_kg !== null) && (
+                        <ul className="flex flex-col text-[12px] text-muted-foreground">
+                          {ticked
+                            .filter((one) => one.cost_per_kg !== null)
+                            .map((one) => (
+                              <li key={one.id}>
+                                Spool #{one.number} replaces {money(one.cost_per_kg!)}/kg
+                              </li>
+                            ))}
+                        </ul>
+                      )}
                     </div>
                   </td>
                   <td className={`${TD} text-right tabular-nums ${stale}`} title={pending ? 'Worked out again when the lines are saved' : undefined}>
