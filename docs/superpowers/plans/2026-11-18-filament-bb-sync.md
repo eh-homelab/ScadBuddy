@@ -1422,6 +1422,40 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     with the same handling, so no change. Tests: `test_a_listing_body_of_the_wrong_kind_is_a_bad_body`,
     `test_a_spool_listing_that_is_not_json_fails_the_pass`,
     `test_a_garbled_catalog_read_is_none_and_logged`. Cost: none.
+118. Task 8: `FilamentBbSync` is registered on `bambuddy_worker` (the print worker, and the
+    API's in-process print queue), the worker and queue that register Task 7's
+    `filament_bb_sync_pass`; that worker is AUTO_UPGRADE (`print_deployment`). The nudge
+    starts it on `temporal_task_queue_bambuddy`. Cost: none.
+119. Task 8: `SYNC_PASS_ACTIVITY`, `SyncPassInput` and `DEFAULT_INTERVAL_S` moved from
+    `bb_sync_run.py` to `bb_sync_models.py`. Why: `workflows/client.py` imports the workflow,
+    and importing `bb_sync_run` from it closes a cycle (`bambuddy_pull` →
+    `filament/component.py` → `api/deps.py` → `workflows/client.py`). Cost: none;
+    `bb_sync_run` imports them back.
+120. Task 8: `SyncStart`, `FILAMENT_BB_SYNC_WORKFLOW` and `CHANGED_SIGNAL` live in
+    `bb_sync_nudge.py`, which the workflow imports (the nudge cannot import the workflow's
+    module, for the same cycle). `SyncStart` has `pending` and `full` (both default False)
+    to carry a signal the run has not served across a continue-as-new, a plain one too.
+    Why: with `interval_s` 0 a lost plain signal would wait for the next write. Cost: none.
+121. Task 8: the nudger's `load_settings` is `SettingsStore.read` over `bambuddy_url` and
+    `spool_overlay_refresh_seconds` (a new workflow's interval). `nudge_after_write` calls
+    `FilamentSyncNudger.nudge_soon` (a task the nudger holds until it ends) after its
+    `yield`. Why: on FastAPI 0.162 a yield dependency's exit runs after the response, and a
+    `BackgroundTasks` task added there never runs (measured on this tree with a test app,
+    2026-11-20). A route that raises (a 422 of its body too) reaches the dependency as the
+    exception, so it nudges nothing. Cost: a route that returned a non-2xx response without
+    raising would nudge; none of the three routers has one.
+122. Task 8: a pass whose 3 attempts all failed is logged (`ActivityError`) and the workflow
+    waits for the next signal or the timer; it never fails the workflow. The pass after
+    `more` keeps the first pass's `full`. Cost: none.
+123. Task 8: `put_settings` compares `snapshot.runtime.filament_sync` (an env-seeded field;
+    `StoredSettings` has none) with the value read before the save, only when the patch
+    sets or resets `filament_sync`.
+124. Task 8: at boot `_adopt_bb_instance_logged` runs `adopt_instance` after the components
+    start and before the workers and the first request; a failure is logged, never raised.
+    `_run_library_worker` starts `nudge(full=True)` once its client connects. The api
+    tests' autouse `filament_nudges` (`tests/api/conftest.py`) records `nudge_soon` and
+    silences `nudge`, as the api tests keep the spool refresh off (#4180): a pass would read
+    Bambuddy beside a test's mocked reads.
 
 ## Self-review
 

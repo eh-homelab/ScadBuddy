@@ -629,11 +629,17 @@ async def put_settings(
             msg,
             errors=[{"loc": ["body", "storefront_turnstile_secret"], "msg": msg}],
         )
+    sync_touched = "filament_sync" in patch.model_fields_set | set(patch.reset)
+    if sync_touched:
+        sync_before = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
     try:
         await asyncio.to_thread(store.save, patch)
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
+    if sync_touched and snapshot.runtime.filament_sync != sync_before:
+        # #6265 Decision 17: a direction that now pushes pushes at once.
+        state.filament_sync.nudge_soon()
     if "print_auto_import" in patch.model_fields_set:
         # #4699: the watcher takes the prints started from this moment on, not from its
         # next pass; switched off, it forgets the moment. It reads the committed switch

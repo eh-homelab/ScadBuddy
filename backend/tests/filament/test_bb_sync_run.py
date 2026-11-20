@@ -24,15 +24,12 @@ from scadbuddy.filament.bb_sync_models import (
     Kind,
     Op,
     ResultsReport,
+    SyncPassInput,
     SyncPassResult,
     SyncPlan,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
-from scadbuddy.filament.bb_sync_run import (
-    FilamentSyncActivities,
-    SyncPassInput,
-    run_pass,
-)
+from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, run_pass
 from scadbuddy.library.settings_store import StoredSettings
 from tests.bambuddy.conftest import BASE_URL, assert_recorded_body, recording, shaped
 

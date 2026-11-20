@@ -8,13 +8,13 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from scadbuddy.api import media as media_api
 from scadbuddy.api.deps import PathsDep, StateDep
-from scadbuddy.api.filament import actor
+from scadbuddy.api.filament import actor, nudge_after_write
 from scadbuddy.api.order_attachments import INERT, NOSNIFF
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.problems import ApiError
@@ -42,7 +42,7 @@ from scadbuddy.filament.suppliers import (
 )
 from scadbuddy.orders import attachments
 
-router = APIRouter(prefix="/filament", tags=["filament"])
+router = APIRouter(prefix="/filament", tags=["filament"], dependencies=[Depends(nudge_after_write)])
 
 
 def _no_supplier(supplier_id: UUID) -> ApiError:

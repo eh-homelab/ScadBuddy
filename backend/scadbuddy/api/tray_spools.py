@@ -17,10 +17,10 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Path, Response, status
+from fastapi import APIRouter, Depends, Path, Response, status
 from pydantic import BaseModel, ConfigDict
 
-from scadbuddy.api.filament import actor
+from scadbuddy.api.filament import actor, nudge_after_write
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.bambuddy.trays import EXTERNAL, seen_trays, tray_label
 from scadbuddy.core.problems import ApiError
@@ -33,7 +33,7 @@ from scadbuddy.printers.reports import report_status
 from scadbuddy.printers.store import printer_uuid
 from scadbuddy.spools.models import SeenTray
 
-router = APIRouter(prefix="/printers", tags=["printers"])
+router = APIRouter(prefix="/printers", tags=["printers"], dependencies=[Depends(nudge_after_write)])
 
 TRAY_PATH = "/{printer_id}/trays/{ams_id}/{tray_id}/spool"
 AmsId = Annotated[int, Path(ge=0, le=255)]

@@ -484,6 +484,18 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
         )
 
 
+def adopt_instance(store: Filament, instance: str) -> None:
+    """Record ``instance`` as the links' Bambuddy when none is recorded and links exist:
+    #6261's pull made them before the state row did (Decision 12). The API calls it at
+    boot with the configured Bambuddy's, before its first nudge."""
+    with store.spools.transaction() as conn:
+        conn.execute(
+            "UPDATE filament_bb_sync_state SET instance = %s"
+            " WHERE instance IS NULL AND EXISTS (SELECT 1 FROM filament_bb_links)",
+            (instance,),
+        )
+
+
 class LocalFilamentSync:
     """`FilamentSyncApi` over SB's own stores, for the API's in-process print queue. The
     print worker's `RemoteFilamentSync` gives the same answers through the CRUD routes,

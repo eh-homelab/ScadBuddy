@@ -15,7 +15,7 @@ from scadbuddy.filament import bb_sync_plan
 from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op, ResultsReport
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
-from scadbuddy.filament.bb_sync_results import apply_results
+from scadbuddy.filament.bb_sync_results import adopt_instance, apply_results
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.models import (
     InsertTypeCreate,
@@ -693,3 +693,31 @@ def test_results_of_one_pass_sent_again_add_one_attempt(pg_pool: PgPool) -> None
     for pass_id, attempts in (("a", 1), ("a", 1), ("b", 2), ("b", 2), (None, 3), (None, 4)):
         _apply(f, [write], [_refused(write)], pass_id=pass_id)
         assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", attempts)]
+
+
+# -- the boot's adoption of links made before the state row (Decision 12, Task 8) ---------
+
+
+def test_boot_records_the_instance_of_existing_links(pg_pool: PgPool) -> None:
+    """Links #6261's pull made before the state row belong to the configured Bambuddy."""
+    f = _filament(pg_pool)
+    _link(pg_pool, _spool(f, _type(f)), 50)
+    adopt_instance(f, INSTANCE)
+    assert _instance(pg_pool) == INSTANCE
+
+
+def test_boot_leaves_the_instance_null_without_links(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _spool(f, _type(f))
+    adopt_instance(f, INSTANCE)
+    assert _instance(pg_pool) is None
+
+
+def test_boot_keeps_an_instance_already_recorded(pg_pool: PgPool) -> None:
+    """Another Bambuddy configured since the links were made does not take them over."""
+    f = _filament(pg_pool)
+    _link(pg_pool, _spool(f, _type(f)), 50)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = 'ffffffffffff'")
+    adopt_instance(f, INSTANCE)
+    assert _instance(pg_pool) == "ffffffffffff"

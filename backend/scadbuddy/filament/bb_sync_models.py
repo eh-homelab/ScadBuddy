@@ -273,6 +273,23 @@ class ResultsRequest(BaseModel, extra="forbid"):
     pass_id: str | None = None
 
 
+#: The pass activity's name (`bb_sync_run.FilamentSyncActivities`), as the workflow
+#: (`workflows/filament_sync.py`) schedules it.
+SYNC_PASS_ACTIVITY = "filament_bb_sync_pass"
+#: The timer's interval a pass reports when it made no plan, unless told another.
+DEFAULT_INTERVAL_S = 300.0
+
+
+class SyncPassInput(BaseModel, extra="forbid"):
+    """The activity's input: the Bambuddy instance the workflow serves, whether the pass
+    is a full one (Decision 7), and the interval the workflow waits now, which a pass
+    that made no plan reports back unchanged."""
+
+    instance: str
+    full: bool
+    interval_s: float = DEFAULT_INTERVAL_S
+
+
 class SyncPassResult(BaseModel, extra="forbid"):
     """What one pass did. ``more``: writes were left, so the next pass runs at once
     (Decision 11). ``skipped``: why it did nothing. ``error``: a failed pass's

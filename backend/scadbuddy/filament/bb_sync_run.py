@@ -25,10 +25,13 @@ from scadbuddy.bambuddy.models import SpoolCatalogEntry
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bambuddy_pull import parse_rows
 from scadbuddy.filament.bb_sync_models import (
+    DEFAULT_INTERVAL_S,
+    SYNC_PASS_ACTIVITY,
     BbSnapshot,
     BbWrite,
     BbWriteResult,
     FilamentSyncApi,
+    SyncPassInput,
     SyncPassResult,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
@@ -37,22 +40,8 @@ from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
 
-#: The activity's name, as the workflow (Task 8) schedules it.
-SYNC_PASS_ACTIVITY = "filament_bb_sync_pass"
 #: At most this many Bambuddy calls (writes and probes) in one pass (Decision 11).
 WRITE_CAP = 200
-#: The timer's interval a pass reports when it made no plan, unless told another.
-DEFAULT_INTERVAL_S = 300.0
-
-
-class SyncPassInput(BaseModel, extra="forbid"):
-    """The activity's input: the Bambuddy instance the workflow serves, whether the pass
-    is a full one (Decision 7), and the interval the workflow waits now, which a pass
-    that made no plan reports back unchanged."""
-
-    instance: str
-    full: bool
-    interval_s: float = DEFAULT_INTERVAL_S
 
 
 async def run_pass(

@@ -26,6 +26,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy import print_source
 from scadbuddy.bambuddy.filaments3mf import UnreadableFilamentsError
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.bb_sync_nudge import FilamentSyncNudger
 from scadbuddy.flows.agent_tools import AgentTools, AgentToolsUnavailableError
 from scadbuddy.main import create_app
 from scadbuddy.render import submit as submit_module
@@ -248,6 +249,25 @@ def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main_module, "_retry_payment_closes_logged", off)
     monkeypatch.setattr(main_module, "_settle_payment_captures_logged", off)
+
+
+@pytest.fixture(autouse=True)
+def filament_nudges(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """#6265 Task 8: the app's filament sync nudges are recorded (each one's ``full``),
+    never sent. A nudge starts a sync workflow whose pass reads Bambuddy beside the test's
+    own mocked reads, as the spool refresh's Schedule did (#4180 CI). The nudge itself is
+    tested on a fake client (`tests/filament/test_bb_sync_nudge.py`)."""
+    nudges: list[bool] = []
+
+    def soon(self: FilamentSyncNudger, *, full: bool = False) -> None:
+        nudges.append(full)
+
+    async def nudge(self: FilamentSyncNudger, *, full: bool = False) -> None:
+        return None
+
+    monkeypatch.setattr(FilamentSyncNudger, "nudge_soon", soon)
+    monkeypatch.setattr(FilamentSyncNudger, "nudge", nudge)
+    return nudges
 
 
 @pytest.fixture(autouse=True)

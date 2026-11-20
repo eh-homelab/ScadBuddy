@@ -12,21 +12,26 @@ and the NTAG confirm,
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
-(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks."""
+(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
+
+Every 2xx answer to a write here, in `api/filament_purchasing.py` and in
+`api/tray_spools.py` nudges the ScadBuddy-to-Bambuddy sync (`nudge_after_write`, #6265
+Decision 17)."""
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
 import logging
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.bambuddy.client import client_for
@@ -80,7 +85,17 @@ from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
 
-router = APIRouter(prefix="/filament", tags=["filament"])
+
+async def nudge_after_write(request: Request, state: StateDep) -> AsyncIterator[None]:
+    """A router's dependency: after a write's 2xx answer, nudge the filament sync in the
+    background (Decision 17). A route that raised (any error answer, a 422 of its body
+    too) nudges nothing, and neither does a read."""
+    yield
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        state.filament_sync.nudge_soon()
+
+
+router = APIRouter(prefix="/filament", tags=["filament"], dependencies=[Depends(nudge_after_write)])
 logger = logging.getLogger(__name__)
 
 #: How long a tag change waits to tell Bambuddy before the reply goes (#6264); the
