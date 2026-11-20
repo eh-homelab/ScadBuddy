@@ -131,12 +131,12 @@ because advisory locks and NOTIFY channels are per database: workers sharing one
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
 Temporal dev server.
-CI runs the suite in six `backend-pytest` jobs (#1167), each `--splits 6 --group N
+CI runs the suite in eight `backend-pytest` jobs (#1167, #6783), each `--splits 8 --group N
 --splitting-algorithm least_duration` (pytest-split) by the timings in
 `backend/.test_durations`; `least_duration`, not the default `duration_based_chunks`,
 because chunks cut the collection order and a stale file then put the slow `tests/api`
 modules in one shard (#6596); `backend-pytest-split`
-checks that the six selections add up to the whole collection and that each
+checks that the eight selections add up to the whole collection and that each
 shard ran what it selected. A test missing from
 the file is placed by the average, so a stale file only unbalances the shards. The
 timings must be CI's own (a file stored on a faster machine left one shard ten minutes
@@ -157,7 +157,10 @@ injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances
 on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
 "today" is read at each call, never at import: a shard that loads before midnight UTC
 and makes orders after it dated every fake deposit a day early (#6307). A shard builds
-in about 4 minutes and tests in 25 to 36; `backend-pytest`'s limit is 55 (#6288).
+in 2 to 3 minutes. With six shards it tested in 27 to 46, and slow runners hit
+`backend-pytest`'s limit of 55 (#6288, #6783: runs 44785128035, 44800511189); eight
+shards on fresh timings give about 25 minutes of tests each. Never raise the limit:
+add a shard, or refresh the timings.
 Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for

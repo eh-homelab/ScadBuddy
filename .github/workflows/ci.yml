@@ -433,13 +433,18 @@ jobs:
         run: .github/scripts/check-plugin-version.test.sh
 
   # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
+  #
+  # The unit tests run in `frontend-unit`, three shards of their own (#6783). In
+  # this job they took 11 to 16 of its 20 minutes (runs 44785128035, 44800511189,
+  # 44802150504: vitest's own Duration 963.89 s on 44800511189), so 10 of 27 green
+  # runs took 19 minutes, and runs 44807121481 and 44768125590 were cancelled in
+  # the Build step after every test file had passed. Lint, typecheck and build
+  # took about 1 minute each there, so this job now takes about 5.
   frontend:
-    name: Frontend lint, typecheck, test, build
+    name: Frontend lint, typecheck, build
     needs: layout
     if: ${{ needs.layout.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
-    # About 10 minutes now that Playwright is `frontend-e2e`: on the slowest
-    # recent main run the other steps add up to 613 s. 20 is twice that.
     timeout-minutes: 20
     defaults:
       run:
@@ -482,9 +487,6 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Unit tests
-        run: pnpm test
-
       - name: Build
         run: pnpm build
 
@@ -499,6 +501,50 @@ jobs:
           SCADBUDDY_STOREFRONT_DIST: ${{ github.workspace }}/frontend/dist
         working-directory: backend
         run: uv run --frozen pytest tests/storefront/test_real_build.py -p no:cacheprovider
+
+  # ── Frontend unit tests: vitest, in three shards (#6783) ────────────────────
+  #
+  # `vitest run --shard=N/3` gives each shard a third of the test files, so the
+  # three together run every file once. vitest fails a shard that gets no file.
+  # A third of the 11 to 16 minutes, plus about 2 minutes of install and
+  # `pnpm gen:api`, is 6 to 8 minutes a shard.
+  frontend-unit:
+    name: Frontend unit tests (${{ matrix.shard }}/3)
+    needs: layout
+    if: ${{ needs.layout.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # `pnpm test` runs `pnpm gen:api` first, which exports the spec with uv.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Unit tests
+        run: pnpm test --shard=${{ matrix.shard }}/3
 
   # ── Frontend e2e: the msw-backed Playwright suite, in shards ────────────────
   #
@@ -1075,7 +1121,7 @@ jobs:
       - name: mypy
         run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync mypy
 
-      # The backend suite runs in `backend-pytest`, six jobs of its own (#1167).
+      # The backend suite runs in `backend-pytest`, eight jobs of its own (#1167, #6783).
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
@@ -1295,15 +1341,23 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-ci temporal-ci || true
 
-  # ── Backend pytest, in six shards (#1167) ──────────────────────────────────
+  # ── Backend pytest, in eight shards (#1167, #6783) ─────────────────────────
   #
   # One 4-vCPU runner is CPU-bound on this suite: eight xdist workers took longer
   # than four (25:59 against 23:53, the per-test setup 0.70 s -> 2.66 s at the
-  # median). So the lever is more runners: six jobs, each running a sixth by
+  # median). So the lever is more runners: eight jobs, each running an eighth by
   # time with pytest-split and `-n auto` inside it. Four shards took 15-26 min
   # each on main (run 40144180572, 2026-10-24), about 295 worker-minutes of tests
-  # in all; six bring a balanced shard to ~12 min of pytest plus ~3.5 min of image
-  # build and setup, below `models` on main and beside the other jobs on a PR.
+  # in all. The suite grew: the timings of main run 44785128035 (2026-11-20) add up
+  # to 805 worker-minutes. Six shards then took 27 to 46 min of pytest each on runs
+  # 44785128035, 44759348040, 44800511189 and 44802150504, plus 2 to 3 min of image
+  # build and 1 min of counting, and slow runners hit the 55 min limit with no
+  # failed test (#6783). The shards that ran long were the ones the stale timings
+  # overloaded: with the file of 2026-11-18, the split gives shards 1-3 about 37.6
+  # min of tests and shards 4-6 about 29.5 min, as run 44785128035 measured (41 and
+  # 30). With the fresh file, eight shards give about 25.2 min of tests each
+  # (simulated least_duration over the file, 4 workers), so a shard takes about 30
+  # min and a runner 1.6 times slower (run 44800511189 shard 4) about 45.
   #
   # Each shard builds the test image itself, READING the `image` job's gha cache
   # (`cache-from` only: no new cache scope, nothing written, so the 10 GB ceiling
@@ -1316,7 +1370,7 @@ jobs:
   # in some shard; a stale file only balances the shards worse, it never fails a
   # run. The split is `least_duration` (each test, slowest first, goes to the
   # shard with the least time so far), not pytest-split's default
-  # `duration_based_chunks`, which cuts the collection order into six runs of
+  # `duration_based_chunks`, which cuts the collection order into runs of
   # tests. With chunks, a file a week stale (3,325 of 17,091 tests missing, the
   # tests/api tier twice its listed time) put the slow tests/api modules in one
   # run of shards: on main's run 44270713273 the shards took 17 to 48 min of
@@ -1331,7 +1385,7 @@ jobs:
   # twice their CI time, so the shard holding them finished ten minutes before the
   # rest. So each shard stores what it ran, timed here
   # (`--store-durations --clean-durations`), and `backend-pytest-split` merges the
-  # six into the `backend-test-durations` artifact. To refresh, download that
+  # eight into the `backend-test-durations` artifact. To refresh, download that
   # artifact from a green run on main, unzip it into backend/ and commit.
   #
   # `--durations-path` takes its value after `=`, never as a second word: pytest
@@ -1342,9 +1396,9 @@ jobs:
   # the committed file is what it splits by.
   #
   # Each shard also counts what it selected and what the whole suite collects,
-  # and `backend-pytest-split` checks the six counts add up to the whole, so no
+  # and `backend-pytest-split` checks the eight counts add up to the whole, so no
   # test can fall between the shards unnoticed.
-  # The LFS fixtures, pulled once per change of them into the Actions cache the six
+  # The LFS fixtures, pulled once per change of them into the Actions cache the eight
   # shards restore from: a miss in `lfs-fixtures` (a new fixture, or an entry evicted
   # before the run) costs one ~290 MB pull of the LFS bandwidth quota, not one per
   # shard. A shard that then misses too (a save that never landed, or an eviction
@@ -1383,17 +1437,18 @@ jobs:
           key: lfs-fixtures-${{ steps.lfs.outputs.key }}
 
   backend-pytest:
-    name: Backend pytest (${{ matrix.group }}/6)
+    name: Backend pytest (${{ matrix.group }}/8)
     needs: [layout, lfs-fixtures]
     if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_backend == 'true' }}
     runs-on: ubuntu-latest
-    # A shard's image build takes about 4 minutes and its tests 25 to 36 (2026-11-14, #6214 and #6211);
-    # at 40 a slow runner cancelled shards at 98% with no failed test.
+    # A shard's image build takes 2 to 3 minutes. With six shards its tests took 27 to
+    # 46 (2026-11-20, #6783), and slow runners hit this limit; eight shards bring
+    # that to about 25 (see the section comment above).
     timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6]
+        group: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
@@ -1459,7 +1514,7 @@ jobs:
           line=$(docker run --rm -v "$PWD/results:/results" \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
-            --collect-only -q --splits 6 --group ${{ matrix.group }} --splitting-algorithm least_duration \
+            --collect-only -q --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
             --durations-path=/results/durations.json | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
           selected=${line%%/*}
@@ -1498,7 +1553,7 @@ jobs:
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 6 --group ${{ matrix.group }} --splitting-algorithm least_duration
+          --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration
           --store-durations --clean-durations --durations-path=/results/durations.json
           --junitxml=/results/junit.xml --durations=20
 
@@ -1599,16 +1654,16 @@ jobs:
           set -euo pipefail
           cat counts/shard-*.txt
           files=(counts/shard-*.txt)
-          [ "${#files[@]}" -eq 6 ] || { echo "::error::expected 6 shard counts, got ${#files[@]}"; exit 1; }
+          [ "${#files[@]}" -eq 8 ] || { echo "::error::expected 8 shard counts, got ${#files[@]}"; exit 1; }
           totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
           [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards collected different suites: $totals"; exit 1; }
           sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
           [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
           short=$(awk '$4 != $2 {print "shard " $1 " ran " $4 " of the " $2 " it selected"}' counts/shard-*.txt)
           [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
-          echo "The six shards select and ran all ${totals} tests."
+          echo "The eight shards select and ran all ${totals} tests."
 
-      # Only from a green run whose six shards each timed what they ran: a shard
+      # Only from a green run whose eight shards each timed what they ran: a shard
       # that failed early sends none, a partial merge would split the next run
       # worse, and a red run's timings are not ones to commit.
       - name: Merge the shards' timings
@@ -1618,8 +1673,8 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           files=(durations/durations-*.json)
-          if [ "${#files[@]}" -ne 6 ]; then
-            echo "::notice::${#files[@]} of 6 shards sent timings; no merged backend/.test_durations from this run"
+          if [ "${#files[@]}" -ne 8 ]; then
+            echo "::notice::${#files[@]} of 8 shards sent timings; no merged backend/.test_durations from this run"
             exit 0
           fi
           collected=$(awk '{print $3}' counts/shard-*.txt | sort -u)
@@ -2524,7 +2579,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
+    needs: [layout, lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2550,6 +2605,7 @@ jobs:
           LAYOUT_RESULT: ${{ needs.layout.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          FRONTEND_UNIT_RESULT: ${{ needs.frontend-unit.result }}
           FRONTEND_E2E_RESULT: ${{ needs.frontend-e2e.result }}
           FRONTEND_E2E_SPLIT_RESULT: ${{ needs.frontend-e2e-split.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
@@ -2635,7 +2691,8 @@ jobs:
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
-          assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
+          assert "Frontend lint, typecheck, build"        "$FRONTEND_RESULT" "$has_frontend"
+          assert "Frontend unit tests (every shard)"      "$FRONTEND_UNIT_RESULT" "$has_frontend"
           assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$has_e2e"
           assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$has_e2e"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
@@ -2687,7 +2744,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
+    needs: [lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
