@@ -212,8 +212,9 @@ class InvoiceLine(_Row):
 
 
 class SpoolBrief(BaseModel):
-    """An open spool as a line's candidate: what a person or the session needs to tell it
-    from another one (#6267). Values are the effective ones (own override over the type's)."""
+    """A spool as a line's candidate: what a person or the session needs to tell it
+    from another one (#6267). Values are the effective ones (own override over the type's).
+    ``archived``: the spool is used up and archived; a line may still fill it (#6707)."""
 
     id: UUID
     number: int
@@ -222,11 +223,13 @@ class SpoolBrief(BaseModel):
     rgba: Rgba | None
     cost_per_kg: Decimal | None
     grams_left: float | None
+    archived: bool = False
 
 
 class LineCandidates(BaseModel):
-    """The open spools a line could update instead of making new ones (#6267): those with
-    the line's material and exact RGBA, split by whether they have a cost yet."""
+    """The spools, archived ones too (#6707), a line could update instead of making new ones
+    (#6267): those with the line's material and exact RGBA, split by whether they have a
+    cost yet."""
 
     position: int
     uncosted: list[SpoolBrief]

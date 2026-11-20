@@ -396,10 +396,11 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     response_model=list[pm.LineCandidates],
     summary="List the spools each invoice line could update",
     description=(
-        "Per line (by `position`), the open spools whose effective material and exact RGBA "
+        "Per line (by `position`), the spools whose effective material and exact RGBA "
         "match the line's type, or its proposed type when it has no type yet: `uncosted` "
-        "(no cost per kg yet) and `costed`. A line with neither type has none. 404 for no "
-        "such invoice."
+        "(no cost per kg yet) and `costed`. Archived (used-up) spools are listed too, with "
+        "`archived` true: a spent spool was still bought. A line with neither type has none. "
+        "404 for no such invoice."
     ),
 )
 async def invoice_candidates(filament: FilamentDep, invoice_id: UUID) -> list[pm.LineCandidates]:
@@ -513,7 +514,9 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
         "Turns a draft into spools in one transaction: new spool types for lines that propose "
         "one, supplier products by SKU, each line's `quantity` spools (or fewer new ones when "
         "the line fills the spools in `update_spool_ids`) with a `cost_per_kg` from the line's "
-        "allocated cost, and one price point per line. Confirming a confirmed invoice answers "
+        "allocated cost, and one price point per line. An archived spool in `update_spool_ids` "
+        "takes its cost and invoice line only, and stays archived. Confirming a confirmed "
+        "invoice answers "
         "200 with it and makes nothing more. 404 for no such invoice. 409, with nothing "
         "written, for an invoice with no lines, one of an archived supplier, one not in the "
         "shop's currency, one whose total is more than 0.05 from its lines plus shipping, or a "
