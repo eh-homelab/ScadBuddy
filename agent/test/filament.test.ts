@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -916,6 +917,84 @@ describe('filament Bambuddy sync tools (#6265)', () => {
   })
 })
 
+describe('filament history and metrics tools', () => {
+  const FIL = `${BACKEND}/api/v1/filament`
+
+  it.each([
+    ['filament_spool_history'],
+    ['filament_forecast'],
+    ['filament_metrics'],
+    ['filament_purchasing_metrics'],
+  ])('%s is read tier', (name) => {
+    expect(tool(name).risk).toBe('read')
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('drops the series and keeps the newest 50 of 80 events', async () => {
+    const events = Array.from({ length: 80 }, (_, i) => ({ seq: 80 - i }))
+    server.use(
+      http.get(`${SPOOL}/history`, () =>
+        HttpResponse.json({ events, series: [{ g: 1 }], metrics: { used_g: 5 }, currency: 'USD', window_days: 30 }),
+      ),
+    )
+    const t = tool('filament_spool_history')
+    const out = firstText(await runTool(t, { spool_id: ROW }, ctx())) as { events: { seq: number }[] }
+    expect(out).not.toHaveProperty('series')
+    expect(out).toMatchObject({ metrics: { used_g: 5 }, currency: 'USD', window_days: 30, truncated: true })
+    expect(out.events).toHaveLength(50)
+    expect(out.events[0]?.seq).toBe(80)
+    expect(out.events[49]?.seq).toBe(31)
+  })
+
+  it('does not mark a short history truncated', async () => {
+    server.use(http.get(`${SPOOL}/history`, () => HttpResponse.json({ events: [{ seq: 1 }], series: [] })))
+    expect(firstText(await runTool(tool('filament_spool_history'), { spool_id: ROW }, ctx()))).toMatchObject({
+      truncated: false,
+    })
+  })
+
+  it('reads the forecast', async () => {
+    server.use(http.get(`${FIL}/forecast`, () => HttpResponse.json({ spools: [] })))
+    expect(firstText(await runTool(tool('filament_forecast'), {}, ctx()))).toEqual({ spools: [] })
+  })
+
+  it('sends the metrics query it was given', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${FIL}/metrics`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    await runTool(tool('filament_metrics'), { dimension: 'brand' }, ctx())
+    await runTool(tool('filament_metrics'), { bucket: 'week', since: '2026-01-01', until: '2026-02-01' }, ctx())
+    expect(seen).toEqual(['?dimension=brand', '?bucket=week&since=2026-01-01&until=2026-02-01'])
+  })
+
+  it('sends the purchasing range', async () => {
+    server.use(
+      http.get(`${FIL}/metrics/purchasing`, ({ request }) => {
+        expect(new URL(request.url).search).toBe('?since=2026-01-01')
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    await runTool(tool('filament_purchasing_metrics'), { since: '2026-01-01' }, ctx())
+  })
+
+  it('refuses a dimension the route does not know', () => {
+    expect(() => tool('filament_metrics').parse({ dimension: 'colour' })).toThrow()
+  })
+
+  it.each([['2026-13-45'], ['2026-02-30']])('refuses the impossible date %s', (day) => {
+    expect(() => tool('filament_metrics').parse({ since: day })).toThrow()
+    expect(() => tool('filament_purchasing_metrics').parse({ until: day })).toThrow()
+  })
+
+  it('accepts a leap day', () => {
+    expect(() => tool('filament_metrics').parse({ since: '2028-02-29' })).not.toThrow()
+  })
+})
+
 describe('filament_type_fill_from_profile (#6714)', () => {
   const TYPES = `${BACKEND}/api/v1/filament/types`
   const fill = { type_id: ROW, code: 'X', filled: { density_g_cm3: '1.32' }, previous: {}, skipped: {}, k_values: [], written: true }
@@ -939,17 +1018,24 @@ describe('filament_type_fill_from_profile (#6714)', () => {
       }),
     )
     expect(firstText(await runTool(tool('filament_type_fill_from_profile'), { refresh: true }, ctx()))).toEqual([fill])
-    const one = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: { density_g_cm3: '1.32' }, k_values: true }, ctx())
+    const shown = [{ printer_id: ROW, extruder: 0, nozzle_diameter: '0.4', k_value: '0.02' }]
+    const one = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown }, ctx())
     expect(firstText(one)).toEqual(fill)
     expect(sent).toEqual([
       { url: `${TYPES}/fill-from-profile`, body: { refresh: true } },
-      { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true } },
+      { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown } },
     ])
   })
 
   it('refuses apply without a type', async () => {
     const refused = await runTool(tool('filament_type_fill_from_profile'), { apply: { density_g_cm3: '1.32' } }, ctx())
     expect(refused.isError).toBe(true)
+  })
+
+  it('refuses k_values without the K values the refresh showed (R-6714-i)', async () => {
+    const refused = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: {}, k_values: true }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused)).toMatch(/shown_k_values/)
   })
 })
 
@@ -1012,6 +1098,21 @@ describe('filament type proposal tools (#6701)', () => {
     expect(input.safeParse({ groups: [{ ...group, label_weight_g: 100_001 }] }).success).toBe(false)
     expect(input.safeParse({ groups: [{ ...group, spool_ids: Array(5000).fill(SPOOL) }] }).success).toBe(true)
     expect(input.safeParse({ groups: [{ ...group, spool_ids: Array(5001).fill(SPOOL) }] }).success).toBe(false)
+  })
+
+  it("keeps shown_k_values' item keys equal to the generated TypeKValueCreate (#6762)", () => {
+    // The spec `pnpm gen:api` exported, as in coverage.test.ts.
+    const spec = JSON.parse(readFileSync(new URL('../../backend/openapi.json', import.meta.url), 'utf8')) as {
+      components: { schemas: Record<string, { properties: Record<string, unknown>; required?: string[] }> }
+    }
+    const theirs = spec.components.schemas.TypeKValueCreate!
+    type Item = { properties: Record<string, unknown>; required?: string[] }
+    const json = z.toJSONSchema(z.object(tool('filament_type_fill_from_profile').shape), { io: 'input' }) as unknown as {
+      properties: { shown_k_values: { items: Item } }
+    }
+    const ours = json.properties.shown_k_values.items
+    expect(Object.keys(ours.properties).sort()).toEqual(Object.keys(theirs.properties).sort())
+    expect([...(ours.required ?? [])].sort()).toEqual([...(theirs.required ?? [])].sort())
   })
 
   it("bounds a group's material_number at 128 characters as the backend does (R-6729-6)", () => {

@@ -22,7 +22,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.settings import Settings
-from scadbuddy.filament import dry_hours, ledger
+from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
@@ -456,7 +456,8 @@ class FilamentSpoolStore:
     def summary(self) -> m.InventorySummary:
         """The unarchived spools in total; a spool's value is its grams left at its
         effective cost per kg, else ``filament_default_cost_per_kg``. A spool is loaded when
-        its place is a printer's tray (``printer_id`` set, `filament/inventory.py`)."""
+        its place is a printer's tray (``printer_id`` set, `filament/inventory.py`).
+        ``consumed_g`` is the grams of every spool's plates, archived ones too."""
         defaults = self._defaults()
         default_cost = defaults.cost_per_kg
         spools = self._list(defaults)
@@ -467,6 +468,11 @@ class FilamentSpoolStore:
                     "SELECT id FROM filament_locations WHERE printer_id IS NOT NULL"
                 ).fetchall()
             }
+            consumed = sum(
+                plate.grams
+                for found in ledger.plate_events(conn).values()
+                for plate in metrics.plates(found)
+            )
         value: Decimal | None = None
         stock: dict[str | None, tuple[int, float]] = {}
         for spool in spools:
@@ -491,6 +497,7 @@ class FilamentSpoolStore:
             loaded=sum(1 for s in spools if s.location_id in trays),
             low_stock=sum(1 for s in spools if s.low_stock),
             needs_type=sum(1 for s in spools if s.type_id is None),
+            consumed_g=consumed,
         )
 
     def tags(self, *, include_unbound: bool = False) -> _TagRows:
@@ -630,13 +637,16 @@ class FilamentSpoolStore:
         ref_kind: str | None = None,
         ref_id: UUID | None = None,
         at: datetime | None = None,
+        invoice_line_id: UUID | None = None,
     ) -> bool:
         """`update` on ``conn``, in the caller's transaction (`filament/csv_import.py`);
         false for no such spool. A row it names that does not exist is the driver's
         `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``edited`` event
         (an invoice line's, #6266); a retry of one pair books nothing twice. ``at`` is when
         an archive or restore happened (the pull's: Bambuddy's change time, #6265 review
-        M3); with none it is booked now."""
+        M3); with none it is booked now. An ``invoice_line_id`` (an invoice confirm's,
+        #6269 Decision 12) that differs from the spool's is set in the same UPDATE and is
+        one more change of that event."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -647,7 +657,8 @@ class FilamentSpoolStore:
                 (spool_id,),
             )
         current = conn.execute(
-            f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
+            f"SELECT {_SPOOL_COLUMNS}, invoice_line_id FROM filament_spools WHERE id = %s"
+            " FOR UPDATE",
             (spool_id,),
         ).fetchone()
         if current is None:
@@ -661,6 +672,9 @@ class FilamentSpoolStore:
             for n in m.SpoolPatch.model_fields
             if n in after and current[n] != after[n]
         }
+        if invoice_line_id is not None and current["invoice_line_id"] != invoice_line_id:
+            after["invoice_line_id"] = invoice_line_id
+            changes["invoice_line_id"] = [current["invoice_line_id"], invoice_line_id]
         if changes:
             columns = list(changes)
             conn.execute(

@@ -5,8 +5,11 @@ import {
   bindTag,
   createSpool,
   deleteSpool,
+  getForecast,
   getInventory,
+  getMetrics,
   getSpool,
+  getSpoolHistory,
   getSummary,
   getTag,
   getType,
@@ -86,6 +89,38 @@ describe('the filament mocks', () => {
       ['Shelf A', 2],
       ['Dry box 1', 2],
     ])
+  })
+
+  it("counts the summary's consumed grams by the one plate rule the history uses (metrics.plates)", async () => {
+    // #2's three plates (120 g) and #3's job SB and BB both booked, once (20 g). #4's `print` ref and #10's open estimate are no plate.
+    expect((await getSummary()).consumed_g).toBe(140)
+    const used = await Promise.all([2, 3, 4, 10].map(async (number) => (await getSpoolHistory(spoolId(number))).metrics.used_g))
+    expect(used).toEqual([120, 20, 0, 0])
+  })
+
+  it('values the stock at the exact grams, as metrics_store._value does (R-T8-9)', async () => {
+    // A spool of the orange type (19.99/kg) with 823.5 g, beside #2's 820 g. The backend's own
+    // `_value` and `_money` on these two spools give 16.3918 + 16.461765 = 32.853565, so 32.85;
+    // rounding the grams first (824 g) would give 32.86.
+    await createSpool({ ...NEW_SPOOL, type_id: T.ORANGE, grams_left: 823.5 })
+    const metrics = await getMetrics({ dimension: 'type' })
+    expect(metrics.stock.find((row) => row.key === T.ORANGE)).toMatchObject({ spools: 2, grams_left: 1643.5, value: '32.85' })
+  })
+
+  it('does not call a type with no spool in stock low', async () => {
+    const spool = await createSpool({ ...NEW_SPOOL, type_id: T.JADE, grams_left: 1000 })
+    for (const each of await listSpools({ includeArchived: true })) {
+      if (each.type_id === T.JADE) await archiveSpool(each.id)
+    }
+    expect(spool.type_id).toBe(T.JADE)
+    const found = (await getForecast()).types.find((type) => type.type_id === T.JADE)
+    expect(found).toMatchObject({ spools: 0, low_stock: false })
+  })
+
+  it('allows a single day, since equal to until, and refuses since after until', async () => {
+    const metrics = await getMetrics({ since: '2026-11-10', until: '2026-11-10' })
+    expect(metrics.since).toBe('2026-11-10')
+    expect((await refusal(getMetrics({ since: '2026-11-11', until: '2026-11-10' }))).status).toBe(422)
   })
 
   it('pages the ledger with no row lost or repeated, and refuses a cursor no page gave', async () => {

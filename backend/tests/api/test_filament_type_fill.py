@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -12,8 +13,11 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.models import SpoolCreate
 from scadbuddy.filament.profile_fill import TypeFiller
+from scadbuddy.filament.spools import FilamentSpoolStore
 from tests.api.test_filament_purchasing import _invoice_body
 from tests.api.test_send import API, configure
 from tests.filament.test_profile_fill import TREE, local_preset
@@ -126,6 +130,77 @@ def test_the_bulk_route_fills_every_type_and_reports_each(client: TestClient) ->
     preview = client.post(f"{TYPES}/fill-from-profile", json={"refresh": True}).json()
     assert {one["code"] for one in preview} == {"LOCAL", "BARE"}
     assert all(one["written"] is False for one in preview)
+
+
+def test_k_values_without_the_shown_ones_are_refused_and_an_empty_list_is_none(
+    client: TestClient,
+) -> None:
+    """R-6714-i: `k_values: true` needs `shown_k_values`; `[]` says the refresh showed none."""
+    made = _type(client)
+    url = f"{TYPES}/{made['id']}/fill-from-profile"
+
+    omitted = client.post(url, json={"apply": {}, "k_values": True})
+    assert omitted.status_code == 422, omitted.text
+    assert "shown_k_values" in omitted.text
+
+    # No linked Bambuddy spool, so Bambuddy gives none, as the refresh showed.
+    none = client.post(url, json={"apply": {}, "k_values": True, "shown_k_values": []})
+    assert none.status_code == 200, none.text
+    assert (none.json()["k_values"], none.json()["written"]) == ([], False)
+
+
+def _linked_k_values(client: TestClient, type_id: str) -> None:
+    """A spool of the type linked to Bambuddy spool 40, whose K profile is on Bambuddy
+    printer 1, which a ScadBuddy printer links."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    pool = state.settings_store.pool
+    spool = FilamentSpoolStore(pool).create(SpoolCreate(type_id=UUID(type_id)), actor="ann").id
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000006747', 'H2C', 1)"
+        )
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, linked_at)"
+            " VALUES (%s, 40, now())",
+            (spool,),
+        )
+    k = {"printer_id": 1, "extruder": 0, "nozzle_diameter": "0.4", "k_value": 0.02}
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 40, "material": "PLA", "k_profiles": [k]}])
+    )
+
+
+@respx.mock
+def test_the_route_writes_the_k_values_shown_and_refuses_others(client: TestClient) -> None:
+    """R-6714-j: `shown_k_values` through the route: a match writes, a difference is 409,
+    and with `k_values: false` they are ignored."""
+    configure(client)
+    made = _type(client)
+    url = f"{TYPES}/{made['id']}/fill-from-profile"
+    _linked_k_values(client, made["id"])
+
+    diff = client.post(url, json={"refresh": True})
+    assert diff.status_code == 200, diff.text
+    shown = [{k: v for k, v in row.items() if k != "type_id"} for row in diff.json()["k_values"]]
+    assert [Decimal(row["k_value"]) for row in shown] == [Decimal("0.02")]
+    other = [shown[0] | {"k_value": "0.03"}]
+
+    ignored = client.post(url, json={"apply": {}, "k_values": False, "shown_k_values": other})
+    assert ignored.status_code == 200, ignored.text
+    assert ignored.json()["written"] is False
+    assert client.get(f"{TYPES}/{made['id']}").json()["k_values"] == []
+
+    changed = client.post(url, json={"apply": {}, "k_values": True, "shown_k_values": other})
+    assert changed.status_code == 409, changed.text
+    assert "K values" in changed.json()["detail"]
+    assert client.get(f"{TYPES}/{made['id']}").json()["k_values"] == []
+
+    done = client.post(url, json={"apply": {}, "k_values": True, "shown_k_values": shown})
+    assert done.status_code == 200, done.text
+    assert done.json()["written"] is True
+    saved = client.get(f"{TYPES}/{made['id']}").json()["k_values"]
+    assert [Decimal(row["k_value"]) for row in saved] == [Decimal("0.02")]
 
 
 def _spy_fill(monkeypatch: pytest.MonkeyPatch) -> list[list[UUID]]:

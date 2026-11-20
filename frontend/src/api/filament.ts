@@ -50,6 +50,20 @@ export type SpoolEventAdd = Omit<Schemas['SpoolEventAdd'], 'source'> & Partial<P
 export type LedgerRow = Schemas['LedgerRow']
 export type EventQuery = Query<'list_events_api_v1_filament_events_get'>
 export type InventorySummary = Schemas['InventorySummary']
+export type SpoolHistory = Schemas['SpoolHistory']
+export type TimelineRow = Schemas['TimelineRow']
+export type GramsPoint = Schemas['GramsPoint']
+export type SpoolMetrics = Schemas['SpoolMetrics']
+export type AmsError = Schemas['AmsError']
+export type Forecast = Schemas['Forecast']
+export type SpoolForecast = Schemas['SpoolForecast']
+export type TypeForecast = Schemas['TypeForecast']
+export type InventoryMetrics = Schemas['InventoryMetrics']
+export type PurchasingMetrics = Schemas['PurchasingMetrics']
+export type PriceSeries = Schemas['PriceSeries']
+export type SpendRow = Schemas['SpendRow']
+export type MetricsQueryParams = Query<'get_metrics_api_v1_filament_metrics_get'>
+export type PurchasingQueryParams = Query<'get_purchasing_metrics_api_v1_filament_metrics_purchasing_get'>
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
@@ -203,6 +217,9 @@ export const setSpoolKValues = (id: string, rows: KValueInput[]) =>
 /** One spool's ledger, oldest first. */
 export const listSpoolEvents = (id: string) => request<SpoolEvent[]>(`${BASE}/spools/${seg(id)}/events`)
 
+/** #6269 — the spool's timeline (newest first), its grams series, its metrics and the burn window. */
+export const getSpoolHistory = (id: string) => request<SpoolHistory>(`${BASE}/spools/${seg(id)}/history`)
+
 /** A weighing (`grams`: the filament left, without the empty spool) or a drying (`temp_c`, `hours`). */
 export const addSpoolEvent = (id: string, body: SpoolEventAdd) => request<SpoolEvent>(`${BASE}/spools/${seg(id)}/events`, json('POST', body))
 
@@ -238,7 +255,8 @@ export const setTypeKValues = (id: string, rows: TypeKValueInput[]) =>
 /**
  * #6714 — fills the type's empty fields from its slicer profile. `refresh` answers the profile's
  * values that differ and writes nothing; `apply` writes the fields a person confirmed (409 when
- * the profile no longer gives one), and with `k_values` the K values the refresh showed.
+ * the profile no longer gives one), and with `k_values` the K values the refresh showed, sent back
+ * as `shown_k_values` (409 when Bambuddy now gives others).
  */
 export const fillTypeFromProfile = (id: string, body: FillRequest = {}) =>
   request<TypeFill>(`${BASE}/types/${seg(id)}/fill-from-profile`, json('POST', body))
@@ -314,6 +332,16 @@ export const getTag = (id: string) => request<TagDetail>(`${BASE}/tags/${seg(id)
 export const listEvents = (filters: EventQuery = {}) => request<EventPage>(`${BASE}/events${query(filters)}`)
 
 export const getSummary = () => request<InventorySummary>(`${BASE}/summary`)
+
+/** #6269 — each unarchived spool's burn and empty day, and each type's days of stock and reorder day. */
+export const getForecast = () => request<Forecast>(`${BASE}/forecast`)
+
+/** #6269 — stock now, and the consumption and waste from `since` to `until` (both days included). */
+export const getMetrics = (params: MetricsQueryParams = {}) => request<InventoryMetrics>(`${BASE}/metrics${query(params)}`)
+
+/** #6269 — price per kg over time and confirmed invoice spend, each in its own currency. */
+export const getPurchasingMetrics = (params: PurchasingQueryParams = {}) =>
+  request<PurchasingMetrics>(`${BASE}/metrics/purchasing${query(params)}`)
 
 /** Every spool with the tray it is in, and each registry printer's trays (Task 9). */
 export const getInventory = (options: { includeArchived?: boolean } = {}) =>

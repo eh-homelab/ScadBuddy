@@ -1,4 +1,4 @@
-import { Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
+import { CalendarClockIcon, Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
@@ -6,6 +6,7 @@ import { getInventory, getSummary, listLocations, listSpools, listTypes, syncAms
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
 import { trayChecks, type TrayCheck } from '../../components/filament/CheckTray'
 import { SpoolCards } from '../../components/filament/SpoolCards'
+import { SpoolForecast } from '../../components/filament/SpoolForecast'
 import { SpoolImport } from '../../components/filament/SpoolImport'
 import { SpoolsTable } from '../../components/filament/SpoolsTable'
 import { SpoolTiles, type TileFilter } from '../../components/filament/SpoolTiles'
@@ -19,6 +20,10 @@ import {
   groupSpools,
   readQuery,
   readStoredColumns,
+  rememberedSpoolsView,
+  rememberingSpoolsView,
+  rememberSpoolsView,
+  setRememberingSpoolsView,
   sortSpools,
   storeColumns,
   writeQuery,
@@ -28,6 +33,7 @@ import {
   type SpoolsStatus,
 } from '../../components/filament/spoolsQuery'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -117,14 +123,26 @@ function flatten(nodes: LocationNode[], trail: string[] = []): { places: Place[]
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The spools could not be loaded. Try again.')
 
 /**
- * #6262 — the Spools tab: the inventory in tiles, then every spool as a dense table or as
- * cards, filtered, grouped and sorted from the URL (`spoolsQuery.ts`). Select spools to
+ * #6262 — the Spools tab: the inventory in tiles, then every spool as a dense table, as
+ * cards or as a forecast (#6269: when each runs out, and the types to reorder), filtered, grouped and sorted from the URL (`spoolsQuery.ts`).
+ * "Remember my view" makes a visit with no query open the last view (R-T8-10). Select spools to
  * archive, restore, delete, move or type them; export what is shown as CSV, or import a
  * CSV (`SpoolImport`). On the Needs-type filter, `TypeProposals` proposes their types (#6701).
  */
 export function SpoolsTab() {
   const [params, setParams] = useSearchParams()
-  const q = useMemo(() => readQuery(params, readStoredColumns() ?? DEFAULT_COLUMNS), [params])
+  const [restore, setRestore] = useState(() => (params.size === 0 ? rememberedSpoolsView() : null))
+  const [keeping, setKeeping] = useState(rememberingSpoolsView)
+  const q = useMemo(() => {
+    const read = readQuery(params, readStoredColumns() ?? DEFAULT_COLUMNS)
+    return params.size === 0 && restore ? { ...read, view: restore } : read
+  }, [params, restore])
+
+  useEffect(() => {
+    if (restore === null) return
+    setRestore(null)
+    if (params.size === 0) setParams(writeQuery(q), { replace: true })
+  }, [restore, params, setParams, q])
   const [data, setData] = useState<Loaded | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
@@ -165,6 +183,7 @@ export function SpoolsTab() {
     const merged = { ...q, ...next }
     for (const key of Object.keys(next) as (keyof SpoolsQuery)[]) if (next[key] === undefined) delete merged[key]
     setParams(writeQuery(merged), { replace: true })
+    if (next.view) rememberSpoolsView(next.view)
   }
 
   const typeCodes = useMemo(() => new Map((data?.types ?? []).map((type) => [type.id, type.code])), [data])
@@ -255,7 +274,27 @@ export function SpoolsTab() {
           >
             <LayoutGridIcon className="size-4" />
           </button>
+          <button
+            type="button"
+            aria-pressed={q.view === 'forecast'}
+            aria-label="Forecast"
+            onClick={() => update({ view: 'forecast' })}
+            className={cn('rounded-sm p-1 text-muted-foreground hover:text-foreground', q.view === 'forecast' && 'bg-muted text-foreground')}
+          >
+            <CalendarClockIcon className="size-4" />
+          </button>
         </div>
+        <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <Switch
+            size="sm"
+            checked={keeping}
+            onCheckedChange={(on) => {
+              setKeeping(on)
+              setRememberingSpoolsView(on, q.view)
+            }}
+          />
+          Remember my view
+        </label>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="outline">
@@ -335,7 +374,7 @@ export function SpoolsTab() {
             </DropdownMenuContent>
           </DropdownMenu>
         )}
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex flex-wrap gap-2">
           <Button size="sm" asChild>
             <Link to="/filament/spools/new">
               <PlusIcon /> New spool
@@ -428,6 +467,7 @@ export function SpoolsTab() {
         />
       )}
       {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} checks={checks} />}
+      {data && q.view === 'forecast' && <SpoolForecast spools={shown} />}
 
       <SpoolImport
         open={importing}

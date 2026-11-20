@@ -7,7 +7,8 @@
  */
 import type { Spool } from '../../api/filament'
 
-export type SpoolsView = 'table' | 'cards'
+/** `forecast` (#6269): each shown spool's burn and empty day, then the types to reorder. */
+export type SpoolsView = 'table' | 'cards' | 'forecast'
 export type SpoolsStatus = 'active' | 'archived' | 'all'
 export type SpoolsGroup = 'none' | 'material' | 'brand' | 'type' | 'location'
 
@@ -80,6 +81,7 @@ const NAMES = [
   ['location', 'location'],
 ] as const
 const GROUPS: readonly SpoolsGroup[] = ['material', 'brand', 'type', 'location']
+const VIEWS: readonly SpoolsView[] = ['table', 'cards', 'forecast']
 
 function isColumn(value: string): value is ColumnId {
   return (COLUMN_IDS as readonly string[]).includes(value)
@@ -97,7 +99,7 @@ export function readQuery(params: URLSearchParams, columns: ColumnId[] = DEFAULT
   const group = params.get('group') as SpoolsGroup | null
   const cols = params.get('cols')
   const q: SpoolsQuery = {
-    view: params.get('view') === 'cards' ? 'cards' : 'table',
+    view: VIEWS.find((one) => one === params.get('view')) ?? 'table',
     status: status === 'archived' || status === 'all' ? status : 'active',
     columns: cols === null ? columns : cols.split(',').filter(isColumn),
     sort: validSort(params.get('sort')) ?? 'number',
@@ -271,4 +273,54 @@ export function storeColumns(columns: ColumnId[]): void {
   } catch {
     // Private mode or a sandboxed frame: the URL still holds the choice.
   }
+}
+
+/**
+ * #6269 R-T8-10 — the view (table, cards or forecast) behind "Remember my view", as the
+ * Metrics and Invoices tabs keep theirs: with it on, a visit with no query opens the last
+ * view. The browser keeps it under `scadbuddy.filament.spools.view`.
+ */
+export const SPOOLS_VIEW_KEY = 'scadbuddy.filament.spools.view'
+
+interface ViewMemory {
+  on: boolean
+  view: SpoolsView
+}
+
+function readViewMemory(): ViewMemory | null {
+  try {
+    const raw = window.localStorage.getItem(SPOOLS_VIEW_KEY)
+    if (!raw) return null
+    const stored = JSON.parse(raw) as { on?: unknown; view?: unknown }
+    return { on: stored.on === true, view: VIEWS.find((one) => one === stored.view) ?? 'table' }
+  } catch {
+    return null
+  }
+}
+
+function writeViewMemory(memory: ViewMemory) {
+  try {
+    window.localStorage.setItem(SPOOLS_VIEW_KEY, JSON.stringify(memory))
+  } catch {
+    // A browser that refuses storage still shows the view for this visit.
+  }
+}
+
+/** Whether "Remember my view" is on. */
+export const rememberingSpoolsView = (): boolean => readViewMemory()?.on === true
+
+/** The view a visit with no query opens, or `null` while "Remember my view" is off. */
+export function rememberedSpoolsView(): SpoolsView | null {
+  const memory = readViewMemory()
+  return memory?.on ? memory.view : null
+}
+
+/** Keeps `view` as the remembered view, when remembering is on. */
+export function rememberSpoolsView(view: SpoolsView) {
+  if (rememberingSpoolsView()) writeViewMemory({ on: true, view })
+}
+
+/** The switch: on keeps `view` from now on, off forgets it. */
+export function setRememberingSpoolsView(on: boolean, view: SpoolsView) {
+  writeViewMemory({ on, view: on ? view : 'table' })
 }

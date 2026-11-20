@@ -131,12 +131,12 @@ because advisory locks and NOTIFY channels are per database: workers sharing one
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
 Temporal dev server.
-CI runs the suite in six `backend-pytest` jobs (#1167), each `--splits 6 --group N
+CI runs the suite in eight `backend-pytest` jobs (#1167, #6783), each `--splits 8 --group N
 --splitting-algorithm least_duration` (pytest-split) by the timings in
 `backend/.test_durations`; `least_duration`, not the default `duration_based_chunks`,
 because chunks cut the collection order and a stale file then put the slow `tests/api`
 modules in one shard (#6596); `backend-pytest-split`
-checks that the six selections add up to the whole collection and that each
+checks that the eight selections add up to the whole collection and that each
 shard ran what it selected. A test missing from
 the file is placed by the average, so a stale file only unbalances the shards. The
 timings must be CI's own (a file stored on a faster machine left one shard ten minutes
@@ -157,7 +157,10 @@ injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances
 on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
 "today" is read at each call, never at import: a shard that loads before midnight UTC
 and makes orders after it dated every fake deposit a day early (#6307). A shard builds
-in about 4 minutes and tests in 25 to 36; `backend-pytest`'s limit is 55 (#6288).
+in 2 to 3 minutes. With six shards it tested in 27 to 46, and slow runners hit
+`backend-pytest`'s limit of 55 (#6288, #6783: runs 44785128035, 44800511189); eight
+shards on fresh timings give about 25 minutes of tests each. Never raise the limit:
+add a shard, or refresh the timings.
 Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
@@ -244,8 +247,20 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   or its `process_overrides`) gets room for one instead (`replate_3mf` `tower_on`), or a
   `PlateFitError` when it does not fit. Plate fit (`analyzers/builtin.py` SB4001) judges
   the tower as the send does, by the file and `AnalysisRequest.prime_tower` (the run's
-  tower choice, `api/accepted_fixes.py` `analysis_request`). It does not model the tower's depth or the
-  "no sparse layers" keep-out.
+  tower choice, `api/accepted_fixes.py` `analysis_request`). The tower is `render/plate.py`
+  `tower_footprint` (#6735): Bambu Studio's own estimate from the plate's filaments, the prime
+  volume and the height (a rib-wall square, 36 mm for two filaments on the H2C, 65 mm for
+  eight), and with `wipe_tower_no_sparse_layers` the slicer's keep-out (about 100 mm on the
+  H2C from objects taller than `nozzle_height`, `plate_profiles.py` `TOWER_KEEP_OUTS`).
+  Arrange packs for that keep-out when its `prime_tower` asks for no sparse layers, and the
+  send keeps it when the file states it. The print dialog's own choice is judged before the
+  slice (#6758, `bambuddy/tower_check.py`, `print_run.check_tower`, the check's
+  `PrintCheck.prime_tower`): the file laid out as the send lays it out, its towers judged by
+  the tower the request chooses (`prime_tower`, `process_overrides`, the template's
+  `print_settings`), and a conflicting tower's free spot (`tower_beside`) given as a fix,
+  `wipe_tower_x`/`wipe_tower_y` process overrides (one value per plate), which the dialog's
+  "Move the prime tower" and the agent's `print_output` `move_prime_tower` send. The process and filament presets are not known there, so it takes
+  BBL's defaults or largest values (0.2 mm layers, 45 mm³ prime volume).
   It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
   by-object plate fails "too close to others" (#6246). A template plate is one object with
   colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
@@ -617,8 +632,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `support_interface_filament` among them; the supports option passes only enable, type and
   build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
   `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
-  and scale, and its tower unless the target's extruders cannot reach it or it stands on
-  its plate's objects' box, #3770 (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  and scale, and its tower unless the target's extruders cannot reach it, it stands on
+  its plate's objects' box (#3770), or the file states "No sparse layers" and the tower is
+  inside that keep-out of them (#6735); the tower is judged at the size the slice builds,
+  `tower_footprint` with the file's filaments and rib wall (`towers_within_reach`, in
+  `bambuddy/send.py` `_laid_out_for`). A sliced file, another
   slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
   draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
@@ -806,6 +824,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. A new
   workflow type: roll `scadbuddy-print` with `Recreate` (README, "A release that needs
   `Recreate`").
+  History and metrics (#6269, spec §5.7; plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,
+  which holds the decisions): `provenance.py` (`current_by`: who made the call, `data.author`
+  on every ledger event, from `orders/actor.py` `current_actor()`), `metrics.py` (pure: plates by
+  §5.5 rule 3, burn, empty and reorder days, the AMS error, the grams-left series),
+  `metrics_models.py` (plain `BaseModel`s), `metrics_store.py` (`MetricsStore`: the spool history,
+  forecast, inventory and purchasing reads, on a `MetricsSettings` callable) and
+  `metrics_export.py` (the Prometheus gauges from one snapshot, at most every 60 s per process;
+  labels are catalog names, 20 values at most, the rest `other`, null `none`, so a rename starts
+  a new series). Routes: `GET /filament/spools/{id}/history`, `/filament/forecast`,
+  `/filament/metrics` and `/filament/metrics/purchasing` (ranges over 1096 days are a 422).
   Purchasing (#6266, spec §5.8; plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`,
   which holds the decisions): `suppliers.py` (`SuppliersStore`: suppliers, products by
   `upper(sku)`, price points; a price point is the price of one pack, tax in, shipping out, and

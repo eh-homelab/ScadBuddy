@@ -162,8 +162,16 @@ describe('the purchasing mocks', () => {
       ['Amazon', '28.9900'],
     ])
     expect((await getSupplierStats()).map((row) => [row.supplier_name, row.spool_count, row.spend])).toEqual([
-      ['Amazon', 1, '21.2200'],
       ['Bambu Lab', 2, '34.6100'],
+      ['Amazon', 1, '21.2200'],
+    ])
+  })
+
+  it('counts a supplier\'s plates as the backend does: an open estimate 0 g, an SB+BB pair once', async () => {
+    resetMockState()
+    expect((await getSupplierStats()).map((row) => [row.supplier_name, row.consumed_g])).toEqual([
+      ['Bambu Lab', 20],
+      ['Amazon', 0],
     ])
   })
 

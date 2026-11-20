@@ -19,6 +19,7 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.filament import ledger, metrics
 from scadbuddy.filament import purchasing_models as pm
 from scadbuddy.filament.bb_sync_models import BbLinked, forget_sync
 from scadbuddy.filament.invoice_money import price_per_kg
@@ -305,10 +306,10 @@ class SuppliersStore:
         """Per supplier with a confirmed invoice: the spools its invoices made, the grams
         they used and what the invoices cost. Archived suppliers are listed, marked
         ``archived``; ``spool_count`` counts every spool bought, archived too, and
-        ``remaining_g`` the grams left of the unarchived ones only. Used grams follow the
-        ledger's rule (`ledger.basis`): a ``print_actual`` delta, and a ``print_estimate``
-        one only while no ``print_ended`` event has its ref. Sorted by grams used, most
-        first, then by name."""
+        ``remaining_g`` the grams left of the unarchived ones only. Used grams are the
+        spools' plates (`metrics.plates`), as the summary's and the Metrics tab's are: a
+        plate SB and BB both booked counts once, a print still running not yet. Sorted
+        by grams used, most first, then by name."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT s.id AS supplier_id, s.name AS supplier_name,"
@@ -322,25 +323,31 @@ class SuppliersStore:
                 "  JOIN filament_invoices i ON i.id = l.invoice_id"
                 "  WHERE i.supplier_id = s.id AND i.status = 'confirmed'"
                 "  AND sp.archived_at IS NULL), 0)::float8 AS remaining_g,"
-                " COALESCE((SELECT sum(-e.delta_g) FROM filament_spool_events e"
-                "  JOIN filament_spools sp ON sp.id = e.spool_id"
-                "  JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
-                "  JOIN filament_invoices i ON i.id = l.invoice_id"
-                "  WHERE i.supplier_id = s.id AND i.status = 'confirmed'"
-                "  AND e.delta_g IS NOT NULL AND (e.source = 'print_actual'"
-                "   OR (e.source = 'print_estimate' AND NOT EXISTS"
-                "    (SELECT 1 FROM filament_spool_events d WHERE d.spool_id = e.spool_id"
-                "     AND d.kind = 'print_ended' AND d.ref_id IS NOT NULL"
-                "     AND d.ref_id = e.ref_id AND d.ref_kind IS NOT DISTINCT FROM e.ref_kind)))"
-                "  ), 0)::float8 AS consumed_g,"
                 " (SELECT sum(l.allocated_cost) FROM filament_invoice_lines l"
                 "  JOIN filament_invoices i ON i.id = l.invoice_id"
                 "  WHERE i.supplier_id = s.id AND i.status = 'confirmed') AS spend"
                 " FROM filament_suppliers s WHERE EXISTS (SELECT 1 FROM filament_invoices i"
                 "  WHERE i.supplier_id = s.id AND i.status = 'confirmed')"
-                " ORDER BY consumed_g DESC, upper(s.name), s.id"
             ).fetchall()
-        return [pm.SupplierStats.model_validate(row) for row in rows]
+            bought = conn.execute(
+                "SELECT i.supplier_id, sp.id AS spool_id FROM filament_spools sp"
+                " JOIN filament_invoice_lines l ON l.id = sp.invoice_line_id"
+                " JOIN filament_invoices i ON i.id = l.invoice_id WHERE i.status = 'confirmed'"
+            ).fetchall()
+            events = ledger.plate_events(conn, [r["spool_id"] for r in bought])
+        consumed: dict[UUID, float] = {}
+        for row in bought:
+            grams = sum(p.grams for p in metrics.plates(events.get(row["spool_id"], [])))
+            consumed[row["supplier_id"]] = consumed.get(row["supplier_id"], 0.0) + grams
+        stats = [
+            pm.SupplierStats.model_validate(
+                row | {"consumed_g": consumed.get(row["supplier_id"], 0.0)}
+            )
+            for row in rows
+        ]
+        return sorted(
+            stats, key=lambda r: (-r.consumed_g, r.supplier_name.upper(), str(r.supplier_id))
+        )
 
     # -- price points -------------------------------------------------------------------
 

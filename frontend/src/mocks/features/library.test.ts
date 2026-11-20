@@ -11,6 +11,7 @@ describe('library print check mock (#755)', () => {
       warnings: [],
       rack: null,
       process_part_settings: null,
+      prime_tower: { conflicts: [], fix: null },
     })
   })
 

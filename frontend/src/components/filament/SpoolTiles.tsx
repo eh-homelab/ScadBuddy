@@ -37,8 +37,9 @@ function Tile({ label, value, pressed, onClick, unit }: { label: string; value: 
 /**
  * #6262 — the inventory in a line, from `GET /filament/summary`: spools, grams left, the
  * five materials with most spools, loaded, low stock and needing a type. Every tile but
- * the grams sets its filter (and clears the others); pressed again, it clears it. No "consumed"
- * tile (#6269, plan Decision 11).
+ * the grams and "Consumed" sets its filter (and clears the others); pressed again, it clears
+ * it. "Consumed" (#6269, plan Decision 18) is the grams every plate of every spool used,
+ * archived spools too, as Bambuddy's tile is.
  */
 export function SpoolTiles({ summary, active, onFilter }: Props) {
   const materials = [...summary.by_material].filter((one) => one.material).sort((a, b) => b.spools - a.spools).slice(0, 5)
@@ -46,6 +47,7 @@ export function SpoolTiles({ summary, active, onFilter }: Props) {
     <div role="group" aria-label="Inventory" className="flex flex-wrap divide-x rounded-md border">
       <Tile label="Spools" value={String(summary.spools)} pressed={!active.lowStock && !active.needsType && !active.material && !active.loaded} onClick={() => onFilter({})} />
       <Tile label="Grams left" value={grams(summary.grams_left)} unit="g" />
+      <Tile label="Consumed" value={grams(summary.consumed_g)} unit="g" />
       {materials.map((one) => (
         <Tile
           key={one.material}

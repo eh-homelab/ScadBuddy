@@ -371,7 +371,7 @@ def test_archiving_an_item_clears_its_sync_errors(pg_pool: PgPool) -> None:
     f.suppliers.update(supplier, SupplierPatch(archived=True))
     f.locations.update(place, LocationPatch(archived=True))
     f.catalog.update("insert-types", insert, InsertTypePatch(archived=True))
-    f.types.update(kind, SpoolTypePatch(archived=True))
+    f.types.update(kind, SpoolTypePatch(archived=True), actor="person")
     assert _errors(pg_pool) == []
     assert _intents(pg_pool) == [("spool", spool)]
 

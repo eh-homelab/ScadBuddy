@@ -13,7 +13,9 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the bundle
 ```
 
-CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Playwright
+CI runs the lint, typecheck and build in the `frontend` job, the unit tests in three
+`frontend-unit` jobs (`pnpm test --shard=N/3`; in one job they took 11 to 16 minutes and
+cancelled it at 20, #6783), and Playwright
 in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 `frontend-e2e-split` checks that the three selections add up to the whole `--list` and
 that each shard ran what it selected, as `backend-pytest-split` does.
@@ -227,7 +229,18 @@ same way, `vite.config.ts`).
   `LanPrintsNote`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
-  Catalog, Shopping list and Ledger (`tabs.ts` lists Metrics as not available until #6269).
+  Catalog, Metrics, Shopping list and Ledger.
+  History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
+  the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
+  `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
+  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"); the
+  forecast view of the Spools tab (`SpoolForecast`, `TypeForecastTable`) and the "Consumed" tile. The
+  charts are plain SVG in `components/filament/charts/` (`ColumnChart`, `LineChart`, `BarList`, `useWidth`).
+  A value's colour follows the value, ranked over 365 days (`MetricsTab` `ranked`); until that request
+  returns the chart uses the range's own rank. The forecast table's "Reorder now" badge moves under the type
+  name by a container query (`@max-[44rem]`), exactly when the table scrolls sideways. The mocks are
+  `mocks/features/filament/metrics.ts`; the burn depends on today, so tests and `e2e/filament-metrics.spec.ts`
+  fix the clock at 2026-11-18T12:00Z.
   Purchasing (#6266): `api/filamentPurchasing.ts`, the exact decimal strings of `lib/decimal.ts`
   (money never goes through `Number`), and the mocks `src/mocks/features/filamentPurchasing.ts`.
   `TypePage` shows a saved type's supplier prices (`components/filament/purchasing/PricePanel.tsx`);

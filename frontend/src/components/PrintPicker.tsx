@@ -96,6 +96,7 @@ import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SupportsStep } from './print/SupportsStep'
 import { PrimeTowerStep } from './print/PrimeTowerStep'
+import { TowerConflictNotice } from './print/TowerConflictNotice'
 import { analysisTower, overriddenTowerKeys } from '../lib/primeTower'
 import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
@@ -311,6 +312,46 @@ interface Props {
 
 /** No registry rows: one constant, so a render without them keeps its dependencies. */
 const NO_ROWS: PrinterRow[] = []
+/**
+ * The tower place a "Move the prime tower" wrote: the check's fix (one value per plate),
+ * and the values those keys held before, so an undo gives the user's own back.
+ */
+type TowerMove = { fix: Record<string, string[]>; before: Record<string, unknown> }
+
+/** Whether a setting holds exactly the value `written` gave it. */
+function holds(value: unknown, written: string[] | undefined): boolean {
+  return written !== undefined && JSON.stringify(value) === JSON.stringify(written)
+}
+
+/** Whether `settings` still hold every value of `move`. */
+function holdsMove(settings: Record<string, unknown>, move: TowerMove | null): boolean {
+  const entries = Object.entries(move?.fix ?? {})
+  return entries.length > 0 && entries.every(([key, value]) => holds(settings[key], value))
+}
+
+/** `move` made over `settings`: the fix's values, and what those keys held before. */
+function towerMoveOver(settings: Record<string, unknown>, fix: Record<string, string[]>): TowerMove {
+  const before = Object.fromEntries(Object.keys(fix).filter((key) => key in settings).map((key) => [key, settings[key]]))
+  return { fix, before }
+}
+
+/**
+ * `settings` with each value `move` wrote taken out again, so the tower goes where the
+ * file puts it, or back to the place the user set before. A key the user set to another
+ * value since stays: it is the user's own.
+ */
+function withoutMove<T extends Record<string, unknown>>(move: TowerMove | null): (settings: T) => T {
+  return (settings) => {
+    const written = Object.keys(move?.fix ?? {}).filter((key) => holds(settings[key], move?.fix[key]))
+    if (move === null || written.length === 0) return settings
+    const rest: Record<string, unknown> = { ...settings }
+    for (const key of written) {
+      if (key in move.before) rest[key] = move.before[key]
+      else delete rest[key]
+    }
+    return rest as T
+  }
+}
 const NO_IDS: string[] = []
 /** A closed dialog follows no topic. */
 const NO_TOPICS: readonly string[] = []
@@ -362,6 +403,8 @@ export function PrintPicker({
   const [carry] = useState(() => new CarryBox())
   /** The re-arrange in flight: closing the dialog (or unmounting it) stops its wait. */
   const arrangeRun = useRef<AbortController | null>(null)
+  /** #6758 — the tower place "Move the prime tower" wrote into the slicer settings, if any. */
+  const [towerMove, setTowerMove] = useState<TowerMove | null>(null)
   useEffect(() => {
     if (open) return
     arrangeRun.current?.abort()
@@ -1092,6 +1135,8 @@ export function PrintPicker({
                 ]),
               ],
               name: arrangedName(from.name),
+              // #6758 — room for the tower chosen here, "No sparse layers" keep-out included.
+              ...(primeTower === null ? {} : { prime_tower: primeTower }),
             },
             { signal: controller.signal, within },
           )
@@ -1100,6 +1145,9 @@ export function PrintPicker({
           // History, but this dialog keeps the output it was opened for.
           if (controller.signal.aborted) return
           carry.set({ plan, ready: false })
+          // A tower place this dialog moved for the old layout is not one for the new.
+          setProcessOverrides(withoutMove(towerMove))
+          setTowerMove(null)
           setArranged(next.output)
           setArrangeNote(arrangedNote(next.plates))
         },
@@ -1366,10 +1414,32 @@ export function PrintPicker({
     ...check.verdict,
     warnings: [...shown(check.verdict.warnings), ...slicedShort],
   }
+  /** #6758 — the slicer settings still hold the tower place this dialog wrote, and a tower is printed. */
+  const towerMoved = check.verdict?.prime_tower != null && holdsMove(processOverrides, towerMove)
   const verdict = (
     <>
       <RackNozzleLine rack={check.verdict?.rack} algorithm={rackAlgorithm} />
       <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
+      {!sliced && (
+        <TowerConflictNotice
+          check={check.verdict?.prime_tower}
+          moved={towerMoved}
+          onMove={(fix) => {
+            // A second move undoes to the place before the first, not to the first move.
+            const base = holdsMove(processOverrides, towerMove) ? withoutMove(towerMove)(processOverrides) : processOverrides
+            setTowerMove(towerMoveOver(base, fix))
+            setProcessOverrides((current) => ({ ...current, ...fix }))
+          }}
+          onUndo={() => {
+            setProcessOverrides(withoutMove(towerMove))
+            setTowerMove(null)
+          }}
+          onRearrange={
+            target && known ? () => (stale ? setAskFor(target.id) : void rearrange(false)) : undefined
+          }
+          arranging={arranging}
+        />
+      )}
     </>
   )
 

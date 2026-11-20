@@ -427,7 +427,8 @@ class ArrangeRequest(BaseModel):
     #: The print's prime tower (#3770), as `print_output` takes it. ``enabled`` false
     #: packs with no room kept for a tower and writes the 3MF with none, stating the
     #: tower off. Omitted keeps room for one on each plate with more than one colour.
-    #: ``no_sparse_layers`` is stated in the 3MF only; its keep-out is not packed for.
+    #: ``no_sparse_layers`` is stated in the 3MF, and each plate keeps the slicer's
+    #: keep-out round its tower (#6735).
     prime_tower: PrimeTowerChoice | None = None
 
     @model_validator(mode="after")

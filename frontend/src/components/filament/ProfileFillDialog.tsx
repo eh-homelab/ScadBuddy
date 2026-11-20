@@ -49,7 +49,10 @@ export function ProfileFillDialog({ typeId, open, onClose, onApplied }: { typeId
     setError(null)
     try {
       const apply = Object.fromEntries(rows.filter(([field]) => kept.has(field)))
-      const done = await fillTypeFromProfile(typeId, { apply, k_values: withK && diff.k_values.length > 0 })
+      const withKValues = withK && diff.k_values.length > 0
+      // The K values the refresh showed go back, so a change since is refused (R-6714-g).
+      const shown = withKValues ? diff.k_values.map(({ type_id: _type, ...row }) => row) : undefined
+      const done = await fillTypeFromProfile(typeId, { apply, k_values: withKValues, ...(shown ? { shown_k_values: shown } : {}) })
       onApplied(done)
     } catch (cause) {
       setError(message(cause))

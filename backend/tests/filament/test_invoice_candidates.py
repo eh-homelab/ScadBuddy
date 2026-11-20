@@ -41,7 +41,7 @@ def test_candidates_split_uncosted_and_costed(pg_pool: PgPool) -> None:
     gone = shop.spools.create(SpoolCreate.model_validate({"type_id": str(type_id)}), actor="test")
     shop.spools.update(gone.id, SpoolPatch(archived=True), actor="test")
     other = shop.type_id("PLA-BLK")
-    shop.types.update(other, SpoolTypePatch(rgba="#000000FF"))
+    shop.types.update(other, SpoolTypePatch(rgba="#000000FF"), actor="ann")
     _spool(shop, other)
     invoice = shop.draft(
         [InvoiceLineIn(description="PLA white", quantity=1, unit_price=D(40), type_id=type_id)]
@@ -65,7 +65,7 @@ def test_a_proposed_type_matches_by_material_and_rgba(pg_pool: PgPool) -> None:
     type_id = shop.type_id()
     match = _spool(shop, type_id)
     translucent = shop.type_id("PLA-WHT-T")
-    shop.types.update(translucent, SpoolTypePatch(rgba="#FFFFFF80"))
+    shop.types.update(translucent, SpoolTypePatch(rgba="#FFFFFF80"), actor="ann")
     _spool(shop, translucent)
     proposed = shop.type_body("PLA-NEW")
     invoice = shop.draft(

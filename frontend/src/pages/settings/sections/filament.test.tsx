@@ -31,6 +31,23 @@ describe('Filament (#6262)', () => {
     expect(within(filament).getByRole('link', { name: 'Filament' })).toHaveAttribute('href', expect.stringContaining('/filament'))
   })
 
+  it('saves the burn window, the lead time and the safety margin with Save Filament (#6269)', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    expect(within(filament).getByLabelText('Burn window, days')).toHaveValue(30)
+    expect(within(filament).getByLabelText('Lead time, days')).toHaveValue(7)
+    expect(within(filament).getByLabelText('Safety margin, days')).toHaveValue(3)
+    await user.clear(within(filament).getByLabelText('Burn window, days'))
+    await enter(user, within(filament).getByLabelText('Burn window, days'), '14')
+    await user.clear(within(filament).getByLabelText('Lead time, days'))
+    await enter(user, within(filament).getByLabelText('Lead time, days'), '21')
+    await user.clear(within(filament).getByLabelText('Safety margin, days'))
+    await enter(user, within(filament).getByLabelText('Safety margin, days'), '10')
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings()).toMatchObject({ filament_burn_window_days: 14, filament_lead_time_days: 21, filament_safety_margin_days: 10 }))
+  })
+
   const DEFAULT_SYNC = { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' } as const
 
   it('offers the four directions for each of the six data types', async () => {

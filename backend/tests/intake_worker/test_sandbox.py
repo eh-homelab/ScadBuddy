@@ -108,9 +108,15 @@ async def _served(spool: Path) -> AsyncIterator[tuple[str, sandbox.Sandbox]]:
 @pytest.fixture
 def sleeper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Each check's child replaced by a process that writes its pid and sleeps: no
-    confinement needed to test what the sandbox does around it."""
+    confinement needed to test what the sandbox does around it. The pid goes to a
+    temporary name first and is renamed into place, so the file never exists empty
+    (#6693: a child stopped between the open and the write left an empty file)."""
     pidfile = tmp_path / "child.pid"
-    code = f"import os, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    partial = f"{pidfile}.partial"
+    code = (
+        f"import os, time; open({partial!r}, 'w').write(str(os.getpid())); "
+        f"os.replace({partial!r}, {str(pidfile)!r}); time.sleep(60)"
+    )
 
     def command(
         hide: str,
@@ -135,6 +141,34 @@ async def _until(condition: Callable[[], bool], what: str, limit: float = 20.0) 
 
 def _pid(pidfile: Path) -> int:
     return int(pidfile.read_text())
+
+
+def _written_pids(*paths: Path) -> list[int]:
+    """The pids that ``paths`` hold. A missing file (renamed while it is read) and an
+    empty one hold none."""
+    pids = []
+    for path in paths:
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            continue
+        if text:
+            pids.append(int(text))
+    return pids
+
+
+def _alive_naming(text: str) -> list[int]:
+    """The live processes (not zombies) whose command line holds ``text``."""
+    alive = []
+    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            named = text.encode() in cmdline.read_bytes()
+        except OSError:
+            continue
+        pid = int(cmdline.parent.name)
+        if named and _state(pid) not in (None, "Z", "X"):
+            alive.append(pid)
+    return alive
 
 
 def _failed(reason: str) -> float:
@@ -424,7 +458,15 @@ async def test_a_check_past_its_timeout_kills_the_child(tmp_path: Path, sleeper:
             )
         assert not box.busy
     assert _failed("check-timeout") == before + 1
-    assert _state(_pid(sleeper)) in (None, "Z", "X")
+    # A child that the timeout stopped before its open left no file, one stopped before
+    # its write left an empty partial file, and one stopped before its rename left its
+    # pid in the partial file (#6760). A child that outlived the timeout may not have
+    # written its pid yet, so the test also looks for any live process whose command
+    # line names this test's own pid file (#6766, #6782).
+    partial = sleeper.with_name(f"{sleeper.name}.partial")
+    assert not _alive_naming(str(partial)), "a child outlived the timeout"
+    for pid in _written_pids(sleeper, partial):
+        assert _state(pid) in (None, "Z", "X")
     assert list((tmp_path / "spool").iterdir()) == []
 
 

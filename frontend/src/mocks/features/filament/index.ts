@@ -2,14 +2,17 @@ import { HttpResponse, http } from 'msw'
 import { newId } from '../../newId'
 import type { components } from '../../../api/schema'
 import type { FilamentInventorySpool, FilamentInventoryView, FilamentSpool } from '../../../api/types'
+import { divDecimal, mulDecimal } from '../../../lib/decimal'
 import { parseRgba } from '../../../lib/rgba'
+// Also a cycle (`handlers.ts` loads every feature): only inside functions.
+import { mockSettings } from '../../handlers'
 // A module cycle (`orders/priceBook.ts` imports `inventoryRows` from here): use it only inside functions.
 import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
-import { mockSettings } from '../../handlers'
 import { printersState } from '../printers'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
+import { jobOf } from '../../../components/filament/eventText'
 
 type S = components['schemas']
 
@@ -74,10 +77,44 @@ function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Pa
   return result
 }
 
+/**
+ * #6714 — the K values a type's linked Bambuddy spools give (`TypeFiller._k_values`), by type
+ * id: none until a test sets them with `setMockBambuddyKValues`.
+ */
+const bambuddyKValues = new Map<string, S['TypeKValueCreate'][]>()
+
+export function setMockBambuddyKValues(typeId: string, rows: S['TypeKValueCreate'][]) {
+  bambuddyKValues.set(typeId, rows)
+}
+
+/** What the fill would import: Bambuddy's K values while the type has none. */
+function bambuddyKValuesOf(typeId: string): S['TypeKValueCreate'][] {
+  return state.typeKValues.some((one) => one.type_id === typeId) ? [] : (bambuddyKValues.get(typeId) ?? [])
+}
+
+/** K value rows compared as the backend compares them (`_k_key`): in no order, `0.020` is `0.02`. */
+function kKey(rows: readonly S['TypeKValueCreate'][]): string {
+  const key = (one: S['TypeKValueCreate']) =>
+    JSON.stringify([one.printer_id, one.extruder, String(Number(one.nozzle_diameter)), one.nozzle_type ?? '', String(Number(one.k_value)), one.name ?? '', one.cali_idx ?? -1, one.setting_id ?? ''])
+  return JSON.stringify(rows.map(key).sort())
+}
+
+const asTypeKValues = (typeId: string, rows: S['TypeKValueCreate'][]): S['TypeKValue'][] =>
+  rows.map((one) => ({ type_id: typeId, nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value) }))
+
+/** Writes ``rows`` as the type's K values into ``result`` (`TypeFiller._write_k`). */
+function writeKValues(typeId: string, rows: S['TypeKValueCreate'][], result: S['TypeFill']): S['TypeFill'] {
+  if (rows.length === 0) return result
+  const saved = asTypeKValues(typeId, rows)
+  state.typeKValues = [...state.typeKValues, ...saved]
+  return { ...result, k_values: saved, written: true }
+}
+
 let state: Seed = seed()
 
 export function reset() {
   state = seed()
+  bambuddyKValues.clear()
   imports.clear()
   invoicedLine.clear()
   fetches.clear()
@@ -107,7 +144,7 @@ const problem = (status: keyof typeof TITLES, detail: string, extensions: object
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
-  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
+  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
@@ -408,6 +445,8 @@ function summary(): S['InventorySummary'] {
     loaded: rows.filter((spool) => state.locations.find((place) => place.id === spool.location_id)?.printer_id).length,
     low_stock: rows.filter((spool) => spool.low_stock).length,
     needs_type: rows.filter((spool) => !spool.type_id).length,
+    // Every spool's plates, archived ones too (plan Decision 18), by the one plate rule (`metrics.plates`).
+    consumed_g: plateGrams(state.events),
   }
 }
 
@@ -750,6 +789,8 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     insert_type_id: null,
     low_stock_pct: null,
     cost_per_kg: null,
+    lead_time_days: null,
+    safety_margin_days: null,
     note: null,
     tdfp_id: null,
     diameter_mm: '1.75',
@@ -920,14 +961,200 @@ export function typeInfo(id: string): { code: string; label: string; label_weigh
 /** Whether an unarchived type has the code (`filament_spool_types_code`, case-blind). */
 export const typeCodeTaken = (code: string) => state.types.some((type) => !type.archived_at && sameName(type.code, code))
 
+const DAY_MS = 86_400_000
+const BB_OUTCOMES = new Set(['completed', 'failed', 'cancelled'])
+const byTime = (a: S['SpoolEvent'], b: S['SpoolEvent']) => a.at.localeCompare(b.at) || a.seq - b.seq
+const PLATE_KINDS = new Set<S['SpoolEvent']['kind']>(['print_started', 'print_ended'])
+
+/** A plate as `metrics.Plate` has it, with the fields the mock reads. */
+export interface MockPlate {
+  at: string
+  grams: number
+  // `metrics_models.Outcome`.
+  outcome: 'completed' | 'failed' | 'cancelled' | 'unknown'
+  printer_id: string | null
+}
+
+/**
+ * One spool's plates, oldest first, as `metrics.plates` counts them: an ended BB usage row,
+ * and an ended SB print run that BB did not book too (a `covered` one is none, a
+ * `not_applied` one a failed 0 g plate). An open `print_started` estimate and a `print`
+ * ref are no plate. The one plate rule of the mock: the history and `consumed_g` use it.
+ */
+function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
+  const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
+  return [...events].sort(byTime).flatMap((event) => {
+    if (event.kind !== 'print_ended') return []
+    const grams = event.delta_g ? -event.delta_g : 0
+    if (event.ref_kind === 'bb_usage') {
+      const status = event.data?.bb_status
+      const outcome = typeof status === 'string' && BB_OUTCOMES.has(status) ? (status as MockPlate['outcome']) : 'unknown'
+      return [{ at: event.at, grams, outcome, printer_id: event.printer_id }]
+    }
+    if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
+    const failed = event.data?.basis === 'not_applied'
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id }]
+  })
+}
+
+/** The grams the plates in `events` used, each spool's plates counted by `platesOf` (`summary`'s `consumed_g`). */
+function plateGrams(events: readonly S['SpoolEvent'][]): number {
+  const spools = new Set(events.map((event) => event.spool_id))
+  return [...spools].reduce((sum, id) => sum + platesOf(events.filter((event) => event.spool_id === id)).reduce((total, plate) => total + plate.grams, 0), 0)
+}
+
+/**
+ * `metrics.burn`: the grams of the plates that ended in the last `windowDays`, over the
+ * window, or over the age since `born` when that is shorter (never less than a day);
+ * `null` when no plate ended in the window.
+ */
+export function burnOf(plates: readonly MockPlate[], windowDays: number, born: string, nowMs: number): number | null {
+  const inside = plates.filter((plate) => nowMs - Date.parse(plate.at) < windowDays * DAY_MS && Date.parse(plate.at) <= nowMs)
+  if (inside.length === 0) return null
+  return inside.reduce((sum, plate) => sum + plate.grams, 0) / Math.max(1, Math.min(windowDays, (nowMs - Date.parse(born)) / DAY_MS))
+}
+
+/** `metrics.MAX_FORECAST_DAYS`: no forecast further out than this. */
+export const MAX_FORECAST_DAYS = 3650
+
+/** `metrics.empty_on`: the UTC day the grams run out at `burn`; `null` with no grams, no burn above 0, or past `MAX_FORECAST_DAYS`. */
+export function emptyOn(grams: number | null | undefined, burn: number | null, nowMs: number): string | null {
+  if (grams == null || burn == null || !Number.isFinite(grams) || !Number.isFinite(burn) || burn <= 0) return null
+  const days = Math.max(grams, 0) / burn
+  return days > MAX_FORECAST_DAYS ? null : new Date(nowMs + days * DAY_MS).toISOString().slice(0, 10)
+}
+
+/** `ledger.reading`: the grams an absolute reading gives (with an AMS reading's `remain_pct` × the label weight when it has none), or `null`. */
+function readingOf(event: S['SpoolEvent'], labelWeight: number | null | undefined): number | null {
+  if (!event.source || !['scale', 'person', 'bb', 'ams_remain'].includes(event.source)) return null
+  if (event.grams_after != null) return event.grams_after
+  const pct = event.source === 'ams_remain' ? event.data?.remain_pct : undefined
+  return typeof pct === 'number' && labelWeight != null ? (pct * labelWeight) / 100 : null
+}
+
+/** `ledger.is_anchor`: a reading, and not an AMS one while the weight is locked or the AMS is printing. */
+const isAnchor = (event: S['SpoolEvent'], weightLocked: boolean, labelWeight: number | null | undefined) =>
+  readingOf(event, labelWeight) != null && !(event.source === 'ams_remain' && (weightLocked || event.data?.printing === true))
+
+/**
+ * `metrics.ams_pairs`: AMS grams less scale grams, one per scale reading with an AMS
+ * reading to pair: the newest `ams_remain` reading before it that is not printing, at most
+ * 24 h older, with no plate event that used grams between them (plan Decision 14).
+ */
+function amsErrors(events: readonly S['SpoolEvent'][], labelWeight: number | null | undefined): number[] {
+  const errors: number[] = []
+  let ams: { at: number; grams: number } | null = null
+  for (const event of [...events].sort(byTime)) {
+    if (PLATE_KINDS.has(event.kind)) {
+      if (event.delta_g) ams = null
+    } else if (event.source === 'ams_remain' && event.data?.printing !== true) {
+      const grams = readingOf(event, labelWeight)
+      if (grams != null) ams = { at: Date.parse(event.at), grams }
+    } else if (event.source === 'scale' && event.grams_after != null && ams && Date.parse(event.at) - ams.at <= DAY_MS) {
+      errors.push(ams.grams - event.grams_after)
+    }
+  }
+  return errors
+}
+
+function amsError(errors: readonly number[]): S['AmsError'] | null {
+  if (errors.length === 0) return null
+  const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0)
+  return { pairs: errors.length, mean_abs_g: sum(errors.map(Math.abs)) / errors.length, bias_g: sum(errors) / errors.length }
+}
+
+/** The cost of `grams` at `perKg`, to the cent as `metrics._money` quantizes it; the mock rounds the grams to whole ones. */
+const costOf = (perKg: string, grams: number) => divDecimal(mulDecimal(perKg, Math.round(grams)), '1000', 2)
+
+/**
+ * `GET /filament/spools/{id}/history` (#6269, `metrics_store.history`): the timeline newest
+ * first by `(at, seq)` with each plate's order and print; the grams series as
+ * `metrics.series` builds it (the value after an event is the next one's `grams_before` by
+ * `seq`, the spool's grams left after the last, sorted by `(at, seq)`, an anchor by
+ * `ledger.is_anchor`); the spool's metrics over the burn window the settings hold, its age
+ * counted from `created_at`; and its type's AMS error.
+ */
+function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
+  const events = state.events.filter((event) => event.spool_id === row.id).sort(byTime)
+  const windowDays = mockSettings().filament_burn_window_days ?? 30
+  const nowMs = Date.now()
+  const plates = platesOf(events)
+  const used = plates.reduce((sum, plate) => sum + plate.grams, 0)
+  const wasted = plates.filter((plate) => plate.outcome === 'failed' || plate.outcome === 'cancelled').reduce((sum, plate) => sum + plate.grams, 0)
+  const burn = burnOf(plates, windowDays, row.created_at, nowMs)
+  const left = row.grams_left
+  const opened = events.find((event) => event.kind === 'loaded')?.at ?? plates[0]?.at ?? null
+  const effective = view(row).effective
+  const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
+  const labelWeight = effective?.label_weight_g
+  const bySeq = [...events].sort((a, b) => a.seq - b.seq)
+  const series: S['GramsPoint'][] = bySeq
+    .flatMap((event, i) => {
+      const grams = i + 1 < bySeq.length ? bySeq[i + 1]!.grams_before : left
+      return grams == null ? [] : [{ event, point: { at: event.at, grams, anchor: isAnchor(event, row.weight_locked, labelWeight), kind: event.kind } }]
+    })
+    .sort((a, b) => byTime(a.event, b.event))
+    .map(({ point }) => point)
+  const sameType = row.type_id ? state.spools.filter((one) => one.type_id === row.type_id) : []
+  return {
+    events: [...events].reverse().map((event) => {
+      const archive = event.data?.bb_archive_id
+      const run = event.ref_kind === 'print_run' ? event.ref_id?.split('/')[0] : undefined
+      return { event, archive_id: typeof archive === 'number' ? archive : null, order_id: (run && state.orderRuns.get(run)) || null }
+    }),
+    series,
+    metrics: {
+      used_g: used,
+      prints: plates.length,
+      grams_per_print: plates.length > 0 ? used / plates.length : null,
+      wasted_g: wasted,
+      cost_used: perKg != null ? costOf(perKg, used) : null,
+      value_left: perKg != null && left != null ? costOf(perKg, left) : null,
+      burn_g_per_day: burn,
+      empty_on: emptyOn(left, burn, nowMs),
+      opened_at: opened,
+      days_since_opened: opened ? (nowMs - Date.parse(opened)) / DAY_MS : null,
+      days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
+      hours_outside_dry: row.hours_outside_dry,
+      ams_error: amsError(amsErrors(events, labelWeight)),
+    },
+    type_ams_error: row.type_id
+      ? amsError(sameType.flatMap((one) => amsErrors(state.events.filter((event) => event.spool_id === one.id), view(one).effective?.label_weight_g)))
+      : null,
+    currency: mockSettings().orders_currency ?? 'USD',
+    window_days: windowDays,
+  }
+}
+
 /** The spools of `ids` that exist, their grams left (unarchived only) and the grams their prints used (#6266 stats). */
 export function spoolUsage(ids: readonly string[]): { count: number; remaining_g: number; consumed_g: number } {
   const rows = state.spools.filter((row) => ids.includes(row.id))
-  const used = state.events.filter((event) => ids.includes(event.spool_id) && event.kind.startsWith('print') && event.delta_g != null)
   return {
     count: rows.length,
     remaining_g: rows.filter((row) => !row.archived_at).reduce((sum, row) => sum + (row.grams_left ?? 0), 0),
-    consumed_g: used.reduce((sum, event) => sum - (event.delta_g ?? 0), 0),
+    consumed_g: plateGrams(state.events.filter((event) => ids.includes(event.spool_id))),
+  }
+}
+
+/**
+ * #6269 — what the metrics routes (`metrics.ts`) read, as `metrics_store._read` does: every
+ * spool (archived too) as the API lists it, its plates by the one plate rule (`platesOf`),
+ * its supplier (its invoice line's confirmed invoice's), the types with their material's
+ * name, and the printers' names.
+ */
+export function metricsInput() {
+  const spools = listed(true).map(view)
+  const suppliers = new Map<string, { id: string; name: string }>()
+  for (const row of state.spools) {
+    const ref = invoiceRefOf(row.id, invoicedLine.get(row.id))
+    if (ref) suppliers.set(row.id, { id: ref.supplier_id, name: ref.supplier_name })
+  }
+  return {
+    spools,
+    plates: new Map(spools.map((spool) => [spool.id, platesOf(state.events.filter((event) => event.spool_id === spool.id))])),
+    suppliers,
+    types: state.types.map((type) => ({ ...type, material: nameOf('materials', type.material_id) })),
+    printers: new Map([[H2C.printer_id, H2C.printer_name]]),
   }
 }
 
@@ -1368,7 +1595,16 @@ export const handlers = [
   // #6714: the fill from a type's slicer profile, over `PROFILES` (`fillType`).
   http.post(`${BASE}/types/fill-from-profile`, async ({ request }) => {
     const body = (await request.json().catch(() => ({}))) as { refresh?: boolean }
-    return HttpResponse.json(state.types.filter((type) => !type.archived_at).map((type) => fillType(type, { refresh: body.refresh === true })))
+    const refresh = body.refresh === true
+    return HttpResponse.json(
+      state.types
+        .filter((type) => !type.archived_at)
+        .map((type) => {
+          const done = fillType(type, { refresh })
+          const rows = bambuddyKValuesOf(type.id)
+          return refresh ? { ...done, k_values: asTypeKValues(type.id, rows) } : writeKValues(type.id, rows, done)
+        }),
+    )
   }),
   http.post(`${BASE}/types/:id/fill-from-profile`, async ({ params, request }) => {
     const type = state.types.find((one) => one.id === params.id)
@@ -1381,9 +1617,19 @@ export const handlers = [
       for (const [field, value] of Object.entries(body.apply)) {
         if (String(given[field as FillField]) !== String(value)) return problem(409, `the profile now gives ${field} ${String(given[field as FillField] ?? 'None')}, not ${String(value)}: refresh again`)
       }
-      return HttpResponse.json(fillType(type, { apply: body.apply as Partial<Record<FillField, number | string>>, kValues: body.k_values === true }))
+      // R-6714-i, R-6714-g: the K values the refresh showed come back, and a change since is refused.
+      if (body.k_values === true && (body.shown_k_values === undefined || body.shown_k_values === null)) {
+        return problem(422, "k_values needs shown_k_values: the K values the refresh showed ([] for none)")
+      }
+      const rows = body.k_values === true ? bambuddyKValuesOf(type.id) : []
+      if (body.k_values === true && kKey(rows) !== kKey(body.shown_k_values ?? [])) return problem(409, 'the K values now are not the ones shown: refresh again')
+      return HttpResponse.json(writeKValues(type.id, rows, fillType(type, { apply: body.apply as Partial<Record<FillField, number | string>>, kValues: body.k_values === true })))
     }
-    return HttpResponse.json(fillType(type, { refresh: body.refresh === true }))
+    const refresh = body.refresh === true
+    const done = fillType(type, { refresh })
+    const rows = bambuddyKValuesOf(type.id)
+    if (refresh) return HttpResponse.json({ ...done, k_values: asTypeKValues(type.id, rows) })
+    return HttpResponse.json(writeKValues(type.id, rows, done))
   }),
   http.put(`${BASE}/types/:id/presets`, async ({ params, request }) => {
     const typeId = String(params.id)
@@ -1632,6 +1878,11 @@ export const handlers = [
     const spoolId = String(params.id)
     if (!findSpool(spoolId)) return problem(404, `no spool ${spoolId}`)
     return HttpResponse.json(state.events.filter((event) => event.spool_id === spoolId).sort((a, b) => a.at.localeCompare(b.at) || a.seq - b.seq))
+  }),
+  http.get(`${BASE}/spools/:id/history`, ({ params }) => {
+    const row = findSpool(String(params.id))
+    if (!row) return problem(404, `no spool ${String(params.id)}`)
+    return HttpResponse.json(spoolHistory(row))
   }),
   http.post(`${BASE}/spools/:id/events`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)

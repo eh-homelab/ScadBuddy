@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -17,12 +20,24 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.filament import actor
-from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, PersonalToken, Service
+from scadbuddy.auth.component import AUTH
+from scadbuddy.auth.gate import SESSION_COOKIE
+from scadbuddy.auth.models import (
+    ANONYMOUS,
+    AuthSession,
+    Person,
+    PersonalToken,
+    Service,
+    principal_for,
+)
+from scadbuddy.auth.service_credentials import LEGACY_CALLERS, ServiceCredentialStore, TokenReader
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import TagScan
+from scadbuddy.core.settings import Settings
 from scadbuddy.filament import assignments_cache, rfid_mode
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.main import create_app
 from scadbuddy.printers.reports import PrinterReportStore
 from tests.api.test_send import API, configure
 from tests.support.printers import bambuddy_printer
@@ -431,6 +446,73 @@ def test_one_person_is_one_actor_by_session_or_token() -> None:
     assert actor(PersonalToken(token_id="t", principal=principal, scope="write")) == principal
     assert actor(Service(caller="agent", scopes=frozenset())) == "service:agent"
     assert actor(ANONYMOUS) == "anonymous"
+
+
+PUBLIC = "https://scadbuddy.test"
+
+
+def _observed(settings: Settings, tmp_path: Path) -> TestClient:
+    """An app in ``observe``, where a session names its person and the agent's credential
+    may name whom it acts for (`test_authorship_session.py`)."""
+    key = tmp_path / "kek"
+    key.write_text(base64.b64encode(os.urandom(32)).decode())
+    app = create_app(
+        settings.model_copy(
+            update={"secret_key_file": key, "public_url": PUBLIC, "auth_mode": "observe"}
+        )
+    )
+    return TestClient(app, base_url=PUBLIC, headers={"X-ScadBuddy-Request": "1"})
+
+
+def _state(client: TestClient) -> AppState:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state
+
+
+def test_patch_spool_by_agent_records_session(settings: Settings, tmp_path: Path) -> None:
+    with _observed(settings, tmp_path) as client:
+        store = _state(client).settings_store
+        if "agent" in LEGACY_CALLERS:
+            token = TokenReader("agent", settings.database_url, store.kek).token()
+        else:
+            token = (
+                ServiceCredentialStore(store.pool)
+                .issue("agent", "bootstrap", rate_limited=False)
+                .token
+            )
+        assert token is not None
+        agent = {
+            "Authorization": f"Bearer {token}",
+            "X-ScadBuddy-Agent-Author": "user:https://id.example#ann",
+            "X-ScadBuddy-Agent-Author-Session": "s-1",
+            "X-ScadBuddy-Agent-Tool": "filament_spool_upsert",
+        }
+        spool = _spool(client)
+        patched = client.patch(f"{SPOOLS}/{spool['id']}", json={"note": "hi"}, headers=agent)
+        assert patched.status_code == 200, patched.text
+        edited = client.get(f"{SPOOLS}/{spool['id']}/events").json()[-1]
+    assert edited["kind"] == "edited"
+    assert edited["actor"] == "service:agent"
+    assert edited["data"]["author"] == {
+        "principal": "user:https://id.example#ann",
+        "session": "s-1",
+        "tool": "filament_spool_upsert",
+    }
+
+
+def test_patch_type_records_the_caller(settings: Settings, tmp_path: Path) -> None:
+    with _observed(settings, tmp_path) as client:
+        auth = _state(client).components.get(AUTH)
+        cookie, _ = auth.sessions.create(issuer="https://idp.test", subject="bo", kind="login")
+        client.cookies.set(SESSION_COOKIE, cookie)
+        made = _type(client, cost_per_kg="20")
+        spool = _spool(client, type_id=made["id"])
+        patched = client.patch(f"{TYPES}/{made['id']}", json={"cost_per_kg": "25"})
+        assert patched.status_code == 200, patched.text
+        edited = client.get(f"{SPOOLS}/{spool['id']}/events").json()[-1]
+    assert edited["kind"] == "edited"
+    assert edited["actor"] == principal_for("https://idp.test", "bo")
+    assert "author" not in edited["data"]
 
 
 IMPORT_BB = "/api/v1/filament/bambuddy/import"

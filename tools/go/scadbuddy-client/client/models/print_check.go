@@ -17,6 +17,8 @@ type PrintCheck struct {
 	nozzle_plan NozzlePlanable
 	// The objects property
 	objects PrintCheck_PrintCheck_objectsable
+	// The prime_tower property
+	prime_tower TowerCheckable
 	// The process_inexact property
 	process_inexact []string
 	// The process_part_settings property
@@ -188,6 +190,16 @@ func (m *PrintCheck) GetFieldDeserializers() map[string]func(i878a80d2330e89d268
 		}
 		return nil
 	}
+	res["prime_tower"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateTowerCheckFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrimeTower(val.(TowerCheckable))
+		}
+		return nil
+	}
 	res["process_inexact"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfPrimitiveValues("string")
 		if err != nil {
@@ -265,6 +277,12 @@ func (m *PrintCheck) GetObjects() PrintCheck_PrintCheck_objectsable {
 	return m.objects
 }
 
+// GetPrimeTower gets the prime_tower property value. The prime_tower property
+// returns a TowerCheckable when successful
+func (m *PrintCheck) GetPrimeTower() TowerCheckable {
+	return m.prime_tower
+}
+
 // GetProcessInexact gets the process_inexact property value. The process_inexact property
 // returns a []string when successful
 func (m *PrintCheck) GetProcessInexact() []string {
@@ -311,6 +329,12 @@ func (m *PrintCheck) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c
 	}
 	{
 		err := writer.WriteObjectValue("objects", m.GetObjects())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("prime_tower", m.GetPrimeTower())
 		if err != nil {
 			return err
 		}
@@ -380,6 +404,11 @@ func (m *PrintCheck) SetObjects(value PrintCheck_PrintCheck_objectsable) {
 	m.objects = value
 }
 
+// SetPrimeTower sets the prime_tower property value. The prime_tower property
+func (m *PrintCheck) SetPrimeTower(value TowerCheckable) {
+	m.prime_tower = value
+}
+
 // SetProcessInexact sets the process_inexact property value. The process_inexact property
 func (m *PrintCheck) SetProcessInexact(value []string) {
 	m.process_inexact = value
@@ -411,6 +440,7 @@ type PrintCheckable interface {
 	GetErrors() []string
 	GetNozzlePlan() NozzlePlanable
 	GetObjects() PrintCheck_PrintCheck_objectsable
+	GetPrimeTower() TowerCheckable
 	GetProcessInexact() []string
 	GetProcessPartSettings() PartSettingsable
 	GetRack() RackPickViewable
@@ -419,6 +449,7 @@ type PrintCheckable interface {
 	SetErrors(value []string)
 	SetNozzlePlan(value NozzlePlanable)
 	SetObjects(value PrintCheck_PrintCheck_objectsable)
+	SetPrimeTower(value TowerCheckable)
 	SetProcessInexact(value []string)
 	SetProcessPartSettings(value PartSettingsable)
 	SetRack(value RackPickViewable)

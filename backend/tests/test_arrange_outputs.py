@@ -19,7 +19,11 @@ import trimesh
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.bambuddy.library_objects import piece_key, publish_library_pieces
+from scadbuddy.bambuddy.library_objects import (
+    object_colours,
+    piece_key,
+    publish_library_pieces,
+)
 from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
@@ -28,16 +32,19 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     laid_out_plates,
     write_bambu_3mf,
+    write_plates_3mf,
 )
 from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import PlateLayout, plates_thumbnails
 from scadbuddy.render.objects3mf import read_objects
+from scadbuddy.render.plate import fit_problem as plate_fit_problem
 from scadbuddy.render.split import ColourPart
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.template import Part
+from scadbuddy.workflows import arrange as arrange_module
 from scadbuddy.workflows import outputs
 from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import (
@@ -844,3 +851,80 @@ async def test_a_layout_plate_with_nothing_to_print_is_refused(tmp_path: Path) -
     )
     with pytest.raises(ApplicationError, match="plate 2 of the layout has nothing to print"):
         await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+
+
+async def test_arrange_counts_the_filaments_the_writer_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6757: Arrange sizes each plate's prime tower from its copies' colours, and the
+    writer sizes it from `PlateParts.filaments`, painting included. A red part painted
+    green, once as it is and once with red swapped to blue, is three filaments to both,
+    so what Arrange packs is always writable."""
+    deps, _ = _deps(tmp_path)
+    body = trimesh.creation.box(extents=(20, 10, 5))
+    payload = bambu_project(
+        items=[at(50, 50)],
+        parts={1: (body, "normal_part", 1)},
+        triangle_extra=' paint_color="8"',
+    )
+    read = read_objects(payload)
+    box = bounding_box(read[0].parts)
+    entry = ManifestObject(
+        part=piece_key("ab" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=object_colours(read[0]),
+        count=1,
+        library_file_id=90,
+    )
+    assert entry.colours == ["#FF0000", "#00FF00"]
+    await publish_library_pieces(deps.blobs, [entry], read)
+    library = part_of(entry)
+    items = [PackItem(part=library), PackItem(part=library, recolour={"#FF0000": "#0000FF"})]
+    # The filaments Arrange itself sizes an accepted placement's tower from (#6770); the
+    # last accepted call is the plate's final colour set.
+    sized: list[int] = []
+    fit = plate_fit_problem
+
+    def recorded(*args: Any, **kwargs: Any) -> str | None:
+        problem = fit(*args, **kwargs)
+        if problem is None and kwargs.get("settings") is not None:
+            sized.append(kwargs["settings"].filaments)
+        return problem
+
+    monkeypatch.setattr(arrange_module, "fit_problem", recorded)
+    layout = pack_layout(
+        PackRequest(
+            items=items,
+            plate=PlateSize(key="default", width=256.0, depth=256.0),
+            allow_own=False,
+        )
+    )
+    assert len(layout.plates) == 1
+    arranged = [sized[-1]]
+    written: list[int] = []
+    write = write_plates_3mf
+
+    def counted(plates: Any, *args: Any, **kwargs: Any) -> None:
+        written.extend(plate.filaments for plate in plates)
+        write(plates, *args, **kwargs)
+
+    monkeypatch.setattr(outputs, "write_plates_3mf", counted)
+    req = OutputRequest(
+        job_id="j8",
+        index=0,
+        slug="demo",
+        layout=layout,
+        parts=[library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([library.piece_key]),
+        provenance={entry.part: entry},
+    )
+    await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert arranged == [3]
+    assert written == arranged

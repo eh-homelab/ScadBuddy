@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import tempfile
 import weakref
 import zipfile
@@ -49,6 +50,7 @@ from scadbuddy.render.bambu3mf import (
     replate_3mf,
     rezipped,
     state_nozzles,
+    stated_value,
     with_part_settings,
 )
 from scadbuddy.render.objects3mf import (
@@ -62,9 +64,11 @@ from scadbuddy.render.plate import (
     PlateFitError,
     PlateGeometry,
     Rect,
+    TowerFootprint,
+    TowerSettings,
     plate_for,
     tower_beside,
-    tower_brim,
+    tower_footprint,
     tower_reaches,
 )
 from scadbuddy.render.provenance import content_key
@@ -193,6 +197,12 @@ _COVERS_REDRAWN = "#covers"
 #: (:func:`towers_within_reach`, #3770). A copy recorded before can keep that tower,
 #: which the slicer reports as "Object conflicts were detected".
 _TOWER_CLEAR = "#clear"
+#: Follows :data:`_TOWER_CLEAR` in every :attr:`Target.key` of a copy laid out since the
+#: prime tower is the size the slice builds, with the "No sparse layers" keep-out
+#: (:func:`~scadbuddy.render.plate.tower_footprint`, #6735). A copy recorded before
+#: reserved a 60 mm square, which a plate of eight or more filaments outgrows, and kept
+#: no keep-out, which the slicer then refuses.
+_TOWER_FOOTPRINT = "#footprint"
 #: In a :attr:`Target.key` whose print turns the prime tower on over a file that states it
 #: off (:attr:`Target.tower_on`, #3770): that copy keeps room for the tower, so it is
 #: never reused for a print that leaves the file's tower off, nor the other way round.
@@ -270,12 +280,16 @@ class Target:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
         It starts with the plate's own key, :data:`_BED_STATED`, :data:`_TOWER_BRIM`,
-        :data:`_COVERS_REDRAWN` and :data:`_TOWER_CLEAR`, so a copy recorded before #4638,
-        whose file states no bed, before #5545, whose tower leaves no room for a tall
-        plate's brim, before #6170, whose covers are the author's, or before #3770, whose
-        tower may stand on its objects, is never reused.
+        :data:`_COVERS_REDRAWN`, :data:`_TOWER_CLEAR` and :data:`_TOWER_FOOTPRINT`, so a
+        copy recorded before #4638, whose file states no bed, before #5545, whose tower
+        leaves no room for a tall plate's brim, before #6170, whose covers are the
+        author's, before #3770, whose tower may stand on its objects, or before #6735,
+        whose tower is a fixed square, is never reused.
         """
-        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}{_TOWER_CLEAR}"
+        key = (
+            f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}{_TOWER_CLEAR}"
+            f"{_TOWER_FOOTPRINT}"
+        )
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
@@ -552,25 +566,56 @@ def _tower_value(value: float) -> str:
     return "0" if text in ("", "-0") else text
 
 
-def _tower_on(corner: tuple[float, float], side: float, height: float, objects: Rect) -> bool:
-    """Whether a tower ``side`` wide at ``wipe_tower_x``/``_y`` ``corner``, with the brim
-    the slicer draws for ``height`` (:func:`tower_brim`), overlaps ``objects`` (#3770).
+def _tower_on(corner: tuple[float, float], tower: TowerFootprint, objects: Rect) -> bool:
+    """Whether ``tower`` (:func:`tower_footprint`, brim included) at ``wipe_tower_x``/``_y``
+    ``corner`` overlaps ``objects`` (#3770), or stands closer to them than its "No sparse
+    layers" keep-out (#6735): the two the slicer refuses.
 
-    The tower is judged as a square. The slicer's tower is ``prime_tower_width`` wide,
-    but its depth comes from the prime volume times the filaments, and is often less.
-    So a tower clear of its objects only on the y side can still move: a harmless
-    over-estimate, kept until #3770's shared tower model knows the depth."""
-    brim = tower_brim(height)
-    x, y = corner[0] - brim, corner[1] - brim
-    return Rect(x, y, x + side + 2 * brim, y + side + 2 * brim).overlaps(objects)
+    The test uses ``keep_out``, not ``TowerFootprint.clearance``, on purpose (#6757). An
+    author's tower moves only when the slicer refuses it, so a tower 0 to
+    ``TOWER_CLEARANCE`` mm from its objects stays. When the tower moves,
+    :func:`tower_beside` keeps ``clearance``, ScadBuddy's own margin for a place it
+    picks."""
+    x, y = corner[0] - tower.brim, corner[1] - tower.brim
+    gap = tower.keep_out
+    return Rect(x, y, x + tower.size[0], y + tower.size[1]).overlaps(
+        Rect(objects.min_x - gap, objects.min_y - gap, objects.max_x + gap, objects.max_y + gap)
+    )
+
+
+def _file_tower(settings: dict[str, object]) -> TowerSettings:
+    """The tower an author's file asks for (#6735): every filament it lists (the plate's
+    own are not read, so this is the largest), its ``prime_tower_rib_wall`` (on unless
+    it states ``"0"``) and ``prime_tower_width``, and its ``wipe_tower_no_sparse_layers``.
+
+    These are the file's own keys. A native slice loads the process preset with
+    ``--load-settings``, and the preset's keys replace the file's (#6757). So the tower
+    the slice builds can differ from the one judged here: the print's prime tower
+    choice and its process overrides set the keys the slicer uses."""
+    colours = settings.get("filament_colour")
+    filaments = len(colours) if isinstance(colours, list) and colours else 2
+    try:
+        width = float(str(stated_value(settings, "prime_tower_width") or PRIME_TOWER_SIDE))
+    except ValueError:
+        width = PRIME_TOWER_SIDE
+    if not (math.isfinite(width) and width > 0):
+        # The file is untrusted: "0", a negative or "nan" is read as no width stated.
+        width = PRIME_TOWER_SIDE
+    return TowerSettings(
+        filaments=filaments,
+        no_sparse_layers=stated_value(settings, "wipe_tower_no_sparse_layers") == "1",
+        rib_wall=stated_value(settings, "prime_tower_rib_wall") != "0",
+        width=width,
+    )
 
 
 def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     """``payload`` with each plate's prime tower that ``plate``'s extruders cannot all
-    reach, or that stands on that plate's objects, moved beside those objects by #105's
-    rule (:func:`tower_beside`), else unchanged (#4014, #3770). The brim judged round
-    each tower is the one the slicer draws for its plate's height (:func:`tower_brim`,
-    #5545).
+    reach, or that stands on that plate's objects or inside their "No sparse layers"
+    keep-out, moved beside those objects by #105's rule (:func:`tower_beside`), else
+    unchanged (#4014, #3770). Each tower is the one the slicer builds for its plate's
+    height and the file's settings (:func:`tower_footprint`, :func:`_file_tower`, #6735),
+    with the brim it draws (#5545).
 
     An author's file keeps the tower where its printer put it: library file 2440, laid
     out on an A1 mini, has it at x 15, and an H2C's second extruder reaches nothing
@@ -598,10 +643,7 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         towers = [(float(x), float(y)) for x, y in zip(xs, ys, strict=True)]
     except ValueError:
         return payload
-    try:
-        side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
-    except (TypeError, ValueError):
-        side = PRIME_TOWER_SIDE
+    asked = _file_tower(settings)
     try:
         # Read within the read budget, model settings included: a library file is
         # untrusted, and one this cannot read keeps its towers (claude-review on #4057).
@@ -622,11 +664,11 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         objects = Rect(
             float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)
         )
-        if tower_reaches(tower, plate, side, height) and not _tower_on(
-            tower, side, height, objects
+        if tower_reaches(tower, plate, height, asked) and not _tower_on(
+            tower, tower_footprint(plate, height, asked), objects
         ):
             continue
-        corner = tower_beside(objects, plate, height)
+        corner = tower_beside(objects, plate, height, asked)
         if corner is not None:
             moved[index - 1] = corner
     if moved == towers:

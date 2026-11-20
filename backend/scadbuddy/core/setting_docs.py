@@ -416,6 +416,18 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "What a kilogram of filament costs when its spool and type name no cost, in the"
             " shop's currency, such as 24.50. Empty sets none.",
         ),
+        "filament_burn_window_days": SettingDoc(
+            "Burn window, days",
+            "Days of print history the burn rate and the forecast look at. 1 to 365.",
+        ),
+        "filament_lead_time_days": SettingDoc(
+            "Lead time, days",
+            "Days a type takes to arrive once ordered, when the type sets none. 0 to 365.",
+        ),
+        "filament_safety_margin_days": SettingDoc(
+            "Safety margin, days",
+            "Days of stock kept on top of the lead time, when the type sets none. 0 to 365.",
+        ),
         # -- Diagnostics ---------------------------------------------------------------
         "log_level": SettingDoc(
             "Log level",

@@ -1,8 +1,8 @@
 /**
  * #6262 — the Filament section's tabs, in spec §10's order
- * (`docs/superpowers/specs/2026-11-14-filament-management-design.md`). Metrics is listed
- * but not available until #6269 builds it (plan 2026-11-15 Decision 10): the section shows
- * only the available ones. Suppliers, Invoices and Shopping list are #6266's.
+ * (`docs/superpowers/specs/2026-11-14-filament-management-design.md`). The section shows
+ * only the available ones. Suppliers, Invoices and Shopping list are #6266's; Metrics is
+ * #6269's.
  */
 export type TabId =
   | 'spools'
@@ -33,7 +33,7 @@ export const FILAMENT_TABS: readonly FilamentTab[] = [
   tab('invoices', 'Invoices', true),
   tab('locations', 'Locations', true),
   tab('catalog', 'Catalog', true),
-  tab('metrics', 'Metrics', false),
+  tab('metrics', 'Metrics', true),
   tab('shopping-list', 'Shopping list', true),
   tab('ledger', 'Ledger', true),
 ]

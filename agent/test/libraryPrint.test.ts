@@ -453,6 +453,129 @@ describe('print_output on a library file', () => {
     expect(body).not.toHaveProperty('filament_profiles')
   })
 
+  it('moves a prime tower the slicer would refuse, by the check before the slice (#6758)', async () => {
+    let checked: Record<string, unknown> | undefined
+    let body: Record<string, unknown> | undefined
+    const conflict = { plate_id: 1, reason: 'keep-out', x: 200, y: 150, move_x: 157.243, move_y: 5, message: 'Plate 1: …' }
+    server.use(
+      http.get(`${LIB}/choices`, () =>
+        HttpResponse.json({
+          printer_id: 1,
+          bed_type: 'Cool Plate',
+          filaments: { slots: [{ slot_id: 1, colour_matches: [10] }], suggested: [{ slot_id: 1, spool_id: 10 }] },
+          model_choices: { tier: 'fine' },
+        }),
+      ),
+      http.post(`${LIB}/check`, async ({ request }) => {
+        checked = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({
+          errors: [],
+          warnings: [],
+          prime_tower: { conflicts: [conflict], fix: { wipe_tower_x: ['157.243'], wipe_tower_y: ['5'] } },
+        })
+      }),
+      http.post(`${LIB}/run`, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ ...running, status: 'succeeded' }, { status: 200 })
+      }),
+    )
+    const t = tool('print_output')
+    const args = {
+      library_file_id: FILE,
+      prime_tower: { enabled: true, no_sparse_layers: true },
+      process_overrides: { skirt_loops: 2 },
+      move_prime_tower: true,
+    }
+    const result = await t.execute(args, ctx())
+
+    expect(checked).toMatchObject({ prime_tower: { enabled: true, no_sparse_layers: true } })
+    expect(body?.['process_overrides']).toEqual({ skirt_loops: 2, wipe_tower_x: ['157.243'], wipe_tower_y: ['5'] })
+    expect(firstText(result)).toMatchObject({ prime_tower: { conflicts: [conflict], moved: true } })
+    expect(t.summarize(args)).toContain('moving the prime tower to a free spot')
+  })
+
+  it('says when a conflicting prime tower has no free spot to move to (#6758)', async () => {
+    let body: Record<string, unknown> | undefined
+    const conflict = { plate_id: 1, reason: 'keep-out', x: 200, y: 150, move_x: null, move_y: null, message: 'Plate 1: …' }
+    server.use(
+      http.get(`${LIB}/choices`, () =>
+        HttpResponse.json({
+          printer_id: 1,
+          bed_type: 'Cool Plate',
+          filaments: { slots: [{ slot_id: 1, colour_matches: [10] }], suggested: [{ slot_id: 1, spool_id: 10 }] },
+          model_choices: { tier: 'fine' },
+        }),
+      ),
+      http.post(`${LIB}/check`, () =>
+        HttpResponse.json({ errors: [], warnings: [], prime_tower: { conflicts: [conflict], fix: null } }),
+      ),
+      http.post(`${LIB}/run`, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ ...running, status: 'succeeded' }, { status: 200 })
+      }),
+    )
+    const result = await tool('print_output').execute(
+      { library_file_id: FILE, prime_tower: { enabled: true, no_sparse_layers: true }, move_prime_tower: true },
+      ctx(),
+    )
+
+    expect(body).not.toHaveProperty('process_overrides')
+    const answer = firstText(result) as { prime_tower: { conflicts: unknown[]; moved: boolean; note?: string } }
+    expect(answer.prime_tower).toMatchObject({ conflicts: [conflict], moved: false })
+    expect(answer.prime_tower.note).toMatch(/No free spot .* slicer will likely refuse it/)
+    expect(answer.prime_tower.note).toContain('Re-arrange')
+  })
+
+  it('checks nothing and moves no tower unless asked (#6758)', async () => {
+    let body: Record<string, unknown> | undefined
+    server.use(
+      http.get(`${LIB}/choices`, () =>
+        HttpResponse.json({
+          printer_id: 1,
+          bed_type: 'Cool Plate',
+          filaments: { slots: [{ slot_id: 1, colour_matches: [10] }], suggested: [{ slot_id: 1, spool_id: 10 }] },
+          model_choices: { tier: 'fine' },
+        }),
+      ),
+      http.post(`${LIB}/run`, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ ...running, status: 'succeeded' }, { status: 200 })
+      }),
+    )
+    const result = await tool('print_output').execute({ library_file_id: FILE }, ctx())
+    expect(body).not.toHaveProperty('process_overrides')
+    expect(firstText(result)).not.toHaveProperty('prime_tower')
+  })
+
+  it('names move_prime_tower when a slice fails on the prime tower (#6758)', async () => {
+    server.use(
+      http.get(`${LIB}/choices`, () =>
+        HttpResponse.json({
+          printer_id: 1,
+          bed_type: 'Cool Plate',
+          filaments: { slots: [{ slot_id: 1, colour_matches: [10] }], suggested: [{ slot_id: 1, spool_id: 10 }] },
+          model_choices: { tier: 'fine' },
+        }),
+      ),
+      http.post(`${LIB}/run`, () => HttpResponse.json(running, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () =>
+        HttpResponse.json({
+          ...running,
+          status: 'failed',
+          error: {
+            status: 502,
+            title: 'Bad Gateway',
+            detail: 'Object conflicts were detected',
+            extensions: { warnings: [{ kind: 'object-conflict', plate_id: 1, message: 'Plate 1: …' }] },
+          },
+        }),
+      ),
+    )
+    const result = await runTool({ ...tool('print_output'), gated: false }, { library_file_id: FILE }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('move_prime_tower: true')
+  })
+
   it('lists the filament profiles (#717)', async () => {
     server.use(
       http.get(`${BACKEND}/api/v1/print/filament-profiles`, () =>
