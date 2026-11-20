@@ -54,8 +54,8 @@ id. A session that is idle is waiting for the person; it is not finished.
 
 Read the file in the first message. Do not look for it with a tool.
 
-Tools, in the order you use them. A candidate spool has an empty own cost and
-no invoice line:
+Tools, in the order you use them. A candidate spool has no invoice line. An
+uncosted one has an empty own cost too; a costed one has its own cost:
 
 1. `filament_invoice_get`: the draft as it stands.
 2. `filament_bambu_colour` with the five-digit `code` of a Bambu SKU: `name`,
@@ -64,7 +64,8 @@ no invoice line:
    table. Never invent an RGBA.
 3. `filament_invoice_candidates`: for each line, the open spools whose own cost
    is empty and which match the line's type (or proposed type) by material and
-   RGBA exactly, and the spools that have a cost already.
+   RGBA exactly, and the spools that have a cost already. A costed spool names
+   its `invoice_line_id`, if it has one.
 4. `filament_invoice_upsert`: write the draft (the header, the lines, each
    line's type and `update_spool_ids`). Edit the draft you were given. Never make
    a second invoice.
@@ -78,8 +79,14 @@ no invoice line:
    - A spool with no cost that matches a line is that purchase. The line
      updates it. An RFID tag often created that spool (`data_origin:
      rfid_auto` in BB).
-   - A spool that has a cost belongs to an earlier purchase. A matching line is
-     a new spool.
+   - Offer uncosted candidates first, then costed ones.
+   - A costed spool with no `invoice_line_id` may be this purchase. The
+     Bambuddy import gave most spools a cost. Offer to link it to the line.
+     Show the person its old cost per kg and the new one. Put it in
+     `update_spool_ids` only when the person says yes. The confirm replaces its
+     cost and writes an `edited` event with both costs (#6700).
+   - A spool that has an `invoice_line_id` belongs to another invoice. Never
+     offer it. The confirm refuses it (409).
    - A line of quantity N that covers one uncosted spool and new ones is one
      update plus N-1 new spools.
    - When it is ambiguous, ask the person. Do not guess between "the same
@@ -137,6 +144,8 @@ For the BB-era scripts (`intake.py`, `3dfp.mjs`), use
 - The 3DFP bot check, its 429 and 403 answers, and the `GFA17` gap are stated
   in `.claude/skills/filament-intake/SKILL.md`, which gives no date or method for
   them. #6267 did not measure them again. Check one before you rely on it.
-- The candidate rule ("uncosted") and the 404 and 503 answers of the colour
-  route are SB's code and its tests: `backend/tests/filament/test_invoice_candidates.py`
-  and `backend/tests/filament/test_colour_codes.py`.
+- The candidate rule ("uncosted", and a costed spool with no invoice line) and
+  the 404 and 503 answers of the colour route are SB's code and its tests:
+  `backend/tests/filament/test_invoice_candidates.py`,
+  `backend/tests/filament/test_invoice_confirm.py` and
+  `backend/tests/filament/test_colour_codes.py`.
