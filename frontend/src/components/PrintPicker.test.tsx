@@ -2509,6 +2509,20 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject(wanted))
     await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject(wanted), { timeout: 5000 })
   })
+
+  it('judges the print with the chosen tower, and again when it changes (#6721)', async () => {
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0))
+    expect(bodies.at(-1)?.['request']).not.toHaveProperty('prime_tower')
+
+    await pick(user, screen.getByLabelText('Prime tower'), 'on')
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { prime_tower: { enabled: true } } }))
+    await pick(user, screen.getByLabelText('Prime tower'), 'off')
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { prime_tower: { enabled: false } } }))
+  })
 })
 
 describe('PrintPicker · Supports (#1899)', () => {

@@ -36,7 +36,7 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
-from scadbuddy.filament import capture, ntag, rfid_mode
+from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
@@ -483,6 +483,53 @@ async def list_spools(
 async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCreate) -> m.Spool:
     try:
         return await asyncio.to_thread(filament.spools.create, body, actor=actor(caller))
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+
+
+@router.get(
+    "/type-proposals",
+    response_model=m.TypeProposals,
+    summary="Propose spool types for the spools that need one",
+    description=(
+        "Groups the unarchived spools with no type by brand, material, subtype, RGBA, label "
+        "weight and the `material_number` of their last Bambuddy reading (spec §8.1). Each "
+        "group has a proposed `code` (the `material_number`, else `BRAND-MATERIAL-SUBTYPE-"
+        "COLOUR`; one another type holds takes `-<label weight>G`), its catalog names, its "
+        "spools and their count, and `type_id` when a type matches it now. The largest group "
+        "first. `ungrouped` lists the spools that lack a material, an RGBA or a label weight, "
+        "with what each lacks. Writes nothing."
+    ),
+)
+async def list_type_proposals(filament: FilamentDep) -> m.TypeProposals:
+    return await asyncio.to_thread(type_proposals.proposals, filament)
+
+
+@router.post(
+    "/type-proposals/confirm",
+    response_model=m.TypeProposalResult,
+    summary="Make the proposed spool types and type their spools",
+    description=(
+        "Each group is a proposal's key, the spools it named and the `code` to give the "
+        "type. In one transaction, per group: a type that matches the key now is used, else "
+        "the type is made (the key, the most common colour name, and each other value every "
+        "spool shares; no cost). Each named spool that is still unarchived, untyped and of "
+        "the key gets the type, loses each override equal to the type's value, and gets one "
+        "`edited` event under the caller's name. Any other spool is in `skipped` with its "
+        "reason (`not_found`, `archived`, `typed`, `changed`). 409 when an unarchived type "
+        "has one of the codes (nothing is written), 422 for a bad body."
+    ),
+)
+async def confirm_type_proposals(
+    filament: FilamentDep, caller: CallerDep, body: m.TypeProposalConfirm
+) -> m.TypeProposalResult:
+    try:
+        return await asyncio.to_thread(type_proposals.confirm, filament, body, actor=actor(caller))
+    except CatalogExistsError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "a spool type already has one of these codes; choose another name",
+        ) from None
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
 
