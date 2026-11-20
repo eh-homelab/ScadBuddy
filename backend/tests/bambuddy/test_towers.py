@@ -250,13 +250,19 @@ def _painted(payload: bytes) -> bytes:
 
 
 def _clear_of_its_objects(payload: bytes, corner: tuple[float, float], height: float) -> bool:
-    """Whether a 60 mm tower at ``corner``, with its brim, misses plate 1's objects."""
+    """Whether a 60 mm tower at ``corner``, with its brim, keeps :data:`TOWER_CLEARANCE`
+    from plate 1's objects, as :func:`tower_beside` places one (the #4014 test above)."""
     low, high = plate_boxes(payload).boxes[1]
     brim = tower_brim(height)
     x0, y0 = corner[0] - brim, corner[1] - brim
     side = PRIME_TOWER_SIDE + 2 * brim
     return not Rect(x0, y0, x0 + side, y0 + side).overlaps(
-        Rect(float(low[0]), float(low[1]), float(high[0]), float(high[1]))
+        Rect(
+            float(low[0]) - TOWER_CLEARANCE,
+            float(low[1]) - TOWER_CLEARANCE,
+            float(high[0]) + TOWER_CLEARANCE,
+            float(high[1]) + TOWER_CLEARANCE,
+        )
     )
 
 
