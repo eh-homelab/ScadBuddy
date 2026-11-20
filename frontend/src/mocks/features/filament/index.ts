@@ -1417,6 +1417,7 @@ export const handlers = [
   http.post(`${BASE}/bambuddy/import`, () =>
     HttpResponse.json({
       created: 0,
+      archived_created: 0,
       linked: 0,
       updated: 0,
       needs_type: 0,

@@ -251,6 +251,51 @@ async def test_a_pull_books_bambuddys_usage_rows(pg_pool: PgPool) -> None:
     assert event.data["bb_archive_id"] == 248
 
 
+async def test_an_archived_bb_spool_comes_in_with_its_usage(pg_pool: PgPool) -> None:
+    """#6707: a BB spool Bambuddy archived before any pull is made archived, and its usage
+    rows are booked (with their archive) under the reading it was made with, which still
+    sets what is left. A second pull makes and books nothing."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    done = T1 + timedelta(minutes=5)
+    spent = bb(
+        id=125, weight_used=1020.93, archived_at=_naive(done), updated_at=_naive(done)
+    ).model_dump(mode="json")
+    rows = [
+        usage(id=1, spool_id=125, weight_used=600.0, created_at=_naive(T0)).model_dump(mode="json"),
+        usage(id=2, spool_id=125, weight_used=420.93).model_dump(mode="json"),
+    ]
+    ended = _naive(T1 + timedelta(seconds=0.9))
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[spent])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(
+            json=[{"id": 248, "printer_id": 1, "completed_at": ended}]
+        )
+        report = await read_and_pull(f, settings)
+        again = await read_and_pull(f, settings)
+    (spool,) = report.created_ids
+    assert (report.archived_created, report.usage_booked, report.usage_unlinked) == (1, 2, 0)
+    events = _usage_events(f, spool)
+    assert sorted((e.ref_id, e.delta_g) for e in events) == [("1", -600.0), ("2", -420.93)]
+    assert {e.ref_id: e.data["bb_archive_id"] for e in events} == {"1": None, "2": 248}
+    got = f.spools.get(spool)
+    assert got is not None and got.archived_at == done
+    assert _left(f, spool) == 0
+    assert (again.created, again.archived_created, again.usage_booked) == (0, 0, 0)
+    assert len(_usage_events(f, spool)) == 2
+
+
+def test_a_spool_archived_in_sb_still_books_no_earlier_usage(pg_pool: PgPool) -> None:
+    """Only a spool the pull made archived books the rows before its reading: one a person
+    archived keeps the rule of any linked spool."""
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    f.spools.archive(spool, True, actor="ann")
+    assert _book(f, [usage(created_at=_naive(T0 - timedelta(hours=1)))]).booked == 0
+
+
 async def test_the_archive_read_reaches_back_to_the_oldest_row_booked(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     spool = _linked(f)

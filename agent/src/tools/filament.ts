@@ -1000,11 +1000,13 @@ export const filamentTools: Tool[] = [
     name: 'filament_bambuddy_import',
     label: "Import Bambuddy's spools",
     description:
-      "Pull Bambuddy's unarchived spools into ScadBuddy's own inventory once (the spool refresh Schedule also " +
+      "Pull Bambuddy's spools, archived ones too, into ScadBuddy's own inventory once (the spool refresh Schedule also " +
       'does this). A linked spool takes what Bambuddy changed since the last pull, unless ScadBuddy changed that ' +
       'field later. A Bambuddy spool whose tag or record a ScadBuddy spool already holds is linked. Any other ' +
       'becomes a new spool, typed by `material_number`, else by brand, material, subtype, colour and label weight, ' +
       'else left needing a type. An archived ScadBuddy spool is never restored or changed (listed as `archived`). ' +
+      'A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived spool with its usage, counted ' +
+      'in `created` and `archived_created`. ' +
       'Returns the counts and ids created, linked, updated, still needing a type and archived, and the Bambuddy ' +
       'rows it could not read (`invalid`). ' +
       '409 when no Bambuddy is configured. Reads Bambuddy, writes ScadBuddy only.',
