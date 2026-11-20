@@ -1301,8 +1301,10 @@ async def reconcile_rfid(
         "whose last write failed (Bambuddy refused it or did not answer) or was held back "
         "(`name_taken`: another Bambuddy row has its name, so ScadBuddy never sent it): its "
         "`kind` (`spool`, `supplier`, `location`, `insert_type` or `filament`), its ScadBuddy "
-        "id (`sb_id`), the error label, the `attempts` and when (`at`), newest first; a "
-        "later write that works drops the row. `skipped` says why no pass runs now: "
+        "id (`sb_id`), its `label` (a spool's `#N`, a spool type's code, any other row's "
+        "name; null when the item is gone), the error label, the `attempts` and when (`at`), "
+        "newest first; a later write that works drops the row. `skipped` says why no pass "
+        "runs now: "
         "`no_bambuddy` (no Bambuddy is configured) or `nothing_pushes` (no data type is set "
         "to push); else null. Reads ScadBuddy only."
     ),

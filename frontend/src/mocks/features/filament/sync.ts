@@ -21,8 +21,8 @@ const FIRST_PASS = Date.parse('2026-11-15T07:00:00Z')
 const MINUTE = 60_000
 
 const seedErrors = (): S['SyncError'][] => [
-  { kind: 'spool', sb_id: spoolId(3), error: 'https://scadbuddy.dev/problems/bambuddy-rejected:422', attempts: 2, at: '2026-11-15T07:00:00Z' },
-  { kind: 'supplier', sb_id: SUPPLIER.MICRO, error: 'name_taken', attempts: 1, at: '2026-11-15T06:55:00Z' },
+  { kind: 'spool', sb_id: spoolId(3), label: '#3', error: 'https://scadbuddy.dev/problems/bambuddy-rejected:422', attempts: 2, at: '2026-11-15T07:00:00Z' },
+  { kind: 'supplier', sb_id: SUPPLIER.MICRO, label: 'Micro Center', error: 'name_taken', attempts: 1, at: '2026-11-15T06:55:00Z' },
 ]
 
 let passes = 0

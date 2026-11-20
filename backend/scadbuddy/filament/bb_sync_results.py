@@ -43,6 +43,7 @@ from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
     BbWrite,
     BbWriteResult,
+    Kind,
     ResultsReport,
     SkipReason,
     SyncError,
@@ -487,6 +488,34 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
         )
 
 
+#: R-T11-1: each error kind's table and the label it shows: a spool's `#N` (the spool
+#: list's name for it), a spool type's code (the Bambuddy filament's name, Decision 14),
+#: any other row's name.
+_LABELS: dict[Kind, tuple[str, str]] = {
+    "spool": ("filament_spools", "'#' || number"),
+    "supplier": ("filament_suppliers", "name"),
+    "location": ("filament_locations", "name"),
+    "insert_type": ("filament_insert_types", "name"),
+    "filament": ("filament_spool_types", "code"),
+}
+
+
+def _labels(conn: Conn, rows: list[Any]) -> dict[tuple[str, UUID], str]:
+    """The label of each error row's item, one query per kind present."""
+    ids: dict[Kind, list[UUID]] = {}
+    for row in rows:
+        ids.setdefault(row["kind"], []).append(row["sb_id"])
+    found: dict[tuple[str, UUID], str] = {}
+    for kind, sb_ids in ids.items():
+        table, label = _LABELS[kind]
+        for hit in conn.execute(
+            f"SELECT id, {label} AS label FROM {table} WHERE id = ANY(%s)",
+            (sb_ids,),
+        ).fetchall():
+            found[(kind, hit["id"])] = hit["label"]
+    return found
+
+
 def sync_status(
     store: Filament, directions: FilamentSync, skipped: SkipReason | None
 ) -> SyncStatus:
@@ -501,6 +530,7 @@ def sync_status(
             "SELECT kind, sb_id, error, attempts, at FROM filament_bb_push_errors"
             " ORDER BY at DESC, kind, sb_id"
         ).fetchall()
+        labels = _labels(conn, errors)
     if state is None:
         raise RuntimeError("filament_bb_sync_state has no row; its migration seeds one")
     return SyncStatus(
@@ -509,7 +539,10 @@ def sync_status(
         last_ok_at=state["last_ok_at"],
         last_error=state["last_error"],
         counts=state["counts"],
-        errors=[SyncError.model_validate(dict(row)) for row in errors],
+        errors=[
+            SyncError.model_validate(dict(row) | {"label": labels.get((row["kind"], row["sb_id"]))})
+            for row in errors
+        ],
         directions=directions,
         skipped=skipped,
     )

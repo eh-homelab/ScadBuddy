@@ -98,11 +98,34 @@ describe('Filament (#6262)', () => {
     await seeded()
     const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
     const [spool, supplier] = within(failed).getAllByRole('listitem') as [HTMLElement, HTMLElement]
-    expect(within(spool).getByRole('link', { name: `Spool ${spoolId(3).slice(0, 8)}` })).toHaveAttribute('href', expect.stringContaining(`/filament/spools/${spoolId(3)}`))
+    expect(within(spool).getByRole('link', { name: 'Spool #3' })).toHaveAttribute('href', expect.stringContaining(`/filament/spools/${spoolId(3)}`))
+    expect(within(supplier).getByRole('link', { name: 'Supplier Micro Center' })).toBeInTheDocument()
     expect(spool).toHaveTextContent('Bambuddy refused it (HTTP 422).')
     expect(spool).toHaveTextContent('2 attempts')
     expect(supplier).toHaveTextContent('Not sent: another Bambuddy row has this name.')
     expect(within(region('Filament')).getByText(/No pass runs: no data type is set to send to Bambuddy/)).toBeInTheDocument()
+  })
+
+  it('names an item that is gone by its id', async () => {
+    const gone = '0badc0de-0000-4000-8000-000000000001'
+    server.use(
+      http.get('*/api/v1/filament/sync/status', () =>
+        HttpResponse.json({
+          instance: null,
+          last_pass_at: null,
+          last_ok_at: null,
+          last_error: null,
+          counts: {},
+          errors: [{ kind: 'location', sb_id: gone, label: null, error: 'internal', attempts: 1, at: '2026-11-15T07:00:00Z' }],
+          directions: DEFAULT_SYNC,
+          skipped: null,
+        }),
+      ),
+    )
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
+    expect(within(failed).getByRole('link', { name: 'Location 0badc0de' })).toBeInTheDocument()
   })
 
   it('sync now re-reads the status', async () => {

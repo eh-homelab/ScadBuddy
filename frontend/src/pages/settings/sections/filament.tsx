@@ -270,7 +270,8 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
           <ul aria-label="Items not synced" className="flex flex-col gap-2">
             {data.errors.map((error) => {
               const href = itemHref(error)
-              const name = `${KIND_LABELS[error.kind]} ${shortId(error.sb_id)}`
+              // The item's own name (a spool's `#N`); its id only when the item is gone.
+              const name = `${KIND_LABELS[error.kind]} ${error.label ?? shortId(error.sb_id)}`
               return (
                 <li key={`${error.kind}:${error.sb_id}`} className="flex flex-col gap-0.5">
                   <span className="font-medium">

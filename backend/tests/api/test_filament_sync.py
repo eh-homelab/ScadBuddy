@@ -14,6 +14,8 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.filament.bb_sync_nudge import FilamentSyncNudger
+from tests.api.test_filament import _spool
+from tests.api.test_filament_purchasing import _supplier
 from tests.api.test_send import configure
 
 pytestmark = pytest.mark.requires_postgres
@@ -101,6 +103,37 @@ def test_status_lists_errors_and_directions(client: TestClient, pg_conninfo: str
         "locations": "off",
     }
     assert body["skipped"] is None
+
+
+def test_status_labels_each_error_row(client: TestClient, pg_conninfo: str) -> None:
+    """R-T11-1: each error row names its item as the UI shows it, a spool by its `#N`, a
+    supplier by its name; a row whose item is gone has no label."""
+    spool = _spool(client)
+    supplier = _supplier(client, "Micro Center")
+    gone = uuid4()
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_push_errors (kind, sb_id, error, attempts, at)"
+            " VALUES ('spool', %s, 'http-500', 1, %s), ('supplier', %s, 'name_taken', 1, %s),"
+            " ('location', %s, 'http-500', 1, %s)",
+            (
+                spool["id"],
+                datetime(2026, 11, 20, 10, tzinfo=UTC),
+                supplier,
+                datetime(2026, 11, 20, 9, tzinfo=UTC),
+                gone,
+                datetime(2026, 11, 20, 8, tzinfo=UTC),
+            ),
+        )
+
+    got = client.get(f"{SYNC}/status")
+
+    assert got.status_code == 200, got.text
+    assert [(e["kind"], e["label"]) for e in got.json()["errors"]] == [
+        ("spool", f"#{spool['number']}"),
+        ("supplier", "Micro Center"),
+        ("location", None),
+    ]
 
 
 def test_status_says_why_no_pass_runs(client: TestClient) -> None:

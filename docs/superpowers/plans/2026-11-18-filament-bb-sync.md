@@ -1524,6 +1524,18 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_signal_running_signals_and_never_starts`,
     `test_signal_running_with_no_workflow_is_quiet`,
     `test_a_save_that_stops_every_push_ends_a_running_workflow`.
+135. Task 11: the six directions are one form string, the six parts joined by `|` in
+    `SYNC_KINDS` order (`values.ts` `syncParts`, `syncValue`); a missing or unknown part reads
+    `off`. The mock keeps a saved `filament_sync` in `sessionStorage`, so a reload keeps it.
+    Cost: none known; the server always sends all six keys.
+136. Task 11 (R-T11-1, concern 4): each `SyncError` carries a `label` the API resolves: a
+    spool's `#N` (the spool list's name for it), a spool type's code (the Bambuddy
+    filament's name, Decision 14), any other row's name; null when the item is gone. One
+    query per kind present (`bb_sync_results._labels`), never one per row. The UI shows the
+    label, and `shortId(sb_id)` only when it is null. The route's and
+    `filament_sync_status`'s descriptions name it. Tests:
+    `test_status_labels_each_error_row`, `names an item that is gone by its id`. Cost: none
+    known.
 
 ## Self-review
 

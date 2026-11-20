@@ -351,10 +351,13 @@ class FilamentSyncApi(Protocol):
 
 class SyncError(BaseModel, extra="forbid"):
     """One `filament_bb_push_errors` row: an item whose last write failed, or was held
-    back as ``name_taken`` (another Bambuddy row has its name; never sent)."""
+    back as ``name_taken`` (another Bambuddy row has its name; never sent). ``label`` names
+    the item as the UI shows it (R-T11-1): a spool's ``#N``, a spool type's code, any other
+    row's name; ``None`` when the item is gone."""
 
     kind: Kind
     sb_id: UUID
+    label: str | None
     error: str
     attempts: int
     at: datetime

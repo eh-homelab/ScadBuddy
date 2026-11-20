@@ -724,7 +724,8 @@ export const filamentTools: Tool[] = [
       "last pass, `last_error` its error (null when it worked), `last_ok_at` the last pass with no error (a skipped " +
       "one too), `counts` the last pass's (`written`, `failed`, `deferred`, `conflicts`, `unmapped_k`). `errors` " +
       'lists each item whose last write to Bambuddy failed, or was held back (`name_taken`: another Bambuddy row ' +
-      'has its name, so it was never sent), with `kind`, its ScadBuddy `sb_id`, `error`, `attempts` and `at`, ' +
+      "has its name, so it was never sent), with `kind`, its ScadBuddy `sb_id`, its `label` (a spool's `#N`, a " +
+      "spool type's code, any other row's name; null when the item is gone), `error`, `attempts` and `at`, " +
       'newest first: this is why a spool is not in Bambuddy. `skipped` says why no pass runs now: ' +
       '`no_bambuddy` or `nothing_pushes` (no data type is set to push); else null. Reads ScadBuddy only.',
     input: z.object({}),
