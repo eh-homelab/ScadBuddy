@@ -185,6 +185,27 @@ async def test_a_workflow_for_an_old_instance_ends(
     assert len(passes.calls) == 1
 
 
+async def test_a_signal_during_a_skipped_pass_runs_one_more(client: Client) -> None:
+    """R-T8-4: a save that turns a direction on nudges while the pass that found nothing
+    pushing still runs; the workflow does not end on that pass, and the next one runs."""
+    passes = Passes(
+        lambda n, start: result(start, skipped="nothing_pushes") if n == 0 else result(start)
+    )
+    handle: WorkflowHandle[FilamentBbSync, None] | None = None
+
+    async def turned_on(n: int) -> None:
+        if n == 0:
+            assert handle is not None
+            await handle.signal(FilamentBbSync.changed, False)
+
+    passes.during = turned_on
+    async with serving(client, passes) as queue:
+        handle = await start(client, queue, 0, signal=True)
+        await until(lambda: len(passes.calls) == 2)
+        assert (await handle.describe()).close_time is None
+    assert [call.run_id for call in passes.calls] == [passes.calls[0].run_id] * 2
+
+
 async def test_a_failed_pass_does_not_end_the_workflow(
     client: Client, monkeypatch: pytest.MonkeyPatch
 ) -> None:

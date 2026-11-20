@@ -1472,6 +1472,19 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_the_directions_route_answers_the_stored_directions`. Why: by default nothing
     pushes, and a workflow would read Bambuddy's five listings every interval for nothing.
     Cost: one more CRUD call per pass.
+126. Task 8 (R-T8-3, review spec finding; keeps Decision 17): `POST
+    /filament/spools/sync-ams-weights` does not nudge. `nudge_after_write` skips the routes
+    named in `api/filament.py` `NOT_NUDGED` (`sync_ams_weights`, the route's name in
+    `request.scope["route"]`); the route stays on the `/filament` router. Test:
+    `test_the_ams_weights_sync_does_not_nudge` (that POST nudges nothing, a spool create on
+    the same router nudges once).
+127. Task 8 (R-T8-4, review Important 1; changes 125): on a `skipped` result the workflow
+    returns only when no `changed` signal is pending. With one pending (a save that turned
+    a direction on while the pass found nothing pushing), it goes back to its wait, which
+    debounces and runs the next pass. Test: `test_a_signal_during_a_skipped_pass_runs_one_more`
+    (`Passes.during` signals during a `nothing_pushes` pass; a second pass runs in the same
+    run). The code has never run on prod, so `v1` still replays (its passes are never
+    skipped) and is not re-recorded; no `workflow.patched`.
 
 ## Self-review
 

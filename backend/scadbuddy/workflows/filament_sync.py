@@ -16,7 +16,8 @@ usual. Each pass reports the interval the settings hold now, and the workflow wa
 long next. A pass for an instance that is no longer the configured one
 (``instance_changed``), with no Bambuddy configured, or with no data type that pushes
 (``nothing_pushes``, R-T8-2), ends the workflow: the next nudge (a settings save that
-turns a direction on is one) starts the configured instance's. A pass whose every
+turns a direction on is one) starts the configured instance's. A skipped pass during
+which a signal came does not end it: the next pass runs (R-T8-4). A pass whose every
 attempt failed is logged, and the workflow waits for the next signal or the timer.
 
 After `CONTINUE_AFTER_PASSES` passes, or when the server suggests it, the workflow
@@ -90,6 +91,10 @@ class FilamentBbSync:
                 if result is None:
                     break
                 interval_s = result.interval_s
+                if result.skipped is not None and self.pending:
+                    # R-T8-4: a signal came during the pass (a save that turned a
+                    # direction on): the next pass reads the settings again.
+                    break
                 if result.instance_changed or result.skipped is not None:
                     workflow.logger.info(
                         "the filament sync has nothing to push to this Bambuddy; ending",

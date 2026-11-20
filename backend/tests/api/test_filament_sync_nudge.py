@@ -34,6 +34,18 @@ def test_a_read_or_a_failed_write_does_not_nudge(
     assert filament_nudges == []
 
 
+def test_the_ams_weights_sync_does_not_nudge(
+    client: TestClient, filament_nudges: list[bool]
+) -> None:
+    """R-T8-3, Decision 17: the AMS weights reach Bambuddy on the timer; another write on
+    the same router still nudges."""
+    synced = client.post(f"{SPOOLS}/sync-ams-weights")
+    assert synced.status_code == 200, synced.text
+    assert filament_nudges == []
+    _spool(client)
+    assert filament_nudges == [False]
+
+
 def test_a_purchasing_write_nudges(client: TestClient, filament_nudges: list[bool]) -> None:
     made = client.post("/api/v1/filament/suppliers", json={"name": "Bambu Lab"})
     assert made.status_code == 201, made.text

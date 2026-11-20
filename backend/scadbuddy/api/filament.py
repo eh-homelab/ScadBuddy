@@ -85,14 +85,21 @@ from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
 
+#: The write routes, by route name, that leave Bambuddy to the timer (Decision 17,
+#: R-T8-3): the AMS weights come from the printers' reports, as the capture's do.
+NOT_NUDGED = frozenset({"sync_ams_weights"})
+
 
 async def nudge_after_write(request: Request, state: StateDep) -> AsyncIterator[None]:
     """A router's dependency: after a write's 2xx answer, nudge the filament sync in the
     background (Decision 17). A route that raised (any error answer, a 422 of its body
-    too) nudges nothing, and neither does a read."""
+    too) nudges nothing, and neither does a read or a route in `NOT_NUDGED`."""
     yield
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        state.filament_sync.nudge_soon()
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    if getattr(request.scope.get("route"), "name", None) in NOT_NUDGED:
+        return
+    state.filament_sync.nudge_soon()
 
 
 router = APIRouter(prefix="/filament", tags=["filament"], dependencies=[Depends(nudge_after_write)])
