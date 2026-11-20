@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from scadbuddy.api import media as media_api
-from scadbuddy.api.deps import PathsDep, StateDep
+from scadbuddy.api.deps import PathsDep, SettingsStoreDep, StateDep
 from scadbuddy.api.filament import actor
 from scadbuddy.api.order_attachments import INERT, NOSNIFF
 from scadbuddy.auth.component import CallerDep
@@ -517,11 +517,12 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
         "200 with it and makes nothing more. 404 for no such invoice. 409, with nothing "
         "written, for an invoice with no lines, one of an archived supplier, one not in the "
         "shop's currency, one whose total is more than 0.05 from its lines plus shipping, or a "
-        "line that cannot be confirmed (the message names the line)."
+        "line that cannot be confirmed (the message names the line). The types it makes are "
+        "then filled from their slicer profiles (`POST /filament/types/fill-from-profile`)."
     ),
 )
 async def confirm_invoice(
-    filament: FilamentDep, caller: CallerDep, invoice_id: UUID
+    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep, invoice_id: UUID
 ) -> pm.InvoiceDetail:
     try:
         done = await asyncio.to_thread(filament.invoices.confirm, invoice_id, actor=actor(caller))
@@ -535,7 +536,19 @@ async def confirm_invoice(
         raise _conflict(exc) from None
     if done is None:
         raise _no_invoice(invoice_id)
-    return done[0]
+    invoice, confirmed_now = done
+    made = list(
+        dict.fromkeys(
+            line.type_id
+            for line in invoice.lines
+            if line.proposed_type is not None and line.type_id is not None
+        )
+    )
+    if confirmed_now and made:
+        # The types the lines proposed are filled from their slicer profiles, as every
+        # type made is (#6714, R-6714-6).
+        await filament.filler.fill(await asyncio.to_thread(store.load), made)
+    return invoice
 
 
 # -- an invoice's file ------------------------------------------------------------------

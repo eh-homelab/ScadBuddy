@@ -1,0 +1,34 @@
+{
+    "name": "Bambulab",
+    "version": "02.08.00.05",
+    "description": "ScadBuddy's spool type profile test tree (#6714)",
+    "machine_model_list": [],
+    "machine_list": [],
+    "process_list": [],
+    "filament_list": [
+        {
+            "name": "fdm_filament_common",
+            "sub_path": "filament/fdm_filament_common.json"
+        },
+        {
+            "name": "fdm_filament_pla",
+            "sub_path": "filament/fdm_filament_pla.json"
+        },
+        {
+            "name": "Bambu PLA Silk @base",
+            "sub_path": "filament/Bambu PLA Silk @base.json"
+        },
+        {
+            "name": "Bambu PLA Silk @BBL H2C",
+            "sub_path": "filament/Bambu PLA Silk @BBL H2C.json"
+        },
+        {
+            "name": "Bambu PLA Silk @BBL H2C 0.4 nozzle",
+            "sub_path": "filament/Bambu PLA Silk @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "Generic PETG @BBL H2C 0.4 nozzle",
+            "sub_path": "filament/Generic PETG @BBL H2C 0.4 nozzle.json"
+        }
+    ]
+}
