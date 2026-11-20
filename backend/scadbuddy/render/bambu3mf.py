@@ -662,7 +662,7 @@ def _flag(value: bool) -> str:
 def stated_value(settings: Mapping[str, Any], key: str) -> object:
     """``settings[key]``, a list read by its first value, as Bambu Studio may write a
     scalar either way. The send reads an author's tower with it too
-    (``send._file_tower``), so both read a key the same way (#6757)."""
+    (``send.file_tower``), so both read a key the same way (#6757)."""
     value = settings.get(key)
     if isinstance(value, list):
         value = value[0] if value else None
@@ -1848,6 +1848,14 @@ class TooManyTrianglesError(ValueError):
 _CHUNK = 1024 * 1024
 
 
+def read_project_settings(archive: zipfile.ZipFile) -> Any:
+    """``project_settings.config``, parsed, read within :data:`MAX_SETTINGS_BYTES`. The
+    file is untrusted: every reader uses this cap, so plate fit and the send read the
+    same settings (#6792). Raises ``KeyError`` (no entry), :class:`ArchiveTooLargeError`
+    or another ``ValueError`` (past the cap, not JSON)."""
+    return json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+
+
 def _read_capped(archive: zipfile.ZipFile, name: str, cap: int) -> bytes:
     """``name``'s bytes, read in chunks and refused past ``cap``, whatever its header
     declares."""
@@ -2499,7 +2507,7 @@ def _read_settings(payload: bytes) -> tuple[Layout, dict[str, Any]] | None:
 
 def author_settings(payload: bytes) -> dict[str, Any] | None:
     """``payload``'s ``project_settings.config`` when it is an author's layout, the
-    only one whose tower the send sizes from the file (``send._file_tower`` in
+    only one whose tower the send sizes from the file (``send.file_tower`` in
     ``send.towers_within_reach``, #6770); otherwise ``None``. A file that ScadBuddy laid
     out goes through :func:`replate_3mf`, which sizes the tower from each plate's own
     parts."""

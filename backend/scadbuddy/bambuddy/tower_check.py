@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import dataclasses
 import io
-import json
 import math
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -31,17 +30,17 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice, tower_asked
 from scadbuddy.bambuddy.send import (
     Target,
-    _file_tower,
     _laid_out_for,
     _source_bed,
     _tower_on,
     _tower_value,
+    file_tower,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.bambu3mf import (
-    PROJECT_SETTINGS_NAME,
     layout_of,
     plate_origin,
+    read_project_settings,
     stated_tower_off,
 )
 from scadbuddy.render.objects3mf import UnreadableObjectsError, plate_boxes
@@ -115,7 +114,7 @@ def chosen_tower(
     overrides: Mapping[str, object],
     template: Mapping[str, object],
 ) -> TowerSettings:
-    """The tower the slice builds: ``stated`` (the file's, ``send._file_tower``) with the
+    """The tower the slice builds: ``stated`` (the file's, ``send.file_tower``) with the
     template's ``print_settings`` over it, then the print's ``choice``, then its process
     overrides, as the slice lays them over each other (#2998: an explicit override wins)."""
     no_sparse = stated.no_sparse_layers
@@ -185,13 +184,13 @@ def judge_towers(
 ) -> TowerCheck:
     """Each tower of ``laid_out`` (a file as the send lays it out for ``plate``), judged
     as :func:`~scadbuddy.bambuddy.send.towers_within_reach` judges one, but at the size
-    and keep-out ``asked`` gives (``None``: the file's own, ``send._file_tower``) and at
+    and keep-out ``asked`` gives (``None``: the file's own, ``send.file_tower``) and at
     the place ``overrides`` give. Only ``plates`` (``None``: all) are judged. A file whose
     objects, project settings or tower places cannot be read has no conflicts: the
     slicer then says why."""
     try:
         with zipfile.ZipFile(io.BytesIO(laid_out)) as archive:
-            settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+            settings = read_project_settings(archive)
     except (KeyError, zipfile.BadZipFile, ValueError):
         return TowerCheck()
     if not isinstance(settings, dict):
@@ -200,7 +199,7 @@ def judge_towers(
     bed = _source_bed(settings)
     if places is None or bed is None:
         return TowerCheck()
-    tower = asked or _file_tower(settings)
+    tower = asked or file_tower(settings)
     try:
         read = plate_boxes(laid_out)
     except UnreadableObjectsError:
@@ -286,7 +285,7 @@ def tower_check(
     except ApiError:
         return None  # it does not fit: the plate-fit check and the run say why
     with zipfile.ZipFile(io.BytesIO(laid)) as archive:
-        stated = _file_tower(json.loads(archive.read(PROJECT_SETTINGS_NAME)))
+        stated = file_tower(read_project_settings(archive))
     return judge_towers(
         laid, plate, chosen_tower(stated, choice, overrides, template), overrides, plates
     )

@@ -417,7 +417,7 @@ def test_only_a_scadbuddy_file_that_states_the_tower_off_reads_as_off(written: P
 
 def test_no_sparse_layers_reads_as_the_send_reads_it(written: Path) -> None:
     """#6757: the send keeps the keep-out for an author's file that states "No sparse
-    layers" (`send._file_tower`), so plate fit (SB4001) reads it from such a file too.
+    layers" (`send.file_tower`), so plate fit (SB4001) reads it from such a file too.
     A file the send prints as it is (`as_is`) reads as off."""
     author = _restated(
         written.read_bytes(),

@@ -13,6 +13,7 @@ import trimesh
 
 from scadbuddy.bambuddy.send import _tower_on, towers_within_reach
 from scadbuddy.render.bambu3mf import (
+    MAX_SETTINGS_BYTES,
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
@@ -116,6 +117,19 @@ def test_a_tower_every_extruder_reaches_is_left_where_its_author_put_it(tmp_path
     # The A1 mini reaches its own tower.
     unmoved = _laid_out_on_an_a1_mini(tmp_path)
     assert towers_within_reach(unmoved, A1_MINI) is unmoved
+
+
+def test_a_file_whose_settings_pass_the_cap_keeps_its_towers(tmp_path: Path) -> None:
+    """#6792: the file is untrusted, so the send reads `project_settings.config` within
+    `MAX_SETTINGS_BYTES`, as plate fit does. Past the cap the file keeps its towers,
+    and the slicer says why, rather than the send reading it whole."""
+    payload = _laid_out_on_an_a1_mini(tmp_path)
+    assert towers_within_reach(payload, H2C) is not payload  # (15, 145): moved
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings["padding"] = "x" * MAX_SETTINGS_BYTES
+    padded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+    assert towers_within_reach(padded, H2C) is padded
 
 
 def test_no_printer_chosen_moves_no_tower(tmp_path: Path) -> None:
