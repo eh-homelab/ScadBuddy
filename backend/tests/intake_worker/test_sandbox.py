@@ -108,9 +108,15 @@ async def _served(spool: Path) -> AsyncIterator[tuple[str, sandbox.Sandbox]]:
 @pytest.fixture
 def sleeper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Each check's child replaced by a process that writes its pid and sleeps: no
-    confinement needed to test what the sandbox does around it."""
+    confinement needed to test what the sandbox does around it. The pid goes to a
+    temporary name first and is renamed into place, so the file never exists empty
+    (#6693: a child stopped between the open and the write left an empty file)."""
     pidfile = tmp_path / "child.pid"
-    code = f"import os, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    partial = f"{pidfile}.partial"
+    code = (
+        f"import os, time; open({partial!r}, 'w').write(str(os.getpid())); "
+        f"os.replace({partial!r}, {str(pidfile)!r}); time.sleep(60)"
+    )
 
     def command(
         hide: str,
