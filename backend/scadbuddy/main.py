@@ -93,6 +93,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync
+from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.print_uses import PoolPrintUses
@@ -1697,7 +1699,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         uses=PoolPrintUses(state.settings_store.pool),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
-    activities = [
+    activities: list[Callable[..., Any]] = [
         *PrintActivities(deps).all(),
         *LanActivities(lan).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
@@ -1709,6 +1711,12 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(PRINT_LIBRARY).serving_native,
             StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
         ).lan_auto_import,
+        # The filament sync's pass (#6265) on this process's own stores, as the CRUD
+        # routes run it for the print worker.
+        FilamentSyncActivities(
+            LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
+            settings_loader(state.settings_store.load),
+        ).sync_pass,
     ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every

@@ -278,13 +278,15 @@ class SyncPassResult(BaseModel, extra="forbid"):
     (Decision 11). ``skipped``: why it did nothing. ``error``: a failed pass's
     ``error_label``; `record_pass` sets ``last_error`` from it, and ``last_ok_at`` only
     when it is ``None`` (Decision 19, F7). ``conflicts``: the largest ``SyncPlan.conflicts``
-    of the pass's rounds (R-T4-33)."""
+    of the pass's rounds (R-T4-33). ``unmapped_k``: the largest ``SyncPlan.unmapped_k`` of
+    its rounds, for the same reason (decision 58)."""
 
     written: int
     failed: int
     deferred: int
     more: bool
     conflicts: int = 0
+    unmapped_k: int = 0
     instance_changed: bool
     interval_s: float
     skipped: Literal["no_bambuddy", "nothing_pushes"] | None = None
@@ -302,7 +304,7 @@ class FilamentSyncApi(Protocol):
         instance: str,
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
-        pass_id: str | None = None,
+        pass_id: str | None,
     ) -> ResultsReport: ...
 
     async def record_pass(self, result: SyncPassResult) -> None: ...

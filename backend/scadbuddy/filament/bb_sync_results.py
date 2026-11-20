@@ -473,6 +473,7 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
         "failed": result.failed,
         "deferred": result.deferred,
         "conflicts": result.conflicts,
+        "unmapped_k": result.unmapped_k,
     }
     with store.spools.transaction() as conn:
         conn.execute(
@@ -513,7 +514,7 @@ class LocalFilamentSync:
         instance: str,
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
-        pass_id: str | None = None,
+        pass_id: str | None,
     ) -> ResultsReport:
         return await asyncio.to_thread(
             apply_results,

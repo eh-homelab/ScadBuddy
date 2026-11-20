@@ -2158,43 +2158,52 @@ class BambuddyClient:
         )
         return Spool.model_validate(response.json())
 
-    async def put_spool_k_profiles(self, spool_id: int, rows: list[dict[str, Any]]) -> None:
+    async def put_spool_k_profiles(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
         """``PUT /api/v1/inventory/spools/{id}/k-profiles`` with ``SpoolKProfileBase`` rows:
-        the spool's whole list is replaced (``routes/inventory.py`` line 2020)."""
-        await self._send(
+        the spool's whole list is replaced (``routes/inventory.py`` line 2020). Answers the
+        list Bambuddy stored, as sent (``SpoolKProfileResponse`` rows, not validated)."""
+        what = f"replace the K-profiles of spool {spool_id}"
+        response = await self._send(
             "PUT",
             f"/inventory/spools/{spool_id}/k-profiles",
             scope=Scope.MANAGE_INVENTORY,
             operation="spools.k_profiles",
-            what=f"replace the K-profiles of spool {spool_id}",
+            what=what,
             json=rows,
         )
+        return self._rows(response, what=what)
 
-    async def put_spool_presets(self, spool_id: int, rows: list[dict[str, Any]]) -> None:
+    async def put_spool_presets(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
         """``PUT /api/v1/inventory/spools/{id}/filament-presets`` with
         ``SpoolFilamentPresetBase`` rows: the whole list is replaced
-        (``routes/inventory.py`` line 2126)."""
-        await self._send(
+        (``routes/inventory.py`` line 2126). Answers the list Bambuddy stored, as sent
+        (``SpoolFilamentPresetResponse`` rows, not validated)."""
+        what = f"replace the per-nozzle presets of spool {spool_id}"
+        response = await self._send(
             "PUT",
             f"/inventory/spools/{spool_id}/filament-presets",
             scope=Scope.MANAGE_INVENTORY,
             operation="spools.presets_put",
-            what=f"replace the per-nozzle presets of spool {spool_id}",
+            what=what,
             json=rows,
         )
+        return self._rows(response, what=what)
 
-    async def put_spool_suppliers(self, spool_id: int, rows: list[dict[str, Any]]) -> None:
+    async def put_spool_suppliers(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
         """``PUT /api/v1/inventory/spools/{id}/suppliers`` with ``SpoolSupplierLinkInput``
         rows: the whole list is replaced; a duplicate supplier or two purchase sources is
-        a 400 and an unknown supplier a 404 (``routes/inventory.py`` lines 2060-2081)."""
-        await self._send(
+        a 400 and an unknown supplier a 404 (``routes/inventory.py`` lines 2060-2081). Answers
+        the list Bambuddy stored, as sent (``SpoolSupplierResponse`` rows, not validated)."""
+        what = f"replace the suppliers of spool {spool_id}"
+        response = await self._send(
             "PUT",
             f"/inventory/spools/{spool_id}/suppliers",
             scope=Scope.MANAGE_INVENTORY,
             operation="spools.suppliers_put",
-            what=f"replace the suppliers of spool {spool_id}",
+            what=what,
             json=rows,
         )
+        return self._rows(response, what=what)
 
     async def suppliers(self) -> list[BbSupplier]:
         """``GET /api/v1/inventory/suppliers`` (``INVENTORY_READ``: Read Status;

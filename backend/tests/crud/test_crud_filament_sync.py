@@ -193,7 +193,10 @@ async def test_results_route_links(store: SettingsStore, crud: CrudClient) -> No
     assert isinstance(write.body, dict)
     answer = {"id": 77, **write.body}
     report = await RemoteFilamentSync(crud).results(
-        INSTANCE, plan.writes, [BbWriteResult(key=write.key, ok=True, bb_id=77, answer=answer)]
+        INSTANCE,
+        plan.writes,
+        [BbWriteResult(key=write.key, ok=True, bb_id=77, answer=answer)],
+        plan.pass_id,
     )
     assert report == ResultsReport(linked=1)
     with store.pool.connection() as conn:
@@ -236,7 +239,13 @@ async def test_a_failed_pass_keeps_last_ok_at(store: SettingsStore, crud: CrudCl
     first = _state(store)
     assert first["last_ok_at"] is not None and first["last_error"] is None
     assert first["last_pass_at"] is not None
-    assert first["counts"] == {"written": 2, "failed": 0, "deferred": 0, "conflicts": 0}
+    assert first["counts"] == {
+        "written": 2,
+        "failed": 0,
+        "deferred": 0,
+        "conflicts": 0,
+        "unmapped_k": 0,
+    }
 
     await remote.record_pass(_pass(written=0, error="timeout"))
     second = _state(store)
@@ -312,5 +321,5 @@ async def test_a_resent_failed_result_is_one_attempt(
     await remote.results(INSTANCE, first.writes, refused, second.pass_id)
     assert _attempts(store) == [2]
     # A result with no pass id is a pass of its own.
-    await remote.results(INSTANCE, first.writes, refused)
+    await remote.results(INSTANCE, first.writes, refused, None)
     assert _attempts(store) == [3]

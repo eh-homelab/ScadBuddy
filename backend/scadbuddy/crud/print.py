@@ -1452,7 +1452,7 @@ class RemoteFilamentSync:
         instance: str,
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
-        pass_id: str | None = None,
+        pass_id: str | None,
     ) -> ResultsReport:
         body = ResultsRequest(
             instance=instance, writes=list(writes), results=list(results), pass_id=pass_id
