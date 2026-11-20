@@ -201,8 +201,9 @@ def test_requests_at_once_on_one_permit_fail_fast_rather_than_wait(
     """Review of #750: the budget check and the acquire cannot be split by another
     request, so of several at once exactly one gets the server and the rest get
     the busy 503 straight away, not after the first one's timeout."""
-    # A waiter would answer only after this; a busy refusal well before it. The margin
-    # is wide because a loaded CI runner took 1.76 s for a refusal against 2 s.
+    # A waiter would answer only after this, as the request that holds the permit does;
+    # a busy refusal before it. The test compares each refusal with the holder's answer,
+    # not with a fixed limit: a loaded CI runner stalled all of them by 4.25 s (#6764).
     monkeypatch.setattr(lsp_diagnostics, "DIAGNOSTICS_TIMEOUT", 8.0)
     app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
     start = threading.Barrier(4)
@@ -222,9 +223,10 @@ def test_requests_at_once_on_one_permit_fail_fast_rather_than_wait(
         for thread in threads:
             thread.join()
     busy = [elapsed for detail, elapsed in answers if "in use" in detail]
+    held = [elapsed for detail, elapsed in answers if "in use" not in detail]
     assert len(answers) == 4
     assert len(busy) == 3
-    assert max(busy) < 4.0
+    assert max(busy) < held[0]
 
 
 async def test_a_cancelled_request_leaves_no_server_behind(
