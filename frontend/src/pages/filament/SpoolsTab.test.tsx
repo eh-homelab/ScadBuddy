@@ -33,6 +33,22 @@ describe('the Spools tab', () => {
     expect(within(rows[0]!).queryByRole('link', { name: /Set type/ })).toBeNull()
   })
 
+  it('flags a spool whose tray reports something else, naming what it reports (#6713)', async () => {
+    render()
+    const rows = spoolRows(await table())
+    const row = (number: string) => rows.find((one) => one.dataset.spool === number)!
+    expect(await within(row('8')).findByText('Check this tray')).toBeInTheDocument()
+    expect(within(row('8')).getByText('3DP-31B-598 AMS-A slot 4 reports PETG #A7AEB2')).toBeInTheDocument()
+    expect(within(row('4')).queryByText('Check this tray')).toBeNull()
+  })
+
+  it('shows the spools when the trays cannot be read', async () => {
+    server.use(http.get('/api/v1/filament/inventory', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    render()
+    expect(spoolRows(await table())).toHaveLength(11)
+    expect(screen.queryByText('Check this tray')).toBeNull()
+  })
+
   it('offers no printer tray in Move to', async () => {
     const { user } = render()
     const rows = spoolRows(await table())
