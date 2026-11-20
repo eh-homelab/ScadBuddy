@@ -2430,16 +2430,20 @@ holds the manifest (spec §12).
 - **The sandbox fails closed.** It starts each parse through `confine.py --strict` (its own
   user, network, mount and PID namespaces, no `/proc`, no capabilities, no new privileges,
   a seccomp filter) and exits 3 at start, logging why, when any step is refused. A container
-  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the sandbox's pod
-  runs with the seccomp profile `Unconfined`
-  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)), its pod
-  only. On a node with `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's
-  default) an AppArmor-unconfined pod gets no capabilities in its user namespace, and the
-  sandbox exits 3 ("the user namespace's id maps: Permission denied"). So the pod runs under
-  a `Localhost` AppArmor profile, `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`),
-  that the nodes must have loaded ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
-  in prod, eh-homelab/clusters `applications/scadbuddy/apparmor-loader.yaml`). The worker's
-  pod keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
+  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)` and `mount`, so the
+  sandbox's pod runs the `Localhost` seccomp profile `deploy/security/seccomp/intake-sandbox.json`
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)): the
+  runtime's default plus exactly those two calls (#6779). On a node with
+  `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's default) an
+  AppArmor-unconfined pod gets no capabilities in its user namespace, and the sandbox exits 3
+  ("the user namespace's id maps: Permission denied"). So the pod runs under the `Localhost`
+  AppArmor profile `scadbuddy-intake-sandbox` (`deploy/security/apparmor/`): the runtime's
+  default plus `userns,` and the launcher's own mounts
+  ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction)).
+  The nodes must have both profiles (in prod, eh-homelab/clusters
+  `applications/scadbuddy/apparmor-loader.yaml`; `docs/security/trust-boundaries.md`,
+  "Browser and parser pod profiles", says how they were measured). The worker's pod keeps
+  `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
   the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason`
   (`unauthorized`, `busy`, `unreachable`, `timeout`, `transport`, `check-timeout`,
   `crashed`, `status`, `bad-answer`; `/metrics` on port 9090). Alert on it and on the
@@ -2554,17 +2558,17 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   `ENTRYPOINT` is `tini --`; `CMD` is `xvfb-run -a python -m scadbuddy.profile_fetch`.
 - **Pod security (applied by the clusters PR, plan Task 11).** The pod runs `runAsNonRoot` as
   uid 10001, with `allowPrivilegeEscalation: false`, every capability dropped and a read-only
-  root file system. The Chromium container, and it alone, runs with the seccomp profile
-  `Unconfined`, because a runtime's default profile refuses the user namespaces that Chromium's
-  sandbox needs. The source is the measurement: CI got the refusal, "No usable sandbox!", on
-  ubuntu-latest on 2026-11-18 (plan Decision 73). The seccomp tutorial
-  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)) explains only
-  how a pod sets a profile, not this refusal. On Ubuntu 24.04 nodes
-  (`kernel.apparmor_restrict_unprivileged_userns=1`) the pod also needs the `Localhost`
-  AppArmor profile `scadbuddy-intake-sandbox` that the intake sandbox uses
-  ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
-  see "Intake worker (#6133)"; plan Decision 6). Nothing measured that Chromium's sandbox starts
-  under that profile on a prod node. The worker sets `RLIMIT_CORE` to 0 itself, so a node that pipes core dumps
+  root file system. A runtime's default seccomp profile refuses the user namespaces that
+  Chromium's sandbox needs ("No usable sandbox!", plan Decision 73). So the pod runs the
+  `Localhost` seccomp profile `deploy/security/seccomp/profile-fetch.json`: the runtime's
+  default plus `clone` with three namespace-flag sets, `unshare(CLONE_NEWUSER)` and `chroot`,
+  each measured necessary (#6779). On Ubuntu 24.04 nodes
+  (`kernel.apparmor_restrict_unprivileged_userns=1`) the pod also needs a `Localhost`
+  AppArmor profile that grants `userns,`; it runs its own, `scadbuddy-profile-fetch`
+  (`deploy/security/apparmor/`: the runtime's default plus `userns,`;
+  [AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction)).
+  `docs/security/trust-boundaries.md`, "Browser and parser pod profiles", says how they were
+  measured; nothing has measured them on a prod node yet. The worker sets `RLIMIT_CORE` to 0 itself, so a node that pipes core dumps
   to a collector never keeps a renderer's memory. Never add `--no-sandbox`.
 - **Network.** The NetworkPolicy allows DNS, the API's 8082, Temporal's frontend and TCP 443
   to `0.0.0.0/0` except `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`
@@ -2589,7 +2593,7 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   the image, with one image line. A build whose `profile-fetch` job published nothing keeps
   the pin and warns (plan Decision 74). `ci.yml`'s `profile-fetch-image` job runs the driver
   tests in the never-published `profile-fetch-test` stage against a local replica of the
-  site, with `--network none` and `--security-opt seccomp=unconfined`.
+  site, with `--network none`, under the pod's own seccomp file and AppArmor profile.
 - **First fetch.** The first real fetch is the owner's, at the next invoice import or with
   the button. Afterwards read `GET /api/v1/filament/types/{id}/profile-fetch` (GET only):
   expect `status: imported` and `gaps: []`.
