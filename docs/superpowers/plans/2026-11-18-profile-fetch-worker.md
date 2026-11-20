@@ -104,7 +104,9 @@ and README "Intake worker (#6133)".
 6. **Chromium's own sandbox stays on.** There is no `--no-sandbox`. Its user namespaces need
    the pod's seccomp `Unconfined` and the Localhost AppArmor profile
    `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`), which the nodes already load for
-   the intake sandbox. Why: a renderer exploit must not reach the process that holds the
+   the intake sandbox. (Amended 2026-11-20, #6779: the pod now runs its own Localhost
+   profiles, seccomp `scadbuddy/profile-fetch.json` and AppArmor `scadbuddy-profile-fetch`;
+   see `docs/security/trust-boundaries.md`, "Browser and parser pod profiles".) Why: a renderer exploit must not reach the process that holds the
    password and the CRUD credential. If the sandbox cannot start, Chromium's launch fails and
    the worker exits. It fails closed.
 7. **The worker's credential reaches one area, `runs`, and only runs the API opened.** The
@@ -396,7 +398,7 @@ Branch from clusters' `main`. Copy the shape of `applications/scadbuddy/scadbudd
 - Create: `applications/scadbuddy/scadbuddy-profile-fetch.yaml`:
   - ServiceAccount `scadbuddy-profile-fetch` with `automountServiceAccountToken: false`.
   - Deployment `scadbuddy-profile-fetch`, with `replicas: 1` and `strategy: Recreate`, and image `ghcr.io/eh-homelab/scadbuddy-profile-fetch:<tag>@sha256:<digest>` (deploy pins it after this).
-  - Pod `securityContext`: `runAsNonRoot`, uid and gid 10001, seccomp `Unconfined`, and AppArmor `Localhost` `scadbuddy-intake-sandbox`. Container: `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]`.
+  - Pod `securityContext`: `runAsNonRoot`, uid and gid 10001, seccomp `Unconfined`, and AppArmor `Localhost` `scadbuddy-intake-sandbox` (amended 2026-11-20, #6779: now seccomp `Localhost` `scadbuddy/profile-fetch.json` and AppArmor `Localhost` `scadbuddy-profile-fetch`). Container: `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]`.
   - Env: `SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`, `SCADBUDDY_SERVICE_TOKEN_FILE` (a projected token of the ServiceAccount, audience `scadbuddy`, outside `/var/run/secrets/kubernetes.io`), `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_PROFILE_FETCH=profile-fetch`, `SCADBUDDY_TDFP_EMAIL` (secretKeyRef `scadbuddy-3dfp`/`email`), `SCADBUDDY_TDFP_PASSWORD` (`scadbuddy-3dfp`/`password`) and `SCADBUDDY_LOG_LEVEL=INFO`.
   - Volumes: an emptyDir at `/tmp` (`sizeLimit: 1Gi`) and an emptyDir `medium: Memory` at `/dev/shm` (`sizeLimit: 512Mi`).
   - Resources: requests `250m`/`1Gi`, limit `2Gi`.
