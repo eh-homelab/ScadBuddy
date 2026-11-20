@@ -494,6 +494,38 @@ describe('print_output on a library file', () => {
     expect(t.summarize(args)).toContain('moving the prime tower to a free spot')
   })
 
+  it('says when a conflicting prime tower has no free spot to move to (#6758)', async () => {
+    let body: Record<string, unknown> | undefined
+    const conflict = { plate_id: 1, reason: 'keep-out', x: 200, y: 150, move_x: null, move_y: null, message: 'Plate 1: …' }
+    server.use(
+      http.get(`${LIB}/choices`, () =>
+        HttpResponse.json({
+          printer_id: 1,
+          bed_type: 'Cool Plate',
+          filaments: { slots: [{ slot_id: 1, colour_matches: [10] }], suggested: [{ slot_id: 1, spool_id: 10 }] },
+          model_choices: { tier: 'fine' },
+        }),
+      ),
+      http.post(`${LIB}/check`, () =>
+        HttpResponse.json({ errors: [], warnings: [], prime_tower: { conflicts: [conflict], fix: null } }),
+      ),
+      http.post(`${LIB}/run`, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ ...running, status: 'succeeded' }, { status: 200 })
+      }),
+    )
+    const result = await tool('print_output').execute(
+      { library_file_id: FILE, prime_tower: { enabled: true, no_sparse_layers: true }, move_prime_tower: true },
+      ctx(),
+    )
+
+    expect(body).not.toHaveProperty('process_overrides')
+    const answer = firstText(result) as { prime_tower: { conflicts: unknown[]; moved: boolean; note?: string } }
+    expect(answer.prime_tower).toMatchObject({ conflicts: [conflict], moved: false })
+    expect(answer.prime_tower.note).toMatch(/No free spot .* slicer will likely refuse it/)
+    expect(answer.prime_tower.note).toContain('Re-arrange')
+  })
+
   it('checks nothing and moves no tower unless asked (#6758)', async () => {
     let body: Record<string, unknown> | undefined
     server.use(

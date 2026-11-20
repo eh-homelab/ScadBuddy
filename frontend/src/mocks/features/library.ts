@@ -527,8 +527,8 @@ export const handlers = [
   http.post(`${base}/print/library/:id/check`, async ({ params, request }) => {
     const refused = libraryRefusal(Number(params['id']))
     if (refused) return refused
+    const body = (await request.json()) as PrintRunRequest
     if (Number(params['id']) === H2C_FILE) {
-      const body = (await request.json()) as PrintRunRequest
       return HttpResponse.json({
         errors: [],
         warnings: [],
@@ -539,7 +539,6 @@ export const handlers = [
     }
     // #5627, #5628 — a library file's controls open on the process's values too.
     const asked = new URL(request.url).searchParams.get('process_values') === 'true'
-    const body = (await request.json()) as PrintRunRequest
     return HttpResponse.json({
       errors: [],
       warnings: [],

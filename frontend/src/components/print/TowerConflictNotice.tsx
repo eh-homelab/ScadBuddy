@@ -5,11 +5,11 @@ import { Button } from '@/components/ui/button'
 type Props = {
   /** The check's `prime_tower`; `null` or absent when there is no tower to judge. */
   check: TowerCheck | null | undefined
-  /** The process overrides set a tower place (`wipe_tower_x`): a move this dialog made. */
+  /** The slicer settings still hold the tower place this dialog's Move wrote, and a tower is printed. */
   moved: boolean
   /** Write the check's fix into the process overrides. */
   onMove: (fix: Record<string, string[]>) => void
-  /** Take the move out of the process overrides. */
+  /** Take the values the move wrote out of the process overrides again. */
   onUndo: () => void
   /** Run Arrange again with room for the chosen tower; only an arranged output has it. */
   onRearrange?: (() => void) | undefined

@@ -1,9 +1,15 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { Output } from '../api/types'
+import type { Output, PrintRunRequest } from '../api/types'
+import { choicesView } from '../mocks/choices'
+import { mockRackCheck } from '../mocks/features/rack'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
+import { server } from '../mocks/server'
+import { mockTowerCheck } from '../mocks/towerCheck'
+import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 
@@ -71,4 +77,70 @@ describe('PrintPicker · prime tower before the slice (#6758)', () => {
     expect(screen.queryByTestId('tower-conflict')).not.toBeInTheDocument()
     expect(screen.queryByTestId('tower-moved')).not.toBeInTheDocument()
   })
+
+  it('shows no moved line for a tower place the user set, and keeps it through a Re-arrange', async () => {
+    remember({ wipe_tower_x: '120', wipe_tower_y: '30' })
+    const check = vi.spyOn(api, 'checkPrint')
+    const { user } = renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await chooseNoSparseLayers()
+    await waitFor(() =>
+      expect(check.mock.calls.at(-1)?.[1]).toMatchObject({ prime_tower: { enabled: true, no_sparse_layers: true } }),
+    )
+    expect(screen.queryByTestId('tower-moved')).not.toBeInTheDocument()
+
+    await choose(user, screen.getByLabelText('Arrange for'), 'Fewest filament swaps')
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    // The dialog now checks the arranged output, with the user's place still set.
+    await waitFor(() => expect(check.mock.calls.at(-1)?.[0]).not.toBe(output.id))
+    expect(check.mock.calls.at(-1)?.[1]).toMatchObject({
+      process_overrides: { wipe_tower_x: '120', wipe_tower_y: '30' },
+    })
+    expect(screen.queryByTestId('tower-moved')).not.toBeInTheDocument()
+  })
+
+  it('Undo gives back the tower place the user set before the move', async () => {
+    remember({ wipe_tower_x: '200' })
+    // The user's place stands in the keep-out: only the free spot clears it.
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', async ({ request }) => {
+        const body = (await request.json()) as PrintRunRequest
+        const moved = body.process_overrides?.['wipe_tower_x']?.toString() === '157.243'
+        return HttpResponse.json({
+          ...mockRackCheck(null),
+          prime_tower: mockTowerCheck(moved ? body : { ...body, process_overrides: {} }),
+        })
+      }),
+    )
+    const check = vi.spyOn(api, 'checkPrint')
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await chooseNoSparseLayers()
+    fireEvent.click(await screen.findByRole('button', { name: 'Move the prime tower' }))
+    fireEvent.click(within(await screen.findByTestId('tower-moved')).getByRole('button', { name: 'Undo' }))
+
+    await waitFor(() => expect(check.mock.calls.at(-1)?.[1].process_overrides).toEqual({ wipe_tower_x: '200' }))
+    expect(await screen.findByTestId('tower-conflict')).toBeInTheDocument()
+  })
+
+  it('hides the moved line once the prime tower is off', async () => {
+    const { user } = renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await chooseNoSparseLayers()
+    fireEvent.click(await screen.findByRole('button', { name: 'Move the prime tower' }))
+    await screen.findByTestId('tower-moved')
+
+    await choose(user, screen.getByLabelText('Prime tower'), 'Off')
+    await waitFor(() => expect(screen.queryByTestId('tower-moved')).not.toBeInTheDocument())
+  })
 })
+
+/** Remembered choices for the output that set these slicer settings by hand. */
+function remember(processOverrides: Record<string, string>): void {
+  server.use(
+    http.get('/api/v1/print/outputs/:id/choices', () =>
+      HttpResponse.json({
+        ...choicesView,
+        model_choices: { printer_id: null, filament_plan: [], process_overrides: processOverrides },
+      }),
+    ),
+  )
+}

@@ -3,10 +3,13 @@ import type { PrintRunRequest, TowerCheck } from '../api/types'
 /**
  * #6758 — the check's prime tower (`backend/scadbuddy/bambuddy/tower_check.py`), for the
  * mock printers: with "No sparse layers" chosen, plate 1's tower stands inside the keep-out
- * until the request moves it (`wipe_tower_x`/`_y` in `process_overrides`). The free spot is
- * the one the backend finds for a 30 mm object in the middle of an H2C.
+ * until the request moves it (`wipe_tower_x`/`_y` in `process_overrides`). A print with the
+ * tower off gets `null`. The free spot is the one the backend finds for a 30 mm object in
+ * the middle of an H2C.
  */
-export function mockTowerCheck(body: PrintRunRequest): TowerCheck {
+export function mockTowerCheck(body: PrintRunRequest): TowerCheck | null {
+  // A print with the tower off has no tower to judge, as the backend answers it.
+  if (body.prime_tower?.enabled === false) return null
   const asked = body.prime_tower?.enabled === true && body.prime_tower.no_sparse_layers === true
   if (!asked || body.process_overrides?.['wipe_tower_x'] !== undefined) return { conflicts: [], fix: null }
   return {

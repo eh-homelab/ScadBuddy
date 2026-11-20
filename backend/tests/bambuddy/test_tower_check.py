@@ -13,7 +13,7 @@ import trimesh
 from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice
 from scadbuddy.bambuddy.print_run import PrintRunRequest, check_tower
 from scadbuddy.bambuddy.print_source import PrintSource
-from scadbuddy.bambuddy.tower_check import chosen_tower, tower_check
+from scadbuddy.bambuddy.tower_check import chosen_tower, judge_towers, tower_check
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, PlateParts, rezipped, write_plates_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE, TowerSettings, plate_for
 from scadbuddy.render.split import ColourPart
@@ -118,6 +118,33 @@ def test_no_tower_or_no_printer_has_nothing_to_judge(tmp_path: Path) -> None:
         tower_check(payload, DEFAULT_PLATE, choice=None, overrides={}, template={}, plates=None)
         is None
     )
+
+
+def _without_settings(payload: bytes) -> bytes:
+    """``payload`` with no project settings, as an author's file may come."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as source,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for name in source.namelist():
+            if name != PROJECT_SETTINGS_NAME:
+                target.writestr(name, source.read(name))
+    return out.getvalue()
+
+
+def test_a_file_whose_settings_cannot_be_read_has_no_conflicts(tmp_path: Path) -> None:
+    """No project settings, settings that are not JSON, or no zip at all: the check says
+    nothing, and the slicer says why it refuses the file."""
+    payload = _author_file(tmp_path, ("165", "150"))
+    unreadable = [
+        _without_settings(payload),
+        rezipped(payload, {PROJECT_SETTINGS_NAME: b"not json"}),
+        b"not a zip",
+    ]
+    for laid_out in unreadable:
+        check = judge_towers(laid_out, H2C, None, {}, None)
+        assert check.conflicts == [] and check.fix is None
 
 
 def test_an_explicit_override_wins_over_the_choice_and_the_template() -> None:

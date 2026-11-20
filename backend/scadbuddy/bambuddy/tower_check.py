@@ -187,9 +187,15 @@ def judge_towers(
     as :func:`~scadbuddy.bambuddy.send.towers_within_reach` judges one, but at the size
     and keep-out ``asked`` gives (``None``: the file's own, ``send._file_tower``) and at
     the place ``overrides`` give. Only ``plates`` (``None``: all) are judged. A file whose
-    objects or tower places cannot be read has no conflicts: the slicer then says why."""
-    with zipfile.ZipFile(io.BytesIO(laid_out)) as archive:
-        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    objects, project settings or tower places cannot be read has no conflicts: the
+    slicer then says why."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(laid_out)) as archive:
+            settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    except (KeyError, zipfile.BadZipFile, ValueError):
+        return TowerCheck()
+    if not isinstance(settings, dict):
+        return TowerCheck()
     places = _places(settings, overrides)
     bed = _source_bed(settings)
     if places is None or bed is None:

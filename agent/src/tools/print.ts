@@ -295,7 +295,15 @@ function conflictWarned(error: PrintRun['error']): boolean {
 interface TowerAnswer {
   conflicts: unknown[]
   moved: boolean
+  /** Why the tower stays where it conflicts: no free spot fits it. */
+  note?: string
 }
+
+/** #6758: the answer's note when a tower conflicts and no free spot fits it. */
+const NO_FREE_SPOT_NOTE =
+  'No free spot on the plate fits the prime tower, so the tower stays where the slicer will likely refuse it ' +
+  '("Object conflicts were detected"). Re-arrange the output with room for the tower (arrange with this ' +
+  'prime_tower), turn off "No sparse layers", or move the objects, then print again.'
 
 /**
  * #6758: the print dialog's check before the slice (`POST …/check`) for `body`, and, when a
@@ -325,7 +333,9 @@ async function moveTower(
   const check = verdict.prime_tower
   const fix = check?.fix ?? null
   if (fix !== null) body.process_overrides = { ...(body.process_overrides ?? {}), ...fix }
-  return { conflicts: check?.conflicts ?? [], moved: fix !== null }
+  const conflicts = check?.conflicts ?? []
+  if (fix === null && conflicts.length > 0) return { conflicts, moved: false, note: NO_FREE_SPOT_NOTE }
+  return { conflicts, moved: fix !== null }
 }
 const calibration = z.enum(['off', 'on', 'auto'])
 
@@ -601,7 +611,8 @@ const PRINT_OUTPUT_INPUT = withSource({
         'would refuse ("Object conflicts were detected": on the objects, inside the "No sparse layers" keep-out, ' +
         "or out of an extruder's reach) to the free spot the check finds. The move is sent as `process_overrides` " +
         "`wipe_tower_x`/`wipe_tower_y` (one value per plate), over any you set. The answer's `prime_tower` says " +
-        'what the check found and whether the tower moved. Omit to print the tower where the file puts it.',
+        'what the check found and whether the tower moved, with a `note` when no free spot fits the tower. ' +
+        'Omit to print the tower where the file puts it.',
     ),
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))
