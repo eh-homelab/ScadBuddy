@@ -7,7 +7,8 @@
 - Wrapping exclusion area `145..251 x 310..326`: only the prime tower is refused there.
 - ScadBuddy's `render/plate.py`: `PRIME_TOWER_SIDE = 60`, `PRIME_TOWER_BRIM = 3`,
   `TOWER_CLEARANCE = 5`, `EDGE_MARGIN = 2`. `bambuddy/send.py` `towers_within_reach`
-  relocates a tower only if a nozzle cannot reach it, and leaves an author layout
+  relocates a tower only if a nozzle cannot reach it or it stands on its plate's
+  objects' box (#3770), and leaves an author layout
   (`print_settings_id` = a real process name such as `0.20mm Standard @BBL H2C`) alone.
 
 ## The "no sparse layers" rule (Bambu Studio `Print.cpp`)

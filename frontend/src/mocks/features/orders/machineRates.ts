@@ -31,6 +31,8 @@ import { printersState } from '../printers'
  * #6665: the view and "Read from Bambuddy" (`POST …/import`) read a linked printer's log and
  * stamp `events_read_at`; `setBambuddyLogAnswers(false)` makes that read fail (503
  * `log_unavailable`), keeping the stamp. The events list pages by its cursor.
+ * Job cost does not read a rate saved here for the two fixture printers in `costs.ts`
+ * `TODAYS_PRINTER_RATES`: that table wins, so saving their rate leaves job cost unchanged.
  */
 
 /** Bambuddy's maintenance tracker for the linked printer, as `GET /maintenance/printers/{id}` lists it. */

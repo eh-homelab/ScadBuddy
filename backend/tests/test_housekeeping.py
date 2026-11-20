@@ -20,6 +20,7 @@ from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.library.history import MAINTAIN_TIMEOUT
+from scadbuddy.orders.machine_rate import READ_LOGS_BUDGET
 from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
@@ -215,6 +216,13 @@ def test_the_git_sweeps_timeout_covers_its_gc_and_no_more() -> None:
     """#2342: the models-git sweep is bounded by its `git gc`'s own timeout plus a
     margin, not the asset sweep's 30 minutes."""
     assert timedelta(seconds=MAINTAIN_TIMEOUT) < GIT_TIMEOUT < SWEEP_TIMEOUT
+
+
+def test_the_maintenance_imports_timeout_covers_its_read_budget_and_a_margin() -> None:
+    """#6663 review: the sweep stops reading logs at `READ_LOGS_BUDGET`, well inside its
+    start-to-close, so a slow Bambuddy never times the activity out."""
+    margin = MAINTENANCE_IMPORT_TIMEOUT - timedelta(seconds=READ_LOGS_BUDGET)
+    assert margin >= timedelta(minutes=2)
 
 
 def test_the_prunes_timeout_covers_its_settle() -> None:

@@ -2940,7 +2940,8 @@ export const orderTools: Tool[] = [
     handler: async ({ printer, source, ...fields }, ctx) => {
       // These kind checks copy the backend's rule in `MachineRateEventCreate._fields`
       // (backend/scadbuddy/orders/machine_rate.py), here only to give a clearer error before the
-      // call. A change to one must change the other.
+      // call. A change to one must change the other: test/orders.test.ts pins the rule's text
+      // and checks each shape it refuses is refused here with its words.
       if (fields.kind === 'part') {
         if (fields.cost === undefined) throw new ToolError('a replaced part needs its cost')
         if (fields.minutes !== undefined || fields.consumables !== undefined) {

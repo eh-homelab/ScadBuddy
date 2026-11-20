@@ -136,10 +136,10 @@ async def delete_machine_rate(printer_id: str, orders: OrdersDep) -> Response:
         "each row once as an imported task event, by its Bambuddy history id; a row read "
         "again changes nothing, and one gone from Bambuddy stays. Answers the view, whose "
         "`actuals.events_read_at` is this read. The view reads the log too, after its live "
-        "task read. 409 `not_linked` for a printer not linked to Bambuddy, 409 "
-        "`no_machine_rate` for one with no inputs (its rate lists no task), 503 "
-        "`log_unavailable` when Bambuddy does not answer: the stored events and their "
-        "`events_read_at` stay as they were."
+        "task read. 409 `not_linked` for a printer not linked to Bambuddy (or with no "
+        "Bambuddy configured), 409 `no_machine_rate` for one with no inputs (its rate lists "
+        "no task), 503 `log_unavailable` when Bambuddy does not answer or its log cannot be "
+        "kept: the stored events and their `events_read_at` stay as they were."
     ),
 )
 async def import_machine_rate_events(printer_id: str, orders: OrdersDep) -> MachineRateView:

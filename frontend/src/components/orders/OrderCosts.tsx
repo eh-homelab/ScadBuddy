@@ -208,6 +208,7 @@ export function OrderCosts({ costs, onChanged }: { costs: Costs; onChanged: () =
       return next
     })
   const anything = (costs.cost_minor ?? 0) > 0 || costs.revenue_minor != null || costs.items.some((i) => i.revenue_minor != null || (i.cost_minor ?? 0) > 0)
+  const bases = basesNote(costs.machine_rate_bases)
   return (
     <section className="flex flex-col gap-2" aria-label="Cost">
       <h2 className="text-sm font-medium">Cost and margin</h2>
@@ -273,7 +274,7 @@ export function OrderCosts({ costs, onChanged }: { costs: Costs; onChanged: () =
       </table>
       {costs.revenue_minor == null && costs.items.length > 0 && <p className="text-xs text-muted-foreground">The order's margin shows once every item has an accepted quote.</p>}
       <div className="flex flex-col gap-2 text-[13px]" aria-label="Order costs">
-        {basesNote(costs.machine_rate_bases) && <p className="text-xs text-muted-foreground">{basesNote(costs.machine_rate_bases)}</p>}
+        {bases && <p className="text-xs text-muted-foreground">{bases}</p>}
         <p className="text-xs text-muted-foreground">
           On the order: shipping {money(costs.shipping_minor ?? 0)}, charges other than tax {money(costs.charges_minor ?? 0)}.
         </p>

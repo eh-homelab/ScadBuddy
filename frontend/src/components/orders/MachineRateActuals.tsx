@@ -1,4 +1,4 @@
-import { Fragment, useId, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { ApiError, api, newRequestId } from '../../api/client'
 import type { CounterView, MachineRateEvent, MachineRateEventPatch, MachineRateView, RowActuals } from '../../api/types'
 import { formatFullTime, formatLocalTime, timeAgo } from '../../lib/format'
@@ -162,9 +162,16 @@ export function EventList({
   // An event logged or read from Bambuddy changes the window: the pages read before it may miss it.
   const windowKey = events.map((event) => event.id).join(',')
   const [pagedFor, setPagedFor] = useState(windowKey)
+  // Each reset of the pages starts a new generation; a page read for an older one is dropped.
+  const [generation, setGeneration] = useState(0)
+  const latest = useRef(generation)
+  useEffect(() => {
+    latest.current = generation
+  }, [generation])
   if (pagedFor !== windowKey) {
     setPagedFor(windowKey)
     setOlder(null)
+    setGeneration((g) => g + 1)
   }
   const inWindow = new Set(events.map((event) => event.id))
   const past = (older?.events ?? []).filter((event) => !inWindow.has(event.id))
@@ -174,14 +181,17 @@ export function EventList({
   const listId = `events-${useId()}`
   const changed = () => {
     setOlder(null)
+    setGeneration((g) => g + 1)
     onChanged()
   }
 
   async function loadOlder() {
+    const asked = generation
     setLoadingOlder(true)
     setOlderError(null)
     try {
       const page = await api.machineRateEvents(printerId, { kind, name, cursor: older?.next })
+      if (latest.current !== asked) return
       setOlder((was) => ({ events: [...(was?.events ?? []), ...page.events], next: page.next ?? null }))
     } catch (err) {
       setOlderError(refusalText(err))
@@ -649,8 +659,8 @@ const READ_REFUSALS: Record<string, string> = {
   no_machine_rate: 'Save the machine rate first, then read its maintenance from Bambuddy.',
 }
 
-/** `unanswered` keeps when the failed read started: a log read the view shows after that time means Bambuddy answered since. */
-type ReadFailure = { kind: 'unanswered'; since: number } | { kind: 'refused'; text: string }
+/** `unanswered` keeps the view's read time when the press started (the server's clock): a later one means Bambuddy answered since. */
+type ReadFailure = { kind: 'unanswered'; seen: string | null | undefined } | { kind: 'refused'; text: string }
 
 /**
  * #6665 (spec §5, §9) — "Read from Bambuddy" beside the window field on a linked printer:
@@ -677,7 +687,7 @@ export function BambuddyRead({
   const now = useNow(true, 30_000)
 
   async function read() {
-    const started = Date.now()
+    const seen = readAt
     setBusy(true)
     setFailure(null)
     try {
@@ -686,7 +696,7 @@ export function BambuddyRead({
     } catch (err) {
       const code = err instanceof ApiError ? ((err.problem.type ?? '').split('/').pop() ?? '') : ''
       if (code === 'log_unavailable') {
-        setFailure({ kind: 'unanswered', since: started })
+        setFailure({ kind: 'unanswered', seen })
         onUnanswered()
       } else setFailure({ kind: 'refused', text: READ_REFUSALS[code] ?? refusalText(err) })
     } finally {
@@ -695,9 +705,11 @@ export function BambuddyRead({
   }
 
   const readMs = readAt ? Date.parse(readAt) : NaN
-  // The view read after a failed import reads the log too: a read time after the failed one
-  // started means Bambuddy answered it, so the warning goes.
-  const unanswered = failure?.kind === 'unanswered' && (Number.isNaN(readMs) || readMs < failure.since)
+  // The view read after a failed import reads the log too: a read time later than the one seen
+  // when the press started means Bambuddy answered it, so the warning goes. Both times are the
+  // server's, so the browser's clock never decides it.
+  const seenMs = failure?.kind === 'unanswered' && failure.seen ? Date.parse(failure.seen) : NaN
+  const unanswered = failure?.kind === 'unanswered' && (Number.isNaN(readMs) || (!Number.isNaN(seenMs) && readMs <= seenMs))
   return (
     <div className="flex flex-col gap-1 text-xs">
       <div className="flex flex-wrap items-center gap-2">
@@ -723,7 +735,7 @@ export function BambuddyRead({
           {failure.text}
         </p>
       )}
-      {(unanswered || (stale && !failure)) && (
+      {(unanswered || (stale && failure?.kind !== 'unanswered')) && (
         <p role={unanswered ? 'alert' : undefined} className="text-[13px] text-warn">
           {unansweredText(readAt, now)}
         </p>
