@@ -31,7 +31,7 @@ function shown(value: unknown): string {
   return Array.isArray(value) ? value.join(' ') : String(value)
 }
 
-/** A row's changes as "field: before → after", a new catalog name marked so. */
+/** A row's changes as "field: before → after", a new catalog name marked so, and a skipped one (no letter or digit, #6706). */
 function Changes({ changes }: { changes: ImportRowResult['changes'] }) {
   const entries = Object.entries(changes)
   if (!entries.length) return <span className="text-muted-foreground">No change</span>
@@ -42,6 +42,7 @@ function Changes({ changes }: { changes: ImportRowResult['changes'] }) {
           <span className="text-muted-foreground">{field}:</span> {before == null ? '' : `${shown(before)} → `}
           <span className="font-medium">{shown(after)}</span>
           {mark && typeof mark === 'object' && 'new' in mark ? <span className="text-muted-foreground"> (new to the catalog)</span> : null}
+          {mark && typeof mark === 'object' && 'skipped' in mark ? <span className="text-warn"> (skipped: it has no letter or digit)</span> : null}
         </li>
       ))}
     </ul>

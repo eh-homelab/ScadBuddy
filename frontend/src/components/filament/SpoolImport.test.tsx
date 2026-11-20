@@ -36,6 +36,14 @@ describe('the spools CSV import', () => {
     expect(screen.getByRole('button', { name: /^Import/ })).toBeDisabled()
   })
 
+  it('marks a catalog name with no letter or digit as skipped, and the line can still import (#6706)', async () => {
+    const { user } = open()
+    await user.upload(screen.getByLabelText('CSV file'), csv('material,subtype\r\nPLA,\u2014\r\n'))
+    const table = await screen.findByRole('table', { name: 'Import preview' })
+    expect(within(table).getByRole('row', { name: /line 2/i })).toHaveTextContent('(skipped: it has no letter or digit)')
+    expect(screen.getByRole('button', { name: /^Import/ })).toBeEnabled()
+  })
+
   it('says which derived columns it ignores', async () => {
     const { user } = open()
     await user.upload(screen.getByLabelText('CSV file'), csv('number,grams_left,last_used_at\r\n3,10,\r\n'))

@@ -57,6 +57,12 @@ row.
   `PLA Plus` share the key `PLAPLUS` (one product); `PLA+` stays apart from `PLA`, and
   `Silk+` from `Silk`. It replaces R-6706-1's expression in `catalog_key`, `key_sql`, the
   migration and its trigger.
+- R-6706-18: one Bambuddy or CSV catalog name with no letter or digit never stops a pull
+  or an import. That field is skipped (the spool gets no link for it, as when the field is
+  empty) and the rest goes on. The pull counts them in `PullReport.names_skipped`; the CSV
+  preview marks the cell `{"skipped": "no letter or digit"}` beside `{"new": true}`. The
+  catalog routes still refuse such a name with 422. (`+` alone is not such a name: it
+  keys to `PLUS`, R-6706-17.)
 - A name or alias with no letter or digit has no key: the trigger refuses such a name
   (422, `CatalogKeyEmptyError`), the migration neither merges nor keys an existing one,
   and a lookup never finds a row for it.

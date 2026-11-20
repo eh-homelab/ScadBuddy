@@ -498,20 +498,21 @@ IMPORT_ROUTE = "POST /filament/spools/import"
     response_model=ImportPreview,
     summary="Import spools from CSV rows",
     description=(
-        "Rows of a spools CSV, parsed by the caller (cells as text, under the export's "
-        "column names). A row with a `number` changes that spool, only where a cell differs "
-        "from what it shows now; an empty cell changes nothing. A row with no `number` makes "
-        "a spool. Material, subtype, brand, category and effect names resolve by key (any "
-        "case and punctuation) against every name and alias, archived rows too, "
-        "and are added to their catalog when missing; `insert_type` and `type` (a spool "
-        "type's code) must exist; `location` must name exactly one unarchived place and is "
-        "a move. Derived columns (`grams_left`, `last_used_at`, ...) are ignored; any other "
-        "unknown column is a 422. `dry_run: true` answers what each row would do (`create`, "
-        "`update` or `error`, with its changes as `[before, after]`) and writes nothing. "
-        "`dry_run: false` writes every row in one transaction, and needs an "
-        "`Idempotency-Key` (428 without one): a retry with the same key answers the first "
-        "result and writes nothing, and the key with another body is a 422. A write with "
-        "any row in error is a 422 naming each line, and writes nothing."
+        "Rows of a spools CSV, parsed by the caller (cells as text, under the export's column "
+        "names). A row with a `number` changes that spool, only where a cell differs from what "
+        "it shows now; an empty cell changes nothing. A row with no `number` makes a spool. "
+        "Material, subtype, brand, category and effect names resolve by key (any case and "
+        "punctuation) against every name and alias, archived rows too, and are added to their "
+        'catalog when missing (a name with no letter or digit is skipped, marked `{"skipped": '
+        "...}`, and the row goes on); `insert_type` and `type` (a spool type's code) must "
+        "exist; `location` must name exactly one unarchived place and is a move. Derived "
+        "columns (`grams_left`, `last_used_at`, ...) are ignored; any other unknown column is a"
+        " 422. `dry_run: true` answers what each row would do (`create`, `update` or `error`, "
+        "with its changes as `[before, after]`) and writes nothing. `dry_run: false` writes "
+        "every row in one transaction, and needs an `Idempotency-Key` (428 without one): a "
+        "retry with the same key answers the first result and writes nothing, and the key with "
+        "another body is a 422. A write with any row in error is a 422 naming each line, and "
+        "writes nothing."
     ),
 )
 async def import_spools(

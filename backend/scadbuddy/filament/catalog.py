@@ -289,6 +289,13 @@ def _clash(
     return CatalogExistsError()
 
 
+def has_key(conn: Conn, name: str) -> bool:
+    """Whether ``name`` has a key (a letter or digit), as the name trigger reads it."""
+    row = conn.execute(f"SELECT {key_sql('%s')} <> '' AS has", (name,)).fetchone()
+    assert row is not None
+    return bool(row["has"])
+
+
 def find_by_key(conn: Conn, kind: str, name: str, *, material: UUID | None = None) -> UUID | None:
     """The row of a catalog with names whose name or alias has ``name``'s key, archived
     or not. A subtype is ``material``'s own, else one for every material."""

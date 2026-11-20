@@ -858,6 +858,11 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
     if (name === null) continue
     const before = shown?.names?.[column] ?? null
     if (before !== null && sameName(before, name)) continue
+    // No letter or digit, so no key: the cell is skipped and the row goes on (R-6706-18).
+    if (catalogKey(name) === '') {
+      changes[column] = [before, name, { skipped: 'no letter or digit' }]
+      continue
+    }
     // By key, against every name and alias, archived rows too (#6706).
     const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
     if (column === 'material') material = found?.id ?? null

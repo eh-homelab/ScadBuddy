@@ -196,3 +196,53 @@ def test_a_subtype_moved_onto_a_taken_alias_is_409_naming_the_holder(client: Tes
     problem = moved.json()
     assert (problem["subtype_id"], problem["subtype_name"]) == (holder["id"], "shiny")
     assert "shiny" in problem["detail"]
+
+
+# -- R-6706-18: a name with no letter or digit skips that field, not the spool ---------
+
+NO_KEY = "—"  # an em dash: no letter or digit, so no key
+
+
+@respx.mock
+def test_the_pull_skips_a_name_with_no_key_and_pulls_the_rest(client: TestClient) -> None:
+    configure(client)
+    base = {"material": "PLA", "rgba": "00FF00", "label_weight": 1000, "weight_used": 0.0}
+    spools = [
+        base | {"id": 41, "subtype": NO_KEY, "updated_at": "2026-11-14T10:00:00"},
+        base | {"id": 42, "subtype": "Matte", "updated_at": "2026-11-14T10:00:00"},
+    ]
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=spools))
+    respx.get(f"{API}/inventory/catalog").mock(return_value=httpx.Response(200, json=[]))
+    pulled = client.post("/api/v1/filament/bambuddy/import")
+    assert pulled.status_code == 200, pulled.text
+    report = pulled.json()
+    assert (report["created"], report["failed_bb_ids"], report["names_skipped"]) == (2, [], 1)
+    names = sorted(
+        (client.get(f"{SPOOLS}/{i}").json()["names"]["subtype"] or "")
+        for i in report["created_ids"]
+    )
+    assert names == ["", "Matte"]
+
+
+def test_the_csv_import_skips_a_name_with_no_key_and_imports_the_rest(
+    client: TestClient,
+) -> None:
+    rows = [{"material": "PLA", "subtype": NO_KEY}, {"material": "PLA", "subtype": "Matte"}]
+    preview = client.post(f"{SPOOLS}/import", json={"rows": rows, "dry_run": True}).json()
+    skipped, kept = preview["rows"]
+    assert skipped["action"] == "create" and skipped["error"] is None
+    assert skipped["changes"]["subtype"] == [None, NO_KEY, {"skipped": "no letter or digit"}]
+    assert kept["changes"]["subtype"][1] == "Matte"
+    done = client.post(
+        f"{SPOOLS}/import",
+        json={"rows": rows, "dry_run": False},
+        headers={"Idempotency-Key": "k-6706-18"},
+    )
+    assert done.status_code == 200, done.text
+    spools = client.get(SPOOLS).json()
+    assert sorted(s["names"]["subtype"] or "" for s in spools) == ["", "Matte"]
+
+
+def test_a_catalog_name_with_no_key_is_still_422(client: TestClient) -> None:
+    refused = client.post(f"{CATALOG}/subtypes", json={"name": NO_KEY})
+    assert refused.status_code == 422, refused.text

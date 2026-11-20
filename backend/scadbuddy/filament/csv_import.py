@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bambuddy_pull import _catalog_id
-from scadbuddy.filament.catalog import CATALOGS, KIND_OF_TABLE, find_by_key
+from scadbuddy.filament.catalog import CATALOGS, KIND_OF_TABLE, find_by_key, has_key
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.locations import LocationStore, MoveTargetError
 from scadbuddy.filament.spools import FilamentSpoolStore, SpoolTypelessError
@@ -117,7 +117,9 @@ class ImportRowResult(BaseModel):
     """What one row does (or did). ``line`` is the row's line in a file with one header
     line (the first row is line 2). ``number`` is the spool's, or ``None`` for a spool a
     dry run would make. ``changes`` maps a column to ``[before, after]``; a catalog name
-    not in the catalog yet carries a third item, ``{"new": true}``."""
+    not in the catalog yet carries a third item, ``{"new": true}``, and one with no letter
+    or digit (no key, so the cell is skipped and the row goes on) ``{"skipped": "no letter
+    or digit"}``."""
 
     line: int
     action: Literal["create", "update", "error"]
@@ -254,6 +256,10 @@ def _plan(
         name = name.strip()
         current = None if spool is None else getattr(spool.names, column)
         if current is not None and current.upper() == name.upper():
+            continue
+        if CATALOGS[KIND_OF_TABLE[table]].names is not None and not has_key(conn, name):
+            # No letter or digit, so no key: this cell is skipped, the row goes on (R-6706-18).
+            changes[column] = [current, name, {"skipped": "no letter or digit"}]
             continue
         found_id = _find(conn, table, name, material)
         # Another spelling of the name the spool shows (an alias, `dual-color`): no change.
