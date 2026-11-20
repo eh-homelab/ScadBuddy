@@ -13,7 +13,9 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the bundle
 ```
 
-CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Playwright
+CI runs the lint, typecheck and build in the `frontend` job, the unit tests in three
+`frontend-unit` jobs (`pnpm test --shard=N/3`; in one job they took 11 to 16 minutes and
+cancelled it at 20, #6783), and Playwright
 in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 `frontend-e2e-split` checks that the three selections add up to the whole `--list` and
 that each shard ran what it selected, as `backend-pytest-split` does.

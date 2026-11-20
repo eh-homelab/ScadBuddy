@@ -216,7 +216,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   there. It is used on the hosted runners in `ci.yml` and `build-image.yml`.
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
-  `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
+  `agent*` stages and the `frontend`, `frontend-unit`, `agent` and `freshness` jobs.
   `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
   the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
