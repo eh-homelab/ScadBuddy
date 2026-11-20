@@ -2466,17 +2466,19 @@ holds the manifest (spec §12).
 ### Profile-fetch worker (#6625)
 
 A new spool type with a 3dfilamentprofiles.com (3DFP) id gets a slicer preset for each
-printer model and nozzle. A Deployment, `scadbuddy-profile-fetch`, does the browser
-part: `python -m scadbuddy.profile_fetch` polls the Temporal queue `profile-fetch`
+printer model and nozzle. Two Deployments do it (#6780). `scadbuddy-profile-fetch` is the
+worker: `python -m scadbuddy.profile_fetch` polls the Temporal queue `profile-fetch`
 (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROFILE_FETCH`) and answers `/healthz` and `/metrics` on port
-9090. The plan is `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`; the spec is
+9090. It runs no browser. `scadbuddy-profile-fetch-browser` is the browser service:
+`python -m scadbuddy.profile_fetch.browser` runs Chromium on the site and answers the
+worker's RPC and `/healthz` on port 8091. The plan is `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`; the spec is
 `docs/superpowers/specs/2026-11-14-filament-management-design.md` §9. eh-homelab/clusters
 holds the manifests (the clusters PR, plan Task 11, applies the pod settings below).
 
 - **The flow.** The API opens a run (a row in `filament_profile_fetches`) and starts the
-  `ProfileFetch` workflow `profile-fetch:<run_id>`. The worker's export activity logs in to
-  3DFP, exports one profile per printer model and nozzle from the spool page, and PUTs each
-  file to the CRUD service. Its import activity then asks the API to import the run. The API
+  `ProfileFetch` workflow `profile-fetch:<run_id>`. The worker's export activity asks the
+  browser service to log in to 3DFP and to export one profile per printer model and nozzle
+  from the spool page, and PUTs each file to the CRUD service. Its import activity then asks the API to import the run. The API
   checks each file, removes its G-code keys, posts the files as one zip to Bambuddy's
   `POST /local-presets/import`, sets the type's presets for the fetched
   `(printer model, nozzle)` keys, reads K values from `GET /printers/{id}/kprofiles/`
@@ -2495,25 +2497,51 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   start while a run is `running` joins that run, unless no worker
   serves the queue: then the API ends that run `failed` and opens a new one
   (`start_fetch` in `filament/profile_fetch.py`; see "When no worker runs" below).
-- **No database and no key.** The worker refuses to start when `SCADBUDDY_DATABASE_URL`,
-  `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set (#5295), and when `DEBUG`
-  turns on a Playwright channel, because that log would write the 3DFP password to stderr.
-  It runs untrusted web content, so it holds only a `profile-fetch` service credential. That
+- **Two pods (#6780).** The browser runs untrusted web content, so it runs in a pod that
+  cannot reach Temporal or the API. Temporal's frontend has no authorizer and no mTLS here
+  (#6724; eh-homelab/clusters `temporal-cluster-v2.yaml` sets no `authorization` and says
+  "this cluster has no mTLS", read 2026-11-20), so a renderer escape in a Temporal worker
+  could start, signal or read any workflow in the namespace. The worker
+  (`backend/scadbuddy/profile_fetch/worker.py`) holds the CRUD credential, reaches Temporal
+  and the API, and runs no browser. The browser service
+  (`backend/scadbuddy/profile_fetch/browser.py`) holds the 3DFP login and runs Chromium.
+  Between them goes an RPC (`backend/scadbuddy/profile_fetch/remote.py`): the worker asks
+  for a sign-in, an "add to My Spools" or one export (3DFP id, printer model, nozzle), and
+  the service answers the exported file's bytes as the HTTP body (never base64), or a
+  failure kind. The worker reads every answer as untrusted: a kind it does not know is
+  `browser`, the failure's text is the worker's own, the body is capped at 512 KiB and an
+  encoded body is refused. Each call carries the RPC token (`Authorization: Bearer`), which
+  authorizes calls to the service and nothing else; the service answers 401 without it,
+  before it reads the body. The 3DFP login lives in the browser pod only, because only the
+  browser types it; the worker refuses to start with it. The CRUD credential lives in the
+  worker pod only; the browser service refuses to start with a proof, a Temporal or API
+  address, or a mounted ServiceAccount token. When an export activity is cancelled, the
+  worker closes its connection, and the service cancels the step and closes the browser.
+- **No database and no key.** Both processes refuse to start when `SCADBUDDY_DATABASE_URL`,
+  `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set (#5295). The browser
+  service also refuses a `DEBUG` that turns on a Playwright channel, because that log would
+  write the 3DFP password to stderr. The worker holds only a `profile-fetch` service credential. That
   credential reaches one CRUD area, `runs`, and only runs the API opened
   (`api/crud_profile_fetch.py`). The credential is a projected ServiceAccount token named by
   `SCADBUDDY_SERVICE_TOKEN_FILE`; the API URL is `SCADBUDDY_API_INTERNAL_URL`.
-- **Environment:** `SCADBUDDY_API_INTERNAL_URL`, `SCADBUDDY_SERVICE_TOKEN_FILE` (or
-  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; set exactly one), `SCADBUDDY_TEMPORAL_ADDRESS`,
-  `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TDFP_EMAIL`, `SCADBUDDY_TDFP_PASSWORD`,
-  `SCADBUDDY_PROFILE_FETCH_WORK_DIR` (a writable volume for the browser's profile, since
-  the root file system is read-only; default `/tmp`) and `SCADBUDDY_LOG_LEVEL`
-  (`profile_fetch/settings.py`). The worker reads the 3DFP login from its secret at start
-  and removes it from its environment. It types the login into the site's login form in
+- **Environment:** the worker takes `SCADBUDDY_API_INTERNAL_URL`,
+  `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; set exactly one),
+  `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`,
+  `SCADBUDDY_PROFILE_FETCH_BROWSER_URL` (the service's plain `http://` URL, e.g.
+  `http://scadbuddy-profile-fetch-browser:8091`), `SCADBUDDY_PROFILE_FETCH_BROWSER_TOKEN_FILE`
+  (the RPC token's file: 32 to 1024 bytes of visible ASCII) and `SCADBUDDY_LOG_LEVEL`. The
+  browser service takes `SCADBUDDY_TDFP_EMAIL`, `SCADBUDDY_TDFP_PASSWORD`,
+  `SCADBUDDY_PROFILE_FETCH_BROWSER_TOKEN_FILE` (the same token),
+  `SCADBUDDY_PROFILE_FETCH_BROWSER_PORT` (default 8091), `SCADBUDDY_PROFILE_FETCH_WORK_DIR`
+  (a writable volume for the browser's profile, since the root file system is read-only;
+  default `/tmp`) and `SCADBUDDY_LOG_LEVEL` (`profile_fetch/settings.py`). The browser
+  service reads the 3DFP login from its secret at start and removes it from its
+  environment. It types the login into the site's login form in
   the browser, so the browser page holds it for the login. Chromium starts with an
   allowlisted environment, so no browser process gets the login in its environment, and
   no error text, trace or HAR carries it. The browser's profile under
   `SCADBUDDY_PROFILE_FETCH_WORK_DIR` keeps the site's cookies, not the login: before each
-  launch the worker turns off Chromium's autofill, form saving, password manager and
+  launch the browser service turns off Chromium's autofill, form saving, password manager and
   credentials service in the profile's `Default/Preferences`, and it sets autocomplete
   off on the login's fields. `test_the_profile_keeps_no_login_after_a_login`
   (`backend/tests/profile_fetch/test_site.py`) measures this: it logs in to the local
@@ -2528,7 +2556,13 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   the item's username lacks it). This is the owner's statement of 2026-11-18 (plan Decision
   15); #6625 did not read the item. The clusters PR makes a OnePasswordItem `scadbuddy-3dfp`
   that makes a Secret with the keys `email` and `password`, which become the two
-  environment variables above. Never print either value. To check that the field is there,
+  environment variables above, in the browser pod only (#6780). The RPC token is a second
+  Secret, `scadbuddy-profile-fetch-browser-rpc`, from a OnePasswordItem of the same name: a
+  1Password password item titled `scadbuddy-profile-fetch-browser-rpc` in `homelab - prod`,
+  whose `password` field holds 64 hex characters (`openssl rand -hex 32`). The owner creates
+  it by hand (the operator only reads items), and only the worker and the browser pods
+  mount it, as the file `token`. To rotate it, change the field and restart both
+  Deployments. Never print either value. To check that the field is there,
   read it into a variable and print a length or the word "missing", never the value:
 
   ```bash
@@ -2548,18 +2582,21 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   no method for either claim. #6625 measured neither against the real site; its tests drive a
   local replica and never reach 3DFP. Chromium's own
   sandbox stays on. The code never passes `--no-sandbox`: a renderer exploit must not reach
-  the process that holds the password and the CRUD credential. If the sandbox cannot start,
-  the browser does not launch and the worker exits 1.
+  the process that holds the password (the browser pod holds no CRUD credential, #6780). If
+  the sandbox cannot start, the browser does not launch and the browser service exits 1.
 - **The image.** `ghcr.io/eh-homelab/scadbuddy-profile-fetch` is the Dockerfile target
   `profile-fetch` (python:3.12-slim-bookworm, `xvfb`, `tini`, Playwright's Chromium in
   `/ms-playwright`, amd64 only, uid 10001). It carries no source tree, no git and no
   database client library: its build fails when any psycopg package imports. Playwright is
   pinned exactly in the `profile-fetch` dependency group, so the app image does not carry it.
-  `ENTRYPOINT` is `tini --`; `CMD` is `xvfb-run -a python -m scadbuddy.profile_fetch`.
-- **Pod security (applied by the clusters PR, plan Task 11).** The pod runs `runAsNonRoot` as
-  uid 10001, with `allowPrivilegeEscalation: false`, every capability dropped and a read-only
-  root file system. A runtime's default seccomp profile refuses the user namespaces that
-  Chromium's sandbox needs ("No usable sandbox!", plan Decision 73). So the pod runs the
+  `ENTRYPOINT` is `tini --`; `CMD` is `xvfb-run -a python -m scadbuddy.profile_fetch.browser`,
+  the browser service. The worker's Deployment runs the same image with `args: [python, -m,
+  scadbuddy.profile_fetch]` (#6780).
+- **Pod security (applied by the clusters PR, plan Task 11).** Both pods run `runAsNonRoot`
+  as uid 10001, with `allowPrivilegeEscalation: false`, every capability dropped and a
+  read-only root file system. The worker runs no browser, so it runs the runtime's default
+  seccomp profile. A runtime's default seccomp profile refuses the user namespaces that
+  Chromium's sandbox needs ("No usable sandbox!", plan Decision 73). So the browser pod runs the
   `Localhost` seccomp profile `deploy/security/seccomp/profile-fetch.json`: the runtime's
   default plus `clone` with three namespace-flag sets, `unshare(CLONE_NEWUSER)` and `chroot`,
   each measured necessary (#6779). On Ubuntu 24.04 nodes
@@ -2568,12 +2605,16 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   (`deploy/security/apparmor/`: the runtime's default plus `userns,`;
   [AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction)).
   `docs/security/trust-boundaries.md`, "Browser and parser pod profiles", says how they were
-  measured; nothing has measured them on a prod node yet. The worker sets `RLIMIT_CORE` to 0 itself, so a node that pipes core dumps
+  measured; nothing has measured them on a prod node yet. The browser service sets `RLIMIT_CORE` to 0 itself, so a node that pipes core dumps
   to a collector never keeps a renderer's memory. Never add `--no-sandbox`.
-- **Network.** The NetworkPolicy allows DNS, the API's 8082, Temporal's frontend and TCP 443
-  to `0.0.0.0/0` except `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`
-  and `169.254.0.0/16` (plan Decision 14). It is not an FQDN list, because the site loads
-  assets from hosts nobody measured; the except-list keeps the browser off the LAN.
+- **Network.** The browser pod's NetworkPolicy allows DNS and TCP 443 to `0.0.0.0/0`
+  except `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
+  `169.254.0.0/16` and the other ranges that are not public (plan Decision 14), and admits
+  only the worker's pods, on 8091. It has no rule to Temporal or the API (#6780); the
+  clusters check `check-scadbuddy-intake-sandbox-policy.sh` fails when one appears. It is
+  not an FQDN list, because the site loads assets from hosts nobody measured; the
+  except-list keeps the browser off the LAN. The worker's policy allows DNS, the API's 8082,
+  Temporal's frontend and the browser service's 8091, and nothing on the internet.
 - **When no worker runs.** The export's `schedule_to_start` is 6 h, since one worker exports
   one run at a time. The API ends a `running` run `failed` ("no profile-fetch worker picked
   the fetch up") on a read or a start, once the run is 10 min old and no worker polls the
@@ -2586,11 +2627,15 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
 - **What is retried.** A login that the site refuses (it sends the browser back to
   `/login`), an unknown 3DFP id, a missing export option and a file over 512 KiB are not
   retried. A network error, a failed navigation, a timeout, a browser crash and Vercel's
-  check are retried. At start the worker logs them and starts anyway, so a network blip
-  does not stop the worker (build Decisions 110, 116).
+  check are retried. At start the browser service logs them and starts anyway, so a network
+  blip does not stop it (build Decisions 110, 116); a refused login or a browser that does
+  not launch ends it with 1. A browser service that cannot be reached is a retried
+  `browser` failure.
 - **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-profile-fetch.yaml`
   (`MANIFEST_PROFILE_FETCH`) like the slicer: only once that file is in clusters and names
-  the image, with one image line. A build whose `profile-fetch` job published nothing keeps
+  the image, with one image line. The browser service's Deployment has no image line of its
+  own: clusters copies the worker's with a kustomize replacement, as for the intake sandbox,
+  so one pin moves both. A build whose `profile-fetch` job published nothing keeps
   the pin and warns (plan Decision 74). `ci.yml`'s `profile-fetch-image` job runs the driver
   tests in the never-published `profile-fetch-test` stage against a local replica of the
   site, with `--network none`, under the pod's own seccomp file and AppArmor profile.

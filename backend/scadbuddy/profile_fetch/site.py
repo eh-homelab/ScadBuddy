@@ -23,11 +23,12 @@ import logging
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Final, Literal, Self
+from typing import Any, Final, Literal, Protocol, Self
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
@@ -507,3 +508,57 @@ class ThreeDfpSite:
                 await self.page.keyboard.press("Escape")
             except PlaywrightError:
                 return
+
+
+class Site(Protocol):
+    """`ThreeDfpSite`'s surface: an async context manager that signs in and exports. The
+    worker's `remote.RemoteSite` has it too, over the browser service's RPC (#6780)."""
+
+    async def __aenter__(self) -> Any: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
+
+    async def login(self) -> None: ...
+
+    async def ensure_in_my_spools(self, tdfp_id: int) -> None: ...
+
+    async def export(self, tdfp_id: int, printer_model: str, nozzle: str) -> ExportedFile: ...
+
+
+class SiteHolder:
+    """One signed-in browser for the process's life (one export at a time, Decision 16).
+    `get` opens it and signs in when there is none; `drop` closes it, so the next `get`
+    starts afresh (after a crash or a timeout, `activities.FRESH_BROWSER_KINDS`). The
+    browser service holds one over `ThreeDfpSite`, and the worker one over
+    `remote.RemoteSite` (#6780)."""
+
+    def __init__(self, open_site: Callable[[], Site]) -> None:
+        self._open = open_site
+        self._site: Site | None = None
+
+    async def get(self) -> Site:
+        if self._site is None:
+            site = self._open()
+            await site.__aenter__()
+            try:
+                await site.login()
+            except BaseException:
+                with suppress(Exception):
+                    await site.__aexit__(None, None, None)
+                raise
+            self._site = site
+        return self._site
+
+    async def drop(self) -> None:
+        site, self._site = self._site, None
+        if site is not None:
+            with suppress(Exception):
+                await site.__aexit__(None, None, None)
+
+    async def aclose(self) -> None:
+        await self.drop()

@@ -615,7 +615,8 @@ class Settings(BaseSettings):
     temporal_task_queue_customer_files: str = "customer-files"
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_PROFILE_FETCH: where the profile-fetch worker
     # (`python -m scadbuddy.profile_fetch`, #6625) exports a type's slicer profiles from
-    # 3dfilamentprofiles.com; the API starts `ProfileFetch` on it.
+    # 3dfilamentprofiles.com, through its browser service (#6780); the API starts
+    # `ProfileFetch` on it.
     temporal_task_queue_profile_fetch: str = "profile-fetch"
     # The nozzle diameters one profile fetch exports for each printer model (#6625), each
     # one of the resolver's sizes. A JSON list: SCADBUDDY_PROFILE_FETCH_NOZZLES='["0.4"]'.

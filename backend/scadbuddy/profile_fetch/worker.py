@@ -1,12 +1,15 @@
-"""The profile-fetch worker's process (#6625 Task 6): ``python -m scadbuddy.profile_fetch``.
+"""The profile-fetch worker's process (#6625 Task 6, #6780): ``python -m scadbuddy.profile_fetch``.
 
-It holds no database secret, no KEK, no store credential and no Bambuddy key, and refuses
-to start with one (`settings.check_environment`). It exchanges its proof for a
-``profile-fetch`` service credential (`exchange_source`), waits until the CRUD service
-serves its areas, signs in to 3dfilamentprofiles.com once (a refused login or a browser
-that does not launch ends the start; any other sign-in failure is logged, and the first
-fetch signs in again), then polls `DEFAULT_QUEUE` for `ProfileFetch` runs, one activity at a
-time (Decision 16). It imports no database code (`tests/profile_fetch/test_worker.py`).
+It holds no database secret, no KEK, no store credential, no Bambuddy key and no 3DFP login,
+and refuses to start with one (`settings.check_environment`). It runs no browser: each step on
+3dfilamentprofiles.com goes to the browser service, a Deployment of its own
+(`browser.py`), over its RPC (`remote.RemoteSite`, at ``SCADBUDDY_PROFILE_FETCH_BROWSER_URL``
+with the RPC token). So no untrusted web content runs in the pod that holds the CRUD
+credential and reaches Temporal (#6780). It exchanges its proof for a ``profile-fetch``
+service credential (`exchange_source`), waits until the CRUD service serves its areas, then
+polls `DEFAULT_QUEUE` for `ProfileFetch` runs, one activity at a time (Decision 16). It does
+not sign in at start: the browser service does, and the first export asks it to again when it
+has no signed-in browser. It imports no database code (`tests/profile_fetch/test_worker.py`).
 It is not versioned (no worker deployment), so a change to the workflow goes behind
 `workflow.patched`. ``/healthz`` on `HEALTH_PORT` answers 200 while it runs, and
 ``/metrics`` there its metrics (`activities.EXPORTS`).
@@ -16,11 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import resource
 import signal
 from collections.abc import Callable
 from contextlib import suppress
-from typing import Final
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from temporalio.client import Client
@@ -31,20 +32,12 @@ from temporalio.worker import Worker
 from scadbuddy.auth.service_auth import ServiceAuth, exchange_source
 from scadbuddy.crud.client import AREAS_POLL, CrudClient, wait_for_areas
 from scadbuddy.profile_fetch.activities import ProfileFetchActivities, Site, SiteHolder
+from scadbuddy.profile_fetch.remote import RemoteSite
 from scadbuddy.profile_fetch.settings import HEALTH_PORT, ProfileFetchSettings
-from scadbuddy.profile_fetch.site import SITE, SiteError, ThreeDfpSite
 from scadbuddy.profile_fetch.wire import AREAS
 from scadbuddy.profile_fetch.workflow import ProfileFetch
 
 logger = logging.getLogger(__name__)
-
-
-def forbid_core_dumps() -> None:
-    """RLIMIT_CORE 0, soft and hard, for this process and every child it starts (Chromium
-    and its renderers inherit it), so a node's ``core_pattern`` never keeps a crashed
-    renderer's memory, where the page and the login lived (build Decision 75;
-    [getrlimit(2)](https://man7.org/linux/man-pages/man2/getrlimit.2.html), RLIMIT_CORE)."""
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -69,42 +62,6 @@ async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -
     writer.close()
 
 
-class StartRefusedError(Exception):
-    """The worker cannot start: the 3DFP login was refused, or the browser did not
-    launch. Its text is fixed and holds no secret."""
-
-
-BROWSER_DID_NOT_START: Final = "the browser did not start"
-
-
-async def _sign_in_at_start(sites: SiteHolder) -> None:
-    """Sign in once before polling. A refused login, or a browser that does not launch
-    (Chromium's sandbox cannot start, Decision 6), refuses the start: every fetch would
-    fail the same way. A bot check, a timeout or a browser failure after the launch is
-    logged and the worker starts anyway: the first export signs in again under its
-    retries, and a Vercel check that does not clear yet does not crash-loop the pod."""
-    refused: str | None = None
-    try:
-        await sites.get()
-    except SiteError as error:
-        if error.kind == "login_failed":
-            refused = "3DFP login failed"
-        else:
-            # The driver's own text, which never holds the login.
-            logger.warning(
-                "3DFP sign-in at start failed (%s): %s; the first fetch signs in again",
-                error.kind,
-                error,
-            )
-    except Exception as error:
-        # Logged by its class only: a launch error's text can quote the environment.
-        logger.error("the browser did not start (%s)", type(error).__name__)
-        refused = BROWSER_DID_NOT_START
-    if refused is not None:
-        # Raised outside the handler: the text is fixed, and no chain rides along.
-        raise StartRefusedError(refused)
-
-
 async def run(
     settings: ProfileFetchSettings,
     *,
@@ -115,16 +72,14 @@ async def run(
     areas_poll: float = AREAS_POLL,
 ) -> None:
     stop = stop or asyncio.Event()
-    # Before any browser launches: no core file of Chromium may outlive a crash.
-    forbid_core_dumps()
     if crud is None:
         auth = ServiceAuth(exchange_source("profile-fetch", settings))
         crud = CrudClient(settings.api_internal_url, "profile-fetch", auth)
 
-    def browser() -> Site:
-        return ThreeDfpSite(SITE, settings.tdfp_email, settings.tdfp_password, settings.profile_dir)
+    def browser_service() -> Site:
+        return RemoteSite(settings.profile_fetch_browser_url, settings.browser_token)
 
-    sites = SiteHolder(open_site or browser)
+    sites = SiteHolder(open_site or browser_service)
     activities = ProfileFetchActivities(crud, sites)
     health = (
         await asyncio.start_server(_healthz, "0.0.0.0", health_port)
@@ -137,7 +92,6 @@ async def run(
         if not await wait_for_areas(crud, "profile-fetch", AREAS, stop, poll=areas_poll):
             logger.info("stopped before the CRUD service served the profile-fetch areas")
             return
-        await _sign_in_at_start(sites)
         client = await Client.connect(
             settings.temporal_address,
             namespace=settings.temporal_namespace,

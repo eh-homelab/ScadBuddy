@@ -22,7 +22,9 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   `seccomp/intake-sandbox.json`, `seccomp/profile-fetch.json` (containerd v2.2.7's default
   for a pod with no capabilities, plus only what each pod's sandbox needs) and the AppArmor
   profiles `apparmor/scadbuddy-intake-sandbox`, `apparmor/scadbuddy-profile-fetch`. CI runs
-  the intake sandbox and the profile-fetch driver tests under them. eh-homelab/clusters
+  the intake sandbox and the profile-fetch driver tests under them. The profile-fetch
+  files are the browser pod's (`scadbuddy-profile-fetch-browser`, #6780); the worker pod
+  runs no browser and keeps the runtime's default. eh-homelab/clusters
   keeps byte-for-byte copies in `applications/scadbuddy/` with their sha256 in
   `apparmor-loader.yaml`: change a file here, then there. What each rule is for, and how it
   was measured: `docs/security/trust-boundaries.md`, "Browser and parser pod profiles".
