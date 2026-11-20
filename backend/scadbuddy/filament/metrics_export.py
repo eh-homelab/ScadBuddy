@@ -96,7 +96,7 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
         (metrics.filament_reorder_types, {(k,): v for k, v in reorder.items()}),
     ]
     # Everything is built above. Set first, then drop the series that left: a failure
-    # while setting leaves the last good series, never an empty gauge.
+    # while setting never leaves an empty gauge.
     for gauge, values in wanted:
         for labels, amount in values.items():
             gauge.labels(*labels).set(amount)

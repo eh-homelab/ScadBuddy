@@ -106,6 +106,12 @@ describe('the filament mocks', () => {
     expect(metrics.stock.find((row) => row.key === T.ORANGE)).toMatchObject({ spools: 2, grams_left: 1643.5, value: '32.85' })
   })
 
+  it('allows a single day, since equal to until, and refuses since after until', async () => {
+    const metrics = await getMetrics({ since: '2026-11-10', until: '2026-11-10' })
+    expect(metrics.since).toBe('2026-11-10')
+    expect((await refusal(getMetrics({ since: '2026-11-11', until: '2026-11-10' }))).status).toBe(422)
+  })
+
   it('pages the ledger with no row lost or repeated, and refuses a cursor no page gave', async () => {
     const seen: string[] = []
     let cursor: string | null | undefined

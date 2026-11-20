@@ -368,7 +368,7 @@ class MetricsStore:
             low[spool.names.material] += spool.low_stock
         reorder = dict.fromkeys(in_stock, 0)
         type_material: dict[UUID, str | None] = {}
-        for spool in stocked:
+        for spool in [*stocked, *read.spools]:
             if spool.type_id is not None:
                 type_material.setdefault(spool.type_id, spool.names.material)
         for kind in _type_forecasts(read, settings, now):

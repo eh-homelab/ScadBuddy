@@ -391,6 +391,20 @@ def test_snapshot_reorder_uses_the_spools_effective_material(pg_pool: PgPool) ->
     assert found.reorder == {"PETG": 1}
 
 
+def test_snapshot_reorder_takes_an_archived_spools_material(pg_pool: PgPool) -> None:
+    petg = next(
+        r.id
+        for r in CatalogStore(pg_pool).list("materials")
+        if isinstance(r, Material) and r.name == "PETG"
+    )
+    type_id = _type(pg_pool, lead_time_days=7, safety_margin_days=3)
+    spool = _spool(pg_pool, type_id=type_id, grams_left=350, material_id=petg)
+    _sb_end(pg_pool, spool, None, 300, "a")
+    FilamentSpoolStore(pg_pool).archive(spool, True, actor="ann")
+    found = _store(pg_pool).snapshot()
+    assert found.reorder == {"PETG": 1}
+
+
 def test_snapshot_folds_nothing_itself(pg_pool: PgPool) -> None:
     kind = CatalogStore(pg_pool).list("location-kinds")[0]
     assert isinstance(kind, LocationKind)

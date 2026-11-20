@@ -1227,7 +1227,7 @@ async def get_forecast(filament: FilamentDep) -> mm.Forecast:
         "per `bucket` (`week` from Monday or `month`; default `month`) and dimension, from "
         "`since` to `until`, both included (default the 180 days before today); and the "
         "waste by material, type and printer with its rate. Archived spools' plates "
-        "count. A key is the id, `null` when none is set. 422 when `since` is not before "
+        "count. A key is the id, `null` when none is set. 422 when `since` is after "
         "`until` or the range is longer than three years."
     ),
 )
@@ -1250,7 +1250,7 @@ async def get_metrics(
         "Each spool type's price per kg at each supplier over time, one series per "
         "currency, from its price points; and the confirmed invoices' totals per "
         "supplier, month and currency, never converted. From `since` to `until`, both "
-        "included (default the 365 days before today). 422 when `since` is not before "
+        "included (default the 365 days before today). 422 when `since` is after "
         "`until` or the range is longer than three years."
     ),
 )

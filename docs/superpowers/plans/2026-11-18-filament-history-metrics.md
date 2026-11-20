@@ -79,7 +79,7 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
    renames nine series.
 3. **The gauges come from a snapshot, refreshed at most every 60 s per process**
    (`FILAMENT_METRICS_MAX_AGE = 60.0`), in a thread, as the store-usage gauges are. Each
-   gauge is cleared before it is set, so a material that leaves stock leaves the series.
+   gauge's series are set, then the series no longer in the snapshot are removed, so a material that leaves stock leaves the series and a failed export keeps the last values.
    Every API pod exports the same values, so the dashboard reads them with `max by (...)`. For a counter-like value (`used_grams`) the `max by` comes before `delta`, through a subquery (R-T6-1).
 4. **Labels.** `material` (the material's catalog `name`), `brand` (catalog name, a closed
    vocabulary), `location_kind` (the kind's catalog `name`, not the location's free-text
@@ -774,7 +774,7 @@ R-T6-5: Task 9's as-built notes must say a material crossing rank 20 makes a one
 28. Task 4: A type's burn takes the plates of all its spools, archived ones too (born at the oldest), and its `grams_left` and `spools` only the unarchived ones, because an emptied and archived spool's use is still the type's demand. A type is listed when it has a spool, unless the type is archived and none of its spools is in stock; a type whose spools are all archived has 0 g and, with use in the window, says "reorder now".
 29. Task 4: `TypeForecast.low_stock` is true when every unarchived spool of the type is low (a type with none in stock is low), because one nearly empty spool among full ones is not a low type.
 30. Task 4: `days_of_stock` is `None` when the burn is `None`, 0 or less, or not finite, or when the result passes `MAX_FORECAST_DAYS`, so it agrees with `empty_on` and never divides by 0.
-31. Task 4: The inventory and purchasing ranges include both `since` and `until` (UTC days); a week bucket starts on Monday, a month bucket on its first day. Both routes refuse `since >= until` and a range over 1096 days (three years, one leap day) with a 422; the purchasing route gets the same checks as the metrics route, because the same unbounded read would cost the same.
+31. Task 4: The inventory and purchasing ranges include both `since` and `until` (UTC days); a week bucket starts on Monday, a month bucket on its first day. Both routes refuse `since > until` (a single day is allowed) and a range over 1096 days (three years, one leap day) with a 422; the purchasing route gets the same checks as the metrics route, because the same unbounded read would cost the same.
 32. Task 4: A key with no value has the label "No material", "No brand", "No type", "No supplier", "No location" or "No printer"; a type's label is its `code`; a printer id with no `printers` row is labelled by its id. A spool's supplier is its invoice line's confirmed invoice's supplier.
 33. Task 4: `Snapshot.burn` lists every material with an unarchived spool (0 with no use in the window) and any other material whose burn is above 0; `low_stock` and `reorder` list every material in stock (0 when none), a type's reorder counted under its type's material name.
 34. Task 4: `SuppliersStore.stats` sorts in Python after `metrics.plates` (most used first, then name, then id), and `test_stats_count_spend_and_stock` now expects 50 g, not 57 g, because the 7 g of an open estimate is a print still running, which counts 0 (the brief).
