@@ -39,6 +39,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from scadbuddy.bambuddy.errors import (
+    BAD_BODY_PROBLEM,
     REJECTED_PROBLEM,
     Scope,
     TagAlreadyLinkedError,
@@ -433,18 +434,22 @@ class BambuddyClient:
     @staticmethod
     def _rows(response: httpx.Response, *, what: str) -> list[Any]:
         """Bambuddy answers these routes with a bare JSON array. A body that is not JSON,
-        or not an array, is a 502 (R-T7-8)."""
+        or not an array, is a 502 `BAD_BODY_PROBLEM` (R-T7-8, R-T7-10). As for the other
+        answers of the wrong shape, no ``bambuddy_status`` is set: Bambuddy's status was a
+        success."""
         try:
             body = response.json()
         except ValueError:
             raise ApiError(
                 status.HTTP_502_BAD_GATEWAY,
                 f"Bambuddy answered something that is not JSON when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
             ) from None
         if not isinstance(body, list):
             raise ApiError(
                 status.HTTP_502_BAD_GATEWAY,
                 f"Bambuddy answered {type(body).__name__}, not a list, when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
             )
         return body
 

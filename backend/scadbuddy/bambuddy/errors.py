@@ -29,6 +29,9 @@ CONFLICT_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-conflict"
 REJECTED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-rejected"
 UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-unavailable"
 NOT_CONFIGURED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-configured"
+#: Bambuddy answered a listing with a success whose body is not JSON, or not a JSON array
+#: (a proxy's error page, say; R-T7-10). Its own type, so a stored `error_label` says so.
+BAD_BODY_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-bad-body"
 PLATE_FIT_PROBLEM = "https://scadbuddy.dev/problems/plate-does-not-fit"
 #: Several library files asked by id and Bambuddy has none: a misrouted base URL more
 #: likely than every file deleted (the names route, #2349). Its own type, so a client can

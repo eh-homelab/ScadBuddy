@@ -82,6 +82,7 @@ from psycopg.rows import DictRow
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.errors import BAD_BODY_PROBLEM
 from scadbuddy.bambuddy.linking import ARCHIVE_OVERLAP, ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import Archive, SpoolAssignment, SpoolCatalogEntry, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
@@ -1311,10 +1312,16 @@ async def read_catalog(settings: StoredSettings) -> list[SpoolCatalogEntry] | No
         except TimeoutError:
             logger.warning("no spool catalog from Bambuddy: no answer within %s s", CATALOG_TIMEOUT)
         except ApiError as error:
-            logger.warning("no spool catalog from Bambuddy: %s", error.detail)
+            if error.type == BAD_BODY_PROBLEM:
+                # No JSON, or not a list (R-T7-10): the client's own detail, no Bambuddy text.
+                logger.warning(
+                    "no spool catalog from Bambuddy: an answer of another shape (%s)", error.detail
+                )
+            else:
+                logger.warning("no spool catalog from Bambuddy: %s", error.detail)
         except ValueError as error:
-            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON). Only
-            # the type is logged: a ValidationError's text quotes Bambuddy's values (#6580).
+            # A pydantic ValidationError: rows of another shape. Only the type is logged: its
+            # text quotes Bambuddy's values (#6580).
             logger.warning(
                 "no spool catalog from Bambuddy: an answer of another shape (%s)",
                 type(error).__name__,
@@ -1345,10 +1352,17 @@ async def try_assignments(settings: StoredSettings) -> list[SpoolAssignment] | N
                 "no tray assignments from Bambuddy: no answer within %s s", ASSIGNMENTS_TIMEOUT
             )
         except ApiError as error:
-            logger.warning("no tray assignments from Bambuddy: %s", error.detail)
+            if error.type == BAD_BODY_PROBLEM:
+                # No JSON, or not a list (R-T7-10): the client's own detail, no Bambuddy text.
+                logger.warning(
+                    "no tray assignments from Bambuddy: an answer of another shape (%s)",
+                    error.detail,
+                )
+            else:
+                logger.warning("no tray assignments from Bambuddy: %s", error.detail)
         except ValueError as error:
-            # A pydantic ValidationError (another shape) or a JSONDecodeError (no JSON). Only
-            # the type is logged: a ValidationError's text quotes Bambuddy's values (#6580).
+            # A pydantic ValidationError: rows of another shape. Only the type is logged: its
+            # text quotes Bambuddy's values (#6580).
             logger.warning(
                 "no tray assignments from Bambuddy: an answer of another shape (%s)",
                 type(error).__name__,

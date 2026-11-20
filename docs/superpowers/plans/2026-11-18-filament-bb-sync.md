@@ -1408,6 +1408,20 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     a weight-only catalog update and an unread catalog entry, `_maybe`'s `"invalid"` path,
     and failed location, catalog and filament reads; `written` counts with an explicit
     `+= 1`. Cost: none.
+117. Task 7 (R-T7-10, re-review; changes 115): both 502s of `BambuddyClient._rows` (a body
+    that is not JSON, a body that is not a JSON array) carry the problem type
+    `BAD_BODY_PROBLEM` (`https://scadbuddy.dev/problems/bambuddy-bad-body`,
+    `bambuddy/errors.py`), so `error_label` names what happened. Like the client's other
+    wrong-shape answers (`REJECTED_PROBLEM` on a model that does not validate), they set no
+    `bambuddy_status`: Bambuddy's status was a success. The callers of a `_rows` read with
+    an `except ValueError` of their own: `bambuddy_pull.read_catalog` and
+    `try_assignments` caught a JSONDecodeError there; they now log a `BAD_BODY_PROBLEM` as
+    "an answer of another shape" in their `except ApiError`, and their `except ValueError`
+    keeps the pydantic ValidationError. Every other such caller (print_import, choices,
+    archive_cache, printers_now, send, print_run, print_history) also catches `ApiError`
+    with the same handling, so no change. Tests: `test_a_listing_body_of_the_wrong_kind_is_a_bad_body`,
+    `test_a_spool_listing_that_is_not_json_fails_the_pass`,
+    `test_a_garbled_catalog_read_is_none_and_logged`. Cost: none.
 
 ## Self-review
 

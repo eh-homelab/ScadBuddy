@@ -15,6 +15,7 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy.errors import BAD_BODY_PROBLEM
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
@@ -377,7 +378,7 @@ async def test_a_spool_listing_that_is_not_json_fails_the_pass() -> None:
     result = await _run(sync)
 
     assert sync.plans == []
-    assert result.error == "about:blank"
+    assert result.error == BAD_BODY_PROBLEM
     assert sync.recorded == [result]
 
 

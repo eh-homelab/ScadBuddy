@@ -15,7 +15,7 @@ import respx
 
 from scadbuddy.bambuddy import client as client_module
 from scadbuddy.bambuddy.client import BambuddyClient, Operation
-from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, SCOPE_PROBLEM, Scope
+from scadbuddy.bambuddy.errors import BAD_BODY_PROBLEM, NOT_FOUND_PROBLEM, SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import Spool
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, assert_recorded_body, recording, shaped
@@ -371,3 +371,26 @@ def test_every_sync_operation_is_a_declared_name() -> None:
     }
     assert new <= passed
     assert new <= set(typing.get_args(Operation))
+
+
+@pytest.mark.parametrize(
+    ("answer", "detail"),
+    [
+        (httpx.Response(200, text="<html>proxy</html>"), "not JSON"),
+        (httpx.Response(200, json={"not": "a list"}), "dict, not a list"),
+    ],
+)
+@respx.mock
+async def test_a_listing_body_of_the_wrong_kind_is_a_bad_body(
+    bambuddy: BambuddyClient, answer: httpx.Response, detail: str
+) -> None:
+    """R-T7-10: a listing that is not JSON, or not a JSON array, is a 502 of its own type,
+    so `rfid_push.error_label` says what happened; Bambuddy's success status is not kept."""
+    respx.get(f"{API}/inventory/suppliers").mock(return_value=answer)
+
+    with pytest.raises(ApiError) as caught:
+        await bambuddy.suppliers()
+
+    assert caught.value.status == 502 and caught.value.type == BAD_BODY_PROBLEM
+    assert detail in caught.value.detail
+    assert "bambuddy_status" not in caught.value.extensions
