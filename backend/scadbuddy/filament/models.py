@@ -875,10 +875,20 @@ class FilamentInventorySpool(BaseModel):
     presets: list[EffectivePreset] = Field(default_factory=list)
 
 
+class TrayMismatch(BaseModel):
+    """What the printer reports in an untagged tray whose placed spool does not agree
+    with it, where Bambuddy assigns no spool that does (#6713, `FilamentInventory.view`):
+    the tray's ``tray_type`` and its ``#RRGGBBAA``. Nothing moves; a person checks."""
+
+    reported_type: str
+    reported_rgba: str | None = None
+
+
 class InventoryTray(BaseModel):
     """One filled tray a registry printer's latest report shows (#6262 Task 9): its label,
     the material and ``#RRGGBBAA`` it reports, and the SB spool it holds
-    (`FilamentInventory.view`), with how that spool was found."""
+    (`FilamentInventory.view`), with how that spool was found, and ``mismatch`` when that
+    spool, placed in an untagged tray, does not agree with what the tray reports (#6713)."""
 
     ams_id: int
     tray_id: int
@@ -889,6 +899,7 @@ class InventoryTray(BaseModel):
     spool_id: UUID | None = None
     spool_number: int | None = None
     found_by: TrayFoundBy | None = None
+    mismatch: TrayMismatch | None = None
 
 
 class PrinterTrays(BaseModel):
