@@ -25,12 +25,11 @@ from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
 from typing import Protocol
 
-from pydantic import BaseModel, model_validator
-
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.filaments3mf import read_filaments
 from scadbuddy.bambuddy.models import PresetRef, PresetValues
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice as PrimeTowerChoice
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -39,24 +38,6 @@ logger = logging.getLogger(__name__)
 #: copies them (``PRIME_TOWER_KEYS``) to strike them in the template's slicer defaults;
 #: a key added here goes there too, and both tests pin the list.
 PRIME_TOWER_KEYS: tuple[str, ...] = ("enable_prime_tower", "wipe_tower_no_sparse_layers")
-
-
-class PrimeTowerChoice(BaseModel):
-    """The prime tower for one print, over whatever the template declares."""
-
-    #: Whether the slicer prints a prime tower when the plate changes filament.
-    enabled: bool
-    #: With the tower on, print it only on layers that change filament; omitted keeps
-    #: the template's, else the process preset's (off). Ignored with the tower off.
-    no_sparse_layers: bool | None = None
-
-    @model_validator(mode="after")
-    def _off_is_only_off(self) -> PrimeTowerChoice:
-        # With the tower off, "No sparse layers" means nothing: dropped, so the two ways
-        # of saying "off" are one print with one run key (#3648 review).
-        if not self.enabled:
-            self.no_sparse_layers = None
-        return self
 
 
 def template_keys_dropped(choice: PrimeTowerChoice | None) -> frozenset[str]:

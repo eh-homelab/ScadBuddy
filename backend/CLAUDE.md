@@ -224,6 +224,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It keeps room for a prime tower on each plate with more than one colour, unless the body's
+  `prime_tower` (`bambuddy/prime_tower_choice.py` `PrimeTowerChoice`, print_output's) is
+  `enabled: false`: then it packs and writes no tower and states `enable_prime_tower` `"0"`
+  in the 3MF, which `replate_3mf` honours at send (#3770). It does not model the tower's depth
+  or the "no sparse layers" keep-out.
   It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
   by-object plate fails "too close to others" (#6246). A template plate is one object with
   colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
