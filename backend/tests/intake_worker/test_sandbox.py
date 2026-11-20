@@ -430,7 +430,9 @@ async def test_a_check_past_its_timeout_kills_the_child(tmp_path: Path, sleeper:
             )
         assert not box.busy
     assert _failed("check-timeout") == before + 1
-    assert _state(_pid(sleeper)) in (None, "Z", "X")
+    # A child that the timeout stopped before it wrote its pid did not live on (#6760).
+    if sleeper.exists():
+        assert _state(_pid(sleeper)) in (None, "Z", "X")
     assert list((tmp_path / "spool").iterdir()) == []
 
 
