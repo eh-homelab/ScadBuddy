@@ -1605,6 +1605,8 @@ jobs:
           printf '%s' "$token" > "$rpc/token"
           chmod 0755 "$rpc"
           chmod 0444 "$rpc/token"
+          # The container goes on every exit path, the early failures included.
+          trap 'docker rm -f intake-sandbox >/dev/null 2>&1 || true' EXIT
           docker run -d --name intake-sandbox --user 10002:10002 --read-only --cap-drop ALL \
             --security-opt no-new-privileges \
             --security-opt seccomp=deploy/security/seccomp/intake-sandbox.json \
@@ -1631,13 +1633,16 @@ jobs:
             -H "Authorization: Bearer $token" -H 'Content-Type: application/octet-stream' \
             -H 'X-Intake-Request: {"filename":"t.stl","timeout":120,"address_space":4294967296,"id":"0123456789abcdef0123456789abcdef"}' \
             --data-binary @"$RUNNER_TEMP/t.stl" http://127.0.0.1:8090/check || true)"
-          docker rm -f intake-sandbox >/dev/null
           echo "check: HTTP $code"
           head -c 300 "$RUNNER_TEMP/verdict.bin" | tr -c '[:print:]' '.'; echo
           test "$code" = 200
           # The body is the verdict's JSON, then the preview: X-Intake-Verdict-Bytes says
           # where the JSON ends (intake_worker/runner.py VERDICT_BYTES_HEADER).
           n="$(tr -d '\r' < "$RUNNER_TEMP/verdict.headers" | awk -F': ' 'tolower($1) == "x-intake-verdict-bytes" {print $2}')"
+          if [ -z "$n" ]; then
+            echo "::error::the check's reply has no X-Intake-Verdict-Bytes header"
+            exit 1
+          fi
           head -c "$n" "$RUNNER_TEMP/verdict.bin" | jq -e '.isolation == null'
 
       # Even when pytest failed, so the split check still says what ran.
