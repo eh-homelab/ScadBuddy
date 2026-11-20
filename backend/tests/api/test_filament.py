@@ -490,6 +490,51 @@ def test_the_bambuddy_import_pulls_once_then_changes_nothing(client: TestClient)
     assert route.call_count == 2
 
 
+# -- type proposals (#6701, spec §8.1) --------------------------------------------------
+
+PROPOSALS = "/api/v1/filament/type-proposals"
+
+
+def test_type_proposals_are_listed_and_confirmed_under_the_callers_name(
+    client: TestClient,
+) -> None:
+    red = [_spool(client, rgba="#FF0000", label_weight_g=1000) for _ in range(2)]
+    bare = _spool(client)
+    listed = client.get(PROPOSALS)
+    assert listed.status_code == 200, listed.text
+    (group,) = listed.json()["groups"]
+    assert (group["code"], group["count"], group["type_id"]) == ("PLA-FF0000", 2, None)
+    assert sorted(group["spool_ids"]) == sorted(str(s["id"]) for s in red)
+    assert listed.json()["ungrouped"] == [
+        {"spool_id": bare["id"], "number": bare["number"], "missing": ["rgba", "label_weight_g"]}
+    ]
+    keys = ("brand_id", "material_id", "subtype_id", "rgba", "label_weight_g", "material_number")
+    pick = {k: group[k] for k in keys} | {"code": "PLA Red", "spool_ids": group["spool_ids"]}
+    done = client.post(f"{PROPOSALS}/confirm", json={"groups": [pick]})
+    assert done.status_code == 200, done.text
+    (result,) = done.json()["groups"]
+    assert (result["code"], result["made"], result["skipped"]) == ("PLA Red", True, [])
+    for spool in red:
+        one = client.get(f"{SPOOLS}/{spool['id']}").json()
+        assert one["type_id"] == result["type_id"]
+        events = client.get(f"{SPOOLS}/{spool['id']}/events").json()
+        assert [(e["kind"], e["actor"]) for e in events][-1] == ("edited", actor(ANONYMOUS))
+    assert client.get(PROPOSALS).json()["groups"] == []
+
+
+def test_a_type_proposal_confirm_with_a_taken_code_is_409(client: TestClient) -> None:
+    _type(client, code="TAKEN", rgba="#0000FF")
+    spool = _spool(client, rgba="#FF0000", label_weight_g=1000)
+    (group,) = client.get(PROPOSALS).json()["groups"]
+    keys = ("brand_id", "material_id", "subtype_id", "rgba", "label_weight_g", "material_number")
+    pick = {k: group[k] for k in keys} | {"code": "taken", "spool_ids": [spool["id"]]}
+    refused = client.post(f"{PROPOSALS}/confirm", json={"groups": [pick]})
+    assert refused.status_code == 409, refused.text
+    assert client.get(f"{SPOOLS}/{spool['id']}").json()["type_id"] is None
+    empty = client.post(f"{PROPOSALS}/confirm", json={"groups": []})
+    assert empty.status_code == 422, empty.text
+
+
 # -- the inventory and a spool's summary (#6262 Task 9, F16) ---------------------------
 
 INVENTORY = "/api/v1/filament/inventory"
@@ -552,6 +597,7 @@ def test_inventory_route_lists_sb_spools(client: TestClient, pg_conninfo: str) -
                     "spool_id": white["id"],
                     "spool_number": white["number"],
                     "found_by": "tag",
+                    "mismatch": None,
                 }
             ],
         }

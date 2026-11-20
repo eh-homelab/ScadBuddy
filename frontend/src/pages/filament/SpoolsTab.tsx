@@ -2,12 +2,14 @@ import { Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIc
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
+import { getInventory, getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
+import { trayChecks, type TrayCheck } from '../../components/filament/CheckTray'
 import { SpoolCards } from '../../components/filament/SpoolCards'
 import { SpoolImport } from '../../components/filament/SpoolImport'
 import { SpoolsTable } from '../../components/filament/SpoolsTable'
 import { SpoolTiles, type TileFilter } from '../../components/filament/SpoolTiles'
+import { TypeProposals } from '../../components/filament/TypeProposals'
 import { EXPORT_COLUMNS, spoolsCsv } from '../../components/filament/spoolsCsv'
 import {
   COLUMN_IDS,
@@ -118,7 +120,7 @@ const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 
  * #6262 — the Spools tab: the inventory in tiles, then every spool as a dense table or as
  * cards, filtered, grouped and sorted from the URL (`spoolsQuery.ts`). Select spools to
  * archive, restore, delete, move or type them; export what is shown as CSV, or import a
- * CSV (`SpoolImport`).
+ * CSV (`SpoolImport`). On the Needs-type filter, `TypeProposals` proposes their types (#6701).
  */
 export function SpoolsTab() {
   const [params, setParams] = useSearchParams()
@@ -130,6 +132,7 @@ export function SpoolsTab() {
   const [importing, setImporting] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [syncError, setSyncError] = useState<string | null>(null)
+  const [checks, setChecks] = useState<ReadonlyMap<string, TrayCheck>>(new Map())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -143,6 +146,14 @@ export function SpoolsTab() {
       setError(null)
     } catch (cause) {
       if (mine === latest.current) setError(message(cause))
+    }
+    // The trays read Bambuddy too, so they come after the list and never hold it back;
+    // without them, no spool is flagged (#6713).
+    try {
+      const checked = trayChecks(await getInventory())
+      if (mine === latest.current) setChecks(checked)
+    } catch {
+      if (mine === latest.current) setChecks(new Map())
     }
   }, [])
 
@@ -359,6 +370,17 @@ export function SpoolsTab() {
         </ul>
       )}
 
+      {/* #6701: on the Needs-type filter, the types ScadBuddy proposes for those spools. */}
+      {q.needsType === true && data && (
+        <TypeProposals
+          key={data.spools.filter((spool) => !spool.type_id && !spool.archived_at).length}
+          onDone={(text) => {
+            setReport(text)
+            void load()
+          }}
+        />
+      )}
+
       {chosen.length > 0 && data && (
         <BulkBar
           selected={chosen}
@@ -402,9 +424,10 @@ export function SpoolsTab() {
           selected={selected}
           onSelect={select}
           typeCodes={typeCodes}
+          checks={checks}
         />
       )}
-      {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} />}
+      {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} checks={checks} />}
 
       <SpoolImport
         open={importing}

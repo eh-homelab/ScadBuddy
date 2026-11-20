@@ -1,5 +1,6 @@
 import { ArrowDownIcon, ArrowUpIcon } from 'lucide-react'
 import { Fragment } from 'react'
+import { CheckTray, type TrayCheck } from './CheckTray'
 import { NeedsDrying } from './NeedsDrying'
 import { SpoolLink } from './SpoolLink'
 import type { Spool } from '../../api/filament'
@@ -32,7 +33,7 @@ export function NeedsType({ spool }: { spool: Spool }) {
   )
 }
 
-function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, string>) {
+function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, string>, check?: TrayCheck) {
   switch (column) {
     case 'number':
       return (
@@ -42,6 +43,7 @@ function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, str
           </SpoolLink>
           <NeedsType spool={spool} />
           <NeedsDrying spool={spool} />
+          <CheckTray check={check} />
         </span>
       )
     case 'colour':
@@ -72,6 +74,8 @@ interface Props {
   selected: ReadonlySet<string>
   onSelect: (ids: string[], on: boolean) => void
   typeCodes: ReadonlyMap<string, string>
+  /** The spools whose tray reports something else, by id (#6713). */
+  checks?: ReadonlyMap<string, TrayCheck>
 }
 
 /**
@@ -79,7 +83,7 @@ interface Props {
  * over a checker, its grams as a ring) lead every row, then the chosen columns. Text is
  * left-aligned, numbers right-aligned in tabular figures; a header sorts.
  */
-export function SpoolsTable({ groups, columns, sort, onSort, selected, onSelect, typeCodes }: Props) {
+export function SpoolsTable({ groups, columns, sort, onSort, selected, onSelect, typeCodes, checks }: Props) {
   const all = groups.flatMap((group) => group.spools.map((spool) => spool.id))
   const chosen = all.filter((id) => selected.has(id)).length
   const descending = sort.startsWith('-')
@@ -159,7 +163,7 @@ export function SpoolsTable({ groups, columns, sort, onSort, selected, onSelect,
                   </td>
                   {columns.map((column) => (
                     <td key={column} className={cn('px-2 py-1', NUMERIC.has(column) && 'text-right tabular-nums')}>
-                      {cell(spool, column, typeCodes)}
+                      {cell(spool, column, typeCodes, checks?.get(spool.id))}
                     </td>
                   ))}
                 </tr>

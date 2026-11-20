@@ -49,6 +49,11 @@ export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
 export type ImportRowResult = Schemas['ImportRowResult']
+export type TypeProposals = Schemas['TypeProposals']
+export type TypeProposal = Schemas['TypeProposal']
+export type UngroupedSpool = Schemas['UngroupedSpool']
+export type TypeProposalPick = Schemas['TypeProposalPick']
+export type TypeProposalResult = Schemas['TypeProposalResult']
 
 /** Each catalog kind (`filament/catalog.py` `CATALOGS`) and the row it holds. */
 export interface CatalogRows {
@@ -210,6 +215,31 @@ export const setTypePresets = (id: string, rows: TypePresetInput[]) =>
 
 export const setTypeKValues = (id: string, rows: TypeKValueInput[]) =>
   request<TypeKValue[]>(`${BASE}/types/${seg(id)}/k-values`, json('PUT', rows))
+
+/** #6701 — the types proposed for the spools that need one, and the spools in no group. */
+export const listTypeProposals = () => request<TypeProposals>(`${BASE}/type-proposals`)
+
+/** #6701 — makes (or reuses) each picked group's type and types its spools, in one transaction. */
+export const confirmTypeProposals = (groups: TypeProposalPick[]) =>
+  request<TypeProposalResult>(`${BASE}/type-proposals/confirm`, json('POST', { groups }))
+
+// -- 3DFP preset fetch (#6625) ---------------------------------------------------------
+
+export type ProfileFetch = Schemas['ProfileFetch']
+export type ProfileFetchStarted = Schemas['ProfileFetchStarted']
+export type ProfileFetchStatus = Schemas['ProfileFetchStatus']
+export type MissingKey = Schemas['MissingKey']
+
+/**
+ * Starts a fetch of the type's presets from 3dfilamentprofiles.com (its saved `tdfp_id`),
+ * or joins the one that runs (`joined`). 422 `no_tdfp_id` or `no_printer_models`; 503 when
+ * the fetch could not be started.
+ */
+export const startProfileFetch = (typeId: string) =>
+  request<ProfileFetchStarted>(`${BASE}/types/${seg(typeId)}/profile-fetch`, { method: 'POST' })
+
+/** The type's last fetch (`run`, null when it never had one) and the keys it has no preset for (`gaps`). */
+export const getProfileFetch = (typeId: string) => request<ProfileFetchStatus>(`${BASE}/types/${seg(typeId)}/profile-fetch`)
 
 // -- catalogs, locations ----------------------------------------------------------------
 

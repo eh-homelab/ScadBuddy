@@ -25,12 +25,11 @@ from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing
 from typing import Protocol
 
-from pydantic import BaseModel, model_validator
-
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.filaments3mf import read_filaments
 from scadbuddy.bambuddy.models import PresetRef, PresetValues
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice as PrimeTowerChoice
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -39,24 +38,6 @@ logger = logging.getLogger(__name__)
 #: copies them (``PRIME_TOWER_KEYS``) to strike them in the template's slicer defaults;
 #: a key added here goes there too, and both tests pin the list.
 PRIME_TOWER_KEYS: tuple[str, ...] = ("enable_prime_tower", "wipe_tower_no_sparse_layers")
-
-
-class PrimeTowerChoice(BaseModel):
-    """The prime tower for one print, over whatever the template declares."""
-
-    #: Whether the slicer prints a prime tower when the plate changes filament.
-    enabled: bool
-    #: With the tower on, print it only on layers that change filament; omitted keeps
-    #: the template's, else the process preset's (off). Ignored with the tower off.
-    no_sparse_layers: bool | None = None
-
-    @model_validator(mode="after")
-    def _off_is_only_off(self) -> PrimeTowerChoice:
-        # With the tower off, "No sparse layers" means nothing: dropped, so the two ways
-        # of saying "off" are one print with one run key (#3648 review).
-        if not self.enabled:
-            self.no_sparse_layers = None
-        return self
 
 
 def template_keys_dropped(choice: PrimeTowerChoice | None) -> frozenset[str]:
@@ -94,6 +75,33 @@ def prime_tower_overrides(choice: PrimeTowerChoice | None) -> dict[str, str]:
     if choice.no_sparse_layers is not None:
         wanted["wipe_tower_no_sparse_layers"] = "1" if choice.no_sparse_layers else "0"
     return wanted
+
+
+def tower_asked(
+    choice: PrimeTowerChoice | None, overrides: Mapping[str, object] | None = None
+) -> bool | None:
+    """Whether the print turns the tower on (true) or off (false), or leaves it to the
+    file and the presets (``None``). The request's ``enable_prime_tower`` override wins
+    over ``choice``, as it does at the slice. A list is read by its first value."""
+    value = (overrides or {}).get("enable_prime_tower")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is not None:
+        return value != "0"
+    return None if choice is None else choice.enabled
+
+
+def file_tower_overrides(
+    stated_off: bool, choice: PrimeTowerChoice | None, overrides: Mapping[str, object] | None
+) -> dict[str, str]:
+    """The process override that keeps a file's stated tower off (#3770). The slicer
+    slices with a process preset that replaces the file's own ``enable_prime_tower``, so
+    a file that states it off (``bambu3mf.stated_tower_off``: an Arrange packed with no
+    room for a tower) gets ``"0"`` here, unless the print itself says on or off
+    (:func:`tower_asked`)."""
+    if stated_off and tower_asked(choice, overrides) is None:
+        return {"enable_prime_tower": "0"}
+    return {}
 
 
 def tower_wanted(

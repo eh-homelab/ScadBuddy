@@ -24,7 +24,7 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Query, Response, status
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.bambuddy.client import client_for
@@ -36,7 +36,7 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
-from scadbuddy.filament import capture, ntag, rfid_mode
+from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
@@ -61,6 +61,17 @@ from scadbuddy.filament.locations import (
     LocationCycleError,
     LocationExistsError,
     MoveTargetError,
+)
+from scadbuddy.filament.profile_fetch import (
+    PROBLEMS,
+    START_TIMEOUT_SECONDS,
+    FetchNotStartedError,
+    FetchRefusedError,
+    ProfileFetchStarted,
+    ProfileFetchStatus,
+    end_unserved,
+    fetches,
+    start_fetch,
 )
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
@@ -420,6 +431,70 @@ async def put_type_k_values(
     return saved
 
 
+@router.post(
+    "/types/{type_id}/profile-fetch",
+    response_model=ProfileFetchStarted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Fetch a spool type's slicer presets from 3DFP",
+    description=(
+        "Starts a fetch of the type's slicer presets from 3dfilamentprofiles.com (its "
+        "`tdfp_id`): the profile-fetch worker exports one Bambu Studio preset per printer "
+        "model ScadBuddy's printers have and per nozzle in the `profile_fetch_nozzles` "
+        "setting, and the API imports them into Bambuddy's local presets and makes them the "
+        "type's presets for those keys. It answers 202 at once with the run (`running`); "
+        "read its progress with `GET` on this path. A start while a fetch of the type runs "
+        "joins it (`joined: true`, the same run) and starts nothing new, unless no "
+        "profile-fetch worker serves that run: it then ends `failed` and a new run starts. "
+        "404 for no such type, 422 `no_tdfp_id` for a type without a 3DFP id, 422 "
+        "`no_printer_models` when no printer has a model, 503 when Temporal did not take the "
+        "start within 10 s (the run ends `failed`)."
+    ),
+)
+async def start_type_profile_fetch(
+    state: StateDep, caller: CallerDep, type_id: UUID
+) -> ProfileFetchStarted:
+    try:
+        return await start_fetch(state, type_id, actor=actor(caller), timeout=START_TIMEOUT_SECONDS)
+    except FetchRefusedError as refused:
+        if refused.code == "type_not_found":
+            raise _no_type(type_id) from None
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(refused),
+            type_=PROBLEMS + refused.code,
+            code=refused.code,
+        ) from None
+    except FetchNotStartedError as exc:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
+
+
+@router.get(
+    "/types/{type_id}/profile-fetch",
+    response_model=ProfileFetchStatus,
+    summary="Read a spool type's 3DFP preset fetch",
+    description=(
+        "The type's last preset fetch from 3dfilamentprofiles.com (`run`, null when it never "
+        "had one): its `status` (`running`, `imported`, `partial`, `failed`), the keys it "
+        "could not set (`missing`), its notes and error. `gaps` lists each printer model "
+        "and nozzle a fetch would export now that the type has no preset for, with the "
+        "reason its last fetch gave. A run that no profile-fetch worker serves (none polls "
+        "its queue 10 min after it started, or it outlived every timeout) is ended `failed` "
+        "on this read. 404 for no such type."
+    ),
+)
+async def get_type_profile_fetch(
+    state: StateDep, filament: FilamentDep, type_id: UUID
+) -> ProfileFetchStatus:
+    if await asyncio.to_thread(filament.types.get, type_id) is None:
+        raise _no_type(type_id)
+    runs = fetches(state)
+    run = await asyncio.to_thread(runs.latest, type_id)
+    if run is not None:
+        run = await end_unserved(state, run)
+    gaps = await asyncio.to_thread(runs.gaps, type_id)
+    return ProfileFetchStatus(run=run, gaps=gaps)
+
+
 # -- spools, tags, the ledger ---------------------------------------------------------
 
 _SPOOL_REFUSED = (
@@ -486,6 +561,53 @@ async def list_spools(
 async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCreate) -> m.Spool:
     try:
         return await asyncio.to_thread(filament.spools.create, body, actor=actor(caller))
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+
+
+@router.get(
+    "/type-proposals",
+    response_model=m.TypeProposals,
+    summary="Propose spool types for the spools that need one",
+    description=(
+        "Groups the unarchived spools with no type by brand, material, subtype, RGBA, label "
+        "weight and the `material_number` of their last Bambuddy reading (spec §8.1). Each "
+        "group has a proposed `code` (the `material_number`, else `BRAND-MATERIAL-SUBTYPE-"
+        "COLOUR`; one another type holds takes `-<label weight>G`), its catalog names, its "
+        "spools and their count, and `type_id` when a type matches it now. The largest group "
+        "first. `ungrouped` lists the spools that lack a material, an RGBA or a label weight, "
+        "with what each lacks. Writes nothing."
+    ),
+)
+async def list_type_proposals(filament: FilamentDep) -> m.TypeProposals:
+    return await asyncio.to_thread(type_proposals.proposals, filament)
+
+
+@router.post(
+    "/type-proposals/confirm",
+    response_model=m.TypeProposalResult,
+    summary="Make the proposed spool types and type their spools",
+    description=(
+        "Each group is a proposal's key, the spools it named and the `code` to give the "
+        "type. In one transaction, per group: a type that matches the key now is used, else "
+        "the type is made (the key, the most common colour name, and each other value every "
+        "spool shares; no cost). Each named spool that is still unarchived, untyped and of "
+        "the key gets the type, loses each override equal to the type's value, and gets one "
+        "`edited` event under the caller's name. Any other spool is in `skipped` with its "
+        "reason (`not_found`, `archived`, `typed`, `changed`). 409 when an unarchived type "
+        "has one of the codes (nothing is written), 422 for a bad body."
+    ),
+)
+async def confirm_type_proposals(
+    filament: FilamentDep, caller: CallerDep, body: m.TypeProposalConfirm
+) -> m.TypeProposalResult:
+    try:
+        return await asyncio.to_thread(type_proposals.confirm, filament, body, actor=actor(caller))
+    except CatalogExistsError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "a spool type already has one of these codes; choose another name",
+        ) from None
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
 
@@ -950,7 +1072,10 @@ async def _assignments(store: SettingsStore, cache: AssignmentsCache) -> list[Sp
         "report holds it in, else the tray it was last linked to on a printer with no "
         "report; `null` on the shelf), and its linked Bambuddy spool. `trays` is each "
         "registry printer's reported trays, with the spool each holds and how it was found "
-        "(`tag` or `link`). Archived spools only with `include_archived`. While Bambuddy is "
+        "(`tag` or `link`). An untagged tray whose placed spool does not match the "
+        "reported material and colour, where Bambuddy assigns no spool that does, carries "
+        "`mismatch` (what the printer reports; #6713). Archived spools only with "
+        "`include_archived`. While Bambuddy is "
         "linked, a spool no registry printer reports is in the tray Bambuddy assigns its "
         "linked Bambuddy spool to (`GET /inventory/assignments`; plan Decision 3, until "
         "#6263); a failed read places the spools by the reports alone. Nothing else is read "

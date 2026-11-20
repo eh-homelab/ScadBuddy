@@ -7,6 +7,8 @@ import { parseRgba } from '../../../lib/rgba'
 import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
+import { mockSettings } from '../../handlers'
+import { printersState } from '../printers'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 
 type S = components['schemas']
@@ -30,6 +32,7 @@ export function reset() {
   state = seed()
   imports.clear()
   invoicedLine.clear()
+  fetches.clear()
 }
 
 /** The invoice line each spool `addInvoicedSpools` made was bought on (#6266). */
@@ -56,10 +59,11 @@ const problem = (status: keyof typeof TITLES, detail: string, extensions: object
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
-  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'note'],
+  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
+  proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived'],
   tag: ['tag_uid', 'tray_uuid', 'kind', 'override'],
   event: ['kind', 'source', 'at', 'grams', 'temp_c', 'hours', 'note'],
@@ -118,6 +122,8 @@ function view(row: SpoolRow): FilamentSpool {
   const pct = effective.low_stock_pct ?? LOW_STOCK_PCT
   return {
     ...row,
+    // The invoice line it was bought on (#6700): a line may fill a spool with none.
+    invoice_line_id: invoicedLine.get(row.id) ?? invoiceRefOf(row.id)?.line_id ?? null,
     effective,
     overridden,
     names: {
@@ -304,6 +310,34 @@ export function inventoryRows(includeArchived = false): FilamentInventorySpool[]
   }))
 }
 
+/**
+ * `GET /filament/inventory`'s trays: the H2C's, one per placed spool. Slot 4's spool (#8,
+ * clear PETG) does not match what the tray reports, grey PETG, so it carries a
+ * `mismatch` (#6713).
+ */
+function inventoryTrays(): S['PrinterTrays'][] {
+  const trays = listed(false).flatMap((row): S['InventoryTray'][] => {
+    const place = trayOf(row)
+    if (!place) return []
+    const spool = view(row)
+    const odd = place.ams_id === 0 && place.tray_id === 3
+    return [
+      {
+        ams_id: place.ams_id,
+        tray_id: place.tray_id,
+        label: `AMS-A slot ${place.tray_id + 1}`,
+        material: odd ? 'PETG' : (spool.names?.material ?? null),
+        rgba: odd ? '#A7AEB2FF' : (spool.effective?.rgba ?? null),
+        spool_id: row.id,
+        spool_number: row.number,
+        found_by: 'link',
+        mismatch: odd ? { reported_type: 'PETG', reported_rgba: '#A7AEB2FF' } : null,
+      },
+    ]
+  })
+  return trays.length ? [{ printer_id: H2C.printer_id, printer_name: H2C.printer_name, trays }] : []
+}
+
 function summary(): S['InventorySummary'] {
   const rows = listed(false).map(view)
   const grams = (spool: FilamentSpool) => spool.grams_left ?? 0
@@ -358,6 +392,7 @@ function readingsOf(sensor: S['Sensor']): S['SensorReading'][] {
 }
 
 const REFUSED = {
+  tdfpId: 'tdfp_id: Input should be a whole number greater than 0 and less than 2147483648',
   catalogExists: 'a row of this catalog already has that name',
   catalogRef: 'a row this one points at does not exist',
   typeless: 'a spool needs a type_id or a material_id',
@@ -511,6 +546,9 @@ function typeRefusal(values: Record<string, unknown>, self?: string): Response |
   if (absent) return problem(422, absent)
   const temps = badTemps(values)
   if (temps) return problem(422, temps)
+  // `filament/models.py` `TdfpId`: a positive whole number below 2^31.
+  const tdfp = values.tdfp_id
+  if (tdfp != null && !(Number.isInteger(tdfp) && (tdfp as number) > 0 && (tdfp as number) < 2 ** 31)) return problem(422, REFUSED.tdfpId)
   if (badRef(values, TYPE_REFS)) return problem(422, REFUSED.catalogRef)
   // `filament_spool_types_code`: upper(code), live types only.
   const taken = !values.archived_at && state.types.some((type) => type.id !== self && !type.archived_at && sameName(type.code, values.code))
@@ -665,6 +703,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     low_stock_pct: null,
     cost_per_kg: null,
     note: null,
+    tdfp_id: null,
     diameter_mm: '1.75',
     ...body,
     id: newId(),
@@ -675,6 +714,142 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
   })
   state.types.push(made)
   return made
+}
+
+// -- type proposals (#6701, `filament/type_proposals.py`) ----------------------------------
+
+/** What a proposal groups by. The mock's spools have no Bambuddy reading, so `material_number` is `null`. */
+const PROPOSAL_KEY = ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g'] as const
+
+/** A spool or a pick, by the key fields; an absent one reads as `null`. */
+type Keyed = { [K in (typeof PROPOSAL_KEY)[number]]?: unknown }
+
+const proposalKey = (row: Keyed) => PROPOSAL_KEY.map((field) => String(row[field] ?? '')).join('|')
+
+/** `type_proposals._match`'s identity match: the first live type of the key. */
+const matchingType = (row: Keyed) =>
+  state.types.find((type) => !type.archived_at && PROPOSAL_KEY.every((field) => (type[field] ?? null) === (row[field] ?? null)))
+
+/** `_base_code`: `BRAND-MATERIAL-SUBTYPE-COLOUR`, upper case, the hex when there is no colour name. */
+function baseCode(row: SpoolRow, colour: string | null): string {
+  const rgba = row.rgba ?? ''
+  const hex = rgba.endsWith('FF') ? rgba.slice(1, 7) : rgba.slice(1)
+  const parts = [nameOf('brands', row.brand_id), nameOf('materials', row.material_id), nameOf('subtypes', row.subtype_id), colour ?? hex]
+  return parts.filter(Boolean).join('-').toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+/** `_colour_name`: the one most of `rows` have, the first one's on a tie. */
+function commonColour(rows: SpoolRow[]): string | null {
+  const counted = new Map<string, number>()
+  for (const row of rows) if (row.colour_name) counted.set(row.colour_name, (counted.get(row.colour_name) ?? 0) + 1)
+  let best: string | null = null
+  for (const [name, count] of counted) if (best === null || count > counted.get(best)!) best = name
+  return best
+}
+
+function typeProposals(): S['TypeProposals'] {
+  const open = state.spools.filter((row) => !row.type_id && !row.archived_at).sort((a, b) => a.number - b.number)
+  const groups = new Map<string, SpoolRow[]>()
+  const ungrouped: S['UngroupedSpool'][] = []
+  for (const row of open) {
+    const missing = (
+      [
+        ['material', row.material_id],
+        ['rgba', row.rgba],
+        ['label_weight_g', row.label_weight_g],
+      ] as const
+    ).flatMap(([name, value]) => (value == null ? [name] : []))
+    if (missing.length) ungrouped.push({ spool_id: row.id, number: row.number, missing })
+    else groups.set(proposalKey(row), [...(groups.get(proposalKey(row)) ?? []), row])
+  }
+  const taken = new Set(state.types.filter((type) => !type.archived_at).map((type) => type.code.toUpperCase()))
+  const ordered = [...groups.values()].sort((a, b) => b.length - a.length || a[0]!.number - b[0]!.number)
+  return {
+    groups: ordered.map((members) => {
+      const first = members[0]!
+      const colour = commonColour(members)
+      const kind = matchingType(first)
+      let code = kind?.code ?? baseCode(first, colour)
+      if (!kind && taken.has(code.toUpperCase())) {
+        const weighed = `${code}-${first.label_weight_g}G`
+        code = weighed
+        for (let n = 2; taken.has(code.toUpperCase()); n++) code = `${weighed}-${n}`
+      }
+      taken.add(code.toUpperCase())
+      return {
+        code,
+        type_id: kind?.id ?? null,
+        brand_id: first.brand_id,
+        material_id: first.material_id!,
+        subtype_id: first.subtype_id,
+        rgba: first.rgba!,
+        label_weight_g: first.label_weight_g!,
+        material_number: null,
+        brand: nameOf('brands', first.brand_id),
+        material: nameOf('materials', first.material_id) ?? '',
+        subtype: nameOf('subtypes', first.subtype_id),
+        colour_name: colour,
+        spool_ids: members.map((row) => row.id),
+        numbers: members.map((row) => row.number),
+        count: members.length,
+      }
+    }),
+    ungrouped,
+  }
+}
+
+/** `confirm`: all or nothing, as the one transaction is. */
+function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult'] | Response {
+  const live = state.types.filter((type) => !type.archived_at).map((type) => type.code.toUpperCase())
+  const codes = picks.map((pick) => pick.code.trim().toUpperCase())
+  if (codes.some((code, at) => codes.indexOf(code) !== at || (live.includes(code) && !matchingType(normalised(picks[at]!)))))
+    return problem(409, 'a spool type already has one of these codes; choose another name')
+  const done: S['ConfirmedProposal'][] = []
+  for (const raw of picks) {
+    const pick = normalised(raw)
+    const want = proposalKey(pick)
+    const eligible: SpoolRow[] = []
+    const skipped: S['SkippedSpool'][] = []
+    for (const id of new Set(pick.spool_ids)) {
+      const row = state.spools.find((one) => one.id === id)
+      const reason = !row ? 'not_found' : row.archived_at ? 'archived' : row.type_id ? 'typed' : proposalKey(row) !== want ? 'changed' : null
+      if (reason) skipped.push({ spool_id: id, reason })
+      else eligible.push(row!)
+    }
+    if (!eligible.length) {
+      done.push({ code: pick.code, type_id: null, made: false, typed: [], skipped })
+      continue
+    }
+    let kind = matchingType(eligible[0]!)
+    const made = !kind
+    if (!kind) {
+      const created = createType({
+        code: pick.code.trim(),
+        brand_id: pick.brand_id ?? null,
+        material_id: pick.material_id,
+        subtype_id: pick.subtype_id ?? null,
+        rgba: pick.rgba,
+        label_weight_g: pick.label_weight_g,
+        colour_name: commonColour(eligible),
+      })
+      if (created instanceof Response) return created
+      kind = created
+    }
+    for (const row of eligible) {
+      const changes: Record<string, unknown[]> = { type_id: [null, kind.id] }
+      const next: SpoolRow = { ...row, type_id: kind.id, updated_at: now() }
+      for (const field of OVERRIDABLE) {
+        if (row[field] != null && JSON.stringify(row[field]) === JSON.stringify(kind[field])) {
+          changes[field] = [row[field], null]
+          ;(next as Record<string, unknown>)[field] = null
+        }
+      }
+      state.spools[state.spools.indexOf(row)] = next
+      addEvent(row.id, 'edited', { data: { changes } })
+    }
+    done.push({ code: kind.code, type_id: kind.id, made, typed: eligible.map((row) => row.id), skipped })
+  }
+  return { groups: done }
 }
 
 /** A type as the purchasing mocks read it (#6266): its code and label, its label weight, or `null` for none. */
@@ -720,7 +895,6 @@ export function spoolClaimRefusal(id: string, typeId: string | null): string | n
   if (!row) return 'does not exist'
   if (row.archived_at) return 'is archived'
   if (invoicedLine.has(id) || invoiceRefOf(id)) return 'already belongs to an invoice line'
-  if (row.cost_per_kg != null) return 'already has its own cost'
   if (row.type_id != null && row.type_id !== typeId) return 'has another spool type'
   return null
 }
@@ -728,12 +902,19 @@ export function spoolClaimRefusal(id: string, typeId: string | null): string | n
 /** The spool's own label weight in grams, if it has one (`_claimed`: the cost uses it before the type's). */
 export const spoolLabelWeight = (id: string) => state.spools.find((one) => one.id === id)?.label_weight_g ?? null
 
-/** Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`). */
+/**
+ * Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`).
+ * The line's cost replaces a spool's own (#6700); that `edited` event is the caller's.
+ */
 export function updateInvoicedSpool(id: string, typeId: string, costPerKg: string, lineId: string): void {
   const at = state.spools.findIndex((one) => one.id === id)
   const row = state.spools[at]!
   state.spools[at] = { ...row, type_id: typeId, cost_per_kg: costPerKg, updated_at: now() }
-  addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor: `invoice:${lineId}`, data: { changes: { type_id: typeId, cost_per_kg: costPerKg } } })
+  const changes: Record<string, [unknown, unknown]> = {}
+  if (row.type_id !== typeId) changes.type_id = [row.type_id, typeId]
+  if (row.cost_per_kg !== costPerKg) changes.cost_per_kg = [row.cost_per_kg, costPerKg]
+  const actor = row.cost_per_kg == null ? `invoice:${lineId}` : 'mock@example.com'
+  if (Object.keys(changes).length) addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor, data: { changes } })
   invoicedLine.set(id, lineId)
 }
 
@@ -760,6 +941,64 @@ export function addInvoicedSpools(typeId: string, count: number, costPerKg: stri
 
 /** `crud/idempotency.py`: each write's key and the body and answer it had. */
 const imports = new Map<string, { body: string; answer: S['ImportPreview'] }>()
+
+// -- 3DFP preset fetch (#6625) ----------------------------------------------------------
+
+/** Each type's last fetch (`ProfileFetches.latest`), by type id. */
+const fetches = new Map<string, S['ProfileFetch']>()
+
+/** `filament/profile_fetch.py` `NO_PRESET`: a gap no run gave a reason for. */
+const NO_PRESET = 'no preset for this printer and nozzle yet'
+const FETCH_NOZZLES = ['0.2', '0.4', '0.6', '0.8'] as const
+
+/** A refusal of the start as `api/filament.py` writes it: a problem typed by its `code`. */
+const fetchRefused = (code: 'no_tdfp_id' | 'no_printer_models', detail: string) =>
+  HttpResponse.json(
+    { type: `https://scadbuddy.dev/problems/profile-fetch/${code}`, title: TITLES[422], status: 422, detail, code },
+    { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+  )
+
+/** `ProfileFetches._targets`: each printer model ScadBuddy's printers have, with the nozzle setting. */
+function fetchTargets(): S['ExportTarget'][] {
+  const nozzles = mockSettings().profile_fetch_nozzles ?? [...FETCH_NOZZLES]
+  const models = [...new Set(printersState().map((printer) => printer.model).filter((model): model is string => !!model))].sort()
+  return models.map((printer_model) => ({ printer_model, nozzles: [...nozzles] }))
+}
+
+/**
+ * The mock has no worker: a running fetch ends `imported` on the next read of it, with
+ * one preset per target key (a Bambuddy local preset id and a 3DFP-style name), as the
+ * API's import writes them.
+ */
+function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
+  if (run.status !== 'running') return run
+  const type = state.types.find((one) => one.id === run.type_id)
+  const made: S['TypePreset'][] = run.targets.flatMap((target, t) =>
+    target.nozzles.map((nozzle, n) => ({
+      type_id: run.type_id,
+      printer_model: target.printer_model,
+      nozzle_diameter: nozzle,
+      slicer_filament: String(9000 + t * 10 + n),
+      slicer_filament_name: `${type?.code ?? 'Filament'} @BBL ${target.printer_model} ${nozzle} nozzle`,
+    })),
+  )
+  const keys = new Set(made.map((row) => `${row.printer_model}|${row.nozzle_diameter}`))
+  state.typePresets = [...state.typePresets.filter((one) => one.type_id !== run.type_id || !keys.has(`${one.printer_model}|${one.nozzle_diameter}`)), ...made]
+  const ended = { ...run, status: 'imported' as const, finished_at: now() }
+  fetches.set(run.type_id, ended)
+  return ended
+}
+
+/** `ProfileFetches.gaps`: each target key the type has no preset for, with its last run's reason. */
+function fetchGaps(typeId: string): S['MissingKey'][] {
+  const have = new Set(state.typePresets.filter((one) => one.type_id === typeId).map((one) => `${one.printer_model}|${one.nozzle_diameter}`))
+  const reasons = new Map((fetches.get(typeId)?.missing ?? []).map((one) => [`${one.printer_model}|${one.nozzle_diameter}`, one.reason]))
+  return fetchTargets().flatMap((target) =>
+    target.nozzles
+      .filter((nozzle) => !have.has(`${target.printer_model}|${nozzle}`))
+      .map((nozzle) => ({ printer_model: target.printer_model, nozzle_diameter: nozzle, reason: reasons.get(`${target.printer_model}|${nozzle}`) ?? NO_PRESET })),
+  )
+}
 
 /** `csv_import.DERIVED_COLUMNS`: dropped from a row. */
 const DERIVED_CSV = new Set(['grams_left', 'last_weighed_g', 'last_weighed_at', 'last_dried_at', 'last_used_at', 'low_stock', 'archived_at'])
@@ -1086,6 +1325,38 @@ export const handlers = [
     state.typePresets = [...state.typePresets.filter((one) => one.type_id !== typeId), ...rows]
     return HttpResponse.json(rows)
   }),
+  http.post(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
+    const typeId = String(params.id)
+    const type = state.types.find((one) => one.id === typeId)
+    if (!type) return problem(404, `no spool type ${typeId}`)
+    const was = fetches.get(typeId)
+    if (was?.status === 'running') return HttpResponse.json({ run: was, joined: true } satisfies S['ProfileFetchStarted'], { status: 202 })
+    if (type.tdfp_id == null) return fetchRefused('no_tdfp_id', 'the type has no 3dfilamentprofiles id')
+    const targets = fetchTargets()
+    if (targets.length === 0) return fetchRefused('no_printer_models', 'no printer has a model to fetch presets for')
+    const run: S['ProfileFetch'] = {
+      id: newId(),
+      type_id: typeId,
+      tdfp_id: type.tdfp_id,
+      status: 'running',
+      targets,
+      missing: [],
+      k_values: 0,
+      notes: [],
+      error: null,
+      started_at: now(),
+      finished_at: null,
+    }
+    fetches.set(typeId, run)
+    return HttpResponse.json({ run, joined: false } satisfies S['ProfileFetchStarted'], { status: 202 })
+  }),
+  http.get(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
+    const typeId = String(params.id)
+    if (!state.types.some((one) => one.id === typeId)) return problem(404, `no spool type ${typeId}`)
+    const was = fetches.get(typeId)
+    const run = was ? finishFetch(was) : null
+    return HttpResponse.json({ run, gaps: fetchGaps(typeId) } satisfies S['ProfileFetchStatus'])
+  }),
   http.put(`${BASE}/types/:id/k-values`, async ({ params, request }) => {
     const typeId = String(params.id)
     const sent = await request.json()
@@ -1374,7 +1645,7 @@ export const handlers = [
   }),
   http.get(`${BASE}/summary`, () => HttpResponse.json(summary())),
   http.get(`${BASE}/inventory`, ({ request }) =>
-    HttpResponse.json({ spools: inventoryRows(flag(request, 'include_archived')), trays: [] } satisfies FilamentInventoryView),
+    HttpResponse.json({ spools: inventoryRows(flag(request, 'include_archived')), trays: inventoryTrays() } satisfies FilamentInventoryView),
   ),
   http.get(`${BASE}/spools/:id/summary`, ({ params }) => {
     const row = findSpool(String(params.id))
@@ -1490,6 +1761,17 @@ export const handlers = [
     const limit = Number(url.searchParams.get('limit') ?? 500)
     const all = readingsOf(found).filter((one) => !since || one.at >= since)
     return HttpResponse.json(all.slice(-limit))
+  }),
+
+  // -- type proposals (#6701) --
+  http.get(`${BASE}/type-proposals`, () => HttpResponse.json(typeProposals())),
+  http.post(`${BASE}/type-proposals/confirm`, async ({ request }) => {
+    const body = (await request.json()) as { groups?: S['TypeProposalPick'][] }
+    const extra = extraKeys(body, ['groups']) ?? extraKeys(body.groups ?? [], FIELDS.proposalPick)
+    if (extra) return extra
+    if (!Array.isArray(body.groups) || !body.groups.length) return problem(422, 'groups: List should have at least 1 item after validation, not 0')
+    const done = confirmProposals(body.groups)
+    return done instanceof Response ? done : HttpResponse.json(done)
   }),
 
   // -- the pull: the mock has no Bambuddy spools to pull, so it changes nothing --

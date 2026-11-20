@@ -28,6 +28,8 @@ from scadbuddy.auth.models import (
     SessionKind,
 )
 from scadbuddy.auth.routes import (
+    CRUD_CLASSES,
+    CRUD_PATH,
     EXCHANGE_ENDPOINTS,
     FLOW_HOST_ENDPOINTS,
     INTERNAL_MODULES,
@@ -40,6 +42,7 @@ from scadbuddy.auth.routes import (
     route_class,
     would_refuse,
 )
+from scadbuddy.auth.service_credentials import SCOPES
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.guard import CrudCaller, crud_router
 from scadbuddy.main import create_app
@@ -76,6 +79,7 @@ def test_every_route_has_a_class() -> None:
             "crud.storefront",
             "crud.agent",
             "crud.intake",
+            "crud.profile-fetch",
             "flow.host",
         )
 
@@ -148,7 +152,7 @@ def test_every_crud_route_has_its_callers_class_and_guard() -> None:
     )
     checked: set[str] = set()
     for route in _mounted(app.routes):
-        match = re.match(r"(?:/api/v1)?/internal/crud/([a-z]+)/", route.path)
+        match = re.match(r"(?:/api/v1)?/internal/crud/([a-z-]+)/", route.path)
         if match:
             caller = match.group(1)
             assert route_class(route) == f"crud.{caller}", route.path
@@ -327,3 +331,11 @@ def test_only_a_person_marks_a_message_sent() -> None:
         "scadbuddy.api.order_messages.record_order_message_outcome": "api",
         "scadbuddy.api.order_messages.mark_order_message_sent": "person",
     }
+
+
+def test_profile_fetch_caller_has_its_scope() -> None:
+    assert CRUD_CLASSES["profile-fetch"] == "crud.profile-fetch"
+    assert SCOPES["profile-fetch"] == frozenset({"crud.profile-fetch"})
+    match = CRUD_PATH.match("/api/v1/internal/crud/profile-fetch/areas")
+    assert match is not None
+    assert match.group(1) == "profile-fetch"

@@ -56,6 +56,7 @@ Grams = Annotated[float, Field(ge=0, le=1_000_000)]
 LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
 Cost = Annotated[Decimal, Field(ge=0, lt=100_000_000)]
+TdfpId = Annotated[int, Field(gt=0, lt=2**31)]
 Colours = Annotated[list[Rgba], Field(max_length=16)]
 #: How far past the server's clock a person's ``at`` may be (their clock may run ahead).
 FUTURE_SKEW = timedelta(minutes=5)
@@ -516,6 +517,7 @@ class SpoolTypeCreate(_In):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    tdfp_id: TdfpId | None = None
     note: Note | None = None
 
 
@@ -540,6 +542,7 @@ class SpoolTypePatch(_Patch):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    tdfp_id: TdfpId | None = None
     note: Note | None = None
     archived: bool | None = None
 
@@ -565,6 +568,7 @@ class SpoolType(_Row):
     low_stock_pct: int | None
     cost_per_kg: Decimal | None
     filament_id: str | None
+    tdfp_id: int | None
     note: str | None
     archived_at: datetime | None
 
@@ -688,6 +692,92 @@ class EffectiveKValue(BaseModel):
     cali_idx: int | None
     setting_id: str | None
     overridden: bool
+
+
+# -- type proposals (#6701, spec §8.1) --------------------------------------------------
+
+
+class TypeProposal(BaseModel):
+    """A type proposed for the open spools that need one and share its key: brand,
+    material, subtype, RGBA, label weight and the ``material_number`` of their last
+    Bambuddy reading. ``code`` is the proposed name; ``type_id`` names a type that matches
+    the key now (the confirm uses it, and makes none). The names are the catalog rows'."""
+
+    code: str
+    type_id: UUID | None
+    brand_id: UUID | None
+    material_id: UUID
+    subtype_id: UUID | None
+    rgba: Rgba
+    label_weight_g: int
+    material_number: str | None
+    brand: str | None
+    material: str
+    subtype: str | None
+    colour_name: str | None
+    spool_ids: list[UUID]
+    numbers: list[int]
+    count: int
+
+
+ProposalField = Literal["material", "rgba", "label_weight_g"]
+
+
+class UngroupedSpool(BaseModel):
+    """An open spool that needs a type but lacks a value a proposal needs."""
+
+    spool_id: UUID
+    number: int
+    missing: list[ProposalField]
+
+
+class TypeProposals(BaseModel):
+    groups: list[TypeProposal]
+    ungrouped: list[UngroupedSpool]
+
+
+class TypeProposalPick(_In):
+    """One proposal a person confirms: its key, the spools it named and the code to give
+    the type (the proposed one, or the person's)."""
+
+    brand_id: UUID | None = None
+    material_id: UUID
+    subtype_id: UUID | None = None
+    rgba: Rgba
+    label_weight_g: LabelWeight
+    material_number: Text | None = None
+    code: Name
+    spool_ids: list[UUID] = Field(min_length=1, max_length=5000)
+
+
+class TypeProposalConfirm(_In):
+    groups: list[TypeProposalPick] = Field(min_length=1, max_length=500)
+
+
+SkipReason = Literal["not_found", "archived", "typed", "changed"]
+
+
+class SkippedSpool(BaseModel):
+    """A spool a confirm left alone: gone, archived, typed meanwhile, or no longer of the
+    proposal's key."""
+
+    spool_id: UUID
+    reason: SkipReason
+
+
+class ConfirmedProposal(BaseModel):
+    """What a confirm did with one proposal: the type it used (``made`` when it made it;
+    ``None`` when no spool was left to type), the spools it typed and those it skipped."""
+
+    code: str
+    type_id: UUID | None
+    made: bool
+    typed: list[UUID]
+    skipped: list[SkippedSpool]
+
+
+class TypeProposalResult(BaseModel):
+    groups: list[ConfirmedProposal]
 
 
 # -- spools ---------------------------------------------------------------------------
@@ -822,6 +912,9 @@ class Spool(_Row):
     last_dried_hours: Decimal | None
     last_used_at: datetime | None
     archived_at: datetime | None
+    #: The invoice line the spool was bought on, if any. An invoice line may fill a spool
+    #: with none, costed or not; one with a line is refused (#6700).
+    invoice_line_id: UUID | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
@@ -888,10 +981,20 @@ class FilamentInventorySpool(BaseModel):
     presets: list[EffectivePreset] = Field(default_factory=list)
 
 
+class TrayMismatch(BaseModel):
+    """What the printer reports in an untagged tray whose placed spool does not agree
+    with it, where Bambuddy assigns no spool that does (#6713, `FilamentInventory.view`):
+    the tray's ``tray_type`` and its ``#RRGGBBAA``. Nothing moves; a person checks."""
+
+    reported_type: str
+    reported_rgba: str | None = None
+
+
 class InventoryTray(BaseModel):
     """One filled tray a registry printer's latest report shows (#6262 Task 9): its label,
     the material and ``#RRGGBBAA`` it reports, and the SB spool it holds
-    (`FilamentInventory.view`), with how that spool was found."""
+    (`FilamentInventory.view`), with how that spool was found, and ``mismatch`` when that
+    spool, placed in an untagged tray, does not agree with what the tray reports (#6713)."""
 
     ams_id: int
     tray_id: int
@@ -902,6 +1005,7 @@ class InventoryTray(BaseModel):
     spool_id: UUID | None = None
     spool_number: int | None = None
     found_by: TrayFoundBy | None = None
+    mismatch: TrayMismatch | None = None
 
 
 class PrinterTrays(BaseModel):

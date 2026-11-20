@@ -14,12 +14,18 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.accepted_fixes import analysis_request
+from scadbuddy.bambuddy import send
 from scadbuddy.bambuddy.prime_tower import (
     PRIME_TOWER_KEYS,
     PrimeTowerChoice,
+    file_tower_overrides,
     prime_tower_overrides,
+    tower_asked,
 )
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.bambu3mf import replate_3mf
 from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import API, prepared, queue_route
 from tests.api.test_print_preview import SLICED, Job, sliced_routes, start_slice
@@ -166,6 +172,149 @@ def test_the_background_slice_slices_with_the_prints_tower(client: TestClient, m
     assert run_print(client, output_id, json=request).status_code == 200
     assert sliced.call_count == 1
     assert queued.called
+
+
+def _state_tower_off(paths: DataPaths, output_id: str) -> None:
+    """The output's 3MF as Arrange writes it with the tower off (#3770): it states
+    ``enable_prime_tower`` "0" and places no tower."""
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    with zipfile.ZipFile(path) as archive:
+        entries = {info.filename: archive.read(info.filename) for info in archive.infolist()}
+    settings = json.loads(entries["Metadata/project_settings.config"])
+    settings["enable_prime_tower"] = "0"
+    settings.pop("wipe_tower_x", None)
+    settings.pop("wipe_tower_y", None)
+    entries["Metadata/project_settings.config"] = json.dumps(settings).encode()
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+
+
+def _replated(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Each ``tower_on`` the send lays a copy out with (:func:`replate_3mf`)."""
+    seen: list[bool] = []
+
+    def replate(payload: bytes, plate: Any, **kwargs: Any) -> bytes:
+        seen.append(kwargs.get("tower_on", False))
+        return replate_3mf(payload, plate, **kwargs)
+
+    monkeypatch.setattr(send, "replate_3mf", replate)
+    return seen
+
+
+@respx.mock
+def test_a_file_arranged_with_the_tower_off_slices_with_it_off(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3770: the slicer's process preset replaces the file's own ``enable_prime_tower``,
+    so a print with no choice of its own sends the file's "0" as an override, and the
+    send trusts the file's tower off."""
+    output_id = prepared(client, model)
+    _state_tower_off(paths, output_id)
+    replated = _replated(monkeypatch)
+    sliced = routes()
+
+    assert run_print(client, output_id, json=body()).status_code == 200
+
+    assert overrides(sliced) == {"enable_prime_tower": "0"}
+    assert replated == [False]
+
+
+@respx.mock
+def test_a_print_that_turns_the_tower_on_lays_out_room_over_the_files_off(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3770: the print's tower on wins at the slice, so the copy is laid out with room
+    for it (``replate_3mf`` ``tower_on``), rather than trusting the file's "0"."""
+    output_id = prepared(client, model)
+    _state_tower_off(paths, output_id)
+    replated = _replated(monkeypatch)
+    sliced = routes()
+    preset_values(PRESET)
+
+    tower = {**body(), "prime_tower": {"enabled": True}}
+    assert run_print(client, output_id, json=tower).status_code == 200
+
+    assert overrides(sliced) == {"enable_prime_tower": "1"}
+    assert replated == [True]
+
+
+@respx.mock
+def test_a_file_that_states_no_tower_off_is_laid_out_as_before(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_id = prepared(client, model)
+    replated = _replated(monkeypatch)
+    routes()
+    preset_values(PRESET)
+
+    tower = {**body(), "prime_tower": {"enabled": True}}
+    assert run_print(client, output_id, json=tower).status_code == 200
+    assert replated == [False]
+
+
+@pytest.mark.parametrize(
+    ("stated_off", "choice", "request_overrides", "wanted"),
+    [
+        (False, None, {}, {}),
+        (True, None, {}, {"enable_prime_tower": "0"}),
+        (True, None, {"layer_height": "0.2"}, {"enable_prime_tower": "0"}),
+        # The print says on or off itself: its own keys go instead.
+        (True, PrimeTowerChoice(enabled=True), {}, {}),
+        (True, PrimeTowerChoice(enabled=False), {}, {}),
+        (True, None, {"enable_prime_tower": "1"}, {}),
+        (True, None, {"enable_prime_tower": ["1"]}, {}),
+    ],
+)
+def test_a_files_tower_off_is_sent_only_when_the_print_says_nothing(
+    stated_off: bool,
+    choice: PrimeTowerChoice | None,
+    request_overrides: dict[str, Any],
+    wanted: dict[str, str],
+) -> None:
+    assert file_tower_overrides(stated_off, choice, request_overrides) == wanted
+
+
+@pytest.mark.parametrize(
+    ("choice", "request_overrides", "asked"),
+    [
+        (None, {}, None),
+        (PrimeTowerChoice(enabled=True), {}, True),
+        (PrimeTowerChoice(enabled=False), {}, False),
+        # The request's override wins at the slice, so it wins here too.
+        (PrimeTowerChoice(enabled=False), {"enable_prime_tower": "1"}, True),
+        (PrimeTowerChoice(enabled=True), {"enable_prime_tower": ["0"]}, False),
+    ],
+)
+def test_whether_the_print_asks_for_a_tower(
+    choice: PrimeTowerChoice | None, request_overrides: dict[str, Any], asked: bool | None
+) -> None:
+    assert tower_asked(choice, request_overrides) is asked
+
+
+@pytest.mark.parametrize(
+    ("extra", "wanted"),
+    [
+        ({}, None),
+        ({"prime_tower": {"enabled": True, "no_sparse_layers": True}}, (True, True)),
+        # The request's override wins, as `tower_asked` reads it at the run.
+        ({"process_overrides": {"enable_prime_tower": "1"}}, (True, None)),
+        (
+            {
+                "prime_tower": {"enabled": True, "no_sparse_layers": True},
+                "process_overrides": {"enable_prime_tower": "0"},
+            },
+            (False, None),
+        ),
+    ],
+)
+def test_the_analysis_judges_the_runs_tower(
+    extra: dict[str, Any], wanted: tuple[bool, bool | None] | None
+) -> None:
+    """#3770: plate fit (SB4001) gets the run's tower choice, so it refuses what the send
+    refuses."""
+    tower = analysis_request(PrintRunRequest.model_validate({**body(), **extra})).prime_tower
+    assert (None if tower is None else (tower.enabled, tower.no_sparse_layers)) == wanted
 
 
 @pytest.mark.parametrize(

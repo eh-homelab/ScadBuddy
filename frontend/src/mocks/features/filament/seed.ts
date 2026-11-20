@@ -284,6 +284,7 @@ function spoolType(look: TypeLook): S['SpoolType'] {
     low_stock_pct: null,
     cost_per_kg: look.cost_per_kg ?? null,
     filament_id: null,
+    tdfp_id: null,
     note: null,
     archived_at: null,
     created_at: AT,

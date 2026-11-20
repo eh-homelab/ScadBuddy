@@ -258,11 +258,26 @@ export const filamentTools: Tool[] = [
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
-      '`archived: true` takes a type off the lists and frees its code. 409 when an unarchived type has the ' +
+      '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
+      "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
+      'fetches its slicer presets by. 409 when an unarchived type has the ' +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
-      fields: z.record(z.string(), z.unknown()).default({}).describe('The type fields to set'),
+      fields: z
+        .object({
+          tdfp_id: z
+            .number()
+            .int()
+            .min(1)
+            .max(2147483647)
+            .nullable()
+            .optional()
+            .describe("The type's filament id on 3dfilamentprofiles.com: a positive integer below 2^31, null clears it"),
+        })
+        .catchall(z.unknown())
+        .default({})
+        .describe('The type fields to set'),
       archived: z.boolean().optional(),
     }),
     risk: 'write',
@@ -285,6 +300,67 @@ export const filamentTools: Tool[] = [
         ),
       )
     },
+  }),
+
+  defineTool({
+    name: 'filament_type_proposals',
+    label: 'Propose spool types for spools that need one',
+    description:
+      'The spool types ScadBuddy proposes for the unarchived spools with no type (spec §8.1), grouped by brand, ' +
+      'material, subtype, RGBA, label weight and the `material_number` of their last Bambuddy reading. Each group ' +
+      'has a proposed `code`, its catalog names, `colour_name`, its `spool_ids`, `numbers` and `count`, and ' +
+      '`type_id` when a type matches it now (confirming uses that type). `ungrouped` lists the spools that lack a ' +
+      'material, an RGBA or a label weight, with what each lacks. Show the groups to the user before ' +
+      'filament_type_proposals_confirm. Writes nothing.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/type-proposals'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/type-proposals'), 'list the type proposals')),
+  }),
+
+  defineTool({
+    name: 'filament_type_proposals_confirm',
+    label: 'Make proposed spool types',
+    description:
+      "Make the spool types of the groups given (from filament_type_proposals: each group's key fields and " +
+      "`spool_ids` as listed, and a `code`: the proposed one or the user's) and type their spools, in one " +
+      'transaction. A type that matches a group now is used instead of a new one. Each spool that is still ' +
+      "unarchived, untyped and of the group gets the type and loses each own value equal to the type's; any other " +
+      'is listed in `skipped` with its reason. 409 when a type already has one of the codes (nothing is written). ' +
+      'Call it only after the user says yes to these groups and names. Writes ScadBuddy only.',
+    input: z.object({
+      groups: z
+        .array(
+          z.object({
+            brand_id: z.string().uuid().nullable().optional(),
+            material_id: z.string().uuid(),
+            subtype_id: z.string().uuid().nullable().optional(),
+            rgba: z.string().describe('`#RRGGBBAA`, as the proposal lists it'),
+            label_weight_g: z.number().int().positive(),
+            material_number: z.string().nullable().optional(),
+            code: z.string().min(1).max(128).describe("The new type's code: the proposed one, or the user's"),
+            spool_ids: z.array(z.string().uuid()).min(1),
+          }),
+        )
+        .min(1)
+        .max(500),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/type-proposals/confirm'],
+    summarize: ({ groups }) => {
+      const spools = groups.reduce((sum, group) => sum + group.spool_ids.length, 0)
+      return `Make ${groups.length} spool type${groups.length === 1 ? '' : 's'} for ${spools} spool${spools === 1 ? '' : 's'}`
+    },
+    handler: async ({ groups }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/type-proposals/confirm', { body: { groups } }),
+          'make the proposed spool types',
+        ),
+      ),
   }),
 
   defineTool({
@@ -316,6 +392,56 @@ export const filamentTools: Tool[] = [
             body: presets,
           }),
           `set the presets of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_type_fetch_profiles',
+    label: "Fetch a spool type's 3DFP presets",
+    description:
+      "Start a fetch of a spool type's slicer presets from 3dfilamentprofiles.com by its `tdfp_id`: " +
+      "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
+      'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
+      "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
+      'where a printer has an exact match. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
+      '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
+      'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
+      '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
+      'fetch could not be started. Writes ScadBuddy and Bambuddy\'s local presets. Approved first.',
+    input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/types/{type_id}/profile-fetch'],
+    summarize: ({ type_id }) => `Fetch the 3DFP presets of spool type ${type_id}`,
+    handler: async ({ type_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/types/{type_id}/profile-fetch', { params: { path: { type_id } } }),
+          `start the 3DFP preset fetch of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_type_profile_fetch',
+    label: "Read a spool type's 3DFP preset fetch",
+    description:
+      "A spool type's last preset fetch from 3dfilamentprofiles.com (`run`, null when it never had one): its " +
+      '`status` (`running`, `imported`, `partial`, `failed`), the keys it could not set (`missing`, each with ' +
+      'its reason), its notes, K values set and `error`. `gaps` lists each printer model and nozzle a fetch ' +
+      'would export now that the type has no preset for, with the reason its last fetch gave. A run no ' +
+      'profile-fetch worker serves is ended `failed` on this read, and its workflow cancelled, so this read ' +
+      'can write. Writes ScadBuddy only.',
+    input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/types/{type_id}/profile-fetch'],
+    handler: async ({ type_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/types/{type_id}/profile-fetch', { params: { path: { type_id } } }),
+          `read the 3DFP preset fetch of spool type ${type_id}`,
         ),
       ),
   }),

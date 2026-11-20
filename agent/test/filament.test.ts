@@ -223,6 +223,103 @@ describe('filament type tools', () => {
   })
 })
 
+describe('filament type 3DFP preset fetch tools (#6625)', () => {
+  const FETCH = `${TYPE}/profile-fetch`
+  const RUN = {
+    id: '8d6f3c1e-0000-4000-8000-0000000066a1',
+    type_id: ROW,
+    tdfp_id: 1234,
+    targets: [{ printer_model: 'H2C', nozzles: ['0.4'] }],
+    status: 'running',
+    missing: [],
+    k_values: 0,
+    notes: [],
+    error: null,
+    started_at: '2026-11-18T00:00:00Z',
+    finished_at: null,
+  }
+
+  it.each([
+    ['filament_type_fetch_profiles', 'outward', true, ['POST /api/v1/filament/types/{type_id}/profile-fetch']],
+    // R-PR2: its read can end a stale run and cancel the run's workflow, so it is a write;
+    // only `outward` is gated.
+    ['filament_type_profile_fetch', 'write', false, ['GET /api/v1/filament/types/{type_id}/profile-fetch']],
+  ])('%s is %s tier, gated %s, on its route', (name, risk, gated, routes) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(gated)
+    expect(tool(name).routes).toEqual(routes)
+  })
+
+  it.each(['filament_type_fetch_profiles', 'filament_type_profile_fetch'])('%s takes a uuid type_id', (name) => {
+    expect(() => tool(name).parse({ type_id: 'not-a-uuid' })).toThrow()
+    expect(() => tool(name).parse({})).toThrow()
+    expect(() => tool(name).parse({ type_id: ROW })).not.toThrow()
+  })
+
+  it('says the start reaches 3DFP and Bambuddy, and the upsert takes a tdfp_id', () => {
+    const start = tool('filament_type_fetch_profiles').description
+    expect(start).not.toContain('Writes ScadBuddy only')
+    expect(start).toContain('Bambuddy')
+    expect(start).toContain('3dfilamentprofiles.com')
+    expect(tool('filament_type_upsert').description).toContain('tdfp_id')
+    expect(start).toMatch(/Approved first\.$/)
+  })
+
+  it('bounds tdfp_id in the upsert fields to a positive integer below 2^31, or null', () => {
+    const upsert = (tdfp_id: unknown) => tool('filament_type_upsert').parse({ fields: { tdfp_id } })
+    for (const bad of [0, -1, 1.5, 2147483648, '12']) expect(() => upsert(bad)).toThrow()
+    for (const good of [1, 2147483647, null]) expect(() => upsert(good)).not.toThrow()
+    expect(() => tool('filament_type_upsert').parse({ fields: { code: 'X' } })).not.toThrow()
+    expect(tool('filament_type_upsert').description).toContain('a positive integer below 2^31')
+  })
+
+  it('starts a fetch with POST and answers the run, its status and whether it joined', async () => {
+    const calls: string[] = []
+    server.use(
+      http.post(FETCH, ({ request }) => {
+        calls.push(request.method)
+        return HttpResponse.json({ run: RUN, joined: true }, { status: 202 })
+      }),
+    )
+    const started = await tool('filament_type_fetch_profiles').execute(
+      tool('filament_type_fetch_profiles').parse({ type_id: ROW }),
+      ctx('outward'),
+    )
+    expect(started.isError).toBeFalsy()
+    expect(calls).toEqual(['POST'])
+    const answer = firstText(started) as { run: { id: string; status: string }; joined: boolean }
+    expect(answer.run.id).toBe(RUN.id)
+    expect(answer.run.status).toBe('running')
+    expect(answer.joined).toBe(true)
+  })
+
+  it("passes the backend's reason when a fetch cannot start", async () => {
+    server.use(
+      http.post(FETCH, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/no_tdfp_id', title: 'No 3DFP id', detail: 'the type has no tdfp_id' },
+          { status: 422 },
+        ),
+      ),
+    )
+    const start = tool('filament_type_fetch_profiles')
+    await expect(start.execute(start.parse({ type_id: ROW }), ctx('outward'))).rejects.toThrow(/no tdfp_id/)
+  })
+
+  it('reads the last fetch and the gaps', async () => {
+    const gaps = [{ printer_model: 'H2C', nozzle_diameter: '0.2', reason: 'the dialog offers no 0.2 mm nozzle' }]
+    server.use(http.get(FETCH, () => HttpResponse.json({ run: RUN, gaps })))
+    const read = await runTool(tool('filament_type_profile_fetch'), { type_id: ROW }, ctx())
+    expect(firstText(read)).toEqual({ run: RUN, gaps })
+  })
+
+  it('reads a type that never had a fetch', async () => {
+    server.use(http.get(FETCH, () => HttpResponse.json({ run: null, gaps: [] })))
+    const read = await runTool(tool('filament_type_profile_fetch'), { type_id: ROW }, ctx())
+    expect(firstText(read)).toEqual({ run: null, gaps: [] })
+  })
+})
+
 const SPOOLS = `${BACKEND}/api/v1/filament/spools`
 const SPOOL = `${SPOOLS}/${ROW}`
 
@@ -730,5 +827,72 @@ describe('filament RFID tools (#6264)', () => {
     server.use(http.post(`${RFID}/reconcile`, () => HttpResponse.json(report)))
     const t = tool('filament_rfid_reconcile')
     expect(firstText(await t.execute(t.parse({}), ctx('outward')))).toEqual(report)
+  })
+})
+
+describe('filament type proposal tools (#6701)', () => {
+  const PROPOSALS = `${BACKEND}/api/v1/filament/type-proposals`
+  const MATERIAL = '8d6f3c1e-0000-4000-8000-0000000067a1'
+  const SPOOL = '8d6f3c1e-0000-4000-8000-0000000067b1'
+  const TYPE = '8d6f3c1e-0000-4000-8000-0000000067c1'
+
+  it.each([
+    ['filament_type_proposals', 'read'],
+    ['filament_type_proposals_confirm', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('tells the assistant to confirm only after the user says yes', () => {
+    expect(tool('filament_type_proposals_confirm').description).toMatch(/only after the user says yes/i)
+  })
+
+  it('lists the proposals', async () => {
+    const proposals = { groups: [{ code: 'PLA-FF0000', count: 2 }], ungrouped: [] }
+    server.use(http.get(PROPOSALS, () => HttpResponse.json(proposals)))
+    const listed = await runTool(tool('filament_type_proposals'), {}, ctx())
+    expect(firstText(listed)).toEqual(proposals)
+  })
+
+  it('confirms the groups given, with their edited codes', async () => {
+    const group = {
+      material_id: MATERIAL,
+      brand_id: null,
+      subtype_id: null,
+      rgba: '#FF0000FF',
+      label_weight_g: 1000,
+      material_number: null,
+      code: 'PLA Red',
+      spool_ids: [SPOOL],
+    }
+    const result = { groups: [{ code: 'PLA Red', type_id: TYPE, made: true, typed: [SPOOL], skipped: [] }] }
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${PROPOSALS}/confirm`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(result)
+      }),
+    )
+    const done = await runTool(tool('filament_type_proposals_confirm'), { groups: [group] }, ctx())
+    expect(firstText(done)).toEqual(result)
+    expect(bodies).toEqual([{ groups: [group] }])
+    expect(tool('filament_type_proposals_confirm').summarize({ groups: [group] })).toBe(
+      'Make 1 spool type for 1 spool',
+    )
+  })
+
+  it('says when a code is taken', async () => {
+    server.use(
+      http.post(`${PROPOSALS}/confirm`, () =>
+        HttpResponse.json({ detail: 'a spool type already has one of these codes' }, { status: 409 }),
+      ),
+    )
+    const refused = await runTool(
+      tool('filament_type_proposals_confirm'),
+      { groups: [{ material_id: MATERIAL, rgba: '#FF0000', label_weight_g: 1000, code: 'X', spool_ids: [SPOOL] }] },
+      ctx(),
+    )
+    expect(refused.isError).toBe(true)
   })
 })
