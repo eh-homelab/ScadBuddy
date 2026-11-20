@@ -2025,8 +2025,9 @@ async def _sequence_clearance(
 ) -> tuple[int | None, list[FilamentWarning]]:
     """#956: for a by-object print (chosen here, else the template's default), the
     objects on each plate printed, and what the toolhead or the gantry would hit, as
-    warnings, never a refusal. Only then is the file read for its objects; an unreadable
-    one says nothing, and the slicer still has the last word."""
+    warnings, never a refusal. A plate that is one object of several filaments gets a
+    warning too (#6781): by object has no effect there. Only then is the file read for
+    its objects; an unreadable one says nothing, and the slicer still has the last word."""
     sequence = (
         request.overrides().get("print_sequence")
         or request.print_sequence

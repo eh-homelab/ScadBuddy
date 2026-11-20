@@ -45,6 +45,7 @@ from scadbuddy.render.bambu3mf import (
     parse_model,
     plate_settings,
 )
+from scadbuddy.render.paint import PaintCodeError, states
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.plate_profiles import CLEARANCES
 from scadbuddy.render.read_budget import ReadBudget
@@ -78,8 +79,8 @@ class PlacedObject:
     low: tuple[float, float, float]
     high: tuple[float, float, float]
     #: The filaments its printed parts use, as ``model_settings.config`` states them
-    #: (a part's own ``extruder``, else its object's); empty when the file states none
-    #: (#6781). A painting's filaments are not among them.
+    #: (a part's own ``extruder``, else its object's, #6781), and the filaments its
+    #: meshes' ``paint_color`` codes paint with (#6797); empty when the file states none.
     extruders: frozenset[int] = frozenset()
 
     @property
@@ -121,6 +122,9 @@ class _Bounds:
         self.archive = archive
         self.models: dict[str, ParsedModel] = {}
         self.boxes: dict[tuple[str, str], np.ndarray | None] = {}
+        #: Each object's painted filaments (#6797), its components' included, read from
+        #: the meshes :meth:`box` already parsed: no second read of the file.
+        self.painted: dict[tuple[str, str], frozenset[int]] = {}
         self.visits = budget.max_visits
         self.triangles = budget.limit("max_triangles")
         self.bytes = budget.model_bytes()
@@ -169,16 +173,21 @@ class _Bounds:
         if found is None:
             return None
         points: list[np.ndarray] = []
+        painted: set[int] = set()
         mesh = found.find(f"{{{CORE_NS}}}mesh")
         if mesh is not None and mesh in model.meshes:
             vertices = np.asarray(model.meshes[mesh].vertices, dtype=float)
             if vertices.size:
                 points.append(vertices.reshape(-1, 3))
+            painted.update(_painted(model.meshes[mesh].paint))
         for component in found.iter(f"{{{CORE_NS}}}component"):
             target = (component.get(f"{{{PRODUCTION_NS}}}path") or f"/{path}").lstrip("/")
-            inner = self.box(target, component.get("objectid", ""), depth + 1)
+            inner_id = component.get("objectid", "")
+            inner = self.box(target, inner_id, depth + 1)
+            painted.update(self.painted.get((target, inner_id), frozenset()))
             if inner is not None:
                 points.append(_moved(inner, _transform(component.get("transform"))))
+        self.painted[key] = frozenset(painted)
         if not points:
             return None
         every = np.vstack(points)
@@ -193,6 +202,20 @@ class _Bounds:
         )
         self.boxes[key] = corners
         return corners
+
+
+def _painted(codes: tuple[str, ...] | None) -> set[int]:
+    """The filaments a mesh's ``paint_color`` codes paint with, each distinct code
+    decoded once (0, the part's own, left out). A code that does not parse adds none:
+    the warning is advice, and the slicer judges the file."""
+    found: set[int] = set()
+    for code in set(codes or ()):
+        if code:
+            try:
+                found.update(states(code))
+            except PaintCodeError:
+                continue
+    return found
 
 
 #: How deep components may nest; a slicer writes two levels.
@@ -289,7 +312,8 @@ def _placed_by_plate(
                 object_names.get(object_id) or f"object {number}",
                 (float(low[0]), float(low[1]), float(low[2])),
                 (float(high[0]), float(high[1]), float(high[2])),
-                object_extruders.get(object_id, frozenset()),
+                object_extruders.get(object_id, frozenset())
+                | bounds.painted.get((ROOT_MODEL_NAME, object_id), frozenset()),
             )
             for plate in wanted:
                 placed[plate].append(found)
@@ -312,7 +336,7 @@ def _stated_extruders(obj: ET.Element) -> frozenset[int]:
     if not parts:
         return frozenset() if own is None else frozenset({own})
     stated = (
-        _extruder(part) or own
+        e if (e := _extruder(part)) is not None else own
         for part in parts
         if part.get("subtype", "normal_part") == "normal_part"
     )
@@ -321,7 +345,8 @@ def _stated_extruders(obj: ET.Element) -> frozenset[int]:
 
 def one_object_warnings(objects: Sequence[PlacedObject], plate: int) -> list[FilamentWarning]:
     """#6781: a by-object print of a plate that is one object of several colours. A
-    template's own multi-plate render writes each plate so, one part per colour. By
+    template's own multi-plate render writes each plate so, one part per colour; a
+    single part painted in several filaments counts the same (#6797). By
     object then has no effect: the slicer prints the plate layer by layer and changes
     filament on every layer. A warning, never a refusal."""
     if len(objects) != 1 or len(objects[0].extruders) < 2:
