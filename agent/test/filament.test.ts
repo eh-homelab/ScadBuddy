@@ -796,17 +796,24 @@ describe('filament_type_fill_from_profile (#6714)', () => {
       }),
     )
     expect(firstText(await runTool(tool('filament_type_fill_from_profile'), { refresh: true }, ctx()))).toEqual([fill])
-    const one = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: { density_g_cm3: '1.32' }, k_values: true }, ctx())
+    const shown = [{ printer_id: ROW, extruder: 0, nozzle_diameter: '0.4', k_value: '0.02' }]
+    const one = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown }, ctx())
     expect(firstText(one)).toEqual(fill)
     expect(sent).toEqual([
       { url: `${TYPES}/fill-from-profile`, body: { refresh: true } },
-      { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true } },
+      { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown } },
     ])
   })
 
   it('refuses apply without a type', async () => {
     const refused = await runTool(tool('filament_type_fill_from_profile'), { apply: { density_g_cm3: '1.32' } }, ctx())
     expect(refused.isError).toBe(true)
+  })
+
+  it('refuses k_values without the K values the refresh showed (R-6714-i)', async () => {
+    const refused = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: {}, k_values: true }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused)).toMatch(/shown_k_values/)
   })
 })
 

@@ -458,7 +458,9 @@ export const filamentTools: Tool[] = [
           }),
         )
         .optional()
-        .describe("With `k_values: true`: the refresh's `k_values`, each without `type_id`"),
+        .describe("With `k_values: true`: the refresh's `k_values`, each without `type_id`; `[]` when it showed none"),
+    }).refine((o) => o.k_values !== true || o.shown_k_values !== undefined, {
+      message: "k_values needs shown_k_values: the refresh's K values ([] for none)",
     }),
     risk: 'write',
     source: SOURCE,

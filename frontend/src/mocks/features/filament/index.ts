@@ -74,10 +74,44 @@ function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Pa
   return result
 }
 
+/**
+ * #6714 — the K values a type's linked Bambuddy spools give (`TypeFiller._k_values`), by type
+ * id: none until a test sets them with `setMockBambuddyKValues`.
+ */
+const bambuddyKValues = new Map<string, S['TypeKValueCreate'][]>()
+
+export function setMockBambuddyKValues(typeId: string, rows: S['TypeKValueCreate'][]) {
+  bambuddyKValues.set(typeId, rows)
+}
+
+/** What the fill would import: Bambuddy's K values while the type has none. */
+function bambuddyKValuesOf(typeId: string): S['TypeKValueCreate'][] {
+  return state.typeKValues.some((one) => one.type_id === typeId) ? [] : (bambuddyKValues.get(typeId) ?? [])
+}
+
+/** K value rows compared as the backend compares them (`_k_key`): in no order, `0.020` is `0.02`. */
+function kKey(rows: readonly S['TypeKValueCreate'][]): string {
+  const key = (one: S['TypeKValueCreate']) =>
+    JSON.stringify([one.printer_id, one.extruder, String(Number(one.nozzle_diameter)), one.nozzle_type ?? '', String(Number(one.k_value)), one.name ?? '', one.cali_idx ?? -1, one.setting_id ?? ''])
+  return JSON.stringify(rows.map(key).sort())
+}
+
+const asTypeKValues = (typeId: string, rows: S['TypeKValueCreate'][]): S['TypeKValue'][] =>
+  rows.map((one) => ({ type_id: typeId, nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value) }))
+
+/** Writes ``rows`` as the type's K values into ``result`` (`TypeFiller._write_k`). */
+function writeKValues(typeId: string, rows: S['TypeKValueCreate'][], result: S['TypeFill']): S['TypeFill'] {
+  if (rows.length === 0) return result
+  const saved = asTypeKValues(typeId, rows)
+  state.typeKValues = [...state.typeKValues, ...saved]
+  return { ...result, k_values: saved, written: true }
+}
+
 let state: Seed = seed()
 
 export function reset() {
   state = seed()
+  bambuddyKValues.clear()
   imports.clear()
   invoicedLine.clear()
   fetches.clear()
@@ -1288,7 +1322,16 @@ export const handlers = [
   // #6714: the fill from a type's slicer profile, over `PROFILES` (`fillType`).
   http.post(`${BASE}/types/fill-from-profile`, async ({ request }) => {
     const body = (await request.json().catch(() => ({}))) as { refresh?: boolean }
-    return HttpResponse.json(state.types.filter((type) => !type.archived_at).map((type) => fillType(type, { refresh: body.refresh === true })))
+    const refresh = body.refresh === true
+    return HttpResponse.json(
+      state.types
+        .filter((type) => !type.archived_at)
+        .map((type) => {
+          const done = fillType(type, { refresh })
+          const rows = bambuddyKValuesOf(type.id)
+          return refresh ? { ...done, k_values: asTypeKValues(type.id, rows) } : writeKValues(type.id, rows, done)
+        }),
+    )
   }),
   http.post(`${BASE}/types/:id/fill-from-profile`, async ({ params, request }) => {
     const type = state.types.find((one) => one.id === params.id)
@@ -1301,9 +1344,19 @@ export const handlers = [
       for (const [field, value] of Object.entries(body.apply)) {
         if (String(given[field as FillField]) !== String(value)) return problem(409, `the profile now gives ${field} ${String(given[field as FillField] ?? 'None')}, not ${String(value)}: refresh again`)
       }
-      return HttpResponse.json(fillType(type, { apply: body.apply as Partial<Record<FillField, number | string>>, kValues: body.k_values === true }))
+      // R-6714-i, R-6714-g: the K values the refresh showed come back, and a change since is refused.
+      if (body.k_values === true && (body.shown_k_values === undefined || body.shown_k_values === null)) {
+        return problem(422, "k_values needs shown_k_values: the K values the refresh showed ([] for none)")
+      }
+      const rows = body.k_values === true ? bambuddyKValuesOf(type.id) : []
+      if (body.k_values === true && kKey(rows) !== kKey(body.shown_k_values ?? [])) return problem(409, 'the K values now are not the ones shown: refresh again')
+      return HttpResponse.json(writeKValues(type.id, rows, fillType(type, { apply: body.apply as Partial<Record<FillField, number | string>>, kValues: body.k_values === true })))
     }
-    return HttpResponse.json(fillType(type, { refresh: body.refresh === true }))
+    const refresh = body.refresh === true
+    const done = fillType(type, { refresh })
+    const rows = bambuddyKValuesOf(type.id)
+    if (refresh) return HttpResponse.json({ ...done, k_values: asTypeKValues(type.id, rows) })
+    return HttpResponse.json(writeKValues(type.id, rows, done))
   }),
   http.put(`${BASE}/types/:id/presets`, async ({ params, request }) => {
     const typeId = String(params.id)

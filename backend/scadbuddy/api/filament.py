@@ -324,7 +324,8 @@ async def fill_types_from_profile(
         "writes those fields, as the refresh showed them, over what the type has, and with "
         "`k_values: true` the K values it showed (sent back as `shown_k_values`), while the "
         "type has none; 409 when the profile, or Bambuddy's spools, no longer give one of "
-        "them, 422 for a field it does not fill or a "
+        "them, 422 for `k_values: true` without `shown_k_values` (`[]` for none), a field "
+        "it does not fill or a "
         "range it would leave backwards. 404 for no such type."
     ),
 )

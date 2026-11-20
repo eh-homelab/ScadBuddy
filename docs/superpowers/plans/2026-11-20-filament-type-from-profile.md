@@ -117,6 +117,16 @@ Posted on #6714.
   When they differ it refuses (`ProfileChangedError`, 409) before anything is written.
 - R-6714-h (#6747): R-6714-5 no longer says "and nozzle type": the K values are one row
   per printer, extruder and nozzle, the table's key.
+- R-6714-i (review of #6750): `FillRequest.shown_k_values` defaults to `None`, and a
+  `model_validator` answers 422 when `k_values` is true and it was not sent; `[]` stays
+  valid and says the refresh showed none. The agent tool's input has the matching
+  `.refine`.
+- R-6714-j (review of #6750): route tests send `shown_k_values` through
+  `POST /filament/types/{id}/fill-from-profile`: a match writes (200), a difference is 409,
+  and with `k_values: false` they are ignored.
+- R-6714-k (review of #6750): the frontend mock of the fill answers 409 when the sent
+  `shown_k_values` differ from its own (`setMockBambuddyKValues`), and a
+  `ProfileFillDialog` test shows the error.
 - R-6714-8: tests use respx and fixture profile JSON; they never call a live service.
 
 ## Tasks

@@ -29,10 +29,10 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import LocalPresetDetail, Spool
@@ -265,8 +265,17 @@ class FillRequest(BaseModel):
     #: With ``apply``: also write the K values a refresh showed, while the type has none.
     k_values: bool = False
     #: With ``k_values``: the K values the refresh showed (its ``k_values``, without
-    #: ``type_id``). 409 when Bambuddy now gives others (R-6714-g).
-    shown_k_values: list[m.TypeKValueCreate] = []
+    #: ``type_id``; ``[]`` for none), required then (R-6714-i). 409 when Bambuddy now
+    #: gives others (R-6714-g).
+    shown_k_values: list[m.TypeKValueCreate] | None = None
+
+    @model_validator(mode="after")
+    def _shown_with_k_values(self) -> Self:
+        if self.k_values and self.shown_k_values is None:
+            raise ValueError(
+                "k_values needs shown_k_values: the K values the refresh showed ([] for none)"
+            )
+        return self
 
 
 class BulkFillRequest(BaseModel):
