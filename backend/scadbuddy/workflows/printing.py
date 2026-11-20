@@ -725,7 +725,8 @@ class PrintRunWorkflow(_PlateStarts):
         ``problems.setting_refused``). The template's settings, the filament profiles'
         and the shorthands' keys are not matched: the user did not type them. A failure
         that is Bambu Studio's "Object conflicts were detected" also carries one
-        ``object-conflict`` warning for the plate (#6732, ``problems.object_conflict``).
+        ``object-conflict`` warning for the plate (#6732, ``problems.object_conflict``),
+        also when it is a refused setting's 422 (#6736).
         Only the failure's problem changes; the commands are the same, so a history
         replays as before."""
         try:
@@ -734,11 +735,14 @@ class PrintRunWorkflow(_PlateStarts):
             if is_cancelled_exception(error):
                 raise
             problem = problem_of(error)
-            changed = (
+            refused = (
                 setting_refused(problem, self.requested_overrides)
                 if self.requested_overrides
                 else None
-            ) or object_conflict(problem, plate.plate_id)
+            )
+            # The 422 keeps the slicer's words, so a refusal that is also an object
+            # conflict carries the warning too (#6736).
+            changed = object_conflict(refused or problem, plate.plate_id) or refused
             if changed is None:
                 raise
             raise ApplicationError(
