@@ -1605,8 +1605,9 @@ jobs:
           printf '%s' "$token" > "$rpc/token"
           chmod 0755 "$rpc"
           chmod 0444 "$rpc/token"
-          # The container goes on every exit path, the early failures included.
-          trap 'docker rm -f intake-sandbox >/dev/null 2>&1 || true' EXIT
+          # The container goes on every exit path, the early failures included. A failed
+          # step first prints what the sandbox logged while it handled the check (#6811).
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "sandbox logs:"; docker logs intake-sandbox 2>&1 || true; fi; docker rm -f intake-sandbox >/dev/null 2>&1 || true' EXIT
           docker run -d --name intake-sandbox --user 10002:10002 --read-only --cap-drop ALL \
             --security-opt no-new-privileges \
             --security-opt seccomp=deploy/security/seccomp/intake-sandbox.json \
