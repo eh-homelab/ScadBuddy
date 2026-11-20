@@ -559,7 +559,8 @@ class TypeFiller:
         (R-6714-e): re-read the row, drop only the pair that is now backwards (into
         ``result.skipped``, with the reason) and write the rest once more, even when the
         re-read finds no backwards pair. That is the one retry; a second race skips what
-        is left."""
+        is left. A type the re-read finds gone is not retried: every wanted field is
+        skipped as deleted meanwhile (#6787)."""
         for retry in (True, False):
             try:
                 return await asyncio.to_thread(
@@ -574,13 +575,16 @@ class TypeFiller:
                     result.skipped |= dict.fromkeys(wanted, why)
                     return None
                 fresh = await asyncio.to_thread(self.types.get, type_id)
-                if fresh is not None:
-                    current = fresh.model_dump()
-                    # A field a person set meanwhile is no longer empty: `fill_empty`
-                    # leaves it, so it takes no part in the range.
-                    for key in [k for k in wanted if current[k] is not None]:
-                        del wanted[key]
-                    result.skipped |= dict.fromkeys(_ranges(current, wanted), why)
+                if fresh is None:
+                    # The type is gone: no retry, and every wanted field says why.
+                    result.skipped |= dict.fromkeys(wanted, "the type was deleted meanwhile")
+                    return None
+                current = fresh.model_dump()
+                # A field a person set meanwhile is no longer empty: `fill_empty`
+                # leaves it, so it takes no part in the range.
+                for key in [k for k in wanted if current[k] is not None]:
+                    del wanted[key]
+                result.skipped |= dict.fromkeys(_ranges(current, wanted), why)
                 if not wanted:
                     return None
         return None
