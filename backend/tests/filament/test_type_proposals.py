@@ -133,6 +133,83 @@ def test_a_code_another_type_holds_gets_the_label_weight(pg_pool: PgPool) -> Non
     assert group.code == "PLA-FF0000-1000G"
 
 
+def _shared_number(f: Filament) -> list[TypeProposal]:
+    """A red and a blue spool whose Bambuddy readings carry one ``material_number``."""
+    pull(
+        f,
+        [
+            bb(id=1, tray_uuid=None, tag_uid=None, material_number="X1"),
+            bb(
+                id=2,
+                tray_uuid=None,
+                tag_uid=None,
+                material_number="X1",
+                rgba="0000FFFF",
+                color_name="Blue",
+            ),
+        ],
+        now=NOW,
+    )
+    groups = type_proposals.proposals(f).groups
+    assert [(g.code, g.rgba, g.type_id) for g in groups] == [
+        ("X1", "#FF0000FF", None),
+        ("X1-1000G", "#0000FFFF", None),
+    ]
+    return groups
+
+
+def _typed_as(f: Filament, group: TypeProposal) -> tuple[str, str]:
+    (spool_id,) = group.spool_ids
+    spool = f.spools.get(spool_id)
+    assert spool is not None and spool.type_id is not None
+    kind = f.types.get(spool.type_id)
+    assert kind is not None
+    return kind.code, kind.rgba
+
+
+def test_groups_that_share_a_material_number_each_get_their_own_type(pg_pool: PgPool) -> None:
+    """R-6701-8: a code match is used only when the type is of the group's key."""
+    f = _filament(pg_pool)
+    red, blue = _shared_number(f)
+    done = _confirm(f, _pick(red), _pick(blue)).groups
+    assert [(r.code, r.made) for r in done] == [("X1", True), ("X1-1000G", True)]
+    assert _typed_as(f, red) == ("X1", "#FF0000FF")
+    assert _typed_as(f, blue) == ("X1-1000G", "#0000FFFF")
+
+
+def test_a_shared_material_number_confirmed_one_group_at_a_time(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    red, _ = _shared_number(f)
+    (first,) = _confirm(f, _pick(red)).groups
+    assert (first.code, first.made) == ("X1", True)
+    # The reload proposes a new type for blue, not the red type that holds the code.
+    (blue,) = type_proposals.proposals(f).groups
+    assert (blue.code, blue.type_id, blue.rgba) == ("X1-1000G", None, "#0000FFFF")
+    (second,) = _confirm(f, _pick(blue)).groups
+    assert (second.code, second.made) == ("X1-1000G", True)
+    assert _typed_as(f, red) == ("X1", "#FF0000FF")
+    assert _typed_as(f, blue) == ("X1-1000G", "#0000FFFF")
+
+
+def test_a_code_match_of_the_key_is_used(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    red, _ = _shared_number(f)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="x1",
+            brand_id=red.brand_id,
+            material_id=red.material_id,
+            subtype_id=red.subtype_id,
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
+    )
+    groups = type_proposals.proposals(f).groups
+    assert [(g.code, g.type_id) for g in groups] == [("x1", kind.id), ("X1-1000G", None)]
+    done = _confirm(f, *(_pick(g) for g in groups)).groups
+    assert [(r.type_id == kind.id, r.made) for r in done] == [(True, False), (False, True)]
+
+
 def test_confirm_makes_the_type_and_types_the_group(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     pull(

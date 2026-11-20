@@ -23,9 +23,9 @@ person says yes) confirms each group.
   because §8.1 says `material_number` carries the type code and the pull matches by it
   first. A code another type or another proposal holds gets `-<label weight>G`, then
   `-2`, `-3`. The person can edit the name before confirming.
-- R-6701-3: the confirm, for each group, first re-checks the pull's match (`match_type`,
-  formerly `_match`). If a type now matches, it uses that type instead of making a
-  duplicate. It sets `type_id` on the group's spools that are still untyped and
+- R-6701-3: the confirm, for each group, first re-checks the match (`_match` in
+  `type_proposals.py`, as R-6701-8 limits it). If a type now matches, it uses that type
+  instead of making a duplicate. It sets `type_id` on the group's spools that are still untyped and
   unarchived, drops any per-spool override that equals the type's value, and writes one
   `edited` ledger event per spool. The actor is the caller's, as other writes do. One
   transaction. A spool that gained a type meanwhile (or was archived, or changed its
@@ -40,6 +40,12 @@ person says yes) confirms each group.
   row, plus "Create all". Below it is a list of the spools that cannot be grouped. It
   must work at a 390 px viewport.
 - R-6701-7: MSW mocks and fixtures for the new routes, per `frontend/CLAUDE.md`.
+- R-6701-8: in `proposals` and `confirm`, a type found by the group's `material_number`
+  (`types.match(code=...)`, which matches by code alone) is used only when its brand,
+  material, subtype, RGBA and label weight equal the group's key. Otherwise the match
+  falls back to the identity match, or the confirm makes the new type. Groups can share a
+  `material_number` and differ in colour or weight (Bambuddy's product code can be shared
+  across colours), and each gets its own type, confirmed together or one at a time.
 
 ## Builder's calls
 
@@ -48,6 +54,11 @@ person says yes) confirms each group.
   (category, effect, extra colours, diameter, density, temperatures, insert type). It
   takes no cost, so no price book row is written.
 - A code that clashes at the confirm is a 409 for the whole confirm; nothing is written.
+- The `material_number` lookup is a correlated subquery per untyped spool. The existing
+  `filament_spool_events_spool_at (spool_id, at)` index serves it: on a synthetic ledger
+  of 2,000 spools and 200,000 events (local Postgres 18, `EXPLAIN ANALYZE`), each lookup
+  was a backward index scan of about 2 rows plus an incremental sort on `seq`. No new
+  index (R-6701-5).
 
 ## Steps
 

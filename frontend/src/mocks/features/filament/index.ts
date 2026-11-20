@@ -687,7 +687,7 @@ type Keyed = { [K in (typeof PROPOSAL_KEY)[number]]?: unknown }
 
 const proposalKey = (row: Keyed) => PROPOSAL_KEY.map((field) => String(row[field] ?? '')).join('|')
 
-/** `match_type`'s identity match: the first live type of the key. */
+/** `type_proposals._match`'s identity match: the first live type of the key. */
 const matchingType = (row: Keyed) =>
   state.types.find((type) => !type.archived_at && PROPOSAL_KEY.every((field) => (type[field] ?? null) === (row[field] ?? null)))
 

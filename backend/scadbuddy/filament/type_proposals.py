@@ -10,10 +10,13 @@ there is one (§8.1: it carries the type code, and the pull matches by it first)
 ``BRAND-MATERIAL-SUBTYPE-COLOUR`` in upper case, with the colour name, else the hex (the
 price book's "Make a type", `frontend/src/components/filament/makeType.ts` `typeCodeOf`).
 A code another type or an earlier group holds takes ``-<label weight>G``, then ``-2``,
-``-3`` ... A group whose key a type matches now (the pull's `match_type`) names that type.
+``-3`` ... A group whose key a type matches now names that type (`_match`): the type its
+``material_number`` names when that type is of the group's key, else the type of its
+identity. Groups can share a ``material_number`` and differ in colour or weight; the code
+alone never puts one group on another's type (R-6701-8).
 
 `confirm` takes the groups a person picked, each with its code, in one transaction. Per
-group it re-checks `match_type` and uses a type that matches now; else it makes the type:
+group it re-checks `_match` and uses a type that matches now; else it makes the type:
 the key, the colour name most of its spools have, and each other value every one of them
 shares (category, effect, extra colours, diameter, density, temperatures, insert type; no
 cost, so no price book row). Then each of the group's spools that is still open, untyped
@@ -34,8 +37,8 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 
 from scadbuddy.filament import models as m
-from scadbuddy.filament.bambuddy_pull import match_type
 from scadbuddy.filament.catalog import CatalogExistsError, CatalogRefError
+from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.types import OVERRIDABLE
 
@@ -102,7 +105,7 @@ def proposals(f: Filament) -> m.TypeProposals:
             want = dict(zip(KEY, key, strict=True))
             names = _names(conn, want)
             colour = _colour_name(members)
-            kind = match_type(conn, f, _after(want, names))
+            kind = _match(conn, f, want, names)
             if kind is not None:
                 code = kind.code
             else:
@@ -174,7 +177,7 @@ def _confirm_one(
         return m.ConfirmedProposal(
             code=pick.code, type_id=None, made=False, typed=[], skipped=skipped
         )
-    kind = match_type(conn, f, _after(want, _names(conn, want)))
+    kind = _match(conn, f, want, _names(conn, want))
     made = kind is None
     if kind is None:
         kind = f.types.create_on(conn, _type_body(pick, eligible))
@@ -210,16 +213,32 @@ def _names(conn: Conn, want: Mapping[str, Any]) -> dict[str, Any]:
     return dict(names)
 
 
-def _after(want: Mapping[str, Any], names: Mapping[str, Any]) -> dict[str, Any]:
-    """The key in the pull's terms (`bambuddy_pull.snapshot`), for `match_type`."""
-    return {
-        "brand": names["brand"],
-        "material": names["material"],
-        "subtype": names["subtype"],
-        "material_number": want["material_number"],
-        "rgba": want["rgba"],
-        "label_weight_g": want["label_weight_g"],
-    }
+def _match(
+    conn: Conn, f: Filament, want: Mapping[str, Any], names: Mapping[str, Any]
+) -> m.SpoolType | None:
+    """The type the group's key names now. The type its ``material_number`` names counts
+    only when that type is of the key (R-6701-8): `types.match` matches by code alone, and
+    groups that differ in colour or weight can share a ``material_number``."""
+    identity = {"brand": names["brand"], "material": names["material"], "subtype": names["subtype"]}
+    if want["material_number"] is not None:
+        kind = f.types.match(
+            code=want["material_number"], rgba="#000000", label_weight_g=0, conn=conn, **identity
+        )
+        if kind is not None and _of_key(kind, want):
+            return kind
+    return f.types.match(
+        rgba=want["rgba"], label_weight_g=want["label_weight_g"], conn=conn, **identity
+    )
+
+
+def _of_key(kind: m.SpoolType, want: Mapping[str, Any]) -> bool:
+    return (
+        kind.brand_id == want["brand_id"]
+        and kind.material_id == want["material_id"]
+        and kind.subtype_id == want["subtype_id"]
+        and normalise_rgba(kind.rgba) == normalise_rgba(want["rgba"])
+        and kind.label_weight_g == want["label_weight_g"]
+    )
 
 
 def _colour_name(rows: Iterable[Row]) -> str | None:
