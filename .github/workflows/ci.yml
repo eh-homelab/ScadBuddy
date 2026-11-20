@@ -1510,10 +1510,12 @@ jobs:
       # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces;
       # Ubuntu runners from 24.04 on refuse `unshare` without it:
       # https://github.com/actions/runner-images/issues/10443), and the container runs
-      # unconfined by seccomp and AppArmor as uid 10001. Seccomp matches the intake
-      # sandbox's own pod. For AppArmor, lifting the sysctl stands in for the pod's
-      # Localhost profile (`unconfined` plus `userns,`), whose nodes keep the sysctl at
-      # 1. It runs test_runner.py and test_sandbox.py (the sandbox's RPC).
+      # unconfined by AppArmor as uid 10001, under the intake sandbox pod's own seccomp
+      # file (deploy/security/seccomp/intake-sandbox.json, #6779). AppArmor is
+      # unconfined here because the pod's profile allows the launcher's mounts at the
+      # pod's paths only, and the tests use their own; lifting the sysctl stands in for
+      # it. The next step runs the sandbox under both pod profiles. It runs
+      # test_runner.py and test_sandbox.py (the sandbox's RPC).
       # SCADBUDDY_REQUIRE_CONFINEMENT=1 makes a refusal a failure, never a skip.
       # Shard 1 only: its test image is already built.
       - name: Intake sandbox confinement
@@ -1524,10 +1526,56 @@ jobs:
             if [ -e "/proc/sys/kernel/$key" ]; then sudo sysctl -w "kernel.$key=0"; fi
           done
           docker run --rm --user 10001:10001 \
-            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt seccomp=deploy/security/seccomp/intake-sandbox.json \
+            --security-opt apparmor=unconfined \
             -e SCADBUDDY_REQUIRE_CONFINEMENT=1 -e HOME=/tmp -e UV_CACHE_DIR=/tmp/uv \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
             -p no:cacheprovider -q -rs tests/intake_worker/test_runner.py tests/intake_worker/test_sandbox.py
+
+      # The intake sandbox as its pod runs it (#6779): its seccomp file and its AppArmor
+      # profile (deploy/security/), the AppArmor restriction of unprivileged user
+      # namespaces on as on the nodes, uid 10002, a read-only root, no capabilities, its
+      # spool and the RPC token's directory at the pod's paths. The sandbox starts only
+      # where its launcher can confine a check (it exits 3 otherwise), and one STL check
+      # must answer 200 with a verdict.
+      - name: Intake sandbox under its pod profiles
+        if: ${{ matrix.group == 1 }}
+        run: |
+          set -euo pipefail
+          sudo apparmor_parser -r -W deploy/security/apparmor/scadbuddy-intake-sandbox
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          rpc="$RUNNER_TEMP/intake-rpc"
+          mkdir -p "$rpc"
+          token="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          printf '%s' "$token" > "$rpc/token"
+          chmod 0755 "$rpc"
+          chmod 0444 "$rpc/token"
+          docker run -d --name intake-sandbox --user 10002:10002 --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=deploy/security/seccomp/intake-sandbox.json \
+            --security-opt apparmor=scadbuddy-intake-sandbox \
+            --tmpfs /var/lib/scadbuddy-intake:rw,exec,nosuid,nodev,size=512m,mode=1777 \
+            -v "$rpc:/etc/scadbuddy-intake-rpc:ro" \
+            -e SCADBUDDY_INTAKE_WORK_DIR=/var/lib/scadbuddy-intake \
+            -e TMPDIR=/var/lib/scadbuddy-intake -e SCADBUDDY_INTAKE_SANDBOX_PORT=8090 \
+            -e SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE=/etc/scadbuddy-intake-rpc/token \
+            -p 127.0.0.1:8090:8090 scadbuddy:ci-test python -m scadbuddy.intake_worker.sandbox
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:8090/healthz 2>/dev/null && break
+            if [ "$(docker inspect -f '{{.State.Running}}' intake-sandbox)" != true ]; then break; fi
+            sleep 1
+          done
+          docker logs intake-sandbox
+          printf 'solid t\nfacet normal 0 0 -1\nouter loop\nvertex 0 0 0\nvertex 0 10 0\nvertex 10 0 0\nendloop\nendfacet\nendsolid t\n' > "$RUNNER_TEMP/t.stl"
+          code="$(curl -sS -o "$RUNNER_TEMP/verdict.bin" -w '%{http_code}' \
+            -H "Authorization: Bearer $token" -H 'Content-Type: application/octet-stream' \
+            -H 'X-Intake-Request: {"filename":"t.stl","timeout":120,"address_space":4294967296,"id":"0123456789abcdef0123456789abcdef"}' \
+            --data-binary @"$RUNNER_TEMP/t.stl" http://127.0.0.1:8090/check || true)"
+          docker rm -f intake-sandbox >/dev/null
+          echo "check: HTTP $code"
+          head -c 300 "$RUNNER_TEMP/verdict.bin" | tr -c '[:print:]' '.'; echo
+          test "$code" = 200
+          grep -q '"isolation": null' "$RUNNER_TEMP/verdict.bin"
 
       # Even when pytest failed, so the split check still says what ran.
       # The timings go along only when they are this run's: one entry per test it
@@ -1978,9 +2026,13 @@ jobs:
   # `profile-fetch-test` target, which is that image plus the dev group and the tests.
   # `--network none`: the driver drives the local replica only, never the real site.
   # SCADBUDDY_TEST_CHROMIUM_REQUIRED=1, so a missing Chromium fails rather than skips.
-  # `--security-opt seccomp=unconfined`: Chromium's own sandbox stays on (Decision 6)
-  # and needs user namespaces, which Docker's default seccomp profile refuses ("No
-  # usable sandbox!"); the pod runs with seccomp Unconfined for the same reason.
+  # The driver tests run under the pod's own profiles (#6779): the seccomp file
+  # deploy/security/seccomp/profile-fetch.json and the AppArmor profile
+  # deploy/security/apparmor/scadbuddy-profile-fetch, with the AppArmor restriction of
+  # unprivileged user namespaces on, as on the nodes. Chromium's own sandbox stays on
+  # (Decision 6) and needs user namespaces, which the runtime's default seccomp profile
+  # refuses ("No usable sandbox!"). So a Chromium that needs a call the profile does not
+  # allow fails here, before the cluster runs it.
   # `--ulimit core=0`: the crash tests crash a renderer, and the runner's core_pattern
   # pipes the dump to systemd-coredump, which held each crashed renderer for about five
   # minutes, so the crash event never came (measured on ubuntu-latest, 2026-11-18).
@@ -2044,7 +2096,13 @@ jobs:
 
       - name: Driver tests in the image
         run: |
-          docker run --rm --network none --security-opt seccomp=unconfined --ulimit core=0 \
+          set -euo pipefail
+          sudo apparmor_parser -r -W deploy/security/apparmor/scadbuddy-profile-fetch
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          docker run --rm --network none --ulimit core=0 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=deploy/security/seccomp/profile-fetch.json \
+            --security-opt apparmor=scadbuddy-profile-fetch \
             -e SCADBUDDY_TEST_CHROMIUM_REQUIRED=1 scadbuddy-profile-fetch-test:ci \
             xvfb-run -a python -m pytest -rs tests/profile_fetch/test_site.py
 
