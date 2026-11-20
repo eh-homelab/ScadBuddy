@@ -401,8 +401,10 @@ async def fill_types_from_profile(
         _FILL_DESCRIPTION + "`refresh: true` answers the profile's values that differ from "
         "the type's, set or not (`filled`, with `previous`), and writes nothing. `apply` "
         "writes those fields, as the refresh showed them, over what the type has, and with "
-        "`k_values: true` the K values it showed, while the type has none; 409 when "
-        "the profile no longer gives one of them, 422 for a field it does not fill or a "
+        "`k_values: true` the K values it showed (sent back as `shown_k_values`), while the "
+        "type has none; 409 when the profile, or Bambuddy's spools, no longer give one of "
+        "them, 422 for `k_values: true` without `shown_k_values` (`[]` for none), a field "
+        "it does not fill or a "
         "range it would leave backwards. 404 for no such type."
     ),
 )
@@ -417,7 +419,11 @@ async def fill_type_from_profile(
     if body.apply is not None:
         try:
             applied = await filament.filler.apply(
-                settings, type_id, body.apply, actor=actor(caller), k_values=body.k_values
+                settings,
+                type_id,
+                body.apply,
+                actor=actor(caller),
+                k_values=body.shown_k_values if body.k_values else None,
             )
         except ProfileChangedError as exc:
             raise ApiError(status.HTTP_409_CONFLICT, str(exc)) from None
@@ -503,7 +509,7 @@ async def put_type_presets(
     if saved and not had:
         # A type's first presets come right after it is made (makeTypeFromSpool, the type
         # page): it is filled from them then (R-6714-6), never on a later change.
-        await fill_quietly(filament.filler, store.load, [type_id], actor=actor(caller))
+        await fill_quietly(lambda: filament.filler, store.load, [type_id], actor=actor(caller))
     return saved
 
 

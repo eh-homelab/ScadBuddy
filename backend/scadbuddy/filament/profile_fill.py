@@ -29,16 +29,16 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import LocalPresetDetail, Spool
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
-from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.filament.types import SpoolTypeStore, TypeTempError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.density import DensityTable, density_text
 from scadbuddy.slicing.profiles import ProfileError
@@ -258,12 +258,24 @@ class TypeFill(BaseModel):
 class FillRequest(BaseModel):
     """`refresh`: answer the profile's values that differ, set or not, and write nothing.
     `apply`: write these fields, as a refresh showed them; `k_values`, with it, the K
-    values too."""
+    values too, once Bambuddy still gives the ones in `shown_k_values`."""
 
     refresh: bool = False
     apply: dict[Field, Value] | None = None
     #: With ``apply``: also write the K values a refresh showed, while the type has none.
     k_values: bool = False
+    #: With ``k_values``: the K values the refresh showed (its ``k_values``, without
+    #: ``type_id``; ``[]`` for none), required then (R-6714-i). 409 when Bambuddy now
+    #: gives others (R-6714-g).
+    shown_k_values: list[m.TypeKValueCreate] | None = None
+
+    @model_validator(mode="after")
+    def _shown_with_k_values(self) -> Self:
+        if self.k_values and self.shown_k_values is None:
+            raise ValueError(
+                "k_values needs shown_k_values: the K values the refresh showed ([] for none)"
+            )
+        return self
 
 
 class BulkFillRequest(BaseModel):
@@ -340,6 +352,23 @@ class _Reads:
         return self._spools
 
 
+def _k_key(rows: Sequence[m.TypeKValueCreate]) -> list[tuple[Any, ...]]:
+    """K value rows to compare, in no particular order; ``0.40`` is ``0.4``."""
+    return sorted(
+        (
+            str(one.printer_id),
+            one.extruder,
+            canonical_nozzle(one.nozzle_diameter),
+            one.nozzle_type or "",
+            one.k_value.normalize(),
+            one.name or "",
+            -1 if one.cali_idx is None else one.cali_idx,
+            one.setting_id or "",
+        )
+        for one in rows
+    )
+
+
 def _rows(type_id: UUID, rows: list[m.TypeKValueCreate]) -> list[m.TypeKValue]:
     return [m.TypeKValue(type_id=type_id, **one.model_dump()) for one in rows]
 
@@ -357,16 +386,17 @@ async def _bambuddy(settings: StoredSettings) -> AsyncIterator[BambuddyClient | 
 
 
 async def fill_quietly(
-    filler: TypeFiller,
+    filler: Callable[[], TypeFiller],
     load: Callable[[], StoredSettings],
     type_ids: Sequence[UUID],
     *,
     actor: str,
 ) -> None:
-    """``filler.fill`` after a write has committed: a failure is logged with its error
-    label and never fails the request that wrote (R-6714-b)."""
+    """``filler().fill`` after a write has committed: a failure, the filler's lookup
+    included (R-6714-f), is logged with its error label and never fails the request that
+    wrote (R-6714-b)."""
     try:
-        await filler.fill(await asyncio.to_thread(load), list(type_ids), actor=actor)
+        await filler().fill(await asyncio.to_thread(load), list(type_ids), actor=actor)
     except Exception as error:
         logger.warning(
             "could not fill the types from their slicer profiles",
@@ -412,11 +442,12 @@ class TypeFiller:
         values: Mapping[Field, Value],
         *,
         actor: str,
-        k_values: bool = False,
+        k_values: Sequence[m.TypeKValueCreate] | None = None,
     ) -> TypeFill | None:
-        """Write ``values`` over the type's, once its profile still gives each of them
-        (`ProfileChangedError` when it does not), and with ``k_values`` the K values a
-        refresh showed, while the type still has none. ``None`` for no such type."""
+        """Write ``values`` over the type's, once its profile still gives each of them,
+        and with ``k_values`` (the K values a refresh showed) those, once Bambuddy's
+        spools still give them and the type still has none (R-6714-g); else
+        `ProfileChangedError`, before anything is written. ``None`` for no such type."""
         row = await asyncio.to_thread(self.types.get, type_id)
         if row is None:
             return None
@@ -435,8 +466,20 @@ class TypeFiller:
                             f"the profile now gives {name} {given.get(name)}, not {value}:"
                             " refresh again"
                         )
-            if k_values:
+            if k_values is not None:
                 rows, result.k_reason = await self._k_values(type_id, reads)
+                if _k_key(rows) != _k_key(k_values):
+                    reason = result.k_reason
+                    if reason is None:
+                        own = await asyncio.to_thread(self.types.k_values, type_id)
+                        if own:
+                            reason = (
+                                "the type now has K values of its own, so none will be imported"
+                            )
+                    why = f": {reason}" if reason else ""
+                    raise ProfileChangedError(
+                        f"the K values now are not the ones shown{why}: refresh again"
+                    )
         if values:
             current = row.model_dump()
             result.previous = {name: current[name] for name in values}
@@ -497,12 +540,18 @@ class TypeFiller:
                 result.filled = wanted
                 result.previous = {name: current[name] for name in wanted}
             elif wanted:
-                written = await asyncio.to_thread(
-                    self.types.fill_empty,
-                    row.id,
-                    {str(k): v for k, v in wanted.items()},
-                    actor=actor,
-                )
+                try:
+                    written = await asyncio.to_thread(
+                        self.types.fill_empty,
+                        row.id,
+                        {str(k): v for k, v in wanted.items()},
+                        actor=actor,
+                    )
+                except TypeTempError as error:
+                    # A person set one end of a range since the read (R-6714-e).
+                    why = f"the type changed meanwhile: {error}"
+                    result.skipped |= dict.fromkeys(wanted, why)
+                    written = None
                 result.filled = {
                     name: value for name, value in wanted.items() if name in (written or {})
                 }

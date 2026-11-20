@@ -398,6 +398,28 @@ def test_the_first_presets_an_import_sets_fill_the_type(
     assert asked == [[fetch.type_id]]
 
 
+@respx.mock
+def test_a_filler_lookup_that_fails_after_the_commit_never_fails_the_import(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-6714-f: the lookup of the filler runs inside `fill_quietly`'s guard."""
+    from scadbuddy.core.components import Key
+    from scadbuddy.filament import component
+
+    # The import's own lookup now names a component nothing registers, so it raises.
+    monkeypatch.setattr(component, "FILAMENT", Key("filament-gone"))
+    bodies = put_all(fetch)
+    bb_import(4)
+    local_presets([name_of(b) for b in bodies])
+    no_k_profiles()
+    with caplog.at_level("WARNING"):
+        r = fetch.import_()
+    assert r.status_code == 200, r.text
+    assert fetch.run().status == "imported"
+    [warning] = [r for r in caplog.records if r.levelname == "WARNING" and hasattr(r, "error")]
+    assert warning.error == "KeyError"
+
+
 def _zip_of(request: httpx.Request) -> bytes:
     """The ``file`` part of a multipart request."""
     body = request.content

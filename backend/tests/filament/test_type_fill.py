@@ -19,9 +19,10 @@ from scadbuddy.filament.models import (
     SpoolTypeCreate,
     SpoolTypePatch,
     TypeKValue,
+    TypeKValueCreate,
     TypePreset,
 )
-from scadbuddy.filament.profile_fill import ProfileChangedError, TypeFiller
+from scadbuddy.filament.profile_fill import ProfileChangedError, TypeFiller, _rows
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -153,6 +154,42 @@ async def test_a_fill_that_would_leave_a_range_backwards_skips_that_pair(
     row = types.get(type_id)
     assert row is not None
     assert (row.nozzle_temp_min, row.bed_temp_min) == (None, 55)
+
+
+async def test_a_range_set_meanwhile_skips_that_type_and_the_rest_are_filled(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-6714-e: a person sets one end of a range between the read and the row lock; that
+    type's `TypeTempError` is a skip, never a 500, and the types after it are filled."""
+    raced = _type(types, pg_pool, "RACED")
+    later = _type(types, pg_pool, "LATER")
+    for type_id in (raced, later):
+        _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    fill_empty = types.fill_empty
+
+    def meanwhile(type_id: UUID, values: Any, *, actor: str) -> Any:
+        if type_id == raced:
+            types.update(raced, SpoolTypePatch(nozzle_temp_max=150), actor=ACTOR)
+        return fill_empty(type_id, values, actor=actor)
+
+    monkeypatch.setattr(types, "fill_empty", meanwhile)
+
+    first, second = await filler.fill(UNLINKED, [raced, later], actor=ACTOR)
+
+    assert (first.filled, first.written) == ({}, False)
+    assert set(first.skipped) == {
+        "nozzle_temp_min",
+        "nozzle_temp_max",
+        "bed_temp_min",
+        "bed_temp_max",
+        "density_g_cm3",
+    }
+    assert all("changed meanwhile" in why for why in first.skipped.values())
+    row = types.get(raced)
+    assert row is not None
+    assert (row.nozzle_temp_min, row.nozzle_temp_max, row.density_g_cm3) == (None, 150, None)
+    assert second.written
+    assert second.filled["nozzle_temp_min"] == 190
 
 
 async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(
@@ -290,8 +327,18 @@ async def test_a_type_without_k_values_takes_its_linked_bambuddy_spools(
     ]
     assert types.k_values(type_id) == []
 
+    # K values that differ from what Bambuddy now gives are refused, as a field is
+    # (R-6714-g), and nothing is written.
+    shown = [
+        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id"})) for r in preview.k_values
+    ]
+    changed = [shown[0].model_copy(update={"k_value": Decimal("0.021")}), shown[1]]
+    with pytest.raises(ProfileChangedError, match="K values"):
+        await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=changed)
+    assert types.k_values(type_id) == []
+
     # A person confirms what the refresh showed; no field, so no profile is needed.
-    done = await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=True)
+    done = await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=shown)
     assert done is not None
     assert done.reason == "the type has no slicer preset"
     assert (done.written, len(done.k_values)) == (True, 2)
@@ -327,6 +374,56 @@ async def test_a_spools_read_that_fails_is_a_k_reason(
 
     assert (done.k_values, done.written) == ([], False)
     assert (done.k_reason or "").startswith("Bambuddy did not list its spools")
+
+
+@respx.mock
+async def test_an_apply_refused_for_a_failed_spools_read_ends_with_the_reason(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    type_id = _type(types, pg_pool)
+    spool = FilamentSpoolStore(pg_pool).create(SpoolCreate(type_id=type_id), actor="ann").id
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, linked_at)"
+            " VALUES (%s, 40, now())",
+            (spool,),
+        )
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
+
+    shown = [
+        TypeKValueCreate(
+            printer_id=UUID(int=7), extruder=0, nozzle_diameter="0.4", k_value=Decimal("0.02")
+        )
+    ]
+    with pytest.raises(ProfileChangedError) as refused:
+        await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=shown)
+
+    # The reason comes before the advice: "...shown: <reason>: refresh again".
+    message = str(refused.value)
+    assert message.startswith("the K values now are not the ones shown: Bambuddy did not list")
+    assert message.endswith(": refresh again")
+    assert types.k_values(type_id) == []
+
+
+async def test_an_apply_refused_for_k_values_added_meanwhile_says_so(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    type_id = _type(types, pg_pool)
+    with pg_pool.connection() as conn:
+        printer = conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000000002', 'H2C', 1) RETURNING id"
+        ).fetchone()
+    assert printer is not None
+    own = TypeKValueCreate(
+        printer_id=printer["id"], extruder=0, nozzle_diameter="0.4", k_value=Decimal("0.03")
+    )
+    types.set_k_values(type_id, _rows(type_id, [own]), actor="ann")
+
+    with pytest.raises(ProfileChangedError) as refused:
+        await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=[own])
+
+    assert "the type now has K values of its own, so none will be imported" in str(refused.value)
 
 
 async def test_a_fill_never_writes_over_a_value_set_meanwhile(

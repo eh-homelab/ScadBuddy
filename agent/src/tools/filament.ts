@@ -511,8 +511,8 @@ export const filamentTools: Tool[] = [
       "spools. Each result names the fields `filled`, the `source` preset, and a `reason` when the profile could not " +
       'be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
       'and writes nothing. With `type_id`, `apply` writes the fields a refresh showed over the type (only after the ' +
-      'user confirms them), and `k_values: true` the K values it showed. 409 when the profile no longer gives an ' +
-      'applied value. Reads Bambuddy, writes ScadBuddy only.',
+      'user confirms them), and `k_values: true` the K values it showed, sent back as `shown_k_values`. 409 when the ' +
+      'profile no longer gives an applied value, or Bambuddy now gives other K values. Reads Bambuddy, writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit for every type"),
       refresh: z.boolean().default(false).describe('Answer the differences and write nothing'),
@@ -521,15 +521,32 @@ export const filamentTools: Tool[] = [
         .optional()
         .describe('The confirmed fields and values a refresh showed, to write over the type'),
       k_values: z.boolean().optional().describe('With `apply`: also write the K values the refresh showed'),
+      shown_k_values: z
+        .array(
+          z.object({
+            printer_id: z.string().uuid(),
+            extruder: z.number().int().min(0),
+            nozzle_diameter: z.string(),
+            k_value: z.string().describe('A decimal, e.g. `0.02`'),
+            nozzle_type: z.string().nullable().optional(),
+            name: z.string().nullable().optional(),
+            cali_idx: z.number().int().nullable().optional(),
+            setting_id: z.string().nullable().optional(),
+          }),
+        )
+        .optional()
+        .describe("With `k_values: true`: the refresh's `k_values`, each without `type_id`; `[]` when it showed none"),
+    }).refine((o) => o.k_values !== true || o.shown_k_values !== undefined, {
+      message: "k_values needs shown_k_values: the refresh's K values ([] for none)",
     }),
     risk: 'write',
     source: SOURCE,
     routes: ['POST /api/v1/filament/types/fill-from-profile', 'POST /api/v1/filament/types/{type_id}/fill-from-profile'],
     summarize: ({ type_id, refresh, apply }) =>
       `${refresh ? 'Compare' : apply ? 'Apply profile values to' : 'Fill'} ${type_id ? `spool type ${type_id}` : 'every spool type'} from the slicer profile`,
-    handler: async ({ type_id, refresh, apply, k_values }, { backend }) => {
+    handler: async ({ type_id, refresh, apply, k_values, shown_k_values }, { backend }) => {
       if (type_id === undefined) {
-        if (apply !== undefined || k_values !== undefined) throw new ToolError('apply and k_values need a type_id')
+        if (apply !== undefined || k_values !== undefined || shown_k_values !== undefined) throw new ToolError('apply and k_values need a type_id')
         return json(
           await ok(backend.POST('/api/v1/filament/types/fill-from-profile', { body: { refresh } }), 'fill the spool types from their profiles'),
         )
@@ -538,7 +555,12 @@ export const filamentTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/filament/types/{type_id}/fill-from-profile', {
             params: { path: { type_id } },
-            body: { refresh, ...(apply !== undefined ? { apply } : {}), ...(k_values !== undefined ? { k_values } : {}) },
+            body: {
+              refresh,
+              ...(apply !== undefined ? { apply } : {}),
+              ...(k_values !== undefined ? { k_values } : {}),
+              ...(shown_k_values !== undefined ? { shown_k_values } : {}),
+            },
           }),
           `fill spool type ${type_id} from its profile`,
         ),

@@ -879,7 +879,7 @@ async def _import_once(
         from scadbuddy.filament.component import FILAMENT
 
         await fill_quietly(
-            state.components.get(FILAMENT).filler,
+            lambda: state.components.get(FILAMENT).filler,
             state.settings_store.load,
             [row["type_id"]],
             actor=row["started_by"],
