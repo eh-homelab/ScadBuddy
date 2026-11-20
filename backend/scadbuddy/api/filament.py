@@ -73,7 +73,7 @@ from scadbuddy.filament.locations import (
     MoveTargetError,
 )
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
-from scadbuddy.filament.rfid_push import push_pending
+from scadbuddy.filament.rfid_push import failure_label, push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
@@ -1325,12 +1325,22 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
         'set to `off` or `bb_to_sb` is never written. Answers 202 `{"started": true}` '
         "once the pass is asked for; it runs in the background, and "
         "`GET /filament/sync/status` shows how it went. 409 with `code` `no_bambuddy` when "
-        "no Bambuddy is configured, and `nothing_pushes` when no data type is set to push."
+        "no Bambuddy is configured, and `nothing_pushes` when no data type is set to push. "
+        "503 when the pass could not be asked for (the workflow service did not answer); "
+        "`detail` names the error, and nothing started."
     ),
 )
-async def run_filament_sync(state: StateDep, store: SettingsStoreDep) -> SyncRun:
-    read = await asyncio.to_thread(store.read, {"bambuddy_url", "filament_sync"})
-    reason = skip_reason(read["bambuddy_url"], read["filament_sync"])
+async def run_filament_sync(state: StateDep) -> SyncRun:
+    try:
+        reason = await state.filament_sync.nudge(full=True, raise_errors=True)
+    except Exception as exc:
+        # R-T10-2: no 202 for a pass that was not asked for. The label, never the message.
+        label = failure_label(exc)
+        logger.warning("could not start the filament sync", extra={"error": label})
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"could not ask the sync workflow for a pass: {label}",
+        ) from None
     if reason == "no_bambuddy":
         raise ApiError(status.HTTP_409_CONFLICT, "no Bambuddy is configured", code=reason)
     if reason == "nothing_pushes":
@@ -1339,7 +1349,6 @@ async def run_filament_sync(state: StateDep, store: SettingsStoreDep) -> SyncRun
             "no data type is set to push to Bambuddy (filament_sync)",
             code=reason,
         )
-    await state.filament_sync.nudge(full=True)
     return SyncRun()
 
 

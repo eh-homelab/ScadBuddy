@@ -73,6 +73,24 @@ def test_saving_filament_sync_nudges(client: TestClient, filament_nudges: list[b
     assert filament_nudges == [False]
 
 
+def test_a_save_that_stops_every_push_signals_only(
+    client: TestClient, filament_nudges: list[bool], filament_signals: list[None]
+) -> None:
+    """R-T10-3: a running workflow learns that nothing pushes (its next pass is
+    ``nothing_pushes`` and it ends); no workflow is started for it."""
+    assert client.put("/api/v1/settings", json={"filament_sync": {"tags": "two_way"}}).is_success
+    assert (filament_nudges, filament_signals) == ([False], [])
+
+    stopped = client.put("/api/v1/settings", json={"filament_sync": {"tags": "bb_to_sb"}})
+    assert stopped.status_code == 200, stopped.text
+    assert (filament_nudges, filament_signals) == ([False], [None])
+
+    # Nothing pushed before either: no signal, no nudge.
+    again = client.put("/api/v1/settings", json={"filament_sync": {"tags": "off"}})
+    assert again.status_code == 200, again.text
+    assert (filament_nudges, filament_signals) == ([False], [None])
+
+
 def test_saving_another_setting_does_not_nudge(
     client: TestClient, filament_nudges: list[bool]
 ) -> None:

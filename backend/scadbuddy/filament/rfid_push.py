@@ -51,7 +51,7 @@ def error_label(exc: ApiError) -> str:
     return exc.type if code is None else f"{exc.type}:{code}"
 
 
-def _label(exc: Exception) -> str:
+def failure_label(exc: Exception) -> str:
     """`error_label` for a Bambuddy problem, else one fixed word: an exception's class
     would leak what failed inside (a database driver's error, say)."""
     return error_label(exc) if isinstance(exc, ApiError) else "internal"
@@ -170,7 +170,7 @@ async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50
         try:
             await _push_one(store, client, tag_id, report)
         except Exception as error:
-            label = _label(error)
+            label = failure_label(error)
             logger.warning(
                 "could not push a tag to Bambuddy",
                 extra={"tag_id": str(tag_id), "error": label},

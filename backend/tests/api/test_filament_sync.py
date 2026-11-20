@@ -4,6 +4,7 @@ Decision 19): the sync's state for a person and the agent, and "Sync now"."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import psycopg
@@ -11,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.filament.bb_sync_nudge import FilamentSyncNudger
 from tests.api.test_send import configure
 
@@ -19,16 +21,32 @@ pytestmark = pytest.mark.requires_postgres
 SYNC = "/api/v1/filament/sync"
 
 
+#: The real nudge, kept before `filament_nudges` (autouse) silences it.
+REAL_NUDGE = FilamentSyncNudger.nudge
+
+
+class FakeTemporal:
+    """The Temporal client the nudger gets: it records each start's signal args, or
+    raises ``fail``."""
+
+    def __init__(self) -> None:
+        self.starts: list[list[Any]] = []
+        self.fail: BaseException | None = None
+
+    async def start_workflow(self, *args: Any, **kwargs: Any) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.starts.append(kwargs["start_signal_args"])
+
+
 @pytest.fixture
-def full_nudges(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
-    """Each awaited `FilamentSyncNudger.nudge`'s ``full``; `filament_nudges` silences it."""
-    nudges: list[bool] = []
-
-    async def nudge(self: FilamentSyncNudger, *, full: bool = False) -> None:
-        nudges.append(full)
-
-    monkeypatch.setattr(FilamentSyncNudger, "nudge", nudge)
-    return nudges
+def temporal(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> FakeTemporal:
+    """The app's real `FilamentSyncNudger.nudge`, over a fake Temporal client."""
+    fake = FakeTemporal()
+    monkeypatch.setattr(FilamentSyncNudger, "nudge", REAL_NUDGE)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(state.filament_sync, "client_getter", lambda: fake)
+    return fake
 
 
 def test_status_lists_errors_and_directions(client: TestClient, pg_conninfo: str) -> None:
@@ -102,34 +120,49 @@ def test_status_says_why_no_pass_runs(client: TestClient) -> None:
 
 
 def test_run_nudges_full(
-    client: TestClient, filament_nudges: list[bool], full_nudges: list[bool]
+    client: TestClient, filament_nudges: list[bool], temporal: FakeTemporal
 ) -> None:
     configure(client, filament_sync={"spools": "two_way"})
     filament_nudges.clear()
-    full_nudges.clear()
 
     ran = client.post(f"{SYNC}/run")
 
     assert ran.status_code == 202, ran.text
     assert ran.json() == {"started": True}
-    assert full_nudges == [True]
+    assert temporal.starts == [[True]]
     # The route nudges itself: `nudge_after_write` adds no plain nudge after it.
     assert filament_nudges == []
 
 
+def test_run_that_cannot_reach_temporal_is_503(
+    client: TestClient, filament_nudges: list[bool], temporal: FakeTemporal
+) -> None:
+    """R-T10-2: no 202 when nothing started; the detail is the label, never the message."""
+    configure(client, filament_sync={"spools": "two_way"})
+    filament_nudges.clear()
+    temporal.fail = RuntimeError("connection refused to 10.0.0.9:7233")
+
+    ran = client.post(f"{SYNC}/run")
+
+    assert ran.status_code == 503, ran.text
+    assert ran.json()["detail"] == "could not ask the sync workflow for a pass: internal"
+    assert "10.0.0.9" not in ran.text
+    assert filament_nudges == []
+
+
 def test_run_without_bambuddy_is_409(
-    client: TestClient, filament_nudges: list[bool], full_nudges: list[bool]
+    client: TestClient, filament_nudges: list[bool], temporal: FakeTemporal
 ) -> None:
     ran = client.post(f"{SYNC}/run")
 
     assert ran.status_code == 409, ran.text
     assert ran.json()["code"] == "no_bambuddy"
-    assert full_nudges == []
+    assert temporal.starts == []
     assert filament_nudges == []
 
 
 def test_run_with_nothing_pushing_is_409(
-    client: TestClient, filament_nudges: list[bool], full_nudges: list[bool]
+    client: TestClient, filament_nudges: list[bool], temporal: FakeTemporal
 ) -> None:
     configure(client)
     filament_nudges.clear()
@@ -138,5 +171,5 @@ def test_run_with_nothing_pushing_is_409(
 
     assert ran.status_code == 409, ran.text
     assert ran.json()["code"] == "nothing_pushes"
-    assert full_nudges == []
+    assert temporal.starts == []
     assert filament_nudges == []

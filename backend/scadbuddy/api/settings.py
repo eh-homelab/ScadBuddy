@@ -55,6 +55,7 @@ from scadbuddy.core.settings import (
     Settings,
     env_var,
 )
+from scadbuddy.filament.bb_sync_models import pushes_anything
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
@@ -638,8 +639,13 @@ async def put_settings(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
     if sync_touched and snapshot.runtime.filament_sync != sync_before:
-        # #6265 Decision 17: a direction that now pushes pushes at once.
-        state.filament_sync.nudge_soon()
+        if pushes_anything(snapshot.runtime.filament_sync):
+            # #6265 Decision 17: a direction that now pushes pushes at once.
+            state.filament_sync.nudge_soon()
+        elif pushes_anything(sync_before):
+            # R-T10-3: nothing pushes now. A running workflow is told, so its next pass is
+            # `nothing_pushes` and it ends; none is started.
+            state.filament_sync.signal_running_soon()
     if "print_auto_import" in patch.model_fields_set:
         # #4699: the watcher takes the prints started from this moment on, not from its
         # next pass; switched off, it forgets the moment. It reads the committed switch

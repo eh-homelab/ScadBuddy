@@ -742,8 +742,9 @@ export const filamentTools: Tool[] = [
       'Bambuddy, then writes it only for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`); ' +
       'see filament_sync_status for the directions. Answers `{started: true}` once the pass is asked for; read ' +
       'filament_sync_status afterwards for how it went. 409 `no_bambuddy` with no Bambuddy configured, ' +
-      '`nothing_pushes` when no data type is set to push. Writes Bambuddy to match ScadBuddy, and ScadBuddy (the ' +
-      'links and the sync status). Approved first.',
+      '`nothing_pushes` when no data type is set to push. 503 when the pass could not be asked for (the workflow ' +
+      'service did not answer; `detail` names the error): nothing started, so try again later. Writes Bambuddy to ' +
+      'match ScadBuddy, and ScadBuddy (the links and the sync status). Approved first.',
     input: z.object({}),
     risk: 'outward',
     source: SOURCE,

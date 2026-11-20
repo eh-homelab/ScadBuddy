@@ -16,8 +16,15 @@ from temporalio.client import Client, WorkflowHandle
 from temporalio.common import RetryPolicy
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament.bb_sync_models import SYNC_PASS_ACTIVITY, SyncPassInput, SyncPassResult
-from scadbuddy.filament.bb_sync_nudge import CHANGED_SIGNAL, SyncStart, workflow_id
+from scadbuddy.filament.bb_sync_nudge import (
+    CHANGED_SIGNAL,
+    FilamentSyncNudger,
+    SyncStart,
+    instance_for,
+    workflow_id,
+)
 from scadbuddy.workflows import filament_sync
 from scadbuddy.workflows.filament_sync import DEBOUNCE, MAX_PASSES_IN_A_ROW, FilamentBbSync
 from tests.support.temporal import temporal_client, terminate_open_workflows
@@ -204,6 +211,35 @@ async def test_a_signal_during_a_skipped_pass_runs_one_more(client: Client) -> N
         await until(lambda: len(passes.calls) == 2)
         assert (await handle.describe()).close_time is None
     assert [call.run_id for call in passes.calls] == [passes.calls[0].run_id] * 2
+
+
+async def test_a_save_that_stops_every_push_ends_a_running_workflow(client: Client) -> None:
+    """R-T10-3: with no timer, the nudger's signal-only `signal_running` (sent by a save
+    that leaves nothing pushing) runs one more pass; it is ``nothing_pushes`` and the
+    workflow ends (R-T8-4)."""
+    passes = Passes(
+        lambda n, start: result(start) if n == 0 else result(start, skipped="nothing_pushes")
+    )
+    url = f"https://bambuddy-{uuid.uuid4().hex[:8]}.test/"
+    settings = {"bambuddy_url": url, "spool_overlay_refresh_seconds": 0}
+    nudger = FilamentSyncNudger(
+        lambda: client,
+        lambda _names: settings | {"filament_sync": FilamentSync()},
+        "unused",
+    )
+    async with serving(client, passes) as queue:
+        handle = await client.start_workflow(
+            FilamentBbSync.run,
+            SyncStart(instance=INSTANCE, interval_s=0),
+            id=workflow_id(instance_for(url)),
+            task_queue=queue,
+            start_signal=CHANGED_SIGNAL,
+            start_signal_args=[False],
+        )
+        await until(lambda: len(passes.calls) == 1)
+        await nudger.signal_running()
+        await asyncio.wait_for(handle.result(), 30)
+    assert len(passes.calls) == 2
 
 
 async def test_a_failed_pass_does_not_end_the_workflow(

@@ -1502,6 +1502,28 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 131. Task 10: `filament_sync_run` is `outward` (gated, approved first) as
     `filament_rfid_reconcile` is, and in `TOUCHES_NOTHING` beside it;
     `filament_sync_status` is `read`.
+132. Task 10 (R-T10-1, concern 1): decision 128 is accepted as built. `skipped` is
+    `skip_reason` of the settings now.
+133. Task 10 (R-T10-2, concern 2; changes 129 and 130): "Sync now" never answers 202 when
+    nothing started. `FilamentSyncNudger.nudge(full=, raise_errors=False)` answers the
+    `SkipReason` it stopped on (else `None`), and with `raise_errors` raises a failed
+    settings read, start or signal (or its 5 s timeout) instead of logging it. The run
+    route calls `nudge(full=True, raise_errors=True)` and no longer reads the settings
+    itself: the 409s come from the nudge's answer, and a raise is a 503 whose detail ends in
+    `rfid_push.failure_label(exc)` (`error_label` for an `ApiError`, else `internal`; it was
+    `_label`), never the message. The write nudge (`nudge_soon`) stays log-only. Tests:
+    `test_run_that_cannot_reach_temporal_is_503`, `test_raise_errors_raises_and_logs_nothing`,
+    `test_a_nudge_answers_why_it_started_nothing`.
+134. Task 10 (R-T10-3, concern 4): a `put_settings` that changes `filament_sync` nudges when
+    the new value pushes; when it pushes nothing and the old value did, it calls
+    `FilamentSyncNudger.signal_running_soon`: a `changed` signal to the configured
+    instance's workflow, never a start. The workflow's next pass is `nothing_pushes` and it
+    ends (R-T8-4), also with `interval_s` 0. A workflow that does not exist (`NOT_FOUND`)
+    or no `bambuddy_url` is nothing; another failure is logged. The api tests' autouse
+    `filament_signals` records it. Tests: `test_a_save_that_stops_every_push_signals_only`,
+    `test_signal_running_signals_and_never_starts`,
+    `test_signal_running_with_no_workflow_is_quiet`,
+    `test_a_save_that_stops_every_push_ends_a_running_workflow`.
 
 ## Self-review
 

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from temporalio.common import WorkflowIDConflictPolicy
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.settings import FilamentSync, Settings
 from scadbuddy.filament.bb_sync_nudge import (
@@ -31,12 +32,27 @@ QUEUE = "bambuddy"
 class FakeClient:
     def __init__(self, fail: BaseException | None = None) -> None:
         self.starts: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.signals: list[tuple[str, tuple[Any, ...]]] = []
         self.fail = fail
 
     async def start_workflow(self, *args: Any, **kwargs: Any) -> None:
         if self.fail is not None:
             raise self.fail
         self.starts.append((args, kwargs))
+
+    def get_workflow_handle(self, workflow_id: str) -> FakeHandle:
+        return FakeHandle(self, workflow_id)
+
+
+class FakeHandle:
+    def __init__(self, client: FakeClient, workflow_id: str) -> None:
+        self.client = client
+        self.id = workflow_id
+
+    async def signal(self, *args: Any) -> None:
+        if self.client.fail is not None:
+            raise self.client.fail
+        self.client.signals.append((self.id, args))
 
 
 #: Only the spools push: a nudge starts the workflow.
@@ -98,9 +114,9 @@ async def test_nudge_without_bambuddy_does_nothing(url: str | None) -> None:
     ids=["defaults", "all-off"],
 )
 async def test_a_nudge_with_nothing_pushing_does_nothing(sync: FilamentSync) -> None:
-    """R-T8-2: no workflow when no data type pushes."""
+    """R-T8-2: no workflow when no data type pushes; the answer says why (R-T10-2)."""
     client = FakeClient()
-    await nudger(client, URL, sync=sync).nudge(full=True)
+    assert await nudger(client, URL, sync=sync).nudge(full=True) == "nothing_pushes"
     assert client.starts == []
 
 
@@ -177,3 +193,63 @@ async def test_nudge_soon_runs_the_nudge_in_a_task() -> None:
         await asyncio.sleep(0.01)
     ((_, kwargs),) = client.starts
     assert kwargs["start_signal_args"] == [True]
+
+
+async def test_a_nudge_answers_why_it_started_nothing() -> None:
+    client = FakeClient()
+    assert await nudger(client, None).nudge(full=True) == "no_bambuddy"
+    assert await nudger(client, URL).nudge(full=True) is None
+    assert len(client.starts) == 1
+
+
+async def test_raise_errors_raises_and_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """R-T10-2: "Sync now" learns that the start failed, so it never answers 202."""
+    client = FakeClient(fail=RuntimeError("Temporal is down"))
+    with (
+        caplog.at_level(logging.WARNING, logger="scadbuddy.filament.bb_sync_nudge"),
+        pytest.raises(RuntimeError, match="Temporal is down"),
+    ):
+        await nudger(client, URL).nudge(full=True, raise_errors=True)
+    assert caplog.records == []
+
+
+async def test_signal_running_signals_and_never_starts() -> None:
+    """R-T10-3: the save that leaves nothing pushing tells a running workflow."""
+    client = FakeClient()
+    await nudger(client, URL, sync=FilamentSync()).signal_running()
+    assert client.starts == []
+    assert client.signals == [(workflow_id(instance_for(URL)), (CHANGED_SIGNAL, False))]
+
+
+@pytest.mark.parametrize("url", [None, ""])
+async def test_signal_running_without_bambuddy_does_nothing(url: str | None) -> None:
+    client = FakeClient()
+    await nudger(client, url).signal_running()
+    assert client.signals == []
+    assert client.starts == []
+
+
+async def test_signal_running_with_no_workflow_is_quiet(caplog: pytest.LogCaptureFixture) -> None:
+    client = FakeClient(fail=RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b""))
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.filament.bb_sync_nudge"):
+        await nudger(client, URL).signal_running()
+    assert caplog.records == []
+    assert client.starts == []
+
+
+async def test_a_signal_failure_is_logged_not_raised(caplog: pytest.LogCaptureFixture) -> None:
+    client = FakeClient(fail=RPCError("down", RPCStatusCode.UNAVAILABLE, b""))
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.filament.bb_sync_nudge"):
+        await nudger(client, URL).signal_running()
+    assert [r.message for r in caplog.records] == ["could not signal the filament sync"]
+
+
+async def test_signal_running_soon_signals_in_a_task() -> None:
+    client = FakeClient()
+    nudger(client, URL).signal_running_soon()
+    assert client.signals == []
+    for _ in range(50):
+        if client.signals:
+            break
+        await asyncio.sleep(0.01)
+    assert len(client.signals) == 1

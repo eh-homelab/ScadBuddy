@@ -262,12 +262,27 @@ def filament_nudges(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     def soon(self: FilamentSyncNudger, *, full: bool = False) -> None:
         nudges.append(full)
 
-    async def nudge(self: FilamentSyncNudger, *, full: bool = False) -> None:
+    async def nudge(
+        self: FilamentSyncNudger, *, full: bool = False, raise_errors: bool = False
+    ) -> None:
         return None
 
     monkeypatch.setattr(FilamentSyncNudger, "nudge_soon", soon)
     monkeypatch.setattr(FilamentSyncNudger, "nudge", nudge)
     return nudges
+
+
+@pytest.fixture(autouse=True)
+def filament_signals(monkeypatch: pytest.MonkeyPatch) -> list[None]:
+    """R-T10-3: the signal-only nudges a save sends when nothing pushes now, recorded and
+    never sent, as `filament_nudges` does."""
+    signals: list[None] = []
+
+    def soon(self: FilamentSyncNudger) -> None:
+        signals.append(None)
+
+    monkeypatch.setattr(FilamentSyncNudger, "signal_running_soon", soon)
+    return signals
 
 
 @pytest.fixture(autouse=True)

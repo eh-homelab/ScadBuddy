@@ -729,6 +729,21 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     expect(posted).toBe(1)
   })
 
+  it('fails on the 503 when nothing started, and says so', async () => {
+    const detail = 'could not ask the sync workflow for a pass: internal'
+    server.use(
+      http.post(`${SYNC}/run`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Service Unavailable', status: 503, detail },
+          { status: 503, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    expect(tool('filament_sync_run').description).toContain('503')
+    const t = tool('filament_sync_run')
+    await expect(t.execute(t.parse({}), ctx('outward'))).rejects.toThrow(detail)
+  })
+
   it('fails on the 409 with no Bambuddy, naming why', async () => {
     server.use(
       http.post(`${SYNC}/run`, () =>
