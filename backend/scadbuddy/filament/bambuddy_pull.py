@@ -38,8 +38,9 @@ this order:
    a tray UUID binds as ``bambu_mifare``; one BB read as OpenTag3D
    (``data_origin == "opentag3d"``) as ``ntag_opentag``; any other as ``other``.
 
-Catalog names from BB (material, subtype, brand, category, effect) resolve by their upper
-case name, and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
+Catalog names from BB (material, subtype, brand, category, effect) resolve by their key
+against every name and alias of the catalog (#6706, `catalog.find_by_key`: `DUAL-COLOR` is
+`Dual Color`), and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
 `BambuddyClient.spool_catalog`) is mapped once per pull (`_insert_types`): an entry is the
 insert type that has its id as ``bb_catalog_id``, else the unlinked one of the same upper
 case name (now linked), else a new one (its weight, no insert material). A type that
@@ -88,6 +89,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, ledger, sensors
 from scadbuddy.filament import models as m
+from scadbuddy.filament.catalog import KIND_OF_TABLE, resolve_or_add
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.presets import drop_migrated, own_presets
@@ -1012,41 +1014,12 @@ def _values(
 
 
 def _catalog_id(conn: Conn, table: str, name: str, material: UUID | None) -> UUID:
-    """The unarchived row of ``table`` named ``name`` in any case, else a new one. A
-    subtype is ``material``'s own when it has one of the name, else one for every
-    material, else a new one of ``material``."""
-    subtype = table == "filament_subtypes"
-    while True:
-        if subtype:
-            row = conn.execute(
-                "SELECT id FROM filament_subtypes WHERE archived_at IS NULL"
-                " AND upper(name) = upper(%s) AND (material_id = %s OR material_id IS NULL)"
-                " ORDER BY material_id IS NULL LIMIT 1",
-                (name, material),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                f"SELECT id FROM {table} WHERE archived_at IS NULL AND upper(name) = upper(%s)",
-                (name,),
-            ).fetchone()
-        if row is not None:
-            found: UUID = row["id"]
-            return found
-        if subtype:
-            made = conn.execute(
-                "INSERT INTO filament_subtypes (name, sort_order, material_id)"
-                " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING RETURNING id",
-                (name, _ADDED_SORT, material),
-            ).fetchone()
-        else:
-            made = conn.execute(
-                f"INSERT INTO {table} (name, sort_order) VALUES (%s, %s)"
-                " ON CONFLICT DO NOTHING RETURNING id",
-                (name, _ADDED_SORT),
-            ).fetchone()
-        if made is not None:
-            new: UUID = made["id"]
-            return new
+    """The row of ``table`` whose name or alias has ``name``'s key (`catalog.find_by_key`,
+    archived or not), else a new one. A subtype is ``material``'s own when it has one of
+    the key, else one for every material, else a new one of ``material``."""
+    return resolve_or_add(
+        conn, KIND_OF_TABLE[table], name, sort_order=_ADDED_SORT, material=material
+    )
 
 
 def _insert_link(conn: Conn, spool_id: UUID, bb: BbSpool, now: datetime) -> None:

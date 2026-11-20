@@ -23,6 +23,7 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import (
     CatalogExistsError,
     CatalogRefError,
+    catalog_key,
     check_temps,
 )
 from scadbuddy.filament.catalog import (
@@ -366,7 +367,7 @@ class SpoolTypeStore:
                     cost_per_kg=cost,
                     alpha=alpha,
                     extra_colours=(row["extra_colours"] or [])[:8],
-                    effect=_book_effect(names["effect"]),
+                    effect=_book_effect(conn, row["effect_id"]),
                 ),
                 conn=conn,
             ).id
@@ -386,13 +387,22 @@ class SpoolTypeStore:
         return linked
 
 
-def _book_effect(name: str | None) -> FilamentEffect | None:
-    """The price book's ``effect`` for an effect catalog name (``Dual Color`` is
-    ``dual-color``); ``None`` for a name the book has no value for."""
-    if name is None:
+def _book_effect(conn: Conn, effect_id: UUID | None) -> FilamentEffect | None:
+    """The price book's ``effect`` for an effect: the book value whose key is the key of
+    its name, else of one of its aliases (#6706: ``Dual Color`` and an alias
+    ``dual-color`` are ``dual-color``); ``None`` when none is."""
+    if effect_id is None:
         return None
-    value = name.strip().lower().replace(" ", "-")
-    return cast("FilamentEffect", value) if value in get_args(FilamentEffect) else None
+    by_key = {catalog_key(value): value for value in get_args(FilamentEffect)}
+    rows = conn.execute(
+        "SELECT key FROM filament_effect_names WHERE effect_id = %s"
+        " ORDER BY NOT canonical, upper(name), name",
+        (effect_id,),
+    ).fetchall()
+    for row in rows:
+        if row["key"] in by_key:
+            return cast("FilamentEffect", by_key[row["key"]])
+    return None
 
 
 #: The K value tables and the column of what each value belongs to.
