@@ -735,7 +735,8 @@ export function BambuddyRead({
           {failure.text}
         </p>
       )}
-      {(unanswered || (stale && failure?.kind !== 'unanswered')) && (
+      {/* The view's own task read fell back to stored intervals: say so whatever the button's last read did. */}
+      {(unanswered || stale) && (
         <p role={unanswered ? 'alert' : undefined} className="text-[13px] text-warn">
           {unansweredText(readAt, now)}
         </p>
