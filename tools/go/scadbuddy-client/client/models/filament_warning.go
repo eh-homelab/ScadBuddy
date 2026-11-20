@@ -15,8 +15,96 @@ type FilamentWarning struct {
 	kind *FilamentWarning_kind
 	// The message property
 	message *string
+	// The plate_id property
+	plate_id FilamentWarning_FilamentWarning_plate_idable
 	// The slot_id property
 	slot_id FilamentWarning_FilamentWarning_slot_idable
+}
+
+// FilamentWarning_FilamentWarning_plate_id composed type wrapper for classes FilamentWarning_plate_idMember1able, int32
+type FilamentWarning_FilamentWarning_plate_id struct {
+	// Composed type representation for type FilamentWarning_plate_idMember1able
+	filamentWarning_plate_idMember1 FilamentWarning_plate_idMember1able
+	// Composed type representation for type int32
+	integer *int32
+}
+
+// NewFilamentWarning_FilamentWarning_plate_id instantiates a new FilamentWarning_FilamentWarning_plate_id and sets the default values.
+func NewFilamentWarning_FilamentWarning_plate_id() *FilamentWarning_FilamentWarning_plate_id {
+	m := &FilamentWarning_FilamentWarning_plate_id{}
+	return m
+}
+
+// CreateFilamentWarning_FilamentWarning_plate_idFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateFilamentWarning_FilamentWarning_plate_idFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewFilamentWarning_FilamentWarning_plate_id()
+	if parseNode != nil {
+		if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetObjectValue(CreateFilamentWarning_plate_idMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(FilamentWarning_plate_idMember1able); ok {
+				result.SetFilamentWarningPlateIdMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *FilamentWarning_FilamentWarning_plate_id) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetFilamentWarningPlateIdMember1 gets the FilamentWarning_plate_idMember1 property value. Composed type representation for type FilamentWarning_plate_idMember1able
+// returns a FilamentWarning_plate_idMember1able when successful
+func (m *FilamentWarning_FilamentWarning_plate_id) GetFilamentWarningPlateIdMember1() FilamentWarning_plate_idMember1able {
+	return m.filamentWarning_plate_idMember1
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *FilamentWarning_FilamentWarning_plate_id) GetInteger() *int32 {
+	return m.integer
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *FilamentWarning_FilamentWarning_plate_id) GetIsComposedType() bool {
+	return true
+}
+
+// Serialize serializes information the current object
+func (m *FilamentWarning_FilamentWarning_plate_id) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetFilamentWarningPlateIdMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetFilamentWarningPlateIdMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetFilamentWarningPlateIdMember1 sets the FilamentWarning_plate_idMember1 property value. Composed type representation for type FilamentWarning_plate_idMember1able
+func (m *FilamentWarning_FilamentWarning_plate_id) SetFilamentWarningPlateIdMember1(value FilamentWarning_plate_idMember1able) {
+	m.filamentWarning_plate_idMember1 = value
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *FilamentWarning_FilamentWarning_plate_id) SetInteger(value *int32) {
+	m.integer = value
 }
 
 // FilamentWarning_FilamentWarning_slot_id composed type wrapper for classes FilamentWarning_slot_idMember1able, int32
@@ -105,6 +193,14 @@ func (m *FilamentWarning_FilamentWarning_slot_id) SetInteger(value *int32) {
 	m.integer = value
 }
 
+type FilamentWarning_FilamentWarning_plate_idable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetFilamentWarningPlateIdMember1() FilamentWarning_plate_idMember1able
+	GetInteger() *int32
+	SetFilamentWarningPlateIdMember1(value FilamentWarning_plate_idMember1able)
+	SetInteger(value *int32)
+}
+
 type FilamentWarning_FilamentWarning_slot_idable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetFilamentWarningSlotIdMember1() FilamentWarning_slot_idMember1able
@@ -156,6 +252,16 @@ func (m *FilamentWarning) GetFieldDeserializers() map[string]func(i878a80d2330e8
 		}
 		return nil
 	}
+	res["plate_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateFilamentWarning_FilamentWarning_plate_idFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPlateId(val.(FilamentWarning_FilamentWarning_plate_idable))
+		}
+		return nil
+	}
 	res["slot_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateFilamentWarning_FilamentWarning_slot_idFromDiscriminatorValue)
 		if err != nil {
@@ -181,6 +287,12 @@ func (m *FilamentWarning) GetMessage() *string {
 	return m.message
 }
 
+// GetPlateId gets the plate_id property value. The plate_id property
+// returns a FilamentWarning_FilamentWarning_plate_idable when successful
+func (m *FilamentWarning) GetPlateId() FilamentWarning_FilamentWarning_plate_idable {
+	return m.plate_id
+}
+
 // GetSlotId gets the slot_id property value. The slot_id property
 // returns a FilamentWarning_FilamentWarning_slot_idable when successful
 func (m *FilamentWarning) GetSlotId() FilamentWarning_FilamentWarning_slot_idable {
@@ -198,6 +310,12 @@ func (m *FilamentWarning) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	}
 	{
 		err := writer.WriteStringValue("message", m.GetMessage())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("plate_id", m.GetPlateId())
 		if err != nil {
 			return err
 		}
@@ -232,6 +350,11 @@ func (m *FilamentWarning) SetMessage(value *string) {
 	m.message = value
 }
 
+// SetPlateId sets the plate_id property value. The plate_id property
+func (m *FilamentWarning) SetPlateId(value FilamentWarning_FilamentWarning_plate_idable) {
+	m.plate_id = value
+}
+
 // SetSlotId sets the slot_id property value. The slot_id property
 func (m *FilamentWarning) SetSlotId(value FilamentWarning_FilamentWarning_slot_idable) {
 	m.slot_id = value
@@ -242,8 +365,10 @@ type FilamentWarningable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetKind() *FilamentWarning_kind
 	GetMessage() *string
+	GetPlateId() FilamentWarning_FilamentWarning_plate_idable
 	GetSlotId() FilamentWarning_FilamentWarning_slot_idable
 	SetKind(value *FilamentWarning_kind)
 	SetMessage(value *string)
+	SetPlateId(value FilamentWarning_FilamentWarning_plate_idable)
 	SetSlotId(value FilamentWarning_FilamentWarning_slot_idable)
 }
