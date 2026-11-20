@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
+import trimesh
 
 from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.builtin import (
@@ -22,8 +24,10 @@ from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic
 from scadbuddy.analyzers.runner import run_checks
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
 from scadbuddy.bambuddy.models import SlotChoice
-from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
+from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.plate import plate_for
+from scadbuddy.render.split import ColourPart
 from tests.analyzers.conftest import (
     basic_slot,
     choices,
@@ -264,6 +268,59 @@ def test_a_multi_plate_output_is_checked_plate_by_plate(tmp_path: Path) -> None:
     [found] = _run(PLATE_FIT, output=wide, model_3mf=too_big, plate=mini)
     assert {e.label: e.value for e in found.evidence}["plates"] == 2
     assert any(e.label == "placement" for e in found.evidence)
+
+
+def _crowded() -> list[ColourPart]:
+    """Two colours over nearly all of the H2C's reachable area: no room for a tower."""
+    return [part(cube_of(290, 300, 4)), part(cube_of(2, 2, 2), "#00FF00", 2)]
+
+
+def cube_of(x: float, y: float, z: float) -> trimesh.Trimesh:
+    box: trimesh.Trimesh = trimesh.creation.box(extents=(x, y, z))
+    box.apply_translation(np.array([x, y, z]) / 2)
+    return box
+
+
+TOWER_ON = AnalysisRequest(prime_tower=PrimeTowerChoice(enabled=True))
+CROWDED = output(size=(290, 300, 4), colours=["#FF0000", "#00FF00"])
+
+
+def test_a_one_plate_file_with_the_tower_off_keeps_no_room_for_one(tmp_path: Path) -> None:
+    """#3770: an Arrange packed with the tower off fits without one, as the send judges."""
+    off = tmp_path / "off.3mf"
+    write_plates_3mf(
+        [single_plate(_crowded())],
+        ["#FF0000", "#00FF00"],
+        off,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    assert _run(PLATE_FIT, output=CROWDED, model_3mf=off) == []
+    # The file is what says so: without it, the colours keep room for a tower.
+    [found] = _run(PLATE_FIT, output=CROWDED)
+    assert any(e.label == "placement" for e in found.evidence)
+    # A print that turns the tower on gets room for it, so the plate does not fit.
+    [found] = _run(PLATE_FIT, output=CROWDED, model_3mf=off, request=TOWER_ON)
+    assert any(e.label == "placement" for e in found.evidence)
+
+
+def test_a_multi_plate_file_with_the_tower_off_gets_room_when_the_print_turns_it_on(
+    tmp_path: Path,
+) -> None:
+    off = tmp_path / "off.3mf"
+    write_plates_3mf(
+        [PlateParts((part(cube()),), (1,)), PlateParts(tuple(_crowded()), (1, 2))],
+        ["#FF0000", "#00FF00"],
+        off,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    assert _run(PLATE_FIT, output=CROWDED, model_3mf=off) == []
+    [found] = _run(PLATE_FIT, output=CROWDED, model_3mf=off, request=TOWER_ON)
+    assert {e.label: e.value for e in found.evidence}["plates"] == 2
+    assert "prime tower" in found.message
 
 
 # --- the runner ---------------------------------------------------------------------

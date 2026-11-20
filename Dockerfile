@@ -608,6 +608,134 @@ EXPOSE 9090
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["scadbuddy-slicer"]
 
+# ── profile-fetch: the 3DFP profile-fetch worker (#6625) ──────────────────────
+# `python -m scadbuddy.profile_fetch` drives a headed Chromium under Xvfb on
+# 3dfilamentprofiles.com (plan 2026-11-18-profile-fetch-worker.md, Decisions 4 to 6),
+# published as ghcr.io/eh-homelab/scadbuddy-profile-fetch. It holds no database secret
+# and no database client config: it reaches the CRUD service over HTTP with its service
+# credential, and the 3DFP login comes from the pod's env (README.md, "Profile-fetch
+# worker"). The browser runs untrusted web content, so the image carries nothing else.
+#
+# Three stages. `profile-fetch-deps` builds the venv: the backend with the
+# `profile-fetch` group (Playwright, pinned exactly) and without the dev group, and
+# without the editable install (`--no-editable`), so the venv alone holds scadbuddy and
+# no source tree is copied on. It needs git, for the git-pinned
+# temporal-agent-harness, which the runtime does not. `profile-fetch` is the image;
+# `profile-fetch-test` adds the dev group and backend/tests, for ci.yml's
+# `profile-fetch-image` job, and is never published.
+# The base is python:3.12, the backend's `requires-python`, by tag and index digest
+# (Docker Hub through the buildx mirror; Dependabot moves it).
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch-deps
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+WORKDIR /app/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+# Without psycopg: the worker has no database (#5295), so no database client library
+# ships in its image. Every psycopg package in uv.lock is named; uv skips a name that
+# the resolution does not install (psycopg-binary is the dev group's).
+RUN uv sync --frozen --no-dev --group profile-fetch --no-install-project \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
+COPY backend/scadbuddy ./scadbuddy
+RUN uv sync --frozen --no-dev --group profile-fetch --no-editable \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
+
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch
+
+ARG TARGETARCH
+# Playwright publishes Chromium for amd64 and arm64, but no CI job builds arm64 and the
+# image has only been measured on amd64.
+RUN [ "$TARGETARCH" = amd64 ] \
+    || { echo "ERROR: the profile-fetch image is built for amd64 only, not '${TARGETARCH}'." >&2; exit 1; }
+
+# xvfb and xauth for `xvfb-run` (headed Chromium, Decision 5), tini to reap what a
+# crashed browser leaves behind, as in the other stages.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tini xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=profile-fetch-deps /opt/venv /opt/venv
+# The browsers in a fixed, root-owned, world-readable directory, not under a user's
+# cache: uid 10001 reads them, and a read-only root file system cannot change them.
+# Playwright's own installer, at the version the lockfile pins: `chromium` is the FULL
+# build (the worker runs it headed, and the env test wraps its binary with
+# --renderer-cmd-prefix, build Decision 60) plus the headless shell the other driver
+# tests launch; `--with-deps` apt-installs the OS libraries and fonts it needs.
+ENV PATH=/opt/venv/bin:$PATH \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+RUN playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /ms-playwright
+
+# Fails the build when a psycopg package is installed or the worker's start imports
+# Postgres code (#5295: it has no database), or when Playwright's full Chromium is not
+# where the driver looks. `-B`, so it writes no bytecode.
+RUN python -B - <<'CHECK'
+import importlib.util, os, sys
+for name in ("psycopg", "psycopg_binary", "psycopg_pool", "psycopg_c"):
+    if importlib.util.find_spec(name) is not None:
+        sys.exit(f"ERROR: {name} is installed in the profile-fetch image")
+import scadbuddy.profile_fetch.worker
+if any(m == "psycopg" or m.startswith("psycopg.") for m in sys.modules):
+    sys.exit("ERROR: importing scadbuddy.profile_fetch.worker imported psycopg")
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    path = p.chromium.executable_path
+if not os.access(path, os.X_OK) or "headless_shell" in path:
+    sys.exit(f"ERROR: Playwright's full Chromium is not installed at {path}")
+CHECK
+
+RUN groupadd --gid 10001 profilefetch \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin profilefetch
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+# HOME is /tmp, as the slicer's: Chromium writes under ~, and a read-only root file
+# system with an emptyDir /tmp keeps that working. The browser's profile goes under
+# SCADBUDDY_PROFILE_FETCH_WORK_DIR (default /tmp).
+ENV HOME=/tmp \
+    SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+WORKDIR /tmp
+# Numeric, as the other stages: Kubernetes' runAsNonRoot cannot check a name (DL3066).
+USER 10001:10001
+# /healthz and /metrics (`profile_fetch.settings.HEALTH_PORT`).
+EXPOSE 9090
+# Decision 4's `tini -- xvfb-run -a python -m scadbuddy.profile_fetch`, with xvfb-run in
+# the command, so a one-off `docker run <image> python …` needs no display.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["xvfb-run", "-a", "python", "-m", "scadbuddy.profile_fetch"]
+
+# ── profile-fetch-test: the driver tests in the profile-fetch image ───────────
+# Never published. ci.yml's `profile-fetch-image` job runs
+# tests/profile_fetch/test_site.py here with `--network none` and
+# SCADBUDDY_TEST_CHROMIUM_REQUIRED=1, so the image's own Chromium, OS libraries and
+# Xvfb are what the driver tests drive. The venv gains the dev group (pytest; and
+# psycopg with its binary wheel, which tests/conftest.py imports and the published
+# stage leaves out).
+FROM profile-fetch-deps AS profile-fetch-test-deps
+RUN uv sync --frozen --group profile-fetch --no-editable
+
+FROM profile-fetch AS profile-fetch-test
+COPY --from=profile-fetch-test-deps /opt/venv /opt/venv
+WORKDIR /app/backend
+COPY backend/pyproject.toml ./
+COPY backend/tests ./tests
+# The test run writes its cache and temporary files under /tmp.
+ENV PYTEST_ADDOPTS="-p no:cacheprovider"
+CMD ["xvfb-run", "-a", "python", "-m", "pytest", "tests/profile_fetch/test_site.py"]
+
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
 # the browser by backend/scadbuddy/library/lsp.py. Upstream publishes prebuilt

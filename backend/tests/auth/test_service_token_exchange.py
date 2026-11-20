@@ -145,6 +145,7 @@ def hs256(service_account: str) -> str:
         ("system:serviceaccount:bambuddy:scadbuddy-agent-worker", "agent"),
         ("system:serviceaccount:bambuddy:scadbuddy", "agent"),
         ("system:serviceaccount:bambuddy:scadbuddy-storefront", "storefront"),
+        ("system:serviceaccount:bambuddy:scadbuddy-profile-fetch", "profile-fetch"),
         # Every pod that names no ServiceAccount runs as `default`: never a caller.
         ("system:serviceaccount:bambuddy:default", None),
         ("system:serviceaccount:bambuddy:pgadmin", None),

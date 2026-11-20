@@ -436,6 +436,8 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         model_name=model_name,
         plate=plate_for(req.plate_model),
         materials=_materials(req),
+        prime_tower=req.prime_tower.enabled if req.prime_tower is not None else None,
+        no_sparse_layers=req.prime_tower.no_sparse_layers if req.prime_tower is not None else None,
     )
     await asyncio.to_thread(write_glb, list(plates[0].parts), work / PREVIEW_NAME)
     root = deps.paths.root
