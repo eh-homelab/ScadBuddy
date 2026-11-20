@@ -28,6 +28,9 @@ const MISSING: Record<UngroupedSpool['missing'][number], string> = {
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 
+/** A row's identity: two rows can name one existing type, so not its code. A spool is in one group. */
+const rowKey = (group: TypeProposal) => group.spool_ids[0]!
+
 const hexOf = (rgba: string) => (rgba.endsWith('FF') ? rgba.slice(0, 7) : rgba)
 
 /** What one confirm did, in one line: each type made or used, then each spool skipped. */
@@ -71,9 +74,15 @@ export function TypeProposals({ onDone }: { onDone: (text: string) => void }) {
     void load()
   }, [load])
 
-  if (!data || (!data.groups.length && !data.ungrouped.length)) return null
+  if (!data)
+    return error ? (
+      <p role="alert" className="text-[13px] text-destructive">
+        {error}
+      </p>
+    ) : null
+  if (!data.groups.length && !data.ungrouped.length) return null
 
-  const nameOf = (group: TypeProposal) => names[group.code] ?? group.code
+  const nameOf = (group: TypeProposal) => names[rowKey(group)] ?? group.code
 
   const create = async (groups: TypeProposal[]) => {
     setBusy(true)
@@ -131,7 +140,7 @@ export function TypeProposals({ onDone }: { onDone: (text: string) => void }) {
             const fields = [group.brand, group.material, group.subtype, group.colour_name ?? hexOf(group.rgba)].filter(Boolean).join(', ')
             const name = nameOf(group)
             return (
-              <li key={group.code} aria-label={group.code} className="flex flex-wrap items-center gap-x-3 gap-y-2 p-2.5">
+              <li key={rowKey(group)} aria-label={group.code} className="flex flex-wrap items-center gap-x-3 gap-y-2 p-2.5">
                 <RgbaSwatch rgba={group.rgba} size="lg" />
                 <div className="min-w-0 flex-1 basis-48 space-y-1">
                   <Input
@@ -139,7 +148,7 @@ export function TypeProposals({ onDone }: { onDone: (text: string) => void }) {
                     value={name}
                     maxLength={128}
                     disabled={busy || group.type_id !== null}
-                    onChange={(event) => setNames((current) => ({ ...current, [group.code]: event.target.value }))}
+                    onChange={(event) => setNames((current) => ({ ...current, [rowKey(group)]: event.target.value }))}
                   />
                   <p className="text-[13px] text-muted-foreground">{`${fields}, ${group.label_weight_g} g`}</p>
                   <p className="text-[13px]">

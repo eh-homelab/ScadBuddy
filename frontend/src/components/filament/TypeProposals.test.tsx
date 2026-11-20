@@ -103,6 +103,30 @@ describe('the Create types panel (#6701)', () => {
     expect(onDone).not.toHaveBeenCalled()
   })
 
+  it('says so when the proposals could not be loaded', async () => {
+    server.use(http.get(PROPOSALS, () => HttpResponse.json({ detail: 'the database is down' }, { status: 503 })))
+    open()
+    expect(await screen.findByRole('alert')).toHaveTextContent('the database is down')
+  })
+
+  it('keys each row by its spools when two rows use one type', async () => {
+    const kind = '00000000-0000-4000-8000-0000000000c1'
+    const groups = [
+      group({ type_id: kind }),
+      group({ type_id: kind, label_weight_g: 250, spool_ids: ['00000000-0000-4000-8000-0000000000b2'], numbers: [32] }),
+    ]
+    server.use(http.get(PROPOSALS, () => HttpResponse.json({ groups, ungrouped: [] })))
+    const errors = vi.spyOn(console, 'error')
+    open()
+    const rows = await screen.findAllByRole('listitem', { name: 'PLA-RED' })
+    expect(rows.map((row) => within(row).getByText(/^1 spool/).textContent)).toEqual([
+      '1 spool: #31 (type PLA-RED exists and is used)',
+      '1 spool: #32 (type PLA-RED exists and is used)',
+    ])
+    expect(errors.mock.calls.flat().join(' ')).not.toContain('same key')
+    errors.mockRestore()
+  })
+
   it('shows nothing when no spool needs a type', async () => {
     server.use(http.get(PROPOSALS, () => HttpResponse.json({ groups: [], ungrouped: [] })))
     const { container } = open()
