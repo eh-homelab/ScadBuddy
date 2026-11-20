@@ -3,6 +3,7 @@ and set on the API's registry."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
@@ -125,29 +126,99 @@ def test_export_clears_a_gone_material() -> None:
     assert 'scadbuddy_filament_used_grams{material="PLA",outcome="completed"} 100.0' in text
 
 
-def test_a_failed_export_keeps_the_last_good_gauges(monkeypatch: pytest.MonkeyPatch) -> None:
-    metrics = Metrics()
-    metrics_export.export(
-        metrics,
-        _snapshot(
-            stock=[("PETG", "Bambu", "Shelf", 1, 800.0, Decimal("18"))],
-            reorder={"PETG": 1},
-        ),
+def _before_and_after() -> tuple[Snapshot, Snapshot]:
+    old = _snapshot(
+        stock=[("PETG", "Bambu", "Shelf", 1, 800.0, Decimal("18"))],
+        used={("PETG", "failed"): 5.0},
+        burn={"PETG": 1.0},
+        days_of_stock={"PETG": 800.0},
+        low_stock={"PETG": 0},
+        reorder={"PETG": 1},
     )
+    new = _snapshot(
+        stock=[("PLA", "Bambu", "Shelf", 1, 900.0, None)],
+        used={("PLA", "completed"): 7.0},
+        burn={"PLA": 2.0},
+        days_of_stock={"PLA": 450.0},
+        low_stock={"PLA": 1},
+        reorder={"PLA": 1},
+    )
+    return old, new
 
-    def boom(*_: object) -> None:
-        raise RuntimeError("boom")
 
-    monkeypatch.setattr(metrics.filament_reorder_types, "labels", boom)
+def _all(metrics: Metrics) -> dict[str, dict[tuple[tuple[str, str], ...], float]]:
+    names = {f.name for f in metrics.filament.collect()}
+    return {n: _samples(metrics, n) for n in sorted(names)}
+
+
+def test_a_failed_export_keeps_the_whole_previous_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = Metrics()
+    old, new = _before_and_after()
+    metrics_export.export(metrics, old)
+    before = _all(metrics)
+    assert len(before) == 8
+
+    # The last family built raises: nothing of the new snapshot may show.
+    monkeypatch.setattr(metrics_export, "GaugeMetricFamily", _fail_on_last(8))
     with pytest.raises(RuntimeError):
-        metrics_export.export(
-            metrics,
-            _snapshot(stock=[("PLA", "Bambu", "Shelf", 1, 900.0, None)], reorder={"PLA": 1}),
-        )
-    stock = _samples(metrics, "scadbuddy_filament_stock_grams")
-    assert {dict(labels)["material"] for labels in stock} == {"PLA", "PETG"}
-    assert 'material="PETG"' in metrics.exposition().decode()
-    assert next(v for k, v in stock.items() if dict(k)["material"] == "PETG") == 800.0
+        metrics_export.export(metrics, new)
+    assert _all(metrics) == before
+    assert 'material="PLA"' not in metrics.exposition().decode()
+
+
+def _fail_on_last(count: int) -> Callable[..., object]:
+    real = metrics_export.GaugeMetricFamily
+    made: list[object] = []
+
+    def make(*args: object, **kwargs: object) -> object:
+        if len(made) == count - 1:
+            raise RuntimeError("boom")
+        made.append(object())
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    return make
+
+
+def test_a_collect_during_an_export_sees_the_old_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = Metrics()
+    old, new = _before_and_after()
+    metrics_export.export(metrics, old)
+    before = _all(metrics)
+    seen: list[dict[str, dict[tuple[tuple[str, str], ...], float]]] = []
+    real = metrics_export.GaugeMetricFamily
+    made: list[object] = []
+
+    def make(*args: object, **kwargs: object) -> object:
+        # The export is part-built here; a scrape now reads the registry.
+        made.append(object())
+        if len(made) == 4:
+            seen.append(_all(metrics))
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(metrics_export, "GaugeMetricFamily", make)
+    metrics_export.export(metrics, new)
+    assert seen == [before]
+    after = _all(metrics)
+    assert after != before
+    assert all(dict(k)["material"] == "PLA" for v in after.values() for k in v)
+
+
+def test_a_collect_keeps_one_snapshot_across_a_swap() -> None:
+    metrics = Metrics()
+    old, new = _before_and_after()
+    metrics_export.export(metrics, old)
+    scrape = metrics.filament.collect()
+    first = next(scrape)
+    metrics_export.export(metrics, new)
+    rest = list(scrape)
+    assert {f.name for f in [first, *rest]} == {f.name for f in metrics.filament.collect()}
+    for family in [first, *rest]:
+        for sample in family.samples:
+            assert "PLA" not in sample.labels.values()
 
 
 def test_days_of_stock_of_folded_materials_is_the_soonest() -> None:

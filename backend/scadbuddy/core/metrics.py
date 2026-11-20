@@ -29,6 +29,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 __all__ = [
     "CONTENT_TYPE_LATEST",
     "ROLE_SERIES",
+    "FilamentCollector",
     "HttpMetrics",
     "Metrics",
     "MetricsRole",
@@ -548,7 +549,8 @@ class Metrics:
         # The filament inventory (#6269 plan Decisions 2-5), the API's only: set from a
         # snapshot at most once a minute (`api/metrics.py` `refresh_filament_metrics`).
         # Labels are catalog names, more than 20 values a label folded into `other`
-        # (`filament/metrics_export.py`); a rename starts a new series.
+        # (`filament/metrics_export.py`); a rename starts a new series. The series are not
+        # gauges: `FilamentCollector` swaps a whole snapshot at once (#6785).
         self.filament_metrics_up = Gauge(
             "scadbuddy_filament_metrics_up",
             "1 when the last filament snapshot read succeeded, 0 when it failed (the"
@@ -557,56 +559,11 @@ class Metrics:
         )
         #: When the last filament snapshot was taken or tried, by the refresh's clock.
         self.filament_snapshot_at: float | None = None
-        self.filament_stock_grams = Gauge(
-            "scadbuddy_filament_stock_grams",
-            "Grams left on the spools in stock, by material, brand and location kind.",
-            ["material", "brand", "location_kind"],
-            registry=r,
-        )
-        self.filament_stock_spools = Gauge(
-            "scadbuddy_filament_stock_spools",
-            "Spools in stock, by material, brand and location kind.",
-            ["material", "brand", "location_kind"],
-            registry=r,
-        )
-        self.filament_stock_value = Gauge(
-            "scadbuddy_filament_stock_value",
-            "What the grams in stock cost, by material, in the shop's currency.",
-            ["material", "currency"],
-            registry=r,
-        )
-        self.filament_used_grams = Gauge(
-            "scadbuddy_filament_used_grams",
-            "Grams of every plate ever booked, by material and outcome; read with delta().",
-            ["material", "outcome"],
-            registry=r,
-        )
-        self.filament_burn = Gauge(
-            "scadbuddy_filament_burn_grams_per_day",
-            "Grams a day used over the burn window, by material.",
-            ["material"],
-            registry=r,
-        )
-        self.filament_days_of_stock = Gauge(
-            "scadbuddy_filament_days_of_stock",
-            "Days the stock lasts at the burn rate, by material; none with no use. A"
-            " folded `other` has its soonest material's days.",
-            ["material"],
-            registry=r,
-        )
-        self.filament_low_stock_spools = Gauge(
-            "scadbuddy_filament_low_stock_spools",
-            "Spools in stock below the low-stock threshold, by material.",
-            ["material"],
-            registry=r,
-        )
-        self.filament_reorder_types = Gauge(
-            "scadbuddy_filament_reorder_types",
-            "Spool types whose reorder date (the empty date less lead time and safety"
-            " margin) is today or past, by material.",
-            ["material"],
-            registry=r,
-        )
+        #: The other filament series: one collector that answers from the last good
+        #: snapshot (`filament/metrics_export.py`), registered in the API role only.
+        self.filament = FilamentCollector()
+        if role == "api":
+            r.register(self.filament)
         # A customer's staged files (#6133): the backstop's repairs, each a bug signal.
         self.staged_files_repaired = Counter(
             "scadbuddy_staged_files_repaired",
@@ -717,6 +674,22 @@ class Metrics:
 
     def exposition(self) -> bytes:
         return generate_latest(self.registry)
+
+
+class FilamentCollector(Collector):
+    """The filament series (#6785): the metric families of the last good snapshot. `swap`
+    replaces the one reference to the whole tuple, so a scrape sees the old snapshot or
+    the new one, never a mix, and a failed export leaves the old one whole."""
+
+    def __init__(self, families: tuple[Metric, ...] = ()) -> None:
+        self._families = families
+
+    def swap(self, families: Iterable[Metric]) -> None:
+        self._families = tuple(families)
+
+    def collect(self) -> Iterable[Metric]:
+        # One read of the reference: a swap during the yield changes nothing here.
+        yield from self._families
 
 
 class _PoolCollector(Collector):

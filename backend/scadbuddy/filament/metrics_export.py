@@ -1,5 +1,6 @@
-"""The filament gauges (#6269 plan Decisions 3-5): `MetricsStore.snapshot()` set on the
-API's registry, each label folded to its 20 largest values plus ``other`` and ``none``.
+"""The filament series (#6269 plan Decisions 3-5): `MetricsStore.snapshot()` exported by
+one collector on the API's registry, each label folded to its 20 largest values plus
+``other`` and ``none``.
 
 A label is ranked once and that ranking serves every gauge that has it: brands and
 location kinds by stock grams, materials by stock grams plus every plate's grams, so a
@@ -12,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from prometheus_client import Gauge
+from prometheus_client.core import GaugeMetricFamily, Metric
 
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.filament.metrics_models import Snapshot
@@ -49,9 +50,10 @@ def _totals(pairs: Iterable[tuple[str | None, float]]) -> dict[str | None, float
 
 
 def export(metrics: Metrics, snapshot: Snapshot) -> None:
-    """Set every filament gauge from ``snapshot`` and drop a series that left it. The
-    series are built first and the old ones go last, so an exception keeps the last good
-    values. `filament_metrics_up` is the caller's."""
+    """Build every filament family from ``snapshot``, then swap the collector's one
+    reference to them (#6785): a failure keeps the previous snapshot whole, and a scrape
+    sees the old snapshot or the new one, never a mix. `filament_metrics_up` is the
+    caller's."""
     stock = snapshot.stock
     materials = fold(
         _totals(
@@ -85,29 +87,66 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
     for material, found in snapshot.days_of_stock.items():
         days[mat(material)] = min(found, days.get(mat(material), found))
 
-    wanted: list[tuple[Gauge, Mapping[Any, float]]] = [
-        (metrics.filament_stock_grams, grams),
-        (metrics.filament_stock_spools, spools),
-        (metrics.filament_stock_value, {(k, snapshot.currency): v for k, v in value.items()}),
-        (metrics.filament_used_grams, used),
-        (metrics.filament_burn, {(k,): v for k, v in burn.items()}),
-        (metrics.filament_days_of_stock, {(k,): v for k, v in days.items()}),
-        (metrics.filament_low_stock_spools, {(k,): v for k, v in low.items()}),
-        (metrics.filament_reorder_types, {(k,): v for k, v in reorder.items()}),
+    wanted: list[tuple[str, str, tuple[str, ...], Mapping[Any, float]]] = [
+        (
+            "scadbuddy_filament_stock_grams",
+            "Grams left on the spools in stock, by material, brand and location kind.",
+            ("material", "brand", "location_kind"),
+            grams,
+        ),
+        (
+            "scadbuddy_filament_stock_spools",
+            "Spools in stock, by material, brand and location kind.",
+            ("material", "brand", "location_kind"),
+            spools,
+        ),
+        (
+            "scadbuddy_filament_stock_value",
+            "What the grams in stock cost, by material, in the shop's currency.",
+            ("material", "currency"),
+            {(k, snapshot.currency): v for k, v in value.items()},
+        ),
+        (
+            "scadbuddy_filament_used_grams",
+            "Grams of every plate ever booked, by material and outcome; read with delta().",
+            ("material", "outcome"),
+            used,
+        ),
+        (
+            "scadbuddy_filament_burn_grams_per_day",
+            "Grams a day used over the burn window, by material.",
+            ("material",),
+            {(k,): v for k, v in burn.items()},
+        ),
+        (
+            "scadbuddy_filament_days_of_stock",
+            "Days the stock lasts at the burn rate, by material; none with no use. A"
+            " folded `other` has its soonest material's days.",
+            ("material",),
+            {(k,): v for k, v in days.items()},
+        ),
+        (
+            "scadbuddy_filament_low_stock_spools",
+            "Spools in stock below the low-stock threshold, by material.",
+            ("material",),
+            {(k,): v for k, v in low.items()},
+        ),
+        (
+            "scadbuddy_filament_reorder_types",
+            "Spool types whose reorder date (the empty date less lead time and safety"
+            " margin) is today or past, by material.",
+            ("material",),
+            {(k,): v for k, v in reorder.items()},
+        ),
     ]
-    # Everything is built above. Set first, then drop the series that left: a failure
-    # while setting never leaves an empty gauge.
-    for gauge, values in wanted:
+    families: list[Metric] = []
+    for name, documentation, labelnames, values in wanted:
+        family = GaugeMetricFamily(name, documentation, labels=labelnames)
         for labels, amount in values.items():
-            gauge.labels(*labels).set(amount)
-    for gauge, values in wanted:
-        # Sample labels are always str; the keys in `wanted` may not be.
-        keep = {tuple(str(p) for p in key) for key in values}
-        for family in gauge.collect():
-            for sample in family.samples:
-                labels = tuple(sample.labels.values())
-                if labels not in keep:
-                    gauge.remove(*labels)
+            family.add_metric([str(p) for p in labels], amount)
+        families.append(family)
+    # The one write: everything above is built, so a failure never reaches the collector.
+    metrics.filament.swap(families)
 
 
 def _by_material(

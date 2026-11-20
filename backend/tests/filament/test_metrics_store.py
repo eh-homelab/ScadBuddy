@@ -418,6 +418,23 @@ def test_snapshot_reorder_takes_the_materials_with_most_grams(pg_pool: PgPool) -
     assert found.reorder == {"PLA": 0, "PETG": 1}
 
 
+def test_snapshot_reorder_counts_a_type_under_its_stocked_spools_material(
+    pg_pool: PgPool,
+) -> None:
+    materials = {
+        r.name: r.id for r in CatalogStore(pg_pool).list("materials") if isinstance(r, Material)
+    }
+    type_id = _type(pg_pool, lead_time_days=7, safety_margin_days=3)
+    stocked = _spool(pg_pool, type_id=type_id, grams_left=50, material_id=materials["PLA"])
+    archived = _spool(pg_pool, type_id=type_id, grams_left=900, material_id=materials["PETG"])
+    _sb_end(pg_pool, stocked, None, 300, "a")
+    FilamentSpoolStore(pg_pool).archive(archived, True, actor="ann")
+    found = _store(pg_pool).snapshot()
+    # The archived spool has more grams, but the stocked one's material wins.
+    assert found.reorder.get("PLA") == 1
+    assert found.reorder.get("PETG", 0) == 0
+
+
 def test_snapshot_folds_nothing_itself(pg_pool: PgPool) -> None:
     kind = CatalogStore(pg_pool).list("location-kinds")[0]
     assert isinstance(kind, LocationKind)
