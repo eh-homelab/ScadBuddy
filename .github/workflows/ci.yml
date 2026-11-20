@@ -1566,8 +1566,13 @@ jobs:
             sleep 1
           done
           docker logs intake-sandbox
+          # A sandbox that exited (3: it could not confine a check) fails here, by name.
+          if [ "$(docker inspect -f '{{.State.Running}}' intake-sandbox)" != true ]; then
+            echo "::error::the intake sandbox exited under its pod profiles"
+            exit 1
+          fi
           printf 'solid t\nfacet normal 0 0 -1\nouter loop\nvertex 0 0 0\nvertex 0 10 0\nvertex 10 0 0\nendloop\nendfacet\nendsolid t\n' > "$RUNNER_TEMP/t.stl"
-          code="$(curl -sS -o "$RUNNER_TEMP/verdict.bin" -w '%{http_code}' \
+          code="$(curl -sS -o "$RUNNER_TEMP/verdict.bin" -D "$RUNNER_TEMP/verdict.headers" -w '%{http_code}' \
             -H "Authorization: Bearer $token" -H 'Content-Type: application/octet-stream' \
             -H 'X-Intake-Request: {"filename":"t.stl","timeout":120,"address_space":4294967296,"id":"0123456789abcdef0123456789abcdef"}' \
             --data-binary @"$RUNNER_TEMP/t.stl" http://127.0.0.1:8090/check || true)"
@@ -1575,7 +1580,10 @@ jobs:
           echo "check: HTTP $code"
           head -c 300 "$RUNNER_TEMP/verdict.bin" | tr -c '[:print:]' '.'; echo
           test "$code" = 200
-          grep -q '"isolation": null' "$RUNNER_TEMP/verdict.bin"
+          # The body is the verdict's JSON, then the preview: X-Intake-Verdict-Bytes says
+          # where the JSON ends (intake_worker/runner.py VERDICT_BYTES_HEADER).
+          n="$(tr -d '\r' < "$RUNNER_TEMP/verdict.headers" | awk -F': ' 'tolower($1) == "x-intake-verdict-bytes" {print $2}')"
+          head -c "$n" "$RUNNER_TEMP/verdict.bin" | jq -e '.isolation == null'
 
       # Even when pytest failed, so the split check still says what ran.
       # The timings go along only when they are this run's: one entry per test it
