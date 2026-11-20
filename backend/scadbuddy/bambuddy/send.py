@@ -532,7 +532,12 @@ def _tower_value(value: float) -> str:
 
 def _tower_on(corner: tuple[float, float], side: float, height: float, objects: Rect) -> bool:
     """Whether a tower ``side`` wide at ``wipe_tower_x``/``_y`` ``corner``, with the brim
-    the slicer draws for ``height`` (:func:`tower_brim`), overlaps ``objects`` (#3770)."""
+    the slicer draws for ``height`` (:func:`tower_brim`), overlaps ``objects`` (#3770).
+
+    The tower is judged as a square. The slicer's tower is ``prime_tower_width`` wide,
+    but its depth comes from the prime volume times the filaments, and is often less.
+    So a tower clear of its objects only on the y side can still move: a harmless
+    over-estimate, kept until #3770's shared tower model knows the depth."""
     brim = tower_brim(height)
     x, y = corner[0] - brim, corner[1] - brim
     return Rect(x, y, x + side + 2 * brim, y + side + 2 * brim).overlaps(objects)
@@ -551,10 +556,14 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     whose square, brim included, overlaps its plate's objects' box makes the slicer
     report "Object conflicts were detected" (#3770, Knitted Cat). Only such a tower
     moves; a plate whose objects cannot be read, or that leaves no room, keeps its own,
-    and the slicer says why. The objects are read where the file places them, less
-    their plate's origin on the file's own bed. The box is the plate's objects'
-    together, so a tower an author put in a gap between objects also moves, to a place
-    clear of them all."""
+    and the slicer says why. A tower is judged even where the file seems to print none
+    (``enable_prime_tower`` ``"0"``, or one filament; claude-review on #6691): the print
+    dialog's choice (#3628) can turn the tower on at slice time, and a smooth timelapse
+    makes one for a single filament (``h2c-plate-layout`` skill), and the send knows
+    neither. Moving a tower that never prints changes only its settings. The objects are read
+    where the file places them, less their plate's origin on the file's own bed. The box
+    is the plate's objects' together, so a tower an author put in a gap between objects
+    also moves, to a place clear of them all."""
     if plate.model is None:
         return payload  # no printer chosen: nothing to judge a tower against
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
