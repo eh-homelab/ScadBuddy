@@ -46,8 +46,16 @@ class Replica:
     #: blob hook (it patches ``HTMLAnchorElement.prototype.click``) does not see. The page's
     #: own script can also bypass the hook and push to ``window.__dl`` itself (#6726):
     #: ``pushed_entry`` pushes ``{name, text}`` with no ``tooLarge`` flag, ``pushed_text``
-    #: pushes the bare text, an entry that is not an object.
-    download: Literal["hooked", "unhooked", "pushed_entry", "pushed_text"] = "hooked"
+    #: pushes the bare text, an entry that is not an object, ``pushed_long_name`` an entry
+    #: whose name is over 1024 characters, ``pushed_number_text`` one whose text is a number.
+    download: Literal[
+        "hooked",
+        "unhooked",
+        "pushed_entry",
+        "pushed_text",
+        "pushed_long_name",
+        "pushed_number_text",
+    ] = "hooked"
     sessions: set[str] = field(default_factory=set)
     in_spools: set[int] = field(default_factory=set)
     logins: int = 0
