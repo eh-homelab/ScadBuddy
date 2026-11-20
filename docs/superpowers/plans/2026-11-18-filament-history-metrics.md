@@ -96,8 +96,10 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
    BB's events of one job as `ledger.basis` does: BB's usage row wins. An SB plate with
    `basis` `not_applied` is a failed plate of 0 g; one with `basis` `covered` is skipped (its
    grams are on another spool). An open estimate (a print still running) is not used yet.
-   Outcome: BB's `bb_status` `completed`, `failed` or `cancelled`; any other BB status is
-   `unknown`; an SB plate is `completed` when applied, else `failed`.
+   Outcome: BB's `bb_status` mapped through `bambuddy/stages.py` `stage_of` (so `complete`, `canceled`,
+   `aborted` and `error` count too; changed by the final review's fix, b4497b59a); a status
+   whose stage is not done, failed or cancelled (`printing`, an unknown word) is `unknown`. The live BB status words are not measured yet. An SB
+   plate is `completed` when applied, else `failed`.
 7. **Waste is the grams of `failed` and `cancelled` plates.** An SB-only failed plate
    books 0 g, so its waste is 0 until BB's usage row is paired with it. The waste rate is
    wasted grams over all used grams.
@@ -342,7 +344,8 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
     −30 actual, BB usage `print_ended` −28 of the same job → one `Plate(grams=28.0,
     outcome="completed")`.
   - `test_bb_status_sets_the_outcome`: `bb_status` `failed` → `failed`, `cancelled` →
-    `cancelled`, `"aborted"` → `unknown`.
+    `cancelled`, `"aborted"` → `cancelled` (through `stages.stage_of`), `"printing"` →
+    `unknown`.
   - `test_not_applied_is_a_failed_plate_of_zero` and `test_covered_plate_is_skipped`.
   - `test_open_estimate_is_not_used`: a `print_started` with no end → `plates == []`.
   - `test_burn_over_the_window`: plates of 60 g and 30 g inside a 30-day window, one of
