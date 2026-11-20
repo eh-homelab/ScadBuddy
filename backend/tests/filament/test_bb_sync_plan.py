@@ -15,7 +15,12 @@ from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync, SyncDirection
 from scadbuddy.filament.bb_sync_models import BbSnapshot, BbWrite, SyncPlan, seen_row
 from scadbuddy.filament.bb_sync_plan import (
+    _CATALOG_FIELDS,
+    _FILAMENT_FIELDS,
+    _LOCATION_FIELDS,
+    _SUPPLIER_FIELDS,
     UNSEEN,
+    UNSEEN_KEY,
     BbRefs,
     body_value,
     compare_form,
@@ -1062,3 +1067,167 @@ def test_an_unseen_field_with_a_seeding_time_waits_for_a_later_sb_change() -> No
     assert decide(**kw, sb_at=late, bb_at=None, seen_at=_T0)
     assert decide(**kw, sb_at=late, bb_at=_T0, seen_at=late)
     assert not decide(**kw, sb_at=_T0, bb_at=late, seen_at=None)
+
+
+# -- R-T4-27: a seeded field is pushed only when SB changes it ------------------------
+
+
+def _shelf_seeded(
+    pool: PgPool, f: Filament, bb: dict[str, Any]
+) -> tuple[UUID, FilamentSync, BbSnapshot]:
+    """A legacy location link under ``two_way``: SB identifier ``A1``, Bambuddy's row
+    ``bb``. A full pass seeds its seen copy; the returned snapshot is that pass's."""
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1")
+    )
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = 4,"
+            " updated_at = now() - interval '1 hour' WHERE id = %s",
+            (shelf.id,),
+        )
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    snap = _snap([], locations=[bb], read_at=datetime.now(UTC) - timedelta(minutes=10))
+    assert _plan(f, snap, sync).writes == []
+    return shelf.id, sync, snap
+
+
+def _bb_pushed(pool: PgPool, table: str, sb_id: UUID) -> dict[str, Any]:
+    with pool.connection() as conn:
+        row = conn.execute(f"SELECT bb_pushed FROM {table} WHERE id = %s", (sb_id,)).fetchone()
+    assert row is not None
+    return dict(row["bb_pushed"])
+
+
+def _ago(minutes: int) -> str:
+    return (datetime.now(UTC) - timedelta(minutes=minutes)).replace(tzinfo=None).isoformat()
+
+
+@pytest.mark.parametrize("bb_time", [None, 30], ids=["no-bb-time", "older-bb-time"])
+def test_a_rename_leaves_a_seeded_differing_identifier_alone(
+    pg_pool: PgPool, bb_time: int | None
+) -> None:
+    """R-T4-27, the re-review's measured scenario (I-1): Bambuddy's identifier ``B7``
+    differs from SB's ``A1`` at seeding. A rename in SB changes the row's ``updated_at``,
+    not the identifier, so only the name is pushed. With a Bambuddy time older than the
+    rename, the row times still say nothing about the identifier."""
+    f = _filament(pg_pool)
+    bb: dict[str, Any] = {"id": 4, "name": "Shelf A", "identifier": "B7"}
+    if bb_time is not None:
+        bb["updated_at"] = _ago(bb_time)
+    shelf, sync, _ = _shelf_seeded(pg_pool, f, bb)
+    f.locations.update(shelf, LocationPatch(name="Shelf Z"))
+    (update,) = _plan(f, _snap([], locations=[bb]), sync).writes
+    assert update.body == {"name": "Shelf Z"}
+
+
+def test_an_sb_identifier_change_after_seeding_is_pushed(pg_pool: PgPool) -> None:
+    """R-T4-27: seeding records SB's hash of the differing field (and Bambuddy's) under
+    the reserved key ``unseen`` of ``bb_pushed``. When SB really changes the field, its
+    hash differs from the record, and the field is pushed."""
+    f = _filament(pg_pool)
+    bb = {"id": 4, "name": "Shelf A", "identifier": "B7"}
+    shelf, sync, _ = _shelf_seeded(pg_pool, f, bb)
+    assert _bb_pushed(pg_pool, "filament_locations", shelf) == {
+        UNSEEN_KEY: {"identifier": {"sb": field_hash("A1"), "bb": field_hash("B7")}}
+    }
+    f.locations.update(shelf, LocationPatch(identifier="C3"))
+    (update,) = _plan(f, _snap([], locations=[bb]), sync).writes
+    assert (update.op, update.bb_id, update.body) == ("update", 4, {"identifier": "C3"})
+
+
+def test_the_reserved_key_is_no_field_name() -> None:
+    """R-T4-27: ``bb_pushed`` maps field names to hashes, so its reserved key must never
+    be the name of a field the plan pushes."""
+    for fields in (_SUPPLIER_FIELDS, _LOCATION_FIELDS, _CATALOG_FIELDS, _FILAMENT_FIELDS):
+        assert UNSEEN_KEY not in fields
+
+
+def test_a_seeded_field_bambuddy_changed_again_is_not_pushed_blind(pg_pool: PgPool) -> None:
+    """Bambuddy changed the seeded field again (``B7`` to ``B9``) and has no time: its
+    value's age is unknown, so SB's later change is not pushed over it. With a Bambuddy
+    time older than SB's change, SB's change is newer and is pushed."""
+    f = _filament(pg_pool)
+    shelf, sync, _ = _shelf_seeded(pg_pool, f, {"id": 4, "name": "Shelf A", "identifier": "B7"})
+    f.locations.update(shelf, LocationPatch(identifier="C3"))
+    moved = {"id": 4, "name": "Shelf A", "identifier": "B9"}
+    assert _plan(f, _snap([], locations=[moved]), sync).writes == []
+    (update,) = _plan(f, _snap([], locations=[moved | {"updated_at": _ago(30)}]), sync).writes
+    assert update.body == {"identifier": "C3"}
+
+
+def test_a_seen_field_bambuddy_changed_is_not_pushed_for_another_sb_change(
+    pg_pool: PgPool,
+) -> None:
+    """A row with no time per field (a location): Bambuddy changed the identifier after
+    SB last saw it, and SB renamed the row later. SB's identifier is still what SB saw,
+    so SB did not change it, and Bambuddy's newer value stays."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1")
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = 4, bb_seen = %s,"
+            " bb_seen_at = now() - interval '1 hour' WHERE id = %s",
+            (Jsonb({"name": "Shelf A", "identifier": "A1"}), shelf.id),
+        )
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    f.locations.update(shelf.id, LocationPatch(name="Shelf Z"))
+    bb = {"id": 4, "name": "Shelf A", "identifier": "B7", "updated_at": _ago(30)}
+    (update,) = _plan(f, _snap([], locations=[bb]), sync).writes
+    assert update.body == {"name": "Shelf Z"}
+
+
+def test_a_value_bambuddy_changed_with_no_time_is_not_overwritten() -> None:
+    """Bambuddy moved off what SB last saw and gives no time: its value's age is
+    unknown, so SB's value is not pushed, however late SB's change."""
+    assert not decide(
+        sb="Red",
+        bb_now="Blue",
+        bb_seen="Green",
+        sb_at=_T0 + timedelta(days=1),
+        bb_at=None,
+        direction="two_way",
+    )
+
+
+def test_a_fresh_seen_copy_without_a_field_reads_the_snapshot(pg_pool: PgPool) -> None:
+    """A copy ``results`` stored in this pass holds only the fields its write sent
+    (R-T4-28). A field it lacks is read from the snapshot's row, not taken as missing,
+    so the identifier SB never changed is not pushed."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf Z", kind_id=_kind(f, "Shelf"), identifier="A1")
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = 4, bb_seen = %s,"
+            " bb_seen_at = now(), bb_pushed = %s WHERE id = %s",
+            (Jsonb({"name": "Shelf Z"}), Jsonb({"name": field_hash("Shelf Z")}), shelf.id),
+        )
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    bb = {"id": 4, "name": "Shelf A", "identifier": "B7"}
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    assert _plan(f, _snap([], locations=[bb], read_at=read_at), sync).writes == []
+
+
+def test_a_legacy_link_does_not_put_an_empty_preset_list_under_two_way(pg_pool: PgPool) -> None:
+    """Bambuddy's spool rows do not carry the preset list, so a legacy link's list in
+    Bambuddy has an unknown value and age. Under ``two_way`` no ``PUT []`` goes over it:
+    an event pass before seeding sends nothing, and seeding records SB's hash."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    sync = SPOOLS.model_copy(update={"spools": "off", "presets": "two_way"})
+    row = _matching(pg_pool, spool, 50, sync)
+    _link(pg_pool, spool, 50)
+    assert "presets" not in [w.op for w in _plan(f, _snap([row], full=False), sync).writes]
+    assert "presets" not in [w.op for w in _plan(f, _snap([row]), sync).writes]
+    with pg_pool.connection() as conn:
+        link = conn.execute(
+            "SELECT pushed_fields FROM filament_bb_links WHERE spool_id = %s", (spool,)
+        ).fetchone()
+    assert link is not None
+    assert link["pushed_fields"]["filament_presets"] == field_hash(
+        compare_form("filament_presets", _desired(pg_pool, spool, sync)["filament_presets"])
+    )

@@ -7,7 +7,8 @@ The print worker reads Bambuddy and posts the snapshot to the plan route (Task 6
 calls `plan`. `plan` reads SB, compares each item with what Bambuddy holds, and writes
 nothing to SB but sync bookkeeping: the create intents (Decision 10) and their expiry
 (R-T4-20), the error row of a rename onto a name Bambuddy already holds (R-T4-8), and the
-seen copy of a link that has none (R-T4-22). The writes' answers reach SB through
+seen copy of a link that has none (R-T4-22) with its marks of the fields that differ
+(R-T4-27). The writes' answers reach SB through
 ``results`` (Task 5) only.
 
 Every compare and every hash of a Bambuddy value goes through `seen_row`/`seen_value`
@@ -143,6 +144,11 @@ class _Unseen:
 #: What SB last saw in Bambuddy when it saw nothing (a link made before Task 3, with no
 #: ``bb_seen``): it equals no value, so only the change times decide (R-T4-4).
 UNSEEN: Any = _Unseen()
+
+#: R-T4-27: the key of `bb_pushed` that holds, per field a seeded seen copy left out, the
+#: hashes of SB's and Bambuddy's values at seeding (``{"sb": …, "bb": …}``). No pushed
+#: field has this name (`test_the_reserved_key_is_no_field_name`).
+UNSEEN_KEY = "unseen"
 
 
 @dataclass(frozen=True)
@@ -461,11 +467,14 @@ def decide(
     """Whether to push one field (Decision 8), all values in the compare form: never
     when SB's value is Bambuddy's; under ``sb_to_bb`` always otherwise; under ``two_way``
     when Bambuddy's value is still what SB last saw there, or SB's change is strictly
-    after BB's ``updated_at`` (a tie goes to Bambuddy, as on the pull). A BB row with no
-    ``updated_at`` has no change time, so SB's wins, unless SB never saw BB's value
-    (`UNSEEN`): then only a BB time SB's change is strictly after lets it win (R-T4-4).
-    With no BB time, a field a seeded seen copy left out (``seen_at`` is that copy's
-    ``bb_seen_at``) waits for an SB change strictly after ``seen_at`` (R-T4-22)."""
+    after BB's ``updated_at`` (a tie goes to Bambuddy, as on the pull). When Bambuddy's
+    value moved off what SB saw and its row has no ``updated_at``, its age is unknown,
+    and SB's value is never pushed over it (decision 77). When SB never saw BB's value
+    (`UNSEEN`), only a BB time SB's change is strictly after lets it win (R-T4-4). With
+    no BB time, a field a seeded seen copy left out (``seen_at`` is that copy's
+    ``bb_seen_at``) waits for an SB change strictly after ``seen_at`` (R-T4-22). This is
+    the rule of spools, whose fields have their own SB change time; the other kinds take
+    `_row_wins`."""
     if sb == bb_now or not pushes(direction):
         return False
     if direction == "sb_to_bb":
@@ -474,9 +483,37 @@ def decide(
         if bb_at is not None:
             return sb_at > bb_at
         return seen_at is not None and sb_at > seen_at
-    if bb_now == bb_seen or bb_at is None:
+    if bb_now == bb_seen:
         return True
-    return sb_at > bb_at
+    return bb_at is not None and sb_at > bb_at
+
+
+def _row_wins(
+    sb: Any,
+    bb_now: Any,
+    bb_seen: Any,
+    mark: Mapping[str, str] | None,
+    sb_at: datetime,
+    bb_at: datetime | None,
+) -> bool:
+    """``two_way`` for one field of a supplier, location, insert type or filament entry,
+    whose SB row has one change time for all its fields (R-T4-27). The row time never
+    shows that SB changed this field, so SB's value is pushed only when SB changed it:
+    for a field in the seen copy, SB's value is not the seen one; for a field a seeded
+    copy left out, SB's hash is not the one ``mark`` recorded at seeding (no mark: not
+    known, no push). Then it wins when Bambuddy kept its value (the seen one, or the one
+    at seeding), else only when Bambuddy's row time is known and SB's is strictly after
+    it."""
+    if bb_seen is UNSEEN:
+        if mark is None or field_hash(sb) == mark["sb"]:
+            return False
+        if field_hash(bb_now) == mark["bb"]:
+            return True
+    elif bb_now == bb_seen:
+        return True
+    elif sb == bb_seen:
+        return False
+    return bb_at is not None and sb_at > bb_at
 
 
 def sb_changed_at(conn: Conn, spool_id: UUID, field: str) -> datetime:
@@ -563,6 +600,8 @@ class _Item:
     desired: dict[str, Any]
     body: dict[str, Any]
     pushed: dict[str, str]
+    #: `UNSEEN_KEY`'s marks: a seeded field's hashes at seeding (R-T4-27).
+    unseen: dict[str, dict[str, str]]
     seen: dict[str, Any] | None
     seen_at: datetime | None
     sb_at: datetime
@@ -668,11 +707,16 @@ class _Planner:
             "DELETE FROM filament_bb_creates WHERE kind = %s AND sb_id = %s", (kind, sb_id)
         )
 
-    def seed(self, table: str, sb_id: UUID, seen: dict[str, Any]) -> None:
-        """R-T4-22: store the seen copy of a linked row that has none, at ``snap.read_at``."""
+    def seed(
+        self, table: str, sb_id: UUID, seen: dict[str, Any], marks: dict[str, dict[str, str]]
+    ) -> None:
+        """R-T4-22: store the seen copy of a linked row that has none, at ``snap.read_at``,
+        and (R-T4-27) the marks of the fields it leaves out in ``bb_pushed[UNSEEN_KEY]``."""
         self.conn.execute(
-            f"UPDATE {table} SET bb_seen = %s, bb_seen_at = %s WHERE id = %s AND bb_seen IS NULL",
-            (Jsonb(seen), self.snap.read_at, sb_id),
+            f"UPDATE {table} SET bb_seen = %s, bb_seen_at = %s,"
+            " bb_pushed = bb_pushed || jsonb_build_object(%s::text, %s::jsonb)"
+            " WHERE id = %s AND bb_seen IS NULL",
+            (Jsonb(seen), self.snap.read_at, UNSEEN_KEY, Jsonb(marks), sb_id),
         )
 
     # -- fields ----------------------------------------------------------------------
@@ -687,13 +731,15 @@ class _Planner:
         sb_at: Any,
         bb_at: datetime | None,
         seen_at: datetime | None = None,
+        marks: Mapping[str, Mapping[str, str]] | None = None,
     ) -> list[str]:
         """The fields to push of one linked item, ``desired`` in the compare form.
         ``direction`` and ``sb_at`` are a field's direction and SB change time, each a
         callable of the field (the change time only asked for when ``two_way`` needs
         it). ``seen_at`` is ``bb_seen_at`` when ``bb_seen`` is set. A field ``bb_now``
         does not carry is compared by its hash alone; an event-driven pass skips a field
-        whose hash matches what was pushed (Decision 7)."""
+        whose hash matches what was pushed (Decision 7). ``marks`` is given for a kind
+        with one SB change time per row, which ``two_way`` decides by `_row_wins`."""
         out = []
         for name, value in desired.items():
             digest = field_hash(value)
@@ -706,6 +752,12 @@ class _Planner:
             now = bb_now[name]
             seen = UNSEEN if bb_seen is None else bb_seen.get(name, UNSEEN)
             way: SyncDirection = direction(name)
+            if marks is not None and way == "two_way":
+                if value != now and _row_wins(
+                    value, now, seen, marks.get(name), sb_at(name), bb_at
+                ):
+                    out.append(name)
+                continue
             seeded = None if bb_seen is None else seen_at
             needs_time = (
                 way == "two_way"
@@ -757,13 +809,18 @@ class _Planner:
                 row = by_id.get(item.bb_id)
                 if row is None or self.refused(kind, item.sb_id, create=False):
                     continue
-                seen, seen_at = item.seen, item.seen_at
+                seen, seen_at, marks = item.seen, item.seen_at, item.unseen
                 table = _SEEN_TABLES.get(kind)
                 if seen is None and table is not None and self.full:
                     current, _ = self.bb_now(row, readable, None, None)
                     seen = {n: v for n, v in current.items() if item.desired.get(n, UNSEEN) == v}
+                    marks = {
+                        n: {"sb": field_hash(item.desired[n]), "bb": field_hash(v)}
+                        for n, v in current.items()
+                        if n in item.desired and n not in seen
+                    }
                     seen_at = self.snap.read_at
-                    self.seed(table, item.sb_id, seen)
+                    self.seed(table, item.sb_id, seen, marks)
                 now, at = self.bb_now(row, readable, seen, seen_at)
                 names = self.changed(
                     item.desired,
@@ -774,6 +831,7 @@ class _Planner:
                     lambda _f, at_=item.sb_at: at_,
                     at,
                     seen_at,
+                    marks,
                 )
                 if "name" in names and str(item.desired["name"]).strip().upper() in by_name:
                     self.name_taken(kind, item.sb_id)
@@ -842,12 +900,13 @@ class _Planner:
         seen_at: datetime | None,
     ) -> tuple[dict[str, Any], datetime | None]:
         """What Bambuddy holds for a row, in the compare form, and its ``updated_at``:
-        what ``results`` stored after this snapshot was read when it did (F11), else the
-        listing's row."""
-        if seen is not None and seen_at is not None and seen_at > self.snap.read_at:
-            return {k: v for k, v in seen.items() if k in readable}, None
+        what ``results`` stored after this snapshot was read when it did (F11), over the
+        listing's row: a stored copy holds only the fields its write sent (R-T4-28), and
+        the listing's value stands for the rest."""
         data = row.model_dump()
         now = {k: _row_form(k, json_form(data.get(k))) for k in readable}
+        if seen is not None and seen_at is not None and seen_at > self.snap.read_at:
+            return now | {k: v for k, v in seen.items() if k in readable}, None
         return now, data.get("updated_at")
 
     # -- spools -----------------------------------------------------------------------
@@ -925,19 +984,34 @@ class _Planner:
         compare = {n: compare_form(n, v) for n, v in desired.items()}
         current: dict[str, Any]
         if seen is not None and fresh:
-            current, current_k, bb_at = seen, seen_k, row["bb_updated_at"]
+            # A stored copy holds only what its write sent (R-T4-28): the listing's row
+            # stands for the rest.
+            listed = {} if bb is None else seen_row(bb)
+            current, current_k, bb_at = listed | seen, seen_k, row["bb_updated_at"]
         elif bb is not None:
             current, current_k, bb_at = seen_row(bb), bb.k_profiles, bb.updated_at
         else:
             return
         now = {n: _bb_form(n, current, current_k) for n in compare if n != "filament_presets"}
         seen_at: datetime | None = row["bb_seen_at"]
+        pushed: dict[str, str] = row["pushed_fields"] or {}
+        # Decision 78: BB rows do not carry the preset list. Under ``two_way`` a link
+        # that never pushed it does not know Bambuddy's list, so an unseeded one leaves
+        # it alone, and seeding takes SB's hash as pushed.
+        blind = (
+            self.sync.presets == "two_way"
+            and "filament_presets" in compare
+            and "filament_presets" not in pushed
+        )
         if seen is None and self.full:
-            seen, seeded_k = self.seed_spool(sb_id, compare, now, current, current_k)
+            seen, seeded_k = self.seed_spool(sb_id, compare, now, current, current_k, blind)
             seen_k = seeded_k if seen_k is None else seen_k
             seen_at = self.snap.read_at
+            if blind:
+                pushed = pushed | {"filament_presets": field_hash(compare["filament_presets"])}
+        elif seen is None and blind:
+            del compare["filament_presets"]
         before = None if seen is None else {n: _seen_form(n, seen, seen_k) for n in compare}
-        pushed: dict[str, str] = row["pushed_fields"] or {}
         names = self.changed(
             compare,
             now,
@@ -996,11 +1070,13 @@ class _Planner:
         now: Mapping[str, Any],
         current: Mapping[str, Any],
         current_k: Any,
+        presets: bool,
     ) -> tuple[dict[str, Any], Any]:
         """R-T4-22: a link with no ``bb_seen`` takes Bambuddy's row from this full
         snapshot as its seen copy, at ``snap.read_at``, in the fields whose value is SB's
         (the K-profiles too when they agree). A field that differs stays out of it, so it
-        is `UNSEEN` and no push goes blind."""
+        is `UNSEEN` and no push goes blind. With ``presets`` SB's preset list hash goes
+        into ``pushed_fields`` (decision 78)."""
         seen = {
             n: current[n]
             for n, v in compare.items()
@@ -1008,11 +1084,18 @@ class _Planner:
         }
         agree_k = "k_profiles" in now and now["k_profiles"] == compare["k_profiles"]
         seen_k = json_form([k.model_dump() for k in current_k or ()]) if agree_k else None
+        marks = {"filament_presets": field_hash(compare["filament_presets"])} if presets else {}
         self.conn.execute(
             "UPDATE filament_bb_links SET bb_seen = %s, bb_seen_at = %s,"
-            " bb_k_profiles = coalesce(bb_k_profiles, %s)"
+            " bb_k_profiles = coalesce(bb_k_profiles, %s), pushed_fields = %s || pushed_fields"
             " WHERE spool_id = %s AND bb_seen IS NULL",
-            (Jsonb(seen), self.snap.read_at, None if seen_k is None else Jsonb(seen_k), sb_id),
+            (
+                Jsonb(seen),
+                self.snap.read_at,
+                None if seen_k is None else Jsonb(seen_k),
+                Jsonb(marks),
+                sb_id,
+            ),
         )
         return seen, seen_k
 
@@ -1167,7 +1250,8 @@ def _item(row: Mapping[str, Any], bb_column: str, name: str, desired: dict[str, 
         name=name,
         desired=compare,
         body=compare,
-        pushed=row["bb_pushed"] or {},
+        pushed={k: v for k, v in (row["bb_pushed"] or {}).items() if k != UNSEEN_KEY},
+        unseen=(row["bb_pushed"] or {}).get(UNSEEN_KEY, {}),
         seen=row.get("bb_seen"),
         seen_at=row.get("bb_seen_at"),
         sb_at=row["updated_at"],
