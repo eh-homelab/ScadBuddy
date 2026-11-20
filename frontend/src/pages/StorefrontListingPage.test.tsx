@@ -374,6 +374,16 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(screen.getByRole('combobox', { name: 'Version' })).toBeInTheDocument()
   })
 
+  it('folds the design picker to one line once a new listing is saved (#6711 review)', async () => {
+    const { user } = renderStorefront()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent('Name Keychain'))
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Design' })).toBeNull()
+  })
+
   it('keeps a title typed before the templates answer (#6290)', async () => {
     const release = hold('get', '/api/v1/models')
     const { user } = renderStorefront()
