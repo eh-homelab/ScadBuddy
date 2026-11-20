@@ -226,7 +226,8 @@ def test_requests_at_once_on_one_permit_fail_fast_rather_than_wait(
     held = [elapsed for detail, elapsed in answers if "in use" not in detail]
     assert len(answers) == 4
     assert len(busy) == 3
-    assert max(busy) < held[0]
+    [holder] = held
+    assert max(busy) < holder
 
 
 async def test_a_cancelled_request_leaves_no_server_behind(
