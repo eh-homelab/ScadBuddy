@@ -149,4 +149,16 @@ describe('the Types tab', () => {
       expect(await screen.findByRole('alert')).toHaveTextContent(/Zed stays in the catalog/)
     })
   })
+
+  it('fills every type from its slicer profile and reports each', async () => {
+    const { user } = renderPage(<TypesTab />)
+    await types()
+    await user.click(screen.getByRole('button', { name: 'Fill from slicer profiles' }))
+    const report = await screen.findByRole('region', { name: 'Fill from slicer profiles' })
+    expect(within(report).getByText(/Filled 15 fields on 3 types/)).toBeInTheDocument()
+    expect(within(report).getByRole('link', { name: 'BL-PLA-BASIC-JADE-WHITE' })).toBeInTheDocument()
+    expect(within(report).getAllByText(/the type has no slicer preset/).length).toBeGreaterThan(0)
+    const jade = (await listTypes()).find((type) => type.id === T.JADE)!
+    expect([jade.nozzle_temp_min, jade.density_g_cm3]).toEqual([190, '1.26'])
+  })
 })

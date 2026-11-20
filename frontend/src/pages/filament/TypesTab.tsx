@@ -1,9 +1,10 @@
-import { PlusIcon, ShoppingCartIcon } from 'lucide-react'
+import { PlusIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { listCatalog, listSpools, listTypes, type CatalogRows, type Spool, type SpoolType } from '../../api/filament'
+import { fillTypesFromProfile, listCatalog, listSpools, listTypes, type CatalogRows, type Spool, type SpoolType, type TypeFill } from '../../api/filament'
 import { addShopping, getPriceSheet, listSuppliers, type PricePoint } from '../../api/filamentPurchasing'
+import { FILL_LABELS } from '../../components/filament/profileFill'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
@@ -67,6 +68,9 @@ export function TypesTab() {
   const [notice, setNotice] = useState<string | null>(null)
   // Types whose add is in flight: a second click meanwhile would make a second pending item.
   const [adding, setAdding] = useState<ReadonlySet<string>>(new Set())
+  /** #6714: the bulk fill's answer, per type; `null` before one ran. */
+  const [filled, setFilled] = useState<TypeFill[] | null>(null)
+  const [filling, setFilling] = useState(false)
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -126,6 +130,20 @@ export function TypesTab() {
     }
   }
 
+  async function fillAll() {
+    setFilling(true)
+    setError(null)
+    setNotice(null)
+    try {
+      setFilled(await fillTypesFromProfile())
+      await load()
+    } catch (cause) {
+      setError(message(cause))
+    } finally {
+      setFilling(false)
+    }
+  }
+
   // Every type is loaded: a price book row linked to an archived type still names it.
   const shown = data?.types.filter((type) => archived || !type.archived_at) ?? []
   return (
@@ -145,12 +163,18 @@ export function TypesTab() {
             />
             Show archived
           </label>
+          <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" size="sm" disabled={filling} title="Fills each type's empty temperatures, density and K values from the slicer preset it prints with." onClick={() => void fillAll()}>
+            <SlidersHorizontalIcon /> {filling ? 'Filling…' : 'Fill from slicer profiles'}
+          </Button>
           <Button asChild size="sm">
             <Link to="/filament/types/new">
               <PlusIcon /> New type
             </Link>
           </Button>
+          </div>
         </div>
+        {filled && <FillReport results={filled} back={location.search} onClose={() => setFilled(null)} />}
         {error && (
           <p role="alert" className="text-[13px] text-warn">
             {error}
@@ -238,5 +262,58 @@ export function TypesTab() {
         <FilamentsEditor types={data?.types} onTypesChanged={() => void load()} />
       </section>
     </div>
+  )
+}
+
+/**
+ * #6714 — what "Fill from slicer profiles" did: the totals, then each type it changed (the
+ * fields and the preset) and each it could not read (why). Types with nothing to fill are
+ * only counted.
+ */
+function FillReport({ results, back, onClose }: { results: TypeFill[]; back: string; onClose: () => void }) {
+  const changed = results.filter((one) => one.written)
+  const fields = changed.reduce((sum, one) => sum + Object.keys(one.filled).length, 0)
+  const kValues = changed.reduce((sum, one) => sum + one.k_values.length, 0)
+  const unread = results.filter((one) => one.reason && !one.written)
+  const untouched = results.length - changed.length - unread.length
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+  return (
+    <section aria-label="Fill from slicer profiles" className="rounded-md border bg-muted/30 px-3 py-2 text-[13px]">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p role="status">
+          Filled {plural(fields, 'field', 'fields')}
+          {kValues > 0 && ` and ${plural(kValues, 'K value', 'K values')}`} on {plural(changed.length, 'type', 'types')}.
+          {untouched > 0 && ` ${plural(untouched, 'type had', 'types had')} nothing empty to fill.`}
+          {unread.length > 0 && ` ${plural(unread.length, 'type', 'types')} could not be read.`}
+        </p>
+        <Button type="button" variant="ghost" size="sm" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+      {(changed.length > 0 || unread.length > 0) && (
+        <ul className="mt-1 flex flex-col gap-1">
+          {changed.map((one) => (
+            <li key={one.type_id}>
+              <Link to={`/filament/types/${one.type_id}`} state={{ back }} className="font-medium underline-offset-4 hover:underline">
+                {one.code}
+              </Link>
+              <span className="text-muted-foreground">
+                {': '}
+                {[...Object.entries(one.filled).map(([field, value]) => `${FILL_LABELS[field as keyof typeof FILL_LABELS] ?? field} ${String(value)}`), ...(one.k_values.length > 0 ? [plural(one.k_values.length, 'K value', 'K values')] : [])].join(', ')}
+                {one.source && `, from ${one.source.name}`}
+              </span>
+            </li>
+          ))}
+          {unread.map((one) => (
+            <li key={one.type_id} className="text-muted-foreground">
+              <Link to={`/filament/types/${one.type_id}`} state={{ back }} className="font-medium text-foreground underline-offset-4 hover:underline">
+                {one.code}
+              </Link>
+              {`: ${one.reason ?? ''}`}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
