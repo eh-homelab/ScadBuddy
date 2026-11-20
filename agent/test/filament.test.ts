@@ -849,3 +849,70 @@ describe('filament history and metrics tools', () => {
     expect(() => tool('filament_metrics').parse({ since: '2028-02-29' })).not.toThrow()
   })
 })
+
+describe('filament type proposal tools (#6701)', () => {
+  const PROPOSALS = `${BACKEND}/api/v1/filament/type-proposals`
+  const MATERIAL = '8d6f3c1e-0000-4000-8000-0000000067a1'
+  const SPOOL = '8d6f3c1e-0000-4000-8000-0000000067b1'
+  const TYPE = '8d6f3c1e-0000-4000-8000-0000000067c1'
+
+  it.each([
+    ['filament_type_proposals', 'read'],
+    ['filament_type_proposals_confirm', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('tells the assistant to confirm only after the user says yes', () => {
+    expect(tool('filament_type_proposals_confirm').description).toMatch(/only after the user says yes/i)
+  })
+
+  it('lists the proposals', async () => {
+    const proposals = { groups: [{ code: 'PLA-FF0000', count: 2 }], ungrouped: [] }
+    server.use(http.get(PROPOSALS, () => HttpResponse.json(proposals)))
+    const listed = await runTool(tool('filament_type_proposals'), {}, ctx())
+    expect(firstText(listed)).toEqual(proposals)
+  })
+
+  it('confirms the groups given, with their edited codes', async () => {
+    const group = {
+      material_id: MATERIAL,
+      brand_id: null,
+      subtype_id: null,
+      rgba: '#FF0000FF',
+      label_weight_g: 1000,
+      material_number: null,
+      code: 'PLA Red',
+      spool_ids: [SPOOL],
+    }
+    const result = { groups: [{ code: 'PLA Red', type_id: TYPE, made: true, typed: [SPOOL], skipped: [] }] }
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${PROPOSALS}/confirm`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(result)
+      }),
+    )
+    const done = await runTool(tool('filament_type_proposals_confirm'), { groups: [group] }, ctx())
+    expect(firstText(done)).toEqual(result)
+    expect(bodies).toEqual([{ groups: [group] }])
+    expect(tool('filament_type_proposals_confirm').summarize({ groups: [group] })).toBe(
+      'Make 1 spool type for 1 spool',
+    )
+  })
+
+  it('says when a code is taken', async () => {
+    server.use(
+      http.post(`${PROPOSALS}/confirm`, () =>
+        HttpResponse.json({ detail: 'a spool type already has one of these codes' }, { status: 409 }),
+      ),
+    )
+    const refused = await runTool(
+      tool('filament_type_proposals_confirm'),
+      { groups: [{ material_id: MATERIAL, rgba: '#FF0000', label_weight_g: 1000, code: 'X', spool_ids: [SPOOL] }] },
+      ctx(),
+    )
+    expect(refused.isError).toBe(true)
+  })
+})

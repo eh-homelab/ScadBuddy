@@ -688,6 +688,92 @@ class EffectiveKValue(BaseModel):
     overridden: bool
 
 
+# -- type proposals (#6701, spec §8.1) --------------------------------------------------
+
+
+class TypeProposal(BaseModel):
+    """A type proposed for the open spools that need one and share its key: brand,
+    material, subtype, RGBA, label weight and the ``material_number`` of their last
+    Bambuddy reading. ``code`` is the proposed name; ``type_id`` names a type that matches
+    the key now (the confirm uses it, and makes none). The names are the catalog rows'."""
+
+    code: str
+    type_id: UUID | None
+    brand_id: UUID | None
+    material_id: UUID
+    subtype_id: UUID | None
+    rgba: Rgba
+    label_weight_g: int
+    material_number: str | None
+    brand: str | None
+    material: str
+    subtype: str | None
+    colour_name: str | None
+    spool_ids: list[UUID]
+    numbers: list[int]
+    count: int
+
+
+ProposalField = Literal["material", "rgba", "label_weight_g"]
+
+
+class UngroupedSpool(BaseModel):
+    """An open spool that needs a type but lacks a value a proposal needs."""
+
+    spool_id: UUID
+    number: int
+    missing: list[ProposalField]
+
+
+class TypeProposals(BaseModel):
+    groups: list[TypeProposal]
+    ungrouped: list[UngroupedSpool]
+
+
+class TypeProposalPick(_In):
+    """One proposal a person confirms: its key, the spools it named and the code to give
+    the type (the proposed one, or the person's)."""
+
+    brand_id: UUID | None = None
+    material_id: UUID
+    subtype_id: UUID | None = None
+    rgba: Rgba
+    label_weight_g: LabelWeight
+    material_number: Text | None = None
+    code: Name
+    spool_ids: list[UUID] = Field(min_length=1, max_length=5000)
+
+
+class TypeProposalConfirm(_In):
+    groups: list[TypeProposalPick] = Field(min_length=1, max_length=500)
+
+
+SkipReason = Literal["not_found", "archived", "typed", "changed"]
+
+
+class SkippedSpool(BaseModel):
+    """A spool a confirm left alone: gone, archived, typed meanwhile, or no longer of the
+    proposal's key."""
+
+    spool_id: UUID
+    reason: SkipReason
+
+
+class ConfirmedProposal(BaseModel):
+    """What a confirm did with one proposal: the type it used (``made`` when it made it;
+    ``None`` when no spool was left to type), the spools it typed and those it skipped."""
+
+    code: str
+    type_id: UUID | None
+    made: bool
+    typed: list[UUID]
+    skipped: list[SkippedSpool]
+
+
+class TypeProposalResult(BaseModel):
+    groups: list[ConfirmedProposal]
+
+
 # -- spools ---------------------------------------------------------------------------
 
 

@@ -159,6 +159,29 @@ test('the labels page prints one roll page per label, and a sheet on one page', 
   expect(pages(await page.pdf({ preferCSSPageSize: true }))).toBe(1)
 })
 
+// #6701 — "Create types" on the Needs-type filter, at a phone's width: the proposed type is
+// renamed and created, the spool leaves the filter, and the page never scrolls sideways.
+test.describe('the Create types panel at 390 px', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('creates a proposed type and types its spool', async ({ page }) => {
+    await page.goto('/filament/spools?needs_type=true')
+    const panel = page.getByRole('region', { name: 'Create types' })
+    const row = panel.getByRole('listitem', { name: 'PLA-TEAL' })
+    await expect(row).toContainText('1 spool: #6')
+    await expect(panel.getByRole('list', { name: 'Not enough to propose a type' })).toContainText('#7 needs a label weight')
+    const [scroll, client] = (await page.evaluate('[document.documentElement.scrollWidth, document.documentElement.clientWidth]')) as [number, number]
+    expect(scroll).toBeLessThanOrEqual(client)
+
+    await row.getByRole('textbox', { name: 'Type name' }).fill('Teal PLA')
+    await row.getByRole('button', { name: 'Create' }).click()
+    await expect(page.getByText('Created Teal PLA for 1 spool.')).toBeVisible()
+    await expect(panel.getByRole('listitem', { name: 'PLA-TEAL' })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: '#6', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: '#7', exact: true }).first()).toBeVisible()
+  })
+})
+
 // #6704 — the spool page scrolls in its own container only; the document must not scroll too.
 for (const size of [
   { width: 1440, height: 900 },

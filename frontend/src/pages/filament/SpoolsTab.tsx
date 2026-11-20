@@ -10,6 +10,7 @@ import { SpoolForecast } from '../../components/filament/SpoolForecast'
 import { SpoolImport } from '../../components/filament/SpoolImport'
 import { SpoolsTable } from '../../components/filament/SpoolsTable'
 import { SpoolTiles, type TileFilter } from '../../components/filament/SpoolTiles'
+import { TypeProposals } from '../../components/filament/TypeProposals'
 import { EXPORT_COLUMNS, spoolsCsv } from '../../components/filament/spoolsCsv'
 import {
   COLUMN_IDS,
@@ -126,7 +127,7 @@ const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 
  * cards or as a forecast (#6269: when each runs out, and the types to reorder), filtered, grouped and sorted from the URL (`spoolsQuery.ts`).
  * "Remember my view" makes a visit with no query open the last view (R-T8-10). Select spools to
  * archive, restore, delete, move or type them; export what is shown as CSV, or import a
- * CSV (`SpoolImport`).
+ * CSV (`SpoolImport`). On the Needs-type filter, `TypeProposals` proposes their types (#6701).
  */
 export function SpoolsTab() {
   const [params, setParams] = useSearchParams()
@@ -406,6 +407,17 @@ export function SpoolsTab() {
             </li>
           ))}
         </ul>
+      )}
+
+      {/* #6701: on the Needs-type filter, the types ScadBuddy proposes for those spools. */}
+      {q.needsType === true && data && (
+        <TypeProposals
+          key={data.spools.filter((spool) => !spool.type_id && !spool.archived_at).length}
+          onDone={(text) => {
+            setReport(text)
+            void load()
+          }}
+        />
       )}
 
       {chosen.length > 0 && data && (
