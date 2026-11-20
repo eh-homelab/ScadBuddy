@@ -226,6 +226,51 @@ async def test_an_export_of_512_kib_exactly_passes(
     assert len(exported.text) == MAX_FILE_BYTES
 
 
+@pytest.mark.parametrize(
+    ("download", "kind"),
+    [
+        ("pushed_entry", "file_too_large"),
+        ("pushed_text", "browser"),
+        ("pushed_long_name", "browser"),
+        ("pushed_number_text", "browser"),
+    ],
+)
+async def test_an_entry_the_page_pushes_itself_is_refused_without_its_text(
+    browser: ThreeDfpSite,
+    replica: ReplicaServer,
+    monkeypatch: pytest.MonkeyPatch,
+    download: str,
+    kind: str,
+) -> None:
+    """The page's own script can bypass the hook and push to ``window.__dl``: an entry
+    over `MAX_FILE_BYTES` with no ``tooLarge`` flag, one that is not an object, one whose
+    name is over `MAX_NAME_CHARS`, or one whose text is not a string. The worker refuses all,
+    and no `Page.evaluate` brings the text across CDP (#6726)."""
+    replica.site.download = download  # type: ignore[assignment]
+    replica.site.export_pad = MAX_FILE_BYTES + 1
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    page = browser.page
+    evaluate = page.evaluate
+    answers: list[Any] = []
+
+    async def spy(expression: str, arg: Any = None) -> Any:
+        answer = await evaluate(expression, arg)
+        answers.append(answer)
+        return answer
+
+    monkeypatch.setattr(page, "evaluate", spy)
+    with pytest.raises(SiteError) as caught:
+        await browser.export(30173, "H2C", "0.4")
+    assert caught.value.kind == kind
+    assert answers, "the export read nothing from the page"
+    assert max(len(json.dumps(answer)) for answer in answers) < 1024
+    # The page's list still holds the oversized text: the driver refused it, not the page.
+    if download != "pushed_number_text":
+        length = "() => { const e = window.__dl[0]; return (e.text ?? e).length; }"
+        assert await evaluate(length) > MAX_FILE_BYTES
+
+
 async def test_a_checkpoint_that_never_clears_is_bot_check(
     browser: ThreeDfpSite, replica: ReplicaServer
 ) -> None:
