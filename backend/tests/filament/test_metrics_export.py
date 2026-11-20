@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.filament import metrics_export
 from scadbuddy.filament.metrics_models import Snapshot
@@ -121,6 +123,31 @@ def test_export_clears_a_gone_material() -> None:
     text = metrics.exposition().decode()
     assert 'material="PETG"' not in text
     assert 'scadbuddy_filament_used_grams{material="PLA",outcome="completed"} 100.0' in text
+
+
+def test_a_failed_export_keeps_the_last_good_gauges(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics = Metrics()
+    metrics_export.export(
+        metrics,
+        _snapshot(
+            stock=[("PETG", "Bambu", "Shelf", 1, 800.0, Decimal("18"))],
+            reorder={"PETG": 1},
+        ),
+    )
+
+    def boom(*_: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(metrics.filament_reorder_types, "labels", boom)
+    with pytest.raises(RuntimeError):
+        metrics_export.export(
+            metrics,
+            _snapshot(stock=[("PLA", "Bambu", "Shelf", 1, 900.0, None)], reorder={"PLA": 1}),
+        )
+    stock = _samples(metrics, "scadbuddy_filament_stock_grams")
+    assert {dict(labels)["material"] for labels in stock} == {"PLA", "PETG"}
+    assert 'material="PETG"' in metrics.exposition().decode()
+    assert next(v for k, v in stock.items() if dict(k)["material"] == "PETG") == 800.0
 
 
 def test_days_of_stock_of_folded_materials_is_the_soonest() -> None:

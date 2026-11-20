@@ -975,8 +975,8 @@ export const filamentTools: Tool[] = [
     description:
       "The unarchived spools' stock (spools, grams left, value) by `dimension`, the grams used and wasted " +
       'per `bucket` and dimension, and the waste by material, type and printer. `since` and `until` are ' +
-      'dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is not ' +
-      'before `until` or the range is over 1096 days.',
+      'dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is after ' +
+      '`until` or the range is over 1096 days.',
     input: z.object({
       dimension: z.enum(['material', 'brand', 'type', 'supplier', 'location']).optional().describe('Default material'),
       bucket: z.enum(['week', 'month']).optional().describe('Default month'),
@@ -1001,8 +1001,8 @@ export const filamentTools: Tool[] = [
     description:
       "Each spool type's price per kg at each supplier over time (one series per currency), and the " +
       "confirmed invoices' totals per supplier, month and currency, never converted. `since` and `until` " +
-      'are dates (`YYYY-MM-DD`), both included; default the 365 days before today. 422 when `since` is not ' +
-      'before `until` or the range is over 1096 days.',
+      'are dates (`YYYY-MM-DD`), both included; default the 365 days before today. 422 when `since` is after ' +
+      '`until` or the range is over 1096 days.',
     input: z.object({ since: DATE.optional(), until: DATE.optional() }),
     risk: 'read',
     source: SOURCE,

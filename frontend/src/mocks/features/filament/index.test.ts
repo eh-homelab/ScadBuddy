@@ -5,6 +5,7 @@ import {
   bindTag,
   createSpool,
   deleteSpool,
+  getForecast,
   getInventory,
   getMetrics,
   getSpool,
@@ -104,6 +105,22 @@ describe('the filament mocks', () => {
     await createSpool({ ...NEW_SPOOL, type_id: T.ORANGE, grams_left: 823.5 })
     const metrics = await getMetrics({ dimension: 'type' })
     expect(metrics.stock.find((row) => row.key === T.ORANGE)).toMatchObject({ spools: 2, grams_left: 1643.5, value: '32.85' })
+  })
+
+  it('does not call a type with no spool in stock low', async () => {
+    const spool = await createSpool({ ...NEW_SPOOL, type_id: T.JADE, grams_left: 1000 })
+    for (const each of await listSpools({ includeArchived: true })) {
+      if (each.type_id === T.JADE) await archiveSpool(each.id)
+    }
+    expect(spool.type_id).toBe(T.JADE)
+    const found = (await getForecast()).types.find((type) => type.type_id === T.JADE)
+    expect(found).toMatchObject({ spools: 0, low_stock: false })
+  })
+
+  it('allows a single day, since equal to until, and refuses since after until', async () => {
+    const metrics = await getMetrics({ since: '2026-11-10', until: '2026-11-10' })
+    expect(metrics.since).toBe('2026-11-10')
+    expect((await refusal(getMetrics({ since: '2026-11-11', until: '2026-11-10' }))).status).toBe(422)
   })
 
   it('pages the ledger with no row lost or repeated, and refuses a cursor no page gave', async () => {

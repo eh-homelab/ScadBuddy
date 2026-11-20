@@ -1167,11 +1167,12 @@ METRICS_MAX_DAYS = 3 * 365 + 1
 
 def _range(since: date | None, until: date | None, default_days: int) -> tuple[date, date]:
     """``until`` defaults to today (UTC), ``since`` to ``default_days`` before it. 422
-    when ``since`` is not before ``until`` or the range passes `METRICS_MAX_DAYS`."""
+    when ``since`` is after ``until`` (a single day, ``since == until``, is allowed) or
+    the range passes `METRICS_MAX_DAYS`."""
     until = datetime.now(UTC).date() if until is None else until
     since = until - timedelta(days=default_days) if since is None else since
-    if since >= until:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "since must be before until")
+    if since > until:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "since must not be after until")
     if (until - since).days > METRICS_MAX_DAYS:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1232,7 +1233,7 @@ async def get_forecast(filament: FilamentDep) -> mm.Forecast:
         "per `bucket` (`week` from Monday or `month`; default `month`) and dimension, from "
         "`since` to `until`, both included (default the 180 days before today); and the "
         "waste by material, type and printer with its rate. Archived spools' plates "
-        "count. A key is the id, `null` when none is set. 422 when `since` is not before "
+        "count. A key is the id, `null` when none is set. 422 when `since` is after "
         "`until` or the range is longer than three years."
     ),
 )
@@ -1255,7 +1256,7 @@ async def get_metrics(
         "Each spool type's price per kg at each supplier over time, one series per "
         "currency, from its price points; and the confirmed invoices' totals per "
         "supplier, month and currency, never converted. From `since` to `until`, both "
-        "included (default the 365 days before today). 422 when `since` is not before "
+        "included (default the 365 days before today). 422 when `since` is after "
         "`until` or the range is longer than three years."
     ),
 )

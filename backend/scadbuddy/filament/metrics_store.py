@@ -367,9 +367,22 @@ class MetricsStore:
         for spool in stocked:
             low[spool.names.material] += spool.low_stock
         reorder = dict.fromkeys(in_stock, 0)
+        # A type counts under its stocked spools' (else all spools') material with most grams,
+        # ties by name, so the pick never depends on list order.
+        type_material: dict[UUID, str | None] = {}
+        for pool in (stocked, read.spools):
+            by_grams: dict[UUID, dict[str | None, float]] = defaultdict(lambda: defaultdict(float))
+            for spool in pool:
+                if spool.type_id is not None:
+                    by_grams[spool.type_id][spool.names.material] += spool.grams_left or 0.0
+            for type_id, by_name in by_grams.items():
+                type_material.setdefault(
+                    type_id, min(by_name, key=lambda n: (-by_name[n], n or ""))
+                )
         for kind in _type_forecasts(read, settings, now):
             if kind.reorder_now:
-                reorder[kind.material] = reorder.get(kind.material, 0) + 1
+                name = type_material.get(kind.type_id, kind.material)
+                reorder[name] = reorder.get(name, 0) + 1
         return mm.Snapshot(
             stock=[(*k, r[0], r[1], _money(r[2])) for k, r in stock.items()],
             used=dict(used),
@@ -485,7 +498,7 @@ def _type_forecasts(read: _Read, settings: MetricsSettings, now: datetime) -> li
                 safety_margin_days=margin,
                 reorder_on=reorder,
                 reorder_now=reorder is not None and reorder <= today,
-                low_stock=all(s.low_stock for s in stocked),
+                low_stock=bool(stocked) and all(s.low_stock for s in stocked),
             )
         )
     return sorted(found, key=lambda t: (t.label.upper(), str(t.type_id)))

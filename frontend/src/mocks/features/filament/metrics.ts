@@ -105,7 +105,7 @@ export function forecast(nowMs = Date.now()): S['Forecast'] {
       safety_margin_days: safety,
       reorder_on: reorder,
       reorder_now: reorder != null && reorder <= today,
-      low_stock: inStock.every((spool) => spool.low_stock),
+      low_stock: inStock.length > 0 && inStock.every((spool) => spool.low_stock),
     })
   }
   return {
@@ -218,7 +218,7 @@ function range(url: URL, defaultDays: number): [string, string] | Response {
   for (const value of [sinceText, untilText]) if (value != null && (!ISO_DAY.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`)))) return problem('Input should be a valid date')
   const until = untilText ?? day(Date.now())
   const since = sinceText ?? addDays(until, -defaultDays)
-  if (since >= until) return problem('since must be before until')
+  if (since > until) return problem('since must not be after until')
   if ((Date.parse(until) - Date.parse(since)) / DAY_MS > METRICS_MAX_DAYS) return problem(`the range is longer than ${METRICS_MAX_DAYS} days (three years)`)
   return [since, until]
 }

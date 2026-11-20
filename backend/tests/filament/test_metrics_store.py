@@ -200,6 +200,15 @@ def test_forecast_type_reorder(pg_pool: PgPool) -> None:
     assert {t.type_id: t for t in later.types}[timed].reorder_now is True
 
 
+def test_a_type_with_no_spool_in_stock_is_not_low(pg_pool: PgPool) -> None:
+    type_id = _type(pg_pool)
+    spool = _spool(pg_pool, type_id=type_id, grams_left=500)
+    FilamentSpoolStore(pg_pool).archive(spool, True, actor="ann")
+    [row] = _store(pg_pool).forecast(NOW).types
+    assert row.spools == 0
+    assert row.low_stock is False
+
+
 def test_a_type_with_no_use_has_no_forecast(pg_pool: PgPool) -> None:
     type_id = _type(pg_pool)
     spool = _spool(pg_pool, type_id=type_id, grams_left=500)
@@ -366,6 +375,47 @@ def test_summary_consumed_counts_a_paired_plate_once(pg_pool: PgPool) -> None:
 
 
 # -- the snapshot -----------------------------------------------------------------------
+
+
+def test_snapshot_reorder_uses_the_spools_effective_material(pg_pool: PgPool) -> None:
+    petg = next(
+        r.id
+        for r in CatalogStore(pg_pool).list("materials")
+        if isinstance(r, Material) and r.name == "PETG"
+    )
+    type_id = _type(pg_pool, lead_time_days=7, safety_margin_days=3)
+    spool = _spool(pg_pool, type_id=type_id, grams_left=350, material_id=petg)
+    _sb_end(pg_pool, spool, None, 300, "a")
+    found = _store(pg_pool).snapshot()
+    assert found.low_stock.keys() == found.reorder.keys() == {"PETG"}
+    assert found.reorder == {"PETG": 1}
+
+
+def test_snapshot_reorder_takes_an_archived_spools_material(pg_pool: PgPool) -> None:
+    petg = next(
+        r.id
+        for r in CatalogStore(pg_pool).list("materials")
+        if isinstance(r, Material) and r.name == "PETG"
+    )
+    type_id = _type(pg_pool, lead_time_days=7, safety_margin_days=3)
+    spool = _spool(pg_pool, type_id=type_id, grams_left=350, material_id=petg)
+    _sb_end(pg_pool, spool, None, 300, "a")
+    FilamentSpoolStore(pg_pool).archive(spool, True, actor="ann")
+    found = _store(pg_pool).snapshot()
+    assert found.reorder == {"PETG": 1}
+
+
+def test_snapshot_reorder_takes_the_materials_with_most_grams(pg_pool: PgPool) -> None:
+    materials = {
+        r.name: r.id for r in CatalogStore(pg_pool).list("materials") if isinstance(r, Material)
+    }
+    type_id = _type(pg_pool, lead_time_days=7, safety_margin_days=3)
+    little = _spool(pg_pool, type_id=type_id, grams_left=100, material_id=materials["PLA"])
+    big = _spool(pg_pool, type_id=type_id, grams_left=250, material_id=materials["PETG"])
+    _sb_end(pg_pool, little, None, 300, "a")
+    _sb_end(pg_pool, big, None, 300, "b")
+    found = _store(pg_pool).snapshot()
+    assert found.reorder == {"PLA": 0, "PETG": 1}
 
 
 def test_snapshot_folds_nothing_itself(pg_pool: PgPool) -> None:

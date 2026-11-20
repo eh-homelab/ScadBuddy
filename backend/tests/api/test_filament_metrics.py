@@ -42,14 +42,18 @@ def test_history_route_404(client: TestClient) -> None:
 def test_metrics_route_rejects_reversed_range(client: TestClient) -> None:
     reversed_ = client.get(f"{URL}/metrics", params={"since": "2026-11-02", "until": "2026-11-01"})
     assert reversed_.status_code == 422, reversed_.text
-    same = client.get(f"{URL}/metrics", params={"since": "2026-11-01", "until": "2026-11-01"})
-    assert same.status_code == 422, same.text
     wide = client.get(f"{URL}/metrics", params={"since": "2020-01-01", "until": "2026-11-01"})
     assert wide.status_code == 422, wide.text
     bad = client.get(
         f"{URL}/metrics/purchasing", params={"since": "2026-11-02", "until": "2026-11-01"}
     )
     assert bad.status_code == 422, bad.text
+
+
+def test_metrics_route_accepts_a_single_day(client: TestClient) -> None:
+    for path in ("/metrics", "/metrics/purchasing"):
+        same = client.get(f"{URL}{path}", params={"since": "2026-11-01", "until": "2026-11-01"})
+        assert same.status_code == 200, same.text
 
 
 def test_metrics_route_defaults(client: TestClient) -> None:
