@@ -24,6 +24,7 @@ from scadbuddy.render.plate import (
     tower_brim,
     tower_footprint,
 )
+from scadbuddy.render.plate_profiles import PLATE_PROFILES, TOWER_KEEP_OUTS
 
 # The keychain of library file 62: 176 x 46 mm in XY, 3 mm tall.
 KEYCHAIN = np.array([[-88.0, -23.0, -1.5], [88.0, 23.0, 1.5]])
@@ -575,3 +576,14 @@ class TestTowerFootprint:
         no_sparse = TowerSettings(no_sparse_layers=True)
         problem = fit_problem(size, h2c, tower=True, settings=no_sparse)
         assert problem is not None and "No sparse layers" in problem
+
+
+def test_every_two_nozzle_printer_has_a_tower_keep_out() -> None:
+    """#6757: `_keep_out` reads `TOWER_KEEP_OUTS` by the plate's model, and a model that
+    is missing gets no keep-out. A regenerated table that drops a printer with two
+    nozzles would then let a "No sparse layers" tower stand too close to the objects."""
+    two_nozzles = [model for model in PLATE_PROFILES if plate_for(model).extruders >= 2]
+    assert "Bambu Lab H2C" in two_nozzles
+    for model in two_nozzles:
+        assert plate_for(model).model == model
+    assert [model for model in two_nozzles if model not in TOWER_KEEP_OUTS] == []

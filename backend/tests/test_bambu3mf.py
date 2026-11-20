@@ -415,6 +415,23 @@ def test_only_a_scadbuddy_file_that_states_the_tower_off_reads_as_off(written: P
     assert not stated_tower_off(b"not a zip")
 
 
+def test_no_sparse_layers_reads_as_the_send_reads_it(written: Path) -> None:
+    """#6757: the send keeps the keep-out for an author's file that states "No sparse
+    layers" (`send._file_tower`), so plate fit (SB4001) reads it from such a file too.
+    A file the send prints as it is (`as_is`) reads as off."""
+    author = _restated(
+        written.read_bytes(),
+        wipe_tower_no_sparse_layers=["1"],
+        print_settings_id=["0.20mm Standard"],
+    )
+    assert layout_of(author) == "author"
+    assert stated_no_sparse_layers(author)
+    assert not stated_no_sparse_layers(
+        _restated(written.read_bytes(), print_settings_id=["0.20mm Standard"])
+    )
+    assert not stated_no_sparse_layers(b"not a zip")
+
+
 class TestReplate:
     def test_replating_moves_the_object_and_the_tower(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))

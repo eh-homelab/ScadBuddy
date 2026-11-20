@@ -261,6 +261,9 @@ def tower_footprint(
     settings = settings or TowerSettings()
     tall = plate.height if height is None else height
     two_nozzles = plate.extruders == 2
+    # The clamp matters only for a smooth timelapse, which prints a tower for one
+    # filament. Every caller that places objects passes `tower=False` for one filament.
+    # Only the send's `towers_within_reach` judges such a tower, for that reason (#6757).
     filaments = max(settings.filaments, 1)
     counted = filaments if two_nozzles else max(filaments - 1, 1)
     volume = PRIME_VOLUME * counted
