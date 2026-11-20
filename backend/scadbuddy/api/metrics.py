@@ -69,10 +69,11 @@ FILAMENT_METRICS_MAX_AGE = 60.0
 async def refresh_filament_metrics(
     state: AppState, *, now: Callable[[], float] = time.monotonic
 ) -> None:
-    """The filament gauges from a snapshot at most every `FILAMENT_METRICS_MAX_AGE`
-    seconds. A try counts as a read, failed or not, so a database that does not answer
-    is asked once a minute, not on every scrape. A failure is logged and sets
-    ``scadbuddy_filament_metrics_up`` 0; the gauges keep the last good read."""
+    """The filament series from a snapshot at most every `FILAMENT_METRICS_MAX_AGE`
+    seconds, swapped in whole (`FilamentCollector`, #6785). A try counts as a read,
+    failed or not, so a database that does not answer is asked once a minute, not on
+    every scrape. A failure is logged and sets
+    ``scadbuddy_filament_metrics_up`` 0; the series keep the whole last good snapshot."""
     metrics = state.metrics
     at = now()
     last = metrics.filament_snapshot_at

@@ -75,11 +75,17 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
    existing tracing setup". The backend has no OTel meter provider: every metric is a
    prometheus_client series in `core/metrics.py` at `GET /metrics`, the dashboards read
    Prometheus, and `lint-dashboard.sh` accepts only series declared there. So the filament
-   numbers are `Gauge`s in that registry. Cost if wrong: a later move to an OTel meter
+   numbers are declared there as the `FILAMENT_SERIES` table, which the lint reads, and a
+   collector exposes them (Decision 3, #6785). Cost if wrong: a later move to an OTel meter
    renames nine series.
 3. **The gauges come from a snapshot, refreshed at most every 60 s per process**
-   (`FILAMENT_METRICS_MAX_AGE = 60.0`), in a thread, as the store-usage gauges are. Each
-   gauge's series are set, then the series no longer in the snapshot are removed, so a material that leaves stock leaves the series and a failed export keeps the last values.
+   (`FILAMENT_METRICS_MAX_AGE = 60.0`), in a thread, as the store-usage gauges are. One
+   custom collector (`FilamentCollector`, `core/metrics.py`) yields the metric families of the
+   last good snapshot. `export` builds the whole new snapshot first, then swaps one
+   reference. A material that leaves stock leaves the series, a failed export keeps the old
+   snapshot whole, and a scrape sees the old snapshot or the new one, never a mix (#6785;
+   the first build set and removed gauge series one by one, so a failure or a scrape
+   between the loops saw a mix).
    Every API pod exports the same values, so the dashboard reads them with `max by (...)`. For a counter-like value (`used_grams`) the `max by` comes before `delta`, through a subquery (R-T6-1).
 4. **Labels.** `material` (the material's catalog `name`), `brand` (catalog name, a closed
    vocabulary), `location_kind` (the kind's catalog `name`, not the location's free-text
@@ -520,8 +526,9 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
 
 **Interfaces:**
 - Consumes: `MetricsStore.snapshot()`.
-- Produces, in `Metrics.__init__` (API role only; not in `ROLE_SERIES`), all `Gauge`:
-  `scadbuddy_filament_metrics_up` (no labels);
+- Produces, in `Metrics.__init__` (API role only; not in `ROLE_SERIES`), `scadbuddy_filament_metrics_up` (a `Gauge`, no
+  labels) and, as the module-level `FILAMENT_SERIES` table of `(name, help, labels)`
+  that `FilamentCollector` exposes (#6785):
   `scadbuddy_filament_stock_grams` and `scadbuddy_filament_stock_spools`
   `["material", "brand", "location_kind"]`;
   `scadbuddy_filament_stock_value` `["material", "currency"]`;
@@ -797,7 +804,7 @@ R-T6-5: Task 9's as-built notes must say a material crossing rank 20 makes a one
 51. Task 6 (folded days of stock): Rows that fold into one label set are summed, except `days_of_stock`, where `other` takes its soonest material's days. A sum of days is not a duration; the minimum keeps the dashboard's red threshold on the material that runs out first.
 52. Task 6 (a try counts): `refresh_filament_metrics` records the clock before the read, whether the read then fails or not. So a database that does not answer is asked once a minute, not on every scrape, and a scrape that arrives during a read does not start a second one. The cache time is the plain attribute `Metrics.filament_snapshot_at`, which the role filter ignores (it is not a metric).
 53. Task 6 (one try): The `try` is inside `refresh_filament_metrics`, which must set `metrics_up` 0 when it fails, and `metrics()` calls it with no second `try` around it. The filament component's lookup is inside that `try` too.
-54. Task 6 (export order): `export` computes every folded value before it clears a gauge, so a failure in the fold leaves the last values in place.
+54. Task 6 (export order): `export` builds every family before it swaps the collector's snapshot (#6785; first, it set the gauges and then removed stale series), so a failure anywhere leaves the last snapshot whole.
 55. Task 6 (route clock in tests): The API tests inject the clock through `refresh_filament_metrics.__kwdefaults__["now"]` (`monkeypatch.setitem`), so the signature stays as the brief gives it and production code has no test-only seam.
 56. Task 6 (dashboard frame): The dashboard copies `scadbuddy-printing.json`'s `links`, `annotations`, `templating`, `editable`, `graphTooltip` and `schemaVersion`. Its default range is 30 days and it refreshes every 5 minutes, because the gauges change at most once a minute and the use panels read a 1-day `delta`. The waste rate's `delta` window is 1 day, the same as the use panel's. Units: `masskg`, `massg`, `d`, `percentunit`; the stock value has no unit, because the currency is its legend.
 57. Task 6 (kustomize version): The lint ran with kustomize v5.8.1, the version `ci.yml`'s lint job pins (sha256 checked against the pin there) and the root CLAUDE.md names since #6621. The plan's own lines that said v5.6.0 (the header, the constraints and Task 6) now say v5.8.1. The root CLAUDE.md needs no edit. (R-T6-2)

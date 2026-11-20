@@ -131,7 +131,29 @@ suffixes = {
     "Summary": lambda n: [n + "_sum", n + "_count"],
     "Info": lambda n: [n.removesuffix("_info") + "_info"],
 }
-for call in ast.walk(ast.parse(open(sys.argv[1]).read())):
+tree = ast.parse(open(sys.argv[1]).read())
+# FILAMENT_SERIES: a table of (name, help, labels), each a Gauge family (#6785).
+for node in ast.walk(tree):
+    target = node.target if isinstance(node, ast.AnnAssign) else (
+        node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
+    )
+    if not (isinstance(target, ast.Name) and target.id == "FILAMENT_SERIES"):
+        continue
+    if not isinstance(node.value, (ast.Tuple, ast.List)):
+        continue
+    for row in node.value.elts:
+        if not (
+            isinstance(row, (ast.Tuple, ast.List))
+            and len(row.elts) == 3
+            and isinstance(row.elts[0], ast.Constant)
+            and str(row.elts[0].value).startswith("scadbuddy_")
+        ):
+            print("MALFORMED_ROW line %d" % row.lineno)
+            continue
+        name, _, labels = row.elts
+        names = [e.value for e in getattr(labels, "elts", []) if isinstance(e, ast.Constant)]
+        print(" ".join([name.value, *names]))
+for call in ast.walk(tree):
     if not isinstance(call, ast.Call):
         continue
     kind = getattr(call.func, "id", getattr(call.func, "attr", None))
@@ -150,6 +172,12 @@ for call in ast.walk(ast.parse(open(sys.argv[1]).read())):
         print(" ".join([series, *names, *extra]))
 PY
 ) || exposed=""
+# A FILAMENT_SERIES row the parse above could not read is an error, never skipped.
+while IFS= read -r bad; do
+  problem "backend/scadbuddy/core/metrics.py" \
+    "FILAMENT_SERIES row at ${bad#MALFORMED_ROW } is not a (\"scadbuddy_...\", help, labels) tuple"
+done < <(grep '^MALFORMED_ROW ' <<< "$exposed" || true)
+exposed=$(grep -v '^MALFORMED_ROW ' <<< "$exposed" || true)
 [ -n "$exposed" ] \
   || problem "backend/scadbuddy/core/metrics.py" "no scadbuddy_* metric declarations found"
 
