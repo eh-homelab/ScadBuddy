@@ -18,7 +18,8 @@ import pytest
 
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import ManualQuoteInput
-from scadbuddy.orders.models import Actor
+from scadbuddy.orders.models import Actor, MachineRateBreakdown
+from scadbuddy.orders.storefront import slice_price
 from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
@@ -292,6 +293,70 @@ def test_job_cost_reads_a_missing_slice_fact_as_unknown(
         "quoted_grams": None,
         "quoted_filament_minor": None,
     }
+
+
+def quote_breakdowns(crud: CrudCaller, order_id: str) -> list[Any]:
+    return [
+        r["machine_rate_breakdown"]
+        for r in rows(
+            crud,
+            "SELECT q.machine_rate_breakdown FROM order_item_quotes q"
+            " JOIN order_items i ON i.id = q.order_item_id WHERE i.order_id = %s",
+            order_id,
+        )
+    ]
+
+
+def test_the_quote_records_the_machine_rate_its_slice_price_was_priced_at(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5774: the checkout's `storefront` quote records the breakdown the slice run priced
+    the variant at, as the price's row keeps it, never a rate read again at checkout: job
+    cost then reads the printer's basis and confidence."""
+    priced_at = MachineRateBreakdown(
+        printer="p-1",
+        source="profile",
+        rate_per_hour="0",
+        currency="USD",
+        actuals=True,
+        actuals_window=3,
+        confidence=66,
+    )
+    later = priced_at.model_copy(update={"confidence": 100})
+    live = [priced_at]
+
+    async def live_rate(_rates: Any, printer: str) -> MachineRateBreakdown:
+        assert printer == "p-1"
+        return live[0]
+
+    monkeypatch.setattr(slice_price, "live_rate", live_rate)
+    draft, _ = firm_line(crud, listing, 48)
+    [row] = rows(
+        crud, "SELECT machine_rate_breakdown FROM storefront_slice_prices WHERE status = 'done'"
+    )
+    assert row["machine_rate_breakdown"] == priced_at.model_dump(mode="json")
+    # The rate moves after the slice: the checkout keeps the one that priced the line. Its
+    # rate per hour is the same, so the key and the price stand.
+    live[0] = later
+    r = submit(crud, draft)
+    assert r.status_code == 200, r.text
+    assert quote_breakdowns(crud, r.json()["id"]) == [priced_at.model_dump(mode="json")]
+
+
+def test_a_price_stored_before_5774_gives_a_quote_with_no_breakdown(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+) -> None:
+    draft, _ = firm_line(crud, listing, 49)
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("UPDATE storefront_slice_prices SET machine_rate_breakdown = NULL")
+    r = submit(crud, draft)
+    assert r.status_code == 200, r.text
+    assert quote_breakdowns(crud, r.json()["id"]) == [None]
 
 
 def test_a_line_whose_design_moved_has_no_firm_price(

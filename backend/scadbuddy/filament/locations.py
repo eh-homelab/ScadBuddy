@@ -33,10 +33,10 @@ _TREE_LOCK = "filament_locations_tree"
 
 class LocationExistsError(ValueError):
     """An unarchived place of that name is under the parent, or an unarchived place is
-    already that tray."""
+    already that tray or that AMS unit (a printer, an ``ams_id`` and no tray)."""
 
     def __init__(self) -> None:
-        super().__init__("a place with that name or that tray already exists")
+        super().__init__("a place with that name, that tray or that AMS unit already exists")
 
 
 class LocationCycleError(ValueError):

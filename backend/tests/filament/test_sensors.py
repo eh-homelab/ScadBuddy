@@ -523,3 +523,45 @@ def test_an_ams_tray_place_is_found_when_every_ams_kind_is_archived(pg_pool: PgP
         conn.execute("UPDATE filament_location_kinds SET archived_at = now() WHERE ams")
         again = LocationStore.ensure_ams_on(conn, printer, 0, 2, label="T")
     assert again.id == tray.id
+
+
+def _location_of(pool: PgPool, sensor: UUID) -> UUID:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT location_id FROM filament_location_sensors WHERE id = %s", (sensor,)
+        ).fetchone()
+    assert row is not None
+    return UUID(str(row["location_id"]))
+
+
+def test_an_ha_sensor_on_an_archived_place_is_not_read(pg_pool: PgPool) -> None:
+    """#6679 item 2: no reading lands on a hidden place, and it is not marked unreachable."""
+    sensor = _sensor(pg_pool)
+    LocationStore(pg_pool).update(_location_of(pg_pool, sensor), LocationPatch(archived=True))
+    with pg_pool.connection() as conn, conn.transaction():
+        assert sensors.apply_ha_states_on(conn, {"sensor.box": "40"}, T0) == (0, 0)
+        assert sensors.apply_ha_states_on(conn, {}, T0) == (0, 0)
+        row = conn.execute(
+            "SELECT reachable FROM filament_location_sensors WHERE id = %s", (sensor,)
+        ).fetchone()
+    assert row is not None and row["reachable"]
+    assert SensorStore(pg_pool).readings(sensor, T0 - timedelta(hours=1), 100) == []
+
+
+def test_a_sensor_on_an_archived_place_is_not_listed(pg_pool: PgPool) -> None:
+    """#6679 item 2: the list leaves out a sensor whose place is hidden."""
+    hidden = _sensor(pg_pool)
+    kinds = CatalogStore(pg_pool).list("location-kinds")
+    kind = next(r.id for r in kinds if isinstance(r, LocationKind) and r.name == "Shelf")
+    other = LocationStore(pg_pool).create(LocationCreate(name="Cabinet", kind_id=kind)).id
+    body = {"location_id": other, "source": "home_assistant", "kind": "humidity"}
+    shown = (
+        SensorStore(pg_pool)
+        .create(SensorIn.model_validate({**body, "entity_id": "sensor.o", "name": "O"}), "ann")
+        .id
+    )
+    place = _location_of(pg_pool, hidden)
+    LocationStore(pg_pool).update(place, LocationPatch(archived=True))
+    store = SensorStore(pg_pool)
+    assert [s.id for s in store.list(None)] == [shown]
+    assert store.list(place) == []

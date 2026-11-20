@@ -60,6 +60,7 @@ def test_sync_books_every_loaded_unlocked_spool(pg_pool: PgPool) -> None:
     spool = _loaded(pg_pool, pid)
     result = _sync(pg_pool)
     assert (result.booked, result.spools) == (1, [spool])
+    assert result.stale_printers == []
     _, forced = _events(pg_pool, spool, "ams_reading")
     assert forced.at == LATER and forced.ref_id is None and forced.actor == "t"
     assert forced.data == {"remain_pct": 50, "printing": False, "forced": True}
@@ -114,6 +115,7 @@ def test_sync_skips_a_stale_report(pg_pool: PgPool) -> None:
     spool = _loaded(pg_pool, pid)
     result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
     assert (result.booked, result.stale) == (0, 1)
+    assert result.stale_printers == [m.StalePrinter(id=UUID(pid), name="H2C")]
     assert len(_events(pg_pool, spool, "ams_reading")) == 1
 
 
@@ -129,6 +131,7 @@ def test_sync_counts_a_printer_whose_report_cannot_be_read_as_stale(
     monkeypatch.setattr(capture, "_status", boom)
     result = _sync(pg_pool)
     assert (result.booked, result.stale) == (0, 1)
+    assert result.stale_printers == [m.StalePrinter(id=UUID(pid), name="H2C")]
     assert len(_events(pg_pool, spool, "ams_reading")) == 1
 
 
@@ -183,6 +186,7 @@ def test_a_spool_on_a_printer_with_no_report_counts_as_stale(pg_pool: PgPool) ->
         conn.execute("DELETE FROM printer_reports WHERE printer_id = %s", (pid,))
     result = _sync(pg_pool)
     assert (result.booked, result.stale) == (0, 1)
+    assert result.stale_printers == [m.StalePrinter(id=UUID(pid), name="H2C")]
     assert len(_events(pg_pool, spool, "ams_reading")) == 1
 
 
@@ -212,6 +216,7 @@ def test_a_spool_on_a_printer_whose_row_is_gone_counts_as_stale(
     monkeypatch.setattr(PrinterStore, "read_on", staticmethod(lambda *args: None))
     result = _sync(pg_pool)
     assert (result.booked, result.stale) == (0, 1)
+    assert result.stale_printers == [m.StalePrinter(id=UUID(pid), name=None)]
     assert len(_events(pg_pool, spool, "ams_reading")) == 1
 
 
@@ -238,4 +243,22 @@ def test_a_spool_placed_between_the_holder_read_and_the_lock_is_left_alone(
     monkeypatch.setattr(capture, "lock", lock_after_a_spool_is_placed)
     result = _sync(pg_pool)
     assert (result.booked, result.spools) == (1, [spool])
+    assert result.stale_printers == []
     assert _events(pg_pool, newcomer[0], "ams_reading") == []
+
+
+def test_a_printer_with_no_report_and_no_spool_is_not_named_stale(pg_pool: PgPool) -> None:
+    _printer(pg_pool)
+    result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
+    assert (result.booked, result.stale) == (0, 0)
+    assert result.stale_printers == []
+
+
+def test_a_printer_with_a_stale_report_and_no_spool_is_not_named_stale(pg_pool: PgPool) -> None:
+    """The sync visits this printer (it has a report row), finds the report stale and
+    holds no spool, so `_stale`'s `if not holders` branch keeps it out of `stale_printers`."""
+    pid, _ = _printer(pg_pool)
+    _write_report(pg_pool, pid, _report(_tray(1, U1)), T0)
+    result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
+    assert (result.booked, result.stale) == (0, 0)
+    assert result.stale_printers == []

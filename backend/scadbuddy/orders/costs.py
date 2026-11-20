@@ -84,6 +84,12 @@ PERCENT = Decimal("0.1")
 EstimatedFigure = Literal["grams", "seconds", "filament", "machine"]
 #: An item's or an order's part of the cost.
 CostPart = Literal["prints", "labour"]
+#: Which machine rate priced an attempt's seconds (#5774, machine-rate actuals spec §6):
+#: its quote's ``machine_time`` line, its breakdown with or without actuals; today's rate
+#: of a printer with a profile, with or without actuals; or the price book's rate.
+MachineRateBasis = Literal[
+    "quote_actuals", "quote_estimate", "printer_actuals", "printer_estimate", "price_book"
+]
 MarginState = Literal["ok", "thin", "loss", "unknown"]
 
 
@@ -108,6 +114,16 @@ class CostRates(BaseModel):
     #: The same rates by each printer's serial: an attempt whose printer was merged away
     #: since (its row deleted) is priced at the rate of the row now holding its serial.
     serial_rates: dict[str, str] = {}
+    #: #5774 (§6): each profiled printer's rate has ``actuals`` (a part priced by its
+    #: actual) and its ``confidence`` (null: no row set to ``actual``), by id and by
+    #: serial. A printer in the rate maps and not here has no profile: the book's rate.
+    printer_actuals: dict[str, bool] = {}
+    serial_actuals: dict[str, bool] = {}
+    printer_confidence: dict[str, int | None] = {}
+    serial_confidence: dict[str, int | None] = {}
+    #: The registry printer whose rate ``machine_rate_per_hour`` is (the configured
+    #: default printer); None: it is the book's.
+    default_printer: str | None = None
     labour_per_item: str = "0"
     thin_margin_percent: str = "15"
 
@@ -130,6 +146,10 @@ class AttemptCost(BaseModel):
     filament_minor: Money | None
     #: ``seconds`` at the machine rate; None with no seconds or no rate.
     machine_minor: Money | None = None
+    #: #5774 (§6): which rate priced ``machine_minor``, and that rate's confidence
+    #: (null for the book's, or when no row was set to ``actual``); None with no figure.
+    machine_rate_basis: MachineRateBasis | None = None
+    machine_rate_confidence: int | None = None
     #: The known parts' sum.
     cost_minor: Money = 0
     estimated: list[EstimatedFigure] = []
@@ -217,6 +237,8 @@ class OrderCosts(Margin):
     thin_margin_percent: str = "15"
     #: Bambuddy is linked and some archive's cost could not be read.
     bambuddy_unavailable: bool = False
+    #: #5774 (§6): the distinct ``machine_rate_basis`` of its attempts, sorted.
+    machine_rate_bases: list[MachineRateBasis] = []
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -348,6 +370,41 @@ class _Item:
         per_kg = sum((prices[s] * weights[s] for s in prices), Decimal(0)) / total
         return per_kg.scaleb(self.exponent) / GRAMS_PER_KG
 
+    def todays_rate(self, attempt: Fulfilment) -> tuple[str, MachineRateBasis, int | None]:
+        """Today's machine rate for an attempt with no quote's rate (#4625): its printer's,
+        else the printer's that kept its serial, else the fallback; with its basis and
+        confidence (#5774)."""
+        rates = self.rates
+        found: tuple[str, dict[str, bool], dict[str, int | None], str] | None = None
+        if attempt.printer and attempt.printer in rates.printer_rates:
+            found = (
+                rates.printer_rates[attempt.printer],
+                rates.printer_actuals,
+                rates.printer_confidence,
+                attempt.printer,
+            )
+        elif attempt.printer_serial and attempt.printer_serial in rates.serial_rates:
+            found = (
+                rates.serial_rates[attempt.printer_serial],
+                rates.serial_actuals,
+                rates.serial_confidence,
+                attempt.printer_serial,
+            )
+        elif rates.default_printer is not None:
+            found = (
+                rates.machine_rate_per_hour,
+                rates.printer_actuals,
+                rates.printer_confidence,
+                rates.default_printer,
+            )
+        if found is None:
+            return rates.machine_rate_per_hour, "price_book", None
+        rate, actuals, confidence, key = found
+        if key not in actuals:
+            return rate, "price_book", None
+        basis: MachineRateBasis = "printer_actuals" if actuals[key] else "printer_estimate"
+        return rate, basis, confidence.get(key)
+
     def attempt(self, attempt: Fulfilment) -> tuple[AttemptCost, Decimal | None]:
         """The attempt's cost, and its filament cost unrounded (for the item's sums)."""
         quote = self.quote_of(attempt)
@@ -378,20 +435,27 @@ class _Item:
             filament = None if per_gram is None else grams * per_gram
 
         machine: Decimal | None = None
+        basis: MachineRateBasis | None = None
+        confidence: int | None = None
         if seconds is not None:
             per_second = unit.per_second if unit is not None else None
             if per_second is None:
-                rate = self.rates.printer_rates.get(attempt.printer or "") or (
-                    self.rates.serial_rates.get(
-                        attempt.printer_serial or "", self.rates.machine_rate_per_hour
-                    )
-                )
+                rate, today_basis, today_confidence = self.todays_rate(attempt)
                 hourly = self.today_minor(rate)
                 if hourly is not None:
                     per_second = hourly / SECONDS_PER_HOUR
                     estimated.append("machine")
-            elif "seconds" in estimated:
-                estimated.append("machine")
+                    basis, confidence = today_basis, today_confidence
+            else:
+                if "seconds" in estimated:
+                    estimated.append("machine")
+                # A quote with no breakdown was priced at the book's rate, or recorded
+                # before #4625, or is a storefront quote of a slice price stored before
+                # #5774: its rate's parts were not recorded, so it reads `quote_estimate`.
+                breakdown = None if quote is None else quote.machine_rate_breakdown
+                actuals = breakdown is not None and breakdown.actuals
+                basis = "quote_actuals" if actuals else "quote_estimate"
+                confidence = None if breakdown is None else breakdown.confidence
             machine = None if per_second is None else seconds * per_second
 
         filament_minor, machine_minor = _minor(filament), _minor(machine)
@@ -409,6 +473,8 @@ class _Item:
                 seconds=seconds,
                 filament_minor=filament_minor,
                 machine_minor=machine_minor,
+                machine_rate_basis=None if machine_minor is None else basis,
+                machine_rate_confidence=None if machine_minor is None else confidence,
                 cost_minor=(filament_minor or 0) + (machine_minor or 0),
                 estimated=estimated,
                 unknown=filament_minor is None or machine_minor is None,
@@ -593,6 +659,9 @@ def _order_costs(rows: _Rows, order: Order, rates: CostRates) -> OrderCosts:
         revenue_minor=revenue,
         estimated=[p for p in parts if any(p in i.estimated for i in items)],
         unknown=unknown,
+        machine_rate_bases=sorted(
+            {a.machine_rate_basis for i in items for a in i.attempts if a.machine_rate_basis}
+        ),
     )
     _margin(costs, thin)
     return costs

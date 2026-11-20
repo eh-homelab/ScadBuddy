@@ -27,6 +27,12 @@ import { printersState } from '../printers'
  * replaced), each row's actual over the last N usable gaps (`task_actual`, `part_actual`),
  * its confidence, `priced_by`, and the printer's counter: Bambuddy's (`setBambuddyHours`,
  * null when Bambuddy does not answer), ScadBuddy's own LAN count (`setLanCount`), or none.
+ *
+ * #6665: the view and "Read from Bambuddy" (`POST …/import`) read a linked printer's log and
+ * stamp `events_read_at`; `setBambuddyLogAnswers(false)` makes that read fail (503
+ * `log_unavailable`), keeping the stamp. The events list pages by its cursor.
+ * Job cost does not read a rate saved here for the two fixture printers in `costs.ts`
+ * `TODAYS_PRINTER_RATES`: that table wins, so saving their rate leaves job cost unchanged.
  */
 
 /** Bambuddy's maintenance tracker for the linked printer, as `GET /maintenance/printers/{id}` lists it. */
@@ -46,6 +52,9 @@ let events = new Map<string, MachineRateEvent[]>()
 let lanCounts = new Map<string, LanSeed>()
 let bambuddyHours: string | null = BAMBUDDY_HOURS
 let nextEvent = 1
+/** #6665: when each printer's Bambuddy log was last read in full (`events_read_at`). */
+let readAt = new Map<string, string>()
+let logAnswers = true
 
 export function reset(): void {
   inputs = new Map()
@@ -53,6 +62,28 @@ export function reset(): void {
   lanCounts = new Map()
   bambuddyHours = BAMBUDDY_HOURS
   nextEvent = 1
+  readAt = new Map()
+  logAnswers = true
+}
+
+/** #6665: whether Bambuddy answers the maintenance log read (`maintenance_history`). */
+export function setBambuddyLogAnswers(answers: boolean): void {
+  logAnswers = answers
+}
+
+/** #6665: `events_read_at` for `printer`, as a full read of its log at `at` leaves it. */
+export function setEventsReadAt(printer: string, at: string | null): void {
+  if (at == null) readAt.delete(printer)
+  else readAt.set(printer, at)
+}
+
+/** A linked printer with a profile reads its log with the view (§3.7); a read that fails keeps `events_read_at`. */
+function readLog(row: PrinterRow): 'read' | 'unlinked' | 'no_profile' | 'unanswered' {
+  if (row.bambuddy_printer_id == null) return 'unlinked'
+  if (!inputs.has(row.id)) return 'no_profile'
+  if (!logAnswers) return 'unanswered'
+  readAt.set(row.id, new Date().toISOString())
+  return 'read'
 }
 
 /** The inputs kept for `printer`, as the store keeps them. */
@@ -413,7 +444,12 @@ function view(row: PrinterRow): MachineRateView {
     breakdown,
     // Read from the mock Bambuddy, which always answers: also before the first save.
     bambuddy_tasks: row.bambuddy_printer_id != null ? BAMBUDDY_TASKS.map((t) => t.task) : [],
-    actuals: { window: kept?.profile.actuals_window ?? 3, rows, orphaned: [...orphans.values()].sort((a, b) => a.name.localeCompare(b.name)) },
+    actuals: {
+      window: kept?.profile.actuals_window ?? 3,
+      rows,
+      orphaned: [...orphans.values()].sort((a, b) => a.name.localeCompare(b.name)),
+      events_read_at: readAt.get(row.id) ?? null,
+    },
     counter: { source: sourceOf(row), hours: reading(row), lan_watch: lanCount(row) },
   }
 }
@@ -426,7 +462,19 @@ const refuse = (status: number, code: string, detail: string) =>
 export const handlers = [
   http.get('/api/v1/printers/:id/machine-rate', ({ params }) => {
     const row = printersState().find((p) => p.id === params.id)
-    return row ? HttpResponse.json(view(row)) : gone(String(params.id))
+    if (!row) return gone(String(params.id))
+    readLog(row)
+    return HttpResponse.json(view(row))
+  }),
+  // #6665: "Read from Bambuddy" (`api/machine_rates.py` `import_machine_rate_events`).
+  http.post('/api/v1/printers/:id/machine-rate/import', ({ params }) => {
+    const row = printersState().find((p) => p.id === params.id)
+    if (!row) return gone(String(params.id))
+    const read = readLog(row)
+    if (read === 'unlinked') return refuse(409, 'not_linked', 'The printer is not linked to Bambuddy: it has no log to read.')
+    if (read === 'no_profile') return refuse(409, 'no_machine_rate', 'The printer has no machine rate inputs yet: set them, then read its log.')
+    if (read === 'unanswered') return refuse(503, 'log_unavailable', 'Bambuddy did not answer. The rate uses the events last read.')
+    return HttpResponse.json(view(row))
   }),
   http.put('/api/v1/printers/:id/machine-rate', async ({ params, request }) => {
     const row = printersState().find((p) => p.id === params.id)
@@ -470,10 +518,17 @@ export const handlers = [
     const url = new URL(request.url)
     const kind = url.searchParams.get('kind')
     const name = url.searchParams.get('name')
+    // Newest first by time, then id, a page at a time (`MachineRateStore.list_events`). The ids are
+    // zero-padded (`evt-0001`), so comparing them as text orders them as numbers.
+    const order = (e: MachineRateEvent) => `${e.at}|${e.id}`
+    const cursor = url.searchParams.get('cursor')
+    const limit = Number(url.searchParams.get('limit') ?? 50)
     const list = machineRateEvents(row.id)
       .filter((e) => (!kind || e.kind === kind) && (!name || e.name === name))
-      .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
-    return HttpResponse.json({ events: list, next: null })
+      .filter((e) => !cursor || order(e) < cursor)
+      .sort((a, b) => (order(a) < order(b) ? 1 : order(a) > order(b) ? -1 : 0))
+    const page = list.slice(0, limit)
+    return HttpResponse.json({ events: page, next: list.length > limit ? order(page[page.length - 1]!) : null })
   }),
   http.post('/api/v1/printers/:id/machine-rate/events', async ({ params, request }) => {
     const row = printersState().find((p) => p.id === params.id)

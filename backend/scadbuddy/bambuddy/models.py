@@ -176,6 +176,25 @@ class MaintenanceStatus(BambuddyModel):
     current_hours: float | None = None
 
 
+class MaintenanceHistoryEntry(BambuddyModel):
+    """One row of ``GET /api/v1/maintenance/items/{item_id}/history``: a task marked done,
+    with the printer's print-hour counter then (``MaintenanceHistoryResponse`` in
+    Bambuddy's ``backend/app/schemas/maintenance.py`` at maziggy/bambuddy@1aa7bce, read
+    2026-11-18; #5774 spec 2026-11-17-machine-rate-actuals §2.1). Bambuddy writes
+    ``performed_at`` with no zone, in UTC (§2.1 "Time zone"), so a naive time is read as
+    UTC."""
+
+    id: int
+    performed_at: datetime
+    hours_at_maintenance: float
+    notes: str | None = None
+
+    @field_validator("performed_at")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 class PrinterMaintenanceOverview(BambuddyModel):
     """``GET /api/v1/maintenance/printers/{id}``: the printer's maintenance tasks, each
     with its interval (``PrinterMaintenanceOverview``, same source)."""

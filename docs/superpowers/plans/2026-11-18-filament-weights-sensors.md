@@ -362,3 +362,47 @@ Load `frontend-design` first.
     with an event stamped one day ahead on a duplicate unit place. The migration's `moved`
     event must come after it (`greatest(clock_timestamp(), max(at) + 1 µs)`). The test
     failed with only `clock_timestamp()` and passes with the migration as it is.
+24. **The 409 for a second unit place names the AMS unit (#6679 item 1).** Decision 15's
+    index refuses a second unarchived hand-made place for one printer and AMS unit. The
+    refusal is `LocationExistsError`, so its text now says "a place with that name, that
+    tray or that AMS unit already exists". The descriptions of `POST /locations` and
+    `PATCH /locations/{id}` name the unit case too, and the frontend mock uses the same text.
+25. **A sensor on an archived place is hidden and not read (#6679 item 2).** Decisions 18
+    and 22 keep AMS readings off hidden places. A Home Assistant sensor has no live place
+    to move to, so `apply_ha_states_on` skips one whose place is archived: it stores no
+    reading and is not marked unreachable. `SensorStore.list` (`GET /filament/sensors`)
+    leaves out every sensor whose place is archived, of either source, so the place and
+    its sensors hide together. An AMS sensor shows again when the next report moves it to
+    its unit's live place (Decision 18). `read_ha_sensors` reads the list, so it makes no
+    Bambuddy call when every Home Assistant sensor is on an archived place.
+26. **The Home Assistant read stays one unfiltered GET (#6679 item 3).** The ruling was to
+    ask Bambuddy only for the entity ids the pull needs, if its route allows it. It does
+    not. Bambuddy 1.3.1's OpenAPI (`GET /openapi.json`, `info.version` `1.3.1`, read with
+    `jq` on 2026-11-18) gives `GET /api/v1/location-ha-sensors/entities` one query
+    parameter, `search` (a string or null), and no list of ids. The other Home Assistant
+    reads are no better: `GET /api/v1/ha-sensors/entities` also takes only `search`,
+    `GET /api/v1/smart-plugs/ha/sensors` takes none and lists power and energy sensors
+    only, and `GET /api/v1/bulk/ha-sensor-readings?ids=` takes printer ids, not entity
+    ids. One `search` call per sensor would make N calls per pull in place of one, and
+    `search` matches text, so it can return more entities than the one asked for. So
+    `read_ha_sensors` keeps one GET with no `search`, and still makes none when no live
+    Home Assistant sensor is set up. Revisit this when Bambuddy's route takes ids.
+27. **The AMS sync names its stale printers (#6679 item 4).** `AmsSyncResult` gains
+    `stale_printers`: each printer whose spools are in `stale`, once, as `StalePrinter`
+    (`id`, and `name` from the printer's row, `null` when the row is gone). A printer that
+    holds no spool is not named. The Spools tab's toast adds the names after the stale
+    count ("Skipped 4 whose printer has not reported lately (H2C, P1S)."), and a printer
+    with no name shows as "printer" and the first 8 characters of its id. The agent tool
+    `filament_sync_ams_weights` describes `stale_printers` and tells the agent to name
+    them. No plugin skill names the sync, so the plugin version does not change.
+28. **Bambuddy's AMS humidity is a percent (#6679 item 5, measured).** The final review of
+    #6650 could not verify Decision 11's "as Bambuddy's status gives a percent". Measured
+    on 2026-11-18 (history point `recorded_at` `2026-11-18T18:54:01`) with read-only GETs (`curl` and `jq`, no write, no
+    WebSocket) on the live Bambuddy 1.3.1 (`https://bambuddy.internal.nullreference.io`),
+    printer 1 (the H2C, printing): `GET /api/v1/printers/1/status` gave `ams[].humidity`
+    31, 17, 14, 15 and 19 for units 0, 1, 2, 3 and 128. Bambu's level is 1 to 5, so these
+    are percents. `GET /api/v1/ams-history/1/{ams_id}` stores `humidity` and
+    `humidity_raw` side by side; its latest point for each unit had both equal to the
+    status value (31.0 and 31.0, and so on). The raw MQTT report was not read: Bambuddy's
+    `GET /api/v1/printers/1/logging` held no messages (logging was off), and turning it on
+    is a write. The comment in `printers/status.py` `ams_units` now says this.

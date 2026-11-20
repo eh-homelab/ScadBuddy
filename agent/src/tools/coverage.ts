@@ -660,24 +660,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "print time and open picks in the print check's rack options, for the hotends that job could use. " +
       "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
   },
-  ...(
-    [
-      'GET /api/v1/printers/{printer_id}/machine-rate/events',
-      'POST /api/v1/printers/{printer_id}/machine-rate/events',
-      'PATCH /api/v1/printers/{printer_id}/machine-rate/events/{event_id}',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "A printer's maintenance events (#5774 PR 2). Their tools, machine_rate_events_list, machine_rate_event_add " +
-      'and machine_rate_event_update, come in #5774 PR 4 (spec 2026-11-17-machine-rate-actuals §5), which removes ' +
-      'these entries.',
-  })),
   {
     operation: 'DELETE /api/v1/printers/{printer_id}/machine-rate/events/{event_id}',
     reason:
       "Deleting a maintenance event (#5774) is a person's correction on the Settings machine-rate page. The spec " +
       "gives the agent no delete tool (2026-11-17-machine-rate-actuals §5): it adds and updates events only.",
+  },
+  {
+    operation: 'POST /api/v1/printers/{printer_id}/machine-rate/import',
+    reason:
+      "Settings' \"Read from Bambuddy\" button (#5774 PR 3). The spec gives the agent no import tool " +
+      '(2026-11-17-machine-rate-actuals §5): machine_rate_get already reads the log after its live task read, ' +
+      'and the housekeeping sweep reads it on its Schedule (§3.7).',
   },
 ]
 

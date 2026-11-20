@@ -15,6 +15,7 @@ import {
   importSpools,
   listEvents,
   listLocations,
+  listSensors,
   listSpools,
   listTags,
   moveSpool,
@@ -28,7 +29,7 @@ import {
   type SpoolTypeCreate,
 } from '../../../api/filament'
 import { resetMockState } from '../../handlers'
-import { B, H2C, IT, L, LK, M, spoolId, T, TAG } from './seed'
+import { B, H2C, IT, L, LK, M, SENSOR, spoolId, T, TAG } from './seed'
 
 // #6262 Task 14 — the Filament section's mock API over its seed, through the client.
 
@@ -297,7 +298,7 @@ describe('the filament mocks', () => {
   it('refuses a place whose name is taken, whose kind is missing, or that would sit under itself', async () => {
     expect(await refusal(upsertLocation({ name: 'Shelf A', kind_id: LK.SHELF, parent_id: L.WORKSHOP, sort_order: 0 }))).toMatchObject({
       status: 409,
-      detail: 'a place with that name or that tray already exists',
+      detail: 'a place with that name, that tray or that AMS unit already exists',
     })
     expect(await refusal(upsertLocation({ name: 'Shelf B', kind_id: L.WORKSHOP, sort_order: 0 }))).toMatchObject({
       status: 422,
@@ -395,5 +396,19 @@ describe('extra keys in a write body (every body model of `filament/models.py` f
   ]
   it.each(cases)('refuses it on %s', async (_name, method, path, payload) => {
     expect(await refusal(request(path, { method, body: payload }))).toMatchObject({ status: 422, detail: expect.stringContaining('Extra inputs are not permitted') })
+  })
+})
+
+describe('the sensors list (#6684)', () => {
+  it('leaves out the sensors of an archived place, as the backend does', async () => {
+    resetMockState()
+    expect((await listSensors()).map((one) => one.id)).toContain(SENSOR.BOX_HUMIDITY)
+    expect((await listSensors(L.DRY_BOX)).map((one) => one.id)).toContain(SENSOR.BOX_HUMIDITY)
+    await upsertLocation({ archived: true }, L.DRY_BOX)
+    const ids = (await listSensors()).map((one) => one.id)
+    expect(ids).not.toContain(SENSOR.BOX_HUMIDITY)
+    expect(ids).not.toContain(SENSOR.BOX_TEMP)
+    expect(ids).toContain(SENSOR.SHELF_HUMIDITY)
+    expect(await listSensors(L.DRY_BOX)).toEqual([])
   })
 })

@@ -4,21 +4,31 @@ not answer, and the printer a quote is priced for."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator, Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
+import psycopg
 import pytest
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
-from scadbuddy.orders.integrations import MaintenanceTask, OrderIntegrations
+from scadbuddy.orders.integrations import (
+    NOT_LINKED,
+    MaintenanceDone,
+    MaintenanceTask,
+    OrderIntegrations,
+)
 from scadbuddy.orders.machine_rate import (
+    PROBLEM,
+    READ_LOGS_BUDGET,
     CostProfile,
     EventFieldError,
     Events,
@@ -76,6 +86,10 @@ class FakeBambuddy:
         not_json: bool = False,
         not_utf8: bool = False,
         bug: bool = False,
+        history: dict[int, list[MaintenanceDone]] | None = None,
+        history_down: bool = False,
+        broken: Collection[int] = (),
+        on_history: Callable[[], object] | None = None,
     ) -> None:
         self.tasks = tasks
         self.garbled = garbled
@@ -83,13 +97,33 @@ class FakeBambuddy:
         self.not_utf8 = not_utf8
         self.bug = bug
         self.asked: list[int] = []
+        #: #5774 PR 3: each task's log by its item id.
+        self.history = history or {}
+        self.history_down = history_down
+        self.history_asked: list[list[int]] = []
+        #: Bambuddy printers whose task read hits a bug, not a refusal.
+        self.broken = broken
+        #: Runs once the log is read, before it is kept.
+        self.on_history = on_history
 
     @property
     def linked(self) -> bool:
         return True
 
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
+        self.history_asked.append(list(item_ids))
+        if self.history_down:
+            raise ApiError(502, "Bambuddy did not answer")
+        if self.on_history is not None:
+            self.on_history()
+        return {item: self.history.get(item, []) for item in item_ids}
+
     async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
         self.asked.append(printer_id)
+        if printer_id in self.broken:
+            raise RuntimeError("a bug in one printer's read")
         if self.tasks is None:
             raise ApiError(502, "Bambuddy did not answer")
         if self.garbled:
@@ -266,9 +300,21 @@ def test_the_money_views_fallback_is_the_default_printers_rate(
     store.replace(lan.id, INPUTS)
     machine = rates(store, printers, settings_store, FakeBambuddy(None))
     by_serial = {lan.serial: "0.7"}
-    assert machine.money_rates() == ("0.9", {lan.id: "0.7"}, by_serial)
+    money = machine.money_rates()
+    assert (money.machine_rate_per_hour, money.printer_rates, money.serial_rates) == (
+        "0.9",
+        {lan.id: "0.7"},
+        by_serial,
+    )
+    assert money.default_printer is None
     settings_store.save(SettingsPatch(default_printer=lan.id))
-    assert machine.money_rates() == ("0.7", {lan.id: "0.7"}, by_serial)
+    money = machine.money_rates()
+    assert (money.machine_rate_per_hour, money.printer_rates, money.serial_rates) == (
+        "0.7",
+        {lan.id: "0.7"},
+        by_serial,
+    )
+    assert money.default_printer == lan.id
 
 
 def test_a_printer_with_no_profile_is_the_books_rate_in_the_money_view(
@@ -281,10 +327,53 @@ def test_a_printer_with_no_profile_is_the_books_rate_in_the_money_view(
     bare = linked_printer(printers)
     store.replace(lan.id, INPUTS)
     settings_store.save(SettingsPatch(default_printer=lan.id))
-    fallback, by_id, by_serial = rates(store, printers, settings_store).money_rates()
-    assert fallback == "0.7"
-    assert by_id == {lan.id: "0.7", bare.id: "0.9"}
-    assert by_serial == {lan.serial: "0.7", bare.serial: "0.9"}
+    money = rates(store, printers, settings_store).money_rates()
+    assert money.machine_rate_per_hour == "0.7"
+    assert money.printer_rates == {lan.id: "0.7", bare.id: "0.9"}
+    assert money.serial_rates == {lan.serial: "0.7", bare.serial: "0.9"}
+    # #5774: only a profiled printer has a basis; the bare one is the book's.
+    assert money.printer_actuals == {lan.id: False}
+    assert money.serial_actuals == {lan.serial: False}
+    assert money.printer_confidence == {lan.id: None}
+    assert money.serial_confidence == {lan.serial: None}
+
+
+def test_the_money_view_says_which_rates_priced_from_actuals(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """#5774 (spec §6): ``CostRates``' actuals and confidence maps, from each printer's
+    stored rate: a part set to ``actual`` with too few events prices at its estimate and
+    gives its confidence; with enough, it prices at its actual."""
+    printer = lan_printer(printers)
+    actual = INPUTS.model_copy(
+        update={
+            "profile": INPUTS.profile.model_copy(update={"actuals_window": 2}),
+            "wear_parts": [
+                WearPart(name="Nozzle", cost="14", life_hours="200", priced_by="actual")
+            ],
+        }
+    )
+    store.replace(printer.id, actual)
+    machine = rates(store, printers, settings_store)
+    log_part(store, printer.id, "0", "20")
+    log_part(store, printer.id, "400", "20")
+    money = machine.money_rates()
+    # One of two replacements: 50 % confidence, the estimate prices.
+    assert (money.printer_actuals, money.printer_confidence) == (
+        {printer.id: False},
+        {printer.id: 50},
+    )
+    assert (money.serial_actuals, money.serial_confidence) == (
+        {printer.serial: False},
+        {printer.serial: 50},
+    )
+    log_part(store, printer.id, "800", "20")
+    money = machine.money_rates()
+    assert (money.printer_actuals, money.printer_confidence) == (
+        {printer.id: True},
+        {printer.id: 100},
+    )
+    assert money.printer_rates[printer.id] == "0.68"
 
 
 async def test_a_reply_that_does_not_validate_falls_back_to_the_stored_intervals(
@@ -1155,3 +1244,356 @@ async def test_the_read_takes_each_rows_window_and_prices_as_every_event_would(
     assert [(o.kind, o.name, o.events) for o in view.actuals.orphaned] == [("part", "Gone", 8)]
     nozzle = next(r for r in view.actuals.rows if r.name == "Nozzle")
     assert [e.hours_at for e in nozzle.events] == ["1100", "1000", "900"]
+
+
+# -- #5774 PR 3: Bambuddy's log imported (spec 2026-11-17-machine-rate-actuals §3.7) -------
+
+#: Prod's Clean Build Plate log (`tests/bambuddy/recordings/maintenance-history.json`,
+#: §2.1), newest first, in the seam's shape.
+PLATE_LOG = [
+    MaintenanceDone(
+        history_id=hid, at=datetime(2026, 11, day, tzinfo=UTC), hours_at=hours, notes=None
+    )
+    for hid, day, hours in (
+        (38, 15, 465.56416666666667),
+        (37, 14, 341.9144444444444),
+        (36, 13, 303.955),
+        (34, 12, 268.96555555555557),
+        (1, 1, 66.4961111111111),
+    )
+]
+PLATE = MaintenanceTask(task="Clean Build Plate", interval_hours=25, item_id=5, current_hours=510.3)
+PLATE_INPUTS = MachineRateInputs(
+    profile=CostProfile(labour_rate_per_hour="30"),
+    maintenance=[MaintenanceCost(task="Clean Build Plate", minutes="10", priced_by="actual")],
+)
+
+
+async def test_bambuddys_log_is_imported_once_and_prices_the_task(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """§3.3's example: prod's build plate at 10 minutes and 30 an hour is 0.0763 an hour
+    over its last 3 gaps, at 100 % confidence."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    bambuddy = FakeBambuddy([PLATE], history={5: PLATE_LOG})
+    machine = rates(store, printers, settings_store, bambuddy)
+    assert await machine.read_log(printer) == "read"
+    assert bambuddy.history_asked == [[5]]
+    stored = store.stored(printer.id)
+    assert stored.events_read_at is not None
+    newest = max(stored.logged, key=lambda e: e.at)
+    assert (newest.origin, newest.source, newest.bambuddy_history_id) == (
+        "bambuddy",
+        "bambuddy:38",
+        38,
+    )
+    assert (newest.hours_at, newest.hours_source, newest.name) == (
+        "465.6",
+        "bambuddy",
+        "Clean Build Plate",
+    )
+    rate = await machine.breakdown(printer)
+    plate = rate.maintenance[0]
+    assert (plate.basis, plate.per_hour, plate.confidence) == ("actual", "0.0763", 100)
+
+    first_read = stored.events_read_at
+    assert await machine.read_log(printer) == "read"
+    again = store.stored(printer.id)
+    assert again.counts == {("task", "Clean Build Plate"): 5}
+    assert again.events_read_at is not None and again.events_read_at >= first_read
+
+
+async def test_a_log_bambuddy_does_not_answer_keeps_the_events_and_the_last_read(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    assert (
+        await rates(
+            store, printers, settings_store, FakeBambuddy([PLATE], history={5: PLATE_LOG[2:]})
+        ).read_log(printer)
+        == "read"
+    )
+    read_at = store.stored(printer.id).events_read_at
+    down = FakeBambuddy([PLATE], history={5: PLATE_LOG}, history_down=True)
+    assert await rates(store, printers, settings_store, down).read_log(printer) == "unanswered"
+    no_tasks = FakeBambuddy(None)
+    assert await rates(store, printers, settings_store, no_tasks).read_log(printer) == "unanswered"
+    kept = store.stored(printer.id)
+    assert kept.counts == {("task", "Clean Build Plate"): 3}
+    assert kept.events_read_at == read_at
+
+
+async def test_only_a_linked_printer_with_a_profile_reads_its_log(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    lan = lan_printer(printers)
+    store.replace(lan.id, PLATE_INPUTS)
+    linked = linked_printer(printers)
+    bambuddy = FakeBambuddy([PLATE], history={5: PLATE_LOG})
+    machine = rates(store, printers, settings_store, bambuddy)
+    assert await machine.read_log(lan) is None
+    # No profile: the rate lists no task, so none is read (§3.7).
+    assert await machine.read_log(linked) is None
+    assert bambuddy.history_asked == []
+    assert store.stored(linked.id).logged == []
+
+
+def test_an_import_after_an_unlink_keeps_nothing(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    assert store.import_events(printer.id, 8, [("Clean Build Plate", PLATE_LOG[0])]) is None
+    stored = store.stored(printer.id)
+    assert (stored.logged, stored.events_read_at) == ([], None)
+
+
+def test_an_imported_row_keeps_its_reading_and_a_short_note(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    long = PLATE_LOG[0].model_copy(update={"notes": "x" * 1500})
+    zero = PLATE_LOG[1].model_copy(update={"hours_at": 0.0})
+    below = PLATE_LOG[2].model_copy(update={"hours_at": -3.0})
+    rows = [("Clean Build Plate", done) for done in (long, zero, below)]
+    assert store.import_events(printer.id, 7, rows) == 3
+    by_id = {e.bambuddy_history_id: e for e in store.list_events(printer.id).events}
+    assert by_id[38].notes == "x" * 1000
+    assert (by_id[37].hours_at, by_id[37].hours_source) == ("0", "bambuddy")
+    # A reading below 0 (an offset typed in Bambuddy) is no reading: it opens no gap.
+    assert (by_id[36].hours_at, by_id[36].hours_source) == (None, None)
+
+
+async def test_the_sweep_reads_every_linked_printer_with_a_profile(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    lan = lan_printer(printers)
+    store.replace(lan.id, PLATE_INPUTS)
+    bambuddy = FakeBambuddy([PLATE], history={5: PLATE_LOG})
+    assert await rates(store, printers, settings_store, bambuddy).read_logs() == (1, 0)
+    assert bambuddy.asked == [7]
+    assert store.stored(printer.id).counts == {("task", "Clean Build Plate"): 5}
+    down = FakeBambuddy([PLATE], history_down=True)
+    assert await rates(store, printers, settings_store, down).read_logs() == (0, 1)
+
+
+async def test_the_view_reads_the_log_after_its_live_task_read(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    bambuddy = FakeBambuddy([PLATE], history={5: PLATE_LOG})
+    view = await rates(store, printers, settings_store, bambuddy).view(printer.id)
+    assert view is not None
+    # One task read for the breakdown, the log and the counter.
+    assert (bambuddy.asked, bambuddy.history_asked) == ([7], [[5]])
+    assert view.actuals.events_read_at is not None
+    plate = view.breakdown.maintenance[0]
+    assert (plate.basis, plate.per_hour) == ("actual", "0.0763")
+    assert view.counter.hours == "510.3"
+
+    down = FakeBambuddy([PLATE], history_down=True)
+    kept = await rates(store, printers, settings_store, down).view(printer.id)
+    assert kept is not None
+    assert kept.actuals.events_read_at == view.actuals.events_read_at
+    with pytest.raises(ApiError) as raised:
+        await rates(store, printers, settings_store, down).view(printer.id, require_log=True)
+    assert (raised.value.status, raised.value.type) == (503, PROBLEM + "log_unavailable")
+
+
+def test_a_row_past_the_columns_bounds_is_skipped(
+    store: MachineRateStore, printers: PrinterStore
+) -> None:
+    """#6663 review: a counter of 1e9 h or more (past ``numeric(10,1)``), a history id
+    past ``integer``, a counter that is no number, or a task name that is empty, too long,
+    holds a NUL or is not UTF-8 is skipped; a note's NULs and lone surrogates are dropped;
+    and the rest of the log is kept."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    rows = [
+        ("Clean Build Plate", done)
+        for done in (
+            PLATE_LOG[0].model_copy(update={"hours_at": 999_999_999.95}),
+            PLATE_LOG[1].model_copy(update={"hours_at": 1e30}),
+            PLATE_LOG[2].model_copy(update={"hours_at": -1e30}),
+            PLATE_LOG[3].model_copy(update={"hours_at": float("nan")}),
+            PLATE_LOG[4].model_copy(update={"history_id": 2**31}),
+            PLATE_LOG[4].model_copy(update={"history_id": -(2**31) - 1}),
+            PLATE_LOG[4].model_copy(update={"hours_at": 999_999_999.9}),
+            PLATE_LOG[0].model_copy(update={"history_id": 41, "notes": "wiped\x00 dry"}),
+            PLATE_LOG[0].model_copy(update={"history_id": 42, "notes": "odd \ud800 byte"}),
+        )
+    ]
+    rows += [
+        (task, PLATE_LOG[0].model_copy(update={"history_id": hid}))
+        for hid, task in ((43, ""), (44, "x" * 101), (45, "Clean\x00Plate"), (46, "\udc80"))
+    ]
+    assert store.import_events(printer.id, 7, rows) == 4
+    by_id = {e.bambuddy_history_id: e for e in store.list_events(printer.id).events}
+    assert set(by_id) == {36, 1, 41, 42}
+    # A counter below 0 is no reading, however far below.
+    assert (by_id[36].hours_at, by_id[36].hours_source) == (None, None)
+    assert by_id[1].hours_at == "999999999.9"
+    assert by_id[41].notes == "wiped dry"
+    assert by_id[42].notes == "odd ? byte"
+    assert store.stored(printer.id).events_read_at is not None
+
+
+async def test_a_printer_that_breaks_does_not_stop_the_sweep(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """#6663 review: any error in one printer's read is counted as a failure, and the
+    next printer is still read."""
+    # Named first, so the sweep reaches it first.
+    broken = printers.ensure_bambuddy(8, serial="01P00A000000008", name="A1", model="P1S")
+    store.replace(broken.id, PLATE_INPUTS)
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    bambuddy = FakeBambuddy([PLATE], history={5: PLATE_LOG}, broken={8})
+    assert await rates(store, printers, settings_store, bambuddy).read_logs() == (1, 1)
+    assert bambuddy.asked == [8, 7]
+    assert store.stored(printer.id).counts == {("task", "Clean Build Plate"): 5}
+
+
+async def test_an_unlink_during_the_read_is_not_linked(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """#6663 review: a printer unlinked between the task read and the write answers 409
+    ``not_linked`` on the button, not 503, and keeps nothing."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    bambuddy = FakeBambuddy(
+        [PLATE],
+        history={5: PLATE_LOG},
+        on_history=lambda: printers.unlink_bambuddy(printer.id),
+    )
+    with pytest.raises(ApiError) as raised:
+        await rates(store, printers, settings_store, bambuddy).view(printer.id, require_log=True)
+    assert (raised.value.status, raised.value.type) == (409, PROBLEM + "not_linked")
+    stored = store.stored(printer.id)
+    assert (stored.logged, stored.events_read_at) == ([], None)
+
+
+async def test_a_store_error_while_keeping_the_log_keeps_the_stored_events(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6663 review: a row the guards miss that the database refuses is no 500. The read
+    is ``unanswered``, the stored events and ``events_read_at`` stay, and it is logged."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    bambuddy = FakeBambuddy([PLATE], history={5: PLATE_LOG[2:]})
+    assert await rates(store, printers, settings_store, bambuddy).read_log(printer) == "read"
+    read_at = store.stored(printer.id).events_read_at
+
+    def refused(*_: object) -> int | None:
+        raise psycopg.errors.CheckViolation("a row past a column's CHECK")
+
+    monkeypatch.setattr(store, "import_events", refused)
+    machine = rates(store, printers, settings_store, FakeBambuddy([PLATE], history={5: PLATE_LOG}))
+    with caplog.at_level("ERROR", logger="scadbuddy.orders.machine_rate"):
+        assert await machine.read_log(printer) == "unanswered"
+    assert any("could not be kept" in r.getMessage() for r in caplog.records)
+    view = await machine.view(printer.id)
+    assert view is not None
+    assert view.actuals.events_read_at == read_at
+    with pytest.raises(ApiError) as raised:
+        await machine.view(printer.id, require_log=True)
+    assert (raised.value.status, raised.value.type) == (503, PROBLEM + "log_unavailable")
+    kept = store.stored(printer.id)
+    assert kept.counts == {("task", "Clean Build Plate"): 3}
+    assert kept.events_read_at == read_at
+
+
+async def test_the_button_with_no_bambuddy_is_not_linked(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """#6663 review: a printer row that still links a Bambuddy printer while Bambuddy is
+    not configured answers 409 ``not_linked``, not 503 ``log_unavailable``."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    machine = MachineRates(store, printers, NOT_LINKED, settings_store)
+    with pytest.raises(ApiError) as raised:
+        await machine.view(printer.id, require_log=True)
+    assert (raised.value.status, raised.value.type) == (409, PROBLEM + "not_linked")
+    # The plain view still answers, from the stored events.
+    assert await machine.view(printer.id) is not None
+
+
+class Clock:
+    """A clock only the fake Bambuddy's reads move."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_the_sweep_stops_at_its_deadline_and_leaves_the_rest_for_the_next_tick(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6663 review: the sweep starts no printer past `READ_LOGS_BUDGET`, so a slow
+    Bambuddy cannot push the activity past its start-to-close; the printers left are
+    logged and read on the next tick."""
+    for bid, serial in ((7, "01P00A000000007"), (8, "01P00A000000008"), (9, "01P00A000000009")):
+        row = printers.ensure_bambuddy(bid, serial=serial, name=f"P{bid}", model="P1S")
+        store.replace(row.id, PLATE_INPUTS)
+    clock = Clock()
+
+    class Slow(FakeBambuddy):
+        async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+            clock.now += READ_LOGS_BUDGET * 0.6
+            return await super().maintenance_tasks(printer_id)
+
+    slow = Slow([PLATE], history={5: PLATE_LOG})
+    with caplog.at_level("WARNING", logger="scadbuddy.orders.machine_rate"):
+        assert await rates(store, printers, settings_store, slow).read_logs(clock=clock) == (2, 0)
+    assert len(slow.asked) == 2
+    skipped = [r for r in caplog.records if "deadline" in r.getMessage()]
+    assert [getattr(r, "skipped", None) for r in skipped] == [1]
+
+    # The next tick reads them all.
+    fast = FakeBambuddy([PLATE], history={5: PLATE_LOG})
+    assert await rates(store, printers, settings_store, fast).read_logs(clock=Clock()) == (3, 0)
+
+
+async def test_a_printer_whose_read_runs_past_the_deadline_is_cut_and_left(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6663 review: one printer's read is bounded by what is left of the budget too, so
+    a Bambuddy that never answers ends the sweep at the deadline, not the activity's
+    limit. The printer keeps its stored events."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, PLATE_INPUTS)
+    # The sweep starts at 0 and reaches the printer with a hundredth of a second left.
+    readings = iter([0.0, READ_LOGS_BUDGET - 0.01])
+
+    class Hung(FakeBambuddy):
+        async def maintenance_history(
+            self, item_ids: Sequence[int]
+        ) -> dict[int, list[MaintenanceDone]]:
+            await asyncio.Event().wait()
+            raise AssertionError("never answers")
+
+    hung = Hung([PLATE], history={5: PLATE_LOG})
+    machine = rates(store, printers, settings_store, hung)
+    with caplog.at_level("WARNING", logger="scadbuddy.orders.machine_rate"):
+        assert await machine.read_logs(clock=lambda: next(readings)) == (0, 0)
+    skipped = [r for r in caplog.records if "deadline" in r.getMessage()]
+    assert [getattr(r, "skipped", None) for r in skipped] == [1]
+    assert store.stored(printer.id).events_read_at is None

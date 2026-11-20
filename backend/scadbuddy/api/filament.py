@@ -481,7 +481,8 @@ async def import_spools(
         "a spool whose weight is locked, every spool of a printer that is printing, one "
         "whose tray reports no `remain` (only RFID trays do), and every spool of a printer "
         "with no report or a stale one. Each spool in a printer's tray is in one count; "
-        "`spools` are the ones booked."
+        "`spools` are the ones booked, and `stale_printers` names (`id`, `name`) each "
+        "printer whose spools are in `stale`."
     ),
 )
 async def sync_ams_weights(filament: FilamentDep, caller: CallerDep) -> m.AmsSyncResult:
@@ -1060,7 +1061,8 @@ async def list_locations(
         "A place has a `name`, a `kind_id` (the `location-kinds` catalog) and optionally a "
         "`parent_id`. An AMS tray also names its `printer_id`, `ams_id` and `tray_id`. 409 "
         "when an unarchived place of the name is under the parent, or one is already that "
-        "tray; 422 for a bad field or a row it points at that does not exist."
+        "tray or that AMS unit (a `printer_id` and an `ams_id` with no `tray_id`); 422 for "
+        "a bad field or a row it points at that does not exist."
     ),
 )
 async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Location:
@@ -1077,8 +1079,8 @@ async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Lo
     description=(
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
         "the place off the tree and frees its name, `false` puts it back. 404 for no such "
-        "place, 409 for a name or tray taken, or a `parent_id` that would make the place "
-        "its own ancestor; 422 for a bad field."
+        "place, 409 for a name, tray or AMS unit taken, or a `parent_id` that would make "
+        "the place its own ancestor; 422 for a bad field."
     ),
 )
 async def patch_location(
@@ -1101,8 +1103,9 @@ async def patch_location(
     response_model=list[m.Sensor],
     summary="List the location sensors",
     description=(
-        "The unarchived humidity and temperature sensors of the places, by name; of one "
-        "place with `location_id`. Each carries its last stored value and time, `reachable` "
+        "The unarchived humidity and temperature sensors of the unarchived places, by name; "
+        "of one place with `location_id`. A sensor on an archived place is left out. Each "
+        "carries its last stored value and time, `reachable` "
         "(false when its last read had no number), and `alerting` (the last value is "
         "outside `alert_below` / `alert_above`)."
     ),
