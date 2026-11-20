@@ -135,6 +135,20 @@ export const setOverrideMode = (enabled: boolean) => request<RfidStatus>(`${BASE
 /** Runs once what the spool refresh Schedule runs: the mode, the pending tags, the override slots. */
 export const reconcileRfid = () => request<RfidReconcileReport>(`${BASE}/rfid/reconcile`, { method: 'POST' })
 
+// -- The Bambuddy sync (#6265) ----------------------------------------------------------
+
+export type SyncStatus = Schemas['SyncStatus']
+export type SyncError = Schemas['SyncError']
+
+/** The last pass, the last clean one, its counts, the items whose last write failed, and why no pass runs (`skipped`). */
+export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
+
+/**
+ * Asks for a full pass now; it runs in the background, and `getSyncStatus` shows how it went.
+ * 409 (`code` `no_bambuddy` or `nothing_pushes`) when no pass can run, 503 when it could not be asked for.
+ */
+export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
+
 /**
  * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with
  * `status: 'timeout'`. The request stays open that long: pass a `signal` to stop waiting.

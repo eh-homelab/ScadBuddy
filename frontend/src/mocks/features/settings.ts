@@ -14,6 +14,10 @@ import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSett
 
 const base = '/api/v1'
 
+/** `FilamentSync`'s data types and the directions each takes (`core/settings.py`). */
+const FILAMENT_SYNC_KINDS = ['spools', 'weights', 'tags', 'presets', 'suppliers', 'locations'] as const
+const SYNC_DIRECTIONS = ['off', 'sb_to_bb', 'bb_to_sb', 'two_way']
+
 const state = {
   bambuddyStatus: structuredClone(fixtures.bambuddyStatus) as BambuddyStatus,
   /** The values the mock process "started" with, for `restart_required`. */
@@ -23,6 +27,40 @@ const state = {
 export function reset(): void {
   state.bambuddyStatus = structuredClone(fixtures.bambuddyStatus)
   state.running = structuredClone(fixtures.settings)
+  syncRestored = false
+  try {
+    sessionStorage.removeItem(SYNC_STORAGE_KEY)
+  } catch {
+    // Nothing stored.
+  }
+}
+
+/**
+ * #6265 — the saved `filament_sync` is kept in `sessionStorage` too, so a reload shows the
+ * directions a test saved, as the server's row would. Each Playwright test has its own
+ * context; `reset` clears it.
+ */
+const SYNC_STORAGE_KEY = 'sb-mock-filament-sync'
+let syncRestored = false
+
+function keepFilamentSync(): void {
+  try {
+    sessionStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(mockSettings().filament_sync))
+  } catch {
+    // No storage: the choice lasts as long as the page.
+  }
+}
+
+/** Puts back the `filament_sync` a reload kept, once per page. */
+export function restoreFilamentSync(): void {
+  if (syncRestored) return
+  syncRestored = true
+  try {
+    const kept = sessionStorage.getItem(SYNC_STORAGE_KEY)
+    if (kept) setMockSettings({ ...mockSettings(), filament_sync: JSON.parse(kept) as Settings['filament_sync'] })
+  } catch {
+    // No storage, or nothing readable in it: the seeded value stays.
+  }
 }
 
 /** The settings the mock process runs with, as if it had just restarted. */
@@ -228,15 +266,13 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'storefront_mail_host' && typeof value === 'string' && (/[\s/@]/.test(value.trim()) || !value.trim())) {
       return refused(name, `Value error, ${envName(name)} is a host name, such as smtp.example.com`)
     }
-    // #6262 Task 13 — `FilamentSync` and the bounds of the two filament fields.
-    if (name === 'filament_sync' && !(value as { spools?: unknown } | null)?.spools?.toString().match(/^(off|bb_to_sb)$/)) {
-      return refused(name, "Input should be 'off' or 'bb_to_sb'")
-    }
-    if (name === 'filament_sync' && !String((value as { tags?: unknown } | null)?.tags ?? 'off').match(/^(off|sb_to_bb)$/)) {
-      return refused(name, "Input should be 'off' or 'sb_to_bb'")
-    }
-    if (name === 'filament_sync' && !String((value as { weights?: unknown } | null)?.weights ?? 'bb_to_sb').match(/^(off|bb_to_sb)$/)) {
-      return refused(name, "Input should be 'off' or 'bb_to_sb'")
+    // #6262 Task 13, #6265 — `FilamentSync` (each of its six data types takes the four
+    // directions) and the bounds of the two filament fields.
+    if (name === 'filament_sync') {
+      const sync = (value ?? {}) as Record<string, unknown>
+      if (FILAMENT_SYNC_KINDS.some((kind) => kind in sync && !SYNC_DIRECTIONS.includes(String(sync[kind])))) {
+        return refused(name, "Input should be 'off', 'sb_to_bb', 'bb_to_sb' or 'two_way'")
+      }
     }
     if (name === 'filament_low_stock_pct' && typeof value === 'number' && value > 100) {
       return refused(name, 'Input should be less than or equal to 100')
@@ -330,12 +366,17 @@ function putSettings(body: Record<string, unknown>) {
 }
 
 export const handlers = [
-  http.get(`${base}/settings`, () => HttpResponse.json(mockSettings())),
+  http.get(`${base}/settings`, () => {
+    restoreFilamentSync()
+    return HttpResponse.json(mockSettings())
+  }),
 
   http.put(`${base}/settings`, async ({ request }) => {
+    restoreFilamentSync()
     const body = (await request.json()) as Record<string, unknown>
     // Stored before the answer comes back, as the server commits before it responds.
     const response = putSettings(body)
+    if (response.ok && ('filament_sync' in body || ((body.reset as string[] | undefined) ?? []).includes('filament_sync'))) keepFilamentSync()
     await delay(120)
     return response
   }),

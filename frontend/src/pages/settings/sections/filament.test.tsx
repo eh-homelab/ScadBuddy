@@ -1,6 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { api } from '../../../api/client'
 import { describe, expect, it } from 'vitest'
+import { spoolId } from '../../../mocks/features/filament/seed'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -17,7 +19,7 @@ describe('Filament (#6262)', () => {
     renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
-    expect(within(filament).getByRole('combobox', { name: 'Spools' })).toHaveTextContent('Bambuddy → ScadBuddy')
+    expect(within(filament).getByRole('combobox', { name: 'Spools and types' })).toHaveTextContent('Bambuddy → ScadBuddy')
     expect(within(filament).getByLabelText('Pull from Bambuddy every')).toHaveValue(300)
     expect(within(filament).getByLabelText('Low stock below, percent')).toHaveValue(20)
     expect(within(filament).getByLabelText('Default cost per kg')).toHaveValue('')
@@ -29,36 +31,118 @@ describe('Filament (#6262)', () => {
     expect(within(filament).getByRole('link', { name: 'Filament' })).toHaveAttribute('href', expect.stringContaining('/filament'))
   })
 
-  it('saves the sync choice as one object per data type', async () => {
-    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
-    await seeded()
-    await choose(user, within(region('Filament')).getByRole('combobox', { name: 'Spools' }), 'Off')
-    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'off', weights: 'bb_to_sb' }))
-  })
+  const DEFAULT_SYNC = { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' } as const
 
-  it('saves the tags choice with Save Filament, as filament_sync.tags beside the spools choice', async () => {
+  it('offers the four directions for each of the six data types', async () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
-    await choose(user, within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' }), "Send ScadBuddy's bindings")
-    await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
-    // Each choice keeps the other: both parts are one setting until it is saved.
-    expect(within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' })).toHaveTextContent("Send ScadBuddy's bindings")
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' })
-    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb', weights: 'bb_to_sb' }))
+    for (const [label, shown] of [
+      ['Spools and types', 'Bambuddy → ScadBuddy'],
+      ['Weights', 'Bambuddy → ScadBuddy'],
+      ['Tags', 'Bambuddy → ScadBuddy'],
+      ['Suppliers and prices', 'Off'],
+      ['Locations', 'Off'],
+      ['Presets and K values', 'Bambuddy → ScadBuddy'],
+    ] as const) {
+      expect(within(filament).getByRole('combobox', { name: label })).toHaveTextContent(shown)
+    }
+    await user.click(within(filament).getByRole('combobox', { name: 'Locations' }))
+    expect((await screen.findAllByRole('option')).map((option) => option.textContent)).toEqual([
+      'Off',
+      'ScadBuddy → Bambuddy',
+      'Bambuddy → ScadBuddy',
+      'Both ways (newer change wins)',
+    ])
   })
 
-  it('saves the weights choice as filament_sync.weights without touching spools or tags', async () => {
+  it('saves every direction in one filament_sync value', async () => {
+    let sent: Record<string, unknown> | undefined
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PUT' && new URL(request.url).pathname === '/api/v1/settings') sent = (await request.clone().json()) as Record<string, unknown>
+    })
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
-    expect(within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' })).toHaveTextContent('Bambuddy → ScadBuddy')
-    await choose(user, within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' }), 'Off')
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' })
+    await choose(user, within(filament).getByRole('combobox', { name: 'Weights' }), 'Both ways (newer change wins)')
+    expect(mockSettings().filament_sync).toEqual(DEFAULT_SYNC)
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'off' }))
+    await waitFor(() => expect(sent?.filament_sync).toEqual({ ...DEFAULT_SYNC, weights: 'two_way' }))
+    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ ...DEFAULT_SYNC, weights: 'two_way' }))
+    server.events.removeAllListeners()
+  })
+
+  it('keeps each choice beside the others until the save', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Tags' }), 'ScadBuddy → Bambuddy')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Spools and types' }), 'Off')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Suppliers and prices' }), 'Bambuddy → ScadBuddy')
+    expect(within(filament).getByRole('combobox', { name: 'Tags' })).toHaveTextContent('ScadBuddy → Bambuddy')
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() =>
+      expect(mockSettings().filament_sync).toEqual({ ...DEFAULT_SYNC, spools: 'off', tags: 'sb_to_bb', suppliers: 'bb_to_sb' }),
+    )
+  })
+
+  it('the mock accepts two_way on every key', async () => {
+    const everyWay = { spools: 'two_way', weights: 'two_way', tags: 'two_way', presets: 'two_way', suppliers: 'two_way', locations: 'two_way' } as const
+    await api.putSettings({ filament_sync: everyWay })
+    expect(mockSettings().filament_sync).toEqual(everyWay)
+    await expect(api.putSettings({ filament_sync: { ...everyWay, tags: 'sideways' as 'off' } })).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('shows a failed spool with its error', async () => {
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
+    const [spool, supplier] = within(failed).getAllByRole('listitem') as [HTMLElement, HTMLElement]
+    expect(within(spool).getByRole('link', { name: `Spool ${spoolId(3).slice(0, 8)}` })).toHaveAttribute('href', expect.stringContaining(`/filament/spools/${spoolId(3)}`))
+    expect(spool).toHaveTextContent('Bambuddy refused it (HTTP 422).')
+    expect(spool).toHaveTextContent('2 attempts')
+    expect(supplier).toHaveTextContent('Not sent: another Bambuddy row has this name.')
+    expect(within(region('Filament')).getByText(/No pass runs: no data type is set to send to Bambuddy/)).toBeInTheDocument()
+  })
+
+  it('sync now re-reads the status', async () => {
+    await api.putSettings({ filament_sync: { ...DEFAULT_SYNC, weights: 'two_way' } })
+    let reads = 0
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname === '/api/v1/filament/sync/status') reads += 1
+    })
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    const failed = await within(filament).findByRole('list', { name: 'Items not synced' })
+    expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('2 attempts')
+    const before = reads
+    await user.click(within(filament).getByRole('button', { name: 'Sync now' }))
+    expect(await within(filament).findByText(/Sync started/)).toBeInTheDocument()
+    await waitFor(() => expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('3 attempts'))
+    expect(reads).toBeGreaterThan(before)
+    server.events.removeAllListeners()
+  })
+
+  it('says what to change when nothing is set to go to Bambuddy', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Sync now' }))
+    expect(await within(filament).findByRole('alert')).toHaveTextContent(/Nothing is set to go to Bambuddy\. Set a data type to "ScadBuddy → Bambuddy" or "Both ways"/)
+  })
+
+  it('says to try again later when the sync could not be started', async () => {
+    server.use(
+      http.post('*/api/v1/filament/sync/run', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the sync could not be started: internal' }, { status: 503 }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Sync now' }))
+    expect(await within(filament).findByRole('alert')).toHaveTextContent('The sync could not be started. Try again later.')
   })
 
   it('switches the RFID override mode on and says Bambuddy no longer adds unknown spools', async () => {
