@@ -13,9 +13,9 @@ from psycopg.types.json import Jsonb
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.filament import bb_sync_plan
 from scadbuddy.filament.bambuddy_pull import pull
-from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op
+from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op, ResultsReport
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
-from scadbuddy.filament.bb_sync_results import ResultsReport, apply_results
+from scadbuddy.filament.bb_sync_results import apply_results
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.models import (
     InsertTypeCreate,

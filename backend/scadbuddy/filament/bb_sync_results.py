@@ -21,17 +21,18 @@ did not send holds Bambuddy's default, not a person's edit.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Literal, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from scadbuddy.bambuddy.models import BbLocation, BbSupplier, CatalogFilament, SpoolCatalogEntry
 from scadbuddy.bambuddy.models import Spool as BbSpool
@@ -39,8 +40,12 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger
 from scadbuddy.filament.bambuddy_pull import REF_KIND, snapshot
 from scadbuddy.filament.bb_sync_models import (
+    BbSnapshot,
     BbWrite,
     BbWriteResult,
+    ResultsReport,
+    SyncPassResult,
+    SyncPlan,
     json_form,
     seen_row,
     seen_value,
@@ -54,10 +59,14 @@ from scadbuddy.filament.bb_sync_plan import (
     desired_and_unmapped,
     k_form,
     pendings,
+    plan,
     row_seen,
 )
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.rfid_push import enqueue_tag
+
+if TYPE_CHECKING:
+    from scadbuddy.library.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -128,17 +137,6 @@ class _Reads:
         if self.refs is not None and kind in _REF_FIELDS:
             ids = cast("dict[UUID, int]", getattr(self.refs, _REF_FIELDS[kind]))
             ids[sb_id] = bb_id
-
-
-class ResultsReport(BaseModel, extra="forbid"):
-    """What `apply_results` did: the items it linked, the other items whose write it
-    recorded, the items whose write failed, and the links a 404 dropped. An ignored
-    result and an ``ok`` probe (it writes nothing to Bambuddy) count in none of them."""
-
-    linked: int = 0
-    updated: int = 0
-    failed: int = 0
-    unlinked: int = 0
 
 
 class _IgnoredError(Exception):
@@ -452,3 +450,61 @@ def _row(
         " bb_seen = %s, bb_seen_at = %s WHERE id = %s",
         (bb_id, Jsonb(write.hashes), Jsonb(merged), now, write.sb_id),
     )
+
+
+def record_pass(store: Filament, result: SyncPassResult) -> None:
+    """Write the state row for one pass (Decision 19): ``last_pass_at`` and the counts
+    always, ``last_error`` from ``result.error``, and ``last_ok_at`` only when it is
+    ``None``, so a failed pass keeps the last clean one's time."""
+    counts = {
+        "written": result.written,
+        "failed": result.failed,
+        "deferred": result.deferred,
+        "conflicts": result.conflicts,
+    }
+    with store.spools.transaction() as conn:
+        conn.execute(
+            "UPDATE filament_bb_sync_state SET last_pass_at = now(),"
+            " last_ok_at = CASE WHEN %s THEN now() ELSE last_ok_at END,"
+            " last_error = %s, counts = %s",
+            (result.error is None, result.error, Jsonb(counts)),
+        )
+
+
+class LocalFilamentSync:
+    """`FilamentSyncApi` over SB's own stores, for the API's in-process print queue. The
+    print worker's `RemoteFilamentSync` gives the same answers through the CRUD routes,
+    which call this class. It reads ``filament_sync`` and the timer's interval
+    (``spool_overlay_refresh_seconds``) on each plan, so a change applies to the next."""
+
+    def __init__(self, filament: Filament, settings_store: SettingsStore) -> None:
+        self._filament = filament
+        self._settings = settings_store
+
+    async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
+        def run() -> SyncPlan:
+            read = self._settings.read({"filament_sync", "spool_overlay_refresh_seconds"})
+            return plan(
+                self._filament,
+                snap,
+                read["filament_sync"],
+                interval_s=float(read["spool_overlay_refresh_seconds"]),
+                limit=limit,
+            )
+
+        return await asyncio.to_thread(run)
+
+    async def results(
+        self, instance: str, writes: Sequence[BbWrite], results: Sequence[BbWriteResult]
+    ) -> ResultsReport:
+        return await asyncio.to_thread(
+            apply_results,
+            self._filament,
+            writes,
+            results,
+            instance=instance,
+            now=datetime.now(UTC),
+        )
+
+    async def record_pass(self, result: SyncPassResult) -> None:
+        await asyncio.to_thread(record_pass, self._filament, result)

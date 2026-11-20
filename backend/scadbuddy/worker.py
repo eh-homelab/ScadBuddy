@@ -1490,6 +1490,7 @@ PRINT_CRUD_AREAS = frozenset(
         "transfer-urls",
         "access-codes",
         "filament",
+        "filament-sync",
     }
 )
 

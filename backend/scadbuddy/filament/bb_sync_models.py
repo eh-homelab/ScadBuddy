@@ -10,10 +10,11 @@ the agent read.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from psycopg import Connection
@@ -247,6 +248,27 @@ class PlanRequest(BaseModel, extra="forbid"):
     limit: int = Field(ge=1, le=200)
 
 
+class ResultsReport(BaseModel, extra="forbid"):
+    """What `apply_results` did: the items it linked, the other items whose write it
+    recorded, the items whose write failed, and the links a 404 dropped. An ignored
+    result and an ``ok`` probe (it writes nothing to Bambuddy) count in none of them."""
+
+    linked: int = 0
+    updated: int = 0
+    failed: int = 0
+    unlinked: int = 0
+
+
+class ResultsRequest(BaseModel, extra="forbid"):
+    """The results route's body: the Bambuddy the answers came from, the writes of the
+    plan round (`apply_results` checks each against the links, the plan is not kept) and
+    what Bambuddy answered to each."""
+
+    instance: str
+    writes: list[BbWrite]
+    results: list[BbWriteResult]
+
+
 class SyncPassResult(BaseModel, extra="forbid"):
     """What one pass did. ``more``: writes were left, so the next pass runs at once
     (Decision 11). ``skipped``: why it did nothing. ``error``: a failed pass's
@@ -263,6 +285,19 @@ class SyncPassResult(BaseModel, extra="forbid"):
     interval_s: float
     skipped: Literal["no_bambuddy", "nothing_pushes"] | None = None
     error: str | None = None
+
+
+class FilamentSyncApi(Protocol):
+    """What the pass reads of SB and writes to it (#6265 Task 6): `LocalFilamentSync` in
+    the API's process, `RemoteFilamentSync` (the CRUD routes) in the print worker."""
+
+    async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan: ...
+
+    async def results(
+        self, instance: str, writes: Sequence[BbWrite], results: Sequence[BbWriteResult]
+    ) -> ResultsReport: ...
+
+    async def record_pass(self, result: SyncPassResult) -> None: ...
 
 
 class SyncError(BaseModel, extra="forbid"):

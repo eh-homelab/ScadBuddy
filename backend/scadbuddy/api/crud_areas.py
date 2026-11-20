@@ -172,6 +172,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "transfer-urls",
         "access-codes",
         "filament",
+        "filament-sync",
     ],
     "storefront": [
         "listings",
