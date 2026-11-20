@@ -3,8 +3,9 @@ file (no file bytes cross the wire), previewed with ``dry_run`` and then written
 
 A row with a ``number`` changes that spool, only in the cells that differ from what the
 spool shows now (its effective value, or the name behind it); an empty cell changes
-nothing. A row with no ``number`` makes a spool. Catalog names resolve by ``upper(name)``
-and are added when missing, as the Bambuddy pull adds them (`bambuddy_pull._catalog_id`);
+nothing. A row with no ``number`` makes a spool. Catalog names resolve by their key against every
+name and alias (#6706, `catalog.find_by_key`; insert types by ``upper(name)``) and are
+added when missing, as the Bambuddy pull adds them (`bambuddy_pull._catalog_id`);
 an insert type is the exception, since a new one needs an empty weight no CSV cell holds,
 so a missing one is a row error. ``type`` is a spool type's code and must exist.
 ``location`` must name exactly one unarchived place, and a spool goes there through
@@ -28,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bambuddy_pull import _catalog_id
+from scadbuddy.filament.catalog import CATALOGS, KIND_OF_TABLE, find_by_key, has_key
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.locations import LocationStore, MoveTargetError
 from scadbuddy.filament.spools import FilamentSpoolStore, SpoolTypelessError
@@ -115,7 +117,9 @@ class ImportRowResult(BaseModel):
     """What one row does (or did). ``line`` is the row's line in a file with one header
     line (the first row is line 2). ``number`` is the spool's, or ``None`` for a spool a
     dry run would make. ``changes`` maps a column to ``[before, after]``; a catalog name
-    not in the catalog yet carries a third item, ``{"new": true}``."""
+    not in the catalog yet carries a third item, ``{"new": true}``, and one with no letter
+    or digit (no key, so the cell is skipped and the row goes on) ``{"skipped": "no letter
+    or digit"}``."""
 
     line: int
     action: Literal["create", "update", "error"]
@@ -253,7 +257,14 @@ def _plan(
         current = None if spool is None else getattr(spool.names, column)
         if current is not None and current.upper() == name.upper():
             continue
+        if CATALOGS[KIND_OF_TABLE[table]].names is not None and not has_key(conn, name):
+            # No letter or digit, so no key: this cell is skipped, the row goes on (R-6706-18).
+            changes[column] = [current, name, {"skipped": "no letter or digit"}]
+            continue
         found_id = _find(conn, table, name, material)
+        # Another spelling of the name the spool shows (an alias, `dual-color`): no change.
+        if found_id is not None and current is not None and _name(conn, table, found_id) == current:
+            continue
         if column == "material":
             material = found_id
         changes[column] = [current, name if found_id is None else _name(conn, table, found_id)]
@@ -423,20 +434,15 @@ def _check_temps(after: m.EffectiveValues) -> None:
 
 
 def _find(conn: Conn, table: str, name: str, material: UUID | None) -> UUID | None:
-    """The unarchived row of ``table`` named ``name`` in any case, as `_catalog_id`
-    finds it, or ``None``."""
-    if table == "filament_subtypes":
-        row = conn.execute(
-            "SELECT id FROM filament_subtypes WHERE archived_at IS NULL"
-            " AND upper(name) = upper(%s) AND (material_id = %s OR material_id IS NULL)"
-            " ORDER BY material_id IS NULL LIMIT 1",
-            (name, material),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            f"SELECT id FROM {table} WHERE archived_at IS NULL AND upper(name) = upper(%s)",
-            (name,),
-        ).fetchone()
+    """The row of ``table`` that `_catalog_id` resolves ``name`` to, or ``None``: by key
+    against every name and alias for a catalog with names (`catalog.find_by_key`), else
+    the unarchived row named ``name`` in any case."""
+    if CATALOGS[KIND_OF_TABLE[table]].names is not None:
+        return find_by_key(conn, KIND_OF_TABLE[table], name, material=material)
+    row = conn.execute(
+        f"SELECT id FROM {table} WHERE archived_at IS NULL AND upper(name) = upper(%s)",
+        (name,),
+    ).fetchone()
     return None if row is None else row["id"]
 
 

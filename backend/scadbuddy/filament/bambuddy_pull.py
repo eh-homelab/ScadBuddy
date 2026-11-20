@@ -38,8 +38,10 @@ this order:
    a tray UUID binds as ``bambu_mifare``; one BB read as OpenTag3D
    (``data_origin == "opentag3d"``) as ``ntag_opentag``; any other as ``other``.
 
-Catalog names from BB (material, subtype, brand, category, effect) resolve by their upper
-case name, and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
+Catalog names from BB (material, subtype, brand, category, effect) resolve by their key
+against every name and alias of the catalog (#6706, `catalog.find_by_key`: `DUAL-COLOR` is
+`Dual Color`), and are added when missing. A spool's type by identity resolves them the
+same way (`SpoolTypeStore.match`, R-6706-19). BB's spool catalog (``GET /inventory/catalog``,
 `BambuddyClient.spool_catalog`) is mapped once per pull (`_insert_types`): an entry is the
 insert type that has its id as ``bb_catalog_id``, else the unlinked one of the same upper
 case name (now linked), else a new one (its weight, no insert material). A type that
@@ -88,6 +90,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, ledger, sensors
 from scadbuddy.filament import models as m
+from scadbuddy.filament.catalog import KIND_OF_TABLE, has_key, resolve_or_add
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.presets import drop_migrated, own_presets
@@ -152,7 +155,8 @@ class PullReport(BaseModel):
     and how many of its entries were skipped (no name or weight, or a name another type
     has), so a spool naming one gets no insert type; and the BB spools it left alone
     because they are Bambuddy's copy of a tag a linked SB spool holds
-    (``rfid_duplicates``, with their ids)."""
+    (``rfid_duplicates``, with their ids); and how many catalog names it skipped because
+    they have no letter or digit (``names_skipped``)."""
 
     created: int = 0
     linked: int = 0
@@ -163,6 +167,9 @@ class PullReport(BaseModel):
     #: BB's spool catalog could not be read or mapped; the insert types were left alone.
     catalog_failed: bool = False
     catalog_skipped: int = 0
+    #: Catalog names (material, subtype, brand, category, effect) with no letter or digit,
+    #: so no key: each field was left as if BB sent none, and its spool pulled (R-6706-18).
+    names_skipped: int = 0
     created_ids: list[UUID] = Field(default_factory=list)
     linked_ids: list[UUID] = Field(default_factory=list)
     updated_ids: list[UUID] = Field(default_factory=list)
@@ -257,7 +264,8 @@ def pull(
         try:
             with store.spools.transaction() as conn:
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
-                outcome = _one(conn, store, bb, now, actor, weights)
+                skipped: list[str] = []
+                outcome = _one(conn, store, bb, now, actor, weights, skipped)
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
@@ -266,6 +274,12 @@ def pull(
             )
             report.failed_bb_ids.append(bb.id)
             continue
+        if skipped:
+            logger.info(
+                "skipped Bambuddy catalog names with no letter or digit",
+                extra={"bb_spool_id": bb.id, "fields": skipped},
+            )
+            report.names_skipped += len(skipped)
         if outcome is None:
             continue
         what, spool_id, typeless = outcome
@@ -357,7 +371,13 @@ def _core_insert_type(conn: Conn, bb: BbSpool) -> UUID | None:
 
 
 def _one(
-    conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str, weights: bool = True
+    conn: Conn,
+    store: Filament,
+    bb: BbSpool,
+    now: datetime,
+    actor: str,
+    weights: bool = True,
+    skipped: list[str] | None = None,
 ) -> tuple[str, UUID | None, bool] | None:
     """What came of one BB spool. An archived SB spool, linked or named by the BB
     record's link, is left as it is: never restored, never written to (``archived``)."""
@@ -371,7 +391,9 @@ def _one(
         spool_id: UUID = link["spool_id"]
         if link["archived"]:
             return "archived", spool_id, False
-        changed = _update(conn, store, bb, spool_id, link["bb_updated_at"], now, actor, weights)
+        changed = _update(
+            conn, store, bb, spool_id, link["bb_updated_at"], now, actor, weights, skipped
+        )
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
         booked = _book(conn, spool_id, bb, actor, weights)
@@ -410,7 +432,7 @@ def _one(
         # Skipped as a duplicate once; the push has since cleared its tag, so no holder
         # shows, but it is still the spool Bambuddy added for a tag SB holds.
         return "duplicate", None, False
-    made, typeless = _create(conn, store, bb, after, now, actor)
+    made, typeless = _create(conn, store, bb, after, now, actor, skipped)
     _book(conn, made, bb, actor, weights)
     _bb_presets(conn, made, bb, actor)
     return "created", made, typeless
@@ -666,10 +688,16 @@ def _backfill_insert_type(conn: Conn, spool_id: UUID, bb: BbSpool) -> list[Any] 
 
 
 def _create(
-    conn: Conn, store: Filament, bb: BbSpool, after: dict[str, Any], now: datetime, actor: str
+    conn: Conn,
+    store: Filament,
+    bb: BbSpool,
+    after: dict[str, Any],
+    now: datetime,
+    actor: str,
+    skipped: list[str] | None = None,
 ) -> tuple[UUID, bool]:
     kind = _match(conn, store, after)
-    values = _values(conn, after, after.keys() - _NOT_COLUMNS)
+    values = _values(conn, after, after.keys() - _NOT_COLUMNS, skipped=skipped)
     if kind is not None:
         typed = kind.model_dump()
         values = {c: v for c, v in values.items() if c not in typed or typed[c] != v}
@@ -755,8 +783,10 @@ def _update(
     now: datetime,
     actor: str,
     weights: bool = True,
+    skipped: list[str] | None = None,
 ) -> bool:
-    """True when the SB spool took anything from BB."""
+    """True when the SB spool took anything from BB; a catalog name with no key goes in
+    ``skipped``."""
     unmoved = bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at
     last = conn.execute(
         "SELECT data -> 'bb' AS bb FROM filament_spool_events"
@@ -828,9 +858,9 @@ def _update(
     }
     wanted = {f for f in moved if _CATALOGS.get(f, (f,))[0] not in edited}
     material = spool.effective.material_id
-    if "material" in wanted:
+    if "material" in wanted and has_key(conn, after["material"]):
         material = _catalog_id(conn, "filament_materials", after["material"], None)
-    values = _values(conn, after, wanted, material=material)
+    values = _values(conn, after, wanted, material=material, skipped=skipped)
     current = spool.effective.model_dump() | {"weight_locked": spool.weight_locked}
     changes = {c: [current.get(c), v] for c, v in values.items() if current.get(c) != v}
     if changes.get("weight_locked") == [True, False] and not _lock_from_bb(conn, spool_id):
@@ -992,19 +1022,35 @@ def _match(conn: Conn, store: Filament, after: dict[str, Any]) -> m.SpoolType | 
 
 
 def _values(
-    conn: Conn, after: dict[str, Any], fields: Any, *, material: UUID | None = None
+    conn: Conn,
+    after: dict[str, Any],
+    fields: Any,
+    *,
+    material: UUID | None = None,
+    skipped: list[str] | None = None,
 ) -> dict[str, Any]:
     """The SB columns of the BB ``fields`` that have a value; catalog names resolved, and
-    added when missing. A subtype belongs to ``material`` (the new one, else this)."""
+    added when missing. A subtype belongs to ``material`` (the new one, else this). A
+    catalog name with no letter or digit has no key: its field is left out, as if BB sent
+    none, and named in ``skipped`` (R-6706-18)."""
     values: dict[str, Any] = {}
-    if "material" in fields and after["material"] is not None:
+
+    def keyed(field: str) -> bool:
+        if has_key(conn, after[field]):
+            return True
+        if skipped is not None:
+            skipped.append(field)
+        return False
+
+    if "material" in fields and after["material"] is not None and keyed("material"):
         values["material_id"] = material = _catalog_id(
             conn, "filament_materials", after["material"], None
         )
     for field, (column, table) in _CATALOGS.items():
         if field == "material" or field not in fields or after[field] is None:
             continue
-        values[column] = _catalog_id(conn, table, after[field], material)
+        if keyed(field):
+            values[column] = _catalog_id(conn, table, after[field], material)
     for field in _PLAIN:
         if field in fields and after[field] is not None:
             values[field] = _column_value(field, after[field])
@@ -1012,41 +1058,12 @@ def _values(
 
 
 def _catalog_id(conn: Conn, table: str, name: str, material: UUID | None) -> UUID:
-    """The unarchived row of ``table`` named ``name`` in any case, else a new one. A
-    subtype is ``material``'s own when it has one of the name, else one for every
-    material, else a new one of ``material``."""
-    subtype = table == "filament_subtypes"
-    while True:
-        if subtype:
-            row = conn.execute(
-                "SELECT id FROM filament_subtypes WHERE archived_at IS NULL"
-                " AND upper(name) = upper(%s) AND (material_id = %s OR material_id IS NULL)"
-                " ORDER BY material_id IS NULL LIMIT 1",
-                (name, material),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                f"SELECT id FROM {table} WHERE archived_at IS NULL AND upper(name) = upper(%s)",
-                (name,),
-            ).fetchone()
-        if row is not None:
-            found: UUID = row["id"]
-            return found
-        if subtype:
-            made = conn.execute(
-                "INSERT INTO filament_subtypes (name, sort_order, material_id)"
-                " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING RETURNING id",
-                (name, _ADDED_SORT, material),
-            ).fetchone()
-        else:
-            made = conn.execute(
-                f"INSERT INTO {table} (name, sort_order) VALUES (%s, %s)"
-                " ON CONFLICT DO NOTHING RETURNING id",
-                (name, _ADDED_SORT),
-            ).fetchone()
-        if made is not None:
-            new: UUID = made["id"]
-            return new
+    """The row of ``table`` whose name or alias has ``name``'s key (`catalog.find_by_key`,
+    archived or not), else a new one. A subtype is ``material``'s own when it has one of
+    the key, else one for every material, else a new one of ``material``."""
+    return resolve_or_add(
+        conn, KIND_OF_TABLE[table], name, sort_order=_ADDED_SORT, material=material
+    )
 
 
 def _insert_link(conn: Conn, spool_id: UUID, bb: BbSpool, now: datetime) -> None:

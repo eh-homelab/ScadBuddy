@@ -94,9 +94,9 @@ const now = () => new Date().toISOString()
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
 
 /** A refusal as `core/problems.py` `problem_response` writes it: every error here. */
-const problem = (status: keyof typeof TITLES, detail: string) =>
+const problem = (status: keyof typeof TITLES, detail: string, extensions: object = {}) =>
   HttpResponse.json(
-    { type: 'about:blank', title: TITLES[status], status, detail },
+    { type: 'about:blank', title: TITLES[status], status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 
@@ -511,9 +511,45 @@ function cleared(body: Record<string, unknown>, fields: readonly string[]): stri
 const CATALOG_FIELDS = Object.fromEntries(
   Object.entries(seed().catalogs).map(([kind, rows]) => [
     kind,
-    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id'].includes(field))),
+    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases'].includes(field))),
   ]),
 ) as Record<keyof Catalogs, Set<string>>
+
+/**
+ * #6706 — the catalogs with aliases (`filament/catalog.py` `NameTable`) and the noun a
+ * clash names (`<noun>_id`, `<noun>_name`). Their names and aliases share one key space
+ * per catalog (a subtype's within its material), archived rows included.
+ */
+const ALIASED = { materials: 'material', subtypes: 'subtype', brands: 'brand', categories: 'category', effects: 'effect' } as const
+type Aliased = keyof typeof ALIASED
+const isAliased = (kind: string): kind is Aliased => kind in ALIASED
+type AliasedRow = { id: string; name: string; aliases: string[]; material_id?: string | null }
+
+/** `catalog_key`: `+` read as `PLUS` (R-6706-17), then the letters and digits, upper case. */
+export const catalogKey = (name: string) =>
+  name
+    .replace(/\+/g, 'PLUS')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .toUpperCase()
+
+/** The row of `kind` that holds `name`'s key in `scope` (a subtype's material), but `self`'s own names. */
+function keyHolder(kind: Aliased, name: string, scope: string | null, self?: string, skipSelf = true): AliasedRow | undefined {
+  const key = catalogKey(name)
+  return (state.catalogs[kind] as AliasedRow[]).find(
+    (row) =>
+      !(skipSelf && row.id === self) &&
+      (kind !== 'subtypes' || (row.material_id ?? null) === scope) &&
+      [row.name, ...row.aliases].some((one) => catalogKey(one) === key),
+  )
+}
+
+function keyClash(kind: Aliased, holder: AliasedRow, name: string): Response {
+  const noun = ALIASED[kind]
+  return problem(409, `the ${noun} '${holder.name}' already has a name or alias that matches '${name}'`, {
+    [`${noun}_id`]: holder.id,
+    [`${noun}_name`]: holder.name,
+  })
+}
 
 const sameName = (a: string, b: unknown) => typeof b === 'string' && a.trim().toUpperCase() === b.trim().toUpperCase()
 
@@ -526,6 +562,12 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
   if (badRef(values, CATALOG_REFS[kind] ?? {})) return problem(422, REFUSED.catalogRef)
   const temps = kind === 'materials' || kind === 'subtypes' ? badTemps(values) : null
   if (temps) return problem(422, temps)
+  if (isAliased(kind)) {
+    // A name takes its key; an archived row keeps its keys (#6706).
+    const holder = typeof values.name === 'string' ? keyHolder(kind, values.name, (values.material_id as string | null | undefined) ?? null, self) : undefined
+    // A rename to one of its own aliases takes that alias's key.
+    return holder ? keyClash(kind, holder, values.name as string) : null
+  }
   // The name indexes are `WHERE archived_at IS NULL`: an archived row holds no name, and
   // restoring one whose name a live row took since is refused.
   if (values.archived_at) return null
@@ -533,7 +575,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
     id: string
     name: string
     archived_at: string | null
-    material_id?: string | null
     manufacturer?: string | null
   }[]
   const taken = rows.some(
@@ -541,8 +582,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
       row.id !== self &&
       !row.archived_at &&
       sameName(row.name, values.name) &&
-      // `filament_subtypes_name`: a subtype's name is unique within its material.
-      (kind !== 'subtypes' || (row.material_id ?? null) === (values.material_id ?? null)) &&
       // `filament_colours_name`: a colour's name is unique per manufacturer (none is one).
       (kind !== 'colours' || sameName(row.manufacturer ?? '', values.manufacturer ?? '')),
   )
@@ -1064,7 +1103,6 @@ function csvValue(field: (typeof CSV_PLAIN)[number], text: string): unknown {
   return text
 }
 
-type Named = { id: string; name: string; archived_at: string | null; material_id?: string | null }
 const liveNamed = <T extends { name: string; archived_at: string | null }>(rows: T[], name: string) =>
   rows.filter((row) => !row.archived_at && sameName(row.name, name))
 
@@ -1109,10 +1147,15 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
     if (name === null) continue
     const before = shown?.names?.[column] ?? null
     if (before !== null && sameName(before, name)) continue
-    const found = liveNamed(state.catalogs[kind] as Named[], name)
-      .filter((one) => kind !== 'subtypes' || one.material_id === material || one.material_id == null)
-      .sort((a, b) => Number(a.material_id == null) - Number(b.material_id == null))[0]
+    // No letter or digit, so no key: the cell is skipped and the row goes on (R-6706-18).
+    if (catalogKey(name) === '') {
+      changes[column] = [before, name, { skipped: 'no letter or digit' }]
+      continue
+    }
+    // By key, against every name and alias, archived rows too (#6706).
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
     if (column === 'material') material = found?.id ?? null
+    if (found && before !== null && found.name === before) continue
     if (found) {
       changes[column] = [before, found.name]
       values[`${column}_id`] = found.id
@@ -1155,7 +1198,7 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
   for (const [column, name] of fresh) {
     const kind = CSV_CATALOGS[column]
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, name, sort_order: 1000, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, name, sort_order: 1000, aliases: [], id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     if (kind === 'subtypes') Object.assign(made, { material_id: (values.material_id as string | undefined) ?? material })
     ;(state.catalogs[kind] as unknown[]).push(made)
     values[`${column}_id`] = made.id
@@ -1233,7 +1276,7 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, sort_order: 0, ...body, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),
@@ -1249,8 +1292,44 @@ export const handlers = [
     const next = patched(rows[at]!, body)
     const refused = catalogRefusal(kind, next, body, rows[at]!.id)
     if (refused) return refused
+    if (isAliased(kind) && typeof body.name === 'string') {
+      const key = catalogKey(body.name)
+      const own = next as unknown as AliasedRow
+      own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
+    }
     rows[at] = next
     return HttpResponse.json(next)
+  }),
+  http.get(`${BASE}/catalog/:kind/resolve`, ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const url = new URL(request.url)
+    const name = url.searchParams.get('name') ?? ''
+    const material = url.searchParams.get('material_id')
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
+    return found ? HttpResponse.json(found) : problem(404, `no ${kind} row is named '${name}'`)
+  }),
+  http.put(`${BASE}/catalog/:kind/:id/aliases`, async ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const row = (state.catalogs[kind] as AliasedRow[]).find((one) => one.id === params.id)
+    if (!row) return problem(404, `no ${kind} row ${String(params.id)}`)
+    const body = (await request.json()) as { aliases?: unknown }
+    if (!Array.isArray(body.aliases)) return problem(422, 'aliases: Field required')
+    const aliases = body.aliases.map((one) => String(one).trim())
+    if (aliases.some((one) => one === '')) return problem(422, 'aliases: String should have at least 1 character')
+    const empty = aliases.find((one) => catalogKey(one) === '')
+    if (empty !== undefined) return problem(422, `the alias '${empty}' has no letter or digit`)
+    const scope = row.material_id ?? null
+    const taken: string[] = [catalogKey(row.name)]
+    for (const alias of aliases) {
+      const holder = keyHolder(kind, alias, scope, row.id)
+      if (holder) return keyClash(kind, holder, alias)
+      if (taken.includes(catalogKey(alias))) return keyClash(kind, row, alias)
+      taken.push(catalogKey(alias))
+    }
+    row.aliases = [...aliases].sort((a, b) => a.toUpperCase().localeCompare(b.toUpperCase()))
+    return HttpResponse.json(row)
   }),
 
   // -- spool types --
@@ -1776,6 +1855,7 @@ export const handlers = [
       invalid: 0,
       catalog_failed: false,
       catalog_skipped: 0,
+      names_skipped: 0,
       created_ids: [],
       linked_ids: [],
       updated_ids: [],

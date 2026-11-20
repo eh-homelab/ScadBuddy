@@ -743,7 +743,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
   and the agent's `stop_print_run` and `confirm_plate_clear`.
 - `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
-  2026-11-14): `catalog.py` (configurable catalogs, no code enums), `types.py`
+  2026-11-14): `catalog.py` (configurable catalogs, no code enums; materials, subtypes,
+  brands, categories and effects keep names and aliases in `filament_<kind>_names`, one key
+  space per catalog, a subtype's per material, filled by a trigger and `set_aliases`; every
+  name lookup goes through `find_by_key` or `resolve_or_add`, the type match
+  `SpoolTypeStore.match` included, #6706), `types.py`
   (`effective()`: spool → type → subtype → material, the one resolver; a type links its
   price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
   (instances and tag bindings; every writer locks the tag before the spool; archive closes

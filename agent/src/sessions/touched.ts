@@ -717,6 +717,7 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
+  'filament_catalog_set_aliases',
   'filament_type_upsert',
   // #6701: the proposed types a person confirmed, and their spools' `edited` events.
   'filament_type_proposals_confirm',

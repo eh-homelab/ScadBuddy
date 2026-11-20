@@ -49,7 +49,7 @@ describe('the Catalog tab', () => {
     await waitFor(() => expect(within(screen.getByRole('table', { name: 'Brands' })).getByText('Prusament')).toBeInTheDocument())
     await user.type(screen.getByLabelText('New name'), 'Prusament')
     await user.click(screen.getByRole('button', { name: 'Add' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('a row of this catalog already has that name')
+    expect(await screen.findByRole('alert')).toHaveTextContent("the brand 'Prusament' already has a name or alias that matches 'Prusament'")
   })
 
   it('renames a row', async () => {

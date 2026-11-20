@@ -79,8 +79,17 @@ export type CatalogKind = keyof CatalogRows
  * carry, so this is the row's own fields, all optional, and `archived`.
  */
 export type CatalogInput<K extends CatalogKind> = Partial<
-  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id'>
+  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id' | 'aliases'>
 > & { archived?: boolean }
+
+/**
+ * #6706 — the catalogs whose rows have aliases (`filament/catalog.py` `NameTable`): each
+ * name and alias is a key (letters and digits, any case) no other name or alias of the
+ * catalog has, a subtype's within its material.
+ */
+export const ALIASED_KINDS = ['materials', 'subtypes', 'brands', 'categories', 'effects'] as const
+export type AliasedKind = (typeof ALIASED_KINDS)[number]
+export const isAliasedKind = (kind: CatalogKind): kind is AliasedKind => (ALIASED_KINDS as readonly string[]).includes(kind)
 
 const BASE = '/filament'
 const seg = encodeURIComponent
@@ -255,6 +264,14 @@ export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeAr
   request<CatalogRows[K][]>(`${BASE}/catalog/${seg(kind)}${query({ include_archived: options.includeArchived || undefined })}`)
 
 /** Adds a row, or with `id` changes one (only the fields sent). */
+/** Replace a row's aliases; a key another name or alias holds is a 409 that names the holder. */
+export const setCatalogAliases = <K extends AliasedKind>(kind: K, id: string, aliases: string[]) =>
+  request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}/${seg(id)}/aliases`, json('PUT', { aliases }))
+
+/** The row whose name or alias has `name`'s key (a subtype: `materialId`'s own, else one for every material); 404 for none. */
+export const resolveCatalog = <K extends AliasedKind>(kind: K, name: string, materialId?: string) =>
+  request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}/resolve${query({ name, material_id: materialId })}`)
+
 export const upsertCatalog = <K extends CatalogKind>(kind: K, body: CatalogInput<K>, id?: string) =>
   id === undefined
     ? request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}`, json('POST', body))
