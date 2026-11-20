@@ -1395,6 +1395,19 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     insert type update that sends one of them takes the other from this pass's snapshot of
     the catalog; an entry the pass did not read is a not-ok `internal` result. Cost: an
     entry Bambuddy changed after the read gets the read value back for that field.
+114. Task 7 (R-T7-7, review finding 1): a pass whose plan answers `instance_changed` (SB's
+    links belong to another Bambuddy) records nothing, as decision 109's pass does, and
+    returns `instance_changed=True`. Test: `test_a_plan_for_another_instance_stops_the_pass`.
+    Why: `last_ok_at` must not move for a pass that synced nothing. Cost: the status keeps
+    the last real pass until Task 8's workflow ends.
+115. Task 7 (R-T7-8, review finding 5): `BambuddyClient._rows` turns a body that is not JSON
+    into the same 502 `ApiError` as a body that is not a list, so a spool listing that is
+    not JSON fails the pass with `error_label(exc)` and `record_pass` gets that error. Test:
+    `test_a_spool_listing_that_is_not_json_fails_the_pass`. Cost: none.
+116. Task 7 (R-T7-9, review findings 2-4 and 6): tests for a probe counting toward the cap,
+    a weight-only catalog update and an unread catalog entry, `_maybe`'s `"invalid"` path,
+    and failed location, catalog and filament reads; `written` counts with an explicit
+    `+= 1`. Cost: none.
 
 ## Self-review
 

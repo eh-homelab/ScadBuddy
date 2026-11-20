@@ -5,12 +5,14 @@ a fake `FilamentSyncApi`; no call reaches a live Bambuddy."""
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
 import httpx
+import pytest
 import respx
 
 from scadbuddy.core.settings import FilamentSync
@@ -276,6 +278,39 @@ async def test_a_failed_supplier_read_is_none_not_empty() -> None:
     assert result.error is None
 
 
+@pytest.mark.parametrize("listing", ["locations", "catalog", "filaments"])
+@respx.mock
+async def test_any_other_failed_read_is_none(listing: str) -> None:
+    routes = _listings()
+    routes[listing].mock(return_value=httpx.Response(503))
+    sync = FakeSync()
+
+    result = await _run(sync)
+
+    [(snap, _)] = sync.plans
+    read = {"locations": snap.locations, "catalog": snap.catalog, "filaments": snap.filaments}
+    assert read[listing] is None
+    assert all(value is not None for name, value in read.items() if name != listing)
+    assert snap.suppliers == [] and result.error is None
+
+
+@respx.mock
+async def test_a_listing_of_rows_that_are_not_its_kind_is_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    routes = _listings()
+    routes["locations"].mock(return_value=httpx.Response(200, json=[{"id": "nine"}]))
+    sync = FakeSync()
+
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.filament.bb_sync_run"):
+        await _run(sync)
+
+    [(snap, _)] = sync.plans
+    assert snap.locations is None
+    [record] = [r for r in caplog.records if r.getMessage().startswith("the sync could not")]
+    assert record.__dict__["error"] == "invalid" and record.__dict__["listing"] == "locations"
+
+
 @respx.mock
 async def test_the_write_cap_sets_more() -> None:
     _listings()
@@ -292,17 +327,20 @@ async def test_the_write_cap_sets_more() -> None:
 async def test_each_round_asks_for_what_is_left_of_the_cap() -> None:
     _listings()
     _spool_updates()
-    sync = FakeSync(
-        [
-            _plan([_write("update", n, {"note": "x"}) for n in range(150)]),
-            _plan([_write("update", n, {"note": "y"}) for n in range(50)]),
-        ]
+    # A probe counts toward the cap like a write (R-T7-9).
+    respx.get(url__regex=rf"{re.escape(API)}/inventory/spools/\d+$").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json=_spool_row(int(request.url.path.rsplit("/", 1)[1]))
+        )
     )
+    first = [_write("update", n, {"note": "x"}) for n in range(140)]
+    first += [_write("probe", 1000 + n, {}) for n in range(10)]
+    sync = FakeSync([_plan(first), _plan([_write("update", n, {"note": "y"}) for n in range(50)])])
 
     result = await _run(sync)
 
     assert [limit for _, limit in sync.plans] == [200, 50]
-    assert result.written == 200 and result.more is False
+    assert result.written == 190 and result.more is False
 
 
 @respx.mock
@@ -327,6 +365,19 @@ async def test_a_failed_spool_read_records_an_error() -> None:
 
     assert sync.plans == []
     assert result.error is not None and result.error.endswith(":500")
+    assert sync.recorded == [result]
+
+
+@respx.mock
+async def test_a_spool_listing_that_is_not_json_fails_the_pass() -> None:
+    routes = _listings()
+    routes["spools"].mock(return_value=httpx.Response(200, text="<html>proxy</html>"))
+    sync = FakeSync()
+
+    result = await _run(sync)
+
+    assert sync.plans == []
+    assert result.error == "about:blank"
     assert sync.recorded == [result]
 
 
@@ -501,6 +552,31 @@ async def test_each_row_kind_goes_to_its_route() -> None:
 
 
 @respx.mock
+async def test_a_catalog_update_of_the_weight_takes_the_name_read() -> None:
+    _listings()
+    weight = _write("update", 6, {"weight": 215}, kind="insert_type")
+    unread = _write("update", 77, {"name": "Gone"}, kind="insert_type")
+    route = respx.put(f"{API}/inventory/catalog/6").mock(
+        return_value=httpx.Response(
+            200, json=shaped("CatalogEntryResponse", id=6, name="Bambu cardboard", weight=215)
+        )
+    )
+    sync = FakeSync([_plan([weight, unread])])
+
+    result = await _run(sync)
+
+    sent = json.loads(route.calls.last.request.content)
+    assert_recorded_body(SYNC, "CatalogEntryUpdate", sent)
+    assert sent == {"name": "Bambu cardboard", "weight": 215}
+    [(_, _, [ok, missing], _)] = sync.sent
+    assert ok.ok and ok.bb_id == 6
+    # An entry this pass did not read: no call, an ``internal`` refusal.
+    assert (missing.ok, missing.error, missing.status) == (False, "internal", None)
+    assert not respx.calls.last.request.url.path.endswith("/77")
+    assert (result.written, result.failed) == (1, 1)
+
+
+@respx.mock
 async def test_a_spool_create_archive_and_restore() -> None:
     _listings()
     body = {"material": "PLA", "rgba": "FF0000FF", "label_weight": 1000}
@@ -535,7 +611,8 @@ async def test_a_plan_for_another_instance_stops_the_pass() -> None:
     result = await _run(sync)
 
     assert result.instance_changed is True and len(sync.plans) == 1
-    assert sync.recorded == [result]
+    # R-T7-7: SB's links belong to another Bambuddy; the pass records nothing.
+    assert sync.recorded == []
 
 
 @respx.mock

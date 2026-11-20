@@ -432,8 +432,15 @@ class BambuddyClient:
 
     @staticmethod
     def _rows(response: httpx.Response, *, what: str) -> list[Any]:
-        """Bambuddy answers these routes with a bare JSON array."""
-        body = response.json()
+        """Bambuddy answers these routes with a bare JSON array. A body that is not JSON,
+        or not an array, is a 502 (R-T7-8)."""
+        try:
+            body = response.json()
+        except ValueError:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered something that is not JSON when asked to {what}",
+            ) from None
         if not isinstance(body, list):
             raise ApiError(
                 status.HTTP_502_BAD_GATEWAY,

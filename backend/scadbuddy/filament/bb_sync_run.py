@@ -68,7 +68,10 @@ async def run_pass(
     """One pass, as the module says. With no Bambuddy URL it is ``skipped``. When the URL
     is another instance's, it calls nothing, records nothing and answers
     ``instance_changed``: the workflow of the configured instance records its own passes.
-    Else it records the pass (`FilamentSyncApi.record_pass`) whether it worked or not.
+    So does a pass whose plan answers ``instance_changed`` (SB's links belong to another
+    Bambuddy, R-T7-7). Else it records the pass (`FilamentSyncApi.record_pass`) whether
+    it worked or not; a spool listing it could not read, or that is not JSON, is a failed
+    pass (R-T7-8).
 
     ``written`` counts the writes Bambuddy answered ok (a probe writes nothing),
     ``failed`` the writes it refused (a probe's 404 is an answer: the spool is gone). The
@@ -99,7 +102,8 @@ async def run_pass(
             await api.record_pass(result)
             return result
         result = await _rounds(api, client, snap, heartbeat, max_rounds, empty)
-    await api.record_pass(result)
+    if not result.instance_changed:
+        await api.record_pass(result)
     return result
 
 
@@ -163,7 +167,8 @@ async def _rounds(
             result = await _call(client, write, snap.catalog)
             results.append(result)
             if result.ok:
-                written += write.op != "probe"
+                if write.op != "probe":
+                    written += 1
             elif not (write.op == "probe" and result.status == 404):
                 failed += 1
             heartbeat()
