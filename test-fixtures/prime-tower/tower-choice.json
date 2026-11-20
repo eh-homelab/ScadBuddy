@@ -1,0 +1,138 @@
+[
+  {
+    "case": "no choice and no setting leaves the tower to the file",
+    "choice": null,
+    "want": null
+  },
+  {
+    "case": "no choice and another setting leaves the tower to the file",
+    "choice": null,
+    "process_overrides": { "enable_support": "1" },
+    "want": null
+  },
+  {
+    "case": "a choice with no setting is the choice",
+    "choice": { "enabled": true, "no_sparse_layers": true },
+    "want": { "enabled": true, "no_sparse_layers": true }
+  },
+  {
+    "case": "a choice off with another setting is the choice",
+    "choice": { "enabled": false },
+    "process_overrides": { "enable_support": "1" },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "the string 1 turns it on",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": "1" },
+    "want": { "enabled": true }
+  },
+  {
+    "case": "the string 0 turns it off",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": "0" },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "the string 0 wins over a choice on",
+    "choice": { "enabled": true, "no_sparse_layers": true },
+    "process_overrides": { "enable_prime_tower": "0" },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "the string 1 wins over a choice off",
+    "choice": { "enabled": false },
+    "process_overrides": { "enable_prime_tower": "1" },
+    "want": { "enabled": true }
+  },
+  {
+    "case": "true turns it on",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": true },
+    "want": { "enabled": true }
+  },
+  {
+    "case": "false turns it off",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": false },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "false wins over a choice on",
+    "choice": { "enabled": true },
+    "process_overrides": { "enable_prime_tower": false },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "the number 1 turns it on",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": 1 },
+    "want": { "enabled": true }
+  },
+  {
+    "case": "the number 0 turns it off",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": 0 },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "the number 0 wins over a choice on",
+    "choice": { "enabled": true, "no_sparse_layers": true },
+    "process_overrides": { "enable_prime_tower": 0 },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "the number 0.0 turns it off",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": 0.0 },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "a list is read by its first value, 0",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": ["0"] },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "a list is read by its first value, 1",
+    "choice": { "enabled": false },
+    "process_overrides": { "enable_prime_tower": ["1", "0"] },
+    "want": { "enabled": true }
+  },
+  {
+    "case": "a list of false is off",
+    "choice": { "enabled": true },
+    "process_overrides": { "enable_prime_tower": [false] },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "a list of the number 0 is off",
+    "choice": { "enabled": true },
+    "process_overrides": { "enable_prime_tower": [0] },
+    "want": { "enabled": false }
+  },
+  {
+    "case": "an empty list keeps the choice",
+    "choice": { "enabled": true, "no_sparse_layers": true },
+    "process_overrides": { "enable_prime_tower": [] },
+    "want": { "enabled": true, "no_sparse_layers": true }
+  },
+  {
+    "case": "an empty list with no choice leaves the tower to the file",
+    "choice": null,
+    "process_overrides": { "enable_prime_tower": [] },
+    "want": null
+  },
+  {
+    "case": "a setting that agrees keeps the choice and its No sparse layers",
+    "choice": { "enabled": true, "no_sparse_layers": true },
+    "process_overrides": { "enable_prime_tower": "1" },
+    "want": { "enabled": true, "no_sparse_layers": true }
+  },
+  {
+    "case": "the number 0 that agrees keeps a choice off",
+    "choice": { "enabled": false },
+    "process_overrides": { "enable_prime_tower": 0 },
+    "want": { "enabled": false }
+  }
+]

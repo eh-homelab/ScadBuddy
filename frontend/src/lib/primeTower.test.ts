@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import type { PrimeTowerChoice } from '../api/types'
 import { analysisTower, overriddenTowerKeys, PRIME_TOWER_KEYS } from './primeTower'
 
 describe('PRIME_TOWER_KEYS', () => {
@@ -41,5 +43,20 @@ describe('analysisTower (#6721)', () => {
   it('keeps the choice when the setting agrees with it', () => {
     const choice = { enabled: true, no_sparse_layers: false }
     expect(analysisTower(choice, { enable_prime_tower: '1' })).toBe(choice)
+  })
+
+  // #6725: the backend's `_tower_choice` and `tower_asked` read the same file
+  // (`backend/tests/bambuddy/test_tower_choice_vectors.py`), so the two cannot drift.
+  it('agrees with the shared vectors', () => {
+    const vectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../../test-fixtures/prime-tower/tower-choice.json`, 'utf8')) as {
+      case: string
+      choice: PrimeTowerChoice | null
+      process_overrides?: Record<string, unknown>
+      want: PrimeTowerChoice | null
+    }[]
+    expect(vectors.length).toBeGreaterThan(0)
+    for (const vector of vectors) {
+      expect(analysisTower(vector.choice, vector.process_overrides ?? null), vector.case).toStrictEqual(vector.want)
+    }
   })
 })
