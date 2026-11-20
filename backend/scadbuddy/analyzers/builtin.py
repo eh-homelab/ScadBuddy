@@ -26,9 +26,10 @@ from scadbuddy.bambuddy.filaments import check as check_filaments
 from scadbuddy.bambuddy.prime_tower import tower_asked
 from scadbuddy.bambuddy.send import _file_tower
 from scadbuddy.render.bambu3mf import (
+    author_settings,
     plates_of,
     replate_3mf,
-    stated_settings,
+    stated_no_sparse_layers,
     stated_tower_off,
 )
 from scadbuddy.render.geometry import OVERHANG_ANGLES, MeshEdge
@@ -570,14 +571,18 @@ def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
         size = output.bbox_mm.size
         over = list(overshoots(size, plate))
         tower = len(output.colors) > 1 and (not stated_off or tower_on)
-        # The tower the send sizes (#6735, #6770): from the file's own settings, as
-        # `send._file_tower` reads them (every filament it lists, its width, rib wall and
-        # "No sparse layers"); from the output's colours when no file states any.
-        stated = stated_settings(payload) if payload is not None else None
+        # The tower the send sizes (#6735, #6770). For an author's file, the file's own
+        # settings as `send._file_tower` reads them: every filament it lists, its width,
+        # rib wall and "No sparse layers". Otherwise the output's colours, with the
+        # keep-out when the file states "No sparse layers" (`replate_3mf`).
+        author = author_settings(payload) if payload is not None else None
         settings = (
-            _file_tower(stated)
-            if stated is not None
-            else TowerSettings(filaments=len(output.colors))
+            _file_tower(author)
+            if author is not None
+            else TowerSettings(
+                filaments=len(output.colors),
+                no_sparse_layers=payload is not None and stated_no_sparse_layers(payload),
+            )
         )
         problem = None if over else fit_problem(size, plate, tower=tower, settings=settings)
     if not over and problem is None:

@@ -884,7 +884,8 @@ async def test_arrange_counts_the_filaments_the_writer_counts(
     await publish_library_pieces(deps.blobs, [entry], read)
     library = part_of(entry)
     items = [PackItem(part=library), PackItem(part=library, recolour={"#FF0000": "#0000FF"})]
-    # The filaments Arrange itself sizes each accepted plate's tower from (#6770).
+    # The filaments Arrange itself sizes an accepted placement's tower from (#6770); the
+    # last accepted call is the plate's final colour set.
     sized: list[int] = []
     fit = plate_fit_problem
 
@@ -903,7 +904,7 @@ async def test_arrange_counts_the_filaments_the_writer_counts(
         )
     )
     assert len(layout.plates) == 1
-    arranged = [max(sized)]
+    arranged = [sized[-1]]
     written: list[int] = []
     write = write_plates_3mf
 
