@@ -20,6 +20,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.filament import purchasing_models as pm
+from scadbuddy.filament.bb_sync_models import forget_sync
 from scadbuddy.filament.invoice_money import price_per_kg
 
 Conn = Connection[DictRow]
@@ -158,13 +159,15 @@ class SuppliersStore:
     def update(self, supplier_id: UUID, patch: pm.SupplierPatch) -> pm.Supplier | None:
         sets, values = _sets(patch)
         try:
-            with self._pool.connection() as conn:
+            with self._pool.connection() as conn, conn.transaction():
                 row = conn.execute(
                     f"UPDATE filament_suppliers SET {', '.join(sets)} WHERE id = %s RETURNING id",
                     [*values, supplier_id],
                 ).fetchone()
                 if row is None:
                     return None
+                if patch.archived:
+                    forget_sync(conn, "supplier", supplier_id)
                 return self._supplier(conn, supplier_id)
         except errors.UniqueViolation:
             raise SupplierExistsError() from None

@@ -8,7 +8,8 @@ calls `plan`. `plan` reads SB, compares each item with what Bambuddy holds, and 
 nothing to SB but sync bookkeeping: the create intents (Decision 10) and their expiry
 (R-T4-20), the error row of a rename onto a name Bambuddy already holds (R-T4-8), and the
 seen copy of a link that has none (R-T4-22) with its marks of the fields that differ
-(R-T4-27, and R-T4-32 for an adoption of a row a person made), and the preset list hash of
+(R-T4-27; R-T4-32 for an adoption of a row a person made, R-T4-35 for a field a person
+changed on a row SB's lost create made), and the preset list hash of
 a link that never pushed it (R-T4-31). The writes' answers reach SB through
 ``results`` (Task 5) only.
 
@@ -21,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -442,7 +443,7 @@ def body_value(field: str, value: Any) -> Any:
     return json_form(value)
 
 
-def _bb_form(field: str, seen: Mapping[str, Any], k_profiles: Any) -> Any:
+def bb_form(field: str, seen: Mapping[str, Any], k_profiles: Any) -> Any:
     """Bambuddy's value of ``field`` in the compare form, from a `seen_row` and its
     K-profiles; ``None`` for the preset list, which no BB row carries."""
     if field == "archived_at":
@@ -595,7 +596,8 @@ class _Candidate:
 @dataclass
 class _Item:
     """One SB row of a kind Bambuddy keeps (not a spool): its desired values (compare
-    form), its link, what was pushed and seen, and its change time."""
+    form), its link, and what was pushed and seen. Its row time is not read: it never
+    shows when SB changed one field (R-T4-27, R-T4-34)."""
 
     sb_id: UUID
     bb_id: int | None
@@ -611,7 +613,6 @@ class _Item:
     marked: bool
     seen: dict[str, Any] | None
     seen_at: datetime | None
-    sb_at: datetime
 
 
 @dataclass
@@ -621,6 +622,8 @@ class _Planner:
     sync: FilamentSync
     refs: BbRefs
     intents: dict[tuple[str, UUID], datetime]
+    #: What each intent's create sent: its field hashes (R-T4-35; ``None``: not known).
+    sent: dict[tuple[str, UUID], dict[str, str] | None]
     #: The items whose last write failed (`filament_bb_push_errors`), by when.
     errors: dict[tuple[str, UUID], datetime]
     phases: dict[_Phase, list[_Candidate]] = field(
@@ -749,8 +752,8 @@ class _Planner:
         bb_seen: Mapping[str, Any] | None,
         pushed: Mapping[str, str],
         direction: Any,
-        sb_at: Any,
-        bb_at: datetime | None,
+        sb_at: Any = None,
+        bb_at: datetime | None = None,
         seen_at: datetime | None = None,
         marks: Mapping[str, Mapping[str, str]] | None = None,
     ) -> list[str]:
@@ -760,7 +763,9 @@ class _Planner:
         it). ``seen_at`` is ``bb_seen_at`` when ``bb_seen`` is set. A field ``bb_now``
         does not carry is compared by its hash alone; an event-driven pass skips a field
         whose hash matches what was pushed (Decision 7). ``marks`` is given for a kind
-        with one SB change time per row, which ``two_way`` decides by `_row_wins`."""
+        with one SB change time per row, which ``two_way`` decides by `_row_wins` and
+        ``sb_to_bb`` by the difference alone: such a kind passes no times (R-T4-34).
+        ``sb_at`` and ``bb_at`` are a spool's."""
         out = []
         for name, value in desired.items():
             digest = field_hash(value)
@@ -817,7 +822,8 @@ class _Planner:
         answer's, Decision 10, or one made in Bambuddy, which a create would clash with:
         its 409). Under ``two_way`` an adoption with no intent (a person made the row), or
         the retry of one (``marked``), sends none of SB's differing values and records
-        their marks (R-T4-32). With the
+        their marks (R-T4-32); one with an intent sends only the fields Bambuddy still
+        holds as the create sent them (``sent``), and marks the rest (R-T4-35). With the
         listing not read (``None``) nothing is written. A full pass
         seeds a linked item's missing seen copy (R-T4-22), and closes the intent of an
         archived item or of a create no row matches (R-T4-20)."""
@@ -838,7 +844,7 @@ class _Planner:
                 seen, seen_at, marks = item.seen, item.seen_at, item.unseen
                 table = _SEEN_TABLES.get(kind)
                 if seen is None and table is not None and self.full:
-                    current, _ = self.bb_now(row, readable, None, None, item.desired)
+                    current = self.bb_now(row, readable, None, None, item.desired)
                     seen = {n: v for n, v in current.items() if item.desired.get(n, UNSEEN) == v}
                     marks = {
                         n: {"sb": field_hash(item.desired[n]), "bb": field_hash(v)}
@@ -847,17 +853,15 @@ class _Planner:
                     }
                     seen_at = self.snap.read_at
                     self.seed(table, item.sb_id, seen, marks)
-                now, at = self.bb_now(row, readable, seen, seen_at, item.desired)
+                now = self.bb_now(row, readable, seen, seen_at, item.desired)
                 names = self.changed(
                     item.desired,
                     now,
                     seen,
                     item.pushed,
                     lambda _f: direction,
-                    lambda _f, at_=item.sb_at: at_,
-                    at,
-                    seen_at,
-                    marks,
+                    seen_at=seen_at,
+                    marks=marks,
                 )
                 if "name" in names and str(item.desired["name"]).strip().upper() in by_name:
                     self.name_taken(kind, item.sb_id)
@@ -892,26 +896,31 @@ class _Planner:
                 del self.intents[kind, item.sb_id]
             self.creating.add((kind, item.sb_id))
             if found is not None:
-                now, _ = self.bb_now(found, readable, None, None, item.desired)
+                now = self.bb_now(found, readable, None, None, item.desired)
                 names = [n for n, v in item.desired.items() if n in now and now[n] != v]
-                if direction == "two_way" and (
-                    item.marked or (kind, item.sb_id) not in self.intents
-                ):
+                person = item.marked or (kind, item.sb_id) not in self.intents
+                if direction == "two_way":
                     # R-T4-32: a person made this row, and its values have an unknown
-                    # age. The adoption sends none of SB's differing values; it records
-                    # their seeding marks (R-T4-27), so the link acts as a seeded one.
-                    # The marks, even none, also say so to the retry of a lost answer,
-                    # which finds the intent this adoption recorded.
-                    self.unseen_marks(
-                        kind,
-                        item.sb_id,
-                        {
-                            n: {"sb": field_hash(item.desired[n]), "bb": field_hash(now[n])}
-                            for n in names
-                        },
-                    )
-                    hashes = {n: h for n, h in hashes.items() if n not in names}
-                    names = []
+                    # age: the adoption sends none of SB's differing values. R-T4-35: SB
+                    # made it (a lost create's answer), and a field Bambuddy no longer
+                    # holds as the create sent it is a person's later edit: it is not
+                    # sent either. Each held field gets its seeding marks (R-T4-27), so
+                    # the link acts as a seeded one. A person's row is marked even with
+                    # none held: that tells the retry of a lost answer, which finds the
+                    # intent this adoption recorded.
+                    sent = {} if person else self.sent.get((kind, item.sb_id)) or {}
+                    held = [n for n in names if person or sent.get(n) != field_hash(now[n])]
+                    if person or held:
+                        self.unseen_marks(
+                            kind,
+                            item.sb_id,
+                            {
+                                n: {"sb": field_hash(item.desired[n]), "bb": field_hash(now[n])}
+                                for n in held
+                            },
+                        )
+                    hashes = {n: h for n, h in hashes.items() if n not in held}
+                    names = [n for n in names if n not in held]
                 self.add(
                     0,
                     kind,
@@ -943,19 +952,18 @@ class _Planner:
         seen: dict[str, Any] | None,
         seen_at: datetime | None,
         desired: Mapping[str, Any],
-    ) -> tuple[dict[str, Any], datetime | None]:
-        """What Bambuddy holds for a row, in the compare form, and its ``updated_at``. A
-        copy ``results`` stored after this snapshot was read (F11) also keeps the old seen
+    ) -> dict[str, Any]:
+        """What Bambuddy holds for a row, in the compare form (`row_seen`). A copy
+        ``results`` stored after this snapshot was read (F11) also keeps the old seen
         value of a field its write did not send and its answer did not match (R-T4-28).
         So a stored value stands over the listing's only when it is SB's value
         (``desired``): the write sent it, or the answer matched SB (R-T4-30). The
-        listing's value stands for the rest, with no row time."""
-        data = row.model_dump()
-        now = {k: _row_form(k, json_form(data.get(k))) for k in readable}
+        listing's value stands for the rest."""
+        now = row_seen(row, readable)
         if seen is not None and seen_at is not None and seen_at > self.snap.read_at:
             fresh = {k: v for k, v in seen.items() if k in readable and desired.get(k, UNSEEN) == v}
-            return now | fresh, None
-        return now, data.get("updated_at")
+            return now | fresh
+        return now
 
     # -- spools -----------------------------------------------------------------------
 
@@ -988,7 +996,7 @@ class _Planner:
         self.unmapped_k += unmapped
         out = {}
         for name, value in desired.items():
-            refs = list(_pendings(value))
+            refs = list(pendings(value))
             waiting = [r for r in refs if self.in_flight(r)]
             if waiting:
                 read = all(
@@ -1038,7 +1046,7 @@ class _Planner:
             # the rest.
             listed = {} if bb is None else seen_row(bb)
             kept = {
-                n: v for n, v in seen.items() if _bb_form(n, seen, seen_k) == compare.get(n, UNSEEN)
+                n: v for n, v in seen.items() if bb_form(n, seen, seen_k) == compare.get(n, UNSEEN)
             }
             current, current_k, bb_at = listed | kept, seen_k, row["bb_updated_at"]
             if "k_profiles" in compare and k_form(seen_k) != compare["k_profiles"]:
@@ -1051,7 +1059,7 @@ class _Planner:
             current, current_k, bb_at = seen_row(bb), bb.k_profiles, bb.updated_at
         else:
             return
-        now = {n: _bb_form(n, current, current_k) for n in compare if n != "filament_presets"}
+        now = {n: bb_form(n, current, current_k) for n in compare if n != "filament_presets"}
         seen_at: datetime | None = row["bb_seen_at"]
         pushed: dict[str, str] = row["pushed_fields"] or {}
         # Decisions 78 and 81 (R-T4-31): BB rows do not carry the preset list. Under
@@ -1080,7 +1088,7 @@ class _Planner:
             now,
             before,
             pushed,
-            lambda f: getattr(self.sync, _FIELD_TYPE.get(f, "spools")),
+            self.direction,
             lambda f: sb_changed_at(self.conn, sb_id, f),
             bb_at,
             seen_at,
@@ -1153,6 +1161,11 @@ class _Planner:
         )
         return seen, seen_k
 
+    def direction(self, field: str) -> SyncDirection:
+        """A spool field's direction: its data type's (Decision 14)."""
+        way: SyncDirection = getattr(self.sync, _FIELD_TYPE.get(field, "spools"))
+        return way
+
     def new_spool(
         self, sb_id: UUID, unlinked_bb: list[BbSpool], raw: Mapping[Any, dict[str, Any]]
     ) -> None:
@@ -1189,6 +1202,20 @@ class _Planner:
                 unlinked_bb.remove(found)
                 current = seen_row(found)
                 diff = [n for n in fields if compare[n] != current.get(n)]
+                # R-T4-35: under ``two_way`` a field Bambuddy no longer holds as SB's lost
+                # create sent it is a person's later edit; it is not sent, and its hash
+                # stays out, so `results` leaves it unseen. A weight held back holds its
+                # lock back too, and the other way round (`_GOES_WITH`).
+                sent = self.sent.get(("spool", sb_id)) or {}
+                held = {
+                    n
+                    for n in diff
+                    if self.direction(n) == "two_way" and sent.get(n) != field_hash(current.get(n))
+                }
+                for name, partner in _GOES_WITH.items():
+                    if name in held or partner in held:
+                        held |= {name, partner} & set(fields)
+                diff = [n for n in diff if n not in held]
                 for name, partner in _GOES_WITH.items():
                     if name in diff and partner in fields and partner not in diff:
                         diff.append(partner)
@@ -1199,7 +1226,7 @@ class _Planner:
                     "update",
                     found.id,
                     {n: body_value(n, desired[n]) for n in diff},
-                    {n: field_hash(v) for n, v in compare.items()} | made,
+                    {n: field_hash(v) for n, v in compare.items() if n not in held} | made,
                 )
                 return
             if self.full:
@@ -1247,20 +1274,22 @@ class _Planner:
                     continue
                 writes.append(write)
                 if candidate.intent:
+                    # R-T4-35: what the create sent, for the adoption of a lost answer.
                     self.conn.execute(
-                        "INSERT INTO filament_bb_creates (kind, sb_id) VALUES (%s, %s)"
-                        " ON CONFLICT (kind, sb_id) DO UPDATE SET started_at = now()",
-                        (write.kind, write.sb_id),
+                        "INSERT INTO filament_bb_creates (kind, sb_id, sent) VALUES (%s, %s, %s)"
+                        " ON CONFLICT (kind, sb_id) DO UPDATE"
+                        " SET started_at = now(), sent = EXCLUDED.sent",
+                        (write.kind, write.sb_id, Jsonb(write.hashes)),
                     )
         return writes
 
 
 def _seen_form(name: str, seen: Mapping[str, Any], k_profiles: Any) -> Any:
     """What SB last saw of ``name`` in a seen copy: `UNSEEN` for a field a seeded copy left
-    out (R-T4-22), else `_bb_form`."""
+    out (R-T4-22), else `bb_form`."""
     if name != "k_profiles" and name not in seen:
         return UNSEEN
-    return _bb_form(name, seen, k_profiles)
+    return bb_form(name, seen, k_profiles)
 
 
 def _row_form(name: str, value: Any) -> Any:
@@ -1270,31 +1299,40 @@ def _row_form(name: str, value: Any) -> Any:
     return value
 
 
+def row_seen(row: Any, readable: frozenset[str]) -> dict[str, Any]:
+    """A Bambuddy supplier, location, catalog or filament row's ``readable`` fields in
+    the compare form: what the plan compares, and what ``results`` stores as its seen
+    copy (R-T4-11)."""
+    data = row.model_dump()
+    return {k: _row_form(k, json_form(data.get(k))) for k in readable}
+
+
 def _adopt_form(bb: BbSpool) -> dict[str, Any]:
     return {k: v for k, v in snapshot(bb).items() if k not in ("tag_uid", "tray_uuid")}
 
 
-def _pendings(value: Any) -> Iterator[Pending]:
+def pendings(value: Any) -> Iterator[Pending]:
     if isinstance(value, Pending):
         yield value
     elif isinstance(value, list):
         for item in value:
-            yield from _pendings(item)
+            yield from pendings(item)
     elif isinstance(value, dict):
         for item in value.values():
-            yield from _pendings(item)
+            yield from pendings(item)
 
 
 # -- the items of their own -----------------------------------------------------------
 
-#: The tables whose rows keep a seen copy (R-T4-22); filament catalog entries keep none.
+#: The tables whose rows keep a seen copy (R-T4-22; filament catalog entries too,
+#: R-T4-25), and whose ``bb_pushed`` holds the marks (R-T4-27, R-T4-32).
 _SEEN_TABLES: dict[str, str] = {
     "supplier": "filament_suppliers",
     "location": "filament_locations",
     "insert_type": "filament_insert_types",
+    "filament": "filament_spool_types",
 }
-#: The tables whose ``bb_pushed`` holds an adoption's marks (R-T4-32).
-_MARK_TABLES: dict[str, str] = _SEEN_TABLES | {"filament": "filament_spool_types"}
+_MARK_TABLES = _SEEN_TABLES
 _SUPPLIER_FIELDS = frozenset({"name", "website", "customer_number", "note"})
 _LOCATION_FIELDS = frozenset({"name", "identifier"})
 _CATALOG_FIELDS = frozenset({"name", "weight"})
@@ -1315,15 +1353,14 @@ def _item(row: Mapping[str, Any], bb_column: str, name: str, desired: dict[str, 
         pushed={k: v for k, v in (row["bb_pushed"] or {}).items() if k != UNSEEN_KEY},
         unseen=(row["bb_pushed"] or {}).get(UNSEEN_KEY, {}),
         marked=UNSEEN_KEY in (row["bb_pushed"] or {}),
-        seen=row.get("bb_seen"),
-        seen_at=row.get("bb_seen_at"),
-        sb_at=row["updated_at"],
+        seen=row["bb_seen"],
+        seen_at=row["bb_seen_at"],
     )
 
 
 def _suppliers(conn: Conn) -> list[_Item]:
     rows = conn.execute(
-        "SELECT id, name, website, customer_number, note, archived_at, updated_at,"
+        "SELECT id, name, website, customer_number, note, archived_at,"
         " bb_supplier_id, bb_pushed, bb_seen, bb_seen_at FROM filament_suppliers"
         " ORDER BY upper(name), id"
     ).fetchall()
@@ -1337,7 +1374,7 @@ def _locations(conn: Conn) -> list[_Item]:
     """The SB places that are no printer place (F18), each named by its path joined with
     `` / `` (Decision 14)."""
     rows = conn.execute(
-        "SELECT id, name, parent_id, identifier, printer_id, archived_at, updated_at,"
+        "SELECT id, name, parent_id, identifier, printer_id, archived_at,"
         " bb_location_id, bb_pushed, bb_seen, bb_seen_at FROM filament_locations"
         " ORDER BY upper(name), id"
     ).fetchall()
@@ -1365,7 +1402,7 @@ def _locations(conn: Conn) -> list[_Item]:
 
 def _insert_types(conn: Conn) -> list[_Item]:
     rows = conn.execute(
-        "SELECT id, name, empty_weight_g, archived_at, updated_at, bb_catalog_id, bb_pushed,"
+        "SELECT id, name, empty_weight_g, archived_at, bb_catalog_id, bb_pushed,"
         " bb_seen, bb_seen_at FROM filament_insert_types ORDER BY upper(name), id"
     ).fetchall()
     return [
@@ -1385,7 +1422,8 @@ def _filaments(conn: Conn) -> list[_Item]:
     rows = conn.execute(
         "SELECT t.id, t.code, t.colour_name, t.rgba, t.density_g_cm3, t.nozzle_temp_min,"
         " t.nozzle_temp_max, t.bed_temp_min, t.bed_temp_max, t.cost_per_kg, t.archived_at,"
-        " t.updated_at, t.bb_filament_id, t.bb_pushed, ma.name AS material, b.name AS brand"
+        " t.bb_filament_id, t.bb_pushed, t.bb_seen, t.bb_seen_at, ma.name AS material,"
+        " b.name AS brand"
         " FROM filament_spool_types t JOIN filament_materials ma ON ma.id = t.material_id"
         " LEFT JOIN filament_brands b ON b.id = t.brand_id ORDER BY upper(t.code), t.id"
     ).fetchall()
@@ -1407,6 +1445,37 @@ def _filaments(conn: Conn) -> list[_Item]:
             desired["cost_per_kg"] = row["cost_per_kg"]
         items.append(_item(row, "bb_filament_id", row["code"], desired))
     return items
+
+
+@dataclass(frozen=True)
+class RowKind:
+    """Where a kind of row of its own keeps its link and what Bambuddy's listing of it
+    carries (``readable``)."""
+
+    table: str
+    bb_column: str
+    readable: frozenset[str]
+    items: Callable[[Conn], list[_Item]]
+
+
+#: The kinds that are rows of their own, not spools.
+ROW_KINDS: dict[str, RowKind] = {
+    "supplier": RowKind("filament_suppliers", "bb_supplier_id", _SUPPLIER_FIELDS, _suppliers),
+    "location": RowKind("filament_locations", "bb_location_id", _LOCATION_FIELDS, _locations),
+    "insert_type": RowKind(
+        "filament_insert_types", "bb_catalog_id", _CATALOG_FIELDS, _insert_types
+    ),
+    "filament": RowKind("filament_spool_types", "bb_filament_id", _FILAMENT_FIELDS, _filaments),
+}
+
+
+def row_desired(conn: Conn, kind: str, sb_id: UUID) -> dict[str, Any] | None:
+    """What SB wants Bambuddy's row of ``kind`` to hold for ``sb_id``, in the compare
+    form; ``None`` when SB pushes no such row (a printer place, no such id)."""
+    for item in ROW_KINDS[kind].items(conn):
+        if item.sb_id == sb_id:
+            return item.desired
+    return None
 
 
 def plan(
@@ -1434,19 +1503,17 @@ def plan(
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
         if state is not None and state["instance"] not in (None, snap.instance):
             return empty.model_copy(update={"instance_changed": True})
-        intents = {
-            (row["kind"], row["sb_id"]): row["started_at"]
-            for row in conn.execute(
-                "SELECT kind, sb_id, started_at FROM filament_bb_creates"
-            ).fetchall()
-        }
+        creates = conn.execute("SELECT kind, sb_id, started_at, sent FROM filament_bb_creates")
+        rows = creates.fetchall()
+        intents = {(row["kind"], row["sb_id"]): row["started_at"] for row in rows}
+        sent = {(row["kind"], row["sb_id"]): row["sent"] for row in rows}
         errors = {
             (row["kind"], row["sb_id"]): row["at"]
             for row in conn.execute(
                 "SELECT kind, sb_id, at FROM filament_bb_push_errors"
             ).fetchall()
         }
-        planner = _Planner(conn, snap, sync, BbRefs.read(conn), intents, errors)
+        planner = _Planner(conn, snap, sync, BbRefs.read(conn), intents, sent, errors)
         planner.rows("supplier", _suppliers(conn), snap.suppliers, sync.suppliers, _SUPPLIER_FIELDS)
         planner.rows("location", _locations(conn), snap.locations, sync.locations, _LOCATION_FIELDS)
         planner.rows("insert_type", _insert_types(conn), snap.catalog, sync.spools, _CATALOG_FIELDS)

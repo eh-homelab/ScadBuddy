@@ -31,17 +31,23 @@ ALTER TABLE filament_insert_types
     ADD COLUMN bb_pushed jsonb NOT NULL DEFAULT '{}',
     ADD COLUMN bb_seen jsonb,
     ADD COLUMN bb_seen_at timestamptz;
--- A spool type's entry in Bambuddy's filament catalog (`/filament-catalog/`, Decision 14).
+-- A spool type's entry in Bambuddy's filament catalog (`/filament-catalog/`, Decision 14),
+-- with its seen copy as the other rows keep one (R-T4-25).
 ALTER TABLE filament_spool_types
     ADD COLUMN bb_filament_id integer UNIQUE,
-    ADD COLUMN bb_pushed jsonb NOT NULL DEFAULT '{}';
+    ADD COLUMN bb_pushed jsonb NOT NULL DEFAULT '{}',
+    ADD COLUMN bb_seen jsonb,
+    ADD COLUMN bb_seen_at timestamptz;
 
 -- Decision 10: a create's intent, written before its POST and deleted when `results`
--- links Bambuddy's answer. A later plan adopts the row a lost answer made.
+-- links Bambuddy's answer. A later plan adopts the row a lost answer made. `sent` is the
+-- field hashes the create sent (R-T4-35): the adoption pushes a field only where
+-- Bambuddy's row still holds what SB sent, so a person's later edit there stays.
 CREATE TABLE filament_bb_creates (
     kind text CHECK (kind IN ('spool', 'supplier', 'location', 'insert_type', 'filament')),
     sb_id uuid,
     started_at timestamptz NOT NULL DEFAULT now(),
+    sent jsonb,
     PRIMARY KEY (kind, sb_id)
 );
 

@@ -374,8 +374,8 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
   `filament_suppliers` gains `bb_supplier_id integer UNIQUE`, `bb_pushed jsonb NOT NULL DEFAULT '{}'`, `bb_seen jsonb`, `bb_seen_at timestamptz`;
   `filament_locations` the same with `bb_location_id`; `filament_insert_types` gains `bb_pushed`, `bb_seen`, `bb_seen_at`;
   every `bb_seen_at` is the time `results` or the pull last wrote that row's `bb_seen`;
-  `filament_spool_types` gains `bb_filament_id integer UNIQUE`, `bb_pushed`;
-  `filament_bb_creates (kind text CHECK (kind IN ('spool','supplier','location','insert_type','filament')), sb_id uuid, started_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (kind, sb_id))`;
+  `filament_spool_types` gains `bb_filament_id integer UNIQUE`, `bb_pushed` (and, from Task 5, `bb_seen`, `bb_seen_at`: decision 76);
+  `filament_bb_creates (kind text CHECK (kind IN ('spool','supplier','location','insert_type','filament')), sb_id uuid, started_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (kind, sb_id))` (and, from Task 5, `sent jsonb`: decision 85);
   `filament_bb_push_errors (kind text CHECK (… same kinds …), sb_id uuid, error text NOT NULL, attempts integer NOT NULL DEFAULT 1, at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (kind, sb_id))`;
   `filament_bb_sync_state (id boolean PRIMARY KEY DEFAULT true CHECK (id), instance text, last_pass_at timestamptz, last_ok_at timestamptz, last_error text, counts jsonb NOT NULL DEFAULT '{}')` seeded with one row whose `instance` is null (Task 8 fills it for links made before this row; Task 5 for the first new link).
 - Produces in `bb_sync_models.py` (pydantic, `extra="forbid"`):
@@ -823,11 +823,11 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 29. Task 3 (R-T3-4): `'Manage Inventory'` is added to the agent's `BambuddyScope` union beside
     the filament catalog label (this replaces the "left" note in item 22). Why: the gap is older
     than this PR, but the fix is one line in a line this PR already edits.
-30. Task 3 (R-T3-5): Task 5 cleans the `filament_bb_push_errors` and `filament_bb_creates` rows
+30. (changed by 89) Task 3 (R-T3-5): Task 5 cleans the `filament_bb_push_errors` and `filament_bb_creates` rows
     of every kind (spool, supplier, location, insert type) when the SB row they name is deleted
     or archived, not only kind `spool`. Why: otherwise a deleted supplier's error shows in
     `SyncStatus.errors` forever.
-31. Task 3 (R-T3-6): before Task 5 stores `seen_row(answer)` for `archive`, `restore`,
+31. (changed by 87) Task 3 (R-T3-6): before Task 5 stores `seen_row(answer)` for `archive`, `restore`,
     `PUT .../suppliers` and `PUT .../k-profiles`, it checks in Task 2's recordings that each
     answer is a full `SpoolResponse`. Where an answer is not, Task 5 reads the spool with a
     GET (`GET` only) and stores that.
@@ -881,7 +881,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     a row `results` stored this pass) lets SB's change win. Why: an archived spool is off
     the lists; there is no BB time to compare. Cost: a field edited on an archived spool
     reaches Bambuddy only after a restore.
-41. (changed by 82) Task 4: suppliers, locations, insert types and filament catalog entries compare field
+41. (changed by 82 and 85) Task 4: suppliers, locations, insert types and filament catalog entries compare field
     by field with BB's listing (suppliers `name`, `website`, `customer_number`, `note`;
     locations `name`, `identifier`; catalog `name`, `weight`; filament `name`, `type`,
     `brand`, `color_hex` upper case, `density`; the rest of a `FilamentCreate` by hash).
@@ -901,7 +901,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     in SB), `type` its material, `color_hex` the first 7 of `rgba`, temperatures the type's
     own, `cost_per_kg` only when set. Why: Decision 14 names the rows, not their bodies.
     Cost: a filament entry's name is a product code, not a display name.
-44. (changed by 50) Task 4: a spool's adoption matches `bambuddy_pull.snapshot` (tags left out, SB sends
+44. (changed by 50 and 85) Task 4: a spool's adoption matches `bambuddy_pull.snapshot` (tags left out, SB sends
     none) of BB's row with that of a `BbSpool` built from the create body, and BB's raw
     `created_at` (which `BbSpool` drops) must be no earlier than the intent less 5 s when
     the row has one. An old intent while the listing is partial waits (`deferred`). The
@@ -963,7 +963,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     after `snap.read_at`) before it probes. A spool written earlier in this pass is planned
     from that answer and never probed, so decision 37's "one round later" holds. Why: the
     probe of every new spool in every later round spent the cap. Cost: none known.
-53. (changed by 65, which 71 replaces, and by 76) Task 4 (R-T4-4, review M-1): a link with `bb_seen` NULL (a legacy link) treats "last
+53. (changed by 65, which 71 replaces, and by 76 and 84) Task 4 (R-T4-4, review M-1): a link with `bb_seen` NULL (a legacy link) treats "last
     seen" as unknown (`bb_sync_plan.UNSEEN`, which equals no value). Under `two_way` the
     newer side wins by time: SB's change time against Bambuddy's row time. When Bambuddy's
     time is unknown, Bambuddy wins and nothing is pushed. The same holds for a supplier,
@@ -971,8 +971,8 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     overwrite a value without knowing it is newer. Cost: under `two_way`, a linked catalog
     or filament entry with no `bb_seen` (Bambuddy gives those rows no time) takes no SB
     change until a write stores `bb_seen`. Decision 71 seeds `bb_seen` for spool links,
-    suppliers, locations and insert types. Filament entries have no `bb_seen` column and
-    keep this cost.
+    suppliers, locations and insert types. Filament entries had no `bb_seen` column and kept
+    this cost until Task 5, which gives them one and seeds them too (decision 76).
 54. Task 4 (R-T4-5, review M-2): a fresh `bb_k_profiles` of NULL is unknown, not an empty
     list. No K write is planned for that spool until a full read gives the list; the
     `before` value of a NULL `bb_k_profiles` is `UNSEEN`. Why: F11. Cost: none known.
@@ -1010,7 +1010,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Bambuddy stores `last_dried_at` (microseconds), `quoted_price_per_kg` (rounding) and an
     empty `note`, `subtype` and `color_name` (`""` or null). `seen_value` then takes
     Bambuddy's form for each, so no field flaps.
-62. Task 4 (R-T4-13, concern 5): linked non-spool rows that Bambuddy deleted are follow-up
+62. (changed by 88) Task 4 (R-T4-13, concern 5): linked non-spool rows that Bambuddy deleted are follow-up
     #6688. Task 5 drops a link on any 404 on a linked item.
 63. (changed by 78 and 81) Task 4 (R-T4-14, concerns 6 and 7): the one-time `PUT []` per linked spool with no
     preset is accepted. Tests written after the code are accepted, given decision 56. The
@@ -1054,7 +1054,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `more`. It then waits for the normal interval, whatever `deferred` says, and logs once
     that it hit the limit. Why: decisions 68 and 69 close the known loops, and this bound
     closes the unknown ones. Cost: work left over after 3 passes waits one interval.
-71. (changed by 74, 77, 78 and 83) Task 4 (R-T4-22, re-review I-2; replaces 65): on a full
+71. (changed by 74, 76, 77, 78 and 83) Task 4 (R-T4-22, re-review I-2; replaces 65): on a full
     pass, `plan` seeds the missing
     seen copy of a linked row whose `bb_seen` is NULL: a spool link (`filament_bb_links`),
     a supplier, a location or an insert type. It sets `bb_seen` from the snapshot's current
@@ -1075,11 +1075,11 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
       field. It then wins when Bambuddy's hash is still the recorded one; when Bambuddy
       changed it too, only a Bambuddy time SB's row time is strictly after lets it win.
       The row time alone never pushes it, also not in the seeding pass.
-    - Filament catalog entries: no seen copy yet (Task 5 adds it, R-T4-25), so no mark,
-      and no `UNSEEN` field pushes under `two_way`.
-    Why: Task 5's `results` has no snapshot, and a blind push would break R-T4-4. Cost:
-    filament catalog entries are not seeded until Task 5 builds R-T4-25; an event pass does
-    not seed.
+    - Filament catalog entries: as suppliers, locations and insert types since Task 5
+      (R-T4-25, decision 76); before it they had no seen copy, so no mark, and no `UNSEEN`
+      field pushed under `two_way`.
+    Why: Task 5's `results` has no snapshot, and a blind push would break R-T4-4. Cost: an
+    event pass does not seed.
 72. Task 4 (R-T4-23): decisions 51, 53 and 64 are corrected. 51 says "one round later",
     53 is marked as changed by 65 (which 71 replaces), and 64 states what a cut retry
     waits for.
@@ -1091,7 +1091,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     time and SB's change is strictly after it (decision 53): that push is not blind. Why:
     the ruling's reason is R-T4-4 ("never overwrite a value without knowing it is newer"),
     and both cases know. Cost: none known.
-74. (changed by 83) Task 4 (R-T4-27, re-review 2 I-1): suppliers, locations and insert types have one SB
+74. (changed by 76 for filament entries, and by 83) Task 4 (R-T4-27, re-review 2 I-1): suppliers, locations and insert types have one SB
     change time per row, so it never shows that SB changed one field. At seeding, `plan`
     records each field the seen copy leaves out in `bb_pushed` under the reserved key
     `unseen` (`bb_sync_plan.UNSEEN_KEY`): `{field: {"sb": <SB's field_hash>, "bb":
@@ -1178,7 +1178,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_seeded_link_does_not_put_its_preset_list_after_a_switch`,
     `test_a_create_records_bambuddys_empty_preset_list`. Cost: a link's first preset push
     waits until SB changes its presets.
-82. Task 4 (R-T4-32, re-review 3 open path a; changes 41): under `two_way`, adopting by name
+82. (changed by 85) Task 4 (R-T4-32, re-review 3 open path a; changes 41): under `two_way`, adopting by name
     a Bambuddy row a person made (no intent) sends none of SB's differing readable fields;
     the adoption body holds only what already agrees (often `{}`), and its hashes leave the
     differing fields out. The plan records their seeding marks
@@ -1209,6 +1209,79 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_seeded_field_bambuddy_changed_again_is_not_pushed_blind` (its second assertion
     now expects no write and one conflict). Cost: such a field stays different until a
     person edits it on one side; the count makes this visible.
+
+84. Task 5 (R-T4-34, re-review 4 M-1): the row-time plumbing that nothing read is gone.
+    `rows` passes no SB time and no Bambuddy time to `changed` for suppliers, locations,
+    insert types and filament entries; `bb_now` returns the compare values only; `_Item`
+    has no `sb_at`, and the item queries read no `updated_at`. `changed`'s `sb_at` and
+    `bb_at` are a spool's (they default to none). Why: every finding gets fixed, nits
+    included, and a dead input invites a later blind push. Cost: none.
+85. Task 5 (R-T4-35, re-review 4 note; changes 41, 44 and 82): under `two_way`, the
+    adoption of a row SB's own create made (its answer was lost) pushes only the fields
+    where Bambuddy's row still holds what the create sent. `filament_bb_creates.sent jsonb`
+    (this branch's unmerged migration, #491) holds the create's field hashes; `take`
+    writes it with the intent, and again when a create is made over an old intent. A
+    differing field whose Bambuddy hash is not the sent one is a person's later edit: it
+    is not in the body or the hashes. A row kind records its seeding marks (decision 74);
+    a spool's field stays out of `bb_seen` (`results`' merge, R-T4-28), so it is `UNSEEN`
+    and decided by the times (decision 71). A held `weight_used` holds `weight_locked`
+    back, and the other way round. An intent with no `sent`, and a field the create did not
+    send (`last_dried_at`), hold the field back. `sb_to_bb` keeps pushing every difference
+    (decision 73). Why: the binding constraint; this closes the last blind-push path.
+    Tests: `test_a_person_edit_of_a_row_sb_made_is_not_pushed`,
+    `test_an_sb_change_after_a_lost_create_is_pushed`,
+    `test_a_lost_spool_create_pushes_only_what_bambuddy_kept` (both cases), and
+    `test_adopting_a_row_a_person_made_pushes_no_differing_field[sb-made]` now stores the
+    sent hashes. Cost: a field Bambuddy normalised on create (trimmed, cased) is held until
+    SB changes it again; after a lost create, a spool's drying time waits for the next
+    drying. A row whose adoption held a field is marked (`_Item.marked`), so the retry of
+    that adoption's lost answer takes the person's path and holds every differing field
+    (liveness only).
+86. Task 5 (build): a create's answer is stored whole as the seen copy (a spool's
+    `bb_k_profiles` too, `[]` when Bambuddy answers none); every other write's answer is
+    merged (R-T4-28). Why: Bambuddy made the row from SB's body in that one call, so a
+    field the create did not send holds Bambuddy's default, never a person's edit; and
+    decision 37's "the drying time and the lists arrive one round later" needs that
+    default as seen. Cost: none known.
+87. Task 5 (build; changes 31): `results` makes no `GET`. `archive` and `restore` answer a
+    full `SpoolResponse` (`sync-routes.json`). The list `PUT`s answer their list only, and
+    under R-T4-28 only the field the write sent is stored, so the list is enough: the
+    worker passes `answer = {"k_profiles": rows}` or `{"suppliers": rows}` (or the whole
+    spool row), and Task 7 must build it so. The preset `PUT` stores its hash only. A list
+    write books no event and leaves `bb_updated_at` as it is; so does a probe. Why: the
+    API process has no Bambuddy client in `results`, and the answer holds what is needed.
+    Cost: none known.
+88. Task 5 (build; changes 62): a 404 drops a link on `update`, `archive`, `restore` and
+    `probe` only. A list `PUT`'s 404 is a failure (an error row): `PUT …/suppliers` also
+    answers 404 for a supplier Bambuddy does not know (`write_semantics.replace_all_lists`).
+    Why: dropping a live spool's link makes the plan create it again (a duplicate). Cost: a
+    spool deleted in Bambuddy whose list `PUT` met the 404 is unlinked one pass later, by
+    its probe.
+89. Task 5 (build; changes 30): archiving a supplier, location, insert type
+    (`CatalogStore.update` of `insert-types`) or spool type deletes its intent and its error
+    row (`bb_sync_models.forget_sync`); archiving a spool deletes its error row only, and
+    `FilamentSpoolStore.delete` deletes both. Why: a spool's intent lets a restore adopt the
+    row its lost create made (Decision 10); without it the restore creates a duplicate, and
+    Task 9's pull could take the orphan row as a new SB spool. The rows' intents close in
+    the plan anyway (decision 69). Cost: an archived spool's intent stays until it is
+    restored or deleted.
+90. Task 5 (build; Decision 9 as written): the push's `synced_from_bb` event carries
+    `snapshot(answer)` whole for every spool write that changes the row, not a merge. Why:
+    a merged `bb` would let the pull take a person's Bambuddy edit stamped with the
+    `updated_at` SB's own write gave the row, over an SB value that may be newer (the
+    binding constraint). Cost: a person's Bambuddy edit of a field the push did not send,
+    made before the push, is hidden from the pull until Bambuddy changes the field again;
+    the push keeps it `UNSEEN` (R-T4-28), so neither side overwrites the other. Task 9's
+    pull, which reads `bb_seen`, can take it.
+91. Task 5 (build): `results` ignores every result while the state row's instance is set
+    and is not the call's (Decision 12); an ignored result and an `ok` probe count nothing
+    in `ResultsReport`; an answer must parse as the write's kind and carry its Bambuddy id.
+    SB's compare value for the merge is computed for every data type. The event's actor is
+    `system:bambuddy-sync`. R-T4-12, measured with `GET /api/v1/inventory/spools` on the
+    live Bambuddy on 2026-11-20 (no key, 106 rows): `last_dried_at` is naive ISO text with
+    microseconds (38 rows), which `json_form` keeps; `quoted_price_per_kg` is a plain
+    number (2 decimals in the 4 priced links of 5, one null); `note`, `subtype` and
+    `color_name` are text or null, never `""`. So `seen_value` needs no change.
 
 ## Self-review
 

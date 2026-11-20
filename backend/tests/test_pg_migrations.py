@@ -898,8 +898,15 @@ def test_the_bb_sync_migration_adds_the_sync_columns_and_tables(pg_conninfo: str
         assert {"bb_pushed", "bb_seen", "bb_seen_at"} <= _table_columns(
             conn, "filament_insert_types"
         )
-        assert {"bb_filament_id", "bb_pushed"} <= _table_columns(conn, "filament_spool_types")
-        assert _table_columns(conn, "filament_bb_creates") == {"kind", "sb_id", "started_at"}
+        assert {"bb_filament_id", "bb_pushed", "bb_seen", "bb_seen_at"} <= _table_columns(
+            conn, "filament_spool_types"
+        )
+        assert _table_columns(conn, "filament_bb_creates") == {
+            "kind",
+            "sb_id",
+            "started_at",
+            "sent",
+        }
         assert _table_columns(conn, "filament_bb_push_errors") == {
             "kind",
             "sb_id",

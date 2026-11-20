@@ -1,0 +1,607 @@
+"""What Bambuddy answered to the sync's writes (#6265 Task 5): links, hashes, the seen
+copies, the echo event, errors and the instance."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID
+
+import pytest
+from psycopg.types.json import Jsonb
+
+from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.filament.bambuddy_pull import pull
+from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op
+from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
+from scadbuddy.filament.bb_sync_results import ResultsReport, apply_results
+from scadbuddy.filament.component import Filament
+from scadbuddy.filament.models import (
+    InsertTypeCreate,
+    InsertTypePatch,
+    LocationCreate,
+    LocationPatch,
+    SpoolPatch,
+    SpoolTypePatch,
+)
+from scadbuddy.filament.purchasing_models import SupplierCreate, SupplierPatch
+from tests.conftest import PgPool
+from tests.filament.test_bb_sync_plan import (
+    INSTANCE,
+    SPOOLS,
+    _bb_pushed,
+    _filament,
+    _intents,
+    _kind,
+    _link,
+    _only,
+    _plan,
+    _row,
+    _snap,
+    _spool,
+    _type,
+)
+
+pytestmark = pytest.mark.requires_postgres
+
+TWO_WAY_LOCATIONS = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+
+
+def _bb_now(minutes: int = 0) -> str:
+    """A Bambuddy time (naive UTC) ``minutes`` from now."""
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).replace(tzinfo=None).isoformat()
+
+
+def _answer(bb_id: int, **over: Any) -> dict[str, Any]:
+    """A recorded Bambuddy spool row with no weighing, drying or preset, so a pull of it
+    books nothing of its own."""
+    quiet: dict[str, Any] = {
+        "last_weighed_at": None,
+        "last_scale_weight": None,
+        "last_dried_at": None,
+        "slicer_filament": None,
+        "slicer_filament_name": None,
+        "k_profiles": [],
+        "updated_at": _bb_now(),
+    }
+    return _row(bb_id, **(quiet | over))
+
+
+def _apply(
+    f: Filament, writes: list[BbWrite], results: list[BbWriteResult], instance: str = INSTANCE
+) -> ResultsReport:
+    return apply_results(f, writes, results, instance=instance, now=datetime.now(UTC))
+
+
+def _ok(write: BbWrite, answer: dict[str, Any] | None, bb_id: int | None = None) -> BbWriteResult:
+    return BbWriteResult(key=write.key, ok=True, bb_id=bb_id or write.bb_id, answer=answer)
+
+
+def _refused(write: BbWrite, status: int = 422) -> BbWriteResult:
+    return BbWriteResult(key=write.key, ok=False, error=f"bambuddy-refused:{status}", status=status)
+
+
+def _write(
+    kind: Kind,
+    sb_id: UUID,
+    op: Op,
+    bb_id: int | None,
+    body: dict[str, Any] | list[Any] | None = None,
+    hashes: dict[str, str] | None = None,
+) -> BbWrite:
+    return BbWrite(
+        key=f"{kind}:{sb_id}:{op}",
+        kind=kind,
+        sb_id=sb_id,
+        op=op,
+        bb_id=bb_id,
+        body={} if body is None else body,
+        hashes=hashes or {},
+    )
+
+
+def _body(write: BbWrite) -> dict[str, Any]:
+    assert isinstance(write.body, dict)
+    return write.body
+
+
+def _link_row(pool: PgPool, spool: UUID) -> dict[str, Any] | None:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM filament_bb_links WHERE spool_id = %s", (spool,)
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
+def _errors(pool: PgPool) -> list[tuple[str, UUID, str, int]]:
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT kind, sb_id, error, attempts FROM filament_bb_push_errors ORDER BY kind"
+        ).fetchall()
+    return [(r["kind"], r["sb_id"], r["error"], r["attempts"]) for r in rows]
+
+
+def _instance(pool: PgPool) -> str | None:
+    with pool.connection() as conn:
+        row = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    assert row is not None
+    instance: str | None = row["instance"]
+    return instance
+
+
+def _pushed_events(f: Filament, spool: UUID) -> list[Any]:
+    return [
+        e
+        for e in f.spools.events(spool)
+        if e.kind == "synced_from_bb" and (e.data or {}).get("pushed")
+    ]
+
+
+def _created(pool: PgPool, f: Filament) -> tuple[UUID, BbWrite, dict[str, Any]]:
+    """A spool the plan creates in Bambuddy as row 60, and `apply_results` links."""
+    spool = _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    answer = _answer(60, **_body(create))
+    assert _apply(f, [create], [_ok(create, answer, 60)]).linked == 1
+    return spool, create, answer
+
+
+# -- creates -------------------------------------------------------------------------
+
+
+def test_a_created_spool_is_linked_with_its_hashes(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool, create, answer = _created(pg_pool, f)
+    link = _link_row(pg_pool, spool)
+    assert link is not None
+    assert link["bb_spool_id"] == 60
+    assert link["pushed_fields"] == create.hashes
+    assert link["bb_seen"]["color_name"] == answer["color_name"]
+    assert link["bb_seen_at"] is not None
+    # R-T4-11: a full answer's K-profiles are stored with its seen copy.
+    assert link["bb_k_profiles"] == []
+    assert _intents(pg_pool) == []
+    (event,) = _pushed_events(f, spool)
+    assert event.data["changes"] == {}
+    assert event.data["bb"]["colour_name"] == answer["color_name"]
+    assert event.grams_after is None
+
+
+def test_a_new_link_queues_the_spools_tags(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    binding = f.spools.bind_tag(
+        spool, tag_uid="AABBCCDD11223344", kind="ntag_opentag", actor="person"
+    )
+    assert binding is not None
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM filament_bb_tag_pending")
+    create = _only(_plan(f, _snap([])).writes, "create")
+    _apply(f, [create], [_ok(create, _answer(60, **_body(create)), 60)])
+    with pg_pool.connection() as conn:
+        pending = [r["tag_id"] for r in conn.execute("SELECT tag_id FROM filament_bb_tag_pending")]
+    assert pending == [binding.tag_id]
+
+
+def test_a_pushed_value_is_not_pulled_back(pg_pool: PgPool) -> None:
+    """Decision 9: the pull compares with the push's event, so it books no reading and
+    takes no change from the row the push made."""
+    f = _filament(pg_pool)
+    spool, _, answer = _created(pg_pool, f)
+    f.spools.update(spool, SpoolPatch(colour_name="Brick"), actor="person")
+    update = _only(_plan(f, _snap([answer])).writes, "update")
+    assert update.body == {"color_name": "Brick"}
+    after = answer | update.body | {"updated_at": _bb_now(1)}
+    assert _apply(f, [update], [_ok(update, after)]).updated == 1
+    events = len(f.spools.events(spool))
+    report = pull(f, [BbSpool.model_validate(after)], now=datetime.now(UTC))
+    assert (report.updated, report.linked, report.created) == (0, 0, 0)
+    assert len(f.spools.events(spool)) == events
+    sb = f.spools.get(spool)
+    assert sb is not None and sb.colour_name == "Brick"
+
+
+def test_a_create_without_an_answer_keeps_its_intent(pg_pool: PgPool) -> None:
+    """The create has no Bambuddy id to link: the intent stays, so a later pass adopts
+    the row the create made (Decision 10)."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    assert _apply(f, [create], [_ok(create, None)]) == ResultsReport()
+    assert _link_row(pg_pool, spool) is None
+    assert _intents(pg_pool) == [("spool", spool)]
+
+
+# -- 404s, probes and deletes ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("op", ["update", "probe", "archive"])
+def test_a_404_drops_the_link(pg_pool: PgPool, op: Op) -> None:
+    """Decision 13: Bambuddy says the row is gone. The link, its hashes and its error row
+    go."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50, pushed={"note": field_hash(None)})
+    write = _write("spool", spool, op, 50, {"note": "x"} if op == "update" else {})
+    _apply(f, [write], [_refused(write, 500)])
+    assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:500", 1)]
+    assert _apply(f, [write], [_refused(write, 404)]).unlinked == 1
+    assert _link_row(pg_pool, spool) is None
+    assert _errors(pg_pool) == []
+
+
+def test_a_404_on_a_list_keeps_the_link(pg_pool: PgPool) -> None:
+    """A ``PUT …/suppliers`` answers 404 for a supplier Bambuddy does not know, not only
+    for a missing spool (``write_semantics.replace_all_lists``): the link stays, and the
+    write counts failed. A missing spool shows in the next listing and its probe."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50)
+    write = _write("spool", spool, "suppliers", 50, [], {"suppliers": field_hash([])})
+    assert _apply(f, [write], [_refused(write, 404)]).failed == 1
+    assert _link_row(pg_pool, spool) is not None
+    assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:404", 1)]
+
+
+def test_a_probe_that_finds_the_spool_keeps_the_link(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50)
+    probe = _write("spool", spool, "probe", 50)
+    _apply(f, [probe], [_ok(probe, _answer(50))])
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_spool_id"] == 50
+    assert link["bb_seen"] is not None and link["bb_seen_at"] is not None
+    assert _pushed_events(f, spool) == []
+
+
+def test_a_spool_whose_link_was_dropped_can_be_deleted(pg_pool: PgPool) -> None:
+    """Regression (Decision 13): ``delete`` refuses only while a link exists."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50)
+    probe = _write("spool", spool, "probe", 50)
+    _apply(f, [probe], [_refused(probe, 404)])
+    assert f.spools.delete(spool) is True
+
+
+def test_deleting_a_spool_removes_its_intent_and_error_rows(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    _apply(f, [create], [_refused(create)])
+    assert _intents(pg_pool) == [("spool", spool)] and len(_errors(pg_pool)) == 1
+    assert f.spools.delete(spool) is True
+    assert _intents(pg_pool) == [] and _errors(pg_pool) == []
+
+
+def test_archiving_an_item_clears_its_sync_errors(pg_pool: PgPool) -> None:
+    """R-T3-5: an archived row's error leaves the status. The intent of a supplier,
+    location, insert type or spool type goes too (the plan closes it anyway, R-T4-20);
+    a spool's intent stays, so a restore adopts the row its lost create made."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    spool = _spool(f, kind)
+    supplier = f.suppliers.create(SupplierCreate(name="Shop")).id
+    place = f.locations.create(LocationCreate(name="Shelf", kind_id=_kind(f, "Shelf"))).id
+    made = f.catalog.create("insert-types", InsertTypeCreate(name="Core", empty_weight_g=200))
+    insert: UUID = getattr(made, "id")  # noqa: B009
+    items: list[tuple[Kind, UUID]] = [
+        ("spool", spool),
+        ("supplier", supplier),
+        ("location", place),
+        ("insert_type", insert),
+        ("filament", kind),
+    ]
+    with pg_pool.connection() as conn:
+        for item in items:
+            conn.execute("INSERT INTO filament_bb_creates (kind, sb_id) VALUES (%s, %s)", item)
+            conn.execute(
+                "INSERT INTO filament_bb_push_errors (kind, sb_id, error) VALUES (%s, %s, 'x')",
+                item,
+            )
+    f.spools.update(spool, SpoolPatch(archived=True), actor="person")
+    f.suppliers.update(supplier, SupplierPatch(archived=True))
+    f.locations.update(place, LocationPatch(archived=True))
+    f.catalog.update("insert-types", insert, InsertTypePatch(archived=True))
+    f.types.update(kind, SpoolTypePatch(archived=True))
+    assert _errors(pg_pool) == []
+    assert _intents(pg_pool) == [("spool", spool)]
+
+
+# -- errors ----------------------------------------------------------------------------
+
+
+def test_a_failure_keeps_the_hashes_and_counts_attempts(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50, pushed={"note": field_hash("old")})
+    write = _write("spool", spool, "update", 50, {"note": "new"}, {"note": field_hash("new")})
+    assert _apply(f, [write], [_refused(write)]).failed == 1
+    _apply(f, [write], [_refused(write)])
+    assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", 2)]
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["pushed_fields"] == {"note": field_hash("old")}
+    _apply(f, [write], [_ok(write, _answer(50, note="new"))])
+    assert _errors(pg_pool) == []
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["pushed_fields"] == {"note": field_hash("new")}
+
+
+# -- what is checked -------------------------------------------------------------------
+
+
+def test_an_unknown_key_is_ignored(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    stray = BbWriteResult(key=f"spool:{spool}:update", ok=True, bb_id=60, answer=_answer(60))
+    assert _apply(f, [create], [stray]) == ResultsReport()
+    assert _link_row(pg_pool, spool) is None
+    assert _intents(pg_pool) == [("spool", spool)]
+
+
+def test_a_write_whose_bb_id_disagrees_with_the_link_is_ignored(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50)
+    write = _write("spool", spool, "update", 51, {"note": "x"}, {"note": field_hash("x")})
+    assert _apply(f, [write], [_ok(write, _answer(51, note="x"))]) == ResultsReport()
+    assert _apply(f, [write], [_refused(write, 404)]) == ResultsReport()
+    link = _link_row(pg_pool, spool)
+    assert link is not None
+    assert (link["bb_spool_id"], link["pushed_fields"], link["bb_seen"]) == (50, {}, None)
+    assert _errors(pg_pool) == []
+
+
+def test_a_create_for_a_linked_item_is_ignored(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50)
+    with pg_pool.connection() as conn:
+        conn.execute("INSERT INTO filament_bb_creates (kind, sb_id) VALUES ('spool', %s)", (spool,))
+    create = _write("spool", spool, "create", None, {"material": "PLA"})
+    assert _apply(f, [create], [_ok(create, _answer(70), 70)]) == ResultsReport()
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_spool_id"] == 50
+
+
+def test_a_write_for_no_such_item_is_ignored(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    missing = UUID(int=7)
+    write = _write("location", missing, "update", 4, {"name": "X"}, {"name": field_hash("X")})
+    assert _apply(f, [write], [_refused(write)]) == ResultsReport()
+    assert _errors(pg_pool) == []
+
+
+def test_an_adoption_links_the_row_its_intent_found(pg_pool: PgPool) -> None:
+    """R-T4-10: an ``update`` on an unlinked spool with an open intent links it, unless
+    another SB spool holds that Bambuddy row."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    spool, other = _spool(f, kind), _spool(f, kind)
+    with pg_pool.connection() as conn:
+        conn.execute("INSERT INTO filament_bb_creates (kind, sb_id) VALUES ('spool', %s)", (spool,))
+    _link(pg_pool, other, 60)
+    taken = _write("spool", spool, "update", 60)
+    assert _apply(f, [taken], [_ok(taken, _answer(60))]) == ResultsReport()
+    free = _write("spool", spool, "update", 61)
+    assert _apply(f, [free], [_ok(free, _answer(61))]).linked == 1
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_spool_id"] == 61
+    assert _intents(pg_pool) == []
+
+
+def test_an_update_on_an_unlinked_item_without_an_intent_is_ignored(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    write = _write("spool", spool, "update", 61)
+    assert _apply(f, [write], [_ok(write, _answer(61))]) == ResultsReport()
+    assert _link_row(pg_pool, spool) is None
+
+
+# -- the instance (Decision 12) -----------------------------------------------------------
+
+
+def test_the_first_link_records_the_instance(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    assert _instance(pg_pool) is None
+    _created(pg_pool, f)
+    assert _instance(pg_pool) == INSTANCE
+
+
+def test_a_result_that_links_nothing_records_no_instance(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    kind = _type(f)
+    spool = _spool(f, kind)
+    _link(pg_pool, spool, 50)
+    probe = _write("spool", spool, "probe", 50)
+    _apply(f, [probe], [_ok(probe, _answer(50))])
+    _spool(f, kind)
+    create = _only(_plan(f, _snap([_answer(50)])).writes, "create")
+    _apply(f, [create], [_refused(create)])
+    assert _instance(pg_pool) is None
+
+
+def test_results_for_another_instance_are_ignored(pg_pool: PgPool) -> None:
+    """Decision 12: a link's Bambuddy id means nothing on another Bambuddy."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = 'ffffffffffff'")
+    with pg_pool.connection() as conn:
+        conn.execute("INSERT INTO filament_bb_creates (kind, sb_id) VALUES ('spool', %s)", (spool,))
+    create = _write("spool", spool, "create", None, {"material": "PLA"})
+    assert _apply(f, [create], [_ok(create, _answer(60), 60)]) == ResultsReport()
+    assert _link_row(pg_pool, spool) is None
+
+
+# -- what is stored as seen (R-T4-11, R-T4-28) --------------------------------------------
+
+
+def test_an_answer_does_not_make_an_unsent_field_seen(pg_pool: PgPool) -> None:
+    """R-T4-28: a person changed the note in Bambuddy, and SB's write sent only the
+    colour name. The answer's note does not become seen: the old seen value stays."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50, seen={"note": None, "color_name": "Red"}, seen_at=datetime.now(UTC))
+    write = _write(
+        "spool", spool, "update", 50, {"color_name": "Brick"}, {"color_name": field_hash("Brick")}
+    )
+    _apply(f, [write], [_ok(write, _answer(50, color_name="Brick", note="a person's"))])
+    link = _link_row(pg_pool, spool)
+    assert link is not None
+    assert link["bb_seen"]["note"] is None
+    assert link["bb_seen"]["color_name"] == "Brick"
+
+
+def test_a_list_answer_is_stored_for_its_field(pg_pool: PgPool) -> None:
+    """R-T3-6: a list ``PUT`` answers its list, not the spool's row, so only that field is
+    stored; the rest of the seen copy stays."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50, seen={"note": "kept"}, seen_at=datetime.now(UTC))
+    k_rows = [{"printer_id": 2, "extruder": 0, "nozzle_diameter": "0.4", "k_value": 0.02}]
+    k_write = _write("spool", spool, "k_profiles", 50, k_rows, {"k_profiles": "h"})
+    links = [
+        {
+            "supplier_id": 3,
+            "supplier_article_number": "SKU",
+            "quoted_price_per_kg": 15,
+            "is_purchase_source": True,
+        }
+    ]
+    s_write = _write("spool", spool, "suppliers", 50, links, {"suppliers": "s"})
+    k_answer = {"k_profiles": [{"id": 9, "spool_id": 50, **k_rows[0]}]}
+    s_answer = {"suppliers": [{"id": 4, "supplier_name": "Shop", **links[0]}]}
+    _apply(f, [k_write, s_write], [_ok(k_write, k_answer), _ok(s_write, s_answer)])
+    link = _link_row(pg_pool, spool)
+    assert link is not None
+    assert link["bb_k_profiles"][0]["k_value"] == 0.02
+    assert link["bb_seen"]["note"] == "kept"
+    assert link["bb_seen"]["suppliers"] == [
+        {
+            "supplier_id": 3,
+            "supplier_article_number": "SKU",
+            "quoted_price_per_kg": 15.0,
+            "is_purchase_source": True,
+        }
+    ]
+    assert link["pushed_fields"] == {"k_profiles": "h", "suppliers": "s"}
+
+
+def _child_under_parent(pool: PgPool, f: Filament) -> tuple[UUID, UUID]:
+    """Two linked locations under ``two_way``: ``Room`` (Bambuddy row 3) and its child
+    ``Room / Shelf A`` (row 4), SB identifier ``A1``, Bambuddy's ``B7``."""
+    shelf = _kind(f, "Shelf")
+    room = f.locations.create(LocationCreate(name="Room", kind_id=shelf)).id
+    child = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=shelf, parent_id=room, identifier="A1")
+    ).id
+    with pool.connection() as conn:
+        for sb_id, bb_id in ((room, 3), (child, 4)):
+            conn.execute(
+                "UPDATE filament_locations SET bb_location_id = %s,"
+                " updated_at = now() - interval '1 hour' WHERE id = %s",
+                (bb_id, sb_id),
+            )
+    return room, child
+
+
+def _locations(*rows: tuple[int, str, str | None]) -> list[dict[str, Any]]:
+    return [{"id": i, "name": n, "identifier": ident} for i, n, ident in rows]
+
+
+def test_a_parent_rename_never_pushes_the_childs_identifier(pg_pool: PgPool) -> None:
+    """R-T4-28, the re-review's scenario 1: a seeded child whose identifier differs. The
+    parent's rename pushes the child's new path only; its answer carries Bambuddy's
+    identifier, which does not become seen, so no later pass pushes ``A1``."""
+    f = _filament(pg_pool)
+    room, child = _child_under_parent(pg_pool, f)
+    bb = _locations((3, "Room", None), (4, "Room / Shelf A", "B7"))
+    seeding = _plan(f, _snap([], locations=bb), TWO_WAY_LOCATIONS)
+    assert seeding.writes == []
+    f.locations.update(room, LocationPatch(name="Hall"))
+    writes = _plan(f, _snap([], locations=bb), TWO_WAY_LOCATIONS).writes
+    assert {w.bb_id: w.body for w in writes} == {
+        3: {"name": "Hall"},
+        4: {"name": "Hall / Shelf A"},
+    }
+    renamed = _locations((3, "Hall", None), (4, "Hall / Shelf A", "B7"))
+    answers = {row["id"]: row for row in renamed}
+    _apply(f, writes, [_ok(w, answers[w.bb_id or 0]) for w in writes])
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_seen FROM filament_locations WHERE id = %s", (child,)
+        ).fetchone()
+    assert row is not None and "identifier" not in row["bb_seen"]
+    assert _bb_pushed(pg_pool, "filament_locations", child)[UNSEEN_KEY] == {
+        "identifier": {"sb": field_hash("A1"), "bb": field_hash("B7")}
+    }
+    for _ in range(2):
+        later = _plan(f, _snap([], locations=renamed), TWO_WAY_LOCATIONS).writes
+        assert [w for w in later if isinstance(w.body, dict) and "identifier" in w.body] == []
+
+
+def test_an_adopted_person_made_row_keeps_its_identifier(pg_pool: PgPool) -> None:
+    """R-T4-32: SB location ``A1`` adopts Bambuddy's ``B7`` (a person made it) under
+    ``two_way``. `apply_results` links it with the marks kept, and the next full pass
+    plans no write that carries ``identifier``."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1")
+    ).id
+    bb = _locations((4, "Shelf A", "B7"))
+    (adopt,) = _plan(f, _snap([], locations=bb), TWO_WAY_LOCATIONS).writes
+    assert (adopt.op, adopt.bb_id, adopt.body) == ("update", 4, {})
+    assert _apply(f, [adopt], [_ok(adopt, bb[0])]).linked == 1
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_location_id, bb_seen FROM filament_locations WHERE id = %s", (shelf,)
+        ).fetchone()
+    assert row is not None
+    assert (row["bb_location_id"], row["bb_seen"]) == (4, {"name": "Shelf A"})
+    pushed = _bb_pushed(pg_pool, "filament_locations", shelf)
+    assert pushed["name"] == field_hash("Shelf A")
+    assert pushed[UNSEEN_KEY] == {"identifier": {"sb": field_hash("A1"), "bb": field_hash("B7")}}
+    assert _intents(pg_pool) == []
+    assert _plan(f, _snap([], locations=bb), TWO_WAY_LOCATIONS).writes == []
+
+
+def test_a_404_on_a_linked_row_drops_its_link(pg_pool: PgPool) -> None:
+    """R-T4-13: a 404 on any linked item drops the link and what it pushed and saw."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"))).id
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = 4, bb_seen = %s, bb_seen_at = now(),"
+            " bb_pushed = %s WHERE id = %s",
+            (Jsonb({"name": "Shelf A"}), Jsonb({"name": "h"}), shelf),
+        )
+    write = _write("location", shelf, "update", 4, {"name": "B"}, {"name": "h2"})
+    assert _apply(f, [write], [_refused(write, 404)]).unlinked == 1
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_location_id, bb_pushed, bb_seen, bb_seen_at FROM filament_locations"
+            " WHERE id = %s",
+            (shelf,),
+        ).fetchone()
+    assert row is not None and tuple(row.values()) == (None, {}, None, None)
+
+
+def test_a_filament_entrys_answer_is_stored_as_seen(pg_pool: PgPool) -> None:
+    """R-T4-25: filament catalog entries keep a seen copy, as the other rows do."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    sync = SPOOLS.model_copy(update={"spools": "two_way"})
+    bb = {"id": 8, "name": "GFA00-RED", "type": "PLA", "brand": None, "color_hex": "#ff0000"}
+    (create,) = [w for w in _plan(f, _snap([], filaments=[]), sync).writes if w.kind == "filament"]
+    assert _apply(f, [create], [_ok(create, bb, 8)]).linked == 1
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_filament_id, bb_seen, bb_seen_at FROM filament_spool_types WHERE id = %s",
+            (kind,),
+        ).fetchone()
+    assert row is not None
+    assert row["bb_filament_id"] == 8 and row["bb_seen_at"] is not None
+    assert row["bb_seen"]["color_hex"] == "#FF0000"

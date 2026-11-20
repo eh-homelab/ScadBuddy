@@ -1337,11 +1337,14 @@ def test_adopting_a_row_a_person_made_pushes_no_differing_field(
         LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1")
     )
     if intent:
+        # SB's create sent ``B7``; SB has changed it to ``A1`` since, and Bambuddy still
+        # holds what SB sent (R-T4-35).
+        sent = {"name": field_hash("Shelf A"), "identifier": field_hash("B7")}
         with pg_pool.connection() as conn:
             conn.execute(
-                "INSERT INTO filament_bb_creates (kind, sb_id, started_at)"
-                " VALUES ('location', %s, now() - interval '1 hour')",
-                (shelf.id,),
+                "INSERT INTO filament_bb_creates (kind, sb_id, started_at, sent)"
+                " VALUES ('location', %s, now() - interval '1 hour', %s)",
+                (shelf.id, Jsonb(sent)),
             )
     sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
     bb = [{"id": 4, "name": "Shelf A", "identifier": "B7"}]
@@ -1395,3 +1398,100 @@ def test_a_field_both_sides_changed_is_a_conflict(pg_pool: PgPool) -> None:
     bb = {"id": 4, "name": "Shelf A", "identifier": "B7", "updated_at": _ago(30)}
     result = _plan(f, _snap([], locations=[bb]), sync)
     assert (result.writes, result.conflicts) == ([], 1)
+
+
+# -- Task 5: R-T4-35 and R-T4-25 -----------------------------------------------------------
+
+
+def _lost_location_create(pg_pool: PgPool, f: Filament, identifier: str) -> UUID:
+    """SB location ``Shelf A`` whose create (with ``identifier``) was planned and whose
+    answer was lost: its intent holds the hashes the create sent."""
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier=identifier)
+    )
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    (create,) = _plan(f, _snap([], locations=[]), sync).writes
+    assert create.op == "create"
+    return shelf.id
+
+
+def _later() -> datetime:
+    return datetime.now(UTC) + timedelta(minutes=1)
+
+
+def test_a_person_edit_of_a_row_sb_made_is_not_pushed(pg_pool: PgPool) -> None:
+    """R-T4-35: SB's create sent ``A1`` and its answer was lost. Bambuddy's row now holds
+    ``B7``, so a person changed it after the create: the adoption does not send ``A1``
+    over it, and records the field's marks as seeding does."""
+    f = _filament(pg_pool)
+    shelf = _lost_location_create(pg_pool, f, "A1")
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    bb = [{"id": 4, "name": "Shelf A", "identifier": "B7"}]
+    (adopt,) = _plan(f, _snap([], locations=bb, read_at=_later()), sync).writes
+    assert (adopt.op, adopt.bb_id, adopt.body) == ("update", 4, {})
+    assert adopt.hashes == {"name": field_hash("Shelf A")}
+    assert _bb_pushed(pg_pool, "filament_locations", shelf) == {
+        UNSEEN_KEY: {"identifier": {"sb": field_hash("A1"), "bb": field_hash("B7")}}
+    }
+
+
+def test_an_sb_change_after_a_lost_create_is_pushed(pg_pool: PgPool) -> None:
+    """R-T4-35: Bambuddy still holds what SB's lost create sent (``B7``), and SB changed
+    it to ``A1`` since: SB's value is newer, so the adoption sends it."""
+    f = _filament(pg_pool)
+    shelf = _lost_location_create(pg_pool, f, "B7")
+    f.locations.update(shelf, LocationPatch(identifier="A1"))
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    bb = [{"id": 4, "name": "Shelf A", "identifier": "B7"}]
+    (adopt,) = _plan(f, _snap([], locations=bb, read_at=_later()), sync).writes
+    assert (adopt.op, adopt.bb_id, adopt.body) == ("update", 4, {"identifier": "A1"})
+    assert UNSEEN_KEY not in _bb_pushed(pg_pool, "filament_locations", shelf)
+
+
+@pytest.mark.parametrize("person", [True, False], ids=["person-edit", "sb-edit"])
+def test_a_lost_spool_create_pushes_only_what_bambuddy_kept(pg_pool: PgPool, person: bool) -> None:
+    """R-T4-35 for spools: the create sent the note ``n1``. A person changed it in
+    Bambuddy: the adoption leaves it, and its hash out. SB changed it, and Bambuddy still
+    holds ``n1``: the adoption sends SB's note."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    f.spools.update(spool, SpoolPatch(note="n1"), actor="person")
+    sync = SPOOLS.model_copy(update={"spools": "two_way"})
+    create = _only(_plan(f, _snap([]), sync).writes, "create")
+    assert isinstance(create.body, dict) and create.body["note"] == "n1"
+    made = (datetime.now(UTC) + timedelta(seconds=1)).replace(tzinfo=None).isoformat()
+    row = _row(60, **create.body, created_at=made)
+    if person:
+        row["note"] = "a person's"
+    else:
+        f.spools.update(spool, SpoolPatch(note="n2"), actor="person")
+    (adopt,) = _plan(f, _snap([row], read_at=_later()), sync).writes
+    assert (adopt.op, adopt.bb_id) == ("update", 60)
+    if person:
+        assert adopt.body == {}
+        assert "note" not in adopt.hashes
+    else:
+        assert adopt.body == {"note": "n2"}
+        assert adopt.hashes["note"] == field_hash("n2")
+
+
+def test_a_filament_entry_is_seeded_with_its_marks(pg_pool: PgPool) -> None:
+    """R-T4-25: a linked filament catalog entry with no seen copy is seeded on a full
+    pass, as suppliers and locations are: the fields that agree are seen, the others get
+    their marks, and none of them is pushed blind under ``two_way``."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spool_types SET bb_filament_id = 8 WHERE id = %s", (kind,))
+    sync = SPOOLS.model_copy(update={"spools": "two_way"})
+    bb = {"id": 8, "name": "GFA00-RED", "type": "PLA", "brand": None, "color_hex": "#ff0000",
+          "density": 9.9}  # fmt: skip
+    writes = _plan(f, _snap([], filaments=[bb]), sync).writes
+    # The fields Bambuddy's listing does not carry compare by hash (decision 48).
+    for write in writes:
+        assert not (_FILAMENT_FIELDS & set(write.body))
+    seen, seen_at = _seen(pg_pool, "filament_spool_types", "id", kind)
+    assert seen == {"name": "GFA00-RED", "type": "PLA", "brand": None, "color_hex": "#FF0000"}
+    assert seen_at is not None
+    marks = _bb_pushed(pg_pool, "filament_spool_types", kind)[UNSEEN_KEY]
+    assert set(marks) == {"density"}

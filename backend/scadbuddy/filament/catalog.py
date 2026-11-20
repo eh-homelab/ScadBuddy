@@ -21,6 +21,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.filament import models as m
+from scadbuddy.filament.bb_sync_models import forget_sync
 
 Conn = Connection[DictRow]
 
@@ -181,6 +182,8 @@ class CatalogStore:
                     f" RETURNING {_columns(spec)}",
                     [*values, row_id],
                 ).fetchone()
+                if archived and kind == "insert-types":
+                    forget_sync(conn, "insert_type", row_id)
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:

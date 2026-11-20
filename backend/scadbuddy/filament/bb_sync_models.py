@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Any, Literal, cast
 from uuid import UUID
 
+from psycopg import Connection
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.models import (
@@ -87,6 +88,15 @@ _FLOAT_FIELDS = frozenset(
         "quoted_price_per_kg",
     }
 )
+
+
+def forget_sync(conn: Connection[Any], kind: Kind, sb_id: UUID) -> None:
+    """R-T3-5: an archived SB row of ``kind`` takes its create intent and its error row
+    out of the sync, on ``conn``'s transaction, so the status no longer shows its error.
+    The plan closes such an intent anyway (R-T4-20). A spool keeps its intent (its
+    archive deletes the error row only): a restore adopts the row a lost create made."""
+    for table in ("filament_bb_creates", "filament_bb_push_errors"):
+        conn.execute(f"DELETE FROM {table} WHERE kind = %s AND sb_id = %s", (kind, sb_id))
 
 
 def _amount(key: str, value: object) -> object:

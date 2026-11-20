@@ -21,6 +21,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.trays import EXTERNAL, unit_label
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
+from scadbuddy.filament.bb_sync_models import forget_sync
 from scadbuddy.filament.catalog import CatalogRefError
 
 Conn = Connection[DictRow]
@@ -151,6 +152,8 @@ class LocationStore:
                     f" RETURNING {_COLUMNS}",
                     [*values, location_id],
                 ).fetchone()
+                if patch.archived:
+                    forget_sync(conn, "location", location_id)
         except errors.UniqueViolation:
             raise LocationExistsError() from None
         except errors.ForeignKeyViolation:

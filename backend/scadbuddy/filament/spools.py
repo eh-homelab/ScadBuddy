@@ -766,10 +766,11 @@ class FilamentSpoolStore:
         return self.update(spool_id, m.SpoolPatch(archived=archived), actor=actor)
 
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
-        """Remove a spool that never printed, with its events and tag bindings; ``False``
-        for no such spool. `SpoolBambuddyLinkedError` when a Bambuddy link names it (the
-        next pull would make it again). `SpoolInUseError` when its ledger holds an event
-        of a kind in ``refusing`` (a ``print_started`` or ``print_ended`` one; the native
+        """Remove a spool that never printed, with its events, tag bindings and Bambuddy
+        sync intent and error rows; ``False`` for no such spool. `SpoolBambuddyLinkedError`
+        when a Bambuddy link names it (the next pull would make it again). `SpoolInUseError`
+        when its ledger holds an event of a kind in ``refusing`` (a ``print_started`` or
+        ``print_ended`` one; the native
         API's delete refuses ``print_ended`` only, `spools/native.py`)."""
         with self._pool.connection() as conn, conn.transaction():
             found = conn.execute(
@@ -790,6 +791,11 @@ class FilamentSpoolStore:
                 raise SpoolBambuddyLinkedError()
             for table in ("filament_spool_events", "filament_tag_bindings"):
                 conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
+            # The Bambuddy sync's intent and error rows name the spool (#6265 R-T3-5).
+            for table in ("filament_bb_creates", "filament_bb_push_errors"):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE kind = 'spool' AND sb_id = %s", (spool_id,)
+                )
             conn.execute("DELETE FROM filament_spools WHERE id = %s", (spool_id,))
         return True
 
@@ -1115,6 +1121,13 @@ class FilamentSpoolStore:
             " updated_at = now() WHERE id = %s",
             (archived, current["id"]),
         )
+        if archived:
+            # #6265 R-T3-5: an archived spool's sync error leaves the status. Its create
+            # intent stays: a restore adopts the row a lost create made (Decision 10).
+            conn.execute(
+                "DELETE FROM filament_bb_push_errors WHERE kind = 'spool' AND sb_id = %s",
+                (current["id"],),
+            )
         ledger.record(conn, current["id"], "archived" if archived else "restored", actor=actor)
 
     @staticmethod
