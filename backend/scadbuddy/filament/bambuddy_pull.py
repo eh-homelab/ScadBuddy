@@ -46,6 +46,8 @@ this order:
 The pull reads BB's archived spools too (#6707). An archived BB spool takes the steps above
 as any other: a linked one is pulled as it is today (BB archiving it never archives or
 changes the SB spool), and one whose tag an SB spool holds is linked or skipped as above.
+BB's live spools are pulled first: of a live and an archived BB record with one tag, the
+live one is linked or made, and the archived one is its RFID duplicate (R-6707-13).
 
 Catalog names from BB (material, subtype, brand, category, effect) resolve by their upper
 case name, and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
@@ -252,23 +254,33 @@ def pull(
     actor: str = ACTOR,
     catalog: Sequence[SpoolCatalogEntry] = (),
     weights: bool = True,
+    usage: Sequence[SpoolUsage] = (),
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
     says, after ``catalog`` (BB's spool catalog) is mapped to insert types. ``now`` is the
     link's time, and its ``bb_updated_at`` when BB sends none; ``actor`` is who the events
     name (a person's import, else ``bambuddy``). One BB spool that fails is rolled back,
-    logged and listed; the rest go on, as when the catalog fails."""
+    logged and listed; the rest go on, as when the catalog fails.
+
+    BB's live spools are pulled before its archived ones, so of two BB records with one
+    tag the live one is linked or made, and the archived one is its RFID duplicate,
+    whatever BB's order (R-6707-13). ``usage`` is BB's usage rows: a spool made archived
+    takes its reading no earlier than its newest row (`_create_archived`)."""
     report = PullReport()
+    newest: dict[int, datetime] = {}
+    for row in usage:
+        if row.weight_used > 0:
+            newest[row.spool_id] = max(row.created_at, newest.get(row.spool_id, row.created_at))
     try:
         report.catalog_skipped = _insert_types(store, catalog)
     except Exception:
         logger.warning("could not map Bambuddy's spool catalog", exc_info=True)
         report.catalog_failed = True
-    for bb in spools:
+    for bb in sorted(spools, key=lambda s: s.archived_at is not None):
         try:
             with store.spools.transaction() as conn:
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
-                outcome = _one(conn, store, bb, now, actor, weights)
+                outcome = _one(conn, store, bb, now, actor, weights, newest.get(bb.id))
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
@@ -371,10 +383,17 @@ def _core_insert_type(conn: Conn, bb: BbSpool) -> UUID | None:
 
 
 def _one(
-    conn: Conn, store: Filament, bb: BbSpool, now: datetime, actor: str, weights: bool = True
+    conn: Conn,
+    store: Filament,
+    bb: BbSpool,
+    now: datetime,
+    actor: str,
+    weights: bool = True,
+    newest_use: datetime | None = None,
 ) -> tuple[str, UUID | None, bool] | None:
     """What came of one BB spool. An archived SB spool, linked or named by the BB
-    record's link, is left as it is: never restored, never written to (``archived``)."""
+    record's link, is left as it is: never restored, never written to (``archived``).
+    ``newest_use`` is the time of BB's newest usage row of it, if any."""
     link = conn.execute(
         "SELECT l.spool_id, l.bb_updated_at, s.archived_at IS NOT NULL AS archived"
         " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
@@ -425,7 +444,7 @@ def _one(
         # shows, but it is still the spool Bambuddy added for a tag SB holds.
         return "duplicate", None, False
     if bb.archived_at is not None:
-        made, typeless = _create_archived(conn, store, bb, after, now, actor)
+        made, typeless = _create_archived(conn, store, bb, after, now, actor, newest_use)
         return "archived_created", made, typeless
     made, typeless = _create(conn, store, bb, after, now, actor)
     _book(conn, made, bb, actor, weights)
@@ -738,28 +757,42 @@ def _create(
 
 
 def _create_archived(
-    conn: Conn, store: Filament, bb: BbSpool, after: dict[str, Any], now: datetime, actor: str
+    conn: Conn,
+    store: Filament,
+    bb: BbSpool,
+    after: dict[str, Any],
+    now: datetime,
+    actor: str,
+    newest_use: datetime | None = None,
 ) -> tuple[UUID, bool]:
     """A BB spool Bambuddy archived before any pull linked it (#6707): a new SB spool as
     `_create` makes one, archived at BB's ``archived_at`` with an ``archived`` event then.
     Its ``data.bb_archived_at`` marks it as one the pull made archived, whose usage rows
     are booked (`bambuddy_usage._links`). The event is never earlier than the ``created``
     one, so the history reads in order when BB moved ``updated_at`` after the archive.
-    No weighing, drying or preset is taken: the pull never writes to an archived spool."""
-    assert bb.archived_at is not None
+    No weighing, drying or preset is taken: the pull never writes to an archived spool.
+
+    BB may not move ``updated_at`` for every change, so a usage row (``newest_use``) can
+    be later than it. BB's ``weight_used`` holds that row already, so the reading is timed
+    at the later of the two: every row lies before it, and none is taken off it again
+    (R-6707-14)."""
+    archived_at = bb.archived_at
+    assert archived_at is not None
+    if newest_use is not None and (bb.updated_at is None or newest_use > bb.updated_at):
+        bb = bb.model_copy(update={"updated_at": newest_use})
     spool_id, typeless = _create(conn, store, bb, after, now, actor, archived=True)
     conn.execute(
         "UPDATE filament_spools SET archived_at = %s, updated_at = now() WHERE id = %s",
-        (bb.archived_at, spool_id),
+        (archived_at, spool_id),
     )
-    at = bb.archived_at if bb.updated_at is None else max(bb.archived_at, bb.updated_at)
+    at = archived_at if bb.updated_at is None else max(archived_at, bb.updated_at)
     ledger.record(
         conn,
         spool_id,
         "archived",
         actor=actor,
         at=at,
-        data={"bb_spool_id": bb.id, "bb_archived_at": bb.archived_at},
+        data={"bb_spool_id": bb.id, "bb_archived_at": archived_at},
     )
     return spool_id, typeless
 
@@ -1203,6 +1236,7 @@ async def read_and_pull(
             actor=actor,
             catalog=catalog or (),
             weights=weights,
+            usage=usage,
         )
     )
     report.catalog_failed = report.catalog_failed or catalog is None

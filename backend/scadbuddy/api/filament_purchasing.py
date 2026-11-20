@@ -397,9 +397,10 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     response_model=list[pm.LineCandidates],
     summary="List the spools each invoice line could update",
     description=(
-        "Per line (by `position`), the open spools whose effective material and exact RGBA "
-        "match the line's type, or its proposed type when it has no type yet: `uncosted` "
-        "(no cost per kg and no invoice line yet) and `costed`. A `costed` spool with no "
+        "Per line (by `position`), the spools (archived ones too, marked `archived`) whose "
+        "effective material and exact RGBA match the line's type, or its proposed type when "
+        "it has no type yet: `uncosted` (no cost per kg and no invoice line yet) and "
+        "`costed`. A `costed` spool with no "
         "`invoice_line_id` may be filled, and the line's cost replaces its own; one with an "
         "`invoice_line_id` is refused at confirm. Archived (used-up) spools are listed too, "
         "with `archived` true: a spent spool was still bought. A line with neither type has "

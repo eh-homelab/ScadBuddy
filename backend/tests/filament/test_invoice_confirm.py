@@ -266,6 +266,26 @@ def test_a_line_fills_an_archived_spool_and_leaves_it_archived(shop: Shop) -> No
     assert [r["id"] for r in shop.spool_rows(invoice.id)] == [spent]
 
 
+def test_an_untyped_archived_spool_stays_untyped_where_an_open_one_takes_the_type(
+    shop: Shop,
+) -> None:
+    """R-6707-15: two spools with a null `type_id` on one line. The open one takes the
+    line's type; the archived one takes its cost and line only, and stays untyped."""
+    type_id = shop.type_id()
+    spent = shop.spools.create(SpoolCreate(material_id=shop.material()), actor="ann").id
+    shop.spools.update(spent, SpoolPatch(archived=True), actor="ann")
+    live = shop.spools.create(SpoolCreate(material_id=shop.material()), actor="ann").id
+    invoice = shop.one(type_id, update_spool_ids=[spent, live])
+    done, _ = _confirm(shop, invoice)
+    got = {s: shop.spools.get(s) for s in (spent, live)}
+    assert {s: (g.type_id, g.archived_at is not None) for s, g in got.items() if g} == {
+        spent: (None, True),
+        live: (type_id, False),
+    }
+    assert {g.cost_per_kg for g in got.values() if g} == {D("21.4000")}
+    assert sorted(done.lines[0].spool_ids) == sorted([spent, live])
+
+
 @pytest.mark.parametrize("kind", ["invoiced", "other_type"])
 def test_a_spool_that_is_invoiced_or_of_another_type_is_refused(shop: Shop, kind: str) -> None:
     type_id = shop.type_id()

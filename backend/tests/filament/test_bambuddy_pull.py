@@ -1039,6 +1039,37 @@ def test_an_archived_bb_duplicate_of_a_linked_tag_makes_no_spool(pg_pool: PgPool
     assert [s.id for s in f.spools.list(include_archived=True)] == [made]
 
 
+def test_the_live_bb_record_of_a_tag_is_linked_before_an_archived_one(pg_pool: PgPool) -> None:
+    """R-6707-13: when an archived and a live BB record carry one tag, the live one is
+    linked to the SB spool that holds it, and the archived one is the RFID duplicate,
+    even when BB lists the archived one first. So the live record's weight reaches SB."""
+    f = _filament(pg_pool)
+    held = f.spools.create(
+        SpoolCreate(material_id=_pla(pg_pool), grams_left=500, note="mine"), actor="ann"
+    )
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    report = pull(f, [_archived_bb(id=8), bb(id=9)], now=NOW)
+    assert (report.linked_ids, report.rfid_duplicate_bb_ids) == ([held.id], [8])
+    assert (report.created, report.archived_created) == (0, 0)
+    with pg_pool.connection() as conn:
+        link = conn.execute(
+            "SELECT bb_spool_id FROM filament_bb_links WHERE spool_id = %s", (held.id,)
+        ).fetchone()
+    assert link == {"bb_spool_id": 9}
+    (spool,) = f.spools.list(include_archived=True)
+    assert (spool.id, spool.archived_at) == (held.id, None)
+
+
+def test_an_archived_bb_record_of_a_live_records_tag_makes_no_spool(pg_pool: PgPool) -> None:
+    """R-6707-13: with no SB spool holding the tag, the live record is made and the
+    archived copy of its tag is skipped, whatever BB's order."""
+    f = _filament(pg_pool)
+    report = pull(f, [_archived_bb(id=8), bb(id=9)], now=NOW)
+    (made,) = report.created_ids
+    assert (report.archived_created, report.rfid_duplicate_bb_ids) == (0, [8])
+    assert [(s.id, s.archived_at) for s in f.spools.list(include_archived=True)] == [(made, None)]
+
+
 async def test_the_pull_reads_bambuddys_archived_spools(pg_pool: PgPool) -> None:
     """#6707 R-6707-1: the import and the Schedule's pull ask for the archived rows."""
     f = _filament(pg_pool)

@@ -287,6 +287,44 @@ async def test_an_archived_bb_spool_comes_in_with_its_usage(pg_pool: PgPool) -> 
     assert len(_usage_events(f, spool)) == 2
 
 
+async def test_an_archived_bb_spool_with_a_row_after_its_updated_at_keeps_bbs_value(
+    pg_pool: PgPool,
+) -> None:
+    """R-6707-14: BB may not move ``updated_at`` for every change, so a usage row can be
+    later than it. BB's ``weight_used`` holds that row already, so grams left stays
+    label - used (1000 - 600), and that row is not taken off again."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    spent = bb(id=125, weight_used=600.0, archived_at=_naive(T1), updated_at=_naive(T1)).model_dump(
+        mode="json"
+    )
+    late = T1 + timedelta(hours=1)
+    rows = [
+        usage(id=1, spool_id=125, weight_used=400.0, created_at=_naive(T0)).model_dump(mode="json"),
+        usage(id=2, spool_id=125, weight_used=200.0, created_at=_naive(late)).model_dump(
+            mode="json"
+        ),
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[spent])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        report = await read_and_pull(f, settings)
+    (spool,) = report.created_ids
+    assert report.usage_booked == 2
+    assert _left(f, spool) == 400
+    # The row keeps its own time; the reading and the archive are not earlier than it.
+    events = f.spools.events(spool)
+    assert {e.ref_id: e.at for e in events if e.ref_kind == ledger.BB_USAGE} == {
+        "1": T0,
+        "2": late,
+    }
+    assert [e.at for e in events if e.kind in ("created", "archived")] == [late, late]
+    got = f.spools.get(spool)
+    assert got is not None and got.archived_at == T1
+
+
 def test_a_spool_archived_in_sb_still_books_no_earlier_usage(pg_pool: PgPool) -> None:
     """Only a spool the pull made archived books the rows before its reading: one a person
     archived keeps the rule of any linked spool."""
