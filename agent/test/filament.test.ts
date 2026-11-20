@@ -834,6 +834,13 @@ describe('filament type proposal tools (#6701)', () => {
     expect(input.safeParse({ groups: [{ ...group, spool_ids: Array(5001).fill(SPOOL) }] }).success).toBe(false)
   })
 
+  it("bounds a group's material_number at 128 characters as the backend does (R-6729-6)", () => {
+    const input = z.object(tool('filament_type_proposals_confirm').shape)
+    const group = { material_id: MATERIAL, rgba: '#FF0000', label_weight_g: 1000, code: 'X', spool_ids: [SPOOL] }
+    expect(input.safeParse({ groups: [{ ...group, material_number: 'N'.repeat(128) }] }).success).toBe(true)
+    expect(input.safeParse({ groups: [{ ...group, material_number: 'N'.repeat(129) }] }).success).toBe(false)
+  })
+
   it('says when a code is taken', async () => {
     server.use(
       http.post(`${PROPOSALS}/confirm`, () =>

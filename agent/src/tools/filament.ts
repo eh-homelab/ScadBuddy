@@ -278,7 +278,7 @@ export const filamentTools: Tool[] = [
             subtype_id: z.string().uuid().nullable().optional(),
             rgba: z.string().describe('`#RRGGBBAA`, as the proposal lists it'),
             label_weight_g: z.number().int().positive().max(100_000),
-            material_number: z.string().nullable().optional(),
+            material_number: z.string().max(128).nullable().optional(),
             code: z.string().min(1).max(128).describe("The new type's code: the proposed one, or the user's"),
             spool_ids: z.array(z.string().uuid()).min(1).max(5000),
           }),

@@ -62,6 +62,12 @@ person says yes) confirms each group.
   short: a cut code could collide.
 - R-6729-4 (#6729, finding 4): the agent tool's zod schema bounds `label_weight_g` at
   100000 and `spool_ids` at 5000 items, matching the backend.
+- R-6729-5 (#6729, the PR's concern 2): `confirm` lets a spool with no `material_number`
+  match a numbered pick only under the fold's own rule: among the open untyped spools now
+  in the database, exactly one numbered group has the same five key fields, and it is the
+  pick's. Otherwise that spool comes back as `changed`, as before.
+- R-6729-6 (#6729, the PR's concern 4): the agent tool's `material_number` takes
+  `.max(128)`, matching the backend.
 
 ## Builder's calls
 

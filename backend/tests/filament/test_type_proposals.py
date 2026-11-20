@@ -458,3 +458,17 @@ def test_another_unique_violation_is_not_a_code_clash(
     with pytest.raises(errors.UniqueViolation):
         _confirm(f, _pick(group))
     assert f.types.list() == []
+
+
+def test_a_spool_with_no_number_in_a_numbered_pick_is_changed_when_two_groups_match(
+    pg_pool: PgPool,
+) -> None:
+    """R-6729-5: the confirm takes a spool with no number into a numbered pick only under
+    the fold's rule, exactly one numbered group of its other key fields."""
+    f = _filament(pg_pool)
+    groups = _two_numbers_and_none(f)
+    n1 = next(g for g in groups if g.material_number == "N1")
+    (bare,) = next(g for g in groups if g.material_number is None).spool_ids
+    (result,) = _confirm(f, _pick(n1, spool_ids=[*n1.spool_ids, bare])).groups
+    assert result.typed == n1.spool_ids
+    assert [(s.spool_id, s.reason) for s in result.skipped] == [(bare, "changed")]

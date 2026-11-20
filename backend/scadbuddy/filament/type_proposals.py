@@ -25,12 +25,14 @@ shares (category, effect, extra colours, diameter, density, temperatures, insert
 cost, so no price book row). Then each of the group's spools that is still open, untyped
 and of the key gets the type, loses each override equal to the type's value and gets one
 ``edited`` event (`FilamentSpoolStore.update_on`). A spool with no ``material_number`` is
-of a pick whose other key fields it shares (the fold). Any other spool is skipped and
-reported. Per group the answer names the type used, whether the group made it (``made``)
-and whether this request made it (``new``): a group that joined a type an earlier group just
-made has ``new`` and not ``made``, so its own code was not used (R-6729-1). A code an
-unarchived type holds (the ``filament_spool_types_code`` index) is `CatalogExistsError`,
-and nothing is written; any other unique violation propagates (R-6729-2).
+of a numbered pick whose other key fields it shares only under the fold's rule: the open
+untyped spools hold exactly one ``material_number`` for those fields, the pick's
+(R-6729-5). Any other spool is skipped and reported. Per group the answer names the type
+used, whether the group made it (``made``) and whether this request made it (``new``):
+a group that joined a type an earlier group just made has ``new`` and not ``made``, so
+its own code was not used (R-6729-1). A code an unarchived type holds (the
+``filament_spool_types_code`` index) is `CatalogExistsError`, and nothing is written; any
+other unique violation propagates (R-6729-2).
 """
 
 from __future__ import annotations
@@ -152,8 +154,9 @@ def confirm(f: Filament, body: m.TypeProposalConfirm, *, actor: str) -> m.TypePr
                     (wanted,),
                 ).fetchall()
             }
+            numbered = _numbered(conn) if any(p.material_number for p in body.groups) else {}
             for pick in body.groups:
-                done.append(_confirm_one(conn, f, pick, rows, actor, made))
+                done.append(_confirm_one(conn, f, pick, rows, actor, made, numbered))
     except errors.UniqueViolation as exc:
         if exc.diag.constraint_name != _CODE_INDEX:
             raise
@@ -170,6 +173,7 @@ def _confirm_one(
     rows: dict[UUID, dict[str, Any]],
     actor: str,
     made_here: set[UUID],
+    numbered: Mapping[tuple[Any, ...], set[str]],
 ) -> m.ConfirmedProposal:
     want = {k: getattr(pick, k) for k in KEY}
     eligible: list[dict[str, Any]] = []
@@ -184,7 +188,7 @@ def _confirm_one(
             else "typed"
             if row["type_id"] is not None
             else "changed"
-            if not _of_pick(row, want)
+            if not _of_pick(row, want, numbered)
             else None
         )
         if reason is not None:
@@ -240,13 +244,30 @@ def _fold(groups: dict[tuple[Any, ...], list[Row]]) -> None:
             groups[into[0]] = sorted(members, key=lambda r: r["number"])
 
 
-def _of_pick(row: Row, want: Mapping[str, Any]) -> bool:
-    """Whether a spool is of a pick's key; one with no ``material_number`` is of any pick
-    whose other key fields it shares (the fold)."""
-    key = dict(zip(KEY, _key(row), strict=True))
-    if key["material_number"] is None:
-        key["material_number"] = want["material_number"]
-    return key == want
+def _numbered(conn: Conn) -> dict[tuple[Any, ...], set[str]]:
+    """The ``material_number``s the open untyped spools hold, by their other key fields."""
+    found: dict[tuple[Any, ...], set[str]] = {}
+    for row in conn.execute(
+        _SPOOL_ROWS + " WHERE s.type_id IS NULL AND s.archived_at IS NULL"
+    ).fetchall():
+        key = _key(row)
+        if key[-1] is not None:
+            found.setdefault(key[:-1], set()).add(key[-1])
+    return found
+
+
+def _of_pick(
+    row: Row, want: Mapping[str, Any], numbered: Mapping[tuple[Any, ...], set[str]]
+) -> bool:
+    """Whether a spool is of a pick's key. One with no ``material_number`` is of a numbered
+    pick whose other key fields it shares only under the fold's rule: the pick's number is
+    the one the open untyped spools hold for those fields (R-6729-5)."""
+    key = _key(row)
+    if key[-1] is None and want["material_number"] is not None:
+        if numbered.get(key[:-1]) != {want["material_number"]}:
+            return False
+        key = (*key[:-1], want["material_number"])
+    return dict(zip(KEY, key, strict=True)) == want
 
 
 def _names(conn: Conn, want: Mapping[str, Any]) -> dict[str, Any]:
