@@ -61,6 +61,12 @@ COPY = 41
 INPUT = b"PK\x03\x04 the dialog's laid-out copy"
 GCODE = b"M620 S0A\nM620 S1A\nM620 S0A\n"
 CREATED = "2026-10-18T18:00:00.000000"
+#: Bambu Studio's `result.json` reason for `CLI_OBJECT_COLLISION_IN_LAYER_PRINT` (-64),
+#: as the Rust worker reports it (`cli_result`), at v02.08.02.61 (`BambuStudio.cpp`).
+OBJECT_CONFLICT = (
+    "Object conflicts were detected. Please verify the slicing of all plates in Bambu Studio"
+    " before uploading. (return code -64)"
+)
 NATIVE_SLICES = Path(__file__).parents[1] / "fixtures" / "native_slices"
 #: The presets the recorded H2C catalogue resolves the dialog's choices to (`body()`),
 #: by their setting ids.
@@ -403,6 +409,24 @@ def test_a_refused_plate_fails_with_its_stderr(
     answer = settled(native_client, output_id, started["job_id"])
     assert answer["status"] == "failed"
     assert "plate 99 is empty" in answer["failure"]
+    assert answer["slice_warnings"] == []
+
+
+def test_an_object_conflict_is_a_structured_warning_that_names_the_plate(
+    native_client: TestClient, model: str, slicer: FakeSlicer
+) -> None:
+    """#6732: Bambu Studio's "Object conflicts were detected" refusal is also one
+    ``object-conflict`` warning for the plate, beside the slicer's own words."""
+    slicer.refuse_plate = True
+    slicer.refusal = OBJECT_CONFLICT
+    output_id = prepared(native_client, model)
+    started = start(native_client, output_id)
+    answer = settled(native_client, output_id, started["job_id"])
+    assert answer["status"] == "failed"
+    assert "Object conflicts were detected" in answer["failure"]
+    [warning] = answer["slice_warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", started["plate_id"])
+    assert f"Plate {started['plate_id']}" in warning["message"]
 
 
 def test_another_subject_reads_404(

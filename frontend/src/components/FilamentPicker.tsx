@@ -109,6 +109,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'mixed-flows': 'text-warn',
   // #4272 — a Track Switch inlet feeding both extruders, by a side chosen by hand.
   'inlet-shared': 'text-warn',
+  // #6732 — the slicer refused a plate with "Object conflicts were detected".
+  'object-conflict': 'text-warn',
 }
 
 /**
