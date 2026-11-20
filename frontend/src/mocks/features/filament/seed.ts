@@ -106,9 +106,12 @@ const row = (n: number, name: string, sort_order = 0) => ({
   updated_at: AT,
 })
 
+/** A row of a catalog with aliases (#6706). */
+const aliased = (n: number, name: string, sort_order = 0, aliases: string[] = []) => ({ ...row(n, name, sort_order), aliases })
+
 function material(n: number, name: string, values: Partial<S['Material']> = {}): S['Material'] {
   return {
-    ...row(n, name),
+    ...aliased(n, name),
     family: null,
     density_g_cm3: null,
     nozzle_temp_min: null,
@@ -130,7 +133,7 @@ function material(n: number, name: string, values: Partial<S['Material']> = {}):
 
 function subtype(n: number, name: string, materialId: string): S['Subtype'] {
   return {
-    ...row(n, name),
+    ...aliased(n, name),
     material_id: materialId,
     density_g_cm3: null,
     nozzle_temp_min: null,
@@ -184,15 +187,15 @@ function catalogs(): Catalogs {
       subtype(14, '95A', M.TPU),
     ],
     brands: [
-      row(20, 'Bambu Lab'),
-      row(21, 'Insignia'),
-      row(22, 'Inland'),
-      row(23, 'Polymaker'),
-      row(24, 'Elegoo'),
-      row(25, 'Sunlu'),
+      aliased(20, 'Bambu Lab'),
+      aliased(21, 'Insignia'),
+      aliased(22, 'Inland'),
+      aliased(23, 'Polymaker'),
+      aliased(24, 'Elegoo'),
+      aliased(25, 'Sunlu'),
     ],
-    categories: [row(30, 'Standard'), row(31, 'Engineering', 1)],
-    effects: [row(40, 'Translucent'), row(41, 'Clear', 1), row(42, 'Silk', 2)],
+    categories: [aliased(30, 'Standard'), aliased(31, 'Engineering', 1)],
+    effects: [aliased(40, 'Translucent', 0, ['Transparent']), aliased(41, 'Clear', 1), aliased(42, 'Silk', 2)],
     'insert-materials': [row(50, 'Plastic'), row(51, 'Cardboard', 1)],
     'insert-types': [
       { ...row(60, 'Bambu reusable spool'), empty_weight_g: 250, insert_material_id: catalogId(50), note: null, bb_catalog_id: null },

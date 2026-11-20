@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from scadbuddy.bambuddy.prime_tower import object_conflict_warning
 from scadbuddy.bambuddy.runs import PrintRunError
-from scadbuddy.workflows.problems import object_conflict
+from scadbuddy.workflows.problems import (
+    SETTING_REFUSED_PROBLEM,
+    object_conflict,
+    setting_refused,
+)
 
 LAYER = (
     "Object conflicts were detected. Please verify the slicing of all plates in Bambu Studio"
@@ -64,3 +68,24 @@ def test_a_failed_slices_problem_keeps_its_words_and_carries_the_warning() -> No
 def test_a_problem_with_no_conflict_is_left_alone() -> None:
     problem = PrintRunError(status=502, title="Bad Gateway", detail="the plate is empty")
     assert object_conflict(problem, 1) is None
+
+
+def test_a_refused_setting_that_is_also_a_conflict_keeps_both() -> None:
+    # #6745: `_slice` reads the conflict from the refused setting's 422 (#6736). The 422
+    # keeps the slicer's words, so the warning is found there, and the key stays.
+    problem = PrintRunError(
+        status=502,
+        title="Bad Gateway",
+        detail=f"Bambuddy failed to slice the plate: {LAYER} wipe_tower_x is out of range.",
+    )
+    refused = setting_refused(problem, {"wipe_tower_x": "200"})
+    assert refused is not None
+
+    both = object_conflict(refused, 4)
+
+    assert both is not None
+    assert (both.type, both.status) == (SETTING_REFUSED_PROBLEM, 422)
+    assert both.detail == refused.detail
+    assert both.extensions["key"] == "wipe_tower_x"
+    [warning] = both.extensions["warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", 4)

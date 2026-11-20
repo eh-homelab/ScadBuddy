@@ -93,6 +93,64 @@ describe('filament catalog tools', () => {
   })
 })
 
+describe('filament catalog aliases (#6706)', () => {
+  const ALIASES = `${ONE}/aliases`
+  const RESOLVE = `${LIST}/resolve`
+
+  it.each([
+    ['filament_catalog_set_aliases', 'write'],
+    ['filament_catalog_resolve', 'read'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('puts the whole alias list of a row', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(ALIASES, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, name: 'Bambu Lab', aliases: ['Bambu', 'BL'] })
+      }),
+    )
+    const result = await runTool(tool('filament_catalog_set_aliases'), { kind: 'brands', row_id: ROW, aliases: ['Bambu', 'BL'] }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ aliases: ['Bambu', 'BL'] }])
+    expect(firstText(result)).toMatchObject({ aliases: ['Bambu', 'BL'] })
+  })
+
+  it('says which row holds a taken alias', async () => {
+    server.use(
+      http.put(ALIASES, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: "the brand 'Sunlu' already has a name or alias that matches 'sun-lu'", brand_id: ROW, brand_name: 'Sunlu' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const result = await runTool(tool('filament_catalog_set_aliases'), { kind: 'brands', row_id: ROW, aliases: ['sun-lu'] }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain("the brand 'Sunlu'")
+  })
+
+  it('takes only the catalogs that have aliases', async () => {
+    const result = await runTool(tool('filament_catalog_set_aliases'), { kind: 'colours', row_id: ROW, aliases: ['x'] }, ctx())
+    expect(result.isError).toBe(true)
+  })
+
+  it('resolves a name by key, a subtype within its material', async () => {
+    server.use(
+      http.get(RESOLVE, ({ request }) => {
+        const query = new URL(request.url).searchParams
+        expect([query.get('name'), query.get('material_id')]).toEqual(['bambu-lab', null])
+        return HttpResponse.json({ id: ROW, name: 'Bambu Lab' })
+      }),
+    )
+    const found = await runTool(tool('filament_catalog_resolve'), { kind: 'brands', name: 'bambu-lab' }, ctx())
+    expect(firstText(found)).toMatchObject({ id: ROW })
+  })
+})
+
 const TYPES = `${BACKEND}/api/v1/filament/types`
 const TYPE = `${TYPES}/${ROW}`
 

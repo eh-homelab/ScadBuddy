@@ -18,11 +18,13 @@ from scadbuddy.filament.models import (
     SpoolCreate,
     SpoolPatch,
     SpoolTypeCreate,
+    SubtypeCreate,
     TypeProposal,
     TypeProposalConfirm,
 )
 from tests.conftest import PgPool
 from tests.filament.test_bambuddy_pull import NOW, _filament, _ids, _pla, bb
+from tests.filament.test_catalog_names import _keyless
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -119,6 +121,46 @@ def test_a_proposal_names_a_type_that_already_matches(pg_pool: PgPool) -> None:
     _spool(f)
     kind = f.types.create(
         SpoolTypeCreate(code="MINE", material_id=_pla(pg_pool), rgba="#FF0000", label_weight_g=1000)
+    )
+    (group,) = type_proposals.proposals(f).groups
+    assert (group.type_id, group.code) == (kind.id, "MINE")
+
+
+def test_a_proposal_matches_its_type_by_id_not_by_a_subtypes_name(pg_pool: PgPool) -> None:
+    """R-6706-22: a group whose subtype is one for every material finds its type, though
+    the material has its own subtype of the same key."""
+    f = _filament(pg_pool)
+    pla = _pla(pg_pool)
+    anyone: Any = f.catalog.create("subtypes", SubtypeCreate(name="Glossy"))
+    f.catalog.create("subtypes", SubtypeCreate(name="glossy", material_id=pla))
+    _spool(f, subtype_id=anyone.id)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="MINE",
+            material_id=pla,
+            subtype_id=anyone.id,
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
+    )
+    (group,) = type_proposals.proposals(f).groups
+    assert (group.type_id, group.code) == (kind.id, "MINE")
+
+
+def test_a_proposal_with_a_keyless_catalog_row_finds_its_type(pg_pool: PgPool) -> None:
+    """R-6706-22: a brand the fill left without a key (R-6706-14) still matches by id."""
+    f = _filament(pg_pool)
+    with pg_pool.connection() as conn:
+        brand = _keyless(conn, "filament_brands", "filament_brands_claim_name", "!!!")
+    _spool(f, brand_id=brand)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="MINE",
+            material_id=_pla(pg_pool),
+            brand_id=brand,
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
     )
     (group,) = type_proposals.proposals(f).groups
     assert (group.type_id, group.code) == (kind.id, "MINE")

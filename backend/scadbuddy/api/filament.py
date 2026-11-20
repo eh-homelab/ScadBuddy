@@ -44,6 +44,8 @@ from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assi
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
+    CatalogKeyClashError,
+    CatalogKeyEmptyError,
     CatalogRefError,
     CatalogSpec,
 )
@@ -143,6 +145,12 @@ def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
 
 
 def _refused(exc: ValueError) -> ApiError:
+    if isinstance(exc, CatalogKeyClashError):
+        holder: dict[str, Any] = {
+            f"{exc.noun}_id": str(exc.holder_id),
+            f"{exc.noun}_name": exc.holder_name,
+        }
+        return ApiError(status.HTTP_409_CONFLICT, str(exc), **holder)
     code = (
         status.HTTP_409_CONFLICT
         if isinstance(
@@ -168,6 +176,7 @@ def _refused(exc: ValueError) -> ApiError:
         "A catalog a spool type or spool picks from, by kind: `materials`, `subtypes`, "
         "`brands`, `categories`, `effects`, `insert-materials`, `insert-types`, `colours` "
         "or `location-kinds`. In sort order; archived rows only with `include_archived`. "
+        "A material, subtype, brand, category or effect has `aliases`, its other names. "
         "404 for an unknown kind."
     ),
 )
@@ -187,8 +196,14 @@ async def list_catalog(
     description=(
         "The fields depend on the kind (every one takes `name` and `sort_order`; materials "
         "add print and drying defaults and handling flags, colours an `rgba`). 404 for an "
-        "unknown kind, 409 when an unarchived row has the name, 422 for a bad field, a "
-        "row it points at that does not exist, or a minimum temperature above its maximum."
+        "unknown kind, 409 when a row has the name, 422 for a bad field, a row it points "
+        "at that does not exist, or a minimum temperature above its maximum. In the "
+        "materials, subtypes, brands, categories and effects catalogs a name matches by its "
+        "key (letters and digits, any case: `dual-color` is `Dual Color`) against every "
+        "name and alias, archived rows too, a subtype's within its material; the 409 then "
+        "names the row that holds it (`<kind>_id`, `<kind>_name`, e.g. `effect_id`); a name "
+        "there with no letter or digit is a 422. `+` counts as `PLUS` (`PLA+` is `PLA Plus`, "
+        "not `PLA`)."
     ),
 )
 async def create_catalog_row(
@@ -198,7 +213,7 @@ async def create_catalog_row(
     parsed = _body(spec.create, body)
     try:
         made = await asyncio.to_thread(filament.catalog.create, kind, parsed)
-    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
+    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(made, kind, UUID(int=0))
 
@@ -209,9 +224,11 @@ async def create_catalog_row(
     summary="Change a row of a filament catalog",
     description=(
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
-        "the row off the lists and frees its name, `false` puts it back. 404 for an unknown "
-        "kind or row, 409 when another unarchived row has the name, 422 for a bad field or a "
-        "minimum temperature above its maximum."
+        "the row off the lists, `false` puts it back; an archived material, subtype, brand, "
+        "category or effect keeps its names and aliases, any other row frees its name. 404 "
+        "for an unknown kind or row, 409 when another row has the name (by key, as on "
+        "create, naming the holder), 422 for a bad field, a name with no letter or digit "
+        "(those catalogs), or a minimum temperature above its maximum."
     ),
 )
 async def patch_catalog_row(
@@ -221,9 +238,70 @@ async def patch_catalog_row(
     parsed = _body(spec.patch, body)
     try:
         changed = await asyncio.to_thread(filament.catalog.update, kind, row_id, parsed)
-    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
+    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(changed, kind, row_id)
+
+
+_ALIASED = ", ".join(kind for kind, spec in CATALOGS.items() if spec.names is not None)
+
+
+def _aliased(kind: str) -> CatalogSpec:
+    spec = _spec(kind)
+    if spec.names is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"the {kind} catalog has no aliases; these do: {_ALIASED}"
+        )
+    return spec
+
+
+@router.put(
+    "/catalog/{kind}/{row_id}/aliases",
+    response_model=CatalogRow,
+    summary="Set the aliases of a catalog row",
+    description=(
+        "The whole alias list of a material, subtype, brand, category or effect: its other "
+        "names, which every name lookup (the Bambuddy import, the CSV import, the price "
+        "book) resolves to it. Each is trimmed. 404 for another kind or no such row, 409 "
+        "when an alias's key (letters and digits, any case) is another name or alias of "
+        "the catalog, the row's own name or an earlier alias of the list (it names the "
+        "holder: `<kind>_id`, `<kind>_name`), 422 for an empty alias or one with no "
+        "letter or digit. Nothing changes on a refusal."
+    ),
+)
+async def put_catalog_aliases(
+    filament: FilamentDep, kind: str, row_id: UUID, body: Annotated[dict[str, Any], Body()]
+) -> CatalogRow:
+    _aliased(kind)
+    parsed = cast("m.AliasesPut", _body(m.AliasesPut, body))
+    try:
+        changed = await asyncio.to_thread(
+            filament.catalog.set_aliases, kind, row_id, list(parsed.aliases)
+        )
+    except (CatalogExistsError, CatalogKeyEmptyError) as exc:
+        raise _refused(exc) from None
+    return _row(changed, kind, row_id)
+
+
+@router.get(
+    "/catalog/{kind}/resolve",
+    response_model=CatalogRow,
+    summary="Find a catalog row by any of its names",
+    description=(
+        "The material, subtype, brand, category or effect whose name or alias has the key "
+        "of `name` (letters and digits, any case), archived or not: what the imports "
+        "resolve a name to. A subtype is `material_id`'s own, else one for every "
+        "material. 404 for another kind or no match."
+    ),
+)
+async def resolve_catalog_row(
+    filament: FilamentDep, kind: str, name: str, material_id: UUID | None = None
+) -> CatalogRow:
+    _aliased(kind)
+    row = await asyncio.to_thread(filament.catalog.resolve, kind, name, material_id)
+    if row is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no {kind} row is named {name!r}")
+    return cast("CatalogRow", row)
 
 
 # -- spool types ----------------------------------------------------------------------
@@ -647,19 +725,21 @@ IMPORT_ROUTE = "POST /filament/spools/import"
     response_model=ImportPreview,
     summary="Import spools from CSV rows",
     description=(
-        "Rows of a spools CSV, parsed by the caller (cells as text, under the export's "
-        "column names). A row with a `number` changes that spool, only where a cell differs "
-        "from what it shows now; an empty cell changes nothing. A row with no `number` makes "
-        "a spool. Material, subtype, brand, category and effect names resolve in any case "
-        "and are added to their catalog when missing; `insert_type` and `type` (a spool "
-        "type's code) must exist; `location` must name exactly one unarchived place and is "
-        "a move. Derived columns (`grams_left`, `last_used_at`, ...) are ignored; any other "
-        "unknown column is a 422. `dry_run: true` answers what each row would do (`create`, "
-        "`update` or `error`, with its changes as `[before, after]`) and writes nothing. "
-        "`dry_run: false` writes every row in one transaction, and needs an "
-        "`Idempotency-Key` (428 without one): a retry with the same key answers the first "
-        "result and writes nothing, and the key with another body is a 422. A write with "
-        "any row in error is a 422 naming each line, and writes nothing."
+        "Rows of a spools CSV, parsed by the caller (cells as text, under the export's column "
+        "names). A row with a `number` changes that spool, only where a cell differs from what "
+        "it shows now; an empty cell changes nothing. A row with no `number` makes a spool. "
+        "Material, subtype, brand, category and effect names resolve by key (any case and "
+        "punctuation) against every name and alias, archived rows too, and are added to their "
+        'catalog when missing (a name with no letter or digit is skipped, marked `{"skipped": '
+        "...}`, and the row goes on); `insert_type` and `type` (a spool type's code) must "
+        "exist; `location` must name exactly one unarchived place and is a move. Derived "
+        "columns (`grams_left`, `last_used_at`, ...) are ignored; any other unknown column is a"
+        " 422. `dry_run: true` answers what each row would do (`create`, `update` or `error`, "
+        "with its changes as `[before, after]`) and writes nothing. `dry_run: false` writes "
+        "every row in one transaction, and needs an `Idempotency-Key` (428 without one): a "
+        "retry with the same key answers the first result and writes nothing, and the key with "
+        "another body is a 422. A write with any row in error is a 422 naming each line, and "
+        "writes nothing."
     ),
 )
 async def import_spools(

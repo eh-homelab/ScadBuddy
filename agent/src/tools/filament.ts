@@ -62,6 +62,9 @@ const kind = z
   ])
   .describe('Which catalog')
 
+/** #6706 — the catalogs whose rows have aliases (backend `filament/catalog.py` `NameTable`). */
+const aliasedKind = z.enum(['materials', 'subtypes', 'brands', 'categories', 'effects']).describe('Which catalog')
+
 const EVENT_KINDS = [
   'created',
   'loaded',
@@ -106,7 +109,8 @@ export const filamentTools: Tool[] = [
     description:
       "One of ScadBuddy's filament catalogs, in sort order: materials (print and drying defaults, handling " +
       'flags), subtypes, brands, categories, effects, insert-materials, insert-types, colours (a maker\'s named ' +
-      'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`.',
+      'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`. A material, ' +
+      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases).',
     input: z.object({ kind, include_archived: z.boolean().default(false) }),
     risk: 'read',
     source: SOURCE,
@@ -128,8 +132,12 @@ export const filamentTools: Tool[] = [
     description:
       'Add a row to a filament catalog (no `row_id`), or edit one: only the `fields` given change, and `null` ' +
       'clears a nullable one. Every row has `name` and `sort_order`; the other fields depend on the kind ' +
-      '(see filament_catalog_list). `archived: true` takes a row off the lists and frees its name, `false` puts ' +
-      'it back. 409 when another unarchived row has the name. Only what the user says. Writes ScadBuddy only.',
+      '(see filament_catalog_list). `archived: true` takes a row off the lists, `false` puts it back. In the ' +
+      'materials, subtypes, brands, categories and effects catalogs a name is matched by its key (letters and ' +
+      'digits, any case: `dual-color` is `Dual Color`) against every name and alias, archived rows included (a ' +
+      "subtype's within its material); the 409 names the row that holds it. In the other catalogs an archived " +
+      'row frees its name and a 409 means another unarchived row has it. Only what the user says. Writes ' +
+      'ScadBuddy only.',
     input: z.object({
       kind,
       row_id: z.string().uuid().optional().describe("A row's `id` from filament_catalog_list; omit to add"),
@@ -161,6 +169,61 @@ export const filamentTools: Tool[] = [
         ),
       )
     },
+  }),
+
+  defineTool({
+    name: 'filament_catalog_resolve',
+    label: 'Find a filament catalog row by name',
+    description:
+      'The material, subtype, brand, category or effect that a name resolves to, as the Bambuddy and CSV ' +
+      "imports resolve it: by key (letters and digits, any case) against every name and alias, archived rows " +
+      "too. A subtype is `material_id`'s own, else one for every material. A 404 means no row has that name.",
+    input: z.object({
+      kind: aliasedKind,
+      name: z.string().min(1),
+      material_id: z.string().uuid().optional().describe("For a subtype: the material's `id`"),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/catalog/{kind}/resolve'],
+    handler: async ({ kind, name, material_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/catalog/{kind}/resolve', {
+            params: { path: { kind }, query: { name, material_id } },
+          }),
+          `find ${name} in the ${kind} catalog`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_catalog_set_aliases',
+    label: 'Set the aliases of a filament catalog row',
+    description:
+      "Replace a material's, subtype's, brand's, category's or effect's aliases (its other names, which the " +
+      'imports and the price book resolve to it) with `aliases`, the whole list; `[]` removes them all. Each ' +
+      "alias's key (letters and digits, any case) must be free in the catalog: a 409 names the row that holds " +
+      'it, and nothing changes. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      kind: aliasedKind,
+      row_id: z.string().uuid().describe("A row's `id` from filament_catalog_list"),
+      aliases: z.array(z.string().trim().min(1).max(128)).max(64),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['PUT /api/v1/filament/catalog/{kind}/{row_id}/aliases'],
+    summarize: ({ kind, row_id, aliases }) => `Set ${kind} row ${row_id} aliases: ${aliases.join(', ') || 'none'}`,
+    handler: async ({ kind, row_id, aliases }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/filament/catalog/{kind}/{row_id}/aliases', {
+            params: { path: { kind, row_id } },
+            body: { aliases },
+          }),
+          `set the aliases of ${kind} row ${row_id}`,
+        ),
+      ),
   }),
 
   defineTool({
@@ -1237,7 +1300,8 @@ export const filamentTools: Tool[] = [
       'Make or change spools from rows of a spools CSV (cells as text, under the export\'s column names: ' +
       `${CSV_COLUMNS.join(', ')}). A row with a \`number\` changes that spool where a cell differs; an empty cell ` +
       'changes nothing. A row with no `number` makes a spool (it needs a `type` code or a `material`). Material, ' +
-      'subtype, brand, category and effect names are added to their catalog when missing; `insert_type`, `type` ' +
+      'subtype, brand, category and effect names resolve by key against every name and alias (`dual-color` is ' +
+      '`Dual Color`) and are added to their catalog when missing; `insert_type`, `type` ' +
       'and `location` must exist (a location is a move). Derived columns (grams_left, last_used_at, ...) are ' +
       'ignored. It previews first and writes only when no line is an error, all rows at once; to see the ' +
       'preview alone, use filament_spool_import_preview. Only what the user says. Writes ScadBuddy only.',

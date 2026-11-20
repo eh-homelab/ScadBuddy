@@ -93,6 +93,19 @@ class _Catalog(_Row):
     archived_at: datetime | None
 
 
+class _Aliased(_Catalog):
+    """A row of a catalog with aliases (#6706): its other names, canonical name aside,
+    each a key no other name or alias of the catalog has (`filament/catalog.py`)."""
+
+    aliases: list[str] = Field(default_factory=list)
+
+
+class AliasesPut(_In):
+    """The whole alias list of a row: trimmed, none empty (#6706, R-6706-6)."""
+
+    aliases: Annotated[list[Name], Field(max_length=64)]
+
+
 # -- the plain catalogs: brand, category, effect, insert material --------------------
 
 
@@ -114,7 +127,7 @@ class BrandCreate(_NamedCreate): ...
 class BrandPatch(_NamedPatch): ...
 
 
-class Brand(_Catalog): ...
+class Brand(_Aliased): ...
 
 
 class CategoryCreate(_NamedCreate): ...
@@ -123,7 +136,7 @@ class CategoryCreate(_NamedCreate): ...
 class CategoryPatch(_NamedPatch): ...
 
 
-class Category(_Catalog): ...
+class Category(_Aliased): ...
 
 
 class EffectCreate(_NamedCreate): ...
@@ -132,7 +145,7 @@ class EffectCreate(_NamedCreate): ...
 class EffectPatch(_NamedPatch): ...
 
 
-class Effect(_Catalog): ...
+class Effect(_Aliased): ...
 
 
 class InsertMaterialCreate(_NamedCreate): ...
@@ -199,7 +212,7 @@ class MaterialPatch(_Patch):
     archived: bool | None = None
 
 
-class Material(_Catalog):
+class Material(_Aliased):
     family: str | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -245,7 +258,7 @@ class SubtypePatch(_Patch):
     archived: bool | None = None
 
 
-class Subtype(_Catalog):
+class Subtype(_Aliased):
     material_id: UUID | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
