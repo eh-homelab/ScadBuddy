@@ -97,6 +97,8 @@ def pack_layout(req: PackRequest) -> Layout:
             colours=req.colours,
             allow_own=req.allow_own,
             tower=req.prime_tower is None or req.prime_tower.enabled,
+            no_sparse_layers=req.prime_tower is not None
+            and req.prime_tower.no_sparse_layers is True,
         )
     except PackError as error:
         raise ApplicationError(str(error), type=PACK_REFUSED, non_retryable=True) from None

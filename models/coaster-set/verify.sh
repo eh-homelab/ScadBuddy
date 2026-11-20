@@ -307,8 +307,9 @@ def holder_mode(hb, cs):
 
 
 # A multi-colour plate needs the prime tower's strip free along one edge:
-# ScadBuddy reserves the 60 mm tower, its 3 mm brim each side, 5 mm to the
-# parts and 2 mm to the edge (backend render/plate.py). Mirrors TOWER in the model.
+# ScadBuddy reserves the tower, its 3 mm brim each side, 5 mm to the parts and
+# 2 mm to the edge (backend render/plate.py); a 60 mm square holds the tower for
+# up to seven colours on the H2C (#6735). Mirrors TOWER in the model.
 TOWER = 60 + 2 * 3 + 5 + 2
 
 

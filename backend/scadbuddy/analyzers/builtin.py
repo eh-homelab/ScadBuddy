@@ -24,9 +24,14 @@ from scadbuddy.analyzers.model import (
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan
 from scadbuddy.bambuddy.filaments import check as check_filaments
 from scadbuddy.bambuddy.prime_tower import tower_asked
-from scadbuddy.render.bambu3mf import plates_of, replate_3mf, stated_tower_off
+from scadbuddy.render.bambu3mf import (
+    plates_of,
+    replate_3mf,
+    stated_no_sparse_layers,
+    stated_tower_off,
+)
 from scadbuddy.render.geometry import OVERHANG_ANGLES, MeshEdge
-from scadbuddy.render.plate import PlateFitError, fit_problem, overshoots
+from scadbuddy.render.plate import PlateFitError, TowerSettings, fit_problem, overshoots
 
 #: Located edges a mesh diagnostic carries per part; the counts are always complete.
 MAX_EDGES_PER_DIAGNOSTIC = 100
@@ -564,7 +569,13 @@ def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
         size = output.bbox_mm.size
         over = list(overshoots(size, plate))
         tower = len(output.colors) > 1 and (not stated_off or tower_on)
-        problem = None if over else fit_problem(size, plate, tower=tower)
+        # The tower the send sizes (#6735): from the colours, with the keep-out when the
+        # file states "No sparse layers".
+        settings = TowerSettings(
+            filaments=len(output.colors),
+            no_sparse_layers=payload is not None and stated_no_sparse_layers(payload),
+        )
+        problem = None if over else fit_problem(size, plate, tower=tower, settings=settings)
     if not over and problem is None:
         return []
     evidence = [

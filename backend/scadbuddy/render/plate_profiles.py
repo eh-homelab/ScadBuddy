@@ -270,3 +270,26 @@ CLEARANCES: dict[str, tuple[float, float, float]] = {
     "Bambu Lab X1E": (57.0, 34.0, 90.0),
     "Bambu Lab X2D": (13.0, 32.8, 133.0),
 }
+
+#: ``printer_model`` -> (``extruder_clearance_max_radius``, ``nozzle_height``, the
+#: largest ``z_hop``), mm: what a prime tower printed with ``wipe_tower_no_sparse_layers``
+#: must keep from the objects (#6735). Bambu Studio refuses to slice a plate whose
+#: objects taller than ``nozzle_height`` stand closer to the tower than the radius
+#: (``compacted_wipe_tower_clearance`` in ``Print.cpp``); the tower is grown by the
+#: spiral lift ``z_hop`` sets first (``compacted_wipe_tower_zone``).
+TOWER_KEEP_OUTS: dict[str, tuple[float, float, float]] = {
+    "Bambu Lab A1": (73.0, 4.76, 0.4),
+    "Bambu Lab A1 mini": (73.0, 4.76, 0.4),
+    "Bambu Lab A2L": (73.0, 4.76, 0.4),
+    "Bambu Lab H2C": (96.0, 4.0, 0.4),
+    "Bambu Lab H2D": (96.0, 4.0, 0.4),
+    "Bambu Lab H2D Pro": (96.0, 4.0, 0.4),
+    "Bambu Lab H2S": (81.0, 4.0, 0.4),
+    "Bambu Lab P1P": (68.0, 4.2, 0.4),
+    "Bambu Lab P1S": (68.0, 4.2, 0.4),
+    "Bambu Lab P2S": (72.0, 4.2, 0.4),
+    "Bambu Lab X1": (68.0, 4.2, 0.4),
+    "Bambu Lab X1 Carbon": (68.0, 4.2, 0.4),
+    "Bambu Lab X1E": (68.0, 4.2, 0.4),
+    "Bambu Lab X2D": (60.0, 4.0, 0.4),
+}

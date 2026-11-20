@@ -26,6 +26,7 @@ from scadbuddy.render.plate import (
     Placement,
     PlateFitError,
     PlateGeometry,
+    TowerSettings,
     centre_on_plate,
     place_on_plate,
 )
@@ -228,18 +229,24 @@ class PlateParts:
             )
 
     @property
-    def tower(self) -> bool:
-        """Whether this plate needs a prime tower: only when it uses more than one
-        filament. One colour prints without one, so reserving room would refuse
-        plates that are perfectly printable. A painted part prints with its painting's
-        filaments too (#1965), but a painting only in filaments the plate already uses
-        adds none (#2108). The painting must be numbered against the file's filament
-        list, as `write_plates_3mf` renumbers it before asking."""
+    def filaments(self) -> int:
+        """How many filaments this plate prints with, which sizes its prime tower
+        (#6735). A painted part prints with its painting's filaments too (#1965), but a
+        painting only in filaments the plate already uses adds none (#2108). The
+        painting must be numbered against the file's filament list, as
+        `write_plates_3mf` renumbers it before asking."""
         used = set(self.extruders)
         for part in self.parts:
             if part.paint is not None:
                 used.update(state for code in part.paint.codes if code for state in states(code))
-        return len(used) > 1
+        return len(used)
+
+    @property
+    def tower(self) -> bool:
+        """Whether this plate needs a prime tower: only when it uses more than one
+        filament (:attr:`filaments`). One colour prints without one, so reserving room
+        would refuse plates that are perfectly printable."""
+        return self.filaments > 1
 
 
 def single_plate(parts: Sequence[ColourPart]) -> PlateParts:
@@ -247,9 +254,11 @@ def single_plate(parts: Sequence[ColourPart]) -> PlateParts:
     return PlateParts(tuple(parts), tuple(range(1, len(parts) + 1)))
 
 
-def _placement(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool) -> Placement:
+def _placement(
+    bounds: np.ndarray, plate: PlateGeometry, *, tower: bool, settings: TowerSettings
+) -> Placement:
     try:
-        return place_on_plate(bounds, plate, tower=tower)
+        return place_on_plate(bounds, plate, tower=tower, settings=settings)
     except PlateFitError:
         # "No printer chosen" is a property of the plate, not of which object was
         # passed. An identity test against the shared singleton would silently
@@ -650,14 +659,24 @@ def _flag(value: bool) -> str:
     return "1" if value else "0"
 
 
-def _tower_off(settings: Mapping[str, Any]) -> bool:
-    """Whether ``project_settings.config`` turns the prime tower off (#3770): the
-    writer states it so for an Arrange that packed with no tower. A list is read by its
-    first value, as Bambu Studio may write a scalar either way."""
-    value = settings.get("enable_prime_tower")
+def _stated(settings: Mapping[str, Any], key: str) -> object:
+    """``settings[key]``, a list read by its first value, as Bambu Studio may write a
+    scalar either way."""
+    value = settings.get(key)
     if isinstance(value, list):
         value = value[0] if value else None
-    return value == "0"
+    return value
+
+
+def _tower_off(settings: Mapping[str, Any]) -> bool:
+    """Whether ``project_settings.config`` turns the prime tower off (#3770): the
+    writer states it so for an Arrange that packed with no tower."""
+    return _stated(settings, "enable_prime_tower") == "0"
+
+
+def _stated_flag(settings: Mapping[str, Any], key: str) -> bool:
+    """Whether ``project_settings.config`` turns the coBool ``key`` on (``"1"``)."""
+    return _stated(settings, key) == "1"
 
 
 def _set_towers(settings: dict[str, Any], towers: Sequence[tuple[float, float] | None]) -> None:
@@ -888,7 +907,14 @@ def write_plates_3mf(
     ]
     covers = thumbnails is not None
     placements = [
-        _placement(model_bounds(each.parts), plate, tower=prime_tower is not False and each.tower)
+        _placement(
+            model_bounds(each.parts),
+            plate,
+            tower=prime_tower is not False and each.tower,
+            settings=TowerSettings(
+                filaments=each.filaments, no_sparse_layers=no_sparse_layers is True
+            ),
+        )
         for each in plates
     ]
     offsets = [
@@ -1325,6 +1351,7 @@ def replate_3mf(
     )
     count = len({each.index for each in laid_out})
     tower_off = _tower_off(settings) and not tower_on
+    no_sparse = _stated_flag(settings, "wipe_tower_no_sparse_layers")
     placements: list[Placement] = []
     transforms: dict[str, str] = {}
     rotation = IDENTITY.rsplit(" ", 3)[0]
@@ -1336,17 +1363,23 @@ def replate_3mf(
             # A tower only for more than one filament, a painting's counted as
             # `PlateParts.tower` counts them (#2108). One object goes by its parts, as
             # it always has; several objects in one colour need none (#956).
-            if tower_off:
-                # Arranged with the tower off (#3770): no room is kept for one.
-                tower = False
-            elif len(each.assembly_ids) > 1 and each.extruders is not None:
-                tower = len(each.extruders | painted) > 1
+            if len(each.assembly_ids) > 1 and each.extruders is not None:
+                filaments = len(each.extruders | painted)
             else:
                 # One object; or several whose model_settings name no extruders, so the
-                # filaments are unknown and a tower is reserved whenever there is more
-                # than one part: room to spare rather than a plate that will not slice.
-                tower = len(each.object_files) > 1
-            placement = place_on_plate(bounds, plate, tower=tower)
+                # filaments are unknown and each part is counted as one: room to spare
+                # rather than a plate that will not slice.
+                filaments = len(each.object_files)
+            # Arranged with the tower off (#3770): no room is kept for one.
+            tower = not tower_off and filaments > 1
+            placement = place_on_plate(
+                bounds,
+                plate,
+                tower=tower,
+                # The tower the slice builds (#6735): its size from the filaments, and
+                # the keep-out when the file states "No sparse layers".
+                settings=TowerSettings(filaments=filaments, no_sparse_layers=no_sparse),
+            )
         except PlateFitError as error:
             if count == 1:
                 raise
@@ -2447,6 +2480,20 @@ def stated_tower_off(payload: bytes) -> bool:
     except (KeyError, ValueError, zipfile.BadZipFile):
         return False
     return isinstance(settings, dict) and _tower_off(settings)
+
+
+def stated_no_sparse_layers(payload: bytes) -> bool:
+    """Whether ``payload`` is laid out by ScadBuddy and states
+    ``wipe_tower_no_sparse_layers`` on: an Arrange asked for it, so :func:`replate_3mf`
+    keeps the slicer's keep-out round the tower (#6735). Any other file is false."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if _layout(archive) != "scadbuddy":
+                return False
+            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return False
+    return isinstance(settings, dict) and _stated_flag(settings, "wipe_tower_no_sparse_layers")
 
 
 def part_settings_slots(payload: bytes) -> set[int] | None:

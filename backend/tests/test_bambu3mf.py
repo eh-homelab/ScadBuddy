@@ -48,6 +48,7 @@ from scadbuddy.render.bambu3mf import (
     replate_3mf,
     single_plate,
     state_nozzles,
+    stated_no_sparse_layers,
     stated_tower_off,
     stl_3mf,
     write_bambu_3mf,
@@ -163,10 +164,12 @@ def test_filament_colours_follow_part_order(written: Path) -> None:
 
 
 def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
-    """Bambu Studio writes every vector option as an array of strings."""
+    """Bambu Studio writes every vector option as an array of strings. The tower is the
+    two-filament one of a one-nozzle plate, 24 mm square (#6735), centred on the object's
+    x 128 with its 3 mm brim."""
     with zipfile.ZipFile(written) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
-    assert settings["wipe_tower_x"] == ["98"]
+    assert settings["wipe_tower_x"] == ["115.985986"]
     assert settings["wipe_tower_y"] == ["5"]
 
 
@@ -342,7 +345,7 @@ def test_a_stated_tower_choice_is_written_and_none_writes_nothing(
         no_sparse_layers=False,
     )
     settings = _settings_of(out)
-    assert settings["wipe_tower_x"] == ["98"]
+    assert settings["wipe_tower_x"] == ["115.985986"]
     assert (settings["enable_prime_tower"], settings["wipe_tower_no_sparse_layers"]) == ("1", "0")
     omitted = _settings_of(written)
     assert "enable_prime_tower" not in omitted
@@ -422,7 +425,8 @@ class TestReplate:
         assert item is not None
         transform = [float(v) for v in (item.get("transform") or "").split()]
         assert transform[9:11] == [175.0, 160.0]
-        assert settings["wipe_tower_x"] == ["145"]
+        # The H2C's two-filament tower, 35.5 mm square (#6735), centred on x 175.
+        assert settings["wipe_tower_x"] == ["157.24278"]
         assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB"]
 
     def test_replating_is_what_writing_for_that_plate_would_have_produced(
@@ -1052,7 +1056,7 @@ def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> 
         "printable_height": "250",
         "filament_diameter": ["1.75", "1.75"],
         "filament_is_support": ["0", "0"],
-        "wipe_tower_x": ["98"],
+        "wipe_tower_x": ["115.985986"],
         "wipe_tower_y": ["5"],
     }
 
@@ -2728,3 +2732,46 @@ def test_painting_in_the_root_model_is_named_too() -> None:
     )
     hinted = hint_painted_slots(_with_entries(payload, {"3D/3dmodel.model": root.encode()}))
     assert _bambuddy_slots(hinted, 2) == {1, 2}
+
+
+def test_a_file_that_states_no_sparse_layers_keeps_the_keep_out(tmp_path: Path) -> None:
+    """#6735: an Arrange asked for "No sparse layers", so the file states it, and the
+    send's re-placing keeps the slicer's keep-out round the tower, as the writer did. A
+    60 mm, 20 mm tall body centred on the H2C leaves 86 mm in front of it, less than the
+    keep-out, so the plate is laid out another way."""
+    h2c = plate_for("H2C")
+    parts = [
+        ColourPart(1, "Body", "#FF6AC1", trimesh.creation.box(extents=(60, 60, 20))),
+        ColourPart(2, "Eye", "#1F6FEB", trimesh.creation.box(extents=(4, 4, 4))),
+    ]
+    render = tmp_path / "render.3mf"
+    write_plates_3mf([single_plate(parts)], [p.colour for p in parts], render, thumbnails=None)
+    no_sparse = _restated(render.read_bytes(), wipe_tower_no_sparse_layers=["1"])
+    assert stated_no_sparse_layers(no_sparse)
+    assert not stated_no_sparse_layers(render.read_bytes())
+
+    def layout(payload: bytes) -> tuple[object, object, list[float]]:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            item = ET.fromstring(archive.read("3D/3dmodel.model")).find(".//{*}item")
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert item is not None
+        moved = [float(v) for v in (item.get("transform") or "").split()][9:11]
+        return settings["wipe_tower_x"], settings["wipe_tower_y"], moved
+
+    plain = layout(replate_3mf(render.read_bytes(), h2c))
+    kept = layout(replate_3mf(no_sparse, h2c))
+
+    # Centred, the body's front edge is 86.5 mm past the tower; moved back, 100.6 mm.
+    assert plain[2] == [175.0, 160.0]
+    assert kept[2][1] > 160.0
+    out = tmp_path / "no-sparse.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        plate=h2c,
+        prime_tower=True,
+        no_sparse_layers=True,
+    )
+    assert layout(out.read_bytes()) == kept

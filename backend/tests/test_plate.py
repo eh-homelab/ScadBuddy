@@ -10,16 +10,19 @@ from scadbuddy.render.plate import (
     EDGE_MARGIN,
     PRIME_TOWER_AUTO_BRIM,
     PRIME_TOWER_BRIM,
-    PRIME_TOWER_SIDE,
     TOWER_CLEARANCE,
     Placement,
     PlateFitError,
     PlateGeometry,
     Rect,
+    TowerSettings,
     bed_types_for,
+    fit_problem,
+    min_tower_depth,
     place_on_plate,
     plate_for,
     tower_brim,
+    tower_footprint,
 )
 
 # The keychain of library file 62: 176 x 46 mm in XY, 3 mm tall.
@@ -28,6 +31,11 @@ KEYCHAIN = np.array([[-88.0, -23.0, -1.5], [88.0, 23.0, 1.5]])
 
 def _bounds(width: float, depth: float, height: float = 3.0) -> np.ndarray:
     return np.array([[0.0, 0.0, 0.0], [width, depth, height]])
+
+
+def _side(plate: PlateGeometry, height: float = 3.0) -> float:
+    """The side of the square two-filament tower (#6735) for objects ``height`` tall."""
+    return tower_footprint(plate, height).width
 
 
 class TestBedTypes:
@@ -175,8 +183,9 @@ class TestTowerBrim:
         x, y = placement.tower
         brim = tower_brim(150.0)
         inset = EDGE_MARGIN + brim
-        assert plate.usable.min_x + inset <= x <= plate.usable.max_x - inset - PRIME_TOWER_SIDE
-        assert plate.usable.min_y + inset <= y <= plate.usable.max_y - inset - PRIME_TOWER_SIDE
+        side = _side(plate, 150.0)
+        assert plate.usable.min_x + inset <= x <= plate.usable.max_x - inset - side
+        assert plate.usable.min_y + inset <= y <= plate.usable.max_y - inset - side
 
 
 class TestPlacement:
@@ -196,9 +205,9 @@ class TestPlacement:
         assert placement.tower is not None
         x, y = placement.tower
         assert x >= plate.usable.min_x
-        assert x + PRIME_TOWER_SIDE <= plate.usable.max_x
+        assert x + _side(plate) <= plate.usable.max_x
         assert y >= plate.usable.min_y
-        assert y + PRIME_TOWER_SIDE <= plate.usable.max_y
+        assert y + _side(plate) <= plate.usable.max_y
         # The failing file put the tower at x=15..75, inside extruder 2's dead zone.
         assert x >= 25.0
 
@@ -212,8 +221,8 @@ class TestPlacement:
             tower = (
                 placement.tower[0],
                 placement.tower[1],
-                placement.tower[0] + PRIME_TOWER_SIDE,
-                placement.tower[1] + PRIME_TOWER_SIDE,
+                placement.tower[0] + _side(plate),
+                placement.tower[1] + _side(plate),
             )
             overlaps = (
                 tower[0] < object_box[2]
@@ -232,9 +241,9 @@ class TestPlacement:
         assert not (x < cutout.max_x and y < cutout.max_y)
 
     @staticmethod
-    def _tower_footprint(placement: Placement) -> Rect:
+    def _tower_footprint(placement: Placement, plate: PlateGeometry) -> Rect:
         assert placement.tower is not None
-        reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+        reserved = _side(plate) + 2 * PRIME_TOWER_BRIM
         x = placement.tower[0] - PRIME_TOWER_BRIM
         y = placement.tower[1] - PRIME_TOWER_BRIM
         return Rect(x, y, x + reserved, y + reserved)
@@ -251,7 +260,7 @@ class TestPlacement:
         plate = plate_for("H2C")
         wrapping = Rect(145.0, 310.0, 251.0, 326.0)
         placement = place_on_plate(_bounds(width, depth), plate)
-        footprint = self._tower_footprint(placement)
+        footprint = self._tower_footprint(placement, plate)
         assert not footprint.overlaps(wrapping), f"tower {footprint} is in the wrapping zone"
 
     @pytest.mark.parametrize("model", ["H2C", "H2D", "H2DP", "H2S", "P2S"])
@@ -264,14 +273,14 @@ class TestPlacement:
         is placed on the moved path.
         """
         plate = plate_for(model)
-        band = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM + TOWER_CLEARANCE + EDGE_MARGIN
+        band = _side(plate) + 2 * PRIME_TOWER_BRIM + TOWER_CLEARANCE + EDGE_MARGIN
         width, depth = (
             (60.0, 20.0)
             if size == "keychain"
             else (plate.usable.width * 0.9, plate.usable.depth - band - 5.0)
         )
         placement = place_on_plate(_bounds(width, depth), plate)
-        footprint = self._tower_footprint(placement)
+        footprint = self._tower_footprint(placement, plate)
         for zone in plate.wrapping_exclusions:
             assert not footprint.overlaps(zone), f"{model}: tower {footprint} is in {zone}"
         assert plate.usable.min_x <= footprint.min_x and footprint.max_x <= plate.usable.max_x
@@ -291,21 +300,22 @@ class TestPlacement:
         without = dataclasses.replace(front_blocked, wrapping_exclusions=())
         wrapping = h2c.wrapping_exclusions[0]
 
-        unchecked = self._tower_footprint(place_on_plate(_bounds(100.0, 100.0), without))
+        unchecked = self._tower_footprint(place_on_plate(_bounds(100.0, 100.0), without), h2c)
         assert unchecked.overlaps(wrapping), "the back strip should have been chosen"
 
-        checked = self._tower_footprint(place_on_plate(_bounds(100.0, 100.0), front_blocked))
+        checked = self._tower_footprint(place_on_plate(_bounds(100.0, 100.0), front_blocked), h2c)
         assert not checked.overlaps(wrapping), f"tower {checked} is in the wrapping zone"
 
     def test_a_large_object_moves_over_to_leave_the_tower_room(self) -> None:
-        # 280 x 180 leaves 140 mm of depth free, more than the tower's 60 + brim +
-        # clearance, so the object gives up the centre and the tower takes the strip.
+        # Centred, 280 x 260 leaves 30 mm in front and behind, less than the
+        # two-filament tower's 35.5 + brim + clearance; off centre it leaves 60, so the
+        # object gives up the centre and the tower takes the strip.
         plate = plate_for("H2C")
-        placement = place_on_plate(_bounds(280.0, 180.0), plate)
+        placement = place_on_plate(_bounds(280.0, 260.0), plate)
         assert placement.tower is not None
-        centre_y = placement.offset[1] + 90.0
+        centre_y = placement.offset[1] + 130.0
         assert centre_y > plate.usable.centre[1], "the object should have moved off centre"
-        tower_top = placement.tower[1] + PRIME_TOWER_BRIM + PRIME_TOWER_SIDE
+        tower_top = placement.tower[1] + PRIME_TOWER_BRIM + _side(plate)
         assert placement.offset[1] - tower_top >= TOWER_CLEARANCE
 
     @pytest.mark.parametrize("depth", [46.0, 140.0, 170.0, 180.0, 190.0, 230.0])
@@ -321,8 +331,8 @@ class TestPlacement:
             placement.tower[1] - PRIME_TOWER_BRIM,
         )
         # ``tower`` names the tower itself; the brim sits outside it on every side,
-        # so the footprint that has to stay clear is wider than PRIME_TOWER_SIDE.
-        reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+        # so the footprint that has to stay clear is wider than the tower.
+        reserved = _side(plate) + 2 * PRIME_TOWER_BRIM
         gaps = [
             placement.offset[1] - (corner[1] + reserved),
             corner[1] - (placement.offset[1] + depth),
@@ -368,7 +378,7 @@ class TestPlacement:
         assert rect[0] >= plate.usable.min_x and rect[2] <= plate.usable.max_x
         assert rect[1] >= plate.usable.min_y and rect[3] <= plate.usable.max_y
 
-        reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+        reserved = _side(plate) + 2 * PRIME_TOWER_BRIM
         corner = (
             placement.tower[0] - PRIME_TOWER_BRIM,
             placement.tower[1] - PRIME_TOWER_BRIM,
@@ -407,7 +417,7 @@ class TestPlacement:
 
         with_cutout = place_on_plate(_bounds(40.0, 40.0), self._cutout_plate((cutout,)))
         assert with_cutout.tower is not None
-        reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+        reserved = _side(self._cutout_plate(())) + 2 * PRIME_TOWER_BRIM
         corner_x = with_cutout.tower[0] - PRIME_TOWER_BRIM
         corner_y = with_cutout.tower[1] - PRIME_TOWER_BRIM
         footprint = Rect(corner_x, corner_y, corner_x + reserved, corner_y + reserved)
@@ -473,3 +483,95 @@ class TestPlacement:
     def test_a_single_colour_object_needs_no_tower(self) -> None:
         placement = place_on_plate(_bounds(295.0, 315.0), plate_for("H2C"), tower=False)
         assert placement.tower is None
+
+
+class TestTowerFootprint:
+    """#6735: the tower the slice builds, by Bambu Studio's own estimate
+    (``Print::wipe_tower_data``, Print.cpp L3243-3311 at v02.08.02.61)."""
+
+    @staticmethod
+    def _rib_side(volume: float, least: float) -> float:
+        # Print.cpp L3289-3293: sqrt(volume / layer height x infill gap), at least the
+        # depth for the height, plus rib width / sqrt(2).
+        return float(max(least, (volume / 0.2 * 1.5) ** 0.5) + 8.0 / 2**0.5)
+
+    def test_a_two_nozzle_tower_counts_every_filament_and_the_nozzle_change(self) -> None:
+        h2c = plate_for("H2C")
+        change = 12.0 * np.pi * 1.75**2 / 4
+        for filaments in (2, 3, 4, 8):
+            tower = tower_footprint(h2c, 20.0, TowerSettings(filaments=filaments))
+            volume = 45.0 * filaments + change * (filaments // 2)
+            least = 5.0 + 15.0 / 95.0 * 15.0
+            assert tower.width == pytest.approx(self._rib_side(volume, least))
+            assert tower.depth == tower.width
+            assert tower.brim == 3.0
+            assert tower.keep_out == 0.0
+
+    def test_a_one_nozzle_tower_counts_one_filament_less(self) -> None:
+        tower = tower_footprint(plate_for("X1C"), 20.0, TowerSettings(filaments=3))
+        assert tower.width == pytest.approx(self._rib_side(45.0 * 2, 5.0 + 15.0 / 95.0 * 15.0))
+
+    def test_eight_filaments_outgrow_the_old_60_mm_square(self) -> None:
+        """The square reserved before #6735 was 60 mm; an eight-filament H2C tower is
+        65 mm, so a plate that fitted the square no longer fits the tower."""
+        h2c = plate_for("H2C")
+        eight = TowerSettings(filaments=8)
+        assert tower_footprint(h2c, 10.0, eight).width > 65.0
+        assert fit_problem((300.0, 245.0, 10.0), h2c, tower=True) is None
+        problem = fit_problem((300.0, 245.0, 10.0), h2c, tower=True, settings=eight)
+        assert problem is not None and "prime tower" in problem
+
+    def test_without_the_rib_wall_the_width_is_stated_and_the_depth_grows(self) -> None:
+        tower = tower_footprint(
+            plate_for("H2C"), 20.0, TowerSettings(filaments=4, rib_wall=False, width=35.0)
+        )
+        volume = 45.0 * 4 + 12.0 * np.pi * 1.75**2 / 4 * 2
+        assert tower.width == 35.0
+        assert tower.depth == pytest.approx(volume / (0.2 * 35.0) * 1.5)
+
+    @pytest.mark.parametrize(
+        ("height", "least"),
+        [(3.0, 5.0), (5.0, 5.0), (100.0, 20.0), (175.0, 30.0), (250.0, 40.0), (400.0, 60.0)],
+    )
+    def test_the_least_depth_follows_the_height(self, height: float, least: float) -> None:
+        """``WipeTower::min_depth_per_height`` (WipeTower.cpp L1587-1589)."""
+        assert min_tower_depth(height) == pytest.approx(least)
+
+    def test_no_sparse_layers_keeps_the_h2c_keep_out_from_tall_objects(self) -> None:
+        """96 mm ``extruder_clearance_max_radius`` less 0.2, the spiral lift's reach
+        for a 0.4 mm ``z_hop`` and 2 x 0.8 mm of padding (Print.cpp L3335-3433)."""
+        h2c = plate_for("H2C")
+        reach = 2 * 0.4 / (2 * np.pi * np.arctan(3 * np.pi / 180))
+        no_sparse = TowerSettings(no_sparse_layers=True)
+        tall = tower_footprint(h2c, 4.4, no_sparse)
+        assert tall.keep_out == pytest.approx(95.8 + reach + 1.6)
+        assert tall.clearance == tall.keep_out
+        short = tower_footprint(h2c, 4.0, no_sparse)
+        assert short.keep_out == pytest.approx(3.8 + reach + 1.6)
+        assert tower_footprint(DEFAULT_PLATE, 4.4, no_sparse).keep_out == 0.0
+
+    def test_a_no_sparse_plate_keeps_its_objects_out_of_the_keep_out(self) -> None:
+        h2c = plate_for("H2C")
+        settings = TowerSettings(no_sparse_layers=True)
+        placement = place_on_plate(_bounds(60.0, 60.0, 10.0), h2c, settings=settings)
+        assert placement.tower is not None
+        tower = tower_footprint(h2c, 10.0, settings)
+        x, y = placement.tower[0] - tower.brim, placement.tower[1] - tower.brim
+        ox, oy = placement.offset[0], placement.offset[1]
+        gaps = [
+            oy - (y + tower.size[1]),
+            y - (oy + 60.0),
+            ox - (x + tower.size[0]),
+            x - (ox + 60.0),
+        ]
+        assert max(gaps) >= tower.keep_out
+
+    def test_a_full_keychain_plate_has_no_room_with_no_sparse_layers(self) -> None:
+        """The skill's 12-tag plate, 218 x 317 mm and 4.4 mm tall: the slicer refuses it
+        with "relative position of the model and the prime tower"."""
+        h2c = plate_for("H2C")
+        size = (218.0, 317.0, 4.4)
+        assert fit_problem(size, h2c, tower=True) is None
+        no_sparse = TowerSettings(no_sparse_layers=True)
+        problem = fit_problem(size, h2c, tower=True, settings=no_sparse)
+        assert problem is not None and "No sparse layers" in problem

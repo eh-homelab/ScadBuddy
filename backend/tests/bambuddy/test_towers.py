@@ -25,11 +25,11 @@ from scadbuddy.render.objects3mf import plate_boxes, read_objects
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     PRIME_TOWER_BRIM,
-    PRIME_TOWER_SIDE,
     TOWER_CLEARANCE,
     Rect,
+    TowerSettings,
     plate_for,
-    tower_brim,
+    tower_footprint,
     tower_reaches,
 )
 from scadbuddy.render.split import ColourPart
@@ -85,7 +85,7 @@ def test_a_tower_the_h2c_cannot_reach_is_moved_beside_each_plates_objects(
     moved = towers_within_reach(payload, H2C)
 
     boxes = plate_boxes(moved).boxes
-    reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+    reserved = tower_footprint(H2C, 20.0).size[0]
     for index, (x, y) in enumerate(_towers(moved), start=1):
         assert tower_reaches((x, y), H2C, height=20.0)
         (low, high), (ox, oy) = boxes[index], plate_origin(index, 2, A1_MINI)
@@ -108,9 +108,9 @@ def test_a_tower_the_h2c_cannot_reach_is_moved_beside_each_plates_objects(
 
 
 def test_a_tower_every_extruder_reaches_is_left_where_its_author_put_it(tmp_path: Path) -> None:
-    """Judged at the file's own 22 mm width: (165, 250) is the tower that sliced plate 2
-    by hand (job 151), and #105's 60 mm square there would cross the H2C's wrapping
-    strip at y 310."""
+    """Judged as the two-filament tower the slice builds (#6735): (165, 250) is the tower
+    that sliced plate 2 by hand (job 151), and #105's 60 mm square there would cross the
+    H2C's wrapping strip at y 310."""
     payload = _laid_out_on_an_a1_mini(tmp_path, ("165", "250"))
     assert towers_within_reach(payload, H2C) is payload
     # The A1 mini reaches its own tower.
@@ -249,19 +249,25 @@ def _painted(payload: bytes) -> bytes:
     return rezipped(payload, changed)
 
 
-def _clear_of_its_objects(payload: bytes, corner: tuple[float, float], height: float) -> bool:
-    """Whether a 60 mm tower at ``corner``, with its brim, keeps :data:`TOWER_CLEARANCE`
-    from plate 1's objects, as :func:`tower_beside` places one (the #4014 test above)."""
+def _clear_of_its_objects(
+    payload: bytes,
+    corner: tuple[float, float],
+    height: float,
+    settings: TowerSettings | None = None,
+) -> bool:
+    """Whether the tower the slice builds (#6735) at ``corner``, with its brim, keeps its
+    clearance from plate 1's objects, as :func:`tower_beside` places one (the #4014 test
+    above)."""
     low, high = plate_boxes(payload).boxes[1]
-    brim = tower_brim(height)
-    x0, y0 = corner[0] - brim, corner[1] - brim
-    side = PRIME_TOWER_SIDE + 2 * brim
-    return not Rect(x0, y0, x0 + side, y0 + side).overlaps(
+    tower = tower_footprint(H2C, height, settings)
+    x0, y0 = corner[0] - tower.brim, corner[1] - tower.brim
+    gap = tower.clearance
+    return not Rect(x0, y0, x0 + tower.size[0], y0 + tower.size[1]).overlaps(
         Rect(
-            float(low[0]) - TOWER_CLEARANCE,
-            float(low[1]) - TOWER_CLEARANCE,
-            float(high[0]) + TOWER_CLEARANCE,
-            float(high[1]) + TOWER_CLEARANCE,
+            float(low[0]) - gap,
+            float(low[1]) - gap,
+            float(high[0]) + gap,
+            float(high[1]) + gap,
         )
     )
 
@@ -276,7 +282,7 @@ def test_a_reachable_tower_on_top_of_the_objects_is_moved_beside_them(tmp_path: 
     read = plate_boxes(payload)
     (low, high), (ox, oy) = read.boxes[1], plate_origin(1, read.count, H2C)
     objects = Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
-    assert _tower_on((160, 140), PRIME_TOWER_SIDE, 20.0, objects)
+    assert _tower_on((160, 140), tower_footprint(H2C, 20.0), objects)
 
     moved = towers_within_reach(payload, H2C)
 
@@ -314,3 +320,39 @@ def test_a_tower_on_objects_that_leave_no_room_stays(tmp_path: Path) -> None:
     crowded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
 
     assert towers_within_reach(crowded, H2C) is crowded
+
+
+def _stated(payload: bytes, **values: object) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings.update(values)
+    return rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+
+
+def test_a_tower_inside_the_no_sparse_keep_out_is_moved_out_of_it(tmp_path: Path) -> None:
+    """#6735: with "No sparse layers" the slicer refuses a tower within about 100 mm of
+    an object taller than 4 mm, "relative position of the model and the prime tower".
+    (160, 20) clears the 20 mm plate's objects, so it stays without the option; with it,
+    the tower moves to where the keep-out holds."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "20"))
+    assert towers_within_reach(payload, H2C) is payload
+
+    no_sparse = _stated(payload, wipe_tower_no_sparse_layers="1")
+    moved = _towers(towers_within_reach(no_sparse, H2C))[0]
+
+    asked = TowerSettings(no_sparse_layers=True)
+    assert moved != (160.0, 20.0)
+    assert tower_reaches(moved, H2C, 20.0, asked)
+    assert _clear_of_its_objects(no_sparse, moved, 20.0, asked)
+
+
+def test_a_tower_with_its_rib_wall_off_is_judged_at_the_files_width(tmp_path: Path) -> None:
+    """#6735: without the rib wall the tower is ``prime_tower_width`` wide and its depth
+    grows with the prime volume; at (262, 150) a 60 mm wide one passes the right
+    nozzle's reach (x 323), while the two-filament rib tower (36 mm) fits."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("262", "150"))
+    assert towers_within_reach(payload, H2C) is payload
+
+    flat = _stated(payload, prime_tower_rib_wall="0", prime_tower_width="60")
+
+    assert _towers(towers_within_reach(flat, H2C))[0] != (262.0, 150.0)
