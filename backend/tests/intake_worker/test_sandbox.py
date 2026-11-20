@@ -157,6 +157,20 @@ def _written_pids(*paths: Path) -> list[int]:
     return pids
 
 
+def _alive_naming(text: str) -> list[int]:
+    """The live processes (not zombies) whose command line holds ``text``."""
+    alive = []
+    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            named = text.encode() in cmdline.read_bytes()
+        except OSError:
+            continue
+        pid = int(cmdline.parent.name)
+        if named and _state(pid) not in (None, "Z", "X"):
+            alive.append(pid)
+    return alive
+
+
 def _failed(reason: str) -> float:
     value: float = runner.SANDBOX_FAILED.labels(reason=reason)._value.get()
     return value
@@ -446,14 +460,12 @@ async def test_a_check_past_its_timeout_kills_the_child(tmp_path: Path, sleeper:
     assert _failed("check-timeout") == before + 1
     # A child that the timeout stopped before its open left no file, one stopped before
     # its write left an empty partial file, and one stopped before its rename left its
-    # pid in the partial file (#6760). A live child writes its pid at once, so a pid
-    # that appears only later means that the child outlived the timeout (#6766).
+    # pid in the partial file (#6760). A child that outlived the timeout may not have
+    # written its pid yet, so the test also looks for any live process whose command
+    # line names this test's own pid file (#6766, #6782).
     partial = sleeper.with_name(f"{sleeper.name}.partial")
-    pids = _written_pids(sleeper, partial)
-    if not pids:
-        await asyncio.sleep(1.0)
-        assert not _written_pids(sleeper, partial), "a child outlived the timeout"
-    for pid in pids:
+    assert not _alive_naming(str(partial)), "a child outlived the timeout"
+    for pid in _written_pids(sleeper, partial):
         assert _state(pid) in (None, "Z", "X")
     assert list((tmp_path / "spool").iterdir()) == []
 
