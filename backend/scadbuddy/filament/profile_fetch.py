@@ -873,8 +873,8 @@ class _Fetched:
     #: that run's status.
     ids: set[int] = field(default_factory=set)
     #: The earlier runs that kept a ``bambuddy_before`` but no ``bambuddy_made``: their
-    #: import may have reached Bambuddy with no listing after it. Each run's before ids,
-    #: and its files' names.
+    #: import may have reached Bambuddy with no listing after it (a refused one records
+    #: that it made nothing, R-PR5). Each run's before ids, and its files' names.
     unlisted: list[tuple[set[int], set[str]]] = field(default_factory=list)
 
     def made(self, listing: Sequence[Any]) -> set[int]:
@@ -994,8 +994,18 @@ async def _import(
             if before is None:
                 listed = await client.local_presets()
                 before = await _keep_before(state, row["id"], [p.id for p in listed.filament])
-            imported = await client.import_local_presets(archive.getvalue())
+            # A refusal made nothing, and the run records that, so a later fetch does not
+            # count a preset a person makes with one of its names as a fetch's (R-PR5). A
+            # 5xx or a lost answer leaves the run unlisted: the zip may have landed.
+            try:
+                imported = await client.import_local_presets(archive.getvalue())
+            except ApiError as error:
+                if error.status >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+                    raise
+                await _keep_made(state, row["id"], [])
+                return _failed(error.detail, missing)
             if not imported.success:
+                await _keep_made(state, row["id"], [])
                 why = "; ".join(imported.errors) or "it did not say why"
                 return _failed(f"Bambuddy refused the import: {why}", missing)
             listing = await client.local_presets()
@@ -1079,7 +1089,7 @@ async def _keep_before(state: AppState, run_id: UUID, ids: list[int]) -> list[in
 async def _keep_made(state: AppState, run_id: UUID, ids: list[int]) -> None:
     """The run's ``bambuddy_made``, in a commit of its own as soon as the import is listed,
     so a later fetch of the type binds them even if this run fails after it (R-PR1). A
-    retry that lists again adds what it finds."""
+    retry that lists again adds what it finds. A refused import keeps none (R-PR5)."""
 
     def write() -> None:
         with state.settings_store.pool.connection() as conn, conn.transaction():

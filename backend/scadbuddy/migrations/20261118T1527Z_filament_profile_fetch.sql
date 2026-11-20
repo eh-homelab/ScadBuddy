@@ -21,7 +21,7 @@ ALTER TABLE filament_spool_types ADD COLUMN tdfp_id integer CHECK (tdfp_id > 0);
 -- lost answer still knows which presets the run made. `bambuddy_made` is the preset ids
 -- the import made (listed after it, absent from `bambuddy_before`, named as one of the
 -- run's files), kept as soon as the import is listed, so a later fetch of the type can
--- bind them even when this run failed. `import_lease_until` is the lease one import
+-- bind them even when this run failed; it is empty when Bambuddy refused the import. `import_lease_until` is the lease one import
 -- request holds on the run: another request claims it only once it has expired.
 CREATE TABLE filament_profile_fetches (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

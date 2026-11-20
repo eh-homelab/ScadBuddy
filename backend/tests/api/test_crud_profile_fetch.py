@@ -523,6 +523,56 @@ def test_presets_an_unfinished_import_made_are_bound_by_the_next_run(fetch: Fetc
     assert [p[2] for p in fetch.presets()] == ["101", "102", "103", "104"]
 
 
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        httpx.Response(403, json={"detail": "Forbidden"}),
+        httpx.Response(
+            200, json={"success": False, "imported": 0, "skipped": 0, "errors": ["bad zip"]}
+        ),
+    ],
+    ids=["403", "not-success"],
+)
+@respx.mock
+def test_a_refused_import_made_nothing_a_later_fetch_binds(
+    fetch: Fetch, refusal: httpx.Response
+) -> None:
+    """R-PR5: Bambuddy refuses run A's import, so A made nothing. A person then makes a
+    preset of one of A's file names; run B does not bind it as a fetch's."""
+    [body] = put_all(fetch, ["0.4"])
+    sent = respx.post(f"{API}/local-presets/import").mock(return_value=refusal)
+    listing = local_presets([], before=_rows(["Other"], 40))
+    first = fetch.import_()
+    assert first.json()["status"] == "failed", first.text
+    [row] = fetch.rows(
+        "SELECT bambuddy_made FROM filament_profile_fetches WHERE id = %s", fetch.run_id
+    )
+    assert row["bambuddy_made"] == []
+
+    run, _ = ProfileFetches(_state(fetch.client).settings_store.pool, lambda: NOZZLES).open(
+        fetch.type_id, actor="person:test"
+    )
+    fetch.run_id = run.id
+    assert fetch.put(body, nozzle="0.4").status_code == 204
+    sent.mock(
+        return_value=httpx.Response(
+            200, json={"success": True, "imported": 0, "skipped": 1, "errors": []}
+        )
+    )
+    _listing(listing, _rows(["Other", name_of(body)], 40), [])
+    no_k_profiles()
+
+    r = fetch.import_(key="k2")
+
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["presets"]) == ("failed", 0), r.text
+    reason = f"Bambuddy already has a preset named {name_of(body)} that no fetch of this type made"
+    assert {"printer_model": "H2C", "nozzle_diameter": "0.4", "reason": reason} in r.json()[
+        "missing"
+    ]
+    assert fetch.presets() == []
+
+
 @respx.mock
 def test_a_missing_key_makes_the_run_partial(fetch: Fetch) -> None:
     bodies = put_all(fetch, ["0.4", "0.6", "0.8"])
