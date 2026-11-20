@@ -321,10 +321,13 @@ def _placed_by_plate(
 
 
 def _extruder(element: ET.Element) -> int | None:
+    """``element``'s stated ``extruder``, or ``None``. A value below 1 means "default"
+    in Bambu Studio, the object's own, as `objects3mf._extruder` reads it."""
     for entry in element.findall("metadata"):
         if entry.get("key") == "extruder":
             value = entry.get("value") or ""
-            return int(value) if value.isascii() and value.isdigit() else None
+            slot = int(value) if value.isascii() and value.isdigit() else 0
+            return slot if slot >= 1 else None
     return None
 
 

@@ -373,6 +373,24 @@ def test_an_unpainted_one_colour_object_says_nothing_of_it(tmp_path: Path) -> No
     assert warnings == []
 
 
+def test_a_part_stating_extruder_zero_prints_in_its_objects_filament(tmp_path: Path) -> None:
+    """claude-review on #6803: in Bambu Studio a part's ``extruder`` 0 means the
+    object's own, as `objects3mf._extruder` reads it. An object of filament 1 whose
+    parts state "1" and "0" is one colour, so it gets no by-object warning."""
+    payload = one_object_two_colours_3mf(tmp_path / "menorah.3mf")
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = archive.read(bambu3mf.MODEL_SETTINGS_NAME).decode()
+    stated = settings.replace(
+        '<metadata key="extruder" value="2"/>', '<metadata key="extruder" value="0"/>'
+    )
+    assert stated != settings
+    zeroed = bambu3mf.rezipped(payload, {bambu3mf.MODEL_SETTINGS_NAME: stated.encode()})
+
+    _, warnings = check_plates(zeroed, [1], None)
+
+    assert warnings == []
+
+
 async def test_only_a_by_object_print_gets_the_one_object_warning(tmp_path: Path) -> None:
     """#6781: by object through the generic process overrides warns; by layer does not."""
     payload = one_object_two_colours_3mf(tmp_path / "menorah.3mf")
