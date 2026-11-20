@@ -96,6 +96,7 @@ import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SupportsStep } from './print/SupportsStep'
 import { PrimeTowerStep } from './print/PrimeTowerStep'
+import { TowerConflictNotice } from './print/TowerConflictNotice'
 import { analysisTower, overriddenTowerKeys } from '../lib/primeTower'
 import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
@@ -311,6 +312,16 @@ interface Props {
 
 /** No registry rows: one constant, so a render without them keeps its dependencies. */
 const NO_ROWS: PrinterRow[] = []
+/** #6758 — the process keys of a prime tower's place, one value per plate. */
+const TOWER_X = 'wipe_tower_x'
+const TOWER_Y = 'wipe_tower_y'
+
+/** `settings` without a prime tower place, so the tower goes where the file puts it. */
+function withoutTowerPlace<T extends Record<string, unknown>>(settings: T): T {
+  if (!(TOWER_X in settings) && !(TOWER_Y in settings)) return settings
+  const { [TOWER_X]: _x, [TOWER_Y]: _y, ...rest } = settings
+  return rest as T
+}
 const NO_IDS: string[] = []
 /** A closed dialog follows no topic. */
 const NO_TOPICS: readonly string[] = []
@@ -1092,6 +1103,8 @@ export function PrintPicker({
                 ]),
               ],
               name: arrangedName(from.name),
+              // #6758 — room for the tower chosen here, "No sparse layers" keep-out included.
+              ...(primeTower === null ? {} : { prime_tower: primeTower }),
             },
             { signal: controller.signal, within },
           )
@@ -1100,6 +1113,8 @@ export function PrintPicker({
           // History, but this dialog keeps the output it was opened for.
           if (controller.signal.aborted) return
           carry.set({ plan, ready: false })
+          // A tower place moved for the old layout is not one for the new.
+          setProcessOverrides(withoutTowerPlace)
           setArranged(next.output)
           setArrangeNote(arrangedNote(next.plates))
         },
@@ -1366,10 +1381,24 @@ export function PrintPicker({
     ...check.verdict,
     warnings: [...shown(check.verdict.warnings), ...slicedShort],
   }
+  /** #6758 — a tower place this dialog wrote into the slicer settings. */
+  const towerMoved = processOverrides[TOWER_X] !== undefined
   const verdict = (
     <>
       <RackNozzleLine rack={check.verdict?.rack} algorithm={rackAlgorithm} />
       <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
+      {!sliced && (
+        <TowerConflictNotice
+          check={check.verdict?.prime_tower}
+          moved={towerMoved}
+          onMove={(fix) => setProcessOverrides((current) => ({ ...current, ...fix }))}
+          onUndo={() => setProcessOverrides(withoutTowerPlace)}
+          onRearrange={
+            target && known ? () => (stale ? setAskFor(target.id) : void rearrange(false)) : undefined
+          }
+          arranging={arranging}
+        />
+      )}
     </>
   )
 

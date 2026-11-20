@@ -250,8 +250,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   eight), and with `wipe_tower_no_sparse_layers` the slicer's keep-out (about 100 mm on the
   H2C from objects taller than `nozzle_height`, `plate_profiles.py` `TOWER_KEEP_OUTS`).
   Arrange packs for that keep-out when its `prime_tower` asks for no sparse layers, and the
-  send keeps it when the file states it; the print dialog's own choice does not reach the
-  layout yet (#3770 P3). The process and filament presets are not known there, so it takes
+  send keeps it when the file states it. The print dialog's own choice is judged before the
+  slice (#6758, `bambuddy/tower_check.py`, `print_run.check_tower`, the check's
+  `PrintCheck.prime_tower`): the file laid out as the send lays it out, its towers judged by
+  the tower the request chooses (`prime_tower`, `process_overrides`, the template's
+  `print_settings`), and a conflicting tower's free spot (`tower_beside`) given as a fix,
+  `wipe_tower_x`/`wipe_tower_y` process overrides (one value per plate), which the dialog's
+  "Move the prime tower" and the agent's `print_output` `move_prime_tower` send. The process and filament presets are not known there, so it takes
   BBL's defaults or largest values (0.2 mm layers, 45 mm³ prime volume).
   It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
   by-object plate fails "too close to others" (#6246). A template plate is one object with

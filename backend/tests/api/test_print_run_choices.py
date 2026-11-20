@@ -2131,6 +2131,7 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
         "process_part_settings": None,
         "slot_part_settings": None,
         "process_inexact": [],
+        "prime_tower": None,
     }
     assert not uploaded.called
     assert not sliced.called

@@ -264,20 +264,68 @@ export function followed(run: PrintRun) {
 }
 
 /** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
-function runOutcome(run: PrintRun, ctx: ToolContext) {
+function runOutcome(run: PrintRun, ctx: ToolContext, tower?: TowerAnswer) {
+  const extra = tower === undefined ? {} : { prime_tower: tower }
   if (run.status === 'failed') {
     const error = run.error
-    const failed = `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}`
+    // #6758: a slice the prime tower failed names the way to move it first.
+    const conflict = tower === undefined && conflictWarned(error)
+    const failed =
+      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}` +
+      (conflict ? '. Call print_output again with move_prime_tower: true to move the prime tower to a free spot first.' : '')
     if (!run.may_have_queued) throw new ToolError(failed)
     // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
     // another print_output call is a new print (its own request_id), so check first. The
     // answer is the run itself, so the session records it (#1017, sessions/touched.ts).
     const note = "The print may still have been queued: check Bambuddy's queue before printing again."
     ctx.report?.({ detail: `${failed}. ${note}` })
-    return { ...json({ ...run, note }), isError: true }
+    return { ...json({ ...run, ...extra, note }), isError: true }
   }
-  if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
-  return json(followed(run))
+  if (run.status === 'running') return json({ ...run, ...extra, note: 'still slicing; poll get_print_run with this id' })
+  return json({ ...followed(run), ...extra })
+}
+
+/** Whether a failed run's error carries the slicer's `object-conflict` warning (#6734). */
+function conflictWarned(error: PrintRun['error']): boolean {
+  const warnings = (error as { extensions?: { warnings?: { kind?: string }[] } } | null | undefined)?.extensions?.warnings
+  return (warnings ?? []).some((warning) => warning.kind === 'object-conflict')
+}
+
+/** #6758: what print_output's `move_prime_tower` found, and whether it moved the tower. */
+interface TowerAnswer {
+  conflicts: unknown[]
+  moved: boolean
+}
+
+/**
+ * #6758: the print dialog's check before the slice (`POST …/check`) for `body`, and, when a
+ * prime tower conflicts and the check finds a free spot, its fix written into
+ * `body.process_overrides` (`wipe_tower_x`/`_y`, over the caller's), as the dialog's "Move the
+ * prime tower" writes it. The run then takes it.
+ */
+async function moveTower(
+  ctx: ToolContext,
+  source: ReturnType<typeof sourceOf>,
+  body: { process_overrides?: Record<string, unknown> } & Record<string, unknown>,
+): Promise<TowerAnswer> {
+  const verdict = await ok(
+    source.kind === 'library'
+      ? ctx.backend.POST('/api/v1/print/library/{file_id}/check', {
+          params: { path: { file_id: source.id } },
+          signal: ctx.signal,
+          body: body as never,
+        })
+      : ctx.backend.POST('/api/v1/print/outputs/{output_id}/check', {
+          params: { path: { output_id: source.id } },
+          signal: ctx.signal,
+          body: body as never,
+        }),
+    'check the prime tower',
+  )
+  const check = verdict.prime_tower
+  const fix = check?.fix ?? null
+  if (fix !== null) body.process_overrides = { ...(body.process_overrides ?? {}), ...fix }
+  return { conflicts: check?.conflicts ?? [], moved: fix !== null }
 }
 const calibration = z.enum(['off', 'on', 'auto'])
 
@@ -545,6 +593,16 @@ const PRINT_OUTPUT_INPUT = withSource({
   prime_tower: primeTowerChoice,
   part_settings: partSettings,
   process_overrides: processOverrides,
+  move_prime_tower: z
+    .boolean()
+    .optional()
+    .describe(
+      '#6758: check the prime tower before the slice, as the print dialog does, and move a tower the slicer ' +
+        'would refuse ("Object conflicts were detected": on the objects, inside the "No sparse layers" keep-out, ' +
+        "or out of an extruder's reach) to the free spot the check finds. The move is sent as `process_overrides` " +
+        "`wipe_tower_x`/`wipe_tower_y` (one value per plate), over any you set. The answer's `prime_tower` says " +
+        'what the check found and whether the tower moved. Omit to print the tower where the file puts it.',
+    ),
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))
     .max(32)
@@ -638,6 +696,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${towerPhrase(args.prime_tower)}` +
     `${partSettingsPhrase(args.part_settings)}` +
     `${processOverridesPhrase(args.process_overrides)}` +
+    `${args.move_prime_tower ? ', moving the prime tower to a free spot when the slicer would refuse it' : ''}` +
     `${args.accepted_fixes?.length ? `, applying ${args.accepted_fixes.length} accepted analyzer fix${args.accepted_fixes.length === 1 ? '' : 'es'} (${args.accepted_fixes.join(', ')})` : ''}` +
     `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
   )
@@ -1641,6 +1700,8 @@ export const printTools: Tool[] = [
     routes: [
       'POST /api/v1/print/outputs/{output_id}/run',
       'POST /api/v1/print/library/{file_id}/run',
+      'POST /api/v1/print/outputs/{output_id}/check',
+      'POST /api/v1/print/library/{file_id}/check',
       'GET /api/v1/print/runs/{run_id}',
       'GET /api/v1/printers/{printer_id}',
     ],
@@ -1812,6 +1873,8 @@ export const printTools: Tool[] = [
         ...(args.accepted_fixes?.length ? { accepted_fixes: args.accepted_fixes } : {}),
         request_id: requestId,
       }
+      // #6758: the dialog's check before the slice, and its fix for the prime tower.
+      const tower = args.move_prime_tower ? await moveTower(ctx, source, body) : undefined
       // A run no worker has picked up yet is a 202 followed to the run, not a 503
       // re-sent (#2795): each re-send of a print is a chance to print twice.
       const started = await reattachFollowing(
@@ -1838,7 +1901,7 @@ export const printTools: Tool[] = [
           "shows the print once it starts; check it and Bambuddy's queue before printing again, as calling " +
           'print_output again would be a second print.',
       )
-      return runOutcome(await waitForRun(ctx, started), ctx)
+      return runOutcome(await waitForRun(ctx, started), ctx, tower)
     },
   }),
 

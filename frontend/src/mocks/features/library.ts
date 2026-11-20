@@ -49,6 +49,7 @@ import {
   setMockLibraryChoices,
 } from '../handlers'
 import { SLICED_REASON, mockLibraryObjects } from '../libraryObjects'
+import { mockTowerCheck } from '../towerCheck'
 
 /**
  * #313 — printing a file already in Bambuddy's library: the listing, a file's plates and
@@ -528,15 +529,24 @@ export const handlers = [
     if (refused) return refused
     if (Number(params['id']) === H2C_FILE) {
       const body = (await request.json()) as PrintRunRequest
-      return HttpResponse.json({ errors: [], warnings: [], rack: null, nozzle_plan: h2cPlan(body) } satisfies PrintCheck)
+      return HttpResponse.json({
+        errors: [],
+        warnings: [],
+        rack: null,
+        nozzle_plan: h2cPlan(body),
+        prime_tower: mockTowerCheck(body),
+      } satisfies PrintCheck)
     }
     // #5627, #5628 — a library file's controls open on the process's values too.
     const asked = new URL(request.url).searchParams.get('process_values') === 'true'
+    const body = (await request.json()) as PrintRunRequest
     return HttpResponse.json({
       errors: [],
       warnings: [],
       rack: null,
       process_part_settings: asked ? MOCK_PROCESS_PARTS : null,
+      // #6758 — the prime tower judged before the slice.
+      prime_tower: mockTowerCheck(body),
     } satisfies PrintCheck)
   }),
 
