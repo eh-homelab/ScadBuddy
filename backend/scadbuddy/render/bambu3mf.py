@@ -579,6 +579,9 @@ def project_settings(
     placements: Sequence[Placement],
     plate: PlateGeometry,
     materials: Mapping[str, str] | None = None,
+    *,
+    prime_tower: bool | None = None,
+    no_sparse_layers: bool | None = None,
 ) -> str:
     """``Metadata/project_settings.config``, in Bambu Studio's own JSON shape.
 
@@ -610,6 +613,11 @@ def project_settings(
     requirements read both there, as :mod:`scadbuddy.bambuddy.filaments3mf` does), and
     ScadBuddy copies the strings a library project stated. Not yet measured: a
     ScadBuddy-written 3MF carrying it, sliced by Bambuddy's headless slicer.
+
+    ``prime_tower`` and ``no_sparse_layers``, when given (#3770), are written as Bambu
+    Studio's ``enable_prime_tower`` and ``wipe_tower_no_sparse_layers``: single coBool
+    values, ``"1"`` or ``"0"`` (``fdm_process_common.json``; see
+    :mod:`scadbuddy.bambuddy.prime_tower`).
     """
     settings: dict[str, str | list[str]] = {
         "filament_colour": list(colours),
@@ -629,8 +637,27 @@ def project_settings(
     stated = [(materials or {}).get(colour.upper(), "") for colour in colours]
     if stated and all(stated):
         settings["filament_type"] = stated
+    if prime_tower is not None:
+        settings["enable_prime_tower"] = _flag(prime_tower)
+    if no_sparse_layers is not None:
+        settings["wipe_tower_no_sparse_layers"] = _flag(no_sparse_layers)
     _set_towers(settings, [placement.tower for placement in placements])
     return json.dumps(settings, indent=4) + "\n"
+
+
+def _flag(value: bool) -> str:
+    """A coBool as ``save_to_json`` writes it."""
+    return "1" if value else "0"
+
+
+def _tower_off(settings: Mapping[str, Any]) -> bool:
+    """Whether ``project_settings.config`` turns the prime tower off (#3770): the
+    writer states it so for an Arrange that packed with no tower. A list is read by its
+    first value, as Bambu Studio may write a scalar either way."""
+    value = settings.get("enable_prime_tower")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return value == "0"
 
 
 def _set_towers(settings: dict[str, Any], towers: Sequence[tuple[float, float] | None]) -> None:
@@ -821,6 +848,8 @@ def write_plates_3mf(
     model_name: str = "model",
     plate: PlateGeometry = DEFAULT_PLATE,
     materials: Mapping[str, str] | None = None,
+    prime_tower: bool | None = None,
+    no_sparse_layers: bool | None = None,
 ) -> None:
     """Write a 3MF with one Bambu plate per entry of ``plates`` (spec §6.4).
 
@@ -829,6 +858,13 @@ def write_plates_3mf(
     (the same all-or-nothing rule as :func:`write_bambu_3mf`). Each plate's parts
     are placed on ``plate`` as a one-plate render would be, then moved to that
     plate's origin in the project (:func:`plate_origin`).
+
+    ``prime_tower`` is the print's tower (Arrange's, #3770): false places no tower on any
+    plate, and true or ``None`` one on each plate that changes filament
+    (:attr:`PlateParts.tower`). Given, it is stated as ``enable_prime_tower``, with
+    ``no_sparse_layers`` as ``wipe_tower_no_sparse_layers``, so :func:`replate_3mf`
+    keeps no room for a tower that is off, unless the print turns it on. ``None`` states
+    neither, as before.
     """
     if not plates:
         raise ValueError("a 3MF needs at least one plate")
@@ -851,7 +887,10 @@ def write_plates_3mf(
         for each in plates
     ]
     covers = thumbnails is not None
-    placements = [_placement(model_bounds(each.parts), plate, tower=each.tower) for each in plates]
+    placements = [
+        _placement(model_bounds(each.parts), plate, tower=prime_tower is not False and each.tower)
+        for each in plates
+    ]
     offsets = [
         _plate_offset(placement, index, len(plates), plate)
         for index, placement in enumerate(placements, start=1)
@@ -878,7 +917,17 @@ def write_plates_3mf(
                 MODEL_SETTINGS_NAME,
                 model_settings(plates, model_name, covers=covers, assemblies_by_plate=assemblies),
             ),
-            (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate, materials)),
+            (
+                PROJECT_SETTINGS_NAME,
+                project_settings(
+                    colours,
+                    placements,
+                    plate,
+                    materials,
+                    prime_tower=prime_tower,
+                    no_sparse_layers=no_sparse_layers,
+                ),
+            ),
         )
     ]
     if thumbnails is not None:
@@ -1224,6 +1273,7 @@ def replate_3mf(
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
     filament_map: FilamentMap | None = None,
+    tower_on: bool = False,
 ) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
@@ -1231,7 +1281,10 @@ def replate_3mf(
     send path re-places it once the target is known: each plate's build item is
     re-centred on the area every extruder reaches, moved to where that plate sits
     on this printer's project (the plate stride follows the bed, spec §6.4), and
-    its prime tower is moved with it. Raises
+    its prime tower is moved with it. A file whose ``enable_prime_tower`` is ``"0"`` (an
+    Arrange with the tower off, #3770) keeps no room for a tower, unless ``tower_on``:
+    the print turns the tower on, and the slice sends that over the file's ``"0"``, so
+    room is kept as for any other file. Raises
     :class:`~scadbuddy.render.plate.PlateFitError` when a plate cannot fit that
     printer — before the upload, rather than after Bambuddy's slicer has spent a
     minute finding out.
@@ -1271,6 +1324,7 @@ def replate_3mf(
         (json.loads(data) for name, data in entries if name == PROJECT_SETTINGS_NAME), {}
     )
     count = len({each.index for each in laid_out})
+    tower_off = _tower_off(settings) and not tower_on
     placements: list[Placement] = []
     transforms: dict[str, str] = {}
     rotation = IDENTITY.rsplit(" ", 3)[0]
@@ -1282,7 +1336,10 @@ def replate_3mf(
             # A tower only for more than one filament, a painting's counted as
             # `PlateParts.tower` counts them (#2108). One object goes by its parts, as
             # it always has; several objects in one colour need none (#956).
-            if len(each.assembly_ids) > 1 and each.extruders is not None:
+            if tower_off:
+                # Arranged with the tower off (#3770): no room is kept for one.
+                tower = False
+            elif len(each.assembly_ids) > 1 and each.extruders is not None:
                 tower = len(each.extruders | painted) > 1
             else:
                 # One object; or several whose model_settings name no extruders, so the
@@ -2374,6 +2431,22 @@ def _layout(archive: zipfile.ZipFile) -> Layout:
     except (KeyError, ValueError, ET.ParseError, zipfile.BadZipFile):
         return "author"
     return "scadbuddy"
+
+
+def stated_tower_off(payload: bytes) -> bool:
+    """Whether ``payload`` is laid out by ScadBuddy (:func:`layout_of` ``scadbuddy``) and
+    states the prime tower off (#3770): an Arrange that packed with no room for a tower.
+    The slicer slices with a process preset that replaces the file's own
+    ``enable_prime_tower``, so the print run sends the file's ``"0"`` as a process
+    override (``prime_tower.file_tower_overrides``). Any other file is false."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if _layout(archive) != "scadbuddy":
+                return False
+            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return False
+    return isinstance(settings, dict) and _tower_off(settings)
 
 
 def part_settings_slots(payload: bytes) -> set[int] | None:

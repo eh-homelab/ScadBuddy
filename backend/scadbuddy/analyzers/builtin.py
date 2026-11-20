@@ -23,7 +23,8 @@ from scadbuddy.analyzers.model import (
 )
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan
 from scadbuddy.bambuddy.filaments import check as check_filaments
-from scadbuddy.render.bambu3mf import plates_of, replate_3mf
+from scadbuddy.bambuddy.prime_tower import tower_asked
+from scadbuddy.render.bambu3mf import plates_of, replate_3mf, stated_tower_off
 from scadbuddy.render.geometry import OVERHANG_ANGLES, MeshEdge
 from scadbuddy.render.plate import PlateFitError, fit_problem, overshoots
 
@@ -513,23 +514,36 @@ LOW_FILAMENT = Analyzer(
 # --- SB4001: plate fit --------------------------------------------------------------
 
 
-def _multi_plate_problem(context: AnalysisContext) -> tuple[int, str | None] | None:
+def _multi_plate_problem(
+    context: AnalysisContext, payload: bytes | None, tower_on: bool
+) -> tuple[int, str | None] | None:
     """``(plates, problem)`` from the send's own check, or ``None`` without a 3MF.
 
     :func:`~scadbuddy.render.bambu3mf.replate_3mf` is what the send runs before an
     upload, and it checks every plate of a multi-plate output (#289) with its own box
     and colours; the output's ``bbox_mm`` spans every plate and would misjudge them.
+    ``tower_on`` is the send's own (:func:`_tower_room`).
     """
     path = context.model_3mf
     plate = context.plate
-    if path is None or plate is None or not path.is_file():
+    if path is None or plate is None or payload is None:
         return None
     count = len(plates_of(path))
     try:
-        replate_3mf(path.read_bytes(), plate)
+        replate_3mf(payload, plate, tower_on=tower_on)
     except PlateFitError as error:
         return count, str(error)
     return count, None
+
+
+def _tower_room(context: AnalysisContext, payload: bytes | None) -> tuple[bool, bool]:
+    """``(stated_off, tower_on)`` as the run judges them (``print_run.plan_run``, #3770).
+
+    A file that states the tower off (an Arrange packed with no room for one) keeps no
+    room for a tower, unless the print turns the tower on (``tower_on``): the slice then
+    sends the tower over the file's ``"0"``, and the send keeps room for it."""
+    stated_off = payload is not None and stated_tower_off(payload)
+    return stated_off, stated_off and tower_asked(context.request.prime_tower) is True
 
 
 def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDiagnostic]:
@@ -537,7 +551,10 @@ def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
     output = context.output
     assert plate is not None and output is not None
     name = plate.model or "the default plate"
-    checked = _multi_plate_problem(context)
+    path = context.model_3mf
+    payload = path.read_bytes() if path is not None and path.is_file() else None
+    stated_off, tower_on = _tower_room(context, payload)
+    checked = _multi_plate_problem(context, payload, tower_on)
     plates = checked[0] if checked is not None else 1
     if plates > 1:
         assert checked is not None
@@ -546,7 +563,8 @@ def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
     else:
         size = output.bbox_mm.size
         over = list(overshoots(size, plate))
-        problem = None if over else fit_problem(size, plate, tower=len(output.colors) > 1)
+        tower = len(output.colors) > 1 and (not stated_off or tower_on)
+        problem = None if over else fit_problem(size, plate, tower=tower)
     if not over and problem is None:
         return []
     evidence = [
@@ -573,7 +591,8 @@ def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
             why=(
                 "X and Y are checked against the area every extruder reaches, Z against "
                 "the printer's printable height, and a multi-colour print also needs "
-                "room for its prime tower; a multi-plate output is checked plate by "
+                "room for its prime tower, unless the file states the tower off and the "
+                "print does not turn it on; a multi-plate output is checked plate by "
                 "plate. The send refuses the same plates."
             ),
             location=DiagnosticLocation(kind="plate", bbox=output.bbox_mm if plates == 1 else None),

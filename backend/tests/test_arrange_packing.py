@@ -144,6 +144,24 @@ def test_by_colour_gives_single_colour_plates_that_need_no_tower() -> None:
     assert len(mixed.plates) == 1
 
 
+def test_with_the_tower_off_a_multi_colour_plate_keeps_no_room_for_one() -> None:
+    """#3770: the print's prime tower off frees its corner, so more copies share a plate."""
+    two = part("two", 60, 60, "#FF0000", "#00FF00")
+    kept = arrange([PackItem(part=two, count=16)], DEFAULT)
+    freed = arrange([PackItem(part=two, count=16)], DEFAULT, tower=False)
+    assert [len(p.items) for p in kept.plates] == [8, 8]
+    assert [len(p.items) for p in freed.plates] == [16]
+    assert_no_overlap(footprints(freed, {"two": two})[0])
+
+
+def test_with_the_tower_off_a_part_the_tower_would_crowd_out_fits() -> None:
+    big = part("big", 250, 250, "#FF0000", "#00FF00")
+    with pytest.raises(PackError, match="prime tower"):
+        arrange([PackItem(part=big)], DEFAULT, allow_own=False)
+    layout = arrange([PackItem(part=big)], DEFAULT, allow_own=False, tower=False)
+    assert [[i.piece_key for i in p.items] for p in layout.plates] == [["big"]]
+
+
 def test_fewest_swaps_lets_a_subset_ride_on_a_plate_that_already_has_its_filament() -> None:
     both = part("both", 60, 60, "#FF0000", "#FFFFFF")
     red = part("red", 20, 20, "#FF0000")
