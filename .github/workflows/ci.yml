@@ -1215,7 +1215,7 @@ jobs:
       # exercise the shipped artefact. This way the bytes under test are
       # exactly the bytes that were built and probed.
       #
-      # The msw-backed suite stays in the `frontend` job, where its own
+      # The msw-backed suite runs in the `frontend-e2e` job, where its own
       # `webServer` serves the production bundle with no backend at all. The
       # two suites are complements, not duplicates: that one pins the UI
       # against a fixed contract, this one proves a real OpenSCAD renders,

@@ -110,7 +110,10 @@ def sleeper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Each check's child replaced by a process that writes its pid and sleeps: no
     confinement needed to test what the sandbox does around it. The pid goes to a
     temporary name first and is renamed into place, so the file never exists empty
-    (#6693: a child stopped between the open and the write left an empty file)."""
+    (#6693: a child stopped between the open and the write left an empty file). The
+    partial path goes into the ``-c`` code verbatim (``repr`` leaves a ``tmp_path``
+    unchanged), and :func:`_alive_naming` finds a live child by it in its command line
+    (#6793)."""
     pidfile = tmp_path / "child.pid"
     partial = f"{pidfile}.partial"
     code = (
