@@ -115,6 +115,16 @@ That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
 (`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`, with the arm64 digest and its REST
 API asset id `TEMPORAL_CLI_ASSET_ARM64`, the arm64 fallback's URL, #5706), in `ci.yml`'s
 two "Install the Temporal CLI" steps; move all three together.
+Tests marked `requires_chromium` (the 3DFP driver, `tests/profile_fetch/test_site.py`,
+#6625) drive Playwright's Chromium against the local replica in
+`tests/profile_fetch/site/`, never the real site. They skip without that Chromium
+(`uv run --frozen playwright install chromium`) and fail instead when
+`SCADBUDDY_TEST_CHROMIUM_REQUIRED=1`. One of them,
+`test_the_profile_keeps_no_login_after_a_login` (R-F12), drives headed Chromium, since
+headless saves no form data to find: it needs a `DISPLAY` (`xvfb-run -a`, as CI's
+`profile-fetch-image` job runs it) and skips without one unless that variable is set.
+Playwright is pinned exactly in the
+`profile-fetch` dependency group, which `dev` includes.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
@@ -793,6 +803,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration
   `20261118T0811Z_session_blobs_pdf.sql`) and store it (`crud_agent_blobs.py` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
+- `backend/scadbuddy/profile_fetch/` — the 3DFP profile-fetch worker (#6625, plan
+  `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
+  scadbuddy.profile_fetch` polls the queue `profile-fetch`, serves `/healthz` and `/metrics` on
+  9090, and holds no database secret (it refuses `FORBIDDEN_ENV`, and a `DEBUG` that turns on a
+  Playwright channel; `settings.py`) and no Postgres code (`psycopg` is not in `sys.modules`).
+  `site.py` drives 3dfilamentprofiles.com with a headed Chromium (Playwright for Python, under
+  Xvfb) and maps each failure to a `SiteError` kind (`login_failed`, only when the site sends the browser back to
+  `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, which the page's blob hook
+  refuses over 512 KiB, `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
+  `failed` activities and the `SiteHolder` that keeps one signed-in browser; `workflow.py` is
+  the `ProfileFetch` workflow; `wire.py` is the bodies shared with the CRUD routes; `worker.py`
+  sets `RLIMIT_CORE` to 0 and builds `ThreeDfpSite`; `site.py`'s `browser_env` is the allowlisted environment that
+  Chromium launches with (no login, no token path). The API side is `filament/profile_fetch.py`
+  (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
+  `fail_unserved`; the module functions `start_fetch`, `store_file`, `import_run`, `mark_failed`
+  and `end_unserved`; the run is the table `filament_profile_fetches`, its files
+  are `blob_refs` held by kind `profile_fetch`) and `api/crud_profile_fetch.py` (`crud_router(
+  "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
+  and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
+  (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

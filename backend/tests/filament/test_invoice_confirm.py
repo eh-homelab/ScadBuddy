@@ -45,7 +45,7 @@ def shop(pg_pool: PgPool) -> Shop:
 def _confirm(shop: Shop, invoice: InvoiceDetail) -> tuple[InvoiceDetail, bool]:
     done = shop.invoices.confirm(invoice.id, actor="ann")
     assert done is not None
-    return done
+    return done[0], done[1]
 
 
 def test_confirm_makes_spools_with_cost_and_link(shop: Shop) -> None:
@@ -99,7 +99,7 @@ def test_two_confirms_at_once_make_one_set(shop: Shop) -> None:
     invoice = shop.one(shop.type_id(), quantity=3, unit_price=D("13.3333"))
     held = _Held(shop)
 
-    def run() -> tuple[InvoiceDetail, bool] | None:
+    def run() -> tuple[InvoiceDetail, bool, tuple[UUID, ...]] | None:
         return held.confirm(invoice.id, actor="ann")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -337,6 +337,20 @@ def test_a_new_type_and_product_are_made_at_confirm(shop: Shop) -> None:
     assert product is not None
     assert product.sku == line.description == "A00-B01"
     assert product.type_id == line.type_id
+
+
+def test_confirm_names_the_types_it_made(shop: Shop) -> None:
+    kept = shop.type_id("PLA-WHT")
+    made = shop.one(None, proposed_type=shop.type_body("NEW-1"))
+    done = shop.invoices.confirm(made.id, actor="ann")
+    assert done is not None
+    assert done[2] == (done[0].lines[0].type_id,)
+    again = shop.invoices.confirm(made.id, actor="ann")
+    assert again is not None
+    assert again[2] == ()
+    other = shop.invoices.confirm(shop.one(kept, description="B00").id, actor="ann")
+    assert other is not None
+    assert other[2] == ()
 
 
 def test_a_sku_that_names_another_type_is_refused(shop: Shop) -> None:

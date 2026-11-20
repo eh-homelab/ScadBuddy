@@ -7,6 +7,8 @@ import { parseRgba } from '../../../lib/rgba'
 import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
+import { mockSettings } from '../../handlers'
+import { printersState } from '../printers'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 
 type S = components['schemas']
@@ -30,6 +32,7 @@ export function reset() {
   state = seed()
   imports.clear()
   invoicedLine.clear()
+  fetches.clear()
 }
 
 /** The invoice line each spool `addInvoicedSpools` made was bought on (#6266). */
@@ -56,7 +59,7 @@ const problem = (status: keyof typeof TITLES, detail: string) =>
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
-  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'note'],
+  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
@@ -388,6 +391,7 @@ function readingsOf(sensor: S['Sensor']): S['SensorReading'][] {
 }
 
 const REFUSED = {
+  tdfpId: 'tdfp_id: Input should be a whole number greater than 0 and less than 2147483648',
   catalogExists: 'a row of this catalog already has that name',
   catalogRef: 'a row this one points at does not exist',
   typeless: 'a spool needs a type_id or a material_id',
@@ -502,6 +506,9 @@ function typeRefusal(values: Record<string, unknown>, self?: string): Response |
   if (absent) return problem(422, absent)
   const temps = badTemps(values)
   if (temps) return problem(422, temps)
+  // `filament/models.py` `TdfpId`: a positive whole number below 2^31.
+  const tdfp = values.tdfp_id
+  if (tdfp != null && !(Number.isInteger(tdfp) && (tdfp as number) > 0 && (tdfp as number) < 2 ** 31)) return problem(422, REFUSED.tdfpId)
   if (badRef(values, TYPE_REFS)) return problem(422, REFUSED.catalogRef)
   // `filament_spool_types_code`: upper(code), live types only.
   const taken = !values.archived_at && state.types.some((type) => type.id !== self && !type.archived_at && sameName(type.code, values.code))
@@ -656,6 +663,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     low_stock_pct: null,
     cost_per_kg: null,
     note: null,
+    tdfp_id: null,
     diameter_mm: '1.75',
     ...body,
     id: newId(),
@@ -757,6 +765,64 @@ export function addInvoicedSpools(typeId: string, count: number, costPerKg: stri
 
 /** `crud/idempotency.py`: each write's key and the body and answer it had. */
 const imports = new Map<string, { body: string; answer: S['ImportPreview'] }>()
+
+// -- 3DFP preset fetch (#6625) ----------------------------------------------------------
+
+/** Each type's last fetch (`ProfileFetches.latest`), by type id. */
+const fetches = new Map<string, S['ProfileFetch']>()
+
+/** `filament/profile_fetch.py` `NO_PRESET`: a gap no run gave a reason for. */
+const NO_PRESET = 'no preset for this printer and nozzle yet'
+const FETCH_NOZZLES = ['0.2', '0.4', '0.6', '0.8'] as const
+
+/** A refusal of the start as `api/filament.py` writes it: a problem typed by its `code`. */
+const fetchRefused = (code: 'no_tdfp_id' | 'no_printer_models', detail: string) =>
+  HttpResponse.json(
+    { type: `https://scadbuddy.dev/problems/profile-fetch/${code}`, title: TITLES[422], status: 422, detail, code },
+    { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+  )
+
+/** `ProfileFetches._targets`: each printer model ScadBuddy's printers have, with the nozzle setting. */
+function fetchTargets(): S['ExportTarget'][] {
+  const nozzles = mockSettings().profile_fetch_nozzles ?? [...FETCH_NOZZLES]
+  const models = [...new Set(printersState().map((printer) => printer.model).filter((model): model is string => !!model))].sort()
+  return models.map((printer_model) => ({ printer_model, nozzles: [...nozzles] }))
+}
+
+/**
+ * The mock has no worker: a running fetch ends `imported` on the next read of it, with
+ * one preset per target key (a Bambuddy local preset id and a 3DFP-style name), as the
+ * API's import writes them.
+ */
+function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
+  if (run.status !== 'running') return run
+  const type = state.types.find((one) => one.id === run.type_id)
+  const made: S['TypePreset'][] = run.targets.flatMap((target, t) =>
+    target.nozzles.map((nozzle, n) => ({
+      type_id: run.type_id,
+      printer_model: target.printer_model,
+      nozzle_diameter: nozzle,
+      slicer_filament: String(9000 + t * 10 + n),
+      slicer_filament_name: `${type?.code ?? 'Filament'} @BBL ${target.printer_model} ${nozzle} nozzle`,
+    })),
+  )
+  const keys = new Set(made.map((row) => `${row.printer_model}|${row.nozzle_diameter}`))
+  state.typePresets = [...state.typePresets.filter((one) => one.type_id !== run.type_id || !keys.has(`${one.printer_model}|${one.nozzle_diameter}`)), ...made]
+  const ended = { ...run, status: 'imported' as const, finished_at: now() }
+  fetches.set(run.type_id, ended)
+  return ended
+}
+
+/** `ProfileFetches.gaps`: each target key the type has no preset for, with its last run's reason. */
+function fetchGaps(typeId: string): S['MissingKey'][] {
+  const have = new Set(state.typePresets.filter((one) => one.type_id === typeId).map((one) => `${one.printer_model}|${one.nozzle_diameter}`))
+  const reasons = new Map((fetches.get(typeId)?.missing ?? []).map((one) => [`${one.printer_model}|${one.nozzle_diameter}`, one.reason]))
+  return fetchTargets().flatMap((target) =>
+    target.nozzles
+      .filter((nozzle) => !have.has(`${target.printer_model}|${nozzle}`))
+      .map((nozzle) => ({ printer_model: target.printer_model, nozzle_diameter: nozzle, reason: reasons.get(`${target.printer_model}|${nozzle}`) ?? NO_PRESET })),
+  )
+}
 
 /** `csv_import.DERIVED_COLUMNS`: dropped from a row. */
 const DERIVED_CSV = new Set(['grams_left', 'last_weighed_g', 'last_weighed_at', 'last_dried_at', 'last_used_at', 'low_stock', 'archived_at'])
@@ -1042,6 +1108,38 @@ export const handlers = [
     if (!state.types.some((one) => one.id === typeId)) return problem(404, `no spool type ${typeId}`)
     state.typePresets = [...state.typePresets.filter((one) => one.type_id !== typeId), ...rows]
     return HttpResponse.json(rows)
+  }),
+  http.post(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
+    const typeId = String(params.id)
+    const type = state.types.find((one) => one.id === typeId)
+    if (!type) return problem(404, `no spool type ${typeId}`)
+    const was = fetches.get(typeId)
+    if (was?.status === 'running') return HttpResponse.json({ run: was, joined: true } satisfies S['ProfileFetchStarted'], { status: 202 })
+    if (type.tdfp_id == null) return fetchRefused('no_tdfp_id', 'the type has no 3dfilamentprofiles id')
+    const targets = fetchTargets()
+    if (targets.length === 0) return fetchRefused('no_printer_models', 'no printer has a model to fetch presets for')
+    const run: S['ProfileFetch'] = {
+      id: newId(),
+      type_id: typeId,
+      tdfp_id: type.tdfp_id,
+      status: 'running',
+      targets,
+      missing: [],
+      k_values: 0,
+      notes: [],
+      error: null,
+      started_at: now(),
+      finished_at: null,
+    }
+    fetches.set(typeId, run)
+    return HttpResponse.json({ run, joined: false } satisfies S['ProfileFetchStarted'], { status: 202 })
+  }),
+  http.get(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
+    const typeId = String(params.id)
+    if (!state.types.some((one) => one.id === typeId)) return problem(404, `no spool type ${typeId}`)
+    const was = fetches.get(typeId)
+    const run = was ? finishFetch(was) : null
+    return HttpResponse.json({ run, gaps: fetchGaps(typeId) } satisfies S['ProfileFetchStatus'])
   }),
   http.put(`${BASE}/types/:id/k-values`, async ({ params, request }) => {
     const typeId = String(params.id)

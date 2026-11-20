@@ -116,6 +116,7 @@ SERVICE_ACCOUNTS: Mapping[str, ServiceCaller] = {
     "scadbuddy-agent-worker": "agent",
     "scadbuddy-storefront": "storefront",
     "scadbuddy-intake": "intake",
+    "scadbuddy-profile-fetch": "profile-fetch",
     # The API pod's: mounted as a projected token in the agent sidecar's container only.
     "scadbuddy": "agent",
 }

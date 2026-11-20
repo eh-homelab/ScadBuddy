@@ -1,0 +1,23 @@
+{
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ],
+    "filament_id": "P1a2b3c4",
+    "filament_settings_id": [
+        "Inland PLA+ @BBL H2C"
+    ],
+    "filament_type": [
+        "PLA"
+    ],
+    "filament_vendor": [
+        "Inland"
+    ],
+    "from": "User",
+    "inherits": "Generic PLA @BBL H2C",
+    "name": "Inland PLA+ @BBL H2C",
+    "nozzle_temperature": [
+        "215",
+        "215"
+    ],
+    "version": "2.3.0.4"
+}
