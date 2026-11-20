@@ -816,6 +816,9 @@ class Spool(_Row):
     last_dried_hours: Decimal | None
     last_used_at: datetime | None
     archived_at: datetime | None
+    #: The invoice line the spool was bought on, if any. An invoice line may fill a spool
+    #: with none, costed or not; one with a line is refused (#6700).
+    invoice_line_id: UUID | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.

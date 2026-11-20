@@ -137,3 +137,19 @@ test('the labels page prints one roll page per label, and a sheet on one page', 
   await page.getByRole('radio', { name: 'Sheet' }).click()
   expect(pages(await page.pdf({ preferCSSPageSize: true }))).toBe(1)
 })
+
+// #6704 — the spool page scrolls in its own container only; the document must not scroll too.
+for (const size of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test(`the spool page scrolls once, not the document, at ${size.width}x${size.height}`, async ({ page }) => {
+    await page.setViewportSize(size)
+    await page.goto(spoolUrl(1))
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    const sizes = await page.evaluate<{ scrollHeight: number; clientHeight: number }>(
+      '({ scrollHeight: document.scrollingElement.scrollHeight, clientHeight: document.scrollingElement.clientHeight })',
+    )
+    expect(sizes.scrollHeight).toBeLessThanOrEqual(sizes.clientHeight)
+  })
+}

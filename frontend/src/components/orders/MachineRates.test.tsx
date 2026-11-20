@@ -610,6 +610,30 @@ describe('MachineRates actuals follow-up (#6665)', () => {
     expect(await within(panel).findByText(/Bambuddy did not answer\. The rate uses/)).toHaveAttribute('role', 'alert')
   })
 
+  it('keeps the stored-intervals line when the re-read gets the log but not the tasks', async () => {
+    await linkedNozzle()
+    setEventsReadAt(LINKED, '2026-11-18T14:02:00')
+    setBambuddyLogAnswers(false)
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    const real = await api.machineRate(LINKED)
+    server.use(
+      http.post('/api/v1/printers/:id/machine-rate/import', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/machine-rate/log_unavailable', title: 'log_unavailable', status: 503, detail: 'Bambuddy did not answer.' },
+          { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+      http.get('/api/v1/printers/:id/machine-rate', () =>
+        HttpResponse.json({ ...real, breakdown: { ...real.breakdown, intervals: 'stored' }, actuals: { ...real.actuals, events_read_at: '2026-11-18T15:00:00' } }),
+      ),
+    )
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    const line = await within(panel).findByText(`Bambuddy did not answer. The rate uses the events last read at ${formatLocalTime(Date.parse('2026-11-18T15:00:00'))}.`)
+    // A newer read answered, so the line is the stored-intervals note, not an alert.
+    expect(line).not.toHaveAttribute('role', 'alert')
+  })
+
   it('says when the page could not read Bambuddy, and which read the rate uses', async () => {
     await linkedNozzle()
     const real = await api.machineRate(LINKED)
