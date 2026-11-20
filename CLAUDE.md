@@ -21,7 +21,7 @@ CLAUDE.md of its own, which Claude Code reads when it works on files there:
 - `workers/rust/CLAUDE.md`: the Rust workers' commands, toolchain and crates.
 - `e2e-stack/CLAUDE.md`: the real-stack e2e runs (login and native hot path) and the stack's layout.
 - `models/CLAUDE.md`: the template checks (`verify.sh`, the `models` job) and the bundled models.
-- `deploy/CLAUDE.md`: the Grafana dashboards.
+- `deploy/CLAUDE.md`: the Grafana dashboards and the browser pods' security profiles (`deploy/security/`).
 - `plugins/CLAUDE.md`: ScadBuddy's Claude plugin.
 
 ## Database access (#5295)
