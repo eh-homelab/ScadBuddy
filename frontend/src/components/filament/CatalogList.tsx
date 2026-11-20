@@ -2,7 +2,8 @@ import { ArchiveIcon, ArchiveRestoreIcon, ArrowDownIcon, ArrowUpIcon, PencilIcon
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { listCatalog, upsertCatalog, type CatalogInput, type CatalogKind } from '../../api/filament'
+import { isAliasedKind, listCatalog, upsertCatalog, type CatalogInput, type CatalogKind } from '../../api/filament'
+import { AliasChips, AliasList } from './AliasChips'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -75,7 +76,9 @@ function details(fields: Field[], row: Row, names: ReadonlyMap<string, string>):
  * #6262 — one catalog as a dense table: add, rename, re-order (`sort_order`), archive and
  * restore a row, and edit its value columns. Archived rows show only with "Show archived"
  * (`?archived=true`). Colours use `RgbaColourField`; an insert type's Bambuddy catalog id
- * is read only (the pull sets it).
+ * is read only (the pull sets it). A material, subtype, brand, category or effect shows
+ * its aliases under its name, and its edit form adds and removes them (`AliasChips`,
+ * #6706); the pickers elsewhere list names only.
  */
 export function CatalogList({ kind }: { kind: CatalogKind }) {
   const spec = CATALOGS.find((one) => one.kind === kind)!
@@ -259,6 +262,9 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           </label>
         )
       })}
+      {isAliasedKind(kind) && draft.id && (
+        <AliasChips kind={kind} id={draft.id} aliases={(rows?.find((row) => row.id === draft.id)?.aliases as string[] | undefined) ?? []} onSaved={load} />
+      )}
       {kind === 'insert-types' && draft.id && (
         <div className="flex flex-col gap-1">
           <span>Bambuddy catalog id</span>
@@ -348,6 +354,11 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                         <span className={gone ? 'text-muted-foreground line-through' : 'font-medium'}>{row.name}</span>
                         {gone && <span className="text-[12px] text-muted-foreground">Archived</span>}
                       </span>
+                      {Array.isArray(row.aliases) && row.aliases.length > 0 && (
+                        <span className="mt-1 block">
+                          <AliasList aliases={row.aliases as string[]} />
+                        </span>
+                      )}
                     </td>
                     <td className={`${TD} text-muted-foreground`}>{details(spec.fields, row, names)}</td>
                     <td className={`${TD} text-right tabular-nums`}>{row.sort_order}</td>
@@ -376,7 +387,8 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                     ? [
                         <tr key={`${row.id}-edit`} className="border-t">
                           <td colSpan={4} className="p-2">
-                            {form}
+                            {/* On a phone the table scrolls sideways: the form stays in view at its left edge. */}
+                            <div className="sticky left-2 max-w-[calc(100vw-3rem)] sm:static sm:max-w-none">{form}</div>
                           </td>
                         </tr>,
                       ]

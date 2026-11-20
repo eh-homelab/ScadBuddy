@@ -112,7 +112,7 @@ def test_price_per_kg_is_derived_from_the_types_label_weight(pg_pool: PgPool) ->
     assert (point.currency, point.source) == ("USD", "manual")
     product = store.product(product_id)
     assert product is not None
-    _types(pg_pool).update(product.type_id, SpoolTypePatch(label_weight_g=500))
+    _types(pg_pool).update(product.type_id, SpoolTypePatch(label_weight_g=500), actor="ann")
     assert store.prices(product_id)[0].price_per_kg == Decimal("40.0000")
     newest = store.product(product_id)
     assert newest is not None
@@ -319,7 +319,7 @@ def test_stats_count_spend_and_stock(pg_pool: PgPool) -> None:
     assert row.supplier_name == "Acme"
     assert not row.archived
     assert row.spool_count == 4
-    assert row.consumed_g == 57.0
+    assert row.consumed_g == 50.0  # c's estimate is still open: not a plate yet
     assert row.spend == Decimal("85.6000")
     assert row.remaining_g == 950 + 993 + 790  # the archived spool is not counted
 
@@ -337,3 +337,24 @@ def test_stats_list_an_archived_supplier_marked(pg_pool: PgPool) -> None:
     [row] = shop.suppliers.stats()
     assert row.archived
     assert row.spool_count == 2
+
+
+def test_stats_consumed_counts_a_paired_plate_once(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    spool = _confirmed(shop, shop.type_id(), "R-1")[0]
+    with pg_pool.connection() as conn:
+        record(
+            conn, spool, "print_ended", source="print_actual", delta_g=-30,
+            ref_kind="print_run", ref_id="run/a/1", data={"job": "a", "basis": "sliced"},
+        )  # fmt: skip
+        record(
+            conn, spool, "print_ended", source="print_actual", delta_g=-28,
+            ref_kind="bb_usage", ref_id="77",
+            data={"job": "a", "basis": "bb_usage", "bb_status": "completed"},
+        )  # fmt: skip
+        record(
+            conn, spool, "print_started", source="print_estimate", delta_g=-9,
+            ref_kind="print_run", ref_id="run/b/1", data={"job": "b"},
+        )  # fmt: skip
+    [row] = shop.suppliers.stats()
+    assert row.consumed_g == 28.0

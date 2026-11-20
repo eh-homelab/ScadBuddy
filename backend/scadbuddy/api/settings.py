@@ -297,6 +297,9 @@ class SettingsView(BaseModel):
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = 20
     filament_default_cost_per_kg: Decimal | None = None
+    filament_burn_window_days: int = 30
+    filament_lead_time_days: int = 7
+    filament_safety_margin_days: int = 3
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None

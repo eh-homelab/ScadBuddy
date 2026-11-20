@@ -158,6 +158,22 @@ def test_a_created_or_updated_spools_event_carries_the_invoice_line_ref(shop: Sh
     assert old in done.lines[0].spool_ids
 
 
+def test_confirm_writes_edited_on_existing_spools(shop: Shop) -> None:
+    type_id = shop.type_id()
+    old = shop.spools.create(SpoolCreate(material_id=shop.material()), actor="ann").id
+    before = len(shop.spools.events(old))
+    invoice = shop.one(type_id, update_spool_ids=[old])
+    done, _ = _confirm(shop, invoice)
+    line_id = done.lines[0].id
+    [event] = [e for e in shop.spools.events(old)[before:] if e.kind == "edited"]
+    changes = event.data["changes"]
+    assert changes["invoice_line_id"] == [None, str(line_id)]
+    assert changes["type_id"] == [None, str(type_id)]
+    assert changes["cost_per_kg"][0] is None
+    assert D(changes["cost_per_kg"][1]) == D("21.4000")
+    assert event.ref_kind == "invoice_line"
+
+
 def test_a_duplicate_proposed_type_is_a_409_line_error(shop: Shop) -> None:
     shop.type_id("PLA-WHT")
     invoice = shop.one(None, proposed_type=shop.type_body("PLA-WHT"))
@@ -201,7 +217,10 @@ def test_a_line_fills_a_costed_spool_and_replaces_its_cost(shop: Shop) -> None:
     assert len(edited) == 1
     assert edited[0].actor == "ann"
     assert (edited[0].ref_kind, edited[0].ref_id) == ("invoice_line", str(line.id))
-    assert edited[0].data["changes"] == {"cost_per_kg": ["9.0000", "42.8000"]}
+    assert edited[0].data["changes"] == {
+        "cost_per_kg": ["9.0000", "42.8000"],
+        "invoice_line_id": [None, str(line.id)],
+    }
 
 
 def test_the_spool_list_names_each_spools_invoice_line(shop: Shop) -> None:
@@ -247,18 +266,53 @@ def test_a_costed_spool_of_a_line_that_is_refused_keeps_its_cost(shop: Shop) -> 
     assert kept.cost_per_kg == D("9.0000")
 
 
-@pytest.mark.parametrize("kind", ["archived", "invoiced", "other_type"])
-def test_a_spool_that_is_archived_invoiced_or_of_another_type_is_refused(
-    shop: Shop, kind: str
+def test_a_line_fills_an_archived_spool_and_leaves_it_archived(shop: Shop) -> None:
+    """#6707 R-6707-12: a spent spool was still bought. The line sets its cost and its
+    invoice line only: it stays archived and keeps no type it did not have."""
+    type_id = shop.type_id()
+    spent = shop.spools.create(SpoolCreate(material_id=shop.material()), actor="ann").id
+    shop.spools.update(spent, SpoolPatch(archived=True), actor="ann")
+    invoice = shop.one(
+        type_id, quantity=1, line_subtotal=D(40), unit_price=D(40), update_spool_ids=[spent]
+    )
+    done, _ = _confirm(shop, invoice)
+    filled = shop.spools.get(spent)
+    assert filled is not None
+    assert filled.archived_at is not None
+    assert filled.type_id is None
+    assert filled.cost_per_kg == D("42.8000")
+    assert done.lines[0].spool_ids == [spent]
+    assert [r["id"] for r in shop.spool_rows(invoice.id)] == [spent]
+
+
+def test_an_untyped_archived_spool_stays_untyped_where_an_open_one_takes_the_type(
+    shop: Shop,
 ) -> None:
+    """R-6707-15: two spools with a null `type_id` on one line. The open one takes the
+    line's type; the archived one takes its cost and line only, and stays untyped."""
+    type_id = shop.type_id()
+    spent = shop.spools.create(SpoolCreate(material_id=shop.material()), actor="ann").id
+    shop.spools.update(spent, SpoolPatch(archived=True), actor="ann")
+    live = shop.spools.create(SpoolCreate(material_id=shop.material()), actor="ann").id
+    invoice = shop.one(type_id, update_spool_ids=[spent, live])
+    done, _ = _confirm(shop, invoice)
+    got = {s: shop.spools.get(s) for s in (spent, live)}
+    assert {s: (g.type_id, g.archived_at is not None) for s, g in got.items() if g} == {
+        spent: (None, True),
+        live: (type_id, False),
+    }
+    assert {g.cost_per_kg for g in got.values() if g} == {D("21.4000")}
+    assert sorted(done.lines[0].spool_ids) == sorted([spent, live])
+
+
+@pytest.mark.parametrize("kind", ["invoiced", "other_type"])
+def test_a_spool_that_is_invoiced_or_of_another_type_is_refused(shop: Shop, kind: str) -> None:
     type_id = shop.type_id()
     other = shop.type_id("PLA-BLK")
     spool = shop.spools.create(
         SpoolCreate(type_id=other if kind == "other_type" else None, material_id=shop.material()),
         actor="ann",
     ).id
-    if kind == "archived":
-        shop.spools.update(spool, SpoolPatch(archived=True), actor="ann")
     if kind == "invoiced":
         first = shop.one(
             type_id, quantity=1, line_subtotal=D(40), unit_price=D(40), update_spool_ids=[spool]
@@ -278,7 +332,6 @@ def test_a_spool_that_is_archived_invoiced_or_of_another_type_is_refused(
         number="N2",
     )
     reason = {
-        "archived": "is archived",
         "invoiced": "already belongs to an invoice line",
         "other_type": "has another spool type",
     }[kind]

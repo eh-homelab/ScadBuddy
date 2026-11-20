@@ -8,10 +8,10 @@ import {
   createSpool,
   deleteSpool,
   getSpool,
+  getSpoolHistory,
   getType,
   listCatalog,
   listLocations,
-  listSpoolEvents,
   listTypes,
   moveSpool,
   patchSpool,
@@ -23,7 +23,7 @@ import {
   type PresetInput,
   type SpoolCreate,
   type SpoolDetail,
-  type SpoolEvent,
+  type SpoolHistory,
   type SpoolPatch,
   type SpoolType,
   type SpoolTypeDetail,
@@ -41,7 +41,11 @@ import { RgbaColourField } from '../../components/filament/RgbaColourField'
 import { NeedsDrying } from '../../components/filament/NeedsDrying'
 import { outsideDryText } from '../../components/filament/outsideDry'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
-import { HistoryList, Section, SectionIndex } from '../../components/filament/SpoolSections'
+import { plateTimes } from '../../components/filament/eventText'
+import { GramsChart } from '../../components/filament/GramsChart'
+import { Section, SectionIndex } from '../../components/filament/SpoolSections'
+import { SpoolMetricsPanel } from '../../components/filament/SpoolMetricsPanel'
+import { SpoolTimeline } from '../../components/filament/SpoolTimeline'
 import { NtagPanel } from '../../components/filament/NtagPanel'
 import { TagPanel } from '../../components/filament/TagPanel'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
@@ -275,6 +279,8 @@ interface Lists {
   insertTypes: CatalogRows['insert-types'][]
   types: SpoolType[]
   places: { id: string; name: string }[]
+  /** Every place by its path, printer trays too: the names a move on the timeline shows. */
+  placeNames: { id: string; name: string }[]
   printers: (KPrinter & { model: string | null })[]
 }
 
@@ -282,6 +288,10 @@ function flatten(nodes: LocationNode[], path: string[] = []): { id: string; name
   // A printer's tray is not a place to move a spool to: loading one is the tray's job.
   return nodes.flatMap((node) => [...(node.printer_id == null ? [{ id: node.id, name: [...path, node.name].join(' / ') }] : []), ...flatten(node.children ?? [], [...path, node.name])])
 }
+
+/** Every place, trays too, by its path. */
+const named = (nodes: LocationNode[], path: string[] = []): { id: string; name: string }[] =>
+  nodes.flatMap((node) => [{ id: node.id, name: [...path, node.name].join(' / ') }, ...named(node.children ?? [], [...path, node.name])])
 
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
 
@@ -308,7 +318,8 @@ export function SpoolPage() {
   const [saved, setSaved] = useState<SpoolDetail | null>(null)
   const [draft, setDraft] = useState<Draft>(BLANK)
   const [lists, setLists] = useState<Lists | null>(null)
-  const [events, setEvents] = useState<SpoolEvent[] | null>(null)
+  const [history, setHistory] = useState<SpoolHistory | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -326,7 +337,8 @@ export function SpoolPage() {
     setSaved(null)
     setDraft(BLANK)
     setMadeId(null)
-    setEvents(null)
+    setHistory(null)
+    setHistoryError(null)
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
       listCatalog('materials'),
@@ -341,7 +353,7 @@ export function SpoolPage() {
     ])
       .then(([spool, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
         if (!live) return
-        setLists({ materials, subtypes, brands, categories, effects, insertTypes, types, places: flatten(places), printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })) })
+        setLists({ materials, subtypes, brands, categories, effects, insertTypes, types, places: flatten(places), placeNames: named(places), printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })) })
         if (spool) {
           setSaved(spool)
           setDraft(draftOf(spool))
@@ -350,13 +362,15 @@ export function SpoolPage() {
       .catch((cause: unknown) => {
         if (live) setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That spool is gone. Pick another from the Spools tab.' : `The spool could not be loaded: ${message(cause)}`)
       })
-    if (id !== 'new') listSpoolEvents(id).then((rows) => live && setEvents(rows), () => live && setEvents([]))
+    if (id !== 'new') getSpoolHistory(id).then((found) => live && setHistory(found), (cause: unknown) => live && setHistoryError(message(cause)))
     return () => {
       live = false
     }
   }, [id])
 
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
+  /** The catalogs and places by id and name: the names the timeline shows for an event's ids. */
+  const catalogs = useMemo(() => (lists ? [lists.materials, lists.subtypes, lists.brands, lists.categories, lists.effects, lists.insertTypes, lists.placeNames] : []), [lists])
   const dirty = JSON.stringify(draft) !== JSON.stringify(base)
   const presetsDirty = JSON.stringify(draft.presets) !== JSON.stringify(base.presets)
   const typeId = draft.type_id
@@ -383,11 +397,20 @@ export function SpoolPage() {
     })
   }
 
-  /** Reads the spool and its ledger again; `keepDraft` leaves unsaved edits as they are. */
+  /** Reads the history again; a failed read keeps the last one and says so. */
+  const readHistory = (spoolId: string) =>
+    getSpoolHistory(spoolId).then(
+      (found) => {
+        setHistory(found)
+        setHistoryError(null)
+      },
+      (cause: unknown) => setHistoryError(message(cause)),
+    )
+
+  /** Reads the spool and its history again; `keepDraft` leaves unsaved edits as they are. */
   async function reload(keepDraft: boolean) {
-    const [fresh, ledger] = await Promise.all([getSpool(spoolKey), listSpoolEvents(spoolKey)])
+    const [fresh] = await Promise.all([getSpool(spoolKey), readHistory(spoolKey)])
     setSaved(fresh)
-    setEvents(ledger)
     if (!keepDraft) setDraft(draftOf(fresh))
     return fresh
   }
@@ -446,14 +469,13 @@ export function SpoolPage() {
         guard.leaveTo(`/filament/spools/${spoolId}`, { replace: true, state: location.state })
         return
       }
-      const [fresh, ledger] = await Promise.all([getSpool(spoolId), listSpoolEvents(spoolId)])
+      const [fresh] = await Promise.all([getSpool(spoolId), readHistory(spoolId)])
       setSaved(fresh)
-      setEvents(ledger)
       setDraft(draftOf(fresh))
     } catch (cause) {
       setError(message(cause))
       // A write that did land is shown as it now is, unsaved edits kept.
-      if (spoolId !== 'new') await Promise.all([getSpool(spoolId).then(setSaved, () => {}), listSpoolEvents(spoolId).then(setEvents, () => {})])
+      if (spoolId !== 'new') await Promise.all([getSpool(spoolId).then(setSaved, () => {}), readHistory(spoolId)])
     } finally {
       setBusy(false)
     }
@@ -844,7 +866,29 @@ export function SpoolPage() {
           </Section>
 
           <Section id="history" title="History">
-            {creating ? <p className="text-[13px] text-muted-foreground">The history starts when the spool is saved.</p> : <HistoryList events={events} />}
+            {creating ? (
+              <p className="text-[13px] text-muted-foreground">The history starts when the spool is saved.</p>
+            ) : (
+              <>
+                {historyError && (
+                  <p role="alert" className="text-[13px] text-warn">
+                    The history could not be loaded: {historyError}
+                  </p>
+                )}
+                {history ? (
+                  <>
+                    <div className="flex flex-col gap-2">
+                      <h3 className="text-[13px] font-medium">Grams left</h3>
+                      <GramsChart points={history.series} plates={plateTimes(history.events.map((row) => row.event))} label="Grams left" />
+                    </div>
+                    {saved && <SpoolMetricsPanel history={history} gramsLeft={leftNow} createdAt={saved.created_at} />}
+                    <SpoolTimeline rows={history.events} catalogs={catalogs} types={lists.types} />
+                  </>
+                ) : (
+                  !historyError && <p className="text-[13px] text-muted-foreground">Loading the history…</p>
+                )}
+              </>
+            )}
           </Section>
         </div>
       </div>

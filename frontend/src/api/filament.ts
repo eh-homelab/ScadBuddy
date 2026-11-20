@@ -50,6 +50,20 @@ export type SpoolEventAdd = Omit<Schemas['SpoolEventAdd'], 'source'> & Partial<P
 export type LedgerRow = Schemas['LedgerRow']
 export type EventQuery = Query<'list_events_api_v1_filament_events_get'>
 export type InventorySummary = Schemas['InventorySummary']
+export type SpoolHistory = Schemas['SpoolHistory']
+export type TimelineRow = Schemas['TimelineRow']
+export type GramsPoint = Schemas['GramsPoint']
+export type SpoolMetrics = Schemas['SpoolMetrics']
+export type AmsError = Schemas['AmsError']
+export type Forecast = Schemas['Forecast']
+export type SpoolForecast = Schemas['SpoolForecast']
+export type TypeForecast = Schemas['TypeForecast']
+export type InventoryMetrics = Schemas['InventoryMetrics']
+export type PurchasingMetrics = Schemas['PurchasingMetrics']
+export type PriceSeries = Schemas['PriceSeries']
+export type SpendRow = Schemas['SpendRow']
+export type MetricsQueryParams = Query<'get_metrics_api_v1_filament_metrics_get'>
+export type PurchasingQueryParams = Query<'get_purchasing_metrics_api_v1_filament_metrics_purchasing_get'>
 export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
@@ -79,8 +93,17 @@ export type CatalogKind = keyof CatalogRows
  * carry, so this is the row's own fields, all optional, and `archived`.
  */
 export type CatalogInput<K extends CatalogKind> = Partial<
-  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id'>
+  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id' | 'aliases'>
 > & { archived?: boolean }
+
+/**
+ * #6706 — the catalogs whose rows have aliases (`filament/catalog.py` `NameTable`): each
+ * name and alias is a key (letters and digits, any case) no other name or alias of the
+ * catalog has, a subtype's within its material.
+ */
+export const ALIASED_KINDS = ['materials', 'subtypes', 'brands', 'categories', 'effects'] as const
+export type AliasedKind = (typeof ALIASED_KINDS)[number]
+export const isAliasedKind = (kind: CatalogKind): kind is AliasedKind => (ALIASED_KINDS as readonly string[]).includes(kind)
 
 const BASE = '/filament'
 const seg = encodeURIComponent
@@ -180,6 +203,9 @@ export const setSpoolKValues = (id: string, rows: KValueInput[]) =>
 /** One spool's ledger, oldest first. */
 export const listSpoolEvents = (id: string) => request<SpoolEvent[]>(`${BASE}/spools/${seg(id)}/events`)
 
+/** #6269 — the spool's timeline (newest first), its grams series, its metrics and the burn window. */
+export const getSpoolHistory = (id: string) => request<SpoolHistory>(`${BASE}/spools/${seg(id)}/history`)
+
 /** A weighing (`grams`: the filament left, without the empty spool) or a drying (`temp_c`, `hours`). */
 export const addSpoolEvent = (id: string, body: SpoolEventAdd) => request<SpoolEvent>(`${BASE}/spools/${seg(id)}/events`, json('POST', body))
 
@@ -256,6 +282,14 @@ export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeAr
   request<CatalogRows[K][]>(`${BASE}/catalog/${seg(kind)}${query({ include_archived: options.includeArchived || undefined })}`)
 
 /** Adds a row, or with `id` changes one (only the fields sent). */
+/** Replace a row's aliases; a key another name or alias holds is a 409 that names the holder. */
+export const setCatalogAliases = <K extends AliasedKind>(kind: K, id: string, aliases: string[]) =>
+  request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}/${seg(id)}/aliases`, json('PUT', { aliases }))
+
+/** The row whose name or alias has `name`'s key (a subtype: `materialId`'s own, else one for every material); 404 for none. */
+export const resolveCatalog = <K extends AliasedKind>(kind: K, name: string, materialId?: string) =>
+  request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}/resolve${query({ name, material_id: materialId })}`)
+
 export const upsertCatalog = <K extends CatalogKind>(kind: K, body: CatalogInput<K>, id?: string) =>
   id === undefined
     ? request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}`, json('POST', body))
@@ -284,6 +318,16 @@ export const getTag = (id: string) => request<TagDetail>(`${BASE}/tags/${seg(id)
 export const listEvents = (filters: EventQuery = {}) => request<EventPage>(`${BASE}/events${query(filters)}`)
 
 export const getSummary = () => request<InventorySummary>(`${BASE}/summary`)
+
+/** #6269 — each unarchived spool's burn and empty day, and each type's days of stock and reorder day. */
+export const getForecast = () => request<Forecast>(`${BASE}/forecast`)
+
+/** #6269 — stock now, and the consumption and waste from `since` to `until` (both days included). */
+export const getMetrics = (params: MetricsQueryParams = {}) => request<InventoryMetrics>(`${BASE}/metrics${query(params)}`)
+
+/** #6269 — price per kg over time and confirmed invoice spend, each in its own currency. */
+export const getPurchasingMetrics = (params: PurchasingQueryParams = {}) =>
+  request<PurchasingMetrics>(`${BASE}/metrics/purchasing${query(params)}`)
 
 /** Every spool with the tray it is in, and each registry printer's trays (Task 9). */
 export const getInventory = (options: { includeArchived?: boolean } = {}) =>

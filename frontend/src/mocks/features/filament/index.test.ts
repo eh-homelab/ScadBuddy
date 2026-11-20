@@ -6,7 +6,9 @@ import {
   createSpool,
   deleteSpool,
   getInventory,
+  getMetrics,
   getSpool,
+  getSpoolHistory,
   getSummary,
   getTag,
   getType,
@@ -19,6 +21,8 @@ import {
   moveSpool,
   patchSpool,
   unbindTag,
+  resolveCatalog,
+  setCatalogAliases,
   upsertCatalog,
   upsertLocation,
   upsertType,
@@ -38,8 +42,10 @@ async function refusal(call: Promise<unknown>) {
     (cause: unknown) => cause,
   )
   expect(error).toBeInstanceOf(ApiError)
-  const { status, title, detail } = (error as ApiError).problem
-  return { status, title, detail }
+  // The problem without its `type`: a refusal's extensions (#6706's holder) come along.
+  const rest: Record<string, unknown> = { ...(error as ApiError).problem }
+  delete rest.type
+  return rest
 }
 
 const NEW_SPOOL = { weight_locked: false } as SpoolCreate
@@ -82,6 +88,22 @@ describe('the filament mocks', () => {
       ['Shelf A', 2],
       ['Dry box 1', 2],
     ])
+  })
+
+  it("counts the summary's consumed grams by the one plate rule the history uses (metrics.plates)", async () => {
+    // #2's three plates (120 g) and #3's job SB and BB both booked, once (20 g). #4's `print` ref and #10's open estimate are no plate.
+    expect((await getSummary()).consumed_g).toBe(140)
+    const used = await Promise.all([2, 3, 4, 10].map(async (number) => (await getSpoolHistory(spoolId(number))).metrics.used_g))
+    expect(used).toEqual([120, 20, 0, 0])
+  })
+
+  it('values the stock at the exact grams, as metrics_store._value does (R-T8-9)', async () => {
+    // A spool of the orange type (19.99/kg) with 823.5 g, beside #2's 820 g. The backend's own
+    // `_value` and `_money` on these two spools give 16.3918 + 16.461765 = 32.853565, so 32.85;
+    // rounding the grams first (824 g) would give 32.86.
+    await createSpool({ ...NEW_SPOOL, type_id: T.ORANGE, grams_left: 823.5 })
+    const metrics = await getMetrics({ dimension: 'type' })
+    expect(metrics.stock.find((row) => row.key === T.ORANGE)).toMatchObject({ spools: 2, grams_left: 1643.5, value: '32.85' })
   })
 
   it('pages the ledger with no row lost or repeated, and refuses a cursor no page gave', async () => {
@@ -248,19 +270,37 @@ describe('the filament mocks', () => {
   })
 
   it('refuses to restore a catalog row whose name a live row has taken since', async () => {
-    const old = await upsertCatalog('brands', { name: 'Hatchbox' })
-    await upsertCatalog('brands', { archived: true }, old.id)
+    const old = await upsertCatalog('insert-materials', { name: 'Foam' })
+    await upsertCatalog('insert-materials', { archived: true }, old.id)
     // An archived row holds no name: the index is `WHERE archived_at IS NULL`.
-    await upsertCatalog('brands', { name: 'HATCHBOX' })
-    expect(await upsertCatalog('brands', { sort_order: 5 }, old.id)).toMatchObject({ sort_order: 5 })
-    expect(await refusal(upsertCatalog('brands', { archived: false }, old.id))).toMatchObject({ status: 409 })
+    await upsertCatalog('insert-materials', { name: 'FOAM' })
+    expect(await upsertCatalog('insert-materials', { sort_order: 5 }, old.id)).toMatchObject({ sort_order: 5 })
+    expect(await refusal(upsertCatalog('insert-materials', { archived: false }, old.id))).toMatchObject({ status: 409 })
+  })
+
+  it('keeps a plus variant apart, and reads + as PLUS (R-6706-17)', async () => {
+    const plus = await upsertCatalog('materials', { name: 'PLA+' })
+    expect(await refusal(upsertCatalog('materials', { name: 'PLA Plus' }))).toMatchObject({ status: 409, material_id: plus.id })
+    expect(await resolveCatalog('materials', 'pla')).toMatchObject({ id: M.PLA })
+  })
+
+  it('keeps an archived row’s names and aliases in a catalog with aliases (#6706)', async () => {
+    const old = await upsertCatalog('brands', { name: 'Hatchbox' })
+    await setCatalogAliases('brands', old.id, ['HB'])
+    await upsertCatalog('brands', { archived: true }, old.id)
+    for (const name of ['hatch-box', 'h.b']) {
+      expect(await refusal(upsertCatalog('brands', { name }))).toMatchObject({ status: 409, brand_id: old.id, brand_name: 'Hatchbox' })
+    }
+    expect(await resolveCatalog('brands', 'hb')).toMatchObject({ id: old.id })
   })
 
   it('refuses a catalog row whose name is taken, whose reference is missing, or that clears its name', async () => {
-    expect(await refusal(upsertCatalog('brands', { name: 'bambu lab' }))).toEqual({
+    expect(await refusal(upsertCatalog('brands', { name: 'bambu-lab' }))).toEqual({
       status: 409,
       title: 'Conflict',
-      detail: 'a row of this catalog already has that name',
+      detail: "the brand 'Bambu Lab' already has a name or alias that matches 'bambu-lab'",
+      brand_id: B.BAMBU,
+      brand_name: 'Bambu Lab',
     })
     expect(await refusal(upsertCatalog('subtypes', { name: 'Glow', material_id: B.BAMBU }))).toMatchObject({
       status: 422,

@@ -2,14 +2,17 @@ import { HttpResponse, http } from 'msw'
 import { newId } from '../../newId'
 import type { components } from '../../../api/schema'
 import type { FilamentInventorySpool, FilamentInventoryView, FilamentSpool } from '../../../api/types'
+import { divDecimal, mulDecimal } from '../../../lib/decimal'
 import { parseRgba } from '../../../lib/rgba'
+// Also a cycle (`handlers.ts` loads every feature): only inside functions.
+import { mockSettings } from '../../handlers'
 // A module cycle (`orders/priceBook.ts` imports `inventoryRows` from here): use it only inside functions.
 import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
-import { mockSettings } from '../../handlers'
 import { printersState } from '../printers'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
+import { jobOf } from '../../../components/filament/eventText'
 
 type S = components['schemas']
 
@@ -128,9 +131,9 @@ const now = () => new Date().toISOString()
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
 
 /** A refusal as `core/problems.py` `problem_response` writes it: every error here. */
-const problem = (status: keyof typeof TITLES, detail: string) =>
+const problem = (status: keyof typeof TITLES, detail: string, extensions: object = {}) =>
   HttpResponse.json(
-    { type: 'about:blank', title: TITLES[status], status, detail },
+    { type: 'about:blank', title: TITLES[status], status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 
@@ -141,7 +144,7 @@ const problem = (status: keyof typeof TITLES, detail: string) =>
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
-  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
+  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
@@ -442,6 +445,8 @@ function summary(): S['InventorySummary'] {
     loaded: rows.filter((spool) => state.locations.find((place) => place.id === spool.location_id)?.printer_id).length,
     low_stock: rows.filter((spool) => spool.low_stock).length,
     needs_type: rows.filter((spool) => !spool.type_id).length,
+    // Every spool's plates, archived ones too (plan Decision 18), by the one plate rule (`metrics.plates`).
+    consumed_g: plateGrams(state.events),
   }
 }
 
@@ -545,9 +550,45 @@ function cleared(body: Record<string, unknown>, fields: readonly string[]): stri
 const CATALOG_FIELDS = Object.fromEntries(
   Object.entries(seed().catalogs).map(([kind, rows]) => [
     kind,
-    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id'].includes(field))),
+    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases'].includes(field))),
   ]),
 ) as Record<keyof Catalogs, Set<string>>
+
+/**
+ * #6706 — the catalogs with aliases (`filament/catalog.py` `NameTable`) and the noun a
+ * clash names (`<noun>_id`, `<noun>_name`). Their names and aliases share one key space
+ * per catalog (a subtype's within its material), archived rows included.
+ */
+const ALIASED = { materials: 'material', subtypes: 'subtype', brands: 'brand', categories: 'category', effects: 'effect' } as const
+type Aliased = keyof typeof ALIASED
+const isAliased = (kind: string): kind is Aliased => kind in ALIASED
+type AliasedRow = { id: string; name: string; aliases: string[]; material_id?: string | null }
+
+/** `catalog_key`: `+` read as `PLUS` (R-6706-17), then the letters and digits, upper case. */
+export const catalogKey = (name: string) =>
+  name
+    .replace(/\+/g, 'PLUS')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .toUpperCase()
+
+/** The row of `kind` that holds `name`'s key in `scope` (a subtype's material), but `self`'s own names. */
+function keyHolder(kind: Aliased, name: string, scope: string | null, self?: string, skipSelf = true): AliasedRow | undefined {
+  const key = catalogKey(name)
+  return (state.catalogs[kind] as AliasedRow[]).find(
+    (row) =>
+      !(skipSelf && row.id === self) &&
+      (kind !== 'subtypes' || (row.material_id ?? null) === scope) &&
+      [row.name, ...row.aliases].some((one) => catalogKey(one) === key),
+  )
+}
+
+function keyClash(kind: Aliased, holder: AliasedRow, name: string): Response {
+  const noun = ALIASED[kind]
+  return problem(409, `the ${noun} '${holder.name}' already has a name or alias that matches '${name}'`, {
+    [`${noun}_id`]: holder.id,
+    [`${noun}_name`]: holder.name,
+  })
+}
 
 const sameName = (a: string, b: unknown) => typeof b === 'string' && a.trim().toUpperCase() === b.trim().toUpperCase()
 
@@ -560,6 +601,12 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
   if (badRef(values, CATALOG_REFS[kind] ?? {})) return problem(422, REFUSED.catalogRef)
   const temps = kind === 'materials' || kind === 'subtypes' ? badTemps(values) : null
   if (temps) return problem(422, temps)
+  if (isAliased(kind)) {
+    // A name takes its key; an archived row keeps its keys (#6706).
+    const holder = typeof values.name === 'string' ? keyHolder(kind, values.name, (values.material_id as string | null | undefined) ?? null, self) : undefined
+    // A rename to one of its own aliases takes that alias's key.
+    return holder ? keyClash(kind, holder, values.name as string) : null
+  }
   // The name indexes are `WHERE archived_at IS NULL`: an archived row holds no name, and
   // restoring one whose name a live row took since is refused.
   if (values.archived_at) return null
@@ -567,7 +614,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
     id: string
     name: string
     archived_at: string | null
-    material_id?: string | null
     manufacturer?: string | null
   }[]
   const taken = rows.some(
@@ -575,8 +621,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
       row.id !== self &&
       !row.archived_at &&
       sameName(row.name, values.name) &&
-      // `filament_subtypes_name`: a subtype's name is unique within its material.
-      (kind !== 'subtypes' || (row.material_id ?? null) === (values.material_id ?? null)) &&
       // `filament_colours_name`: a colour's name is unique per manufacturer (none is one).
       (kind !== 'colours' || sameName(row.manufacturer ?? '', values.manufacturer ?? '')),
   )
@@ -745,6 +789,8 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     insert_type_id: null,
     low_stock_pct: null,
     cost_per_kg: null,
+    lead_time_days: null,
+    safety_margin_days: null,
     note: null,
     tdfp_id: null,
     diameter_mm: '1.75',
@@ -915,14 +961,200 @@ export function typeInfo(id: string): { code: string; label: string; label_weigh
 /** Whether an unarchived type has the code (`filament_spool_types_code`, case-blind). */
 export const typeCodeTaken = (code: string) => state.types.some((type) => !type.archived_at && sameName(type.code, code))
 
+const DAY_MS = 86_400_000
+const BB_OUTCOMES = new Set(['completed', 'failed', 'cancelled'])
+const byTime = (a: S['SpoolEvent'], b: S['SpoolEvent']) => a.at.localeCompare(b.at) || a.seq - b.seq
+const PLATE_KINDS = new Set<S['SpoolEvent']['kind']>(['print_started', 'print_ended'])
+
+/** A plate as `metrics.Plate` has it, with the fields the mock reads. */
+export interface MockPlate {
+  at: string
+  grams: number
+  // `metrics_models.Outcome`.
+  outcome: 'completed' | 'failed' | 'cancelled' | 'unknown'
+  printer_id: string | null
+}
+
+/**
+ * One spool's plates, oldest first, as `metrics.plates` counts them: an ended BB usage row,
+ * and an ended SB print run that BB did not book too (a `covered` one is none, a
+ * `not_applied` one a failed 0 g plate). An open `print_started` estimate and a `print`
+ * ref are no plate. The one plate rule of the mock: the history and `consumed_g` use it.
+ */
+function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
+  const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
+  return [...events].sort(byTime).flatMap((event) => {
+    if (event.kind !== 'print_ended') return []
+    const grams = event.delta_g ? -event.delta_g : 0
+    if (event.ref_kind === 'bb_usage') {
+      const status = event.data?.bb_status
+      const outcome = typeof status === 'string' && BB_OUTCOMES.has(status) ? (status as MockPlate['outcome']) : 'unknown'
+      return [{ at: event.at, grams, outcome, printer_id: event.printer_id }]
+    }
+    if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
+    const failed = event.data?.basis === 'not_applied'
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id }]
+  })
+}
+
+/** The grams the plates in `events` used, each spool's plates counted by `platesOf` (`summary`'s `consumed_g`). */
+function plateGrams(events: readonly S['SpoolEvent'][]): number {
+  const spools = new Set(events.map((event) => event.spool_id))
+  return [...spools].reduce((sum, id) => sum + platesOf(events.filter((event) => event.spool_id === id)).reduce((total, plate) => total + plate.grams, 0), 0)
+}
+
+/**
+ * `metrics.burn`: the grams of the plates that ended in the last `windowDays`, over the
+ * window, or over the age since `born` when that is shorter (never less than a day);
+ * `null` when no plate ended in the window.
+ */
+export function burnOf(plates: readonly MockPlate[], windowDays: number, born: string, nowMs: number): number | null {
+  const inside = plates.filter((plate) => nowMs - Date.parse(plate.at) < windowDays * DAY_MS && Date.parse(plate.at) <= nowMs)
+  if (inside.length === 0) return null
+  return inside.reduce((sum, plate) => sum + plate.grams, 0) / Math.max(1, Math.min(windowDays, (nowMs - Date.parse(born)) / DAY_MS))
+}
+
+/** `metrics.MAX_FORECAST_DAYS`: no forecast further out than this. */
+export const MAX_FORECAST_DAYS = 3650
+
+/** `metrics.empty_on`: the UTC day the grams run out at `burn`; `null` with no grams, no burn above 0, or past `MAX_FORECAST_DAYS`. */
+export function emptyOn(grams: number | null | undefined, burn: number | null, nowMs: number): string | null {
+  if (grams == null || burn == null || !Number.isFinite(grams) || !Number.isFinite(burn) || burn <= 0) return null
+  const days = Math.max(grams, 0) / burn
+  return days > MAX_FORECAST_DAYS ? null : new Date(nowMs + days * DAY_MS).toISOString().slice(0, 10)
+}
+
+/** `ledger.reading`: the grams an absolute reading gives (with an AMS reading's `remain_pct` × the label weight when it has none), or `null`. */
+function readingOf(event: S['SpoolEvent'], labelWeight: number | null | undefined): number | null {
+  if (!event.source || !['scale', 'person', 'bb', 'ams_remain'].includes(event.source)) return null
+  if (event.grams_after != null) return event.grams_after
+  const pct = event.source === 'ams_remain' ? event.data?.remain_pct : undefined
+  return typeof pct === 'number' && labelWeight != null ? (pct * labelWeight) / 100 : null
+}
+
+/** `ledger.is_anchor`: a reading, and not an AMS one while the weight is locked or the AMS is printing. */
+const isAnchor = (event: S['SpoolEvent'], weightLocked: boolean, labelWeight: number | null | undefined) =>
+  readingOf(event, labelWeight) != null && !(event.source === 'ams_remain' && (weightLocked || event.data?.printing === true))
+
+/**
+ * `metrics.ams_pairs`: AMS grams less scale grams, one per scale reading with an AMS
+ * reading to pair: the newest `ams_remain` reading before it that is not printing, at most
+ * 24 h older, with no plate event that used grams between them (plan Decision 14).
+ */
+function amsErrors(events: readonly S['SpoolEvent'][], labelWeight: number | null | undefined): number[] {
+  const errors: number[] = []
+  let ams: { at: number; grams: number } | null = null
+  for (const event of [...events].sort(byTime)) {
+    if (PLATE_KINDS.has(event.kind)) {
+      if (event.delta_g) ams = null
+    } else if (event.source === 'ams_remain' && event.data?.printing !== true) {
+      const grams = readingOf(event, labelWeight)
+      if (grams != null) ams = { at: Date.parse(event.at), grams }
+    } else if (event.source === 'scale' && event.grams_after != null && ams && Date.parse(event.at) - ams.at <= DAY_MS) {
+      errors.push(ams.grams - event.grams_after)
+    }
+  }
+  return errors
+}
+
+function amsError(errors: readonly number[]): S['AmsError'] | null {
+  if (errors.length === 0) return null
+  const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0)
+  return { pairs: errors.length, mean_abs_g: sum(errors.map(Math.abs)) / errors.length, bias_g: sum(errors) / errors.length }
+}
+
+/** The cost of `grams` at `perKg`, to the cent as `metrics._money` quantizes it; the mock rounds the grams to whole ones. */
+const costOf = (perKg: string, grams: number) => divDecimal(mulDecimal(perKg, Math.round(grams)), '1000', 2)
+
+/**
+ * `GET /filament/spools/{id}/history` (#6269, `metrics_store.history`): the timeline newest
+ * first by `(at, seq)` with each plate's order and print; the grams series as
+ * `metrics.series` builds it (the value after an event is the next one's `grams_before` by
+ * `seq`, the spool's grams left after the last, sorted by `(at, seq)`, an anchor by
+ * `ledger.is_anchor`); the spool's metrics over the burn window the settings hold, its age
+ * counted from `created_at`; and its type's AMS error.
+ */
+function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
+  const events = state.events.filter((event) => event.spool_id === row.id).sort(byTime)
+  const windowDays = mockSettings().filament_burn_window_days ?? 30
+  const nowMs = Date.now()
+  const plates = platesOf(events)
+  const used = plates.reduce((sum, plate) => sum + plate.grams, 0)
+  const wasted = plates.filter((plate) => plate.outcome === 'failed' || plate.outcome === 'cancelled').reduce((sum, plate) => sum + plate.grams, 0)
+  const burn = burnOf(plates, windowDays, row.created_at, nowMs)
+  const left = row.grams_left
+  const opened = events.find((event) => event.kind === 'loaded')?.at ?? plates[0]?.at ?? null
+  const effective = view(row).effective
+  const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
+  const labelWeight = effective?.label_weight_g
+  const bySeq = [...events].sort((a, b) => a.seq - b.seq)
+  const series: S['GramsPoint'][] = bySeq
+    .flatMap((event, i) => {
+      const grams = i + 1 < bySeq.length ? bySeq[i + 1]!.grams_before : left
+      return grams == null ? [] : [{ event, point: { at: event.at, grams, anchor: isAnchor(event, row.weight_locked, labelWeight), kind: event.kind } }]
+    })
+    .sort((a, b) => byTime(a.event, b.event))
+    .map(({ point }) => point)
+  const sameType = row.type_id ? state.spools.filter((one) => one.type_id === row.type_id) : []
+  return {
+    events: [...events].reverse().map((event) => {
+      const archive = event.data?.bb_archive_id
+      const run = event.ref_kind === 'print_run' ? event.ref_id?.split('/')[0] : undefined
+      return { event, archive_id: typeof archive === 'number' ? archive : null, order_id: (run && state.orderRuns.get(run)) || null }
+    }),
+    series,
+    metrics: {
+      used_g: used,
+      prints: plates.length,
+      grams_per_print: plates.length > 0 ? used / plates.length : null,
+      wasted_g: wasted,
+      cost_used: perKg != null ? costOf(perKg, used) : null,
+      value_left: perKg != null && left != null ? costOf(perKg, left) : null,
+      burn_g_per_day: burn,
+      empty_on: emptyOn(left, burn, nowMs),
+      opened_at: opened,
+      days_since_opened: opened ? (nowMs - Date.parse(opened)) / DAY_MS : null,
+      days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
+      hours_outside_dry: row.hours_outside_dry,
+      ams_error: amsError(amsErrors(events, labelWeight)),
+    },
+    type_ams_error: row.type_id
+      ? amsError(sameType.flatMap((one) => amsErrors(state.events.filter((event) => event.spool_id === one.id), view(one).effective?.label_weight_g)))
+      : null,
+    currency: mockSettings().orders_currency ?? 'USD',
+    window_days: windowDays,
+  }
+}
+
 /** The spools of `ids` that exist, their grams left (unarchived only) and the grams their prints used (#6266 stats). */
 export function spoolUsage(ids: readonly string[]): { count: number; remaining_g: number; consumed_g: number } {
   const rows = state.spools.filter((row) => ids.includes(row.id))
-  const used = state.events.filter((event) => ids.includes(event.spool_id) && event.kind.startsWith('print') && event.delta_g != null)
   return {
     count: rows.length,
     remaining_g: rows.filter((row) => !row.archived_at).reduce((sum, row) => sum + (row.grams_left ?? 0), 0),
-    consumed_g: used.reduce((sum, event) => sum - (event.delta_g ?? 0), 0),
+    consumed_g: plateGrams(state.events.filter((event) => ids.includes(event.spool_id))),
+  }
+}
+
+/**
+ * #6269 — what the metrics routes (`metrics.ts`) read, as `metrics_store._read` does: every
+ * spool (archived too) as the API lists it, its plates by the one plate rule (`platesOf`),
+ * its supplier (its invoice line's confirmed invoice's), the types with their material's
+ * name, and the printers' names.
+ */
+export function metricsInput() {
+  const spools = listed(true).map(view)
+  const suppliers = new Map<string, { id: string; name: string }>()
+  for (const row of state.spools) {
+    const ref = invoiceRefOf(row.id, invoicedLine.get(row.id))
+    if (ref) suppliers.set(row.id, { id: ref.supplier_id, name: ref.supplier_name })
+  }
+  return {
+    spools,
+    plates: new Map(spools.map((spool) => [spool.id, platesOf(state.events.filter((event) => event.spool_id === spool.id))])),
+    suppliers,
+    types: state.types.map((type) => ({ ...type, material: nameOf('materials', type.material_id) })),
+    printers: new Map([[H2C.printer_id, H2C.printer_name]]),
   }
 }
 
@@ -938,7 +1170,6 @@ export function checkTypeProposal(raw: unknown): Response | null {
 export function spoolClaimRefusal(id: string, typeId: string | null): string | null {
   const row = state.spools.find((one) => one.id === id)
   if (!row) return 'does not exist'
-  if (row.archived_at) return 'is archived'
   if (invoicedLine.has(id) || invoiceRefOf(id)) return 'already belongs to an invoice line'
   if (row.type_id != null && row.type_id !== typeId) return 'has another spool type'
   return null
@@ -949,14 +1180,16 @@ export const spoolLabelWeight = (id: string) => state.spools.find((one) => one.i
 
 /**
  * Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`).
- * The line's cost replaces a spool's own (#6700); that `edited` event is the caller's.
+ * The line's cost replaces a spool's own (#6700); that `edited` event is the caller's. An archived spool takes its
+ * cost and line only: it keeps its type, or none, and stays archived (#6707).
  */
 export function updateInvoicedSpool(id: string, typeId: string, costPerKg: string, lineId: string): void {
   const at = state.spools.findIndex((one) => one.id === id)
   const row = state.spools[at]!
-  state.spools[at] = { ...row, type_id: typeId, cost_per_kg: costPerKg, updated_at: now() }
+  const type = row.archived_at ? row.type_id : typeId
+  state.spools[at] = { ...row, type_id: type, cost_per_kg: costPerKg, updated_at: now() }
   const changes: Record<string, [unknown, unknown]> = {}
-  if (row.type_id !== typeId) changes.type_id = [row.type_id, typeId]
+  if (row.type_id !== type) changes.type_id = [row.type_id, type]
   if (row.cost_per_kg !== costPerKg) changes.cost_per_kg = [row.cost_per_kg, costPerKg]
   const actor = row.cost_per_kg == null ? `invoice:${lineId}` : 'mock@example.com'
   if (Object.keys(changes).length) addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor, data: { changes } })
@@ -1098,7 +1331,6 @@ function csvValue(field: (typeof CSV_PLAIN)[number], text: string): unknown {
   return text
 }
 
-type Named = { id: string; name: string; archived_at: string | null; material_id?: string | null }
 const liveNamed = <T extends { name: string; archived_at: string | null }>(rows: T[], name: string) =>
   rows.filter((row) => !row.archived_at && sameName(row.name, name))
 
@@ -1143,10 +1375,15 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
     if (name === null) continue
     const before = shown?.names?.[column] ?? null
     if (before !== null && sameName(before, name)) continue
-    const found = liveNamed(state.catalogs[kind] as Named[], name)
-      .filter((one) => kind !== 'subtypes' || one.material_id === material || one.material_id == null)
-      .sort((a, b) => Number(a.material_id == null) - Number(b.material_id == null))[0]
+    // No letter or digit, so no key: the cell is skipped and the row goes on (R-6706-18).
+    if (catalogKey(name) === '') {
+      changes[column] = [before, name, { skipped: 'no letter or digit' }]
+      continue
+    }
+    // By key, against every name and alias, archived rows too (#6706).
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
     if (column === 'material') material = found?.id ?? null
+    if (found && before !== null && found.name === before) continue
     if (found) {
       changes[column] = [before, found.name]
       values[`${column}_id`] = found.id
@@ -1189,7 +1426,7 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
   for (const [column, name] of fresh) {
     const kind = CSV_CATALOGS[column]
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, name, sort_order: 1000, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, name, sort_order: 1000, aliases: [], id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     if (kind === 'subtypes') Object.assign(made, { material_id: (values.material_id as string | undefined) ?? material })
     ;(state.catalogs[kind] as unknown[]).push(made)
     values[`${column}_id`] = made.id
@@ -1267,7 +1504,7 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, sort_order: 0, ...body, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),
@@ -1283,8 +1520,44 @@ export const handlers = [
     const next = patched(rows[at]!, body)
     const refused = catalogRefusal(kind, next, body, rows[at]!.id)
     if (refused) return refused
+    if (isAliased(kind) && typeof body.name === 'string') {
+      const key = catalogKey(body.name)
+      const own = next as unknown as AliasedRow
+      own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
+    }
     rows[at] = next
     return HttpResponse.json(next)
+  }),
+  http.get(`${BASE}/catalog/:kind/resolve`, ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const url = new URL(request.url)
+    const name = url.searchParams.get('name') ?? ''
+    const material = url.searchParams.get('material_id')
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
+    return found ? HttpResponse.json(found) : problem(404, `no ${kind} row is named '${name}'`)
+  }),
+  http.put(`${BASE}/catalog/:kind/:id/aliases`, async ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const row = (state.catalogs[kind] as AliasedRow[]).find((one) => one.id === params.id)
+    if (!row) return problem(404, `no ${kind} row ${String(params.id)}`)
+    const body = (await request.json()) as { aliases?: unknown }
+    if (!Array.isArray(body.aliases)) return problem(422, 'aliases: Field required')
+    const aliases = body.aliases.map((one) => String(one).trim())
+    if (aliases.some((one) => one === '')) return problem(422, 'aliases: String should have at least 1 character')
+    const empty = aliases.find((one) => catalogKey(one) === '')
+    if (empty !== undefined) return problem(422, `the alias '${empty}' has no letter or digit`)
+    const scope = row.material_id ?? null
+    const taken: string[] = [catalogKey(row.name)]
+    for (const alias of aliases) {
+      const holder = keyHolder(kind, alias, scope, row.id)
+      if (holder) return keyClash(kind, holder, alias)
+      if (taken.includes(catalogKey(alias))) return keyClash(kind, row, alias)
+      taken.push(catalogKey(alias))
+    }
+    row.aliases = [...aliases].sort((a, b) => a.toUpperCase().localeCompare(b.toUpperCase()))
+    return HttpResponse.json(row)
   }),
 
   // -- spool types --
@@ -1606,6 +1879,11 @@ export const handlers = [
     if (!findSpool(spoolId)) return problem(404, `no spool ${spoolId}`)
     return HttpResponse.json(state.events.filter((event) => event.spool_id === spoolId).sort((a, b) => a.at.localeCompare(b.at) || a.seq - b.seq))
   }),
+  http.get(`${BASE}/spools/:id/history`, ({ params }) => {
+    const row = findSpool(String(params.id))
+    if (!row) return problem(404, `no spool ${String(params.id)}`)
+    return HttpResponse.json(spoolHistory(row))
+  }),
   http.post(`${BASE}/spools/:id/events`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)
     if (at < 0) return problem(404, `no spool ${String(params.id)}`)
@@ -1822,6 +2100,7 @@ export const handlers = [
   http.post(`${BASE}/bambuddy/import`, () =>
     HttpResponse.json({
       created: 0,
+      archived_created: 0,
       linked: 0,
       updated: 0,
       needs_type: 0,
@@ -1829,6 +2108,7 @@ export const handlers = [
       invalid: 0,
       catalog_failed: false,
       catalog_skipped: 0,
+      names_skipped: 0,
       created_ids: [],
       linked_ids: [],
       updated_ids: [],
@@ -1840,6 +2120,8 @@ export const handlers = [
       usage_unlinked: 0,
       rfid_duplicates: 0,
       rfid_duplicate_bb_ids: [],
+      archived_deferred: 0,
+      archived_deferred_bb_ids: [],
     } satisfies S['PullReport']),
   ),
 ]

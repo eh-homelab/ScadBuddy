@@ -871,6 +871,9 @@ class SettingsPatch(BaseModel):
     filament_sync: FilamentSync | None = None
     filament_low_stock_pct: int | None = Field(default=None, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    filament_burn_window_days: int | None = Field(default=None, ge=1, le=365)
+    filament_lead_time_days: int | None = Field(default=None, ge=0, le=365)
+    filament_safety_margin_days: int | None = Field(default=None, ge=0, le=365)
     log_level: str | None = None
     temporal_ui_url: str | None = None
 

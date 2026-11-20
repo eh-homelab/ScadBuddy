@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -37,12 +37,15 @@ from scadbuddy.crud.idempotency import (
     required_key,
 )
 from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
+from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
+    CatalogKeyClashError,
+    CatalogKeyEmptyError,
     CatalogRefError,
     CatalogSpec,
 )
@@ -142,6 +145,12 @@ def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
 
 
 def _refused(exc: ValueError) -> ApiError:
+    if isinstance(exc, CatalogKeyClashError):
+        holder: dict[str, Any] = {
+            f"{exc.noun}_id": str(exc.holder_id),
+            f"{exc.noun}_name": exc.holder_name,
+        }
+        return ApiError(status.HTTP_409_CONFLICT, str(exc), **holder)
     code = (
         status.HTTP_409_CONFLICT
         if isinstance(
@@ -167,6 +176,7 @@ def _refused(exc: ValueError) -> ApiError:
         "A catalog a spool type or spool picks from, by kind: `materials`, `subtypes`, "
         "`brands`, `categories`, `effects`, `insert-materials`, `insert-types`, `colours` "
         "or `location-kinds`. In sort order; archived rows only with `include_archived`. "
+        "A material, subtype, brand, category or effect has `aliases`, its other names. "
         "404 for an unknown kind."
     ),
 )
@@ -186,8 +196,14 @@ async def list_catalog(
     description=(
         "The fields depend on the kind (every one takes `name` and `sort_order`; materials "
         "add print and drying defaults and handling flags, colours an `rgba`). 404 for an "
-        "unknown kind, 409 when an unarchived row has the name, 422 for a bad field, a "
-        "row it points at that does not exist, or a minimum temperature above its maximum."
+        "unknown kind, 409 when a row has the name, 422 for a bad field, a row it points "
+        "at that does not exist, or a minimum temperature above its maximum. In the "
+        "materials, subtypes, brands, categories and effects catalogs a name matches by its "
+        "key (letters and digits, any case: `dual-color` is `Dual Color`) against every "
+        "name and alias, archived rows too, a subtype's within its material; the 409 then "
+        "names the row that holds it (`<kind>_id`, `<kind>_name`, e.g. `effect_id`); a name "
+        "there with no letter or digit is a 422. `+` counts as `PLUS` (`PLA+` is `PLA Plus`, "
+        "not `PLA`)."
     ),
 )
 async def create_catalog_row(
@@ -197,7 +213,7 @@ async def create_catalog_row(
     parsed = _body(spec.create, body)
     try:
         made = await asyncio.to_thread(filament.catalog.create, kind, parsed)
-    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
+    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(made, kind, UUID(int=0))
 
@@ -208,9 +224,11 @@ async def create_catalog_row(
     summary="Change a row of a filament catalog",
     description=(
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
-        "the row off the lists and frees its name, `false` puts it back. 404 for an unknown "
-        "kind or row, 409 when another unarchived row has the name, 422 for a bad field or a "
-        "minimum temperature above its maximum."
+        "the row off the lists, `false` puts it back; an archived material, subtype, brand, "
+        "category or effect keeps its names and aliases, any other row frees its name. 404 "
+        "for an unknown kind or row, 409 when another row has the name (by key, as on "
+        "create, naming the holder), 422 for a bad field, a name with no letter or digit "
+        "(those catalogs), or a minimum temperature above its maximum."
     ),
 )
 async def patch_catalog_row(
@@ -220,9 +238,70 @@ async def patch_catalog_row(
     parsed = _body(spec.patch, body)
     try:
         changed = await asyncio.to_thread(filament.catalog.update, kind, row_id, parsed)
-    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
+    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(changed, kind, row_id)
+
+
+_ALIASED = ", ".join(kind for kind, spec in CATALOGS.items() if spec.names is not None)
+
+
+def _aliased(kind: str) -> CatalogSpec:
+    spec = _spec(kind)
+    if spec.names is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"the {kind} catalog has no aliases; these do: {_ALIASED}"
+        )
+    return spec
+
+
+@router.put(
+    "/catalog/{kind}/{row_id}/aliases",
+    response_model=CatalogRow,
+    summary="Set the aliases of a catalog row",
+    description=(
+        "The whole alias list of a material, subtype, brand, category or effect: its other "
+        "names, which every name lookup (the Bambuddy import, the CSV import, the price "
+        "book) resolves to it. Each is trimmed. 404 for another kind or no such row, 409 "
+        "when an alias's key (letters and digits, any case) is another name or alias of "
+        "the catalog, the row's own name or an earlier alias of the list (it names the "
+        "holder: `<kind>_id`, `<kind>_name`), 422 for an empty alias or one with no "
+        "letter or digit. Nothing changes on a refusal."
+    ),
+)
+async def put_catalog_aliases(
+    filament: FilamentDep, kind: str, row_id: UUID, body: Annotated[dict[str, Any], Body()]
+) -> CatalogRow:
+    _aliased(kind)
+    parsed = cast("m.AliasesPut", _body(m.AliasesPut, body))
+    try:
+        changed = await asyncio.to_thread(
+            filament.catalog.set_aliases, kind, row_id, list(parsed.aliases)
+        )
+    except (CatalogExistsError, CatalogKeyEmptyError) as exc:
+        raise _refused(exc) from None
+    return _row(changed, kind, row_id)
+
+
+@router.get(
+    "/catalog/{kind}/resolve",
+    response_model=CatalogRow,
+    summary="Find a catalog row by any of its names",
+    description=(
+        "The material, subtype, brand, category or effect whose name or alias has the key "
+        "of `name` (letters and digits, any case), archived or not: what the imports "
+        "resolve a name to. A subtype is `material_id`'s own, else one for every "
+        "material. 404 for another kind or no match."
+    ),
+)
+async def resolve_catalog_row(
+    filament: FilamentDep, kind: str, name: str, material_id: UUID | None = None
+) -> CatalogRow:
+    _aliased(kind)
+    row = await asyncio.to_thread(filament.catalog.resolve, kind, name, material_id)
+    if row is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no {kind} row is named {name!r}")
+    return cast("CatalogRow", row)
 
 
 # -- spool types ----------------------------------------------------------------------
@@ -308,10 +387,10 @@ _FILL_DESCRIPTION = (
     ),
 )
 async def fill_types_from_profile(
-    filament: FilamentDep, store: SettingsStoreDep, body: BulkFillRequest
+    filament: FilamentDep, caller: CallerDep, store: SettingsStoreDep, body: BulkFillRequest
 ) -> list[TypeFill]:
     settings = await asyncio.to_thread(store.load)
-    return await filament.filler.fill(settings, None, refresh=body.refresh)
+    return await filament.filler.fill(settings, None, actor=actor(caller), refresh=body.refresh)
 
 
 @router.post(
@@ -330,7 +409,11 @@ async def fill_types_from_profile(
     ),
 )
 async def fill_type_from_profile(
-    filament: FilamentDep, store: SettingsStoreDep, type_id: UUID, body: FillRequest
+    filament: FilamentDep,
+    caller: CallerDep,
+    store: SettingsStoreDep,
+    type_id: UUID,
+    body: FillRequest,
 ) -> TypeFill:
     settings = await asyncio.to_thread(store.load)
     if body.apply is not None:
@@ -339,6 +422,7 @@ async def fill_type_from_profile(
                 settings,
                 type_id,
                 body.apply,
+                actor=actor(caller),
                 k_values=body.shown_k_values if body.k_values else None,
             )
         except ProfileChangedError as exc:
@@ -348,7 +432,9 @@ async def fill_type_from_profile(
         if applied is None:
             raise _no_type(type_id)
         return applied
-    found = await filament.filler.fill(settings, [type_id], refresh=body.refresh)
+    found = await filament.filler.fill(
+        settings, [type_id], actor=actor(caller), refresh=body.refresh
+    )
     if not found:
         raise _no_type(type_id)
     return found[0]
@@ -380,9 +466,11 @@ async def get_type(filament: FilamentDep, type_id: UUID) -> m.SpoolTypeDetail:
         "unarchived type has the code, 422 for a bad field."
     ),
 )
-async def patch_type(filament: FilamentDep, type_id: UUID, body: m.SpoolTypePatch) -> m.SpoolType:
+async def patch_type(
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: m.SpoolTypePatch
+) -> m.SpoolType:
     try:
-        changed = await asyncio.to_thread(filament.types.update, type_id, body)
+        changed = await asyncio.to_thread(filament.types.update, type_id, body, actor=actor(caller))
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if changed is None:
@@ -402,12 +490,18 @@ async def patch_type(filament: FilamentDep, type_id: UUID, body: m.SpoolTypePatc
     ),
 )
 async def put_type_presets(
-    filament: FilamentDep, store: SettingsStoreDep, type_id: UUID, body: list[m.TypePresetCreate]
+    filament: FilamentDep,
+    caller: CallerDep,
+    store: SettingsStoreDep,
+    type_id: UUID,
+    body: list[m.TypePresetCreate],
 ) -> list[m.TypePreset]:
     rows = [m.TypePreset(type_id=type_id, **one.model_dump()) for one in body]
     had = await asyncio.to_thread(filament.types.presets, type_id)
     try:
-        saved = await asyncio.to_thread(filament.types.set_presets, type_id, rows)
+        saved = await asyncio.to_thread(
+            filament.types.set_presets, type_id, rows, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if saved is None:
@@ -415,7 +509,7 @@ async def put_type_presets(
     if saved and not had:
         # A type's first presets come right after it is made (makeTypeFromSpool, the type
         # page): it is filled from them then (R-6714-6), never on a later change.
-        await fill_quietly(lambda: filament.filler, store.load, [type_id])
+        await fill_quietly(lambda: filament.filler, store.load, [type_id], actor=actor(caller))
     return saved
 
 
@@ -429,11 +523,13 @@ async def put_type_presets(
     ),
 )
 async def put_type_k_values(
-    filament: FilamentDep, type_id: UUID, body: list[m.TypeKValueCreate]
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: list[m.TypeKValueCreate]
 ) -> list[m.TypeKValue]:
     rows = [m.TypeKValue(type_id=type_id, **one.model_dump()) for one in body]
     try:
-        saved = await asyncio.to_thread(filament.types.set_k_values, type_id, rows)
+        saved = await asyncio.to_thread(
+            filament.types.set_k_values, type_id, rows, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if saved is None:
@@ -635,19 +731,21 @@ IMPORT_ROUTE = "POST /filament/spools/import"
     response_model=ImportPreview,
     summary="Import spools from CSV rows",
     description=(
-        "Rows of a spools CSV, parsed by the caller (cells as text, under the export's "
-        "column names). A row with a `number` changes that spool, only where a cell differs "
-        "from what it shows now; an empty cell changes nothing. A row with no `number` makes "
-        "a spool. Material, subtype, brand, category and effect names resolve in any case "
-        "and are added to their catalog when missing; `insert_type` and `type` (a spool "
-        "type's code) must exist; `location` must name exactly one unarchived place and is "
-        "a move. Derived columns (`grams_left`, `last_used_at`, ...) are ignored; any other "
-        "unknown column is a 422. `dry_run: true` answers what each row would do (`create`, "
-        "`update` or `error`, with its changes as `[before, after]`) and writes nothing. "
-        "`dry_run: false` writes every row in one transaction, and needs an "
-        "`Idempotency-Key` (428 without one): a retry with the same key answers the first "
-        "result and writes nothing, and the key with another body is a 422. A write with "
-        "any row in error is a 422 naming each line, and writes nothing."
+        "Rows of a spools CSV, parsed by the caller (cells as text, under the export's column "
+        "names). A row with a `number` changes that spool, only where a cell differs from what "
+        "it shows now; an empty cell changes nothing. A row with no `number` makes a spool. "
+        "Material, subtype, brand, category and effect names resolve by key (any case and "
+        "punctuation) against every name and alias, archived rows too, and are added to their "
+        'catalog when missing (a name with no letter or digit is skipped, marked `{"skipped": '
+        "...}`, and the row goes on); `insert_type` and `type` (a spool type's code) must "
+        "exist; `location` must name exactly one unarchived place and is a move. Derived "
+        "columns (`grams_left`, `last_used_at`, ...) are ignored; any other unknown column is a"
+        " 422. `dry_run: true` answers what each row would do (`create`, `update` or `error`, "
+        "with its changes as `[before, after]`) and writes nothing. `dry_run: false` writes "
+        "every row in one transaction, and needs an `Idempotency-Key` (428 without one): a "
+        "retry with the same key answers the first result and writes nothing, and the key with "
+        "another body is a 422. A write with any row in error is a 422 naming each line, and "
+        "writes nothing."
     ),
 )
 async def import_spools(
@@ -1054,11 +1152,118 @@ async def list_events(
         "The unarchived spools in total: their number, grams left, the value of those "
         "grams at each spool's cost per kg (`null` when none has a cost), the stock by "
         "material, how many sit in a printer's tray (a place with `printer_id` set), how "
-        "many are low on stock, and how many still need a type."
+        "many are low on stock, how many still need a type, and `consumed_g`: the grams "
+        "of every spool's plates, archived ones too, a plate SB and Bambuddy both booked "
+        "counted once."
     ),
 )
 async def get_summary(filament: FilamentDep) -> m.InventorySummary:
     return await asyncio.to_thread(filament.spools.summary)
+
+
+#: The longest range the metrics routes read: three years, one leap day included.
+METRICS_MAX_DAYS = 3 * 365 + 1
+
+
+def _range(since: date | None, until: date | None, default_days: int) -> tuple[date, date]:
+    """``until`` defaults to today (UTC), ``since`` to ``default_days`` before it. 422
+    when ``since`` is not before ``until`` or the range passes `METRICS_MAX_DAYS`."""
+    until = datetime.now(UTC).date() if until is None else until
+    since = until - timedelta(days=default_days) if since is None else since
+    if since >= until:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "since must be before until")
+    if (until - since).days > METRICS_MAX_DAYS:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the range is longer than {METRICS_MAX_DAYS} days (three years)",
+        )
+    return since, until
+
+
+@router.get(
+    "/spools/{spool_id}/history",
+    response_model=mm.SpoolHistory,
+    summary="A spool's history and metrics",
+    description=(
+        "The spool's timeline, newest first by `(at, seq)`: each ledger event (its "
+        "`actor` and `data.author` say who made it) with `order_id`, the order whose "
+        "attempt printed the plate, and `archive_id`, the Bambuddy print archive it "
+        "matched. `series` is the grams left after each event, oldest first, the readings "
+        "the grams anchored on marked `anchor` (at most 500 points). `metrics` is the "
+        "spool's use, waste, cost used and value left (in `currency`, the shop's), burn "
+        "rate over the last `window_days` and empty day, days since opened and last use, "
+        "hours outside dry storage and AMS error; `type_ams_error` is the AMS error over "
+        "every spool of its type. 404 for no such spool."
+    ),
+)
+async def get_spool_history(filament: FilamentDep, spool_id: UUID) -> mm.SpoolHistory:
+    found = await asyncio.to_thread(filament.metrics.history, spool_id)
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
+
+
+@router.get(
+    "/forecast",
+    response_model=mm.Forecast,
+    summary="When spools and types run out",
+    description=(
+        "Each unarchived spool's burn rate (grams per day over the last `window_days`, the "
+        "setting `filament_burn_window_days`) and the day it runs out, and each spool "
+        "type's stock, burn over all its spools, days of stock, empty day and reorder day "
+        "(the empty day less its lead time and safety margin, else the settings' "
+        "`filament_lead_time_days` and `filament_safety_margin_days`). `reorder_now` is a "
+        "reorder day today or past. A spool or type with no use in the window has no "
+        "burn, no empty day and no reorder day."
+    ),
+)
+async def get_forecast(filament: FilamentDep) -> mm.Forecast:
+    return await asyncio.to_thread(filament.metrics.forecast)
+
+
+@router.get(
+    "/metrics",
+    response_model=mm.InventoryMetrics,
+    summary="Stock, consumption and waste",
+    description=(
+        "The unarchived spools' stock (spools, grams left and value in `currency`, the "
+        "shop's) by `dimension` (`material`, `brand`, `type`, `supplier` or `location`; "
+        "default `material`); the grams used and wasted (failed and cancelled plates) "
+        "per `bucket` (`week` from Monday or `month`; default `month`) and dimension, from "
+        "`since` to `until`, both included (default the 180 days before today); and the "
+        "waste by material, type and printer with its rate. Archived spools' plates "
+        "count. A key is the id, `null` when none is set. 422 when `since` is not before "
+        "`until` or the range is longer than three years."
+    ),
+)
+async def get_metrics(
+    filament: FilamentDep,
+    dimension: mm.Dimension = "material",
+    bucket: mm.Bucket = "month",
+    since: date | None = None,
+    until: date | None = None,
+) -> mm.InventoryMetrics:
+    start, end = _range(since, until, 180)
+    return await asyncio.to_thread(filament.metrics.inventory, dimension, bucket, start, end)
+
+
+@router.get(
+    "/metrics/purchasing",
+    response_model=mm.PurchasingMetrics,
+    summary="Price per kg and supplier spend",
+    description=(
+        "Each spool type's price per kg at each supplier over time, one series per "
+        "currency, from its price points; and the confirmed invoices' totals per "
+        "supplier, month and currency, never converted. From `since` to `until`, both "
+        "included (default the 365 days before today). 422 when `since` is not before "
+        "`until` or the range is longer than three years."
+    ),
+)
+async def get_purchasing_metrics(
+    filament: FilamentDep, since: date | None = None, until: date | None = None
+) -> mm.PurchasingMetrics:
+    start, end = _range(since, until, 365)
+    return await asyncio.to_thread(filament.metrics.purchasing, start, end)
 
 
 async def _assignments(store: SettingsStore, cache: AssignmentsCache) -> list[SpoolAssignment]:
@@ -1360,7 +1565,8 @@ async def move_spool(
     response_model=PullReport,
     summary="Import Bambuddy's spools",
     description=(
-        "Read Bambuddy's unarchived spools and pull them into ScadBuddy's own, once (the spool "
+        "Read Bambuddy's spools, archived ones too, and pull them into ScadBuddy's own, once "
+        "(the spool "
         "refresh Schedule does the same). A BB spool already linked takes the fields BB changed "
         "since the last pull, unless ScadBuddy changed that field later; a change of what is "
         "left is a `bb` reading unless the spool's weight is locked. "
@@ -1373,6 +1579,9 @@ async def move_spool(
         "for a tag a linked ScadBuddy spool holds makes no spool (`rfid_duplicates` and "
         "`rfid_duplicate_bb_ids` name it, and it stays skipped). Never writes to Bambuddy. "
         "An archived ScadBuddy spool is never restored or changed; it is listed as `archived`. "
+        "A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived "
+        "spool (Bambuddy's archive time, what is left, its usage rows), counted in `created` "
+        "and in `archived_created`; Bambuddy archiving a linked spool changes nothing. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
         "still needing a type and archived, the BB spool ids it could not pull, the count "
         "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "

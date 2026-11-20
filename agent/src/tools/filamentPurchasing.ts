@@ -334,10 +334,11 @@ export const filamentPurchasingTools: Tool[] = [
     name: 'filament_invoice_candidates',
     label: "Read an invoice's spool candidates",
     description:
-      "For each line of an invoice draft: the open spools with no cost whose effective material and RGBA match " +
+      "For each line of an invoice draft: the spools with no cost whose effective material and RGBA match " +
       "the line's type (or its proposed type) exactly, and those with a cost already. A costed spool with no " +
       '`invoice_line_id` may be filled after the user agrees, and the line cost replaces its own; one with an ' +
-      '`invoice_line_id` belongs to another invoice. Use it before you create ' +
+      '`invoice_line_id` belongs to another invoice. Archived (used-up) spools are listed too, with ' +
+      '`archived: true`; a line may fill one. Use it before you create ' +
       'spools for a line, so a spool the user already has is costed, not added twice. When a line has more ' +
       'candidates than you can place, ask the user. 404 for no such invoice. Reads only.',
     input: z.object({ invoice_id: z.string().uuid().describe("An invoice draft's `id`") }),
@@ -424,7 +425,8 @@ export const filamentPurchasingTools: Tool[] = [
     description:
       'Confirm a draft invoice: it makes the spools of every line (`quantity` of them, or fewer new ones when a ' +
       'line fills the spools in `update_spool_ids`), each with a `cost_per_kg` from the line cost (it replaces a ' +
-      "filled spool's own cost), any new spool " +
+      "filled spool's own cost; an archived spool takes its cost and invoice line only, and stays archived), " +
+      'any new spool ' +
       'type or supplier product, and one price point per line, in one transaction. A confirmed invoice is frozen. ' +
       'Confirming it again changes nothing. 409, with nothing written, for no lines, a currency other than the ' +
       "shop's, a total more than 0.05 off its lines plus shipping, or a line that cannot be confirmed. Only when " +

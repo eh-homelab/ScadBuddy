@@ -10,7 +10,7 @@ export function invoiceImportPrompt(invoiceId: string): string {
     '',
     'First load the `filament` skill and follow it. These rules always apply:',
     '- Read the invoice from the attached file: its number, date, currency, subtotal, shipping, tax and total, and each line with its quantity and prices.',
-    '- Diff before you create. For each line, call filament_invoice_candidates and update an open spool that already matches before you make a new one.',
+    '- Diff before you create. For each line, call filament_invoice_candidates and update a spool that already matches before you make a new one. An archived (used-up) spool (`archived: true`) may be filled too: a spent spool was still bought. It takes the line cost and stays archived.',
     '- Offer uncosted candidates first, then costed ones. A costed candidate with no invoice_line_id is often a spool that the Bambuddy import costed: offer to link it to the line, show the person its old cost per kg and the new one, and add it to update_spool_ids only when the person says yes. The confirm replaces its cost. Never offer a spool that has an invoice_line_id: it belongs to another invoice.',
     '- The cost of one spool is (line subtotal + line tax + the line\'s share of shipping) ÷ quantity. Shipping is shared over the lines by value. The confirm computes this number; show the person the same one.',
     '- For a Bambu Lab line, find the colour with filament_bambu_colour, from the code in the SKU.',

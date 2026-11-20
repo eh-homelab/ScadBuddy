@@ -386,13 +386,17 @@ async def _bambuddy(settings: StoredSettings) -> AsyncIterator[BambuddyClient | 
 
 
 async def fill_quietly(
-    filler: Callable[[], TypeFiller], load: Callable[[], StoredSettings], type_ids: Sequence[UUID]
+    filler: Callable[[], TypeFiller],
+    load: Callable[[], StoredSettings],
+    type_ids: Sequence[UUID],
+    *,
+    actor: str,
 ) -> None:
     """``filler().fill`` after a write has committed: a failure, the filler's lookup
     included (R-6714-f), is logged with its error label and never fails the request that
     wrote (R-6714-b)."""
     try:
-        await filler().fill(await asyncio.to_thread(load), list(type_ids))
+        await filler().fill(await asyncio.to_thread(load), list(type_ids), actor=actor)
     except Exception as error:
         logger.warning(
             "could not fill the types from their slicer profiles",
@@ -409,10 +413,16 @@ class TypeFiller:
     table: Callable[[], DensityTable | None]
 
     async def fill(
-        self, settings: StoredSettings, type_ids: Sequence[UUID] | None, *, refresh: bool = False
+        self,
+        settings: StoredSettings,
+        type_ids: Sequence[UUID] | None,
+        *,
+        actor: str,
+        refresh: bool = False,
     ) -> list[TypeFill]:
         """Fill (or, with ``refresh``, compare) each type of ``type_ids`` that exists, or
-        every unarchived type for ``None``."""
+        every unarchived type for ``None``. A write fans out to the type's spools as
+        ``actor`` (R-T9-4)."""
         if type_ids is None:
             rows = await asyncio.to_thread(self.types.list)
         else:
@@ -421,7 +431,9 @@ class TypeFiller:
         table = await asyncio.to_thread(self.table)
         async with _bambuddy(settings) as client:
             reads = _Reads(client)
-            return [await self._one(row, table, reads, refresh=refresh) for row in rows]
+            return [
+                await self._one(row, table, reads, actor=actor, refresh=refresh) for row in rows
+            ]
 
     async def apply(
         self,
@@ -429,6 +441,7 @@ class TypeFiller:
         type_id: UUID,
         values: Mapping[Field, Value],
         *,
+        actor: str,
         k_values: Sequence[m.TypeKValueCreate] | None = None,
     ) -> TypeFill | None:
         """Write ``values`` over the type's, once its profile still gives each of them,
@@ -464,18 +477,18 @@ class TypeFiller:
             current = row.model_dump()
             result.previous = {name: current[name] for name in values}
             patch = m.SpoolTypePatch.model_validate(dict(values))
-            await asyncio.to_thread(self.types.update, type_id, patch)
+            await asyncio.to_thread(self.types.update, type_id, patch, actor=actor)
             result.filled = dict(values)
             result.written = True
-        await self._write_k(result, rows)
+        await self._write_k(result, rows, actor)
         return result
 
-    async def _write_k(self, result: TypeFill, rows: list[m.TypeKValueCreate]) -> None:
+    async def _write_k(self, result: TypeFill, rows: list[m.TypeKValueCreate], actor: str) -> None:
         """Write ``rows`` as the type's K values while it has none, into ``result``."""
         if not rows:
             return
         saved = await asyncio.to_thread(
-            self.types.fill_k_values, result.type_id, _rows(result.type_id, rows)
+            self.types.fill_k_values, result.type_id, _rows(result.type_id, rows), actor=actor
         )
         if saved is not None:
             result.k_values = saved
@@ -498,7 +511,13 @@ class TypeFiller:
         return result, read
 
     async def _one(
-        self, row: m.SpoolType, table: DensityTable | None, reads: _Reads, *, refresh: bool
+        self,
+        row: m.SpoolType,
+        table: DensityTable | None,
+        reads: _Reads,
+        *,
+        actor: str,
+        refresh: bool,
     ) -> TypeFill:
         result, profile = await self._read(row, table, reads)
         if profile is not None:
@@ -516,7 +535,10 @@ class TypeFiller:
             elif wanted:
                 try:
                     written = await asyncio.to_thread(
-                        self.types.fill_empty, row.id, {str(k): v for k, v in wanted.items()}
+                        self.types.fill_empty,
+                        row.id,
+                        {str(k): v for k, v in wanted.items()},
+                        actor=actor,
                     )
                 except TypeTempError as error:
                     # A person set one end of a range since the read (R-6714-e).
@@ -531,7 +553,7 @@ class TypeFiller:
         if refresh:
             result.k_values = _rows(row.id, rows)
         else:
-            await self._write_k(result, rows)
+            await self._write_k(result, rows, actor)
         return result
 
     async def _k_values(

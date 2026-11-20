@@ -30,7 +30,13 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.filament import profile_fetch
 from scadbuddy.filament.component import FILAMENT
-from scadbuddy.filament.models import TypeKValue, TypePreset
+from scadbuddy.filament.models import (
+    SpoolCreate,
+    SpoolKValueCreate,
+    SpoolPresetCreate,
+    TypeKValue,
+    TypePreset,
+)
 from scadbuddy.filament.profile_fetch import HOLDER, ProfileFetches
 from scadbuddy.orders.attachments import blob_path
 from scadbuddy.printers.component import PRINTERS
@@ -647,6 +653,7 @@ def test_other_keys_are_kept(fetch: Fetch) -> None:
                 slicer_filament_name="mine",
             )
         ],
+        actor="ann",
     )
     bodies = put_all(fetch)
     bb_import(4)
@@ -756,6 +763,7 @@ def test_a_stale_k_value_of_a_fetched_key_is_removed_and_named(fetch: Fetch) -> 
             _k_row(fetch, fetch.printer_id, "0.8", "0.06"),  # its K table failed: kept
             _k_row(fetch, x1c.id, "0.4", "0.07"),  # not fetched: kept
         ],
+        actor="ann",
     )
     bodies = [export("0.2", filament_id="GFL99"), export("0.4"), export("0.6"), export("0.8")]
     for nozzle, body in zip(NOZZLES, bodies, strict=True):
@@ -1030,3 +1038,101 @@ def test_failed_ends_the_run_with_its_reason(fetch: Fetch) -> None:
     run = fetch.run()
     assert (run.status, run.error) == ("failed", "no profile-fetch worker picked the fetch up")
     assert fetch.failed("again").status_code == 409
+
+
+# -- the import fans out to the type's spools (R-T9-3) ---------------------------------------
+
+
+def _k_table(request: httpx.Request) -> httpx.Response:
+    """One K row, for the 0.4 nozzle, that the fetched preset matches."""
+    if request.url.params["nozzle_diameter"] == "0.4":
+        return httpx.Response(200, json={"profiles": [_profile("P1a2b3c4", "0.025")]})
+    return httpx.Response(200, json={"profiles": []})
+
+
+def _edits(fetch: Fetch, spool_id: UUID) -> list[Any]:
+    spools = _state(fetch.client).components.get(FILAMENT).spools
+    return [e for e in spools.events(spool_id) if e.kind == "edited"]
+
+
+@respx.mock
+def test_an_import_writes_edited_on_spools_that_inherit(fetch: Fetch) -> None:
+    """A type edit fans out (spec §5.7): the import's preset and K-value change each write
+    one ``edited`` event, as the run's starter, on a spool that inherits it; a spool that
+    sets every changed key itself gets none."""
+    spools = _state(fetch.client).components.get(FILAMENT).spools
+    heir = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
+    own = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
+    spools.set_presets(
+        own,
+        [
+            SpoolPresetCreate(printer_model="H2C", nozzle_diameter=n, slicer_filament="MINE")
+            for n in NOZZLES
+        ],
+        actor="ann",
+    )
+    spools.set_k_values(
+        own,
+        [
+            SpoolKValueCreate(
+                printer_id=UUID(fetch.printer_id),
+                extruder=0,
+                nozzle_diameter="0.4",
+                k_value=Decimal("0.01"),
+            )
+        ],
+        actor="ann",
+    )
+    before = {s: len(_edits(fetch, s)) for s in (heir, own)}
+    bodies = put_all(fetch)
+    bb_import(4)
+    local_presets([name_of(b) for b in bodies])
+    respx.get(url__regex=KPROFILES.pattern).mock(side_effect=_k_table)
+
+    r = fetch.import_()
+
+    assert r.status_code == 200, r.text
+    assert r.json()["k_values"] == 1
+    events = _edits(fetch, heir)[before[heir] :]
+    assert [sorted(e.data["changes"]) for e in events] == [["presets"], ["k_values"]]
+    assert {e.actor for e in events} == {"person:test"}
+    assert {e.data["type_id"] for e in events} == {str(fetch.type_id)}
+    old, new = events[0].data["changes"]["presets"]
+    assert old == []
+    assert [p["slicer_filament"] for p in new] == ["101", "102", "103", "104"]
+    old, new = events[1].data["changes"]["k_values"]
+    assert old == []
+    assert [Decimal(str(k["k_value"])) for k in new] == [Decimal("0.025")]
+    assert _edits(fetch, own)[before[own] :] == []
+
+
+@respx.mock
+def test_an_import_that_changes_nothing_writes_no_event(fetch: Fetch) -> None:
+    bodies = put_all(fetch)
+    types = _state(fetch.client).components.get(FILAMENT).types
+    types.set_presets(
+        fetch.type_id,
+        [
+            TypePreset(
+                type_id=fetch.type_id,
+                printer_model="H2C",
+                nozzle_diameter=n,
+                slicer_filament=str(101 + i),
+                slicer_filament_name=name_of(bodies[i]),
+            )
+            for i, n in enumerate(NOZZLES)
+        ],
+        actor="ann",
+    )
+    spools = _state(fetch.client).components.get(FILAMENT).spools
+    heir = spools.create(SpoolCreate(type_id=fetch.type_id), actor="ann").id
+    before = len(_edits(fetch, heir))
+    bb_import(4)
+    local_presets([name_of(b) for b in bodies])
+    no_k_profiles()
+
+    r = fetch.import_()
+
+    assert r.status_code == 200, r.text
+    assert len(fetch.presets()) == 4
+    assert _edits(fetch, heir)[before:] == []

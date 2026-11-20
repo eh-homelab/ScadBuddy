@@ -743,7 +743,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
   and the agent's `stop_print_run` and `confirm_plate_clear`.
 - `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
-  2026-11-14): `catalog.py` (configurable catalogs, no code enums), `types.py`
+  2026-11-14): `catalog.py` (configurable catalogs, no code enums; materials, subtypes,
+  brands, categories and effects keep names and aliases in `filament_<kind>_names`, one key
+  space per catalog, a subtype's per material, filled by a trigger and `set_aliases`; every
+  name lookup goes through `find_by_key` or `resolve_or_add`, the type match
+  `SpoolTypeStore.match` included, #6706), `types.py`
   (`effective()`: spool → type → subtype → material, the one resolver; a type links its
   price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
   (instances and tag bindings; every writer locks the tag before the spool; archive closes
@@ -772,6 +776,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tile, with `spool_id`, `kind`, `source` and a cursor. The price book (the `filaments` rows
   that `orders/pricebook.py` prices) is edited on Filament → Types (`components/orders/FilamentsEditor.tsx`),
   not in Settings.
+  History and metrics (#6269, spec §5.7; plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,
+  which holds the decisions): `provenance.py` (`current_by`: who made the call, `data.author`
+  on every ledger event, from `orders/actor.py` `current_actor()`), `metrics.py` (pure: plates by
+  §5.5 rule 3, burn, empty and reorder days, the AMS error, the grams-left series),
+  `metrics_models.py` (plain `BaseModel`s), `metrics_store.py` (`MetricsStore`: the spool history,
+  forecast, inventory and purchasing reads, on a `MetricsSettings` callable) and
+  `metrics_export.py` (the Prometheus gauges from one snapshot, at most every 60 s per process;
+  labels are catalog names, 20 values at most, the rest `other`, null `none`, so a rename starts
+  a new series). Routes: `GET /filament/spools/{id}/history`, `/filament/forecast`,
+  `/filament/metrics` and `/filament/metrics/purchasing` (ranges over 1096 days are a 422).
   Purchasing (#6266, spec §5.8; plan `docs/superpowers/plans/2026-11-17-filament-suppliers.md`,
   which holds the decisions): `suppliers.py` (`SuppliersStore`: suppliers, products by
   `upper(sku)`, price points; a price point is the price of one pack, tax in, shipping out, and
@@ -797,8 +811,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `colour_codes.py` (`ColourCodes`, Bambu Studio's `filaments_color_codes.json` read from
   `slicer_profiles_dir`/`BBL/filament/`, cached per process; `GET /filament/bambu-colour-codes?code=`
   answers 404 for an unknown code and 503 for a missing table), `InvoiceStore.candidates` (`GET
-  /filament/invoices/{id}/candidates`: per line, the open spools whose own `cost_per_kg` is NULL and
-  which have no invoice line, and the costed ones, matched by effective material and RGBA), and
+  /filament/invoices/{id}/candidates`: per line, the spools (archived ones too, marked `archived`)
+  whose own `cost_per_kg` is NULL and which have no invoice line, and the costed ones, matched by
+  effective material and RGBA; confirm may fill an archived spool, which takes its cost and invoice
+  line only and stays archived, #6707), and
   `InvoicePatch.import_run_id` with the conditional `if_import_run_id` (one UPDATE under the invoice's
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration

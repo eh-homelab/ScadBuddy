@@ -9,9 +9,10 @@ in the transaction that writes the type; ``filament_id`` is that row.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from decimal import Decimal
-from typing import Any, cast, get_args
+from typing import Any, Literal, cast, get_args
 from uuid import UUID
 
 from psycopg import Connection, errors
@@ -23,7 +24,9 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import (
     CatalogExistsError,
     CatalogRefError,
+    catalog_key,
     check_temps,
+    lookup_key,
 )
 from scadbuddy.filament.catalog import (
     TypeTempError as TypeTempError,
@@ -164,9 +167,12 @@ class SpoolTypeStore:
         row = self._link_price_book(conn, row, changed=True)
         return m.SpoolType.model_validate(row)
 
-    def update(self, type_id: UUID, patch: m.SpoolTypePatch) -> m.SpoolType | None:
+    def update(self, type_id: UUID, patch: m.SpoolTypePatch, *, actor: str) -> m.SpoolType | None:
         """The fields ``patch`` sends (``archived`` included); ``None`` for no such type.
-        The temperature ranges are checked as they stand after the patch."""
+        The temperature ranges are checked as they stand after the patch. A changed field
+        in `OVERRIDABLE` writes one ``edited`` event, as ``actor``, on each unarchived
+        spool of the type that does not override it (`_fan_out`); that event also
+        refreshes the spool's grams, which read the label weight."""
         sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
         columns = [n for n in sent if n != "archived"]
         sets = [f"{name} = %s" for name in columns]
@@ -190,71 +196,63 @@ class SpoolTypeStore:
                 ).fetchone()
                 assert row is not None
                 row = self._link_price_book(conn, row, changed=bool(set(columns) & _PRICED))
-                if (
-                    "label_weight_g" in columns
-                    and current["label_weight_g"] != patch.label_weight_g
-                ):
-                    self._refresh_spools(conn, type_id)
+                changes = {
+                    n: [current[n], row[n]]
+                    for n in columns
+                    if n in OVERRIDABLE and current[n] != row[n]
+                }
+                _fan_out(conn, type_id, changes, actor)
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         return m.SpoolType.model_validate(row)
 
-    @staticmethod
-    def _refresh_spools(conn: Conn, type_id: UUID) -> None:
-        """A type's label weight reads into its spools' ``grams_left`` (an AMS percentage
-        is a share of it), so each unarchived spool that does not set its own is
-        recomputed, locked in id order."""
-        rows = conn.execute(
-            "SELECT id FROM filament_spools WHERE type_id = %s AND label_weight_g IS NULL"
-            " AND archived_at IS NULL ORDER BY id FOR UPDATE",
-            (type_id,),
-        ).fetchall()
-        for row in rows:
-            ledger.refresh_derived(conn, row["id"])
-
-    def archive(self, type_id: UUID, archived: bool) -> m.SpoolType | None:
+    def archive(self, type_id: UUID, archived: bool, *, actor: str) -> m.SpoolType | None:
         """Take a type off the lists (``True``), freeing its code, or put it back."""
-        return self.update(type_id, m.SpoolTypePatch(archived=archived))
+        return self.update(type_id, m.SpoolTypePatch(archived=archived), actor=actor)
 
-    def set_presets(self, type_id: UUID, rows: _Presets) -> _Presets | None:
-        """The type's presets, replaced by ``rows``; ``None`` for no such type."""
+    def set_presets(self, type_id: UUID, rows: _Presets, *, actor: str) -> _Presets | None:
+        """The type's presets, replaced by ``rows``; ``None`` for no such type. A change
+        writes one ``edited`` event (``changes.presets``), as ``actor``, on each
+        unarchived spool of the type that does not set every changed key itself."""
         try:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
                     return None
-                conn.execute(
-                    "DELETE FROM filament_spool_type_presets WHERE type_id = %s", (type_id,)
-                )
-                for row in rows:
+                with list_edit(conn, type_id, "presets", actor):
                     conn.execute(
-                        "INSERT INTO filament_spool_type_presets (type_id, printer_model,"
-                        " nozzle_diameter, slicer_filament, slicer_filament_name)"
-                        " VALUES (%s, %s, %s, %s, %s)",
-                        (
-                            type_id,
-                            row.printer_model,
-                            row.nozzle_diameter,
-                            row.slicer_filament,
-                            row.slicer_filament_name,
-                        ),
+                        "DELETE FROM filament_spool_type_presets WHERE type_id = %s", (type_id,)
                     )
+                    for row in rows:
+                        conn.execute(
+                            "INSERT INTO filament_spool_type_presets (type_id, printer_model,"
+                            " nozzle_diameter, slicer_filament, slicer_filament_name)"
+                            " VALUES (%s, %s, %s, %s, %s)",
+                            (
+                                type_id,
+                                row.printer_model,
+                                row.nozzle_diameter,
+                                row.slicer_filament,
+                                row.slicer_filament_name,
+                            ),
+                        )
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
         return self.presets(type_id)
 
-    def set_k_values(self, type_id: UUID, rows: _KValues) -> _KValues | None:
+    def set_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
         """The type's pressure-advance values, replaced by ``rows``; ``None`` for no such
-        type."""
-        return self._replace_k_values(type_id, rows, only_if_none=False)
+        type. `set_presets`'s events, with ``changes.k_values``."""
+        return self._replace_k_values(type_id, rows, actor=actor, only_if_none=False)
 
     def _replace_k_values(
-        self, type_id: UUID, rows: _KValues, *, only_if_none: bool
+        self, type_id: UUID, rows: _KValues, *, actor: str, only_if_none: bool
     ) -> _KValues | None:
         """`set_k_values`'s one transaction under the type's row lock; with
         ``only_if_none`` it writes only while the type has no K values (#6714, R-6714-c),
-        checked under that same lock, and answers ``None`` when it has some."""
+        checked under that same lock, and answers ``None`` when it has some. A change
+        fans out as ``actor`` (`list_edit`)."""
         try:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
@@ -266,37 +264,40 @@ class SpoolTypeStore:
                     ).fetchone()
                     if has is not None:
                         return None
-                conn.execute(
-                    "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
-                )
-                for row in rows:
+                with list_edit(conn, type_id, "k_values", actor):
                     conn.execute(
-                        "INSERT INTO filament_spool_type_k_values (type_id, printer_id, extruder,"
-                        " nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id)"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            type_id,
-                            row.printer_id,
-                            row.extruder,
-                            row.nozzle_diameter,
-                            row.nozzle_type,
-                            row.k_value,
-                            row.name,
-                            row.cali_idx,
-                            row.setting_id,
-                        ),
+                        "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
                     )
+                    for row in rows:
+                        conn.execute(
+                            "INSERT INTO filament_spool_type_k_values (type_id, printer_id,"
+                            " extruder, nozzle_diameter, nozzle_type, k_value, name, cali_idx,"
+                            " setting_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (
+                                type_id,
+                                row.printer_id,
+                                row.extruder,
+                                row.nozzle_diameter,
+                                row.nozzle_type,
+                                row.k_value,
+                                row.name,
+                                row.cali_idx,
+                                row.setting_id,
+                            ),
+                        )
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         return self.k_values(type_id)
 
-    def fill_empty(self, type_id: UUID, values: Mapping[str, Any]) -> dict[str, Any] | None:
+    def fill_empty(
+        self, type_id: UUID, values: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any] | None:
         """Write each of ``values`` (:data:`PROFILE_FIELDS` only) whose column is still
         null, on the locked row, so a value a person set meanwhile stands (#6714). The
         fields written; ``None`` for no such type. `TypeTempError` for a range it would
-        leave backwards."""
+        leave backwards. The fields written fan out as ``actor``, as `update`'s do."""
         unknown = set(values) - PROFILE_FIELDS
         if unknown:
             raise ValueError(f"not a profile field: {', '.join(sorted(unknown))}")
@@ -313,12 +314,14 @@ class SpoolTypeStore:
                 " updated_at = now() WHERE id = %s",
                 [*empty.values(), type_id],
             )
+            changes = {n: [None, v] for n, v in empty.items() if n in OVERRIDABLE}
+            _fan_out(conn, type_id, changes, actor)
         return empty
 
-    def fill_k_values(self, type_id: UUID, rows: _KValues) -> _KValues | None:
+    def fill_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
         """`set_k_values`, only while the type has none (#6714); ``None`` when it has some
         or does not exist. The check and the write are one transaction (R-6714-c)."""
-        return self._replace_k_values(type_id, rows, only_if_none=True)
+        return self._replace_k_values(type_id, rows, actor=actor, only_if_none=True)
 
     def linked_bb_spools(self, type_id: UUID) -> _Ids:
         """The Bambuddy spool ids the type's spools are linked to, the newest spool's
@@ -400,14 +403,36 @@ class SpoolTypeStore:
         conn: Conn | None = None,
     ) -> m.SpoolType | None:
         """The unarchived type a product description names. ``code`` alone decides when
-        given (case-insensitive); else brand, material and subtype are catalog names (any
-        case; none matches a type with none), ``rgba`` is compared with its alpha (six
-        digits are opaque) and ``label_weight_g`` exactly. On ``conn`` when given (a caller
-        in its own transaction, `filament/bambuddy_pull.py`), else on a pooled one."""
+        given (case-insensitive); else brand, material and subtype are catalog names, each
+        resolved by key against every name and alias (`catalog.find_by_key`, R-6706-19; a
+        subtype is the found material's, else one for every material). None, or a name
+        with no letter or digit, matches a type with none; a name no row holds matches no
+        type (a caller that holds the ids uses `match_ids`). ``rgba`` is compared with its
+        alpha (six digits are opaque) and ``label_weight_g`` exactly. On ``conn`` when
+        given (a caller in its own transaction, `filament/bambuddy_pull.py`), else on a
+        pooled one."""
         if conn is not None:
             return self._match(conn, code, brand, material, subtype, rgba, label_weight_g)
         with self._pool.connection() as pooled:
             return self._match(pooled, code, brand, material, subtype, rgba, label_weight_g)
+
+    @staticmethod
+    def match_ids(
+        conn: Conn,
+        *,
+        code: str | None = None,
+        brand_id: UUID | None,
+        material_id: UUID,
+        subtype_id: UUID | None,
+        rgba: str,
+        label_weight_g: int,
+    ) -> m.SpoolType | None:
+        """`match` for a caller that holds the catalog ids (R-6706-22: the type proposals'
+        groups): ``code`` alone decides when given; else the type of exactly these ids,
+        ``None`` matching a type with none. On ``conn``, in the caller's transaction."""
+        if code is not None:
+            return _by_code(conn, code)
+        return _by_ids(conn, material_id, subtype_id, brand_id, rgba, label_weight_g)
 
     @staticmethod
     def _match(
@@ -420,26 +445,15 @@ class SpoolTypeStore:
         label_weight_g: int,
     ) -> m.SpoolType | None:
         if code is not None:
-            row = conn.execute(
-                f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
-                " WHERE upper(code) = upper(%s) AND archived_at IS NULL",
-                (code,),
-            ).fetchone()
-        else:
-            columns = ", ".join(f"t.{c}" for c in m.SpoolType.model_fields)
-            row = conn.execute(
-                f"SELECT {columns} FROM filament_spool_types t"
-                " JOIN filament_materials mat ON mat.id = t.material_id"
-                " LEFT JOIN filament_subtypes sub ON sub.id = t.subtype_id"
-                " LEFT JOIN filament_brands b ON b.id = t.brand_id"
-                " WHERE t.archived_at IS NULL AND upper(mat.name) = upper(%s)"
-                " AND upper(coalesce(sub.name, '')) = upper(coalesce(%s, ''))"
-                " AND upper(coalesce(b.name, '')) = upper(coalesce(%s, ''))"
-                " AND t.rgba = %s AND t.label_weight_g = %s"
-                " ORDER BY t.created_at, t.id LIMIT 1",
-                (material, subtype, brand, normalise_rgba(rgba), label_weight_g),
-            ).fetchone()
-        return None if row is None else m.SpoolType.model_validate(row)
+            return _by_code(conn, code)
+        material_id = _by_key(conn, "materials", material)
+        if material_id is None or material_id is False:
+            return None
+        subtype_id = _by_key(conn, "subtypes", subtype, material=material_id)
+        brand_id = _by_key(conn, "brands", brand)
+        if subtype_id is False or brand_id is False:
+            return None
+        return _by_ids(conn, material_id, subtype_id, brand_id, rgba, label_weight_g)
 
     # -- internals --------------------------------------------------------------------
 
@@ -491,7 +505,7 @@ class SpoolTypeStore:
                     cost_per_kg=cost,
                     alpha=alpha,
                     extra_colours=(row["extra_colours"] or [])[:8],
-                    effect=_book_effect(names["effect"]),
+                    effect=_book_effect(conn, row["effect_id"]),
                 ),
                 conn=conn,
             ).id
@@ -511,13 +525,169 @@ class SpoolTypeStore:
         return linked
 
 
-def _book_effect(name: str | None) -> FilamentEffect | None:
-    """The price book's ``effect`` for an effect catalog name (``Dual Color`` is
-    ``dual-color``); ``None`` for a name the book has no value for."""
+#: A type's child list, the spools' own list of it, and its order.
+_ChildTable = tuple[str, str, str, str]
+_PRESETS: _ChildTable = (
+    "filament_spool_type_presets",
+    "filament_spool_presets",
+    _PRESET_COLUMNS,
+    "printer_model, nozzle_diameter",
+)
+_K_VALUES: _ChildTable = (
+    "filament_spool_type_k_values",
+    "filament_spool_k_values",
+    _K_COLUMNS,
+    "printer_id, extruder, nozzle_diameter",
+)
+#: The spool's own list that stands in for a type's list, row by row (`_fan_out`).
+_OWN_LISTS = {"presets": _PRESETS, "k_values": _K_VALUES}
+
+
+def _child_rows(conn: Conn, table: _ChildTable, type_id: UUID) -> list[dict[str, Any]]:
+    """The type's rows of one child list, by key, as the ``edited`` event stores them."""
+    name, _, columns, order = table
+    return conn.execute(
+        f"SELECT {columns} FROM {name} WHERE type_id = %s ORDER BY {order}", (type_id,)
+    ).fetchall()
+
+
+@contextmanager
+def list_edit(conn: Conn, type_id: UUID, name: str, actor: str) -> Iterator[None]:
+    """Around a write of the type's ``name`` list (``presets`` or ``k_values``) on
+    ``conn``: when the list's rows differ after it, `_fan_out` that change as ``actor``,
+    in the same transaction. No change writes no event. The Type page's saves and a
+    profile fetch's import (R-T9-3) both go through it."""
+    table = _OWN_LISTS[name]
+    before = _child_rows(conn, table, type_id)
+    yield
+    after = _child_rows(conn, table, type_id)
+    if before != after:
+        _fan_out(conn, type_id, {name: [before, after]}, actor)
+
+
+def _fan_out(conn: Conn, type_id: UUID, changes: dict[str, list[Any]], actor: str) -> None:
+    """One ``edited`` event, on the type edit's transaction, on each unarchived spool of
+    the type that takes a changed value from it (plan Decision 11): ``data.changes`` the
+    changes it does not override, ``data.type_id`` the type. A spool overrides an
+    `OVERRIDABLE` field by setting it. Presets and K values merge key by key
+    (`presets.py`), so a spool overrides a ``presets`` or ``k_values`` change only when it
+    has its own row for every key the change touched. The spools are locked in id order,
+    as `ledger.record` locks each."""
+    if not changes:
+        return
+    fields = ", ".join(f"s.{f}" for f in OVERRIDABLE)
+    rows = conn.execute(
+        f"SELECT s.id, {fields} FROM filament_spools s"
+        " WHERE s.type_id = %s AND s.archived_at IS NULL ORDER BY s.id FOR UPDATE OF s",
+        (type_id,),
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    touched = {k: _changed_keys(_OWN_LISTS[k], *changes[k]) for k in _OWN_LISTS if k in changes}
+    own = {k: _own_keys(conn, _OWN_LISTS[k], ids) for k in touched}
+    for row in rows:
+        kept = set(overridden(row)) | {
+            k for k, keys in touched.items() if keys <= own[k].get(row["id"], set())
+        }
+        inherited = {f: pair for f, pair in changes.items() if f not in kept}
+        if inherited:
+            ledger.record(
+                conn,
+                row["id"],
+                "edited",
+                actor=actor,
+                data={"changes": inherited, "type_id": str(type_id)},
+            )
+
+
+def _key_columns(table: _ChildTable) -> list[str]:
+    """The columns that key one row of a child list: its order."""
+    return [c.strip() for c in table[3].split(",")]
+
+
+def _changed_keys(
+    table: _ChildTable, before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> set[tuple[Any, ...]]:
+    """The keys whose row a type's list save added, removed or changed."""
+    columns = _key_columns(table)
+    old = {tuple(r[c] for c in columns): r for r in before}
+    new = {tuple(r[c] for c in columns): r for r in after}
+    return {k for k in old.keys() | new.keys() if old.get(k) != new.get(k)}
+
+
+def _own_keys(
+    conn: Conn, table: _ChildTable, spool_ids: list[UUID]
+) -> dict[UUID, set[tuple[Any, ...]]]:
+    """The keys each spool sets in its own list of ``table``."""
+    columns = _key_columns(table)
+    found: dict[UUID, set[tuple[Any, ...]]] = {}
+    for r in conn.execute(
+        f"SELECT spool_id, {', '.join(columns)} FROM {table[1]} WHERE spool_id = ANY(%s)",
+        (spool_ids,),
+    ).fetchall():
+        found.setdefault(r["spool_id"], set()).add(tuple(r[c] for c in columns))
+    return found
+
+
+def _by_code(conn: Conn, code: str) -> m.SpoolType | None:
+    """The unarchived type of ``code``, in any case."""
+    row = conn.execute(
+        f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
+        " WHERE upper(code) = upper(%s) AND archived_at IS NULL",
+        (code,),
+    ).fetchone()
+    return None if row is None else m.SpoolType.model_validate(row)
+
+
+def _by_ids(
+    conn: Conn,
+    material_id: UUID,
+    subtype_id: UUID | None,
+    brand_id: UUID | None,
+    rgba: str,
+    label_weight_g: int,
+) -> m.SpoolType | None:
+    """The oldest unarchived type of these catalog ids, colour and label weight."""
+    row = conn.execute(
+        f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
+        " WHERE archived_at IS NULL AND material_id = %s"
+        " AND subtype_id IS NOT DISTINCT FROM %s AND brand_id IS NOT DISTINCT FROM %s"
+        " AND rgba = %s AND label_weight_g = %s"
+        " ORDER BY created_at, id LIMIT 1",
+        (material_id, subtype_id, brand_id, normalise_rgba(rgba), label_weight_g),
+    ).fetchone()
+    return None if row is None else m.SpoolType.model_validate(row)
+
+
+def _by_key(
+    conn: Conn, kind: str, name: str | None, *, material: UUID | None = None
+) -> UUID | Literal[False] | None:
+    """The catalog row ``name`` names by key (`lookup_key`, one query, R-6706-25);
+    ``None`` for no name or one with no letter or digit (it counts as none, R-6706-18),
+    ``False`` when no row holds its key."""
     if name is None:
         return None
-    value = name.strip().lower().replace(" ", "-")
-    return cast("FilamentEffect", value) if value in get_args(FilamentEffect) else None
+    keyed, found = lookup_key(conn, kind, name, material=material)
+    if not keyed:
+        return None
+    return False if found is None else found
+
+
+def _book_effect(conn: Conn, effect_id: UUID | None) -> FilamentEffect | None:
+    """The price book's ``effect`` for an effect: the book value whose key is the key of
+    its name, else of one of its aliases (#6706: ``Dual Color`` and an alias
+    ``dual-color`` are ``dual-color``); ``None`` when none is."""
+    if effect_id is None:
+        return None
+    by_key = {catalog_key(value): value for value in get_args(FilamentEffect)}
+    rows = conn.execute(
+        "SELECT key FROM filament_effect_names WHERE effect_id = %s"
+        " ORDER BY NOT canonical, upper(name), name",
+        (effect_id,),
+    ).fetchall()
+    for row in rows:
+        if row["key"] in by_key:
+            return cast("FilamentEffect", by_key[row["key"]])
+    return None
 
 
 #: The K value tables and the column of what each value belongs to.

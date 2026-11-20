@@ -93,6 +93,64 @@ describe('filament catalog tools', () => {
   })
 })
 
+describe('filament catalog aliases (#6706)', () => {
+  const ALIASES = `${ONE}/aliases`
+  const RESOLVE = `${LIST}/resolve`
+
+  it.each([
+    ['filament_catalog_set_aliases', 'write'],
+    ['filament_catalog_resolve', 'read'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('puts the whole alias list of a row', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(ALIASES, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, name: 'Bambu Lab', aliases: ['Bambu', 'BL'] })
+      }),
+    )
+    const result = await runTool(tool('filament_catalog_set_aliases'), { kind: 'brands', row_id: ROW, aliases: ['Bambu', 'BL'] }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ aliases: ['Bambu', 'BL'] }])
+    expect(firstText(result)).toMatchObject({ aliases: ['Bambu', 'BL'] })
+  })
+
+  it('says which row holds a taken alias', async () => {
+    server.use(
+      http.put(ALIASES, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: "the brand 'Sunlu' already has a name or alias that matches 'sun-lu'", brand_id: ROW, brand_name: 'Sunlu' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const result = await runTool(tool('filament_catalog_set_aliases'), { kind: 'brands', row_id: ROW, aliases: ['sun-lu'] }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain("the brand 'Sunlu'")
+  })
+
+  it('takes only the catalogs that have aliases', async () => {
+    const result = await runTool(tool('filament_catalog_set_aliases'), { kind: 'colours', row_id: ROW, aliases: ['x'] }, ctx())
+    expect(result.isError).toBe(true)
+  })
+
+  it('resolves a name by key, a subtype within its material', async () => {
+    server.use(
+      http.get(RESOLVE, ({ request }) => {
+        const query = new URL(request.url).searchParams
+        expect([query.get('name'), query.get('material_id')]).toEqual(['bambu-lab', null])
+        return HttpResponse.json({ id: ROW, name: 'Bambu Lab' })
+      }),
+    )
+    const found = await runTool(tool('filament_catalog_resolve'), { kind: 'brands', name: 'bambu-lab' }, ctx())
+    expect(firstText(found)).toMatchObject({ id: ROW })
+  })
+})
+
 const TYPES = `${BACKEND}/api/v1/filament/types`
 const TYPE = `${TYPES}/${ROW}`
 
@@ -770,6 +828,84 @@ describe('filament RFID tools (#6264)', () => {
     server.use(http.post(`${RFID}/reconcile`, () => HttpResponse.json(report)))
     const t = tool('filament_rfid_reconcile')
     expect(firstText(await t.execute(t.parse({}), ctx('outward')))).toEqual(report)
+  })
+})
+
+describe('filament history and metrics tools', () => {
+  const FIL = `${BACKEND}/api/v1/filament`
+
+  it.each([
+    ['filament_spool_history'],
+    ['filament_forecast'],
+    ['filament_metrics'],
+    ['filament_purchasing_metrics'],
+  ])('%s is read tier', (name) => {
+    expect(tool(name).risk).toBe('read')
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('drops the series and keeps the newest 50 of 80 events', async () => {
+    const events = Array.from({ length: 80 }, (_, i) => ({ seq: 80 - i }))
+    server.use(
+      http.get(`${SPOOL}/history`, () =>
+        HttpResponse.json({ events, series: [{ g: 1 }], metrics: { used_g: 5 }, currency: 'USD', window_days: 30 }),
+      ),
+    )
+    const t = tool('filament_spool_history')
+    const out = firstText(await runTool(t, { spool_id: ROW }, ctx())) as { events: { seq: number }[] }
+    expect(out).not.toHaveProperty('series')
+    expect(out).toMatchObject({ metrics: { used_g: 5 }, currency: 'USD', window_days: 30, truncated: true })
+    expect(out.events).toHaveLength(50)
+    expect(out.events[0]?.seq).toBe(80)
+    expect(out.events[49]?.seq).toBe(31)
+  })
+
+  it('does not mark a short history truncated', async () => {
+    server.use(http.get(`${SPOOL}/history`, () => HttpResponse.json({ events: [{ seq: 1 }], series: [] })))
+    expect(firstText(await runTool(tool('filament_spool_history'), { spool_id: ROW }, ctx()))).toMatchObject({
+      truncated: false,
+    })
+  })
+
+  it('reads the forecast', async () => {
+    server.use(http.get(`${FIL}/forecast`, () => HttpResponse.json({ spools: [] })))
+    expect(firstText(await runTool(tool('filament_forecast'), {}, ctx()))).toEqual({ spools: [] })
+  })
+
+  it('sends the metrics query it was given', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${FIL}/metrics`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    await runTool(tool('filament_metrics'), { dimension: 'brand' }, ctx())
+    await runTool(tool('filament_metrics'), { bucket: 'week', since: '2026-01-01', until: '2026-02-01' }, ctx())
+    expect(seen).toEqual(['?dimension=brand', '?bucket=week&since=2026-01-01&until=2026-02-01'])
+  })
+
+  it('sends the purchasing range', async () => {
+    server.use(
+      http.get(`${FIL}/metrics/purchasing`, ({ request }) => {
+        expect(new URL(request.url).search).toBe('?since=2026-01-01')
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    await runTool(tool('filament_purchasing_metrics'), { since: '2026-01-01' }, ctx())
+  })
+
+  it('refuses a dimension the route does not know', () => {
+    expect(() => tool('filament_metrics').parse({ dimension: 'colour' })).toThrow()
+  })
+
+  it.each([['2026-13-45'], ['2026-02-30']])('refuses the impossible date %s', (day) => {
+    expect(() => tool('filament_metrics').parse({ since: day })).toThrow()
+    expect(() => tool('filament_purchasing_metrics').parse({ until: day })).toThrow()
+  })
+
+  it('accepts a leap day', () => {
+    expect(() => tool('filament_metrics').parse({ since: '2028-02-29' })).not.toThrow()
   })
 })
 

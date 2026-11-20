@@ -1,12 +1,12 @@
-import { screen, within } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import type { FilamentOptions, SlotChoice } from '../api/types'
+import type { FilamentOptions, FilamentWarning, SlotChoice } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { SHELF_NUMBER, TAGGED_TRAY, UNTAGGED_TRAY, hotFilaments } from '../mocks/features/hotPath'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
-import { FilamentPicker } from './FilamentPicker'
+import { FilamentPicker, WarningList } from './FilamentPicker'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 
 /** Controlled the way `PrintPicker` holds it, so a click really moves the selection. */
@@ -514,5 +514,15 @@ describe('FilamentPicker on the native path (source: trays)', () => {
     const { user } = open(fixtures.filamentOptions)
     await expand(user, 1)
     expect(screen.getByTestId('filter-material')).toBeInTheDocument()
+  })
+})
+
+// #6748: the run's error and the queued panel both list warnings with `WarningList`. A kind
+// this build does not know (a newer API) still shows, in the quiet tone.
+describe('WarningList', () => {
+  it('gives a warning of an unknown kind the quiet tone', () => {
+    const warning = { kind: 'from-a-newer-api', message: 'A newer warning.' } as unknown as FilamentWarning
+    render(<WarningList warnings={[warning]} testId="warnings" />)
+    expect(within(screen.getByTestId('warnings')).getByText('A newer warning.')).toHaveClass('text-subtle')
   })
 })

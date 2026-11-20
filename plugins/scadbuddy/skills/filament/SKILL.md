@@ -64,10 +64,13 @@ uncosted one has an empty own cost too; a costed one has its own cost:
    `rgba`, `fila_type`, `fila_id`. A 404 means the table does not have the code.
    Say so and ask the person for the colour. A 503 means this install has no
    table. Never invent an RGBA.
-3. `filament_invoice_candidates`: for each line, the open spools whose own cost
+3. `filament_invoice_candidates`: for each line, the spools whose own cost
    is empty and which match the line's type (or proposed type) by material and
    RGBA exactly, and the spools that have a cost already. A costed spool names
-   its `invoice_line_id`, if it has one.
+   its `invoice_line_id`, if it has one. Archived (used-up) spools are listed
+   too, with `archived: true`. A line may fill an archived spool: the spool
+   takes its cost and invoice line, and stays archived. A spent spool was still
+   bought, so fill it when the invoice is that purchase.
 4. `filament_invoice_upsert`: write the draft (the header, the lines, each
    line's type and `update_spool_ids`). Edit the draft you were given. Never make
    a second invoice.

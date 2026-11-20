@@ -55,6 +55,7 @@ MaxHours = Annotated[Decimal, Field(ge=0, le=Decimal("99999.9"))]
 Grams = Annotated[float, Field(ge=0, le=1_000_000)]
 LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
+Days = Annotated[int, Field(ge=0, le=365)]
 Cost = Annotated[Decimal, Field(ge=0, lt=100_000_000)]
 TdfpId = Annotated[int, Field(gt=0, lt=2**31)]
 Colours = Annotated[list[Rgba], Field(max_length=16)]
@@ -92,6 +93,19 @@ class _Catalog(_Row):
     archived_at: datetime | None
 
 
+class _Aliased(_Catalog):
+    """A row of a catalog with aliases (#6706): its other names, canonical name aside,
+    each a key no other name or alias of the catalog has (`filament/catalog.py`)."""
+
+    aliases: list[str] = Field(default_factory=list)
+
+
+class AliasesPut(_In):
+    """The whole alias list of a row: trimmed, none empty (#6706, R-6706-6)."""
+
+    aliases: Annotated[list[Name], Field(max_length=64)]
+
+
 # -- the plain catalogs: brand, category, effect, insert material --------------------
 
 
@@ -113,7 +127,7 @@ class BrandCreate(_NamedCreate): ...
 class BrandPatch(_NamedPatch): ...
 
 
-class Brand(_Catalog): ...
+class Brand(_Aliased): ...
 
 
 class CategoryCreate(_NamedCreate): ...
@@ -122,7 +136,7 @@ class CategoryCreate(_NamedCreate): ...
 class CategoryPatch(_NamedPatch): ...
 
 
-class Category(_Catalog): ...
+class Category(_Aliased): ...
 
 
 class EffectCreate(_NamedCreate): ...
@@ -131,7 +145,7 @@ class EffectCreate(_NamedCreate): ...
 class EffectPatch(_NamedPatch): ...
 
 
-class Effect(_Catalog): ...
+class Effect(_Aliased): ...
 
 
 class InsertMaterialCreate(_NamedCreate): ...
@@ -198,7 +212,7 @@ class MaterialPatch(_Patch):
     archived: bool | None = None
 
 
-class Material(_Catalog):
+class Material(_Aliased):
     family: str | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -244,7 +258,7 @@ class SubtypePatch(_Patch):
     archived: bool | None = None
 
 
-class Subtype(_Catalog):
+class Subtype(_Aliased):
     material_id: UUID | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -504,6 +518,8 @@ class SpoolTypeCreate(_In):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    lead_time_days: Days | None = None
+    safety_margin_days: Days | None = None
     tdfp_id: TdfpId | None = None
     note: Note | None = None
 
@@ -529,6 +545,8 @@ class SpoolTypePatch(_Patch):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    lead_time_days: Days | None = None
+    safety_margin_days: Days | None = None
     tdfp_id: TdfpId | None = None
     note: Note | None = None
     archived: bool | None = None
@@ -554,6 +572,8 @@ class SpoolType(_Row):
     insert_type_id: UUID | None
     low_stock_pct: int | None
     cost_per_kg: Decimal | None
+    lead_time_days: int | None
+    safety_margin_days: int | None
     filament_id: str | None
     tdfp_id: int | None
     note: str | None
@@ -1480,6 +1500,9 @@ class InventorySummary(BaseModel):
     loaded: int
     low_stock: int
     needs_type: int
+    #: Grams of every plate of every spool, archived ones too, each plate counted once
+    #: (`metrics.plates`, plan Decision 18).
+    consumed_g: float
 
 
 class TagPushReport(BaseModel):

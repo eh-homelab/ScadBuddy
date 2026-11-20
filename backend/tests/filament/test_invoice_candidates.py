@@ -41,14 +41,15 @@ def test_candidates_split_uncosted_and_costed(pg_pool: PgPool) -> None:
     gone = shop.spools.create(SpoolCreate.model_validate({"type_id": str(type_id)}), actor="test")
     shop.spools.update(gone.id, SpoolPatch(archived=True), actor="test")
     other = shop.type_id("PLA-BLK")
-    shop.types.update(other, SpoolTypePatch(rgba="#000000FF"))
+    shop.types.update(other, SpoolTypePatch(rgba="#000000FF"), actor="ann")
     _spool(shop, other)
     invoice = shop.draft(
         [InvoiceLineIn(description="PLA white", quantity=1, unit_price=D(40), type_id=type_id)]
     )
     (line,) = _candidates(shop, invoice.id)
     assert line.position == invoice.lines[0].position
-    assert [s.number for s in line.uncosted] == [bare]
+    # An archived spool was still bought (#6707 R-6707-12): it is listed, marked archived.
+    assert [(s.number, s.archived) for s in line.uncosted] == [(bare, False), (gone.number, True)]
     assert [s.number for s in line.costed] == [priced]
     assert line.costed[0].cost_per_kg == D("21.5")
     # A costed spool with no invoice line may still be filled (#6700, R-6700-1).
@@ -64,7 +65,7 @@ def test_a_proposed_type_matches_by_material_and_rgba(pg_pool: PgPool) -> None:
     type_id = shop.type_id()
     match = _spool(shop, type_id)
     translucent = shop.type_id("PLA-WHT-T")
-    shop.types.update(translucent, SpoolTypePatch(rgba="#FFFFFF80"))
+    shop.types.update(translucent, SpoolTypePatch(rgba="#FFFFFF80"), actor="ann")
     _spool(shop, translucent)
     proposed = shop.type_body("PLA-NEW")
     invoice = shop.draft(

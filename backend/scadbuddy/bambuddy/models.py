@@ -1178,6 +1178,7 @@ class Spool(BambuddyModel):
     category: str | None = None
     storage_location: str | None = None
     location_id: int | None = None
+    #: When Bambuddy archived the spool; naive UTC as its other times, read as UTC (#6707).
     archived_at: datetime | None = None
     #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
     #: nobody entered a price (#785).
@@ -1210,7 +1211,7 @@ class Spool(BambuddyModel):
     tag_type: str | None = None
     data_origin: str | None = None
 
-    @field_validator("updated_at", "last_weighed_at", "last_dried_at")
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at")
     @classmethod
     def _utc(cls, value: datetime | None) -> datetime | None:
         return as_utc(value)

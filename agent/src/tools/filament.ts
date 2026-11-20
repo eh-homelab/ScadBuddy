@@ -62,6 +62,9 @@ const kind = z
   ])
   .describe('Which catalog')
 
+/** #6706 — the catalogs whose rows have aliases (backend `filament/catalog.py` `NameTable`). */
+const aliasedKind = z.enum(['materials', 'subtypes', 'brands', 'categories', 'effects']).describe('Which catalog')
+
 const EVENT_KINDS = [
   'created',
   'loaded',
@@ -80,6 +83,19 @@ const EVENT_KINDS = [
   'synced_from_bb',
 ] as const
 
+/** A calendar day, as the metrics routes' `date` query takes it. */
+const DATE = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((v) => {
+    const d = new Date(`${v}T00:00:00Z`)
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v
+  }, 'Not a real calendar date')
+  .describe('A date, YYYY-MM-DD')
+
+/** The events `filament_spool_history` returns: the route sends them newest first. */
+const HISTORY_EVENTS = 50
+
 const csvRows = z
   .array(z.record(z.string(), z.string().nullable()))
   .min(1)
@@ -93,7 +109,8 @@ export const filamentTools: Tool[] = [
     description:
       "One of ScadBuddy's filament catalogs, in sort order: materials (print and drying defaults, handling " +
       'flags), subtypes, brands, categories, effects, insert-materials, insert-types, colours (a maker\'s named ' +
-      'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`.',
+      'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`. A material, ' +
+      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases).',
     input: z.object({ kind, include_archived: z.boolean().default(false) }),
     risk: 'read',
     source: SOURCE,
@@ -115,8 +132,12 @@ export const filamentTools: Tool[] = [
     description:
       'Add a row to a filament catalog (no `row_id`), or edit one: only the `fields` given change, and `null` ' +
       'clears a nullable one. Every row has `name` and `sort_order`; the other fields depend on the kind ' +
-      '(see filament_catalog_list). `archived: true` takes a row off the lists and frees its name, `false` puts ' +
-      'it back. 409 when another unarchived row has the name. Only what the user says. Writes ScadBuddy only.',
+      '(see filament_catalog_list). `archived: true` takes a row off the lists, `false` puts it back. In the ' +
+      'materials, subtypes, brands, categories and effects catalogs a name is matched by its key (letters and ' +
+      'digits, any case: `dual-color` is `Dual Color`) against every name and alias, archived rows included (a ' +
+      "subtype's within its material); the 409 names the row that holds it. In the other catalogs an archived " +
+      'row frees its name and a 409 means another unarchived row has it. Only what the user says. Writes ' +
+      'ScadBuddy only.',
     input: z.object({
       kind,
       row_id: z.string().uuid().optional().describe("A row's `id` from filament_catalog_list; omit to add"),
@@ -148,6 +169,61 @@ export const filamentTools: Tool[] = [
         ),
       )
     },
+  }),
+
+  defineTool({
+    name: 'filament_catalog_resolve',
+    label: 'Find a filament catalog row by name',
+    description:
+      'The material, subtype, brand, category or effect that a name resolves to, as the Bambuddy and CSV ' +
+      "imports resolve it: by key (letters and digits, any case) against every name and alias, archived rows " +
+      "too. A subtype is `material_id`'s own, else one for every material. A 404 means no row has that name.",
+    input: z.object({
+      kind: aliasedKind,
+      name: z.string().min(1),
+      material_id: z.string().uuid().optional().describe("For a subtype: the material's `id`"),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/catalog/{kind}/resolve'],
+    handler: async ({ kind, name, material_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/catalog/{kind}/resolve', {
+            params: { path: { kind }, query: { name, material_id } },
+          }),
+          `find ${name} in the ${kind} catalog`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_catalog_set_aliases',
+    label: 'Set the aliases of a filament catalog row',
+    description:
+      "Replace a material's, subtype's, brand's, category's or effect's aliases (its other names, which the " +
+      'imports and the price book resolve to it) with `aliases`, the whole list; `[]` removes them all. Each ' +
+      "alias's key (letters and digits, any case) must be free in the catalog: a 409 names the row that holds " +
+      'it, and nothing changes. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      kind: aliasedKind,
+      row_id: z.string().uuid().describe("A row's `id` from filament_catalog_list"),
+      aliases: z.array(z.string().trim().min(1).max(128)).max(64),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['PUT /api/v1/filament/catalog/{kind}/{row_id}/aliases'],
+    summarize: ({ kind, row_id, aliases }) => `Set ${kind} row ${row_id} aliases: ${aliases.join(', ') || 'none'}`,
+    handler: async ({ kind, row_id, aliases }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/filament/catalog/{kind}/{row_id}/aliases', {
+            params: { path: { kind, row_id } },
+            body: { aliases },
+          }),
+          `set the aliases of ${kind} row ${row_id}`,
+        ),
+      ),
   }),
 
   defineTool({
@@ -195,9 +271,10 @@ export const filamentTools: Tool[] = [
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
+      '`lead_time_days` and `safety_margin_days` (days, `null` clears) set the type\'s own reorder timing. ' +
       '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
       "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
-      'fetches its slicer presets by. 409 when an unarchived type has the ' +
+      "fetches its slicer presets by. 409 when an unarchived type has the " +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
@@ -854,6 +931,92 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_spool_history',
+    label: "Read a spool's history and metrics",
+    description:
+      "A spool's timeline and metrics: the newest 50 ledger `events` (newest first, with `actor`, `order_id` " +
+      'and `archive_id`), its `metrics` (use, waste, cost used, value left, burn rate, empty day, days since ' +
+      'opened and last use, hours outside dry storage, AMS error), `type_ams_error`, `currency` and ' +
+      '`window_days`. `truncated` is true when older events exist. filament_spool_events lists every event, oldest first, so the ' +
+      'older events are at the start of its list. ' +
+      'The grams-left `series` is left out. 404 for no such spool.',
+    input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools/{spool_id}/history'],
+    handler: async ({ spool_id }, { backend }) => {
+      const { series: _series, events, ...rest } = await ok(
+        backend.GET('/api/v1/filament/spools/{spool_id}/history', { params: { path: { spool_id } } }),
+        `read the history of spool ${spool_id}`,
+      )
+      return json({ ...rest, events: events.slice(0, HISTORY_EVENTS), truncated: events.length > HISTORY_EVENTS })
+    },
+  }),
+
+  defineTool({
+    name: 'filament_forecast',
+    label: 'Forecast when spools and types run out',
+    description:
+      "Each unarchived spool's burn rate (grams per day over the last `window_days`) and the day it runs " +
+      "out, and each spool type's stock, burn, days of stock, empty day and reorder day (its lead time and " +
+      'safety margin taken off the empty day). `reorder_now` is true when the reorder day is today or past. ' +
+      'A spool or type with no use in the window has no burn, empty day or reorder day.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/forecast'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/forecast'), 'read the filament forecast')),
+  }),
+
+  defineTool({
+    name: 'filament_metrics',
+    label: 'Read stock, consumption and waste',
+    description:
+      "The unarchived spools' stock (spools, grams left, value) by `dimension`, the grams used and wasted " +
+      'per `bucket` and dimension, and the waste by material, type and printer. `since` and `until` are ' +
+      'dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is not ' +
+      'before `until` or the range is over 1096 days.',
+    input: z.object({
+      dimension: z.enum(['material', 'brand', 'type', 'supplier', 'location']).optional().describe('Default material'),
+      bucket: z.enum(['week', 'month']).optional().describe('Default month'),
+      since: DATE.optional(),
+      until: DATE.optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/metrics'],
+    handler: async ({ dimension, bucket, since, until }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/metrics', { params: { query: { dimension, bucket, since, until } } }),
+          'read the filament metrics',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_purchasing_metrics',
+    label: 'Read price per kg and supplier spend',
+    description:
+      "Each spool type's price per kg at each supplier over time (one series per currency), and the " +
+      "confirmed invoices' totals per supplier, month and currency, never converted. `since` and `until` " +
+      'are dates (`YYYY-MM-DD`), both included; default the 365 days before today. 422 when `since` is not ' +
+      'before `until` or the range is over 1096 days.',
+    input: z.object({ since: DATE.optional(), until: DATE.optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/metrics/purchasing'],
+    handler: async ({ since, until }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/metrics/purchasing', { params: { query: { since, until } } }),
+          'read the purchasing metrics',
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_rfid_status',
     label: 'Read the RFID override mode',
     description:
@@ -1159,7 +1322,8 @@ export const filamentTools: Tool[] = [
       'Make or change spools from rows of a spools CSV (cells as text, under the export\'s column names: ' +
       `${CSV_COLUMNS.join(', ')}). A row with a \`number\` changes that spool where a cell differs; an empty cell ` +
       'changes nothing. A row with no `number` makes a spool (it needs a `type` code or a `material`). Material, ' +
-      'subtype, brand, category and effect names are added to their catalog when missing; `insert_type`, `type` ' +
+      'subtype, brand, category and effect names resolve by key against every name and alias (`dual-color` is ' +
+      '`Dual Color`) and are added to their catalog when missing; `insert_type`, `type` ' +
       'and `location` must exist (a location is a move). Derived columns (grams_left, last_used_at, ...) are ' +
       'ignored. It previews first and writes only when no line is an error, all rows at once; to see the ' +
       'preview alone, use filament_spool_import_preview. Only what the user says. Writes ScadBuddy only.',
@@ -1197,13 +1361,19 @@ export const filamentTools: Tool[] = [
     name: 'filament_bambuddy_import',
     label: "Import Bambuddy's spools",
     description:
-      "Pull Bambuddy's unarchived spools into ScadBuddy's own inventory once (the spool refresh Schedule also " +
+      "Pull Bambuddy's spools, archived ones too, into ScadBuddy's own inventory once (the spool refresh Schedule also " +
       'does this). A linked spool takes what Bambuddy changed since the last pull, unless ScadBuddy changed that ' +
       'field later. A Bambuddy spool whose tag or record a ScadBuddy spool already holds is linked. Any other ' +
       'becomes a new spool, typed by `material_number`, else by brand, material, subtype, colour and label weight, ' +
       'else left needing a type. An archived ScadBuddy spool is never restored or changed (listed as `archived`). ' +
+      'A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived spool with its usage, counted ' +
+      'in `created` and `archived_created`. When the usage rows cannot be read, such a spool is not made yet ' +
+      '(`archived_deferred`, with its Bambuddy id); a later pull makes it. ' +
       'Returns the counts and ids created, linked, updated, still needing a type and archived, and the Bambuddy ' +
-      'rows it could not read (`invalid`). ' +
+      'rows it could not read (`invalid`) or pull (`failed_bb_ids`). Also: `rfid_duplicates` (Bambuddy spools made ' +
+      'for a tag a linked spool holds, left alone), `catalog_failed` and `catalog_skipped` (Bambuddy\'s spool ' +
+      'catalog), `names_skipped` (catalog names with no letter or digit, left out), and `usage_booked` and ' +
+      '`usage_unlinked` (Bambuddy usage rows booked, and those of an unlinked spool). ' +
       '409 when no Bambuddy is configured. Reads Bambuddy, writes ScadBuddy only.',
     input: z.object({}),
     risk: 'write',

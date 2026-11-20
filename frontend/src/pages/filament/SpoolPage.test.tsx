@@ -1,10 +1,12 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE } from '../../mocks/features/filamentPurchasingSeed'
+import { ORDER_CLOSED } from '../../mocks/features/orders/state'
+import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -439,5 +441,44 @@ describe('the spool page', () => {
     open(2)
     await heading(2)
     expect(screen.queryByRole('link', { name: /^Invoice / })).not.toBeInTheDocument()
+  })
+})
+
+describe('the spool page\'s history (#6269)', () => {
+  it('shows the grams chart, the metrics and the timeline from the history route', async () => {
+    // The numbers `metrics.series` and `spool_metrics` give for #2's seed ledger at this time
+    // (run with `uv run --frozen python`; Task 7 fix 1 report): 1000 g to 820 g with 3 anchors,
+    // 120 g over the 17.1 days since #2 was created is 7.0 g a day, and 820 g lasts to 2027-03-15.
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime('2026-11-18T12:00:00Z')
+    onTestFinished(() => void vi.useRealTimers())
+    open(2)
+    await heading(2)
+    const history = screen.getByRole('region', { name: 'History' })
+    expect(await within(history).findByRole('img', { name: 'Grams left: 1000 g to 820 g, 3 anchor readings' })).toBeInTheDocument()
+    expect(history.querySelectorAll('[data-plate]')).toHaveLength(3)
+    const metrics = within(history).getByLabelText('Spool metrics')
+    for (const name of ['Burn rate', 'Empty around', 'Waste', 'AMS error']) expect(within(metrics).getByText(name)).toBeInTheDocument()
+    expect(within(metrics).getByText('Burn rate').parentElement).toHaveTextContent('7 g a day')
+    expect(within(metrics).getByText('Burn rate').parentElement).toHaveTextContent('Since it was added 17 days ago')
+    expect(within(metrics).getByText('Empty around').parentElement).toHaveTextContent(new Date('2027-03-15T00:00:00Z').toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' }))
+    expect(within(metrics).getByText('30 g')).toBeInTheDocument()
+    expect(within(metrics).getByText('±20 g')).toBeInTheDocument()
+    const timeline = within(history).getByRole('list', { name: 'History of this spool' })
+    expect(within(timeline).getByRole('link', { name: 'Print 41' })).toHaveAttribute('href', '/prints/41')
+    expect(within(timeline).getByRole('link', { name: 'Its order' })).toHaveAttribute('href', `/orders/${ORDER_CLOSED}`)
+    expect(within(timeline).getByText('Cost per kg: not set → 25.00')).toBeInTheDocument()
+    expect(within(timeline).getByText('Assistant')).toBeInTheDocument()
+    // A BB plate is booked as the API books it: its grams off, measured, and no grams left.
+    expect(within(timeline).getByText(', −55 g, measured, AMS A1')).toBeInTheDocument()
+  })
+
+  it('says why the burn rate is empty, with the window the settings hold', async () => {
+    setMockSettings({ ...mockSettings(), filament_burn_window_days: 14 })
+    open(1)
+    await heading(1)
+    const metrics = await within(screen.getByRole('region', { name: 'History' })).findByLabelText('Spool metrics')
+    const burn = within(metrics).getByText('Burn rate').parentElement!
+    expect(burn).toHaveTextContent('—')
+    expect(burn).toHaveTextContent('No prints in the last 14 days')
   })
 })

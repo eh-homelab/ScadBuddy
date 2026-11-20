@@ -14,6 +14,7 @@ from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
 from scadbuddy.filament.profile_fill import TypeFiller
@@ -44,6 +45,8 @@ class Filament:
     invoices: InvoiceStore
     #: The spools a person means to buy (#6266).
     shopping: ShoppingStore
+    #: A spool's history, the forecast and the inventory metrics (#6269).
+    metrics: MetricsStore
     #: Bambuddy's tray assignments, as this app last read them (#6580).
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
     #: The image's slicer profiles a type is filled from (#6714); ``None`` without them.
@@ -81,6 +84,25 @@ def _build(core: Core, components: Components) -> Filament:
         # A settings read on a connection of its own, on each use (`defaults`' rule).
         return core.settings_store.snapshot().runtime.orders_currency
 
+    def metrics_settings() -> MetricsSettings:
+        # One query, on a connection of its own, on each use (`defaults`' rule).
+        read = core.settings_store.read(
+            {
+                "filament_burn_window_days",
+                "filament_lead_time_days",
+                "filament_safety_margin_days",
+                "filament_default_cost_per_kg",
+                "orders_currency",
+            }
+        )
+        return MetricsSettings(
+            window_days=int(read["filament_burn_window_days"]),
+            lead_time_days=int(read["filament_lead_time_days"]),
+            safety_margin_days=int(read["filament_safety_margin_days"]),
+            currency=read["orders_currency"],
+            default_cost_per_kg=read["filament_default_cost_per_kg"],
+        )
+
     # What a native print used is settled on its SB spools as the follow reads it settled
     # (#4643, #6262 Task 6); the follow is a core service and imports no feature.
     core.print_follower.on_read.append(print_use_hook(PoolPrintUses(pool)))
@@ -98,6 +120,7 @@ def _build(core: Core, components: Components) -> Filament:
         suppliers=SuppliersStore(pool, shop_currency),
         invoices=InvoiceStore(pool, shop_currency, spools, types),
         shopping=ShoppingStore(pool),
+        metrics=MetricsStore(pool, spools, metrics_settings),
         profile_table=lambda: density_table(core.settings.slicer_profiles_dir),
     )
 

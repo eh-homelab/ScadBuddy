@@ -5,6 +5,7 @@ import { CatalogTab } from './CatalogTab'
 import { LedgerTab } from './LedgerTab'
 import { InvoicesTab } from './InvoicesTab'
 import { LocationsTab } from './LocationsTab'
+import { MetricsTab } from './MetricsTab'
 import { ShoppingListTab } from './ShoppingListTab'
 import { SpoolsTab } from './SpoolsTab'
 import { SuppliersTab } from './SuppliersTab'
@@ -59,6 +60,7 @@ export function FilamentPage({ tab }: { tab: TabId }) {
         {tab === 'tags' && <TagsTab />}
         {tab === 'locations' && <LocationsTab />}
         {tab === 'catalog' && <CatalogTab />}
+        {tab === 'metrics' && <MetricsTab />}
         {tab === 'ledger' && <LedgerTab />}
         {tab === 'suppliers' && <SuppliersTab />}
         {tab === 'invoices' && <InvoicesTab />}

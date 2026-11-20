@@ -57,7 +57,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent, record, stored
 from scadbuddy.filament.models import TypeKValue, TypePreset
 from scadbuddy.filament.profile_fill import fill_quietly
-from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.filament.types import SpoolTypeStore, list_edit
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.profile_fetch.wire import (
     FETCH_WORKFLOW,
@@ -548,7 +548,7 @@ def _run(conn: Conn, run_id: UUID, *, lock: bool = False, running: bool = True) 
     """The run's row: 404 for none, and 409 for one that has ended when ``running``."""
     row = conn.execute(
         "SELECT id, type_id, status, targets, files, bambuddy_before, missing, k_values,"
-        " notes, error FROM filament_profile_fetches WHERE id = %s"
+        " notes, error, started_by FROM filament_profile_fetches WHERE id = %s"
         + (" FOR UPDATE" if lock else ""),
         (run_id,),
     ).fetchone()
@@ -837,14 +837,18 @@ async def _import_once(
             if now["status"] != "running":
                 reply = Replay(200, _stored_outcome(now).model_dump(mode="json"))
             else:
+                # R-T9-3: a change fans out to the type's spools, as a Type page save does.
+                type_id, by = now["type_id"], now["started_by"]
                 had = conn.execute(
                     "SELECT 1 FROM filament_spool_type_presets WHERE type_id = %s LIMIT 1",
-                    (now["type_id"],),
+                    (type_id,),
                 ).fetchone()
                 first_presets.append(had is None and bool(ending.presets))
-                SpoolTypeStore.merge_presets(conn, now["type_id"], ending.presets)
-                _drop_stale_k_values(conn, now["type_id"], ending)
-                SpoolTypeStore.merge_k_values(conn, now["type_id"], ending.k_values)
+                with list_edit(conn, type_id, "presets", by):
+                    SpoolTypeStore.merge_presets(conn, type_id, ending.presets)
+                with list_edit(conn, type_id, "k_values", by):
+                    _drop_stale_k_values(conn, type_id, ending)
+                    SpoolTypeStore.merge_k_values(conn, type_id, ending.k_values)
                 files = now["files"]
                 for preset in ending.presets:
                     entry = files[preset.printer_model][preset.nozzle_diameter]
@@ -878,6 +882,7 @@ async def _import_once(
             lambda: state.components.get(FILAMENT).filler,
             state.settings_store.load,
             [row["type_id"]],
+            actor=row["started_by"],
         )
     return ImportOutcome.model_validate(done.body)
 
