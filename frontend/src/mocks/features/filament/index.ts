@@ -26,6 +26,54 @@ type S = components['schemas']
 
 const BASE = '/api/v1/filament'
 
+/** #6714 — the slicer profiles the mock fills a type from, by preset id. */
+const PROFILES: Record<string, { name: string; values: Partial<Record<FillField, number | string>>; cost_hint: string }> = {
+  GFA00: { name: 'Bambu PLA Basic @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 190, nozzle_temp_max: 230, bed_temp_min: 35, bed_temp_max: 65, density_g_cm3: '1.26', diameter_mm: '1.75' }, cost_hint: '24.99' },
+  GFG02: { name: 'Bambu PETG HF @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 230, nozzle_temp_max: 260, bed_temp_min: 70, bed_temp_max: 80, density_g_cm3: '1.25', diameter_mm: '1.75' }, cost_hint: '19.99' },
+}
+
+const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+type FillField = (typeof FILL_FIELDS)[number]
+
+/** The type's H2C 0.4 mm preset, else any 0.4 mm one, else the first, and its profile (R-6714-1). */
+function profileOf(type: S['SpoolType']) {
+  const presets = state.typePresets.filter((one) => one.type_id === type.id)
+  const at04 = presets.filter((one) => Number(one.nozzle_diameter) === 0.4)
+  const preset = at04.find((one) => one.printer_model.toUpperCase() === 'H2C') ?? at04[0] ?? presets[0]
+  if (!preset) return null
+  const profile = PROFILES[preset.slicer_filament]
+  return { preset, values: profile?.values ?? null, profile }
+}
+
+/** `TypeFiller.fill` (and `apply`) over the mock's types: empty fields only, a refresh compares. */
+function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Partial<Record<FillField, number | string>>; kValues?: boolean }): S['TypeFill'] {
+  const result: S['TypeFill'] = { type_id: type.id, code: type.code, filled: {}, previous: {}, skipped: {}, k_values: [], written: false }
+  const found = profileOf(type)
+  if (!found) return { ...result, reason: 'the type has no slicer preset' }
+  if (!found.profile) return { ...result, reason: `Bambu Studio 02.08.02.61 has no filament preset ${found.preset.slicer_filament}` }
+  result.source = { preset_id: found.preset.slicer_filament, name: found.profile.name, origin: 'system', printer_model: found.preset.printer_model, nozzle_diameter: found.preset.nozzle_diameter }
+  result.cost_hint = found.profile.cost_hint
+  const at = state.types.findIndex((one) => one.id === type.id)
+  const current = type as unknown as Record<FillField, number | string | null>
+  if (options.apply) {
+    for (const field of Object.keys(options.apply)) result.previous[field] = current[field as FillField]
+    state.types[at] = { ...type, ...options.apply } as S['SpoolType']
+    return { ...result, filled: options.apply, written: Object.keys(options.apply).length > 0 }
+  }
+  for (const [field, value] of Object.entries(found.profile.values)) {
+    const now = current[field as FillField]
+    if (options.refresh ? String(now) !== String(value) : now === null) {
+      result.filled[field] = value
+      if (options.refresh) result.previous[field] = now
+    }
+  }
+  if (!options.refresh && Object.keys(result.filled).length > 0) {
+    state.types[at] = { ...type, ...result.filled } as S['SpoolType']
+    result.written = true
+  }
+  return result
+}
+
 let state: Seed = seed()
 
 export function reset() {
@@ -1236,6 +1284,26 @@ export const handlers = [
     if (refused) return refused
     state.types[at] = PRICED.some((field) => field in body) ? linkPriceBook(next) : next
     return HttpResponse.json(state.types[at])
+  }),
+  // #6714: the fill from a type's slicer profile, over `PROFILES` (`fillType`).
+  http.post(`${BASE}/types/fill-from-profile`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { refresh?: boolean }
+    return HttpResponse.json(state.types.filter((type) => !type.archived_at).map((type) => fillType(type, { refresh: body.refresh === true })))
+  }),
+  http.post(`${BASE}/types/:id/fill-from-profile`, async ({ params, request }) => {
+    const type = state.types.find((one) => one.id === params.id)
+    if (!type) return problem(404, `no spool type ${String(params.id)}`)
+    const body = (await request.json().catch(() => ({}))) as S['FillRequest']
+    if (body.apply) {
+      const unknown = Object.keys(body.apply).find((field) => !(FILL_FIELDS as readonly string[]).includes(field))
+      if (unknown) return problem(422, `apply.${unknown}: Input should be ${FILL_FIELDS.join(', ')}`)
+      const given = profileOf(type)?.values ?? {}
+      for (const [field, value] of Object.entries(body.apply)) {
+        if (String(given[field as FillField]) !== String(value)) return problem(409, `the profile now gives ${field} ${String(given[field as FillField] ?? 'None')}, not ${String(value)}: refresh again`)
+      }
+      return HttpResponse.json(fillType(type, { apply: body.apply as Partial<Record<FillField, number | string>>, kValues: body.k_values === true }))
+    }
+    return HttpResponse.json(fillType(type, { refresh: body.refresh === true }))
   }),
   http.put(`${BASE}/types/:id/presets`, async ({ params, request }) => {
     const typeId = String(params.id)

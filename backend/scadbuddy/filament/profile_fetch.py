@@ -56,6 +56,7 @@ from scadbuddy.bambuddy.models import KProfile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent, record, stored
 from scadbuddy.filament.models import TypeKValue, TypePreset
+from scadbuddy.filament.profile_fill import fill_quietly
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.profile_fetch.wire import (
@@ -825,6 +826,7 @@ async def _import_once(
     pool = state.settings_store.pool
     run_id = row["id"]
     ending = await _import(state, row, failures, printers, fetched)
+    first_presets: list[bool] = []
 
     def finish() -> Replay:
         with pool.connection() as conn, conn.transaction():
@@ -835,6 +837,11 @@ async def _import_once(
             if now["status"] != "running":
                 reply = Replay(200, _stored_outcome(now).model_dump(mode="json"))
             else:
+                had = conn.execute(
+                    "SELECT 1 FROM filament_spool_type_presets WHERE type_id = %s LIMIT 1",
+                    (now["type_id"],),
+                ).fetchone()
+                first_presets.append(had is None and bool(ending.presets))
                 SpoolTypeStore.merge_presets(conn, now["type_id"], ending.presets)
                 _drop_stale_k_values(conn, now["type_id"], ending)
                 SpoolTypeStore.merge_k_values(conn, now["type_id"], ending.k_values)
@@ -862,6 +869,14 @@ async def _import_once(
             return reply
 
     done = await asyncio.to_thread(finish)
+    if first_presets == [True]:
+        # A type's first presets fill its empty fields from their profile (#6714, R-6714-a);
+        # after the commit, and a failure never fails the import.
+        from scadbuddy.filament.component import FILAMENT
+
+        await fill_quietly(
+            state.components.get(FILAMENT).filler, state.settings_store.load, [row["type_id"]]
+        )
     return ImportOutcome.model_validate(done.body)
 
 
