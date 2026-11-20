@@ -104,6 +104,7 @@ def test_gaps_are_the_targets_the_type_has_no_preset_for(pg_pool: PgPool) -> Non
                 slicer_filament_name="n",
             )
         ],
+        actor="ann",
     )
     gaps = _fetches(pg_pool).gaps(type_id)
     assert [(g.printer_model, g.nozzle_diameter) for g in gaps] == [("H2C", "0.2")]
@@ -139,8 +140,8 @@ def test_merge_replaces_only_the_given_keys(pg_pool: PgPool) -> None:
             setting_id=None,
         )
 
-    types.set_presets(type_id, [preset("X1C", "0.4", "1"), preset("H2C", "0.4", "2")])
-    types.set_k_values(type_id, [k(0, "0.4", "0.02"), k(1, "0.4", "0.03")])
+    types.set_presets(type_id, [preset("X1C", "0.4", "1"), preset("H2C", "0.4", "2")], actor="ann")
+    types.set_k_values(type_id, [k(0, "0.4", "0.02"), k(1, "0.4", "0.03")], actor="ann")
     with pg_pool.connection() as conn, conn.transaction():
         types.merge_presets(conn, type_id, [preset("H2C", "0.4", "9"), preset("H2C", "0.2", "8")])
         types.merge_k_values(conn, type_id, [k(0, "0.4", "0.05")])

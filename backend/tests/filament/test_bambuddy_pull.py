@@ -35,6 +35,7 @@ from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.models import (
     InsertType,
     InsertTypeCreate,
@@ -82,6 +83,7 @@ def _filament(pool: PgPool) -> Filament:
         suppliers=SuppliersStore(pool, lambda: "USD"),
         invoices=InvoiceStore(pool, lambda: "USD", spools, types),
         shopping=ShoppingStore(pool),
+        metrics=MetricsStore(pool, spools, MetricsSettings),
     )
 
 
@@ -1425,7 +1427,7 @@ def test_a_spool_takes_its_core_weight_insert_type(pg_pool: PgPool) -> None:
     assert typeless.type_id is None and typeless.insert_type_id == inserts[5]
     assert with_type.type_id == typed.id and with_type.insert_type_id == inserts[6]
     # The type's own insert type is no override.
-    f.types.update(typed.id, SpoolTypePatch(insert_type_id=inserts[5]))
+    f.types.update(typed.id, SpoolTypePatch(insert_type_id=inserts[5]), actor="ann")
     same = pull(
         f,
         [bb(id=3, material_number="GFA00-RED", core_weight_catalog_id=5, **none)],
@@ -1745,7 +1747,7 @@ def test_bb_moving_to_the_types_own_insert_type_clears_the_override(pg_pool: PgP
     ).created_ids
     inserts = {k.bb_catalog_id: k.id for k in _insert_types(f)}
     assert _own_insert(f, made) == inserts[6]
-    f.types.update(typed.id, SpoolTypePatch(insert_type_id=inserts[5]))
+    f.types.update(typed.id, SpoolTypePatch(insert_type_id=inserts[5]), actor="ann")
     pull(
         f,
         [bb(updated_at="2026-11-14T11:00:00", core_weight_catalog_id=5, **row)],

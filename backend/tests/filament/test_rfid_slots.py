@@ -30,6 +30,7 @@ from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.filament.invoices import InvoiceStore
 from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.models import (
     Material,
     SlotReport,
@@ -82,6 +83,7 @@ def _filament(pool: PgPool) -> Filament:
         suppliers=SuppliersStore(pool, lambda: "USD"),
         invoices=InvoiceStore(pool, lambda: "USD", spools, types),
         shopping=ShoppingStore(pool),
+        metrics=MetricsStore(pool, spools, MetricsSettings),
     )
 
 
@@ -157,6 +159,7 @@ class World:
                     slicer_filament_name=None,
                 )
             ],
+            actor="ann",
         )
 
     def bind(self, *, override: bool) -> None:
@@ -260,6 +263,7 @@ async def test_the_k_value_of_the_extruder_the_ams_feeds_is_sent(
             )
             for ext in (0, 1)
         ],
+        actor="ann",
     )
     route = _configure()
 

@@ -338,6 +338,32 @@ describe('the prices panel', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('must start with http')
   })
 
+  it('saves a lead time and a safety margin (#6269), and clears them back to the defaults', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    const lead = await screen.findByLabelText('Lead time (days)')
+    expect(lead).toHaveValue('')
+    await user.type(lead, '14')
+    await user.type(screen.getByLabelText('Safety margin (days)'), '5')
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect(await getType(T.JADE)).toMatchObject({ lead_time_days: 14, safety_margin_days: 5 }))
+    await user.clear(screen.getByLabelText('Lead time (days)'))
+    await user.clear(screen.getByLabelText('Safety margin (days)'))
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect(await getType(T.JADE)).toMatchObject({ lead_time_days: null, safety_margin_days: null }))
+  })
+
+  it('shows the seeded lead time and refuses one over 365 days', async () => {
+    const { user } = render(`/filament/types/${T.ORANGE}`)
+    const lead = await screen.findByLabelText('Lead time (days)')
+    expect(lead).toHaveValue('30')
+    expect(screen.getByLabelText('Safety margin (days)')).toHaveValue('90')
+    await user.clear(lead)
+    await user.type(lead, '400')
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    expect(await screen.findByText('Enter the lead time as at most 365 days.')).toBeInTheDocument()
+    expect((await getType(T.ORANGE)).lead_time_days).toBe(30)
+  })
+
   it('fills from the slicer profile: shows the diff, and writes only the rows kept', async () => {
     const { user } = render(`/filament/types/${T.JADE}`)
     await code()

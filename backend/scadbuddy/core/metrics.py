@@ -545,6 +545,68 @@ class Metrics:
             "Stored files removed by the sweep because nothing referenced or used them.",
             registry=r,
         )
+        # The filament inventory (#6269 plan Decisions 2-5), the API's only: set from a
+        # snapshot at most once a minute (`api/metrics.py` `refresh_filament_metrics`).
+        # Labels are catalog names, more than 20 values a label folded into `other`
+        # (`filament/metrics_export.py`); a rename starts a new series.
+        self.filament_metrics_up = Gauge(
+            "scadbuddy_filament_metrics_up",
+            "1 when the last filament snapshot read succeeded, 0 when it failed (the"
+            " filament gauges then keep the values of the last good read).",
+            registry=r,
+        )
+        #: When the last filament snapshot was taken or tried, by the refresh's clock.
+        self.filament_snapshot_at: float | None = None
+        self.filament_stock_grams = Gauge(
+            "scadbuddy_filament_stock_grams",
+            "Grams left on the spools in stock, by material, brand and location kind.",
+            ["material", "brand", "location_kind"],
+            registry=r,
+        )
+        self.filament_stock_spools = Gauge(
+            "scadbuddy_filament_stock_spools",
+            "Spools in stock, by material, brand and location kind.",
+            ["material", "brand", "location_kind"],
+            registry=r,
+        )
+        self.filament_stock_value = Gauge(
+            "scadbuddy_filament_stock_value",
+            "What the grams in stock cost, by material, in the shop's currency.",
+            ["material", "currency"],
+            registry=r,
+        )
+        self.filament_used_grams = Gauge(
+            "scadbuddy_filament_used_grams",
+            "Grams of every plate ever booked, by material and outcome; read with delta().",
+            ["material", "outcome"],
+            registry=r,
+        )
+        self.filament_burn = Gauge(
+            "scadbuddy_filament_burn_grams_per_day",
+            "Grams a day used over the burn window, by material.",
+            ["material"],
+            registry=r,
+        )
+        self.filament_days_of_stock = Gauge(
+            "scadbuddy_filament_days_of_stock",
+            "Days the stock lasts at the burn rate, by material; none with no use. A"
+            " folded `other` has its soonest material's days.",
+            ["material"],
+            registry=r,
+        )
+        self.filament_low_stock_spools = Gauge(
+            "scadbuddy_filament_low_stock_spools",
+            "Spools in stock below the low-stock threshold, by material.",
+            ["material"],
+            registry=r,
+        )
+        self.filament_reorder_types = Gauge(
+            "scadbuddy_filament_reorder_types",
+            "Spool types whose reorder date (the empty date less lead time and safety"
+            " margin) is today or past, by material.",
+            ["material"],
+            registry=r,
+        )
         # A customer's staged files (#6133): the backstop's repairs, each a bug signal.
         self.staged_files_repaired = Counter(
             "scadbuddy_staged_files_repaired",

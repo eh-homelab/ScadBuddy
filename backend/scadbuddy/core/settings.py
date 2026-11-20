@@ -755,6 +755,12 @@ class Settings(BaseSettings):
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = Field(default=20, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    # #6269: `filament_burn_window_days` is the span of print history the burn rate and the
+    # forecast read; a type that sets no `lead_time_days` or `safety_margin_days` takes the two
+    # defaults.
+    filament_burn_window_days: int = Field(default=30, ge=1, le=365)
+    filament_lead_time_days: int = Field(default=7, ge=0, le=365)
+    filament_safety_margin_days: int = Field(default=3, ge=0, le=365)
 
     @field_validator("flow_approval_timeout_seconds")
     @classmethod
@@ -1109,6 +1115,9 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_sync": "live",
         "filament_low_stock_pct": "live",
         "filament_default_cost_per_kg": "live",
+        "filament_burn_window_days": "live",
+        "filament_lead_time_days": "live",
+        "filament_safety_margin_days": "live",
         # Attributes of the stores that read them on every use.
         "library_max_bytes": "live",
         "asset_max_total_bytes": "live",

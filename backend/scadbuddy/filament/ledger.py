@@ -30,7 +30,7 @@ named time, so it never pushes a physical time past a newer anchor. Three rules 
 2. An ``ams_remain`` reading with ``data.printing`` true is recorded but is never an
    anchor: the AMS remain % moves in steps during a plate.
 3. One plate is counted once. SB's events (``ref_kind`` `PRINT_RUN`) and BB's usage row
-   (`BB_USAGE`) of one job (`job_of`) on one spool are a pair. For a pair, SB's events
+   (`BB_USAGE`) of one job (`job_of`) on one spool are a pair (`pairs`). For a pair, SB's events
    are skipped and BB's ``delta_g`` counts, because BB keeps a failed plate's partial
    grams and SB books 0 g. The pair counts when it lies after the anchor, and each
    anchor is compared in its own clock: an anchor from BB (`BB_REFS`) with BB's usage
@@ -66,6 +66,7 @@ from psycopg.types.json import Jsonb
 from pydantic_core import to_jsonable_python
 
 from scadbuddy.filament import models as m
+from scadbuddy.filament.provenance import current_by
 
 Conn = Connection[DictRow]
 
@@ -128,7 +129,12 @@ def record(
     booked, also for an event that names an earlier time. ``None`` when an event with
     the spool, ``ref_kind``, ``ref_id`` and ``kind`` is already recorded (a retry books
     nothing). ``at`` is when it physically happened; with none the event is booked
-    now, by the module's rule."""
+    now, by the module's rule. An agent's or a flow's call adds ``data.author``
+    (`provenance.current_by`), unless ``data`` names one; never ``data.by``, which
+    `capture.py` writes as a string."""
+    author = current_by()
+    if author is not None and "author" not in (data or {}):
+        data = (data or {}) | {"author": author}
     # Before the insert, whose foreign key would take a KEY SHARE lock that
     # `refresh_derived`'s FOR UPDATE then has to upgrade: two writers deadlock there.
     conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))
@@ -166,7 +172,9 @@ def record(
     return event
 
 
-def _reading(event: m.SpoolEvent, label_weight_g: int | None) -> float | None:
+def reading(event: m.SpoolEvent, label_weight_g: int | None) -> float | None:
+    """The grams an absolute reading gives, by the rule above; ``None`` for an event
+    that is not one."""
     if event.source not in _ABSOLUTE:
         return None
     if event.grams_after is not None:
@@ -177,6 +185,29 @@ def _reading(event: m.SpoolEvent, label_weight_g: int | None) -> float | None:
     return None
 
 
+def pairs(events: Sequence[m.SpoolEvent]) -> set[str]:
+    """Rule 3's pairs: the jobs with a BB usage `PRINT_ENDED` event and an SB
+    (`PRINT_RUN`) plate event on this spool."""
+    used = {job_of(e) for e in events if e.ref_kind == BB_USAGE and e.kind == PRINT_ENDED}
+    return {
+        job
+        for e in events
+        if e.ref_kind == PRINT_RUN and e.kind in _USED and (job := job_of(e)) in used
+        if job is not None
+    }
+
+
+def is_anchor(event: m.SpoolEvent, *, weight_locked: bool, label_weight_g: int | None) -> bool:
+    """Whether ``event`` may anchor the grams left: it is a reading, and not an
+    ``ams_remain`` one while the weight is locked or the AMS is printing (rule 2).
+    `basis` also skips an ``ams_remain`` reading older than the newest manual one."""
+    if reading(event, label_weight_g) is None:
+        return False
+    return not (
+        event.source == "ams_remain" and (weight_locked or event.data.get("printing") is True)
+    )
+
+
 def basis(
     events: Sequence[m.SpoolEvent], *, weight_locked: bool, label_weight_g: int | None
 ) -> m.GramsBasis:
@@ -184,30 +215,28 @@ def basis(
     above; no anchor when there is no reading. At one time, deltas come first and events
     of one kind keep the order they were booked in (rule 1)."""
     ordered = sorted(events, key=lambda e: (e.at, 0 if e.source in _DELTA else 1, e.seq))
-    readings = [_reading(e, label_weight_g) for e in ordered]
+    readings = [reading(e, label_weight_g) for e in ordered]
     manual = max(
         (i for i, e in enumerate(ordered) if e.source in _MANUAL and readings[i] is not None),
         default=-1,
     )
     anchor = -1
     for i, event in enumerate(ordered):
-        if readings[i] is None:
+        if not is_anchor(event, weight_locked=weight_locked, label_weight_g=label_weight_g):
             continue
-        if event.source == "ams_remain" and (
-            weight_locked or i < manual or event.data.get("printing") is True
-        ):
+        if event.source == "ams_remain" and i < manual:
             continue
         anchor = i
     if anchor < 0:
         return m.GramsBasis(anchor=None, deltas=[])
     # Rule 3: a job with a BB usage row and an SB plate event on this spool is a pair.
     # `plate` is SB's position of the plate per job: its newest end, else its newest start.
-    used = {job_of(e) for e in ordered if e.ref_kind == BB_USAGE and e.kind == PRINT_ENDED}
+    paired = pairs(ordered)
     ends: dict[str, int] = {}
     starts: dict[str, int] = {}
     for i, event in enumerate(ordered):
         job = job_of(event)
-        if event.ref_kind == PRINT_RUN and job in used and job is not None:
+        if event.ref_kind == PRINT_RUN and job in paired and job is not None:
             if event.kind == PRINT_ENDED:
                 ends[job] = i
             elif event.kind == PRINT_STARTED:
@@ -241,7 +270,7 @@ def grams_left(
     found = basis(events, weight_locked=weight_locked, label_weight_g=label_weight_g)
     if found.anchor is None:
         return None
-    value = _reading(found.anchor, label_weight_g)
+    value = reading(found.anchor, label_weight_g)
     assert value is not None
     for event in found.deltas:
         assert event.delta_g is not None
@@ -256,6 +285,26 @@ def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:
         (spool_id,),
     ).fetchall()
     return [m.SpoolEvent.model_validate(row) for row in rows]
+
+
+def plate_events(
+    conn: Conn, spool_ids: Sequence[UUID] | None = None
+) -> dict[UUID, list[m.SpoolEvent]]:
+    """The `PRINT_STARTED` and `PRINT_ENDED` events of ``spool_ids`` (every spool with
+    none), per spool, oldest first: what `metrics.plates` reads. The partial index
+    ``filament_spool_events_plates`` serves it, so the AMS readings are never read."""
+    where = "kind IN ('print_started', 'print_ended')"
+    args: list[Any] = []
+    if spool_ids is not None:
+        where += " AND spool_id = ANY(%s)"
+        args.append(list(spool_ids))
+    found: dict[UUID, list[m.SpoolEvent]] = {}
+    for row in conn.execute(
+        f"SELECT {_COLUMNS} FROM filament_spool_events WHERE {where} ORDER BY spool_id, at, seq",
+        args,
+    ).fetchall():
+        found.setdefault(row["spool_id"], []).append(m.SpoolEvent.model_validate(row))
+    return found
 
 
 class BadCursorError(ValueError):
@@ -396,11 +445,11 @@ def _book_on_top(
     """The columns ``event`` changes when it is on top. A last reading is the walk's
     anchor whenever it qualifies (no manual reading is later), and no delta follows it."""
     sets: dict[str, Any] = {}
-    reading = _reading(event, label_weight_g)
-    if reading is not None and not (
-        event.source == "ams_remain" and (weight_locked or event.data.get("printing") is True)
+    value = reading(event, label_weight_g)
+    if value is not None and is_anchor(
+        event, weight_locked=weight_locked, label_weight_g=label_weight_g
     ):
-        sets["grams_left"] = max(reading, 0.0)
+        sets["grams_left"] = max(value, 0.0)
     if _weighs(event):
         sets |= {"last_weighed_g": event.grams_after, "last_weighed_at": event.at}
     if event.kind == "dried":

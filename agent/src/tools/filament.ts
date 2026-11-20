@@ -83,6 +83,19 @@ const EVENT_KINDS = [
   'synced_from_bb',
 ] as const
 
+/** A calendar day, as the metrics routes' `date` query takes it. */
+const DATE = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((v) => {
+    const d = new Date(`${v}T00:00:00Z`)
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v
+  }, 'Not a real calendar date')
+  .describe('A date, YYYY-MM-DD')
+
+/** The events `filament_spool_history` returns: the route sends them newest first. */
+const HISTORY_EVENTS = 50
+
 const csvRows = z
   .array(z.record(z.string(), z.string().nullable()))
   .min(1)
@@ -258,9 +271,10 @@ export const filamentTools: Tool[] = [
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
+      '`lead_time_days` and `safety_margin_days` (days, `null` clears) set the type\'s own reorder timing. ' +
       '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
       "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
-      'fetches its slicer presets by. 409 when an unarchived type has the ' +
+      "fetches its slicer presets by. 409 when an unarchived type has the " +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
@@ -892,6 +906,92 @@ export const filamentTools: Tool[] = [
     routes: ['GET /api/v1/filament/summary'],
     handler: async (_input, { backend }) =>
       json(await ok(backend.GET('/api/v1/filament/summary'), 'summarise the inventory')),
+  }),
+
+  defineTool({
+    name: 'filament_spool_history',
+    label: "Read a spool's history and metrics",
+    description:
+      "A spool's timeline and metrics: the newest 50 ledger `events` (newest first, with `actor`, `order_id` " +
+      'and `archive_id`), its `metrics` (use, waste, cost used, value left, burn rate, empty day, days since ' +
+      'opened and last use, hours outside dry storage, AMS error), `type_ams_error`, `currency` and ' +
+      '`window_days`. `truncated` is true when older events exist. filament_spool_events lists every event, oldest first, so the ' +
+      'older events are at the start of its list. ' +
+      'The grams-left `series` is left out. 404 for no such spool.',
+    input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools/{spool_id}/history'],
+    handler: async ({ spool_id }, { backend }) => {
+      const { series: _series, events, ...rest } = await ok(
+        backend.GET('/api/v1/filament/spools/{spool_id}/history', { params: { path: { spool_id } } }),
+        `read the history of spool ${spool_id}`,
+      )
+      return json({ ...rest, events: events.slice(0, HISTORY_EVENTS), truncated: events.length > HISTORY_EVENTS })
+    },
+  }),
+
+  defineTool({
+    name: 'filament_forecast',
+    label: 'Forecast when spools and types run out',
+    description:
+      "Each unarchived spool's burn rate (grams per day over the last `window_days`) and the day it runs " +
+      "out, and each spool type's stock, burn, days of stock, empty day and reorder day (its lead time and " +
+      'safety margin taken off the empty day). `reorder_now` is true when the reorder day is today or past. ' +
+      'A spool or type with no use in the window has no burn, empty day or reorder day.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/forecast'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/forecast'), 'read the filament forecast')),
+  }),
+
+  defineTool({
+    name: 'filament_metrics',
+    label: 'Read stock, consumption and waste',
+    description:
+      "The unarchived spools' stock (spools, grams left, value) by `dimension`, the grams used and wasted " +
+      'per `bucket` and dimension, and the waste by material, type and printer. `since` and `until` are ' +
+      'dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is not ' +
+      'before `until` or the range is over 1096 days.',
+    input: z.object({
+      dimension: z.enum(['material', 'brand', 'type', 'supplier', 'location']).optional().describe('Default material'),
+      bucket: z.enum(['week', 'month']).optional().describe('Default month'),
+      since: DATE.optional(),
+      until: DATE.optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/metrics'],
+    handler: async ({ dimension, bucket, since, until }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/metrics', { params: { query: { dimension, bucket, since, until } } }),
+          'read the filament metrics',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_purchasing_metrics',
+    label: 'Read price per kg and supplier spend',
+    description:
+      "Each spool type's price per kg at each supplier over time (one series per currency), and the " +
+      "confirmed invoices' totals per supplier, month and currency, never converted. `since` and `until` " +
+      'are dates (`YYYY-MM-DD`), both included; default the 365 days before today. 422 when `since` is not ' +
+      'before `until` or the range is over 1096 days.',
+    input: z.object({ since: DATE.optional(), until: DATE.optional() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/metrics/purchasing'],
+    handler: async ({ since, until }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/metrics/purchasing', { params: { query: { since, until } } }),
+          'read the purchasing metrics',
+        ),
+      ),
   }),
 
   defineTool({

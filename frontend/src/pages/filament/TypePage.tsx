@@ -55,6 +55,8 @@ interface Draft {
   density_g_cm3: string
   cost_per_kg: string
   low_stock_pct: string
+  lead_time_days: string
+  safety_margin_days: string
   nozzle_temp_min: string
   nozzle_temp_max: string
   bed_temp_min: string
@@ -82,6 +84,8 @@ const BLANK: Draft = {
   density_g_cm3: '',
   cost_per_kg: '',
   low_stock_pct: '',
+  lead_time_days: '',
+  safety_margin_days: '',
   nozzle_temp_min: '',
   nozzle_temp_max: '',
   bed_temp_min: '',
@@ -111,6 +115,8 @@ function draftOf(type: SpoolTypeDetail): Draft {
     density_g_cm3: str(type.density_g_cm3),
     cost_per_kg: str(type.cost_per_kg),
     low_stock_pct: str(type.low_stock_pct),
+    lead_time_days: str(type.lead_time_days),
+    safety_margin_days: str(type.safety_margin_days),
     nozzle_temp_min: str(type.nozzle_temp_min),
     nozzle_temp_max: str(type.nozzle_temp_max),
     bed_temp_min: str(type.bed_temp_min),
@@ -168,8 +174,14 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
     nozzle_temp_max: whole('maximum nozzle temperature', draft.nozzle_temp_max),
     bed_temp_min: whole('minimum bed temperature', draft.bed_temp_min),
     bed_temp_max: whole('maximum bed temperature', draft.bed_temp_max),
+    lead_time_days: whole('lead time in days', draft.lead_time_days),
+    safety_margin_days: whole('safety margin in days', draft.safety_margin_days),
   }
   for (const value of Object.values(fields)) if (typeof value === 'string') return value
+  // `filament/models.py` `Days`: 0 to 365, as the settings that stand in for them.
+  for (const [label, value] of [['lead time', fields.lead_time_days], ['safety margin', fields.safety_margin_days]] as const) {
+    if (typeof value === 'number' && value > 365) return `Enter the ${label} as at most 365 days.`
+  }
   const tdfp = tdfpOf(draft.tdfp_id)
   if (tdfp === undefined) return `Enter the 3DFP id as a whole number from 1 to ${TDFP_MAX}.`
   const diameter = decimal('filament diameter', draft.diameter_mm)
@@ -193,7 +205,16 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
     cost_per_kg: cost,
     tdfp_id: tdfp,
     note: draft.note.trim() || null,
-    ...(fields as { label_weight_g: number; low_stock_pct: number | null; nozzle_temp_min: number | null; nozzle_temp_max: number | null; bed_temp_min: number | null; bed_temp_max: number | null }),
+    ...(fields as {
+      label_weight_g: number
+      low_stock_pct: number | null
+      nozzle_temp_min: number | null
+      nozzle_temp_max: number | null
+      bed_temp_min: number | null
+      bed_temp_max: number | null
+      lead_time_days: number | null
+      safety_margin_days: number | null
+    }),
   }
 }
 
@@ -540,6 +561,16 @@ export function TypePage() {
               {text('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
             </div>
             <p className="text-[12px] text-muted-foreground">A priced type is a row of the price book, which prices quotes.</p>
+          </section>
+          <section aria-label="Reordering" className="flex flex-col gap-3">
+            <h2 className="text-sm font-semibold tracking-tight">Reordering</h2>
+            <div className="grid grid-cols-2 gap-3">
+              {text('lead_time_days', 'Lead time (days)', { mode: 'numeric', hint: 'How long an order takes to arrive.' })}
+              {text('safety_margin_days', 'Safety margin (days)', { mode: 'numeric', hint: 'Stock to keep on top of the lead time.' })}
+            </div>
+            <p className="text-[12px] text-muted-foreground">
+              Empty, the type takes the defaults in Settings, Filament. The Metrics tab says when to reorder: the day it runs out, less both.
+            </p>
           </section>
           <section aria-label="Temperatures" className="flex flex-col gap-3">
             <h2 className="text-sm font-semibold tracking-tight">Temperatures</h2>

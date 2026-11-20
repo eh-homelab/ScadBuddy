@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -37,6 +37,7 @@ from scadbuddy.crud.idempotency import (
     required_key,
 )
 from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
+from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
@@ -386,10 +387,10 @@ _FILL_DESCRIPTION = (
     ),
 )
 async def fill_types_from_profile(
-    filament: FilamentDep, store: SettingsStoreDep, body: BulkFillRequest
+    filament: FilamentDep, caller: CallerDep, store: SettingsStoreDep, body: BulkFillRequest
 ) -> list[TypeFill]:
     settings = await asyncio.to_thread(store.load)
-    return await filament.filler.fill(settings, None, refresh=body.refresh)
+    return await filament.filler.fill(settings, None, actor=actor(caller), refresh=body.refresh)
 
 
 @router.post(
@@ -406,13 +407,17 @@ async def fill_types_from_profile(
     ),
 )
 async def fill_type_from_profile(
-    filament: FilamentDep, store: SettingsStoreDep, type_id: UUID, body: FillRequest
+    filament: FilamentDep,
+    caller: CallerDep,
+    store: SettingsStoreDep,
+    type_id: UUID,
+    body: FillRequest,
 ) -> TypeFill:
     settings = await asyncio.to_thread(store.load)
     if body.apply is not None:
         try:
             applied = await filament.filler.apply(
-                settings, type_id, body.apply, k_values=body.k_values
+                settings, type_id, body.apply, actor=actor(caller), k_values=body.k_values
             )
         except ProfileChangedError as exc:
             raise ApiError(status.HTTP_409_CONFLICT, str(exc)) from None
@@ -421,7 +426,9 @@ async def fill_type_from_profile(
         if applied is None:
             raise _no_type(type_id)
         return applied
-    found = await filament.filler.fill(settings, [type_id], refresh=body.refresh)
+    found = await filament.filler.fill(
+        settings, [type_id], actor=actor(caller), refresh=body.refresh
+    )
     if not found:
         raise _no_type(type_id)
     return found[0]
@@ -453,9 +460,11 @@ async def get_type(filament: FilamentDep, type_id: UUID) -> m.SpoolTypeDetail:
         "unarchived type has the code, 422 for a bad field."
     ),
 )
-async def patch_type(filament: FilamentDep, type_id: UUID, body: m.SpoolTypePatch) -> m.SpoolType:
+async def patch_type(
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: m.SpoolTypePatch
+) -> m.SpoolType:
     try:
-        changed = await asyncio.to_thread(filament.types.update, type_id, body)
+        changed = await asyncio.to_thread(filament.types.update, type_id, body, actor=actor(caller))
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if changed is None:
@@ -475,12 +484,18 @@ async def patch_type(filament: FilamentDep, type_id: UUID, body: m.SpoolTypePatc
     ),
 )
 async def put_type_presets(
-    filament: FilamentDep, store: SettingsStoreDep, type_id: UUID, body: list[m.TypePresetCreate]
+    filament: FilamentDep,
+    caller: CallerDep,
+    store: SettingsStoreDep,
+    type_id: UUID,
+    body: list[m.TypePresetCreate],
 ) -> list[m.TypePreset]:
     rows = [m.TypePreset(type_id=type_id, **one.model_dump()) for one in body]
     had = await asyncio.to_thread(filament.types.presets, type_id)
     try:
-        saved = await asyncio.to_thread(filament.types.set_presets, type_id, rows)
+        saved = await asyncio.to_thread(
+            filament.types.set_presets, type_id, rows, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if saved is None:
@@ -488,7 +503,7 @@ async def put_type_presets(
     if saved and not had:
         # A type's first presets come right after it is made (makeTypeFromSpool, the type
         # page): it is filled from them then (R-6714-6), never on a later change.
-        await fill_quietly(filament.filler, store.load, [type_id])
+        await fill_quietly(filament.filler, store.load, [type_id], actor=actor(caller))
     return saved
 
 
@@ -502,11 +517,13 @@ async def put_type_presets(
     ),
 )
 async def put_type_k_values(
-    filament: FilamentDep, type_id: UUID, body: list[m.TypeKValueCreate]
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: list[m.TypeKValueCreate]
 ) -> list[m.TypeKValue]:
     rows = [m.TypeKValue(type_id=type_id, **one.model_dump()) for one in body]
     try:
-        saved = await asyncio.to_thread(filament.types.set_k_values, type_id, rows)
+        saved = await asyncio.to_thread(
+            filament.types.set_k_values, type_id, rows, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if saved is None:
@@ -1129,11 +1146,118 @@ async def list_events(
         "The unarchived spools in total: their number, grams left, the value of those "
         "grams at each spool's cost per kg (`null` when none has a cost), the stock by "
         "material, how many sit in a printer's tray (a place with `printer_id` set), how "
-        "many are low on stock, and how many still need a type."
+        "many are low on stock, how many still need a type, and `consumed_g`: the grams "
+        "of every spool's plates, archived ones too, a plate SB and Bambuddy both booked "
+        "counted once."
     ),
 )
 async def get_summary(filament: FilamentDep) -> m.InventorySummary:
     return await asyncio.to_thread(filament.spools.summary)
+
+
+#: The longest range the metrics routes read: three years, one leap day included.
+METRICS_MAX_DAYS = 3 * 365 + 1
+
+
+def _range(since: date | None, until: date | None, default_days: int) -> tuple[date, date]:
+    """``until`` defaults to today (UTC), ``since`` to ``default_days`` before it. 422
+    when ``since`` is not before ``until`` or the range passes `METRICS_MAX_DAYS`."""
+    until = datetime.now(UTC).date() if until is None else until
+    since = until - timedelta(days=default_days) if since is None else since
+    if since >= until:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "since must be before until")
+    if (until - since).days > METRICS_MAX_DAYS:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the range is longer than {METRICS_MAX_DAYS} days (three years)",
+        )
+    return since, until
+
+
+@router.get(
+    "/spools/{spool_id}/history",
+    response_model=mm.SpoolHistory,
+    summary="A spool's history and metrics",
+    description=(
+        "The spool's timeline, newest first by `(at, seq)`: each ledger event (its "
+        "`actor` and `data.author` say who made it) with `order_id`, the order whose "
+        "attempt printed the plate, and `archive_id`, the Bambuddy print archive it "
+        "matched. `series` is the grams left after each event, oldest first, the readings "
+        "the grams anchored on marked `anchor` (at most 500 points). `metrics` is the "
+        "spool's use, waste, cost used and value left (in `currency`, the shop's), burn "
+        "rate over the last `window_days` and empty day, days since opened and last use, "
+        "hours outside dry storage and AMS error; `type_ams_error` is the AMS error over "
+        "every spool of its type. 404 for no such spool."
+    ),
+)
+async def get_spool_history(filament: FilamentDep, spool_id: UUID) -> mm.SpoolHistory:
+    found = await asyncio.to_thread(filament.metrics.history, spool_id)
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
+
+
+@router.get(
+    "/forecast",
+    response_model=mm.Forecast,
+    summary="When spools and types run out",
+    description=(
+        "Each unarchived spool's burn rate (grams per day over the last `window_days`, the "
+        "setting `filament_burn_window_days`) and the day it runs out, and each spool "
+        "type's stock, burn over all its spools, days of stock, empty day and reorder day "
+        "(the empty day less its lead time and safety margin, else the settings' "
+        "`filament_lead_time_days` and `filament_safety_margin_days`). `reorder_now` is a "
+        "reorder day today or past. A spool or type with no use in the window has no "
+        "burn, no empty day and no reorder day."
+    ),
+)
+async def get_forecast(filament: FilamentDep) -> mm.Forecast:
+    return await asyncio.to_thread(filament.metrics.forecast)
+
+
+@router.get(
+    "/metrics",
+    response_model=mm.InventoryMetrics,
+    summary="Stock, consumption and waste",
+    description=(
+        "The unarchived spools' stock (spools, grams left and value in `currency`, the "
+        "shop's) by `dimension` (`material`, `brand`, `type`, `supplier` or `location`; "
+        "default `material`); the grams used and wasted (failed and cancelled plates) "
+        "per `bucket` (`week` from Monday or `month`; default `month`) and dimension, from "
+        "`since` to `until`, both included (default the 180 days before today); and the "
+        "waste by material, type and printer with its rate. Archived spools' plates "
+        "count. A key is the id, `null` when none is set. 422 when `since` is not before "
+        "`until` or the range is longer than three years."
+    ),
+)
+async def get_metrics(
+    filament: FilamentDep,
+    dimension: mm.Dimension = "material",
+    bucket: mm.Bucket = "month",
+    since: date | None = None,
+    until: date | None = None,
+) -> mm.InventoryMetrics:
+    start, end = _range(since, until, 180)
+    return await asyncio.to_thread(filament.metrics.inventory, dimension, bucket, start, end)
+
+
+@router.get(
+    "/metrics/purchasing",
+    response_model=mm.PurchasingMetrics,
+    summary="Price per kg and supplier spend",
+    description=(
+        "Each spool type's price per kg at each supplier over time, one series per "
+        "currency, from its price points; and the confirmed invoices' totals per "
+        "supplier, month and currency, never converted. From `since` to `until`, both "
+        "included (default the 365 days before today). 422 when `since` is not before "
+        "`until` or the range is longer than three years."
+    ),
+)
+async def get_purchasing_metrics(
+    filament: FilamentDep, since: date | None = None, until: date | None = None
+) -> mm.PurchasingMetrics:
+    start, end = _range(since, until, 365)
+    return await asyncio.to_thread(filament.metrics.purchasing, start, end)
 
 
 async def _assignments(store: SettingsStore, cache: AssignmentsCache) -> list[SpoolAssignment]:

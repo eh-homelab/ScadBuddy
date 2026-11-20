@@ -9,3 +9,11 @@ describe('the Filament tab routes in App.tsx', () => {
     expect(routes).toEqual(available)
   })
 })
+
+describe('the Filament tabs', () => {
+  it('make Metrics available (#6269), between Catalog and Shopping list', () => {
+    const available = FILAMENT_TABS.filter((tab) => tab.available).map((tab) => tab.id)
+    expect(available).toContain('metrics')
+    expect(available.slice(available.indexOf('catalog'), available.indexOf('catalog') + 3)).toEqual(['catalog', 'metrics', 'shopping-list'])
+  })
+})

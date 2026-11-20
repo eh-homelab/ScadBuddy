@@ -378,7 +378,7 @@ check 'a Temporal SDK series this lint does not list fails' \
 good
 jq '.uid = "scadbuddy-extra"' "$r/$a" > "$r/deploy/grafana/scadbuddy-extra.json"
 check 'a dashboard with no ConfigMap fails' \
-  "1:$k: must build one ConfigMap per dashboard (7), not 6 document(s)|$k: deploy/grafana/scadbuddy-extra.json must build into one ConfigMap scadbuddy-extra-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy-extra.json (got: none)" \
+  "1:$k: must build one ConfigMap per dashboard (8), not 7 document(s)|$k: deploy/grafana/scadbuddy-extra.json must build into one ConfigMap scadbuddy-extra-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy-extra.json (got: none)" \
   "$(run)"
 
 good

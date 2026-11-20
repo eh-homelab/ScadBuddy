@@ -79,3 +79,11 @@ configMapGenerator:
         grafana_dashboard: "1"
     files:
       - scadbuddy-agent.json
+  - name: scadbuddy-filament-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+    files:
+      - scadbuddy-filament.json

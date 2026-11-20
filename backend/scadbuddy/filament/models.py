@@ -55,6 +55,7 @@ MaxHours = Annotated[Decimal, Field(ge=0, le=Decimal("99999.9"))]
 Grams = Annotated[float, Field(ge=0, le=1_000_000)]
 LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
+Days = Annotated[int, Field(ge=0, le=365)]
 Cost = Annotated[Decimal, Field(ge=0, lt=100_000_000)]
 TdfpId = Annotated[int, Field(gt=0, lt=2**31)]
 Colours = Annotated[list[Rgba], Field(max_length=16)]
@@ -517,6 +518,8 @@ class SpoolTypeCreate(_In):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    lead_time_days: Days | None = None
+    safety_margin_days: Days | None = None
     tdfp_id: TdfpId | None = None
     note: Note | None = None
 
@@ -542,6 +545,8 @@ class SpoolTypePatch(_Patch):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    lead_time_days: Days | None = None
+    safety_margin_days: Days | None = None
     tdfp_id: TdfpId | None = None
     note: Note | None = None
     archived: bool | None = None
@@ -567,6 +572,8 @@ class SpoolType(_Row):
     insert_type_id: UUID | None
     low_stock_pct: int | None
     cost_per_kg: Decimal | None
+    lead_time_days: int | None
+    safety_margin_days: int | None
     filament_id: str | None
     tdfp_id: int | None
     note: str | None
@@ -1493,6 +1500,9 @@ class InventorySummary(BaseModel):
     loaded: int
     low_stock: int
     needs_type: int
+    #: Grams of every plate of every spool, archived ones too, each plate counted once
+    #: (`metrics.plates`, plan Decision 18).
+    consumed_g: float
 
 
 class TagPushReport(BaseModel):

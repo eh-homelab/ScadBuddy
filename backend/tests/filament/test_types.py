@@ -8,15 +8,21 @@ from uuid import UUID
 
 import pytest
 from psycopg import errors
+from pydantic import ValidationError
 
 from scadbuddy.filament.catalog import CatalogExistsError, CatalogStore
 from scadbuddy.filament.models import (
     Material,
+    SpoolCreate,
+    SpoolEvent,
+    SpoolPatch,
+    SpoolPresetCreate,
     SpoolTypeCreate,
     SpoolTypePatch,
     TypeKValue,
     TypePreset,
 )
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore, TypeTempError, effective, overridden
 from scadbuddy.orders.models import FilamentPatch
 from scadbuddy.orders.store import OrderStore
@@ -73,7 +79,7 @@ def test_a_priced_type_writes_its_price_book_row(pg_pool: PgPool) -> None:
         "#FFFFFF",
         Decimal("19.99"),
     )
-    changed = store.update(made.id, SpoolTypePatch(cost_per_kg=Decimal("21.5")))
+    changed = store.update(made.id, SpoolTypePatch(cost_per_kg=Decimal("21.5")), actor="ann")
     assert changed is not None
     assert changed.filament_id == made.filament_id
     book = orders.filament(made.filament_id)
@@ -170,7 +176,7 @@ def test_match_by_code_ignores_case_and_archived(pg_pool: PgPool) -> None:
     )
     assert found is not None
     assert found.id == made.id
-    store.archive(made.id, True)
+    store.archive(made.id, True, actor="ann")
     assert (
         store.match(
             code="abc-1", brand=None, material="x", subtype=None, rgba="#000000", label_weight_g=1
@@ -194,7 +200,7 @@ def test_a_temperature_range_must_not_be_backwards(pg_pool: PgPool) -> None:
         store.create(_body(pg_pool, nozzle_temp_min=250, nozzle_temp_max=200))
     made = store.create(_body(pg_pool, bed_temp_min=50, bed_temp_max=60))
     with pytest.raises(TypeTempError):
-        store.update(made.id, SpoolTypePatch(bed_temp_max=40))
+        store.update(made.id, SpoolTypePatch(bed_temp_max=40), actor="ann")
     unchanged = store.get(made.id)
     assert unchanged is not None
     assert unchanged.bed_temp_max == 60
@@ -211,11 +217,11 @@ def test_presets_and_k_values_are_replaced_whole(pg_pool: PgPool) -> None:
         slicer_filament="GFA00",
         slicer_filament_name=None,
     )
-    assert store.set_presets(made.id, [one]) == [one]
+    assert store.set_presets(made.id, [one], actor="ann") == [one]
     assert store.presets(made.id) == [one]
-    assert store.set_presets(made.id, []) == []
+    assert store.set_presets(made.id, [], actor="ann") == []
     assert store.presets(made.id) == []
-    assert store.set_presets(UUID(int=9), [one]) is None
+    assert store.set_presets(UUID(int=9), [one], actor="ann") is None
     unknown_printer = TypeKValue(
         type_id=made.id,
         printer_id=UUID(int=9),
@@ -228,7 +234,7 @@ def test_presets_and_k_values_are_replaced_whole(pg_pool: PgPool) -> None:
         setting_id=None,
     )
     with pytest.raises(ValueError, match="points at"):
-        store.set_k_values(made.id, [unknown_printer])
+        store.set_k_values(made.id, [unknown_printer], actor="ann")
 
 
 @pg
@@ -236,7 +242,7 @@ def test_list_hides_archived_types(pg_pool: PgPool) -> None:
     store = SpoolTypeStore(pg_pool)
     made = store.create(_body(pg_pool))
     assert [t.id for t in store.list()] == [made.id]
-    store.archive(made.id, True)
+    store.archive(made.id, True, actor="ann")
     assert store.list() == []
     assert [t.id for t in store.list(include_archived=True)] == [made.id]
 
@@ -250,7 +256,7 @@ def test_changing_a_type_colour_never_rewrites_a_shared_row(pg_pool: PgPool) -> 
     assert a.filament_id == b.filament_id
     shared = a.filament_id
     assert shared is not None
-    changed = store.update(a.id, SpoolTypePatch(rgba="#FF0000"))
+    changed = store.update(a.id, SpoolTypePatch(rgba="#FF0000"), actor="ann")
     assert changed is not None
     assert changed.filament_id != shared
     kept = orders.filament(shared)
@@ -273,8 +279,8 @@ def test_a_patch_without_price_or_identity_leaves_the_row_alone(pg_pool: PgPool)
     book = orders.filament(made.filament_id)
     assert book is not None
     orders.update_filament(made.filament_id, FilamentPatch(colour_name="Mine"))
-    store.update(made.id, SpoolTypePatch(note="x"))
-    store.archive(made.id, True)
+    store.update(made.id, SpoolTypePatch(note="x"), actor="ann")
+    store.archive(made.id, True, actor="ann")
     again = orders.filament(made.filament_id)
     assert again is not None
     assert again.colour_name == "Mine"
@@ -300,6 +306,169 @@ def test_a_failure_after_the_price_book_write_rolls_back_the_type(
 
 
 @pg
+def test_type_keeps_lead_time_and_safety_margin(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    made = store.create(_body(pg_pool, lead_time_days=10, safety_margin_days=2))
+    got = store.get(made.id)
+    assert got is not None
+    assert (got.lead_time_days, got.safety_margin_days) == (10, 2)
+    store.update(made.id, SpoolTypePatch(lead_time_days=None), actor="ann")
+    after = store.get(made.id)
+    assert after is not None
+    assert (after.lead_time_days, after.safety_margin_days) == (None, 2)
+
+
+def test_negative_lead_time_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        SpoolTypePatch(lead_time_days=-1)
+
+
+def _edits(spools: FilamentSpoolStore, spool_id: UUID, after: int = 0) -> list[SpoolEvent]:
+    return [e for e in spools.events(spool_id) if e.kind == "edited"][after:]
+
+
+@pg
+def test_type_edit_writes_edited_on_spools_that_inherit(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    made = store.create(_body(pg_pool, cost_per_kg="20"))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    b = spools.create(SpoolCreate(type_id=made.id, cost_per_kg=Decimal(30)), actor="ann").id
+    c = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    spools.update(c, SpoolPatch(archived=True), actor="ann")
+    before = {s: len(_edits(spools, s)) for s in (a, b, c)}
+    store.update(made.id, SpoolTypePatch(cost_per_kg=Decimal(25)), actor="user:bo")
+    [event] = _edits(spools, a, before[a])
+    changes = event.data["changes"]
+    assert list(changes) == ["cost_per_kg"]
+    assert [Decimal(v) for v in changes["cost_per_kg"]] == [20, 25]
+    assert event.data["type_id"] == str(made.id)
+    assert event.actor == "user:bo"
+    assert _edits(spools, b, before[b]) == []
+    assert _edits(spools, c, before[c]) == []
+
+
+@pg
+def test_type_edit_of_a_field_not_overridable_writes_nothing(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    made = store.create(_body(pg_pool))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    before = len(spools.events(a))
+    store.update(made.id, SpoolTypePatch(note="x", lead_time_days=5), actor="user:bo")
+    assert len(spools.events(a)) == before
+
+
+@pg
+def test_type_label_weight_edit_writes_edited_on_inheriting_spools(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    made = store.create(_body(pg_pool))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    store.update(made.id, SpoolTypePatch(label_weight_g=800), actor="user:bo")
+    [event] = _edits(spools, a)
+    assert event.data["changes"]["label_weight_g"] == [1000, 800]
+
+
+@pg
+def test_type_presets_and_k_values_edit_writes_edited_on_spools_without_their_own(
+    pg_pool: PgPool,
+) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    made = store.create(_body(pg_pool))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    b = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    own = SpoolPresetCreate(printer_model="H2C", nozzle_diameter="0.4", slicer_filament="MINE")
+    spools.set_presets(b, [own], actor="ann")
+    before = {s: len(_edits(spools, s)) for s in (a, b)}
+    row = TypePreset(
+        type_id=made.id,
+        printer_model="H2C",
+        nozzle_diameter="0.4",
+        slicer_filament="GFA00",
+        slicer_filament_name=None,
+    )
+    store.set_presets(made.id, [row], actor="user:bo")
+    [event] = _edits(spools, a, before[a])
+    old, new = event.data["changes"]["presets"]
+    assert old == []
+    assert [r["slicer_filament"] for r in new] == ["GFA00"]
+    assert event.data["type_id"] == str(made.id)
+    assert event.actor == "user:bo"
+    assert _edits(spools, b, before[b]) == []
+    store.set_k_values(made.id, [], actor="user:bo")
+    assert _edits(spools, a, before[a] + 1) == []
+
+
+def _printer(pool: PgPool) -> UUID:
+    printer = UUID(int=0x6269)
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, 'S6269', 'Garage')", (printer,)
+        )
+    return printer
+
+
+def _preset(type_id: UUID, nozzle: str, slicer: str) -> TypePreset:
+    return TypePreset(
+        type_id=type_id,
+        printer_model="H2C",
+        nozzle_diameter=nozzle,
+        slicer_filament=slicer,
+        slicer_filament_name=None,
+    )
+
+
+@pg
+def test_type_preset_edit_reaches_a_spool_that_sets_another_key(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    made = store.create(_body(pg_pool))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    own = SpoolPresetCreate(printer_model="H2C", nozzle_diameter="0.4", slicer_filament="MINE")
+    spools.set_presets(a, [own], actor="ann")
+    before = len(_edits(spools, a))
+    store.set_presets(made.id, [_preset(made.id, "0.6", "GFA06")], actor="user:bo")
+    [event] = _edits(spools, a, before)
+    assert event.data["type_id"] == str(made.id)
+    store.set_presets(
+        made.id,
+        [_preset(made.id, "0.4", "GFA04"), _preset(made.id, "0.6", "GFA06")],
+        actor="user:bo",
+    )
+    assert _edits(spools, a, before + 1) == []
+
+
+@pg
+def test_type_k_value_edit_writes_edited_on_an_inheriting_spool(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    printer = _printer(pg_pool)
+    made = store.create(_body(pg_pool))
+    a = spools.create(SpoolCreate(type_id=made.id), actor="ann").id
+    before = len(_edits(spools, a))
+    row = TypeKValue(
+        type_id=made.id,
+        printer_id=printer,
+        extruder=0,
+        nozzle_diameter="0.4",
+        nozzle_type=None,
+        k_value=Decimal("0.02"),
+        name=None,
+        cali_idx=None,
+        setting_id=None,
+    )
+    store.set_k_values(made.id, [row], actor="user:bo")
+    [event] = _edits(spools, a, before)
+    old, new = event.data["changes"]["k_values"]
+    assert old == []
+    assert [Decimal(r["k_value"]) for r in new] == [Decimal("0.02")]
+    assert event.data["type_id"] == str(made.id)
+    assert event.actor == "user:bo"
+
+
+@pg
 def test_a_type_keeps_its_tdfp_id(pg_pool: PgPool) -> None:
     store = SpoolTypeStore(pg_pool)
     made = store.create(_body(pg_pool, tdfp_id=30173))
@@ -308,7 +477,7 @@ def test_a_type_keeps_its_tdfp_id(pg_pool: PgPool) -> None:
     assert got is not None
     assert got.tdfp_id == 30173
     assert store.create(_body(pg_pool, code="NONE")).tdfp_id is None
-    changed = store.update(made.id, SpoolTypePatch(tdfp_id=5))
+    changed = store.update(made.id, SpoolTypePatch(tdfp_id=5), actor="ann")
     assert changed is not None
     assert changed.tdfp_id == 5
     with pytest.raises(ValueError, match="greater than 0"):

@@ -281,6 +281,53 @@ export function typeSuppliersOf(typeId: string): S['SpoolTypeSupplier'][] {
     .sort((a, b) => a.supplier_name.localeCompare(b.supplier_name))
 }
 
+/**
+ * For the metrics mock (#6269, `metrics_store.purchasing`): each type's price per kg at each
+ * supplier, one series per (type, supplier, currency), its points by date, then as made;
+ * and the confirmed invoices' totals per supplier, month and currency, never converted.
+ * From `since` to `until`, both included; archived suppliers and products count.
+ */
+export function purchasingMetrics(since: string, until: string): S['PurchasingMetrics'] {
+  const series = new Map<string, S['PriceSeries']>()
+  // Code-point order, as Python compares strings (the backend sorts in SQL and Python).
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+  const points = state.prices
+    .filter((price) => since <= price.on_date && price.on_date <= until)
+    .sort((a, b) => cmp(a.on_date, b.on_date) || cmp(a.created_at, b.created_at) || cmp(a.id, b.id))
+  for (const price of points) {
+    const product = productOf(price.product_id)
+    const type = product ? typeInfo(product.type_id) : null
+    if (!product || !type) continue
+    const key = `${product.type_id}|${product.supplier_id}|${price.currency}`
+    const found = series.get(key) ?? {
+      type_id: product.type_id,
+      type_label: type.code,
+      supplier_id: product.supplier_id,
+      supplier_name: supplierOf(product.supplier_id)?.name ?? '',
+      currency: price.currency,
+      points: [],
+    }
+    found.points.push({ on_date: price.on_date, price_per_kg: pricePerKg(price.price, product.pack_size, type.label_weight_g) })
+    series.set(key, found)
+  }
+  const spend = new Map<string, S['SpendRow']>()
+  for (const invoice of state.invoices) {
+    if (invoice.status !== 'confirmed' || invoice.invoice_date < since || invoice.invoice_date > until) continue
+    const month = `${invoice.invoice_date.slice(0, 7)}-01`
+    const key = `${invoice.supplier_id}|${month}|${invoice.currency}`
+    const found = spend.get(key)
+    if (found) spend.set(key, { ...found, total: addDecimals(found.total, invoice.total), invoices: found.invoices + 1 })
+    else spend.set(key, { supplier_id: invoice.supplier_id, supplier_name: supplierOf(invoice.supplier_id)?.name ?? '', month, currency: invoice.currency, total: invoice.total, invoices: 1 })
+  }
+  const upper = (text: string) => text.toUpperCase()
+  return {
+    prices: [...series.values()].sort((a, b) => cmp(upper(a.type_label), upper(b.type_label)) || cmp(upper(a.supplier_name), upper(b.supplier_name)) || cmp(a.currency, b.currency)),
+    spend: [...spend.values()].sort(
+      (a, b) => cmp(a.month, b.month) || cmp(upper(a.supplier_name), upper(b.supplier_name)) || cmp(a.supplier_id, b.supplier_id) || cmp(a.currency, b.currency),
+    ),
+  }
+}
+
 // -- bodies -----------------------------------------------------------------------------------
 
 const FIELDS = {
