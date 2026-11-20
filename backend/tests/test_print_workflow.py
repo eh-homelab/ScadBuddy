@@ -1320,6 +1320,37 @@ async def test_a_slice_refusal_naming_a_requested_override_is_recorded_as_a_422_
     assert fake.calls[-1].startswith("fail:422:")
 
 
+async def test_a_refused_setting_with_object_conflicts_keeps_both(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    # #6736: a failure that names a requested override and is also Bambu Studio's
+    # "Object conflicts were detected" stays the 422 naming the key, and also carries
+    # the `object-conflict` warning for the plate.
+    refused = PrintRunError(
+        status=502,
+        title="Bad Gateway",
+        detail=(
+            "Bambuddy failed to slice the plate: Object conflicts were detected with"
+            " wipe_tower_x. Please verify the slicing of all plates in Bambu Studio."
+        ),
+    )
+    fake.slice_errors = [ApplicationError(refused.detail, refused, type=FAILED, non_retryable=True)]
+    fake.plates = [4]
+    arg = run_input().model_copy(
+        update={
+            "request": REQUEST.model_copy(update={"process_overrides": {"wipe_tower_x": "200"}})
+        }
+    )
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "failed" and run.error is not None
+    assert run.error.type == SETTING_REFUSED_PROBLEM and run.error.status == 422
+    assert run.error.extensions["key"] == "wipe_tower_x"
+    [warning] = run.error.extensions["warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", 4)
+
+
 async def test_a_slice_with_object_conflicts_records_one_warning_naming_the_plate(
     client: Client, quick: str, fake: Fake
 ) -> None:

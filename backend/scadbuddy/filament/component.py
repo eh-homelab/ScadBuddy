@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
@@ -16,12 +17,14 @@ from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.presets import PoolSpoolPresets
 from scadbuddy.filament.print_uses import PoolPrintUses, print_use_hook
+from scadbuddy.filament.profile_fill import TypeFiller
 from scadbuddy.filament.rfid_mode import RfidModeStore
 from scadbuddy.filament.sensors import SensorStore
 from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.orders.density import DensityTable, density_table
 
 
 @dataclass
@@ -46,6 +49,13 @@ class Filament:
     metrics: MetricsStore
     #: Bambuddy's tray assignments, as this app last read them (#6580).
     assignments: AssignmentsCache = field(default_factory=AssignmentsCache)
+    #: The image's slicer profiles a type is filled from (#6714); ``None`` without them.
+    profile_table: Callable[[], DensityTable | None] = lambda: None
+
+    @property
+    def filler(self) -> TypeFiller:
+        """Fills spool types from their slicer profiles (#6714)."""
+        return TypeFiller(self.types, self.profile_table)
 
     @property
     def reads(self) -> PoolSbSpoolReads:
@@ -111,6 +121,7 @@ def _build(core: Core, components: Components) -> Filament:
         invoices=InvoiceStore(pool, shop_currency, spools, types),
         shopping=ShoppingStore(pool),
         metrics=MetricsStore(pool, spools, metrics_settings),
+        profile_table=lambda: density_table(core.settings.slicer_profiles_dir),
     )
 
 

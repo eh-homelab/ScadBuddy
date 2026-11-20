@@ -27,6 +27,11 @@ export type TypePresetInput = Schemas['TypePresetCreate']
 export type TypePreset = Schemas['TypePreset']
 export type TypeKValueInput = Schemas['TypeKValueCreate']
 export type TypeKValue = Schemas['TypeKValue']
+export type TypeFill = Schemas['TypeFill']
+export type FillRequest = Schemas['FillRequest']
+/** The type fields a slicer profile fills (#6714, `filament/profile_fill.py` `Field`). */
+export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+export type FillField = (typeof FILL_FIELDS)[number]
 export type Location = Schemas['Location']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
@@ -223,6 +228,18 @@ export const setTypePresets = (id: string, rows: TypePresetInput[]) =>
 
 export const setTypeKValues = (id: string, rows: TypeKValueInput[]) =>
   request<TypeKValue[]>(`${BASE}/types/${seg(id)}/k-values`, json('PUT', rows))
+
+/**
+ * #6714 — fills the type's empty fields from its slicer profile. `refresh` answers the profile's
+ * values that differ and writes nothing; `apply` writes the fields a person confirmed (409 when
+ * the profile no longer gives one), and with `k_values` the K values the refresh showed.
+ */
+export const fillTypeFromProfile = (id: string, body: FillRequest = {}) =>
+  request<TypeFill>(`${BASE}/types/${seg(id)}/fill-from-profile`, json('POST', body))
+
+/** #6714 — fills every type's empty fields from its slicer profile; `refresh` only compares. */
+export const fillTypesFromProfile = (body: { refresh?: boolean } = {}) =>
+  request<TypeFill[]>(`${BASE}/types/fill-from-profile`, json('POST', body))
 
 /** #6701 — the types proposed for the spools that need one, and the spools in no group. */
 export const listTypeProposals = () => request<TypeProposals>(`${BASE}/type-proposals`)

@@ -363,6 +363,43 @@ describe('the prices panel', () => {
     expect(await screen.findByText('Enter the lead time as at most 365 days.')).toBeInTheDocument()
     expect((await getType(T.ORANGE)).lead_time_days).toBe(30)
   })
+
+  it('fills from the slicer profile: shows the diff, and writes only the rows kept', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Fill from slicer profile' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fill from slicer profile' })
+    expect(within(dialog).getByText(/Bambu PLA Basic @BBL H2C 0.4 nozzle/)).toBeInTheDocument()
+    const diff = within(dialog).getByRole('table', { name: 'Changes from the profile' })
+    const density = within(diff).getByRole('row', { name: /Density/ })
+    expect(density).toHaveTextContent('Empty')
+    expect(density).toHaveTextContent('1.26')
+    // The diameter already matches, so it is not offered; the cost is a hint only.
+    expect(within(diff).queryByRole('row', { name: /Diameter/ })).toBeNull()
+    expect(within(dialog).getByText(/24.99/)).toBeInTheDocument()
+    await user.click(within(density).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Apply 4 changes' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const type = await getType(T.JADE)
+    expect([type.nozzle_temp_min, type.nozzle_temp_max, type.bed_temp_min, type.bed_temp_max, type.density_g_cm3]).toEqual([190, 230, 35, 65, null])
+    expect(screen.getByLabelText('Nozzle temperature, min (°C)')).toHaveValue('190')
+    expect(await screen.findByText('Filled 4 fields from Bambu PLA Basic @BBL H2C 0.4 nozzle.')).toBeInTheDocument()
+  })
+
+  it('says why a type cannot be filled from a profile', async () => {
+    const { user } = render(`/filament/types/${T.MISTLETOE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Fill from slicer profile' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fill from slicer profile' })
+    expect(await within(dialog).findByText(/the type has no slicer preset/)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /^Apply/ })).toBeNull()
+  })
+
+  it('asks to save first while there are unsaved edits', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await user.type(await screen.findByLabelText('Colour name'), 'x')
+    expect(screen.getByRole('button', { name: 'Fill from slicer profile' })).toBeDisabled()
+  })
 })
 
 describe('the 3DFP id and fetch (#6625)', () => {

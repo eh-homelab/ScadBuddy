@@ -38,6 +38,7 @@ Row = Mapping[str, Any]
 _Types = list[m.SpoolType]
 _Presets = list[m.TypePreset]
 _KValues = list[m.TypeKValue]
+_Ids = list[int]
 
 #: The fields whose change rewrites a type's price book row.
 _PRICED = frozenset({"cost_per_kg", "material_id", "subtype_id", "brand_id", "rgba"})
@@ -47,6 +48,19 @@ _K_COLUMNS = ", ".join(m.TypeKValue.model_fields)
 
 #: Every field a spool may override, in the order `EffectiveValues` declares them.
 OVERRIDABLE: tuple[str, ...] = tuple(m.EffectiveValues.model_fields)
+
+#: The fields a slicer profile fills (#6714, `filament/profile_fill.py`): the only
+#: columns `SpoolTypeStore.fill_empty` writes.
+PROFILE_FIELDS: frozenset[str] = frozenset(
+    {
+        "nozzle_temp_min",
+        "nozzle_temp_max",
+        "bed_temp_min",
+        "bed_temp_max",
+        "density_g_cm3",
+        "diameter_mm",
+    }
+)
 
 #: What a subtype and a material give a spool: their print defaults, nothing else (a
 #: subtype's own ``material_id`` names its parent, not the spool's material).
@@ -228,10 +242,26 @@ class SpoolTypeStore:
     def set_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
         """The type's pressure-advance values, replaced by ``rows``; ``None`` for no such
         type. `set_presets`'s events, with ``changes.k_values``."""
+        return self._replace_k_values(type_id, rows, actor=actor, only_if_none=False)
+
+    def _replace_k_values(
+        self, type_id: UUID, rows: _KValues, *, actor: str, only_if_none: bool
+    ) -> _KValues | None:
+        """`set_k_values`'s one transaction under the type's row lock; with
+        ``only_if_none`` it writes only while the type has no K values (#6714, R-6714-c),
+        checked under that same lock, and answers ``None`` when it has some. A change
+        fans out as ``actor`` (`list_edit`)."""
         try:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
                     return None
+                if only_if_none:
+                    has = conn.execute(
+                        "SELECT 1 FROM filament_spool_type_k_values WHERE type_id = %s LIMIT 1",
+                        (type_id,),
+                    ).fetchone()
+                    if has is not None:
+                        return None
                 with list_edit(conn, type_id, "k_values", actor):
                     conn.execute(
                         "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
@@ -258,6 +288,58 @@ class SpoolTypeStore:
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         return self.k_values(type_id)
+
+    def fill_empty(
+        self, type_id: UUID, values: Mapping[str, Any], *, actor: str
+    ) -> dict[str, Any] | None:
+        """Write each of ``values`` (:data:`PROFILE_FIELDS` only) whose column is still
+        null, on the locked row, so a value a person set meanwhile stands (#6714). The
+        fields written; ``None`` for no such type. `TypeTempError` for a range it would
+        leave backwards. The fields written fan out as ``actor``, as `update`'s do."""
+        unknown = set(values) - PROFILE_FIELDS
+        if unknown:
+            raise ValueError(f"not a profile field: {', '.join(sorted(unknown))}")
+        with self._orders.transaction() as conn:
+            current = self._row(conn, type_id, lock=True)
+            if current is None:
+                return None
+            empty = {name: value for name, value in values.items() if current[name] is None}
+            if not empty:
+                return {}
+            check_temps(current | empty)
+            conn.execute(
+                f"UPDATE filament_spool_types SET {', '.join(f'{n} = %s' for n in empty)},"
+                " updated_at = now() WHERE id = %s",
+                [*empty.values(), type_id],
+            )
+            changes = {n: [None, v] for n, v in empty.items() if n in OVERRIDABLE}
+            _fan_out(conn, type_id, changes, actor)
+        return empty
+
+    def fill_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
+        """`set_k_values`, only while the type has none (#6714); ``None`` when it has some
+        or does not exist. The check and the write are one transaction (R-6714-c)."""
+        return self._replace_k_values(type_id, rows, actor=actor, only_if_none=True)
+
+    def linked_bb_spools(self, type_id: UUID) -> _Ids:
+        """The Bambuddy spool ids the type's spools are linked to, the newest spool's
+        first (#6714)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT l.bb_spool_id FROM filament_bb_links l"
+                " JOIN filament_spools s ON s.id = l.spool_id WHERE s.type_id = %s"
+                " ORDER BY s.created_at DESC, s.id",
+                (type_id,),
+            ).fetchall()
+        return [row["bb_spool_id"] for row in rows]
+
+    def printers_by_bambuddy_id(self) -> dict[int, UUID]:
+        """Each registry printer linked to a Bambuddy printer, by that printer's id."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, bambuddy_printer_id FROM printers WHERE bambuddy_printer_id IS NOT NULL"
+            ).fetchall()
+        return {row["bambuddy_printer_id"]: row["id"] for row in rows}
 
     @staticmethod
     def merge_presets(conn: Conn, type_id: UUID, rows: _Presets) -> None:

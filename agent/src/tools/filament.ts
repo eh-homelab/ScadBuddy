@@ -437,6 +437,53 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_type_fill_from_profile',
+    label: 'Fill spool types from their slicer profiles',
+    description:
+      "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
+      'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
+      'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
+      'empty fields (nozzle and bed temperature ranges from the H2C plates, density; the diameter is never empty), ' +
+      'never the cost (`cost_hint` is only a hint), and a type with no K values takes those of its linked Bambuddy ' +
+      "spools. Each result names the fields `filled`, the `source` preset, and a `reason` when the profile could not " +
+      'be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
+      'and writes nothing. With `type_id`, `apply` writes the fields a refresh showed over the type (only after the ' +
+      'user confirms them), and `k_values: true` the K values it showed. 409 when the profile no longer gives an ' +
+      'applied value. Reads Bambuddy, writes ScadBuddy only.',
+    input: z.object({
+      type_id: z.string().uuid().optional().describe("A type's `id`; omit for every type"),
+      refresh: z.boolean().default(false).describe('Answer the differences and write nothing'),
+      apply: z
+        .partialRecord(z.enum(['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm']), z.union([z.number(), z.string()]))
+        .optional()
+        .describe('The confirmed fields and values a refresh showed, to write over the type'),
+      k_values: z.boolean().optional().describe('With `apply`: also write the K values the refresh showed'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/types/fill-from-profile', 'POST /api/v1/filament/types/{type_id}/fill-from-profile'],
+    summarize: ({ type_id, refresh, apply }) =>
+      `${refresh ? 'Compare' : apply ? 'Apply profile values to' : 'Fill'} ${type_id ? `spool type ${type_id}` : 'every spool type'} from the slicer profile`,
+    handler: async ({ type_id, refresh, apply, k_values }, { backend }) => {
+      if (type_id === undefined) {
+        if (apply !== undefined || k_values !== undefined) throw new ToolError('apply and k_values need a type_id')
+        return json(
+          await ok(backend.POST('/api/v1/filament/types/fill-from-profile', { body: { refresh } }), 'fill the spool types from their profiles'),
+        )
+      }
+      return json(
+        await ok(
+          backend.POST('/api/v1/filament/types/{type_id}/fill-from-profile', {
+            params: { path: { type_id } },
+            body: { refresh, ...(apply !== undefined ? { apply } : {}), ...(k_values !== undefined ? { k_values } : {}) },
+          }),
+          `fill spool type ${type_id} from its profile`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
     name: 'filament_spool_list',
     label: 'List filament spools',
     description:

@@ -39,6 +39,9 @@ disagree give none. Measured 2026-11-13 on v02.08.02.61's ``resources/profiles/B
 (https://github.com/bambulab/BambuStudio/tree/v02.08.02.61, every listed filament
 preset read): ``GFA00`` Bambu PLA Basic 1.26, ``GFA05`` Bambu PLA Silk 1.32, ``GFG00``
 Bambu PETG Basic 1.25; ``fdm_filament_common`` holds ``0``, which is no density.
+
+The same table names the preset an id gives for one printer and nozzle, and flattens it,
+for a spool type filled from its whole profile (#6714, `filament/profile_fill.py`).
 """
 
 from __future__ import annotations
@@ -75,6 +78,8 @@ class _Preset:
     filament_id: str | None
     setting_id: str | None
     density: str | None
+    #: Its ``compatible_printers`` (``Bambu Lab H2C 0.4 nozzle``), resolved (#6714).
+    printers: tuple[str, ...] = ()
 
 
 def _first(value: Any) -> str | None:
@@ -101,6 +106,17 @@ def _resolved(name: str, key: str, docs: dict[str, dict[str, Any]]) -> str | Non
     """``key`` of preset ``name`` as :func:`~scadbuddy.slicing.profiles.flatten` would
     give it (the child's own value, then its ``include`` presets last first, then its
     parent's), for the first value only, without copying the preset."""
+    return _first(_resolved_value(name, key, docs))
+
+
+def _resolved_list(name: str, key: str, docs: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    """:func:`_resolved`'s whole value, as text items."""
+    value = _resolved_value(name, key, docs)
+    items = value if isinstance(value, list) else [value]
+    return tuple(item for item in items if isinstance(item, str))
+
+
+def _resolved_value(name: str, key: str, docs: dict[str, dict[str, Any]]) -> Any:
     seen: set[str] = set()
     current: str | None = name
     while current and current not in seen:
@@ -109,14 +125,14 @@ def _resolved(name: str, key: str, docs: dict[str, dict[str, Any]]) -> str | Non
         if doc is None:
             return None
         if key in doc:
-            return _first(doc[key])
+            return doc[key]
         included = doc.get("include") or []
         if isinstance(included, str):
             included = [included]
         for other in reversed(included if isinstance(included, list) else []):
             options = docs.get(other) if isinstance(other, str) else None
             if options is not None and key in options:
-                return _first(options[key])
+                return options[key]
         parent = doc.get("inherits")
         current = parent if isinstance(parent, str) else None
     return None
@@ -124,9 +140,12 @@ def _resolved(name: str, key: str, docs: dict[str, dict[str, Any]]) -> str | Non
 
 class DensityTable:
     """Every filament preset of the image's tree with its density, by ``filament_id``
-    and ``setting_id``."""
+    and ``setting_id``. Built from a tree, it also names the preset an id gives for a
+    printer (:meth:`preset_name`) and keeps the tree (``profiles``) that flattens it, which
+    a spool type is filled from (#6714)."""
 
-    def __init__(self, presets: list[_Preset]) -> None:
+    def __init__(self, presets: list[_Preset], profiles: Profiles | None = None) -> None:
+        self.profiles = profiles
         self._by_filament_id: dict[str, list[_Preset]] = {}
         self._by_setting_id: dict[str, _Preset] = {}
         for preset in presets:
@@ -147,9 +166,11 @@ class DensityTable:
                     filament_id=_resolved(name, "filament_id", docs),
                     setting_id=_first(docs[name].get("setting_id")),
                     density=density_text(_resolved(name, "filament_density", docs)),
+                    printers=_resolved_list(name, "compatible_printers", docs),
                 )
                 for name in sorted(docs)
-            ]
+            ],
+            profiles,
         )
 
     def for_preset(self, preset_id: str) -> ProfileDensity | None:
@@ -162,6 +183,20 @@ class DensityTable:
         if preset is None or preset.density is None:
             return None
         return ProfileDensity(density_g_cm3=preset.density, profile=preset.name)
+
+    def preset_name(self, preset_id: str, printer: str | None) -> str | None:
+        """The tree's preset ``preset_id`` names for ``printer`` (a ``compatible_printers``
+        entry, ``Bambu Lab H2C 0.4 nozzle``): of a ``filament_id``'s presets, the one for
+        that printer, else its ``@base``, else the first by name; else the preset with that
+        ``setting_id``; ``None`` for an id the tree lacks."""
+        presets = self._by_filament_id.get(preset_id)
+        if presets:
+            return next(
+                (p.name for p in presets if printer is not None and printer in p.printers),
+                next((p.name for p in presets if p.base), presets[0].name),
+            )
+        preset = self._by_setting_id.get(preset_id)
+        return None if preset is None else preset.name
 
     @staticmethod
     def _pick(presets: list[_Preset]) -> ProfileDensity | None:

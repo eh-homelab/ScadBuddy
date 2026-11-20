@@ -72,6 +72,13 @@ from scadbuddy.filament.profile_fetch import (
     fetches,
     start_fetch,
 )
+from scadbuddy.filament.profile_fill import (
+    BulkFillRequest,
+    FillRequest,
+    ProfileChangedError,
+    TypeFill,
+    fill_quietly,
+)
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
@@ -263,7 +270,10 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
         "its alpha), a `label_weight_g` and optional print values a spool inherits. With a "
         "`cost_per_kg` it also writes the price book row of its material, subtype, brand, "
         "colour and alpha (`filament_id`), which takes its stops and effect when it is new "
-        "(#6209). 409 when an unarchived type has the code, 422 for a bad field, a row it "
+        "(#6209). A type made has no preset, so nothing is filled yet: it is filled from its "
+        "slicer profile when its first presets arrive (`PUT /filament/types/{type_id}/presets`, "
+        "or a 3DFP preset fetch's import, #6714). 409 when an "
+        "unarchived type has the code, 422 for a bad field, a row it "
         "points at that does not exist, or a minimum temperature above its maximum."
     ),
 )
@@ -272,6 +282,78 @@ async def create_type(filament: FilamentDep, body: m.SpoolTypeCreate) -> m.Spool
         return await asyncio.to_thread(filament.types.create, body)
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
+
+
+_FILL_DESCRIPTION = (
+    "Reads the type's slicer filament profile: of its presets, the H2C 0.4 mm one, else "
+    "any 0.4 mm one, else the first. A numeric preset id is Bambuddy's local preset (read "
+    "while Bambuddy is linked, over the tree preset it inherits), any other the image's "
+    "Bambu Studio preset of that `filament_id` for the printer and nozzle (else its "
+    "`@base`) or of that `setting_id`. It maps `nozzle_temperature_range_low/high`, the "
+    "H2C plates' temperatures (SuperTack, Engineering, Textured PEI; above 0), "
+    "`filament_density` and `filament_diameter` onto the type, and fills only its empty "
+    "fields (`diameter_mm` is never empty). `filament_cost` is `cost_hint`, never written. "
+    "A type with no K values takes those of the Bambuddy spools its spools are linked to. "
+    "A profile that cannot be read leaves the type alone and says why in `reason`. "
+)
+
+
+@router.post(
+    "/types/fill-from-profile",
+    response_model=list[TypeFill],
+    summary="Fill every spool type from its slicer profile",
+    description=(
+        _FILL_DESCRIPTION + "Answers each unarchived type: the fields `filled`, their "
+        "`source` preset, and any `reason`. `refresh: true` answers, per type, the profile's "
+        "values that differ from the type's (`filled`, with `previous`) and writes nothing."
+    ),
+)
+async def fill_types_from_profile(
+    filament: FilamentDep, caller: CallerDep, store: SettingsStoreDep, body: BulkFillRequest
+) -> list[TypeFill]:
+    settings = await asyncio.to_thread(store.load)
+    return await filament.filler.fill(settings, None, actor=actor(caller), refresh=body.refresh)
+
+
+@router.post(
+    "/types/{type_id}/fill-from-profile",
+    response_model=TypeFill,
+    summary="Fill a spool type from its slicer profile",
+    description=(
+        _FILL_DESCRIPTION + "`refresh: true` answers the profile's values that differ from "
+        "the type's, set or not (`filled`, with `previous`), and writes nothing. `apply` "
+        "writes those fields, as the refresh showed them, over what the type has, and with "
+        "`k_values: true` the K values it showed, while the type has none; 409 when "
+        "the profile no longer gives one of them, 422 for a field it does not fill or a "
+        "range it would leave backwards. 404 for no such type."
+    ),
+)
+async def fill_type_from_profile(
+    filament: FilamentDep,
+    caller: CallerDep,
+    store: SettingsStoreDep,
+    type_id: UUID,
+    body: FillRequest,
+) -> TypeFill:
+    settings = await asyncio.to_thread(store.load)
+    if body.apply is not None:
+        try:
+            applied = await filament.filler.apply(
+                settings, type_id, body.apply, actor=actor(caller), k_values=body.k_values
+            )
+        except ProfileChangedError as exc:
+            raise ApiError(status.HTTP_409_CONFLICT, str(exc)) from None
+        except _TYPE_REFUSED as exc:
+            raise _refused(exc) from None
+        if applied is None:
+            raise _no_type(type_id)
+        return applied
+    found = await filament.filler.fill(
+        settings, [type_id], actor=actor(caller), refresh=body.refresh
+    )
+    if not found:
+        raise _no_type(type_id)
+    return found[0]
 
 
 @router.get(
@@ -317,14 +399,21 @@ async def patch_type(
     response_model=list[m.TypePreset],
     summary="Replace a spool type's slicer presets",
     description=(
-        "The whole list: one slicer filament per printer model and nozzle diameter. 404 "
-        "for no such type, 422 for two rows with the same model and nozzle."
+        "The whole list: one slicer filament per printer model and nozzle diameter. The "
+        "first presets of a type that had none fill its empty fields from their profile "
+        "(`POST /filament/types/{type_id}/fill-from-profile`). 404 for no such type, 422 "
+        "for two rows with the same model and nozzle."
     ),
 )
 async def put_type_presets(
-    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: list[m.TypePresetCreate]
+    filament: FilamentDep,
+    caller: CallerDep,
+    store: SettingsStoreDep,
+    type_id: UUID,
+    body: list[m.TypePresetCreate],
 ) -> list[m.TypePreset]:
     rows = [m.TypePreset(type_id=type_id, **one.model_dump()) for one in body]
+    had = await asyncio.to_thread(filament.types.presets, type_id)
     try:
         saved = await asyncio.to_thread(
             filament.types.set_presets, type_id, rows, actor=actor(caller)
@@ -333,6 +422,10 @@ async def put_type_presets(
         raise _refused(exc) from None
     if saved is None:
         raise _no_type(type_id)
+    if saved and not had:
+        # A type's first presets come right after it is made (makeTypeFromSpool, the type
+        # page): it is filled from them then (R-6714-6), never on a later change.
+        await fill_quietly(filament.filler, store.load, [type_id], actor=actor(caller))
     return saved
 
 

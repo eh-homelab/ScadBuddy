@@ -56,6 +56,7 @@ from scadbuddy.bambuddy.models import KProfile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent, record, stored
 from scadbuddy.filament.models import TypeKValue, TypePreset
+from scadbuddy.filament.profile_fill import fill_quietly
 from scadbuddy.filament.types import SpoolTypeStore, list_edit
 from scadbuddy.orders.attachments import blob_path, keep_file
 from scadbuddy.profile_fetch.wire import (
@@ -825,6 +826,7 @@ async def _import_once(
     pool = state.settings_store.pool
     run_id = row["id"]
     ending = await _import(state, row, failures, printers, fetched)
+    first_presets: list[bool] = []
 
     def finish() -> Replay:
         with pool.connection() as conn, conn.transaction():
@@ -837,6 +839,11 @@ async def _import_once(
             else:
                 # R-T9-3: a change fans out to the type's spools, as a Type page save does.
                 type_id, by = now["type_id"], now["started_by"]
+                had = conn.execute(
+                    "SELECT 1 FROM filament_spool_type_presets WHERE type_id = %s LIMIT 1",
+                    (type_id,),
+                ).fetchone()
+                first_presets.append(had is None and bool(ending.presets))
                 with list_edit(conn, type_id, "presets", by):
                     SpoolTypeStore.merge_presets(conn, type_id, ending.presets)
                 with list_edit(conn, type_id, "k_values", by):
@@ -866,6 +873,17 @@ async def _import_once(
             return reply
 
     done = await asyncio.to_thread(finish)
+    if first_presets == [True]:
+        # A type's first presets fill its empty fields from their profile (#6714, R-6714-a);
+        # after the commit, and a failure never fails the import.
+        from scadbuddy.filament.component import FILAMENT
+
+        await fill_quietly(
+            state.components.get(FILAMENT).filler,
+            state.settings_store.load,
+            [row["type_id"]],
+            actor=row["started_by"],
+        )
     return ImportOutcome.model_validate(done.body)
 
 

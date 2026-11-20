@@ -20,6 +20,7 @@ const slice = vi.hoisted(() => ({
     progress: null,
     toolpathUrl: null,
     error: null,
+    warnings: [],
     reslice: () => undefined,
     canReslice: false,
     reslicing: false,

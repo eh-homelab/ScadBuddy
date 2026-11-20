@@ -376,6 +376,28 @@ def test_import_posts_one_zip_and_sets_the_type_presets(fetch: Fetch) -> None:
     assert made["bambuddy_made"] == [101, 102, 103, 104]
 
 
+@respx.mock
+def test_the_first_presets_an_import_sets_fill_the_type(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-6714-a: after the import commits; a type that has presets is not filled again."""
+    from scadbuddy.filament.profile_fill import TypeFiller
+
+    asked: list[list[Any]] = []
+
+    async def spy(self: Any, settings: Any, type_ids: Any, **kwargs: Any) -> list[Any]:
+        asked.append(list(type_ids))
+        return []
+
+    monkeypatch.setattr(TypeFiller, "fill", spy)
+    bodies = put_all(fetch)
+    bb_import(4)
+    local_presets([name_of(b) for b in bodies])
+    no_k_profiles()
+    assert fetch.import_().status_code == 200
+    assert asked == [[fetch.type_id]]
+
+
 def _zip_of(request: httpx.Request) -> bytes:
     """The ``file`` part of a multipart request."""
     body = request.content
@@ -953,7 +975,16 @@ def test_import_needs_its_key(fetch: Fetch) -> None:
 
 
 @respx.mock
-def test_the_held_copy_is_refreshed_after_import(fetch: Fetch) -> None:
+def test_the_held_copy_is_refreshed_after_import(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scadbuddy.filament.profile_fill import TypeFiller
+
+    async def no_fill(self: Any, settings: Any, type_ids: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    # The first presets also fill the type (one more local-preset read): not what this counts.
+    monkeypatch.setattr(TypeFiller, "fill", no_fill)
     state = _state(fetch.client)
     state.settings = state.settings.model_copy(update={"spool_overlay_refresh_seconds": 300})
     bodies = put_all(fetch)

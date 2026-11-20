@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, ShoppingCartIcon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
@@ -22,6 +22,7 @@ import { KValueTable } from '../../components/filament/KValueTable'
 import { kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
 import { ProfileFetchPanel } from '../../components/filament/ProfileFetchPanel'
+import { ProfileFillDialog } from '../../components/filament/ProfileFillDialog'
 import { presetRowsError } from '../../components/filament/presetRows'
 import { PricePanel } from '../../components/filament/purchasing/PricePanel'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
@@ -297,6 +298,7 @@ export function TypePage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [adding, setAdding] = useState(false)
+  const [filling, setFilling] = useState(false)
   const money = useMoney()
 
   useEffect(() => {
@@ -491,6 +493,12 @@ export function TypePage() {
           </Button>
         )}
         {!creating && (
+          <Button type="button" variant="outline" size="sm" disabled={busy || dirty} title={dirty ? 'Save or discard your changes first.' : undefined} onClick={() => setFilling(true)}>
+            <SlidersHorizontalIcon />
+            Fill from slicer profile
+          </Button>
+        )}
+        {!creating && (
           <Button type="button" variant="outline" size="sm" disabled={busy || adding} onClick={() => void addToShopping()}>
             <ShoppingCartIcon />
             Add to shopping list
@@ -649,6 +657,24 @@ export function TypePage() {
             </table>
           </div>
         </section>
+      )}
+
+      {!creating && (
+        <ProfileFillDialog
+          typeId={madeId ?? id}
+          open={filling}
+          onClose={() => setFilling(false)}
+          onApplied={(done) => {
+            setFilling(false)
+            const fields = Object.keys(done.filled).length
+            const parts = [fields > 0 ? `${fields} ${fields === 1 ? 'field' : 'fields'}` : null, done.k_values.length > 0 ? `${done.k_values.length} K ${done.k_values.length === 1 ? 'value' : 'values'}` : null].filter(Boolean)
+            void getType(madeId ?? id).then((fresh) => {
+              setSaved(fresh)
+              setDraft(draftOf(fresh))
+              setNotice(`Filled ${parts.join(' and ')}${done.source ? ` from ${done.source.name}` : ''}.`)
+            }, (cause: unknown) => setError(message(cause)))
+          }}
+        />
       )}
 
       <AlertDialog open={guard.pending !== null} onOpenChange={(next) => !next && guard.stay()}>

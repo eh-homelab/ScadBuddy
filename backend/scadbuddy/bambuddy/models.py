@@ -1115,10 +1115,20 @@ class KProfileTable(BambuddyModel):
 
 
 class SpoolKProfile(BambuddyModel):
-    """A spool's K-profile, as ``GET /inventory/spools`` nests it: only the preset it
-    names (#6136)."""
+    """A spool's K-profile, as ``GET /inventory/spools`` nests it: the preset it names
+    (#6136), and the calibration a spool type imports (#6714). The fields are
+    ``SpoolKProfileResponse`` in the live Bambuddy's OpenAPI (read 2026-11-20); each is
+    optional here, so a row without them still reads."""
 
     setting_id: str | None = None
+    #: Bambuddy's printer id, which a ScadBuddy printer links (``bambuddy_printer_id``).
+    printer_id: int | None = None
+    extruder: int | None = None
+    nozzle_diameter: str | None = None
+    nozzle_type: str | None = None
+    k_value: float | None = None
+    name: str | None = None
+    cali_idx: int | None = None
 
 
 class CatalogFilament(BambuddyModel):
