@@ -321,6 +321,12 @@ def test_a_failure_keeps_the_hashes_and_counts_attempts(pg_pool: PgPool) -> None
     _link(pg_pool, spool, 50, pushed={"note": field_hash("old")})
     write = _write("spool", spool, "update", 50, {"note": "new"}, {"note": field_hash("new")})
     assert _apply(f, [write], [_refused(write)]).failed == 1
+    # The same refusal again at once is the write sent again (R-T6-1); a later pass's is
+    # another attempt.
+    _apply(f, [write], [_refused(write)])
+    assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", 1)]
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_push_errors SET at = now() - interval '1 minute'")
     _apply(f, [write], [_refused(write)])
     assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", 2)]
     link = _link_row(pg_pool, spool)

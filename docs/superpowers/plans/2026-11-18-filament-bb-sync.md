@@ -1339,6 +1339,20 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
      location reads, 2 reference reads). Cost: a person's SB edit made during the call is
      not seen by the call's later results; it only decides whether an unsent field of
      the answer is stored as seen, so no push goes blind.
+103. Task 6 (R-T6-1, review M-1): `/results` keeps no Idempotency-Key. `apply_results` adds no
+    attempt when the item's error row has the same error and is younger than
+    `RESEND_WINDOW_S` (30 s, the CRUD client's retry budget), and keeps its `at`: that is the
+    same write sent again. Test: `test_a_resent_failed_result_is_one_attempt`. Cost: a real
+    second failure of the same error within 30 s (back-to-back `more` passes) counts once.
+    The report of a resent ok create still answers `linked=0`.
+104. Task 6 (R-T6-2, review M-2): no code change. A skipped pass with no error sets
+    `last_ok_at`, as Decision 19 says. The status UI must not read it as "last sync".
+105. Task 6 (R-T6-3, review M-3): `test_remote_and_local_give_the_same_plan` compares a
+    non-empty results answer (a refused write: `ResultsReport(failed=1)`) from both
+    implementations.
+106. Task 6 (R-T6-4, review M-4): the area test in `test_crud_filament.py` checks membership
+    only, and its docstring no longer says "appended last". The tail asserts of the later
+    areas check the order.
 
 ## Self-review
 

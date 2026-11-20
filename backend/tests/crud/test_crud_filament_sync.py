@@ -120,6 +120,12 @@ def _state(store: SettingsStore) -> dict[str, object]:
     return dict(row)
 
 
+def _attempts(store: SettingsStore) -> list[int]:
+    with store.pool.connection() as conn:
+        rows = conn.execute("SELECT attempts FROM filament_bb_push_errors").fetchall()
+    return [row["attempts"] for row in rows]
+
+
 def _pass(**over: object) -> SyncPassResult:
     fields: dict[str, object] = {
         "written": 2,
@@ -259,8 +265,32 @@ async def test_remote_and_local_give_the_same_plan(store: SettingsStore, crud: C
     remote = await RemoteFilamentSync(crud).plan(snap, 2)
     assert planned == remote
     assert len(remote.writes) == 2 and remote.deferred == 1
-    # Results and the pass record go the same way: a write both sides know.
-    again = await local.results(INSTANCE, remote.writes, [])
-    assert again == await RemoteFilamentSync(crud).results(INSTANCE, remote.writes, [])
+    # Results go the same way: the same refused write answers the same non-empty report
+    # either way, and the second does not count as another attempt (R-T6-1).
+    refused = [BbWriteResult(key=remote.writes[0].key, ok=False, error="timeout")]
+    expected = ResultsReport(failed=1)
+    assert await local.results(INSTANCE, remote.writes, refused) == expected
+    assert await RemoteFilamentSync(crud).results(INSTANCE, remote.writes, refused) == expected
+    assert _attempts(store) == [1]
     await local.record_pass(_pass())
     assert _state(store)["last_error"] is None
+
+
+@pg
+async def test_a_resent_failed_result_is_one_attempt(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """R-T6-1: the route has no Idempotency-Key, so a failed result sent again after a
+    lost answer must not raise the item's attempts a second time."""
+    _spools(store, 1)
+    remote = RemoteFilamentSync(crud)
+    plan = await remote.plan(_snapshot(), 200)
+    (write,) = plan.writes
+    refused = [BbWriteResult(key=write.key, ok=False, error="timeout")]
+    assert await remote.results(INSTANCE, plan.writes, refused) == ResultsReport(failed=1)
+    assert await remote.results(INSTANCE, plan.writes, refused) == ResultsReport(failed=1)
+    assert _attempts(store) == [1]
+    # Another error is a new attempt.
+    other = [BbWriteResult(key=write.key, ok=False, error="refused", status=422)]
+    await remote.results(INSTANCE, plan.writes, other)
+    assert _attempts(store) == [2]

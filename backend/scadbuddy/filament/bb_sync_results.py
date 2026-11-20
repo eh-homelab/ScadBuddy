@@ -72,6 +72,10 @@ logger = logging.getLogger(__name__)
 
 Conn = Connection[DictRow]
 
+#: How long a repeated error for one item counts as the same write sent again, not a new
+#: attempt: the CRUD client's retry budget (`crud/client.py` `UNAVAILABLE_BUDGET`, R-T6-1).
+RESEND_WINDOW_S = 30.0
+
 #: Who the push's ``synced_from_bb`` event names.
 ACTOR = "system:bambuddy-sync"
 
@@ -219,11 +223,19 @@ def _apply(
         if result.status == 404 and linked is not None and write.op in _GONE_ON_404:
             _unlink(conn, write)
             return "unlinked"
+        # The same error again within `RESEND_WINDOW_S` is a resend (the CRUD client sends
+        # a POST again after a lost answer, R-T6-1): it adds no attempt and keeps ``at``.
         conn.execute(
             "INSERT INTO filament_bb_push_errors (kind, sb_id, error) VALUES (%s, %s, %s)"
             " ON CONFLICT (kind, sb_id) DO UPDATE SET error = EXCLUDED.error,"
-            " attempts = filament_bb_push_errors.attempts + 1, at = now()",
-            (write.kind, write.sb_id, result.error or "internal"),
+            " attempts = filament_bb_push_errors.attempts + CASE WHEN"
+            " filament_bb_push_errors.error = EXCLUDED.error AND"
+            " filament_bb_push_errors.at > now() - make_interval(secs => %s)"
+            " THEN 0 ELSE 1 END,"
+            " at = CASE WHEN filament_bb_push_errors.error = EXCLUDED.error AND"
+            " filament_bb_push_errors.at > now() - make_interval(secs => %s)"
+            " THEN filament_bb_push_errors.at ELSE now() END",
+            (write.kind, write.sb_id, result.error or "internal", RESEND_WINDOW_S, RESEND_WINDOW_S),
         )
         return "failed"
     bb_id = _answered_id(write, result)
