@@ -74,8 +74,10 @@ def test_the_filament_tables_and_seeds_exist(pg_pool: PgPool) -> None:
         conn.execute(brand)
         with pytest.raises(errors.UniqueViolation), conn.transaction():
             conn.execute(brand.replace("Acme", "ACME"))
+        # An archived brand keeps its key (#6706, R-6706-5): the name stays taken.
         conn.execute("UPDATE filament_brands SET archived_at = now() WHERE name = 'Acme'")
-        conn.execute(brand.replace("Acme", "ACME"))
+        with pytest.raises(errors.UniqueViolation), conn.transaction():
+            conn.execute(brand.replace("Acme", "a-c-m-e"))
 
 
 @pg
