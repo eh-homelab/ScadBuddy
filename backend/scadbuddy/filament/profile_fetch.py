@@ -875,7 +875,9 @@ async def _import_once(
         from scadbuddy.filament.component import FILAMENT
 
         await fill_quietly(
-            state.components.get(FILAMENT).filler, state.settings_store.load, [row["type_id"]]
+            lambda: state.components.get(FILAMENT).filler,
+            state.settings_store.load,
+            [row["type_id"]],
         )
     return ImportOutcome.model_validate(done.body)
 

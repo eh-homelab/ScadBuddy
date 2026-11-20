@@ -76,8 +76,8 @@ Posted on #6714.
   returns the diff (with `previous`) without writing, and `apply` with the confirmed
   fields and values writes them, after checking that the profile still gives them.
 - R-6714-5: K values: Bambuddy spool `k_profiles` of the BB spools linked to the type's
-  spools become the type's K values when it has none (dedupe by printer, extruder,
-  nozzle and nozzle type; one row per printer, extruder and nozzle, the table's key).
+  spools become the type's K values when it has none (one row per printer, extruder and
+  nozzle, the table's key).
   A BB printer is the ScadBuddy printer linked to it; a K profile of an unlinked printer
   is skipped. Bambuddy does expose printer K calibrations (above), but printer 1 had
   none on 2026-11-20 and they name a `filament_id`, not a spool; they are not imported
@@ -105,6 +105,18 @@ Posted on #6714.
   transaction, under the row lock `set_k_values` takes (`_replace_k_values`).
 - R-6714-d: `read_profile` spells the nozzle as the presets do (`canonical_nozzle`:
   `0.40` is `0.4`) when it names the printer, so `0.40` reads the H2C 0.4 mm preset.
+- R-6714-e (#6747): the bulk route's fill catches `TypeTempError` for each type in
+  `TypeFiller._one` (a person set one end of a range between the read and the row lock)
+  and records that type's fields in `skipped` with the reason. One type's race never
+  answers 500, and the types after it are still filled.
+- R-6714-f (#6747): `fill_quietly` takes the filler as a callable, so the profile-fetch
+  import's `state.components.get(FILAMENT)` lookup runs inside its guard: nothing after the
+  commit fails the import.
+- R-6714-g (#6747): `TypeFiller.apply` with K values compares the K values it would write
+  with the ones the refresh showed (`FillRequest.shown_k_values`), as it compares fields.
+  When they differ it refuses (`ProfileChangedError`, 409) before anything is written.
+- R-6714-h (#6747): R-6714-5 no longer says "and nozzle type": the K values are one row
+  per printer, extruder and nozzle, the table's key.
 - R-6714-8: tests use respx and fixture profile JSON; they never call a live service.
 
 ## Tasks

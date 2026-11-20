@@ -19,6 +19,7 @@ from scadbuddy.filament.models import (
     SpoolTypeCreate,
     SpoolTypePatch,
     TypeKValue,
+    TypeKValueCreate,
     TypePreset,
 )
 from scadbuddy.filament.profile_fill import ProfileChangedError, TypeFiller
@@ -123,6 +124,42 @@ async def test_a_fill_that_would_leave_a_range_backwards_skips_that_pair(
     row = types.get(type_id)
     assert row is not None
     assert (row.nozzle_temp_min, row.bed_temp_min) == (None, 55)
+
+
+async def test_a_range_set_meanwhile_skips_that_type_and_the_rest_are_filled(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-6714-e: a person sets one end of a range between the read and the row lock; that
+    type's `TypeTempError` is a skip, never a 500, and the types after it are filled."""
+    raced = _type(types, pg_pool, "RACED")
+    later = _type(types, pg_pool, "LATER")
+    for type_id in (raced, later):
+        _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    fill_empty = types.fill_empty
+
+    def meanwhile(type_id: UUID, values: Any) -> Any:
+        if type_id == raced:
+            types.update(raced, SpoolTypePatch(nozzle_temp_max=150))
+        return fill_empty(type_id, values)
+
+    monkeypatch.setattr(types, "fill_empty", meanwhile)
+
+    first, second = await filler.fill(UNLINKED, [raced, later])
+
+    assert (first.filled, first.written) == ({}, False)
+    assert set(first.skipped) == {
+        "nozzle_temp_min",
+        "nozzle_temp_max",
+        "bed_temp_min",
+        "bed_temp_max",
+        "density_g_cm3",
+    }
+    assert all("changed meanwhile" in why for why in first.skipped.values())
+    row = types.get(raced)
+    assert row is not None
+    assert (row.nozzle_temp_min, row.nozzle_temp_max, row.density_g_cm3) == (None, 150, None)
+    assert second.written
+    assert second.filled["nozzle_temp_min"] == 190
 
 
 async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(
@@ -260,8 +297,18 @@ async def test_a_type_without_k_values_takes_its_linked_bambuddy_spools(
     ]
     assert types.k_values(type_id) == []
 
+    # K values that differ from what Bambuddy now gives are refused, as a field is
+    # (R-6714-g), and nothing is written.
+    shown = [
+        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id"})) for r in preview.k_values
+    ]
+    changed = [shown[0].model_copy(update={"k_value": Decimal("0.021")}), shown[1]]
+    with pytest.raises(ProfileChangedError, match="K values"):
+        await filler.apply(LINKED, type_id, {}, k_values=changed)
+    assert types.k_values(type_id) == []
+
     # A person confirms what the refresh showed; no field, so no profile is needed.
-    done = await filler.apply(LINKED, type_id, {}, k_values=True)
+    done = await filler.apply(LINKED, type_id, {}, k_values=shown)
     assert done is not None
     assert done.reason == "the type has no slicer preset"
     assert (done.written, len(done.k_values)) == (True, 2)

@@ -215,7 +215,8 @@ export const setTypeKValues = (id: string, rows: TypeKValueInput[]) =>
 /**
  * #6714 — fills the type's empty fields from its slicer profile. `refresh` answers the profile's
  * values that differ and writes nothing; `apply` writes the fields a person confirmed (409 when
- * the profile no longer gives one), and with `k_values` the K values the refresh showed.
+ * the profile no longer gives one), and with `k_values` the K values the refresh showed, sent back
+ * as `shown_k_values` (409 when Bambuddy now gives others).
  */
 export const fillTypeFromProfile = (id: string, body: FillRequest = {}) =>
   request<TypeFill>(`${BASE}/types/${seg(id)}/fill-from-profile`, json('POST', body))
