@@ -1,6 +1,7 @@
 """The profile-fetch worker's activities (#6625 Task 6). The worker holds no database secret
 and no Bambuddy key: it reaches the CRUD service's ``profile-fetch`` routes with its service
-credential (plan Decision 7), and 3dfilamentprofiles.com through `site.ThreeDfpSite`.
+credential (plan Decision 7). It runs no browser: it reaches 3dfilamentprofiles.com through
+the browser service, a pod of its own, with `remote.RemoteSite` (#6780).
 
 `ProfileFetchActivities.export` signs in when the browser is new, adds the filament to My
 Spools, and exports each target, PUTting each file's bytes as it comes, named by their
@@ -20,10 +21,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
-from contextlib import suppress
-from types import TracebackType
-from typing import Any, Final, Protocol
+from collections.abc import Awaitable
+from typing import Final
 from urllib.parse import quote, urlencode
 
 from prometheus_client import Counter
@@ -33,7 +32,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, activity_key
 from scadbuddy.crud.wire import PREFIX
-from scadbuddy.profile_fetch.site import ExportedFile, Kind, SiteError
+from scadbuddy.profile_fetch.site import Kind, Site, SiteError, SiteHolder
 from scadbuddy.profile_fetch.wire import (
     EXPORT_ACTIVITY,
     FAILED_ACTIVITY,
@@ -51,6 +50,8 @@ from scadbuddy.profile_fetch.wire import (
 from scadbuddy.profile_fetch.workflow import IMPORT_REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["ProfileFetchActivities", "Site", "SiteHolder", "site_failure"]
 
 BASE: Final = f"/api/v1{PREFIX}/profile-fetch/runs"
 #: Decision 13: worth another attempt. A refused login, an unknown 3DFP id, a missing
@@ -73,57 +74,6 @@ EXPORTS = Counter(
     " (option_missing, too_large, refused) or the site failure that failed the attempt.",
     ["outcome"],
 )
-
-
-class Site(Protocol):
-    """`site.ThreeDfpSite`'s surface: an async context manager that signs in and exports."""
-
-    async def __aenter__(self) -> Any: ...
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None: ...
-
-    async def login(self) -> None: ...
-
-    async def ensure_in_my_spools(self, tdfp_id: int) -> None: ...
-
-    async def export(self, tdfp_id: int, printer_model: str, nozzle: str) -> ExportedFile: ...
-
-
-class SiteHolder:
-    """One signed-in browser for the worker's life (one export at a time, Decision 16).
-    `get` opens it and signs in when there is none; `drop` closes it, so the next `get`
-    starts afresh (after a crash or a timeout, `FRESH_BROWSER_KINDS`)."""
-
-    def __init__(self, open_site: Callable[[], Site]) -> None:
-        self._open = open_site
-        self._site: Site | None = None
-
-    async def get(self) -> Site:
-        if self._site is None:
-            site = self._open()
-            await site.__aenter__()
-            try:
-                await site.login()
-            except BaseException:
-                with suppress(Exception):
-                    await site.__aexit__(None, None, None)
-                raise
-            self._site = site
-        return self._site
-
-    async def drop(self) -> None:
-        site, self._site = self._site, None
-        if site is not None:
-            with suppress(Exception):
-                await site.__aexit__(None, None, None)
-
-    async def aclose(self) -> None:
-        await self.drop()
 
 
 def site_failure(error: BaseException) -> ApplicationError:

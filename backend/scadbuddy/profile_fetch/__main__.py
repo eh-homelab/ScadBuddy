@@ -1,4 +1,5 @@
-"""``python -m scadbuddy.profile_fetch``: the profile-fetch worker (`worker.py`)."""
+"""``python -m scadbuddy.profile_fetch``: the profile-fetch worker (`worker.py`). The browser
+service is ``python -m scadbuddy.profile_fetch.browser`` (`browser.py`, #6780)."""
 
 from __future__ import annotations
 
@@ -16,9 +17,8 @@ from scadbuddy.profile_fetch.settings import (
     ProfileFetchRefusal,
     ProfileFetchSettings,
     check_environment,
-    forget_login,
 )
-from scadbuddy.profile_fetch.worker import StartRefusedError, install_stop, run
+from scadbuddy.profile_fetch.worker import install_stop, run
 
 logger = logging.getLogger(__name__)
 
@@ -37,28 +37,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         for reason in refusal.reasons:
             logger.error(reason)
         return 2
-    # Before the login is read: no process of this user may ptrace this one or read its
-    # memory, where the 3DFP login and the service credential live (`hardening.py`).
+    # Before the proof and the RPC token are read: no process of this user may ptrace this
+    # one or read its memory, where the service credential lives (`hardening.py`).
     forbid_dumping()
     try:
         settings = ProfileFetchSettings()  # type: ignore[call-arg]  # read from the environment
     except ValidationError as invalid:
-        forget_login(os.environ)
         configure_logging()
-        # Each refused setting by its name and why, never the value: pydantic's own text
-        # quotes the input, which could be the login.
+        # Each refused setting by its name and why, never the value.
         for error in invalid.errors(include_input=False, include_url=False):
             name = ".".join(str(part) for part in error["loc"]) or "settings"
             logger.error("setting %s: %s", name, error["msg"])
         return 2
-    # The settings hold the login now: no child process may inherit it.
-    forget_login(os.environ)
     configure_logging(settings.log_level)
-    try:
-        asyncio.run(_main(settings))
-    except StartRefusedError as refused:
-        logger.error("%s", refused)
-        return 1
+    asyncio.run(_main(settings))
     return 0
 
 

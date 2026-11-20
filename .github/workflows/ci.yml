@@ -2152,19 +2152,36 @@ jobs:
           tags: scadbuddy-profile-fetch-test:ci
           cache-from: type=gha,scope=profile-fetch
 
-      # As the cluster runs it: uid 10001, and with no settings the worker refuses to
-      # start (exit 2), naming each missing one.
+      # As the cluster runs it: uid 10001, and with no settings each process refuses to
+      # start (exit 2), naming each missing one. The default command is the browser
+      # service (#6780), which needs the 3DFP login; the worker
+      # (`python -m scadbuddy.profile_fetch`) needs the browser service's URL instead, and
+      # refuses the login.
       - name: Profile-fetch smoke
         run: |
           set -euo pipefail
           test "$(docker run --rm scadbuddy-profile-fetch:ci id -u)" = 10001
           docker run --rm scadbuddy-profile-fetch:ci python -c \
             "import sys, scadbuddy.profile_fetch.worker; sys.exit(any(m.split('.')[0] == 'psycopg' for m in sys.modules))"
+          docker run --rm scadbuddy-profile-fetch:ci python -c \
+            "import sys, scadbuddy.profile_fetch.browser; sys.exit(any(m.split('.')[0] in ('psycopg', 'temporalio') for m in sys.modules))"
           status=0
           docker run --rm --network none scadbuddy-profile-fetch:ci > "$RUNNER_TEMP/start.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/start.log"
           test "$status" -eq 2
           grep -q 'setting tdfp_password: Field required' "$RUNNER_TEMP/start.log"
+          status=0
+          docker run --rm --network none scadbuddy-profile-fetch:ci python -m scadbuddy.profile_fetch \
+            > "$RUNNER_TEMP/worker.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/worker.log"
+          test "$status" -eq 2
+          grep -q 'setting profile_fetch_browser_url: Field required' "$RUNNER_TEMP/worker.log"
+          status=0
+          docker run --rm --network none -e SCADBUDDY_TDFP_PASSWORD=x scadbuddy-profile-fetch:ci \
+            python -m scadbuddy.profile_fetch > "$RUNNER_TEMP/worker-login.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/worker-login.log"
+          test "$status" -eq 2
+          grep -q 'SCADBUDDY_TDFP_PASSWORD is set' "$RUNNER_TEMP/worker-login.log"
 
       - name: Driver tests in the image
         run: |

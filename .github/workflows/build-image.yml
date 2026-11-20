@@ -643,10 +643,11 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The profile-fetch worker (#6625, plan 2026-11-18-profile-fetch-worker.md
-  # Decision 4): the Dockerfile's `profile-fetch` target, `python -m
-  # scadbuddy.profile_fetch` with Playwright's Chromium under Xvfb, published as
-  # ghcr.io/eh-homelab/scadbuddy-profile-fetch and run as a Deployment of its own
+  # The profile-fetch worker and browser service (#6625, #6780; plan
+  # 2026-11-18-profile-fetch-worker.md Decision 4): the Dockerfile's `profile-fetch`
+  # target, Playwright's Chromium under Xvfb, published as
+  # ghcr.io/eh-homelab/scadbuddy-profile-fetch and run as two Deployments of their own,
+  # `python -m scadbuddy.profile_fetch.browser` and `python -m scadbuddy.profile_fetch`
   # (README.md, "Profile-fetch worker"). Same tag scheme as the other images.
   #
   # `continue-on-error` for the slicer's reason: a first publish of a new package

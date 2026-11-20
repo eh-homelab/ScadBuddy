@@ -840,19 +840,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration
   `20261118T0811Z_session_blobs_pdf.sql`) and store it (`crud_agent_blobs.py` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
-- `backend/scadbuddy/profile_fetch/` — the 3DFP profile-fetch worker (#6625, plan
-  `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
-  scadbuddy.profile_fetch` polls the queue `profile-fetch`, serves `/healthz` and `/metrics` on
-  9090, and holds no database secret (it refuses `FORBIDDEN_ENV`, and a `DEBUG` that turns on a
-  Playwright channel; `settings.py`) and no Postgres code (`psycopg` is not in `sys.modules`).
-  `site.py` drives 3dfilamentprofiles.com with a headed Chromium (Playwright for Python, under
-  Xvfb) and maps each failure to a `SiteError` kind (`login_failed`, only when the site sends the browser back to
+- `backend/scadbuddy/profile_fetch/` — the 3DFP profile-fetch worker and its browser service
+  (#6625, #6780, plan `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
+  scadbuddy.profile_fetch` (`worker.py`) polls the queue `profile-fetch`, serves `/healthz` and
+  `/metrics` on 9090, holds the CRUD credential and runs no browser; it refuses `FORBIDDEN_ENV`
+  and the 3DFP login (`settings.py`) and imports no Postgres code (`psycopg` is not in
+  `sys.modules`). `python -m scadbuddy.profile_fetch.browser` (`browser.py`) is the browser
+  service, a pod of its own with no route to Temporal or the API: it holds the 3DFP login and
+  the RPC token, refuses a proof, a Temporal or API address, a mounted ServiceAccount token and a
+  `DEBUG` that turns on a Playwright channel, imports no Temporal or CRUD client, sets
+  `RLIMIT_CORE` to 0 and signs in at start. `remote.py` is the RPC (`RemoteSite`, the worker's
+  `site.Site` over HTTP on 8091 with the token; the export's bytes are the answer's body, a
+  failure crosses as its kind only and the worker writes its text). `site.py` drives
+  3dfilamentprofiles.com with a headed Chromium (Playwright for Python, under Xvfb), holds the
+  `Site` protocol and the `SiteHolder` that keeps one signed-in browser, and maps each failure to
+  a `SiteError` kind (`login_failed`, only when the site sends the browser back to
   `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, an export over 512 KiB,
-  which the worker refuses from the text's length before it reads the text (`_read_export`,
+  which the driver refuses from the text's length before it reads the text (`_read_export`,
   #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
-  `failed` activities and the `SiteHolder` that keeps one signed-in browser; `workflow.py` is
-  the `ProfileFetch` workflow; `wire.py` is the bodies shared with the CRUD routes; `worker.py`
-  sets `RLIMIT_CORE` to 0 and builds `ThreeDfpSite`; `site.py`'s `browser_env` is the allowlisted environment that
+  `failed` activities; `workflow.py` is the `ProfileFetch` workflow; `wire.py` is the bodies
+  shared with the CRUD routes; `site.py`'s `browser_env` is the allowlisted environment that
   Chromium launches with (no login, no token path). The API side is `filament/profile_fetch.py`
   (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
   `fail_unserved`; the module functions `start_fetch`, `store_file`, `import_run`, `mark_failed`

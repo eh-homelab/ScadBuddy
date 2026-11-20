@@ -608,13 +608,17 @@ EXPOSE 9090
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["scadbuddy-slicer"]
 
-# ── profile-fetch: the 3DFP profile-fetch worker (#6625) ──────────────────────
-# `python -m scadbuddy.profile_fetch` drives a headed Chromium under Xvfb on
-# 3dfilamentprofiles.com (plan 2026-11-18-profile-fetch-worker.md, Decisions 4 to 6),
-# published as ghcr.io/eh-homelab/scadbuddy-profile-fetch. It holds no database secret
-# and no database client config: it reaches the CRUD service over HTTP with its service
-# credential, and the 3DFP login comes from the pod's env (README.md, "Profile-fetch
-# worker"). The browser runs untrusted web content, so the image carries nothing else.
+# ── profile-fetch: the 3DFP profile-fetch worker and browser service (#6625, #6780)
+# One image, two Deployments (README.md, "Profile-fetch worker"). Its default command,
+# `xvfb-run -a python -m scadbuddy.profile_fetch.browser`, is the browser service: a
+# headed Chromium under Xvfb on 3dfilamentprofiles.com (plan
+# 2026-11-18-profile-fetch-worker.md, Decisions 4 to 6), with the 3DFP login from the
+# pod's env and no route to Temporal or the API. The worker's Deployment runs
+# `python -m scadbuddy.profile_fetch`: the Temporal worker, which holds the CRUD
+# credential, runs no browser and drives the service over its RPC (#6780). Neither holds
+# a database secret or database client config. Published as
+# ghcr.io/eh-homelab/scadbuddy-profile-fetch. The browser runs untrusted web content, so
+# the image carries nothing else.
 #
 # Three stages. `profile-fetch-deps` builds the venv: the backend with the
 # `profile-fetch` group (Playwright, pinned exactly) and without the dev group, and
@@ -677,14 +681,18 @@ RUN playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /ms-playwright
 
-# Fails the build when a psycopg package is installed or the worker's start imports
-# Postgres code (#5295: it has no database), or when Playwright's full Chromium is not
-# where the driver looks. `-B`, so it writes no bytecode.
+# Fails the build when a psycopg package is installed, when the worker's or the browser
+# service's start imports Postgres code (#5295: neither has a database), when the browser
+# service's start imports the Temporal SDK (#6780: it has no route to Temporal), or when
+# Playwright's full Chromium is not where the driver looks. `-B`, so it writes no bytecode.
 RUN python -B - <<'CHECK'
 import importlib.util, os, sys
 for name in ("psycopg", "psycopg_binary", "psycopg_pool", "psycopg_c"):
     if importlib.util.find_spec(name) is not None:
         sys.exit(f"ERROR: {name} is installed in the profile-fetch image")
+import scadbuddy.profile_fetch.browser
+if any(m.split(".")[0] in ("psycopg", "temporalio") for m in sys.modules):
+    sys.exit("ERROR: importing scadbuddy.profile_fetch.browser imported psycopg or temporalio")
 import scadbuddy.profile_fetch.worker
 if any(m == "psycopg" or m.startswith("psycopg.") for m in sys.modules):
     sys.exit("ERROR: importing scadbuddy.profile_fetch.worker imported psycopg")
@@ -710,12 +718,15 @@ ENV HOME=/tmp \
 WORKDIR /tmp
 # Numeric, as the other stages: Kubernetes' runAsNonRoot cannot check a name (DL3066).
 USER 10001:10001
-# /healthz and /metrics (`profile_fetch.settings.HEALTH_PORT`).
-EXPOSE 9090
-# Decision 4's `tini -- xvfb-run -a python -m scadbuddy.profile_fetch`, with xvfb-run in
-# the command, so a one-off `docker run <image> python …` needs no display.
+# The worker's /healthz and /metrics (`profile_fetch.settings.HEALTH_PORT`), and the
+# browser service's RPC and /healthz (`profile_fetch.remote.BROWSER_PORT`).
+EXPOSE 9090 8091
+# Decision 4's `tini -- xvfb-run -a python -m …`, with xvfb-run in the command, so a
+# one-off `docker run <image> python …` needs no display. The default is the browser
+# service; the worker's Deployment sets `args: [python, -m, scadbuddy.profile_fetch]`,
+# which keeps `tini` as the entrypoint.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["xvfb-run", "-a", "python", "-m", "scadbuddy.profile_fetch"]
+CMD ["xvfb-run", "-a", "python", "-m", "scadbuddy.profile_fetch.browser"]
 
 # ── profile-fetch-test: the driver tests in the profile-fetch image ───────────
 # Never published. ci.yml's `profile-fetch-image` job runs
