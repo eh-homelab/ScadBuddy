@@ -227,7 +227,7 @@ same way, `vite.config.ts`).
   `LanPrintsNote`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
-  Catalog, Shopping list, Ledger and Metrics.
+  Catalog, Metrics, Shopping list and Ledger.
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
   `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:

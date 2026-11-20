@@ -469,14 +469,18 @@ the numbers are its decisions):
   rows' `name`, because those tables have no code column. A rename of a material, brand or
   location kind starts a new series. A label has at most 20 values; the rest fold into
   `other`, and null is `none`. A material that crosses rank 20 makes a one-day step in
-  "Used per day" and in `other`; the totals stay right. A real value named `other` or
+  "Used per day" and in `other`; the totals stay right. A used spool that changes material
+  (a person types it, an invoice confirm types it, or its type's material changes) moves
+  its past grams to the new material, because `metrics_store.py` labels every plate by the
+  spool's current material: "Used per day" shows one negative bar and one false spike for a
+  day, and "Waste rate" moves if any of those plates failed. A real value named `other` or
   `none` is exported as `other*` or `none*`.
 - Consumption is a cumulative gauge (5): `scadbuddy_filament_used_grams{material,outcome}`
   is the grams of every plate booked; the panels use `delta` over the range, after a
   `max by` across API pods.
 - A plate is counted by §5.5 rule 3 with no anchor (6), by `metrics.plates`: BB's usage row
-  wins over SB's estimate, a `covered` plate counts 0 here (its grams are on another
-  spool), and an open estimate counts 0 g until the print ends.
+  wins over SB's estimate, a `covered` plate is skipped (its grams are on another
+  spool, so it is not a print either), and an open estimate counts 0 g until the print ends.
 - Waste is the grams of failed and cancelled plates (7); an SB-only failed plate books 0 g.
 - Burn rate (8) is the grams of plates that ended inside the window
   (`filament_burn_window_days`, default 30) over the window's days, or over the spool's age
@@ -485,8 +489,10 @@ the numbers are its decisions):
 - A type edit fans out (11): a change to an overridable field, a preset or a K value writes
   one `edited` event on each unarchived spool that does not override it.
 - The chart shows what SB believed then (13): each event stores `grams_before`; the value
-  after an event is the next event's `grams_before`. Over 500 points thin out, and the
-  anchors, plates and last point stay.
+  after an event is the next event's `grams_before`. Over 500 points thin out. The manual,
+  scale and BB anchors, the plates and the last point stay; AMS anchors thin with the rest
+  (`metrics.py` `series`, the `keep` line). An anchor mark uses the spool's current weight
+  lock, not the lock at the reading's time, because the ledger does not record it.
 - The AMS error (14) pairs each scale reading with the newest earlier AMS reading (not
   while printing, within 24 h, no plate that took grams between).
 

@@ -111,8 +111,18 @@ def test_bb_status_sets_the_outcome() -> None:
         bb_end(days(3), 1, "a", "failed"),
         bb_end(days(2), 1, "b", "cancelled"),
         bb_end(days(1), 1, "c", "aborted"),
+        bb_end(days(0.5), 1, "d", "Canceled"),
+        bb_end(days(0.4), 1, "e", "complete"),
+        bb_end(days(0.3), 1, "f", "printing"),
     ]
-    assert [p.outcome for p in metrics.plates(events)] == ["failed", "cancelled", "unknown"]
+    assert [p.outcome for p in metrics.plates(events)] == [
+        "failed",
+        "cancelled",
+        "cancelled",
+        "cancelled",
+        "completed",
+        "unknown",
+    ]
 
 
 def test_not_applied_is_a_failed_plate_of_zero() -> None:

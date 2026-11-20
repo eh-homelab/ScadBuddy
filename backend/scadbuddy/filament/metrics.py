@@ -16,8 +16,8 @@ from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from math import ceil, isfinite
-from typing import cast, get_args
 
+from scadbuddy.bambuddy.stages import stage_of
 from scadbuddy.filament import ledger
 from scadbuddy.filament.metrics_models import AmsError, GramsPoint, Outcome, Plate, SpoolMetrics
 from scadbuddy.filament.models import SpoolEvent
@@ -26,8 +26,13 @@ from scadbuddy.filament.models import SpoolEvent
 AMS_PAIR_WINDOW = timedelta(hours=24)
 #: A forecast further out than this many days is no forecast (``empty_on`` is ``None``).
 MAX_FORECAST_DAYS = 3650
-#: The outcomes BB's ``bb_status`` names as they are; any other status is ``unknown``.
-_BB_OUTCOMES = frozenset(get_args(Outcome)) - {"unknown"}
+#: BB's ``bb_status`` through ``stages.stage_of`` (its words differ per object: ``canceled``,
+#: ``aborted``, ``complete``); a status that is neither done, failed nor cancelled is ``unknown``.
+_STAGE_OUTCOMES: dict[str, Outcome] = {
+    "done": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
 _PLATE_KINDS = frozenset({ledger.PRINT_STARTED, ledger.PRINT_ENDED})
 _CENT = Decimal("0.01")
 _DAY = 86400.0
@@ -52,7 +57,9 @@ def plates(events: Sequence[SpoolEvent]) -> list[Plate]:
         grams = _grams(event)
         if event.ref_kind == ledger.BB_USAGE:
             status = event.data.get("bb_status")
-            outcome = cast("Outcome", status) if status in _BB_OUTCOMES else "unknown"
+            outcome = _STAGE_OUTCOMES.get(
+                stage_of(status if isinstance(status, str) else None), "unknown"
+            )
         elif event.ref_kind == ledger.PRINT_RUN and job not in paired:
             basis = event.data.get("basis")
             if basis == "covered":

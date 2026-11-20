@@ -148,7 +148,7 @@ export function jobOf(event: SpoolEvent): string | null {
 }
 
 /**
- * When each plate ended, one time per plate (plan Decision 65), as `metrics.plates` counts
+ * When each plate ended, one time per plate (plan Decision 82, R-T7-7), as `metrics.plates` counts
  * them: an ended BB usage row, and an ended SB print run BB did not book too. A `covered`
  * end is no plate and a `not_applied` one used no grams, so neither gets a tick.
  */
