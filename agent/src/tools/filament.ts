@@ -225,6 +225,67 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_type_proposals',
+    label: 'Propose spool types for spools that need one',
+    description:
+      'The spool types ScadBuddy proposes for the unarchived spools with no type (spec §8.1), grouped by brand, ' +
+      'material, subtype, RGBA, label weight and the `material_number` of their last Bambuddy reading. Each group ' +
+      'has a proposed `code`, its catalog names, `colour_name`, its `spool_ids`, `numbers` and `count`, and ' +
+      '`type_id` when a type matches it now (confirming uses that type). `ungrouped` lists the spools that lack a ' +
+      'material, an RGBA or a label weight, with what each lacks. Show the groups to the user before ' +
+      'filament_type_proposals_confirm. Writes nothing.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/type-proposals'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/type-proposals'), 'list the type proposals')),
+  }),
+
+  defineTool({
+    name: 'filament_type_proposals_confirm',
+    label: 'Make proposed spool types',
+    description:
+      "Make the spool types of the groups given (from filament_type_proposals: each group's key fields and " +
+      "`spool_ids` as listed, and a `code`: the proposed one or the user's) and type their spools, in one " +
+      'transaction. A type that matches a group now is used instead of a new one. Each spool that is still ' +
+      "unarchived, untyped and of the group gets the type and loses each own value equal to the type's; any other " +
+      'is listed in `skipped` with its reason. 409 when a type already has one of the codes (nothing is written). ' +
+      'Call it only after the user says yes to these groups and names. Writes ScadBuddy only.',
+    input: z.object({
+      groups: z
+        .array(
+          z.object({
+            brand_id: z.string().uuid().nullable().optional(),
+            material_id: z.string().uuid(),
+            subtype_id: z.string().uuid().nullable().optional(),
+            rgba: z.string().describe('`#RRGGBBAA`, as the proposal lists it'),
+            label_weight_g: z.number().int().positive(),
+            material_number: z.string().nullable().optional(),
+            code: z.string().min(1).max(128).describe("The new type's code: the proposed one, or the user's"),
+            spool_ids: z.array(z.string().uuid()).min(1),
+          }),
+        )
+        .min(1)
+        .max(500),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/type-proposals/confirm'],
+    summarize: ({ groups }) => {
+      const spools = groups.reduce((sum, group) => sum + group.spool_ids.length, 0)
+      return `Make ${groups.length} spool type${groups.length === 1 ? '' : 's'} for ${spools} spool${spools === 1 ? '' : 's'}`
+    },
+    handler: async ({ groups }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/type-proposals/confirm', { body: { groups } }),
+          'make the proposed spool types',
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_type_set_presets',
     label: "Set a spool type's slicer presets",
     description:
