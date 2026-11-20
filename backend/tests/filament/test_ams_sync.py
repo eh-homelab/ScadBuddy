@@ -248,6 +248,8 @@ def test_a_spool_placed_between_the_holder_read_and_the_lock_is_left_alone(
 
 
 def test_a_printer_with_no_report_and_no_spool_is_not_named_stale(pg_pool: PgPool) -> None:
+    """The sync never visits this printer (it has no report row), so the visit filter, not
+    `_stale`, keeps it out of `stale_printers`."""
     _printer(pg_pool)
     result = _sync(pg_pool, T0 + STALE_AFTER + timedelta(seconds=1))
     assert (result.booked, result.stale) == (0, 0)
