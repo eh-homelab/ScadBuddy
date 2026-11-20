@@ -105,7 +105,7 @@ export function forecast(nowMs = Date.now()): S['Forecast'] {
       safety_margin_days: safety,
       reorder_on: reorder,
       reorder_now: reorder != null && reorder <= today,
-      low_stock: inStock.every((spool) => spool.low_stock),
+      low_stock: inStock.length > 0 && inStock.every((spool) => spool.low_stock),
     })
   }
   return {

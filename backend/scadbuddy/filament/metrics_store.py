@@ -367,10 +367,18 @@ class MetricsStore:
         for spool in stocked:
             low[spool.names.material] += spool.low_stock
         reorder = dict.fromkeys(in_stock, 0)
+        # A type counts under its stocked spools' (else all spools') material with most grams,
+        # ties by name, so the pick never depends on list order.
         type_material: dict[UUID, str | None] = {}
-        for spool in [*stocked, *read.spools]:
-            if spool.type_id is not None:
-                type_material.setdefault(spool.type_id, spool.names.material)
+        for pool in (stocked, read.spools):
+            by_grams: dict[UUID, dict[str | None, float]] = defaultdict(lambda: defaultdict(float))
+            for spool in pool:
+                if spool.type_id is not None:
+                    by_grams[spool.type_id][spool.names.material] += spool.grams_left or 0.0
+            for type_id, by_name in by_grams.items():
+                type_material.setdefault(
+                    type_id, min(by_name, key=lambda n: (-by_name[n], n or ""))
+                )
         for kind in _type_forecasts(read, settings, now):
             if kind.reorder_now:
                 name = type_material.get(kind.type_id, kind.material)

@@ -177,7 +177,7 @@ class TypeForecast(BaseModel):
     reorder_on: date | None
     #: ``reorder_on`` is today or past.
     reorder_now: bool
-    #: Every unarchived spool of the type is low on stock (none in stock counts).
+    #: Every unarchived spool of the type is low on stock (false when none is in stock).
     low_stock: bool
 
 

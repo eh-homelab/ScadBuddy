@@ -144,7 +144,8 @@ def test_a_failed_export_keeps_the_last_good_gauges(monkeypatch: pytest.MonkeyPa
             metrics,
             _snapshot(stock=[("PLA", "Bambu", "Shelf", 1, 900.0, None)], reorder={"PLA": 1}),
         )
-    assert _samples(metrics, "scadbuddy_filament_stock_grams") != {}
+    stock = _samples(metrics, "scadbuddy_filament_stock_grams")
+    assert {dict(labels)["material"] for labels in stock} == {"PLA", "PETG"}
     assert 'material="PETG"' in metrics.exposition().decode()
 
 
