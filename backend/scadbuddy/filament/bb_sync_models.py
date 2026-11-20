@@ -350,7 +350,8 @@ class FilamentSyncApi(Protocol):
 
 
 class SyncError(BaseModel, extra="forbid"):
-    """One `filament_bb_push_errors` row: an item whose last write failed."""
+    """One `filament_bb_push_errors` row: an item whose last write failed, or was held
+    back as ``name_taken`` (another Bambuddy row has its name; never sent)."""
 
     kind: Kind
     sb_id: UUID
@@ -362,8 +363,8 @@ class SyncError(BaseModel, extra="forbid"):
 class SyncStatus(BaseModel, extra="forbid"):
     """The sync's state (Decision 19): the instance the links belong to, the last pass and
     the last clean one, the last pass's error and counts, the items whose last write
-    failed, and the directions. ``skipped`` is `skip_reason` of the settings now: why no
-    pass runs (the nudge starts none), else ``None``."""
+    failed or was held back, and the directions. ``skipped`` is `skip_reason` of the
+    settings now: why no pass runs (the nudge starts none), else ``None``."""
 
     instance: str | None
     last_pass_at: datetime | None

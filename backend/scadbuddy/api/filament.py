@@ -1298,12 +1298,13 @@ async def reconcile_rfid(
         "last pass, `last_error` its error label (null when it worked), and `last_ok_at` the "
         "last pass with no error, a skipped one too. `counts` is the last pass's: `written`, "
         "`failed`, `deferred`, `conflicts` and `unmapped_k`. `errors` holds one row per item "
-        "whose last write Bambuddy refused or did not answer: its `kind` (`spool`, "
-        "`supplier`, `location`, `insert_type` or `filament`), its ScadBuddy id (`sb_id`), "
-        "the error label, the failed `attempts` and when (`at`), newest first; a later write "
-        "that works drops the row. `skipped` says why no pass runs now: `no_bambuddy` (no "
-        "Bambuddy is configured) or `nothing_pushes` (no data type is set to push); else "
-        "null. Reads ScadBuddy only."
+        "whose last write failed (Bambuddy refused it or did not answer) or was held back "
+        "(`name_taken`: another Bambuddy row has its name, so ScadBuddy never sent it): its "
+        "`kind` (`spool`, `supplier`, `location`, `insert_type` or `filament`), its ScadBuddy "
+        "id (`sb_id`), the error label, the `attempts` and when (`at`), newest first; a "
+        "later write that works drops the row. `skipped` says why no pass runs now: "
+        "`no_bambuddy` (no Bambuddy is configured) or `nothing_pushes` (no data type is set "
+        "to push); else null. Reads ScadBuddy only."
     ),
 )
 async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDep) -> SyncStatus:
@@ -1326,8 +1327,9 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
         "once the pass is asked for; it runs in the background, and "
         "`GET /filament/sync/status` shows how it went. 409 with `code` `no_bambuddy` when "
         "no Bambuddy is configured, and `nothing_pushes` when no data type is set to push. "
-        "503 when the pass could not be asked for (the workflow service did not answer); "
-        "`detail` names the error, and nothing started."
+        "503 when the pass could not be asked for (the settings read or the workflow service "
+        "failed, or the two took over 5 seconds); `detail` ends in an error label "
+        "(`internal` for any failure outside Bambuddy), and nothing started."
     ),
 )
 async def run_filament_sync(state: StateDep) -> SyncRun:
