@@ -376,6 +376,56 @@ async def test_a_spools_read_that_fails_is_a_k_reason(
     assert (done.k_reason or "").startswith("Bambuddy did not list its spools")
 
 
+@respx.mock
+async def test_an_apply_refused_for_a_failed_spools_read_ends_with_the_reason(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    type_id = _type(types, pg_pool)
+    spool = FilamentSpoolStore(pg_pool).create(SpoolCreate(type_id=type_id), actor="ann").id
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, linked_at)"
+            " VALUES (%s, 40, now())",
+            (spool,),
+        )
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
+
+    shown = [
+        TypeKValueCreate(
+            printer_id=UUID(int=7), extruder=0, nozzle_diameter="0.4", k_value=Decimal("0.02")
+        )
+    ]
+    with pytest.raises(ProfileChangedError) as refused:
+        await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=shown)
+
+    # The reason comes before the advice: "...shown: <reason>: refresh again".
+    message = str(refused.value)
+    assert message.startswith("the K values now are not the ones shown: Bambuddy did not list")
+    assert message.endswith(": refresh again")
+    assert types.k_values(type_id) == []
+
+
+async def test_an_apply_refused_for_k_values_added_meanwhile_says_so(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    type_id = _type(types, pg_pool)
+    with pg_pool.connection() as conn:
+        printer = conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000000002', 'H2C', 1) RETURNING id"
+        ).fetchone()
+    assert printer is not None
+    own = TypeKValueCreate(
+        printer_id=printer["id"], extruder=0, nozzle_diameter="0.4", k_value=Decimal("0.03")
+    )
+    types.set_k_values(type_id, _rows(type_id, [own]), actor="ann")
+
+    with pytest.raises(ProfileChangedError) as refused:
+        await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=[own])
+
+    assert "the type now has K values of its own, so none will be imported" in str(refused.value)
+
+
 async def test_a_fill_never_writes_over_a_value_set_meanwhile(
     types: SpoolTypeStore, pg_pool: PgPool
 ) -> None:

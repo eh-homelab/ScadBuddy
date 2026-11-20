@@ -469,7 +469,14 @@ class TypeFiller:
             if k_values is not None:
                 rows, result.k_reason = await self._k_values(type_id, reads)
                 if _k_key(rows) != _k_key(k_values):
-                    why = f": {result.k_reason}" if result.k_reason else ""
+                    reason = result.k_reason
+                    if reason is None:
+                        own = await asyncio.to_thread(self.types.k_values, type_id)
+                        if own:
+                            reason = (
+                                "the type now has K values of its own, so none will be imported"
+                            )
+                    why = f": {reason}" if reason else ""
                     raise ProfileChangedError(
                         f"the K values now are not the ones shown{why}: refresh again"
                     )
