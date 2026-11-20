@@ -430,9 +430,17 @@ async def test_a_check_past_its_timeout_kills_the_child(tmp_path: Path, sleeper:
             )
         assert not box.busy
     assert _failed("check-timeout") == before + 1
-    # A child that the timeout stopped before it wrote its pid did not live on (#6760).
-    if sleeper.exists():
-        assert _state(_pid(sleeper)) in (None, "Z", "X")
+    # A child that the timeout stopped before its rename left its pid in the partial
+    # file, and one stopped before its write left neither file (#6760). A live child
+    # writes its pid at once, so neither file may appear later (#6766).
+    partial = sleeper.with_name(f"{sleeper.name}.partial")
+    if not sleeper.exists() and not partial.exists():
+        await asyncio.sleep(1.0)
+        assert not sleeper.exists(), "a child outlived the timeout"
+        assert not partial.exists(), "a child outlived the timeout"
+    for path in (sleeper, partial):
+        if path.exists() and path.read_text():
+            assert _state(_pid(path)) in (None, "Z", "X")
     assert list((tmp_path / "spool").iterdir()) == []
 
 
