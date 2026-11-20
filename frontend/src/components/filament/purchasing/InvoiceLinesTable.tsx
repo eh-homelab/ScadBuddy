@@ -193,6 +193,7 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
                         candidates={[...ticked.filter((one) => !candidates.some((c) => c.id === one.id)), ...candidates]}
                         quantity={quantity}
                         value={row.updateSpoolIds}
+                        money={money}
                         onChange={(next) => {
                           change(at, { updateSpoolIds: next })
                           onCommit()

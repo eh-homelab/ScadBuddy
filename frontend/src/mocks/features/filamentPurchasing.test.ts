@@ -214,8 +214,11 @@ describe('the purchasing mocks', () => {
     it('fills a costed spool with no invoice line and replaces its cost, with one edited event (#6700)', async () => {
       resetMockState()
       const costed = await createSpool({ type_id: T.JADE, cost_per_kg: '10', weight_locked: false })
+      expect(costed.invoice_line_id).toBeNull()
       const done = await confirmInvoice((await draft([costed.id])).id)
       expect(done.lines[0]!.spool_ids[0]).toBe(costed.id)
+      const listed = (await listSpools({ includeArchived: true })).find((one) => one.id === costed.id)
+      expect(listed?.invoice_line_id).toBe(done.lines[0]!.id)
       expect(await getSpool(costed.id)).toMatchObject({ cost_per_kg: '15.0000' })
       const edited = (await listSpoolEvents(costed.id)).filter((event) => event.kind === 'edited')
       expect(edited.length).toBe(1)

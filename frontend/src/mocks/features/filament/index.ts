@@ -118,6 +118,8 @@ function view(row: SpoolRow): FilamentSpool {
   const pct = effective.low_stock_pct ?? LOW_STOCK_PCT
   return {
     ...row,
+    // The invoice line it was bought on (#6700): a line may fill a spool with none.
+    invoice_line_id: invoicedLine.get(row.id) ?? invoiceRefOf(row.id)?.line_id ?? null,
     effective,
     overridden,
     names: {
