@@ -2,8 +2,9 @@ import { Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIc
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
+import { getInventory, getSummary, listLocations, listSpools, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
+import { trayChecks, type TrayCheck } from '../../components/filament/CheckTray'
 import { SpoolCards } from '../../components/filament/SpoolCards'
 import { SpoolImport } from '../../components/filament/SpoolImport'
 import { SpoolsTable } from '../../components/filament/SpoolsTable'
@@ -131,6 +132,7 @@ export function SpoolsTab() {
   const [importing, setImporting] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [syncError, setSyncError] = useState<string | null>(null)
+  const [checks, setChecks] = useState<ReadonlyMap<string, TrayCheck>>(new Map())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -144,6 +146,14 @@ export function SpoolsTab() {
       setError(null)
     } catch (cause) {
       if (mine === latest.current) setError(message(cause))
+    }
+    // The trays read Bambuddy too, so they come after the list and never hold it back;
+    // without them, no spool is flagged (#6713).
+    try {
+      const checked = trayChecks(await getInventory())
+      if (mine === latest.current) setChecks(checked)
+    } catch {
+      if (mine === latest.current) setChecks(new Map())
     }
   }, [])
 
@@ -414,9 +424,10 @@ export function SpoolsTab() {
           selected={selected}
           onSelect={select}
           typeCodes={typeCodes}
+          checks={checks}
         />
       )}
-      {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} />}
+      {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} checks={checks} />}
 
       <SpoolImport
         open={importing}

@@ -286,13 +286,15 @@ class LocationStore:
         *,
         actor: str,
         at: datetime | None = None,
+        reason: str | None = None,
     ) -> m.SpoolEvent | None:
         """`move` on ``conn``, in the caller's transaction (`filament/inventory.py`
         `FilamentInventory.link`). A move through `move`/`move_on` clears the spool's
         ``tray_fingerprint``: what a tray showed when the spool was placed there says
         nothing of its new place. A printer merge (`repoint_printer_locations`) keeps it,
         since the spool stays in the same tray. ``at`` is when it happened (a report's
-        time, `filament/capture.py`); with none the ledger books it now."""
+        time, `filament/capture.py`); with none the ledger books it now. A ``reason`` is
+        the event's ``data.reason`` (a tray reconcile's, #6713)."""
         spool = conn.execute(
             "SELECT location_id FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
         ).fetchone()
@@ -324,7 +326,8 @@ class LocationStore:
             "moved",
             actor=actor,
             at=at,
-            data={"from": before, "to": location_id},
+            data={"from": before, "to": location_id}
+            | ({} if reason is None else {"reason": reason}),
         )
 
     # -- internals --------------------------------------------------------------------

@@ -181,7 +181,43 @@ def test_a_line_with_no_type_is_a_line_error(shop: Shop) -> None:
     shop.nothing_was_made(invoice.id)
 
 
-def test_a_costed_spool_stops_the_whole_confirm(shop: Shop) -> None:
+def test_a_line_fills_a_costed_spool_and_replaces_its_cost(shop: Shop) -> None:
+    """R-6700-1 and R-6700-2: a spool with its own cost and no invoice line is filled; its
+    cost is the line's, and one `edited` event by the caller records the old and new cost."""
+    type_id = shop.type_id()
+    costed = shop.spools.create(SpoolCreate(type_id=type_id, cost_per_kg=D("9")), actor="ann").id
+    invoice = shop.one(
+        type_id, quantity=1, unit_price=D(40), line_subtotal=D(40), update_spool_ids=[costed]
+    )
+    done, now = _confirm(shop, invoice)
+    assert now
+    line = done.lines[0]
+    assert line.spool_ids == [costed]
+    filled = shop.spools.get(costed)
+    assert filled is not None
+    assert filled.cost_per_kg == D("42.8000")
+    assert [r["id"] for r in shop.spool_rows(invoice.id)] == [costed]
+    edited = [e for e in shop.spools.events(costed) if e.kind == "edited"]
+    assert len(edited) == 1
+    assert edited[0].actor == "ann"
+    assert (edited[0].ref_kind, edited[0].ref_id) == ("invoice_line", str(line.id))
+    assert edited[0].data["changes"] == {"cost_per_kg": ["9.0000", "42.8000"]}
+
+
+def test_the_spool_list_names_each_spools_invoice_line(shop: Shop) -> None:
+    """R-6700-7: the invoice page offers a costed spool with no invoice line, never one on
+    another invoice; the list says which is which."""
+    type_id = shop.type_id()
+    costed = shop.spools.create(SpoolCreate(type_id=type_id, cost_per_kg=D("9")), actor="ann").id
+    assert {s.id: s.invoice_line_id for s in shop.spools.list()} == {costed: None}
+    invoice = shop.one(
+        type_id, quantity=1, unit_price=D(40), line_subtotal=D(40), update_spool_ids=[costed]
+    )
+    done, _ = _confirm(shop, invoice)
+    assert {s.id: s.invoice_line_id for s in shop.spools.list()} == {costed: done.lines[0].id}
+
+
+def test_a_costed_spool_of_a_line_that_is_refused_keeps_its_cost(shop: Shop) -> None:
     type_id = shop.type_id()
     costed = shop.spools.create(SpoolCreate(type_id=type_id, cost_per_kg=D("9")), actor="ann").id
     invoice = shop.draft(
@@ -192,21 +228,23 @@ def test_a_costed_spool_stops_the_whole_confirm(shop: Shop) -> None:
                 unit_price=D(20),
                 line_subtotal=D(20),
                 type_id=type_id,
+                update_spool_ids=[costed],
             ),
             InvoiceLineIn(
                 description="two",
                 quantity=1,
                 unit_price=D(20),
                 line_subtotal=D(20),
-                type_id=type_id,
-                update_spool_ids=[costed],
+                type_id=None,
             ),
         ]
     )
-    with pytest.raises(InvoiceLineError, match="line 2") as raised:
+    with pytest.raises(InvoiceLineError, match="line 2"):
         shop.invoices.confirm(invoice.id, actor="ann")
-    assert str(costed) in str(raised.value)
     shop.nothing_was_made(invoice.id, spools=1)
+    kept = shop.spools.get(costed)
+    assert kept is not None
+    assert kept.cost_per_kg == D("9.0000")
 
 
 @pytest.mark.parametrize("kind", ["archived", "invoiced", "other_type"])
@@ -239,7 +277,12 @@ def test_a_spool_that_is_archived_invoiced_or_of_another_type_is_refused(
         ],
         number="N2",
     )
-    with pytest.raises(InvoiceLineError, match="line 1"):
+    reason = {
+        "archived": "is archived",
+        "invoiced": "already belongs to an invoice line",
+        "other_type": "has another spool type",
+    }[kind]
+    with pytest.raises(InvoiceLineError, match=f"line 1: spool {spool} {reason}"):
         shop.invoices.confirm(invoice.id, actor="ann")
     assert shop.status(invoice.id) == "draft"
 
