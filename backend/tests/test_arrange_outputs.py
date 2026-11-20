@@ -38,11 +38,13 @@ from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import PlateLayout, plates_thumbnails
 from scadbuddy.render.objects3mf import read_objects
+from scadbuddy.render.plate import fit_problem as plate_fit_problem
 from scadbuddy.render.split import ColourPart
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.template import Part
+from scadbuddy.workflows import arrange as arrange_module
 from scadbuddy.workflows import outputs
 from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import (
@@ -882,6 +884,17 @@ async def test_arrange_counts_the_filaments_the_writer_counts(
     await publish_library_pieces(deps.blobs, [entry], read)
     library = part_of(entry)
     items = [PackItem(part=library), PackItem(part=library, recolour={"#FF0000": "#0000FF"})]
+    # The filaments Arrange itself sizes each accepted plate's tower from (#6770).
+    sized: list[int] = []
+    fit = plate_fit_problem
+
+    def recorded(*args: Any, **kwargs: Any) -> str | None:
+        problem = fit(*args, **kwargs)
+        if problem is None and kwargs.get("settings") is not None:
+            sized.append(kwargs["settings"].filaments)
+        return problem
+
+    monkeypatch.setattr(arrange_module, "fit_problem", recorded)
     layout = pack_layout(
         PackRequest(
             items=items,
@@ -889,16 +902,8 @@ async def test_arrange_counts_the_filaments_the_writer_counts(
             allow_own=False,
         )
     )
-    arranged = [
-        len(
-            {
-                c.upper()
-                for placed in plate.items
-                for c in PackItem(part=library, recolour=placed.recolour).colours()
-            }
-        )
-        for plate in layout.plates
-    ]
+    assert len(layout.plates) == 1
+    arranged = [max(sized)]
     written: list[int] = []
     write = write_plates_3mf
 

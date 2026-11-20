@@ -323,6 +323,26 @@ def test_a_multi_plate_file_with_the_tower_off_gets_room_when_the_print_turns_it
     assert "prime tower" in found.message
 
 
+def test_the_tower_is_sized_from_every_filament_the_file_lists(tmp_path: Path) -> None:
+    """#6770: the send sizes an author's tower from every `filament_colour` the file
+    lists (`send._file_tower`), so plate fit does too. 300 x 265 mm leaves room on the
+    H2C for a two-filament tower, not for a four-filament one."""
+    size = (300, 265, 4)
+    parts = [part(cube_of(*size)), part(cube_of(2, 2, 2), "#00FF00", 2)]
+    two = output(size=size, colours=["#FF0000", "#00FF00"])
+    listed = tmp_path / "four.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        ["#FF0000", "#00FF00", "#0000FF", "#FFFF00"],
+        listed,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+    )
+    assert _run(PLATE_FIT, output=two) == []
+    [found] = _run(PLATE_FIT, output=two, model_3mf=listed)
+    assert any(e.label == "placement" for e in found.evidence)
+
+
 # --- the runner ---------------------------------------------------------------------
 
 

@@ -2483,21 +2483,29 @@ def stated_tower_off(payload: bytes) -> bool:
     return isinstance(settings, dict) and _tower_off(settings)
 
 
+def stated_settings(payload: bytes) -> dict[str, Any] | None:
+    """``payload``'s ``project_settings.config`` as the send reads its tower from it
+    (``send.towers_within_reach``, #6757, #6770), or ``None``: a file the send prints as
+    it is (``as_is``), or one with no readable settings."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if _layout(archive) == "as_is":
+                return None
+            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
 def stated_no_sparse_layers(payload: bytes) -> bool:
     """Whether ``payload`` states ``wipe_tower_no_sparse_layers`` on, read as the send
     reads it (#6757). A file laid out by ScadBuddy states it when an Arrange asked for
     it, and :func:`replate_3mf` keeps the slicer's keep-out round the tower (#6735). An
     author's file keeps it too: the send moves its tower out of the keep-out
     (``send.towers_within_reach``). A file the send prints as it is (``as_is``) is
-    false."""
-    try:
-        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            if _layout(archive) == "as_is":
-                return False
-            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
-    except (KeyError, ValueError, zipfile.BadZipFile):
-        return False
-    return isinstance(settings, dict) and _stated_flag(settings, "wipe_tower_no_sparse_layers")
+    false (:func:`stated_settings`)."""
+    settings = stated_settings(payload)
+    return settings is not None and _stated_flag(settings, "wipe_tower_no_sparse_layers")
 
 
 def part_settings_slots(payload: bytes) -> set[int] | None:
