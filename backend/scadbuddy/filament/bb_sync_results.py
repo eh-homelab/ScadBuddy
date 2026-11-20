@@ -506,6 +506,11 @@ class LocalFilamentSync:
         self._filament = filament
         self._settings = settings_store
 
+    async def directions(self) -> FilamentSync:
+        read = await asyncio.to_thread(self._settings.read, {"filament_sync"})
+        sync: FilamentSync = read["filament_sync"]
+        return sync
+
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
         def run() -> SyncPlan:
             read = self._settings.read({"filament_sync", "spool_overlay_refresh_seconds"})

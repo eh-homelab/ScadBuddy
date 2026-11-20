@@ -171,7 +171,9 @@ async def test_the_interval_comes_back_from_the_pass(client: Client) -> None:
 
 
 @pytest.mark.parametrize(
-    "ending", [{"instance_changed": True}, {"skipped": "no_bambuddy"}], ids=["instance", "none"]
+    "ending",
+    [{"instance_changed": True}, {"skipped": "no_bambuddy"}, {"skipped": "nothing_pushes"}],
+    ids=["instance", "none", "nothing-pushes"],
 )
 async def test_a_workflow_for_an_old_instance_ends(
     client: Client, ending: dict[str, object]

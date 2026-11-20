@@ -22,14 +22,17 @@ from pydantic import BaseModel
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
+from scadbuddy.filament.bb_sync_models import pushes_anything
+
 logger = logging.getLogger(__name__)
 
 FILAMENT_BB_SYNC_WORKFLOW = "FilamentBbSync"
 CHANGED_SIGNAL = "changed"
 #: The whole nudge's bound: the settings read and the signal-with-start (Decision 17).
 NUDGE_TIMEOUT = 5.0
-#: What a nudge reads: the instance, and the timer's interval a new workflow starts with.
-NUDGE_SETTINGS = frozenset({"bambuddy_url", "spool_overlay_refresh_seconds"})
+#: What a nudge reads: the instance, the timer's interval a new workflow starts with, and
+#: the directions (nothing pushes: no workflow, R-T8-2).
+NUDGE_SETTINGS = frozenset({"bambuddy_url", "spool_overlay_refresh_seconds", "filament_sync"})
 
 
 class SyncStart(BaseModel, extra="forbid"):
@@ -73,13 +76,14 @@ class FilamentSyncNudger:
 
     async def nudge(self, *, full: bool = False) -> None:
         """Signal the configured Bambuddy's workflow ``changed``, and start it when none
-        runs. Nothing without a ``bambuddy_url``. A failure is logged, never raised: the
-        timer's full pass makes up for a lost nudge (Decision 7)."""
+        runs. Nothing without a ``bambuddy_url``, or when no data type pushes (R-T8-2). A
+        failure is logged, never raised: the timer's full pass makes up for a lost nudge
+        (Decision 7)."""
         try:
             async with asyncio.timeout(NUDGE_TIMEOUT):
                 read = await asyncio.to_thread(self.load_settings, NUDGE_SETTINGS)
                 url = read["bambuddy_url"]
-                if not url:
+                if not url or not pushes_anything(read["filament_sync"]):
                     return
                 instance = instance_for(url)
                 await self.client_getter().start_workflow(

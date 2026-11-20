@@ -28,7 +28,7 @@ from scadbuddy.bambuddy.models import (
     as_utc,
 )
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.core.settings import FilamentSync
+from scadbuddy.core.settings import FilamentSync, pushes
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 
 #: The SB rows the sync writes to Bambuddy, as `filament_bb_creates.kind` and
@@ -310,9 +310,16 @@ class SyncPassResult(BaseModel, extra="forbid"):
     error: str | None = None
 
 
+def pushes_anything(sync: FilamentSync) -> bool:
+    """True when some data type moves ScadBuddy's data into Bambuddy (R-T8-2)."""
+    return any(pushes(getattr(sync, name)) for name in FilamentSync.model_fields)
+
+
 class FilamentSyncApi(Protocol):
     """What the pass reads of SB and writes to it (#6265 Task 6): `LocalFilamentSync` in
     the API's process, `RemoteFilamentSync` (the CRUD routes) in the print worker."""
+
+    async def directions(self) -> FilamentSync: ...
 
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan: ...
 

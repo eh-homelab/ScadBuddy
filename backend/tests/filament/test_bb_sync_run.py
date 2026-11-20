@@ -42,16 +42,26 @@ SETTINGS = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="s3cret")
 Round = SyncPlan | Callable[[int, list[list[BbWriteResult]]], SyncPlan]
 
 
+#: A pass's directions: the spools push, so the pass reads Bambuddy.
+PUSHES_SPOOLS = FilamentSync(spools="sb_to_bb")
+
+
 class FakeSync:
     """A `FilamentSyncApi` that answers ``rounds`` in turn (then an empty plan) and keeps
     every call."""
 
-    def __init__(self, rounds: Sequence[Round] = ()) -> None:
+    def __init__(
+        self, rounds: Sequence[Round] = (), directions: FilamentSync = PUSHES_SPOOLS
+    ) -> None:
         self.rounds = list(rounds)
+        self.sync = directions
         self.plans: list[tuple[BbSnapshot, int]] = []
         self.planned: list[SyncPlan] = []
         self.sent: list[tuple[str, list[BbWrite], list[BbWriteResult], str | None]] = []
         self.recorded: list[SyncPassResult] = []
+
+    async def directions(self) -> FilamentSync:
+        return self.sync
 
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
         self.plans.append((snap, limit))
@@ -172,6 +182,37 @@ async def test_another_instance_calls_nothing() -> None:
     assert result.instance_changed is True
     assert not respx.calls
     assert sync.plans == [] and sync.recorded == []
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "directions",
+    [FilamentSync(), FilamentSync(spools="bb_to_sb", weights="off", suppliers="off")],
+    ids=["defaults", "pulls-only"],
+)
+async def test_nothing_pushing_skips_before_any_bambuddy_read(directions: FilamentSync) -> None:
+    """R-T8-2: no data type pushes, so the pass reads nothing of Bambuddy, plans nothing
+    and records the pass as skipped."""
+    sync = FakeSync(directions=directions)
+    _listings()
+
+    result = await _run(sync)
+
+    assert result.skipped == "nothing_pushes" and result.error is None
+    assert not respx.calls
+    assert sync.plans == [] and sync.recorded == [result]
+
+
+@respx.mock
+@pytest.mark.parametrize("direction", ["sb_to_bb", "two_way"])
+async def test_one_pushing_type_reads_bambuddy(direction: str) -> None:
+    sync = FakeSync(directions=FilamentSync(locations=direction))  # type: ignore[arg-type]
+    routes = _listings()
+
+    result = await _run(sync)
+
+    assert result.skipped is None
+    assert routes["spools"].called
 
 
 def test_the_instance_ignores_case_and_a_trailing_slash() -> None:

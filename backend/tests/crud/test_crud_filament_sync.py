@@ -48,6 +48,7 @@ SPOOLS = FilamentSync(
 PLAN = f"{BASE}/filament/sync/plan"
 RESULTS = f"{BASE}/filament/sync/results"
 PASS = f"{BASE}/filament/sync/pass"
+DIRECTIONS = f"{BASE}/filament/sync/directions"
 
 
 def test_the_print_areas_list_filament_sync() -> None:
@@ -172,6 +173,24 @@ async def test_plan_route_returns_the_plan(store: SettingsStore, crud: CrudClien
     assert plan.interval_s == float(
         store.read({"spool_overlay_refresh_seconds"})["spool_overlay_refresh_seconds"]
     )
+
+
+@pg
+async def test_the_directions_route_answers_the_stored_directions(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """R-T8-2: the pass reads them before Bambuddy; local and remote agree."""
+    assert await RemoteFilamentSync(crud).directions() == SPOOLS
+    assert await LocalFilamentSync(filament_on(store.pool), store).directions() == SPOOLS
+    app = print_crud_app(store, ServiceCredentialStore(store.pool))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://api"
+    ) as bare:
+        assert (await bare.get(DIRECTIONS)).status_code == 401
+    with threaded_print_crud(store, caller="render") as other:
+        with pytest.raises(CrudRefusedError) as wrong:
+            other.request("GET", DIRECTIONS)
+        assert wrong.value.status == 403
 
 
 @pg

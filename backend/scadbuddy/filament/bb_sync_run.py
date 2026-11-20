@@ -33,6 +33,7 @@ from scadbuddy.filament.bb_sync_models import (
     FilamentSyncApi,
     SyncPassInput,
     SyncPassResult,
+    pushes_anything,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.rfid_push import error_label
@@ -54,7 +55,8 @@ async def run_pass(
     max_rounds: int = 4,
     interval_s: float = DEFAULT_INTERVAL_S,
 ) -> SyncPassResult:
-    """One pass, as the module says. With no Bambuddy URL it is ``skipped``. When the URL
+    """One pass, as the module says. With no Bambuddy URL it is ``skipped``, and so is a
+    pass with no data type that pushes (``nothing_pushes``, R-T8-2: no Bambuddy read). When the URL
     is another instance's, it calls nothing, records nothing and answers
     ``instance_changed``: the workflow of the configured instance records its own passes.
     So does a pass whose plan answers ``instance_changed`` (SB's links belong to another
@@ -83,6 +85,11 @@ async def run_pass(
         return result
     if instance_for(settings.bambuddy_url) != instance:
         return empty.model_copy(update={"instance_changed": True})
+    if not pushes_anything(await api.directions()):
+        # R-T8-2: no Bambuddy read when nothing pushes; the workflow ends on it.
+        result = empty.model_copy(update={"skipped": "nothing_pushes"})
+        await api.record_pass(result)
+        return result
     async with client_for(settings) as client:
         try:
             snap = await _read(client, instance, full)

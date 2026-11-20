@@ -1456,6 +1456,22 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     tests' autouse `filament_nudges` (`tests/api/conftest.py`) records `nudge_soon` and
     silences `nudge`, as the api tests keep the spool refresh off (#4180): a pass would read
     Bambuddy beside a test's mocked reads.
+125. Task 8 (R-T8-2, controller ruling on concern 1): `run_pass` reads the stored
+    `filament_sync` through `FilamentSyncApi.directions` (`LocalFilamentSync` reads the
+    settings; `RemoteFilamentSync` the new CRUD route `GET …/print/filament/sync/directions`,
+    area `filament-sync`, since the print worker's settings carry no `filament_sync`). After
+    the URL and instance checks, a pass in which no data type pushes (`pushes_anything`,
+    `bb_sync_models.py`) records the pass as `skipped="nothing_pushes"` and returns before
+    any Bambuddy read. The workflow ends on any `skipped`. `FilamentSyncNudger.nudge` reads
+    `filament_sync` too and starts nothing when nothing pushes, as with no `bambuddy_url`.
+    A settings save that turns a direction on nudges (decision 123), which starts the
+    workflow again. Tests: `test_nothing_pushing_skips_before_any_bambuddy_read`,
+    `test_a_workflow_for_an_old_instance_ends[nothing-pushes]`,
+    `test_a_nudge_with_nothing_pushing_does_nothing`,
+    `test_turning_a_direction_on_starts_the_workflow`,
+    `test_the_directions_route_answers_the_stored_directions`. Why: by default nothing
+    pushes, and a workflow would read Bambuddy's five listings every interval for nothing.
+    Cost: one more CRUD call per pass.
 
 ## Self-review
 

@@ -211,6 +211,7 @@ from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import (
     MaybeIdempotencyKey,
@@ -1866,6 +1867,19 @@ def _sync(filament: FilamentDep, settings: SettingsStoreDep) -> LocalFilamentSyn
 
 
 SyncDep = Annotated[LocalFilamentSync, Depends(_sync)]
+
+
+@router.get(
+    "/filament/sync/directions",
+    name="crud_print_filament_sync_directions",
+    summary="Which way each kind of filament data moves",
+    description=(
+        "The stored `filament_sync` (#6265 R-T8-2): a pass reads it before Bambuddy, and"
+        " skips the pass when no data type pushes."
+    ),
+)
+async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
+    return await sync.directions()
 
 
 @router.post(

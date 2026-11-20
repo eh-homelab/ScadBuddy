@@ -149,6 +149,7 @@ from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.client import (
     CrudClient,
     CrudRefusedError,
@@ -1441,6 +1442,10 @@ class RemoteFilamentSync:
 
     def __init__(self, client: CrudClient) -> None:
         self._client = client
+
+    async def directions(self) -> FilamentSync:
+        response = await self._client.request("GET", f"{BASE}/filament/sync/directions")
+        return FilamentSync.model_validate(response.json())
 
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
         body = PlanRequest(snapshot=snap, limit=limit).model_dump(mode="json")
