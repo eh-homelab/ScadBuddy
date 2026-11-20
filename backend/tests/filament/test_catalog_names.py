@@ -19,6 +19,7 @@ from scadbuddy.filament.catalog import (
     catalog_key,
     find_by_key,
     key_sql,
+    lookup_key,
     resolve_or_add,
 )
 from scadbuddy.filament.models import (
@@ -307,3 +308,34 @@ def test_a_keyless_row_takes_a_patch_that_keeps_its_name(pg_pool: PgPool) -> Non
         store.update("brands", brand, BrandPatch(name="???"))
     renamed = store.update("brands", brand, BrandPatch(name="Acme Two"))
     assert renamed is not None and renamed.name == "Acme Two"
+
+
+@pg
+def test_a_keyless_subtype_moved_onto_a_taken_alias_key_is_a_clash(pg_pool: PgPool) -> None:
+    """R-6706-24: a keyless subtype's aliases move with it, and a taken key there is the
+    409 a normal move gives, naming the holder."""
+    store: Any = CatalogStore(pg_pool)
+    pla = next(r for r in store.list("materials") if r.name == "PLA")
+    with pg_pool.connection() as conn:
+        subtype = _keyless(conn, "filament_subtypes", "filament_subtypes_claim_name", "***")
+    store.set_aliases("subtypes", subtype, ["Lustre"])
+    holder = store.create("subtypes", SubtypeCreate(name="Lustre", material_id=pla.id))
+    with pytest.raises(CatalogKeyClashError) as clash:
+        store.update("subtypes", subtype, SubtypePatch(material_id=pla.id))
+    assert (clash.value.holder_id, clash.value.holder_name) == (holder.id, "Lustre")
+    assert store.get("subtypes", subtype).material_id is None
+
+
+@pg
+def test_one_lookup_tells_a_keyless_name_from_an_unknown_key(pg_pool: PgPool) -> None:
+    """R-6706-25: `lookup_key` answers both in one query."""
+    store: Any = CatalogStore(pg_pool)
+    made = store.create("brands", BrandCreate(name="Lookup Co"))
+    with pg_pool.connection() as conn:
+        assert lookup_key(conn, "brands", "lookup-co") == (True, made.id)
+        assert lookup_key(conn, "brands", "Nobody Co") == (True, None)
+        assert lookup_key(conn, "brands", "???") == (False, None)
+        pla = find_by_key(conn, "materials", "PLA")
+        keyed, basic = lookup_key(conn, "subtypes", "basic", material=pla)
+        assert keyed and basic == find_by_key(conn, "subtypes", "Basic", material=pla)
+        assert basic is not None

@@ -87,6 +87,13 @@ row.
   material with no key is unknown, never a disagreement. The CIEDE2000 colour rule is
   unchanged. (A material `PETG HF` cannot hold the alias `PETG-HF`: the two share the key
   `PETGHF`, so the tray agrees by the name's own key.)
+- R-6706-24: a keyless subtype moved onto a scope where one of its aliases' keys is taken
+  is the 409 a normal move gives (`CatalogKeyClashError`, naming the holder). The subtype
+  PATCH path already maps the trigger's unique violation on the names table that way; a
+  test pins it.
+- R-6706-25: `catalog.lookup_key` answers in one query whether a name has a key and which
+  row holds it. `find_by_key` and the type match's `_by_key` use it, so the match makes one
+  query per field, not a `has_key` call and a lookup.
 - A name or alias with no letter or digit has no key: the trigger refuses such a name
   (422, `CatalogKeyEmptyError`), the migration neither merges nor keys an existing one,
   and a lookup never finds a row for it.

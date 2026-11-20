@@ -25,8 +25,7 @@ from scadbuddy.filament.catalog import (
     CatalogRefError,
     catalog_key,
     check_temps,
-    find_by_key,
-    has_key,
+    lookup_key,
 )
 from scadbuddy.filament.catalog import (
     TypeTempError as TypeTempError,
@@ -481,12 +480,14 @@ def _by_ids(
 def _by_key(
     conn: Conn, kind: str, name: str | None, *, material: UUID | None = None
 ) -> UUID | Literal[False] | None:
-    """The catalog row ``name`` names by key (`find_by_key`); ``None`` for no name or one
-    with no letter or digit (it counts as none, R-6706-18), ``False`` when no row holds
-    its key."""
-    if name is None or not has_key(conn, name):
+    """The catalog row ``name`` names by key (`lookup_key`, one query, R-6706-25);
+    ``None`` for no name or one with no letter or digit (it counts as none, R-6706-18),
+    ``False`` when no row holds its key."""
+    if name is None:
         return None
-    found = find_by_key(conn, kind, name, material=material)
+    keyed, found = lookup_key(conn, kind, name, material=material)
+    if not keyed:
+        return None
     return False if found is None else found
 
 

@@ -296,21 +296,30 @@ def has_key(conn: Conn, name: str) -> bool:
     return bool(row["has"])
 
 
+def lookup_key(
+    conn: Conn, kind: str, name: str, *, material: UUID | None = None
+) -> tuple[bool, UUID | None]:
+    """In one query: whether ``name`` has a key (`has_key`), and the row `find_by_key`
+    finds for it (none for a name with no key)."""
+    _, names = _names(kind)
+    where, scope = "n.key = k.key", list[Any]()
+    if names.scope is not None:
+        where += " AND n.material_scope IN (%s, %s) ORDER BY n.material_scope = %s"
+        scope = [material or NIL, NIL, NIL]
+    # The subquery's placeholders come before the key's in the text.
+    row = conn.execute(
+        f"SELECT k.key <> '' AS keyed, (SELECT n.{names.owner} FROM {names.table} n"
+        f" WHERE {where} LIMIT 1) AS id FROM (SELECT {key_sql('%s')} AS key) k",
+        [*scope, name],
+    ).fetchone()
+    assert row is not None
+    return bool(row["keyed"]), row["id"]
+
+
 def find_by_key(conn: Conn, kind: str, name: str, *, material: UUID | None = None) -> UUID | None:
     """The row of a catalog with names whose name or alias has ``name``'s key, archived
     or not. A subtype is ``material``'s own, else one for every material."""
-    _, names = _names(kind)
-    if names.scope is None:
-        row = conn.execute(
-            f"SELECT {names.owner} AS id FROM {names.table} WHERE key = {key_sql('%s')}", (name,)
-        ).fetchone()
-    else:
-        row = conn.execute(
-            f"SELECT {names.owner} AS id FROM {names.table} WHERE key = {key_sql('%s')}"
-            " AND material_scope IN (%s, %s) ORDER BY material_scope = %s LIMIT 1",
-            (name, material or NIL, NIL, NIL),
-        ).fetchone()
-    return None if row is None else row["id"]
+    return lookup_key(conn, kind, name, material=material)[1]
 
 
 def resolve_or_add(
