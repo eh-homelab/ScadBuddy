@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../../components/ui/collapsible'
 import { ApiError } from '../../api/client'
 import { getForecast, getMetrics, getPurchasingMetrics, type Forecast, type InventoryMetrics, type PurchasingMetrics } from '../../api/filament'
 import { BarList } from '../../components/filament/charts/BarList'
@@ -155,9 +156,9 @@ function Consumption({ metrics, order }: { metrics: InventoryMetrics; order: rea
         <p className="text-[12px] text-muted-foreground">
           {g(used)} used {span}; {g(wasted)} of it in failed and cancelled prints.
         </p>
-        <details className="text-[12px]">
-          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Show the numbers</summary>
-          <div className="mt-2 max-h-72 overflow-auto rounded-md border">
+        <Collapsible className="text-[12px]">
+          <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground">Show the numbers</CollapsibleTrigger>
+          <CollapsibleContent className="mt-2 max-h-72 overflow-auto rounded-md border">
             <table aria-label="Consumption" className="w-full text-[12px]">
               <thead className="bg-muted/40 text-left text-muted-foreground">
                 <tr>
@@ -178,8 +179,8 @@ function Consumption({ metrics, order }: { metrics: InventoryMetrics; order: rea
                 ))}
               </tbody>
             </table>
-          </div>
-        </details>
+          </CollapsibleContent>
+        </Collapsible>
       </figcaption>
     </figure>
   )

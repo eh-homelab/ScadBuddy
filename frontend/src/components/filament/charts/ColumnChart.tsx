@@ -102,7 +102,7 @@ export function ColumnChart({ columns, series, label, formatValue, width: fallba
             ) : null,
           )}
         </g>
-        {hover != null && <rect aria-hidden="true" x={left + slot * hover} y={TOP} width={slot} height={plotH} className="fill-muted" opacity={0.6} />}
+        {hover != null && <rect aria-hidden="true" x={left + slot * hover} y={TOP} width={slot} height={plotH} className="fill-foreground" opacity={0.08} />}
         {columns.map((column, i) => {
           let base = 0
           const drawn = series.filter((one) => (column.values[one.id] ?? 0) > 0)
