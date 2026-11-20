@@ -696,8 +696,11 @@ SB makes it native. Its rules, as SB rules:
 - **Diff before create.** Before it proposes any spool, the session compares
   each line with the existing inventory. A spool with no cost that matches a
   line (often one an RFID tag auto-created) is that purchase: the line updates
-  it. A spool that already has a cost belongs to an earlier purchase, so a
-  matching line is a new spool. A qty-N line can be one update plus N-1 new
+  it. A spool that has a cost but no invoice line (most spools the Bambuddy
+  import made) may be this purchase too: the session offers it with its old and
+  new cost per kg, and the line updates it only when the person says yes; the
+  confirm replaces its cost (#6700). A spool on another invoice line is never
+  filled. A qty-N line can be one update plus N-1 new
   spools. When it is ambiguous, the session asks the person and never guesses.
 - **Cost per spool** = (line subtotal + that line's tax) ÷ quantity. Use the
   tax per line when the invoice prints it. When it prints only a total tax, the

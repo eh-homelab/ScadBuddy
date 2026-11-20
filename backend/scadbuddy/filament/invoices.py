@@ -41,7 +41,7 @@ Row = Mapping[str, Any]
 _Ids = list[UUID]
 _Invoices = list[pm.Invoice]
 _Candidates = list[pm.LineCandidates]
-_Claimed = list[tuple[UUID, int | None]]
+_Claimed = list[tuple[UUID, int | None, Decimal | None]]
 _Made = dict[str, tuple[UUID, int]]
 _SKU_MAX = 128
 _LINE_BOUNDS = "a line is out of range: its spool list, its total or the invoice total"
@@ -252,25 +252,19 @@ class InvoiceStore:
         """Per line, the open (unarchived) spools that match its type, or its proposed
         type, by effective material and exact RGBA, split by whether the spool's own purchase
         is known: an own cost or an invoice line. A type's cost is a default, not a
-        purchase. A line with neither type has none. None for no such invoice (#6267)."""
+        purchase. A costed spool names its invoice line, if it has one: one without may be
+        filled, and the line's cost replaces its own (#6700). A line with neither type has
+        none. None for no such invoice (#6267)."""
         invoice = self.get(invoice_id)
         if invoice is None:
             return None
         open_spools = self._spools.list()
-        with self._pool.connection() as conn:
-            bought = {
-                r["id"]
-                for r in conn.execute(
-                    "SELECT id FROM filament_spools"
-                    " WHERE cost_per_kg IS NOT NULL OR invoice_line_id IS NOT NULL"
-                ).fetchall()
-            }
         found: _Candidates = []
         for line in invoice.lines:
             key = self._line_key(line)
             matching = [
                 (
-                    s.id in bought,
+                    s.cost_per_kg is not None or s.invoice_line_id is not None,
                     pm.SpoolBrief(
                         id=s.id,
                         number=s.number,
@@ -279,6 +273,7 @@ class InvoiceStore:
                         rgba=s.effective.rgba,
                         cost_per_kg=s.effective.cost_per_kg,
                         grams_left=s.grams_left,
+                        invoice_line_id=s.invoice_line_id,
                     ),
                 )
                 for s in open_spools
@@ -538,8 +533,9 @@ class InvoiceStore:
         """Turn a draft into types, supplier products, spools with their cost, and price
         points, in one transaction (Decisions 3, 4, 9, 11-13). ``(invoice, confirmed_now)``;
         false when it was already confirmed (nothing more is made); ``None`` for no such
-        invoice. A refusal is a typed `ValueError` and nothing is written. `actor` is unused:
-        the events carry `invoice:<id>` as the actor."""
+        invoice. A refusal is a typed `ValueError` and nothing is written. The events carry
+        `invoice:<id>` as the actor, except the `edited` event of a filled spool whose own
+        cost the line replaces: that one carries `actor` (#6700, R-6700-2)."""
         shop = self._shop_currency()
         with self._pool.connection() as conn, conn.transaction():
             head = conn.execute(
@@ -580,7 +576,7 @@ class InvoiceStore:
             who = f"invoice:{invoice_id}"
             made: _Made = {}
             for line in lines:
-                self._confirm_line(conn, head, line, who, made)
+                self._confirm_line(conn, head, line, who, made, actor=actor)
             conn.execute(
                 "UPDATE filament_invoices SET status = 'confirmed', confirmed_at = now(),"
                 " updated_at = now() WHERE id = %s",
@@ -593,21 +589,25 @@ class InvoiceStore:
         assert found is not None
         return found
 
-    def _confirm_line(self, conn: Conn, head: Row, line: Row, who: str, made: _Made) -> None:
+    def _confirm_line(
+        self, conn: Conn, head: Row, line: Row, who: str, made: _Made, *, actor: str
+    ) -> None:
         position: int = line["position"]
         type_id, label_g = self._line_type(conn, line, made)
         product_id, pack_size = self._line_product(conn, head, line, type_id)
         known = self._claimed(conn, line, type_id)
         touched: _Ids = []
         try:
-            for spool_id, own_label_g in known:
+            for spool_id, own_label_g, own_cost in known:
                 grams = own_label_g or label_g
                 cost = spool_cost_per_kg(line["allocated_cost"], line["quantity"], grams)
+                # A spool with its own cost is replaced at the person's word (#6700), so its
+                # `edited` event, which records the old and new cost, is theirs.
                 self._spools.update_on(
                     conn,
                     spool_id,
                     m.SpoolPatch(type_id=type_id, cost_per_kg=cost),
-                    actor=who,
+                    actor=who if own_cost is None else actor,
                     ref_kind=_REF_KIND,
                     ref_id=line["id"],
                 )
@@ -736,8 +736,9 @@ class InvoiceStore:
 
     @staticmethod
     def _claimed(conn: Conn, line: Row, type_id: UUID) -> _Claimed:
-        """The spools the line fills in, each with its own label weight, if it has one;
-        every one is checked first (Decision 11)."""
+        """The spools the line fills in, each with its own label weight and its own cost, if
+        it has them; every one is checked first (Decision 11). A spool with its own cost but
+        no invoice line is filled, and the line's cost replaces its own (#6700, R-6700-1)."""
         position: int = line["position"]
         ids: _Ids = line["update_spool_ids"]
         if not ids:
@@ -765,12 +766,10 @@ class InvoiceStore:
                 reason = "is archived"
             elif row["invoice_line_id"] is not None:
                 reason = "already belongs to an invoice line"
-            elif row["cost_per_kg"] is not None:
-                reason = "already has its own cost"
             elif row["type_id"] is not None and row["type_id"] != type_id:
                 reason = "has another spool type"
             else:
-                known.append((spool_id, row["label_weight_g"]))
+                known.append((spool_id, row["label_weight_g"], row["cost_per_kg"]))
                 continue
             raise InvoiceLineError(position, f"spool {spool_id} {reason}")
         return known

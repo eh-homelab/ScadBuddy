@@ -222,11 +222,15 @@ class SpoolBrief(BaseModel):
     rgba: Rgba | None
     cost_per_kg: Decimal | None
     grams_left: float | None
+    #: The invoice line the spool was bought on. A costed spool with none may be filled,
+    #: and the line's cost replaces its own; one with a line is refused at confirm (#6700).
+    invoice_line_id: UUID | None = None
 
 
 class LineCandidates(BaseModel):
     """The open spools a line could update instead of making new ones (#6267): those with
-    the line's material and exact RGBA, split by whether they have a cost yet."""
+    the line's material and exact RGBA, split by whether they have a cost yet. A ``costed``
+    spool with no ``invoice_line_id`` may be filled; its cost is then replaced (#6700)."""
 
     position: int
     uncosted: list[SpoolBrief]

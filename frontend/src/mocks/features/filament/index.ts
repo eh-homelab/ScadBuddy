@@ -118,6 +118,8 @@ function view(row: SpoolRow): FilamentSpool {
   const pct = effective.low_stock_pct ?? LOW_STOCK_PCT
   return {
     ...row,
+    // The invoice line it was bought on (#6700): a line may fill a spool with none.
+    invoice_line_id: invoicedLine.get(row.id) ?? invoiceRefOf(row.id)?.line_id ?? null,
     effective,
     overridden,
     names: {
@@ -681,7 +683,6 @@ export function spoolClaimRefusal(id: string, typeId: string | null): string | n
   if (!row) return 'does not exist'
   if (row.archived_at) return 'is archived'
   if (invoicedLine.has(id) || invoiceRefOf(id)) return 'already belongs to an invoice line'
-  if (row.cost_per_kg != null) return 'already has its own cost'
   if (row.type_id != null && row.type_id !== typeId) return 'has another spool type'
   return null
 }
@@ -689,12 +690,19 @@ export function spoolClaimRefusal(id: string, typeId: string | null): string | n
 /** The spool's own label weight in grams, if it has one (`_claimed`: the cost uses it before the type's). */
 export const spoolLabelWeight = (id: string) => state.spools.find((one) => one.id === id)?.label_weight_g ?? null
 
-/** Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`). */
+/**
+ * Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`).
+ * The line's cost replaces a spool's own (#6700); that `edited` event is the caller's.
+ */
 export function updateInvoicedSpool(id: string, typeId: string, costPerKg: string, lineId: string): void {
   const at = state.spools.findIndex((one) => one.id === id)
   const row = state.spools[at]!
   state.spools[at] = { ...row, type_id: typeId, cost_per_kg: costPerKg, updated_at: now() }
-  addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor: `invoice:${lineId}`, data: { changes: { type_id: typeId, cost_per_kg: costPerKg } } })
+  const changes: Record<string, [unknown, unknown]> = {}
+  if (row.type_id !== typeId) changes.type_id = [row.type_id, typeId]
+  if (row.cost_per_kg !== costPerKg) changes.cost_per_kg = [row.cost_per_kg, costPerKg]
+  const actor = row.cost_per_kg == null ? `invoice:${lineId}` : 'mock@example.com'
+  if (Object.keys(changes).length) addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor, data: { changes } })
   invoicedLine.set(id, lineId)
 }
 
