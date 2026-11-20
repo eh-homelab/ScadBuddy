@@ -319,9 +319,15 @@ class SyncPassResult(BaseModel, extra="forbid"):
     error: str | None = None
 
 
+#: The data types the engine pushes (`tags` is #6264's drain, Decision 6).
+PUSHED_TYPES = ("spools", "weights", "presets", "suppliers", "locations")
+
+
 def pushes_anything(sync: FilamentSync) -> bool:
-    """True when some data type moves ScadBuddy's data into Bambuddy (R-T8-2)."""
-    return any(pushes(getattr(sync, name)) for name in FilamentSync.model_fields)
+    """True when some data type the engine pushes moves ScadBuddy's data into Bambuddy
+    (R-T8-2). ``tags`` does not count: tags reach Bambuddy through the refresh's tag
+    drain, not through this pass (Decision 6)."""
+    return any(pushes(getattr(sync, name)) for name in PUSHED_TYPES)
 
 
 def skip_reason(bambuddy_url: str | None, sync: FilamentSync) -> SkipReason | None:

@@ -148,6 +148,10 @@ def test_status_says_why_no_pass_runs(client: TestClient) -> None:
     configure(client)
     assert client.get(f"{SYNC}/status").json()["skipped"] == "nothing_pushes"
 
+    # The engine never pushes tags (Decision 6): tags alone is still nothing.
+    configure(client, filament_sync={"tags": "two_way"})
+    assert client.get(f"{SYNC}/status").json()["skipped"] == "nothing_pushes"
+
     configure(client, filament_sync={"locations": "two_way"})
     assert client.get(f"{SYNC}/status").json()["skipped"] is None
 
@@ -194,10 +198,14 @@ def test_run_without_bambuddy_is_409(
     assert filament_nudges == []
 
 
+@pytest.mark.parametrize("sync", [{}, {"tags": "two_way"}], ids=["defaults", "tags-only"])
 def test_run_with_nothing_pushing_is_409(
-    client: TestClient, filament_nudges: list[bool], temporal: FakeTemporal
+    client: TestClient,
+    filament_nudges: list[bool],
+    temporal: FakeTemporal,
+    sync: dict[str, str],
 ) -> None:
-    configure(client)
+    configure(client, filament_sync=sync)
     filament_nudges.clear()
 
     ran = client.post(f"{SYNC}/run")

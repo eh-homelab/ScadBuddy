@@ -2662,3 +2662,51 @@ def test_a_persons_edit_the_push_did_not_send_is_pulled(pg_pool: PgPool) -> None
     sb = f.spools.get(spool)
     assert sb is not None
     assert (sb.colour_name, sb.note) == ("Teal", "mine")
+
+
+def _link_times(pool: PgPool, spool: UUID) -> tuple[datetime, datetime | None]:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_updated_at, bb_seen_at FROM filament_bb_links WHERE spool_id = %s",
+            (spool,),
+        ).fetchone()
+    assert row is not None
+    return row["bb_updated_at"], row["bb_seen_at"]
+
+
+def test_a_row_older_than_the_link_is_left_alone(pg_pool: PgPool) -> None:
+    """Review M1: the push's results recorded a newer Bambuddy row than one this pull
+    read before it. The stale row takes nothing, books nothing and moves no link time."""
+    f = _filament(pg_pool)
+    (spool,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    newer = datetime.now(UTC) - timedelta(hours=1)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_updated_at = %s WHERE spool_id = %s",
+            (newer, spool),
+        )
+    seen, events = _link_seen(pg_pool, spool), _bb_events(f, spool)
+
+    stale = bb(updated_at=_bb_time(-2), weight_used=400.0, color_name="Blue")
+    report = pull(f, [stale], now=NOW + timedelta(hours=1))
+
+    assert report.updated == 0
+    assert _link_times(pg_pool, spool) == (newer, NOW)
+    assert (_link_seen(pg_pool, spool), _bb_events(f, spool)) == (seen, events)
+    sb = f.spools.get(spool)
+    assert sb is not None and sb.colour_name == "Red"
+
+
+def test_a_pull_that_sees_nothing_new_keeps_the_seen_time(pg_pool: PgPool) -> None:
+    """Review M2: ``bb_seen_at`` moves only when the seen copy changes, so a running pass
+    does not take every linked spool as written after its snapshot."""
+    f = _filament(pg_pool)
+    row = bb(updated_at=_bb_time(-3))
+    (spool,) = pull(f, [row], now=NOW).created_ids
+    assert _link_times(pg_pool, spool)[1] == NOW
+
+    pull(f, [row], now=NOW + timedelta(hours=1))
+    assert _link_times(pg_pool, spool)[1] == NOW
+
+    pull(f, [bb(updated_at=_bb_time(-1), color_name="Blue")], now=NOW + timedelta(hours=2))
+    assert _link_times(pg_pool, spool)[1] == NOW + timedelta(hours=2)

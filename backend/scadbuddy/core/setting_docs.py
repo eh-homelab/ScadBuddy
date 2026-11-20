@@ -399,9 +399,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Pull from Bambuddy every",
             "How often Bambuddy's spools are pulled and its local presets kept, on a schedule"
             " of their own so a print never waits on Bambuddy. The same run reconciles each"
-            " printer's report with the filament ledger (the capture backstop). 0 turns all"
-            " three off. A change"
-            " applies at the next start.",
+            " printer's report with the filament ledger (the capture backstop). It is also"
+            " how often the Bambuddy sync runs a full pass of what ScadBuddy sends to"
+            " Bambuddy. 0 turns the pull, the presets and the backstop off, and stops the"
+            " sync's timer: the sync then runs only after a filament change or Sync now."
+            " A change applies to the pull at the next start, and to the sync after its"
+            " next pass.",
         ),
         "filament_low_stock_pct": SettingDoc(
             "Low stock below, percent",

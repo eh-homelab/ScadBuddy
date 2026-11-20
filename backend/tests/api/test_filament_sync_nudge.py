@@ -78,17 +78,58 @@ def test_a_save_that_stops_every_push_signals_only(
 ) -> None:
     """R-T10-3: a running workflow learns that nothing pushes (its next pass is
     ``nothing_pushes`` and it ends); no workflow is started for it."""
-    assert client.put("/api/v1/settings", json={"filament_sync": {"tags": "two_way"}}).is_success
+    saved = client.put("/api/v1/settings", json={"filament_sync": {"locations": "two_way"}})
+    assert saved.is_success
     assert (filament_nudges, filament_signals) == ([False], [])
 
-    stopped = client.put("/api/v1/settings", json={"filament_sync": {"tags": "bb_to_sb"}})
+    stopped = client.put("/api/v1/settings", json={"filament_sync": {"locations": "bb_to_sb"}})
     assert stopped.status_code == 200, stopped.text
     assert (filament_nudges, filament_signals) == ([False], [None])
 
     # Nothing pushed before either: no signal, no nudge.
-    again = client.put("/api/v1/settings", json={"filament_sync": {"tags": "off"}})
+    again = client.put("/api/v1/settings", json={"filament_sync": {"locations": "off"}})
     assert again.status_code == 200, again.text
     assert (filament_nudges, filament_signals) == ([False], [None])
+
+
+def test_a_save_of_the_interval_signals_a_running_workflow(
+    client: TestClient, filament_nudges: list[bool], filament_signals: list[None]
+) -> None:
+    """Decision 153: a running workflow waits the interval its last pass read; a new one
+    reaches it by a signal (a pass then reads it), also from 0 (no timer). Nothing is
+    started, and the same value again sends nothing."""
+    assert client.put("/api/v1/settings", json={"filament_sync": {"spools": "two_way"}}).is_success
+    filament_nudges.clear()
+
+    # The test app starts with 0 (no timer).
+    on = client.put("/api/v1/settings", json={"spool_overlay_refresh_seconds": 600})
+    assert on.status_code == 200, on.text
+    assert (filament_nudges, filament_signals) == ([], [None])
+
+    again = client.put("/api/v1/settings", json={"spool_overlay_refresh_seconds": 600})
+    assert again.status_code == 200, again.text
+    assert (filament_nudges, filament_signals) == ([], [None])
+
+    off = client.put("/api/v1/settings", json={"spool_overlay_refresh_seconds": 0})
+    assert off.status_code == 200, off.text
+    assert (filament_nudges, filament_signals) == ([], [None, None])
+
+
+def test_a_save_of_the_bambuddy_url_nudges_when_something_pushes(
+    client: TestClient, filament_nudges: list[bool], filament_signals: list[None]
+) -> None:
+    """Decision 153: a new ``bambuddy_url`` starts that instance's workflow at once when
+    something pushes (its plan answers ``instance_changed`` when the links belong to the
+    old one); with nothing pushing it starts nothing."""
+    moved = client.put("/api/v1/settings", json={"bambuddy_url": "http://bambuddy-a.test"})
+    assert moved.status_code == 200, moved.text
+    assert (filament_nudges, filament_signals) == ([], [])
+
+    assert client.put("/api/v1/settings", json={"filament_sync": {"spools": "two_way"}}).is_success
+    filament_nudges.clear()
+    moved = client.put("/api/v1/settings", json={"bambuddy_url": "http://bambuddy-b.test"})
+    assert moved.status_code == 200, moved.text
+    assert (filament_nudges, filament_signals) == ([False], [])
 
 
 def test_saving_another_setting_does_not_nudge(

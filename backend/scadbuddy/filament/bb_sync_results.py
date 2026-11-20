@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID, uuid4
 
-from psycopg import Connection
+from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
@@ -38,7 +38,7 @@ from scadbuddy.bambuddy.models import BbLocation, BbSupplier, CatalogFilament, S
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger
-from scadbuddy.filament.bambuddy_pull import REF_KIND, snapshot
+from scadbuddy.filament.bambuddy_pull import REF_KIND, record_instance, snapshot
 from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
     BbWrite,
@@ -171,8 +171,9 @@ def apply_results(
     ``last_pass_id`` is ``pass_id`` (the plan round these results answer): results sent
     again after a lost answer count once (R-T6-5). A ``None`` ``pass_id`` is a round of
     its own, so it always adds one. The state row's instance
-    is set by the first result that links anything (Decision 12), and results for
-    another instance are all ignored."""
+    is set by the first result that links anything (Decision 12; the pull sets it too,
+    `bambuddy_pull.record_instance`), and results for another instance are all ignored.
+    A result whose link another SB row holds by now is ignored (review I1)."""
     report = ResultsReport()
     reads = _Reads()
     writes = {write.key: write for write in plan_writes}
@@ -243,10 +244,16 @@ def _apply(
         )
         return "failed"
     bb_id = _answered_id(write, result)
-    if write.kind == "spool":
-        _spool(conn, write, result, item, bb_id, now, reads)
-    else:
-        _row(conn, write, result, item, bb_id, now, reads)
+    try:
+        with conn.transaction():
+            if write.kind == "spool":
+                _spool(conn, write, result, item, bb_id, now, reads)
+            else:
+                _row(conn, write, result, item, bb_id, now, reads)
+    except errors.UniqueViolation:
+        # Review I1: another SB row took this Bambuddy row since the write was planned
+        # (a pull, say). One result never fails the round's others.
+        raise _IgnoredError("another SB row holds that Bambuddy row") from None
     if write.op == "probe":
         # A probe writes nothing to Bambuddy: it counts nothing, and the item's last
         # write keeps its error row.
@@ -550,14 +557,11 @@ def sync_status(
 
 def adopt_instance(store: Filament, instance: str) -> None:
     """Record ``instance`` as the links' Bambuddy when none is recorded and links exist:
-    #6261's pull made them before the state row did (Decision 12). The API calls it at
-    boot with the configured Bambuddy's, before its first nudge."""
+    #6261's pull made them before the state row did (Decision 12). A link of a supplier,
+    location, insert type or filament counts too (`bambuddy_pull.ANY_LINK`). The API
+    calls it at boot with the configured Bambuddy's, before its first nudge."""
     with store.spools.transaction() as conn:
-        conn.execute(
-            "UPDATE filament_bb_sync_state SET instance = %s"
-            " WHERE instance IS NULL AND EXISTS (SELECT 1 FROM filament_bb_links)",
-            (instance,),
-        )
+        record_instance(conn, instance)
 
 
 class LocalFilamentSync:

@@ -1594,7 +1594,8 @@ async def reconcile_rfid(
         "`filament_sync`: one of `off`, `sb_to_bb`, `bb_to_sb` or `two_way` for each of the "
         "six data types `spools`, `weights`, `tags`, `presets`, `suppliers` and "
         "`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or "
-        "`two_way`. `instance` is the Bambuddy the links belong to. `last_pass_at` is the "
+        "`two_way`, and never for `tags`, which reach Bambuddy through the spool refresh's "
+        "tag drain. `instance` is the Bambuddy the links belong to. `last_pass_at` is the "
         "last pass, `last_error` its error label (null when it worked), and `last_ok_at` the "
         "last pass with no error, a skipped one too. `counts` is the last pass's: `written`, "
         "`failed`, `deferred`, `conflicts` and `unmapped_k`. `errors` holds one row per item "
@@ -1605,8 +1606,8 @@ async def reconcile_rfid(
         "name; null when the item is gone), the error label, the `attempts` and when (`at`), "
         "newest first; a later write that works drops the row. `skipped` says why no pass "
         "runs now: "
-        "`no_bambuddy` (no Bambuddy is configured) or `nothing_pushes` (no data type is set "
-        "to push); else null. Reads ScadBuddy only."
+        "`no_bambuddy` (no Bambuddy is configured) or `nothing_pushes` (no data type but "
+        "`tags` is set to push); else null. Reads ScadBuddy only."
     ),
 )
 async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDep) -> SyncStatus:
@@ -1625,10 +1626,12 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
     description=(
         "Asks for a full sync pass now: the print worker reads Bambuddy, then writes it only "
         "for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`); a type "
-        'set to `off` or `bb_to_sb` is never written. Answers 202 `{"started": true}` '
+        "set to `off` or `bb_to_sb` is never written, and nor is `tags` (the spool "
+        'refresh\'s tag drain sends tags). Answers 202 `{"started": true}` '
         "once the pass is asked for; it runs in the background, and "
         "`GET /filament/sync/status` shows how it went. 409 with `code` `no_bambuddy` when "
-        "no Bambuddy is configured, and `nothing_pushes` when no data type is set to push. "
+        "no Bambuddy is configured, and `nothing_pushes` when no data type but `tags` is set "
+        "to push. "
         "503 when the pass could not be asked for (the settings read or the workflow service "
         "failed, or the two took over 5 seconds); `detail` ends in an error label "
         "(`internal` for any failure outside Bambuddy), and nothing started."

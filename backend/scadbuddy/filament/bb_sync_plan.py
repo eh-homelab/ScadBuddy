@@ -44,6 +44,7 @@ from scadbuddy.filament.bb_sync_models import (
     Op,
     SyncPlan,
     json_form,
+    pushes_anything,
     seen_row,
     seen_value,
 )
@@ -55,9 +56,6 @@ from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import OVERRIDABLE
 
 Conn = Connection[DictRow]
-
-#: The data types the engine pushes (`tags` is #6264's drain, Decision 6).
-_PUSHED_TYPES = ("spools", "weights", "presets", "suppliers", "locations")
 
 #: A spool field's data type (Decision 14), by Bambuddy's names; a field not listed is a
 #: ``spools`` field.
@@ -1552,7 +1550,7 @@ def plan(
     transaction (Decision 10). Nothing is planned when no data type pushes, or when the
     links belong to another Bambuddy (``instance_changed``, Decision 12)."""
     empty = SyncPlan(writes=[], deferred=0, directions=sync, interval_s=interval_s)
-    if not any(pushes(getattr(sync, t)) for t in _PUSHED_TYPES):
+    if not pushes_anything(sync):
         return empty
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()

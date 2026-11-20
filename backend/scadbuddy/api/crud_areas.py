@@ -86,7 +86,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/filament/print-uses`` and ``…/filament/print-uses/settle``: a native run's SB
 #: spools and what its LAN starts use of them (#6262 Task 6); and ``…/filament/rows`` and
 #: ``…/filament/bb-to-sb``, the Bambuddy path's SB spools (Task 7). An area of its own, so a
-#: print worker that books there waits for an API that serves them. The intake
+#: print worker that books there waits for an API that serves them. Its ``filament-sync``
+#: area is ``…/print/filament/sync/directions``, ``…/plan``, ``…/results`` and ``…/pass``:
+#: the sync pass's reads and writes of SB, `FilamentSyncApi` (#6265 Task 6). The intake
 #: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
 #: customer's staged file, checked by the intake worker (#6133). The agent's small stores
 #: (#5299 step 5, `api/crud_agent_stores.py`): its ``activity-kinds`` area is

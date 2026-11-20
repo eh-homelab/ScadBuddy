@@ -103,7 +103,7 @@ describe('Filament (#6262)', () => {
     expect(spool).toHaveTextContent('Bambuddy refused it (HTTP 422).')
     expect(spool).toHaveTextContent('2 attempts')
     expect(supplier).toHaveTextContent('Not sent: another Bambuddy row has this name.')
-    expect(within(region('Filament')).getByText(/No pass runs: no data type is set to send to Bambuddy/)).toBeInTheDocument()
+    expect(within(region('Filament')).getByText(/No pass runs: no data type but tags is set to send to Bambuddy/)).toBeInTheDocument()
   })
 
   it('names an item that is gone by its id', async () => {

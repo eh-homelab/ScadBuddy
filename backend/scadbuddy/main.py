@@ -900,7 +900,7 @@ async def _adopt_bb_instance_logged(state: AppState) -> None:
     """The filament links #6261's pull made before the sync's state row belong to the
     configured Bambuddy (`adopt_instance`, #6265 Decision 12). Nothing without a
     Bambuddy. A failure is logged, never raised: the boot goes on, and the first pass
-    that links a spool records the instance itself."""
+    or pull that links anything records the instance itself."""
     try:
         read = await asyncio.to_thread(state.settings_store.read, {"bambuddy_url"})
         if read["bambuddy_url"]:

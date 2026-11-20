@@ -70,7 +70,7 @@ CREATE TABLE filament_bb_push_errors (
 
 -- Decisions 12 and 19: the one state row. `instance` is the Bambuddy the links were made
 -- against; it starts null and is set by the API's `adopt_instance` for links made before
--- this row, or by the first `results` that links anything (F6). `last_ok_at` moves only
+-- this row, or by the first `results` or pull that links anything (F6, plan decision 155). `last_ok_at` moves only
 -- on a pass with no `error` (F7).
 CREATE TABLE filament_bb_sync_state (
     id boolean PRIMARY KEY DEFAULT true CHECK (id),

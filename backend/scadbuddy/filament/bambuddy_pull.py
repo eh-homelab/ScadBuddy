@@ -128,6 +128,7 @@ from scadbuddy.bambuddy.models import (
     SpoolCatalogEntry,
     SpoolKProfile,
     SpoolUsage,
+    as_utc,
 )
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core import settings as core_settings
@@ -136,6 +137,7 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, ledger, sensors
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import BbLinked, json_form, seen_row
+from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.catalog import KIND_OF_TABLE, lookup_key, resolve_or_add
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
@@ -303,11 +305,11 @@ class PullReport(BaseModel):
     spools it made archived because Bambuddy archived them (#6707); they are in
     ``created`` too. ``archived_deferred`` counts the archived BB spools it did not make
     because BB's usage rows could not be read (R-6707-16), with their ids: the next pull
-    that reads them makes those spools. ``claimed`` counts the BB spools left to an open
-    create intent (Decision 10). ``suppliers`` and ``locations`` count the SB rows the pull
-    made, linked or changed; ``moved`` the linked spools it moved to BB's location; and
-    ``conflicts`` the supplier and location fields both sides changed, which it left as SB
-    holds them (R-T4-33)."""
+    that reads them makes those spools. ``claimed`` counts the BB spools, suppliers and
+    locations left to an open create intent (Decision 10). ``suppliers`` and
+    ``locations`` count the SB rows the pull made, linked or changed; ``moved`` the
+    linked spools it moved to BB's location; and ``conflicts`` the supplier and location
+    fields both sides changed, which it left as SB holds them (R-T4-33)."""
 
     created: int = 0
     archived_created: int = 0
@@ -382,6 +384,29 @@ def _column_value(field: str, value: Any) -> Any:
     return Decimal(value) if field == "cost_per_kg" and value is not None else value
 
 
+#: Some SB row or spool is linked to a Bambuddy row (Decision 12).
+ANY_LINK = (
+    "EXISTS (SELECT 1 FROM filament_bb_links)"
+    " OR EXISTS (SELECT 1 FROM filament_suppliers WHERE bb_supplier_id IS NOT NULL)"
+    " OR EXISTS (SELECT 1 FROM filament_locations WHERE bb_location_id IS NOT NULL)"
+    " OR EXISTS (SELECT 1 FROM filament_insert_types WHERE bb_catalog_id IS NOT NULL)"
+    " OR EXISTS (SELECT 1 FROM filament_spool_types WHERE bb_filament_id IS NOT NULL)"
+)
+
+
+def record_instance(conn: Conn, instance: str | None) -> None:
+    """Decision 12 (review I2): when no instance is recorded and a link exists, the links
+    belong to ``instance``, the Bambuddy they were made against. Run in the transaction
+    that made the link, so no link is committed without it. ``None`` (a caller that does
+    not know the Bambuddy) records nothing."""
+    if instance is not None:
+        conn.execute(
+            "UPDATE filament_bb_sync_state SET instance = %s"
+            f" WHERE instance IS NULL AND ({ANY_LINK})",
+            (instance,),
+        )
+
+
 def pull(
     store: Filament,
     spools: Sequence[BbSpool],
@@ -394,6 +419,7 @@ def pull(
     defer_archived: bool = False,
     suppliers: Sequence[BbSupplier] | None = None,
     locations: Sequence[BbLocation] | None = None,
+    instance: str | None = None,
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
     says, after ``catalog`` (BB's spool catalog) is mapped to insert types, and BB's
@@ -410,14 +436,18 @@ def pull(
     takes its reading no earlier than its newest row (`_create_archived`). With
     ``defer_archived`` (BB's usage rows could not be read) no archived spool is made: its
     reading could not be timed after its rows, so one would be taken off twice. It waits
-    for a pull that has them (R-6707-16)."""
+    for a pull that has them (R-6707-16).
+
+    ``instance`` is the Bambuddy read (`bb_sync_nudge.instance_for`): each transaction
+    that links a row or a spool records it as the links' instance when none is
+    (`record_instance`, Decision 12)."""
     report = PullReport()
     newest: dict[int, datetime] = {}
     for row in usage:
         if row.weight_used > 0:
             newest[row.spool_id] = max(row.created_at, newest.get(row.spool_id, row.created_at))
     try:
-        report.catalog_skipped = _insert_types(store, catalog if pulls.spools else ())
+        report.catalog_skipped = _insert_types(store, catalog if pulls.spools else (), instance)
     except Exception:
         logger.warning("could not map Bambuddy's spool catalog", exc_info=True)
         report.catalog_failed = True
@@ -429,12 +459,13 @@ def pull(
         if rows is None or not wanted:
             continue
         try:
-            changed, conflicts = _pull_rows(store, kind, rows, now)
+            changed, conflicts, claimed = _pull_rows(store, kind, rows, now, instance)
         except Exception:
             logger.warning("could not pull Bambuddy's %ss", kind, exc_info=True)
             continue
         setattr(report, f"{kind}s", changed)
         report.conflicts += conflicts
+        report.claimed += claimed
     run = _Run(store, now, actor, pulls, defer_archived, *_context(store, pulls))
     for bb in sorted(spools, key=lambda s: s.archived_at is not None):
         try:
@@ -442,6 +473,7 @@ def pull(
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
                 skipped: list[str] = []
                 outcome = _one(conn, run, bb, skipped, newest.get(bb.id))
+                record_instance(conn, instance)
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
@@ -552,7 +584,9 @@ _ALL = FilamentSync(
 )
 
 
-def _insert_types(store: Filament, catalog: Sequence[SpoolCatalogEntry]) -> int:
+def _insert_types(
+    store: Filament, catalog: Sequence[SpoolCatalogEntry], instance: str | None = None
+) -> int:
     """Make each entry an insert type, in one transaction under its own advisory lock
     (``0`` is no BB spool id): the type with its ``bb_catalog_id``, else the unlinked one
     of the same upper case name, which takes the id, else a new one. A type that exists
@@ -611,6 +645,7 @@ def _insert_types(store: Filament, catalog: Sequence[SpoolCatalogEntry]) -> int:
                 " VALUES (%s, %s, %s, %s)",
                 (name, _ADDED_SORT, grams, entry.id),
             )
+        record_instance(conn, instance)
     return skipped
 
 
@@ -640,7 +675,8 @@ def _one(
     claim (``claimed``, Decision 10). ``newest_use`` is the time of BB's newest usage row
     of it, if any; with ``run.defer_archived`` an archived BB spool that would be made is
     not (``archived_deferred``). Every link the BB spool has after this gets its seen
-    copy (`_write_seen`)."""
+    copy (`_write_seen`). A linked row strictly older than the link's ``bb_updated_at``
+    (read before a push's results recorded a newer one) is left alone (review M1)."""
     store, now, actor, pulls = run.store, run.now, run.actor, run.pulls
     link = conn.execute(
         "SELECT l.spool_id, l.bb_updated_at, s.archived_at IS NOT NULL AS archived"
@@ -650,6 +686,8 @@ def _one(
     ).fetchone()
     if link is not None:
         spool_id: UUID = link["spool_id"]
+        if bb.updated_at is not None and as_utc(bb.updated_at) < link["bb_updated_at"]:
+            return None
         taken: set[str] = set()
         if link["archived"]:
             restored = pulls.spools and _archive_state(conn, run, spool_id, bb, archived=True)
@@ -1433,7 +1471,9 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
     SB's compare value; any other keeps its old seen value, or stays out when unseen.
     R-T9-3 and R-T9-5 make two exceptions: a link with no seen location (under
     ``pulls.locations``) or no seen archive state (under ``pulls.spools``) takes
-    Bambuddy's value as seen, so only a later Bambuddy change moves or archives it."""
+    Bambuddy's value as seen, so only a later Bambuddy change moves or archives it.
+    ``bb_seen_at`` moves only when ``bb_seen`` changes (review M2): a running pass takes a
+    newer one as `results` writing it after its snapshot (F11)."""
     from scadbuddy.filament import bb_sync_plan as plan
 
     seen = seen_row(bb)
@@ -1456,9 +1496,13 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
     }
     # The seeds go first, so a seen value the link holds already wins over them.
     conn.execute(
-        "UPDATE filament_bb_links SET bb_seen = %s || coalesce(bb_seen, '{}'::jsonb) || %s,"
-        " bb_seen_at = %s WHERE spool_id = %s",
-        (Jsonb(seeds), Jsonb(agree), run.now, spool_id),
+        "UPDATE filament_bb_links SET bb_seen = n.seen, bb_seen_at = CASE WHEN"
+        " n.seen IS DISTINCT FROM l.bb_seen OR l.bb_seen_at IS NULL THEN %s"
+        " ELSE l.bb_seen_at END"
+        " FROM filament_bb_links l, LATERAL (SELECT %s || coalesce(l.bb_seen, '{}'::jsonb)"
+        " || %s AS seen) n"
+        " WHERE filament_bb_links.spool_id = %s AND l.spool_id = filament_bb_links.spool_id",
+        (run.now, Jsonb(seeds), Jsonb(agree), spool_id),
     )
 
 
@@ -1481,11 +1525,32 @@ def _archive_state(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, *, archiv
     seen = _link_seen(conn, spool_id)
     if "archived_at" not in seen or (seen["archived_at"] is not None) == bb_archived:
         return False
-    times = [t for t in (bb.updated_at, bb.archived_at) if t is not None]
-    if _sb_newer(conn, spool_id, "archived_at", max(times) if times else run.now):
+    times = [as_utc(t) for t in (bb.updated_at, bb.archived_at) if t is not None]
+    at = max(times) if times else run.now
+    if _sb_newer(conn, spool_id, "archived_at", at):
         return False
-    run.store.spools.update_on(conn, spool_id, m.SpoolPatch(archived=bb_archived), actor=run.actor)
+    run.store.spools.update_on(
+        conn,
+        spool_id,
+        m.SpoolPatch(archived=bb_archived),
+        actor=run.actor,
+        at=_bb_event_at(conn, spool_id, at),
+    )
     return True
+
+
+def _bb_event_at(conn: Conn, spool_id: UUID, bb_at: datetime) -> datetime:
+    """When the pull books an event that takes Bambuddy's change (review M3): at
+    Bambuddy's change time, so `sb_changed_at` never counts the pull's own write as an SB
+    change newer than Bambuddy's; but never before the spool's newest event, so the
+    ledger keeps its order."""
+    row = conn.execute(
+        "SELECT max(at) + interval '1 microsecond' AS at FROM filament_spool_events"
+        " WHERE spool_id = %s",
+        (spool_id,),
+    ).fetchone()
+    after: datetime | None = None if row is None else row["at"]
+    return bb_at if after is None else max(bb_at, after)
 
 
 def _follow_location(
@@ -1522,9 +1587,12 @@ def _follow_location(
         seen = _link_seen(conn, spool_id)
         if "location_id" not in seen or seen["location_id"] == bb.location_id:
             return False
-    if _sb_newer(conn, spool_id, "location_id", bb.updated_at or run.now):
+    at = as_utc(bb.updated_at) or run.now
+    if _sb_newer(conn, spool_id, "location_id", at):
         return False
-    LocationStore.move_on(conn, spool_id, target, actor=run.actor)
+    LocationStore.move_on(
+        conn, spool_id, target, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
+    )
     taken.add("location_id")
     run.moved += 1
     return True
@@ -1684,7 +1752,8 @@ def _pull_rows(
     kind: Literal["supplier", "location"],
     rows: Sequence[BbSupplier] | Sequence[BbLocation],
     now: datetime,
-) -> tuple[int, int]:
+    instance: str | None = None,
+) -> tuple[int, int, int]:
     """BB's suppliers or locations into SB's rows, in one transaction under its own
     advisory lock: each is the SB row `link_bb_on` finds, links or makes. A row it made
     sees all of BB's values. A linked one takes each field `_row_field` says, unless
@@ -1692,17 +1761,37 @@ def _pull_rows(
     keeps its parents' path (`` / ``, Decision 14). A field kept by the time rule gets its
     seeding marks in ``bb_pushed["unseen"]`` (R-T4-27), so only a real change moves it
     later. The seen copy is merged (R-T4-28) at ``now``. An archived SB row is left alone.
-    The rows made, linked or changed, and the conflicts (R-T4-33)."""
+    A BB row no SB row links, whose upper case name is the name an unlinked SB row with
+    an open create intent pushes (a location's path), is the push's to adopt (Decision 10,
+    review I1): it is skipped, as `_Run.claimed` skips a spool. The transaction records
+    ``instance`` (`record_instance`). The rows made, linked or changed, the conflicts
+    (R-T4-33), and the rows skipped for an intent."""
     from scadbuddy.filament import bb_sync_plan as plan
 
     spec = plan.ROW_KINDS[kind]
-    changed = conflicts = 0
+    changed = conflicts = claimed = 0
     with store.spools.transaction() as conn:
         conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, _ROW_LOCK[kind]))
+        intents = {
+            r["sb_id"]
+            for r in conn.execute(
+                "SELECT sb_id FROM filament_bb_creates WHERE kind = %s", (kind,)
+            ).fetchall()
+        }
+        before = spec.items(conn)
+        linked = {item.bb_id for item in before if item.bb_id is not None}
+        wanted = {
+            item.name.strip().upper()
+            for item in before
+            if item.bb_id is None and not item.archived and item.sb_id in intents
+        }
         found: list[tuple[Any, UUID, BbLinked]] = []
         for row in rows:
             name = _text(row.name)
             if name is None:
+                continue
+            if row.id not in linked and name.upper() in wanted:
+                claimed += 1
                 continue
             bb_now = plan.row_seen(row, spec.readable)
             if isinstance(row, BbSupplier):
@@ -1757,7 +1846,8 @@ def _pull_rows(
                 )
             if how != "found" or written:
                 changed += 1
-    return changed, conflicts
+        record_instance(conn, instance)
+    return changed, conflicts, claimed
 
 
 def _write_field(conn: Conn, table: str, sb_id: UUID, name: str, value: Any, path: str) -> bool:
@@ -1992,6 +2082,7 @@ async def read_and_pull(
             defer_archived=usage_failed,
             suppliers=suppliers,
             locations=locations,
+            instance=instance_for(settings.bambuddy_url) if settings.bambuddy_url else None,
         )
     )
     report.catalog_failed = report.catalog_failed or catalog is None

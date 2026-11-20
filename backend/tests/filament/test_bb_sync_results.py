@@ -10,9 +10,11 @@ from uuid import UUID
 import pytest
 from psycopg.types.json import Jsonb
 
+from scadbuddy.bambuddy.models import BbLocation, BbSupplier
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bb_sync_plan
-from scadbuddy.filament.bambuddy_pull import pull
+from scadbuddy.filament.bambuddy_pull import Pulls, pull
 from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op, ResultsReport
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
 from scadbuddy.filament.bb_sync_results import adopt_instance, apply_results
@@ -26,6 +28,7 @@ from scadbuddy.filament.models import (
     SpoolTypePatch,
 )
 from scadbuddy.filament.purchasing_models import SupplierCreate, SupplierPatch
+from scadbuddy.filament.spools import SpoolBambuddyCreatingError
 from tests.conftest import PgPool
 from tests.filament.test_bb_sync_plan import (
     INSTANCE,
@@ -282,6 +285,19 @@ def test_deleting_a_spool_removes_its_intent_and_error_rows(pg_pool: PgPool) -> 
     assert _intents(pg_pool) == [("spool", spool)] and len(_errors(pg_pool)) == 1
     assert f.spools.delete(spool) is True
     assert _intents(pg_pool) == [] and _errors(pg_pool) == []
+
+
+def test_a_spool_whose_create_has_no_answer_is_not_deleted(pg_pool: PgPool) -> None:
+    """Review M9: the create may have made a Bambuddy row whose answer was lost. Deleting
+    the spool would drop the intent, and the pull would then import that row as a new SB
+    spool, so the delete is refused until an answer (a link or a refusal) comes."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _only(_plan(f, _snap([])).writes, "create")
+    with pytest.raises(SpoolBambuddyCreatingError):
+        f.spools.delete(spool)
+    assert _intents(pg_pool) == [("spool", spool)]
+    assert f.spools.get(spool) is not None
 
 
 def test_archiving_an_item_clears_its_sync_errors(pg_pool: PgPool) -> None:
@@ -695,6 +711,109 @@ def test_results_of_one_pass_sent_again_add_one_attempt(pg_pool: PgPool) -> None
         assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", attempts)]
 
 
+# -- a pull between a push's creates and their results (Decision 10, review I1) -----------
+
+_PULL_ROWS = Pulls.of(FilamentSync(suppliers="two_way", locations="two_way"))
+TWO_WAY_ROWS = TWO_WAY_LOCATIONS.model_copy(update={"suppliers": "two_way"})
+
+
+def _places(pool: PgPool) -> list[tuple[str, str | None, int | None]]:
+    """Each SB place: its name, its parent's name and its Bambuddy id."""
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT l.name, p.name AS parent, l.bb_location_id FROM filament_locations l"
+            " LEFT JOIN filament_locations p ON p.id = l.parent_id ORDER BY l.name"
+        ).fetchall()
+    return [(r["name"], r["parent"], r["bb_location_id"]) for r in rows]
+
+
+def test_a_pull_between_creates_and_results_leaves_the_rows_to_the_push(
+    pg_pool: PgPool,
+) -> None:
+    """Review I1: the push creates a root place, a nested one and a supplier; before its
+    results come, the pull reads them in Bambuddy. The pull leaves each to its open intent,
+    so the results link them: one SB row per place, no intent left open."""
+    f = _filament(pg_pool)
+    shelf = _kind(f, "Shelf")
+    root = f.locations.create(LocationCreate(name="Shelf A", kind_id=shelf)).id
+    f.locations.create(LocationCreate(name="Bin 1", kind_id=shelf, parent_id=root))
+    f.suppliers.create(SupplierCreate(name="Micro Center"))
+    writes = _plan(f, _snap([], locations=[], suppliers=[]), TWO_WAY_ROWS).writes
+    creates = [w for w in writes if w.op == "create"]
+    names = sorted(_body(w)["name"] for w in creates)
+    assert names == ["Micro Center", "Shelf A", "Shelf A / Bin 1"]
+    ids = {"Shelf A": 8, "Shelf A / Bin 1": 7, "Micro Center": 9}
+    answers = {w.key: {"id": ids[_body(w)["name"]], **_body(w)} for w in creates}
+
+    report = pull(
+        f,
+        [],
+        now=datetime.now(UTC),
+        pulls=_PULL_ROWS,
+        locations=[BbLocation.model_validate(a) for a in answers.values() if a["id"] != 9],
+        suppliers=[BbSupplier.model_validate(a) for a in answers.values() if a["id"] == 9],
+    )
+    assert (report.locations, report.suppliers, report.claimed) == (0, 0, 3)
+
+    done = _apply(f, creates, [_ok(w, answers[w.key], answers[w.key]["id"]) for w in creates])
+    assert done.linked == 3
+    assert _places(pg_pool) == [("Bin 1", "Shelf A", 7), ("Shelf A", None, 8)]
+    assert _intents(pg_pool) == []
+
+
+def test_a_link_another_row_holds_is_ignored_not_raised(pg_pool: PgPool) -> None:
+    """Review I1: a result whose Bambuddy row another SB row already holds is ignored,
+    and the round's other results are still recorded."""
+    f = _filament(pg_pool)
+    shelf = _kind(f, "Shelf")
+    a = f.locations.create(LocationCreate(name="Shelf A", kind_id=shelf)).id
+    f.locations.create(LocationCreate(name="Shelf B", kind_id=shelf))
+    creates = [
+        w for w in _plan(f, _snap([], locations=[]), TWO_WAY_LOCATIONS).writes if w.op == "create"
+    ]
+    # Another row took Bambuddy's row 7 between the create and its results.
+    f.locations.create(LocationCreate(name="Elsewhere", kind_id=shelf))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET bb_location_id = 7 WHERE name = 'Elsewhere'")
+    ids = {"Shelf A": 7, "Shelf B": 8}
+    results = [
+        _ok(w, {"id": ids[_body(w)["name"]], **_body(w)}, ids[_body(w)["name"]]) for w in creates
+    ]
+    assert _apply(f, creates, results).linked == 1
+    assert ("location", a) in _intents(pg_pool)
+    assert ("Shelf B", None, 8) in _places(pg_pool)
+
+
+# -- the pull's links record the instance (Decision 12, review I2) -------------------------
+
+
+def test_the_pulls_row_links_record_the_instance(pg_pool: PgPool) -> None:
+    """Review I2: the pull links a place against Bambuddy A, then the URL points at B: the
+    plan answers ``instance_changed`` and writes nothing with A's ids."""
+    f = _filament(pg_pool)
+    f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf")))
+    a = [BbLocation(id=4, name="Shelf A")]
+    pull(f, [], now=datetime.now(UTC), pulls=_PULL_ROWS, locations=a, instance=INSTANCE)
+    assert _instance(pg_pool) == INSTANCE
+
+    other = _snap([], locations=[]).model_copy(update={"instance": "bbbbbbbbbbbb"})
+    planned = _plan(f, other, TWO_WAY_LOCATIONS)
+    assert planned.instance_changed is True
+    assert planned.writes == []
+
+
+def test_the_pulls_spool_links_record_the_instance(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    pull(f, [BbSpool.model_validate(_answer(50))], now=datetime.now(UTC), instance=INSTANCE)
+    assert _instance(pg_pool) == INSTANCE
+
+
+def test_a_pull_without_an_instance_records_none(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    pull(f, [BbSpool.model_validate(_answer(50))], now=datetime.now(UTC))
+    assert _instance(pg_pool) is None
+
+
 # -- the boot's adoption of links made before the state row (Decision 12, Task 8) ---------
 
 
@@ -702,6 +821,31 @@ def test_boot_records_the_instance_of_existing_links(pg_pool: PgPool) -> None:
     """Links #6261's pull made before the state row belong to the configured Bambuddy."""
     f = _filament(pg_pool)
     _link(pg_pool, _spool(f, _type(f)), 50)
+    adopt_instance(f, INSTANCE)
+    assert _instance(pg_pool) == INSTANCE
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("filament_suppliers", "bb_supplier_id"),
+        ("filament_locations", "bb_location_id"),
+        ("filament_insert_types", "bb_catalog_id"),
+        ("filament_spool_types", "bb_filament_id"),
+    ],
+)
+def test_boot_records_the_instance_of_existing_row_links(
+    pg_pool: PgPool, table: str, column: str
+) -> None:
+    """Review I2: a row link the pull made counts as a link too."""
+    f = _filament(pg_pool)
+    f.suppliers.create(SupplierCreate(name="Micro Center"))
+    f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf")))
+    f.catalog.create("insert-types", InsertTypeCreate(name="Cardboard", empty_weight_g=200))
+    _type(f)
+    with pg_pool.connection() as conn:
+        assert conn.execute(f"SELECT 1 FROM {table}").fetchone() is not None, table
+        conn.execute(f"UPDATE {table} SET {column} = 5")
     adopt_instance(f, INSTANCE)
     assert _instance(pg_pool) == INSTANCE
 

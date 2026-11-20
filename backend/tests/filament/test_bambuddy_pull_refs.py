@@ -409,3 +409,27 @@ def test_a_field_only_bambuddy_changed_is_pulled(pg_pool: PgPool) -> None:
     assert after["identifier"] == "B7"
     assert after["bb_seen"] == {"name": "Shelf A", "identifier": "B7"}
     assert (report.locations, report.conflicts) == (1, 0)
+
+
+def test_the_pulls_archive_and_move_are_booked_at_bambuddys_time(pg_pool: PgPool) -> None:
+    """Review M3: the pull's ``archived`` and ``moved`` events carry Bambuddy's change
+    time, not the pull's, so they never count as an SB change newer than Bambuddy's
+    (`sb_changed_at`), and a later Bambuddy change still wins on both sides."""
+    from scadbuddy.filament.bb_sync_plan import sb_changed_at
+
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    garage = _locations([{"id": 5, "name": "Garage"}])
+    pull(f, [bb(updated_at=_bb_time(-3))], now=NOW, pulls=ROWS, locations=garage)
+    # After the spool's ``created_at``, which `sb_changed_at` also counts.
+    when = _bb_time(1)
+    changed = bb(location_id=5, archived_at=when, updated_at=when)
+    pull(f, [changed], now=NOW, pulls=ROWS, locations=garage)
+
+    spool = f.spools.get(made)
+    assert spool is not None and spool.archived_at is not None and spool.location_id is not None
+    at = datetime.fromisoformat(when).replace(tzinfo=UTC)
+    with pg_pool.connection() as conn:
+        assert sb_changed_at(conn, made, "location_id") == at
+        # Booked just after the move, which came first: the ledger keeps its order.
+        assert at < sb_changed_at(conn, made, "archived_at") <= at + timedelta(microseconds=1)

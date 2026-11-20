@@ -187,7 +187,7 @@ function syncErrorText(label: string): string {
 
 const SKIPPED_TEXT: Record<NonNullable<SyncStatus['skipped']>, string> = {
   no_bambuddy: 'No pass runs: no Bambuddy is set up.',
-  nothing_pushes: 'No pass runs: no data type is set to send to Bambuddy.',
+  nothing_pushes: 'No pass runs: no data type but tags is set to send to Bambuddy (tags go with the refresh).',
 }
 
 /** What "Sync now" says when the server refuses it, in plain words. */

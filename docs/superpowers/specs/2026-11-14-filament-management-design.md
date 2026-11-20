@@ -704,7 +704,10 @@ below are the plan's):
   (`core/settings.py` `FilamentSync`). `spools`, `weights`, `tags` and `presets` default to
   `bb_to_sb`, `suppliers` and `locations` to `off`. A migration rewrote #6264's stored
   `tags` once: `off` became `bb_to_sb`, `sb_to_bb` became `two_way`
-  (`migrations/20261118T1907Z_filament_sync_tags_values.sql`).
+  (`migrations/20261118T1907Z_filament_sync_tags_values.sql`). A row with `spools` `off`
+  is the exception: before #6265 it skipped the whole pull, so it still pulls nothing.
+  Its `weights`, `presets` and `tags` became `off`, except a `tags` `sb_to_bb`, which
+  stayed `sb_to_bb` (the push it was).
 - Pull stays in the API (Decision 5). BB to SB is still `SpoolRefresh`'s pull
   (`filament/bambuddy_pull.py`), gated per data type, and now also takes archive state,
   K values, suppliers and locations. Its Bambuddy reads stay in the CRUD service's pod.

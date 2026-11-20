@@ -8,7 +8,9 @@ description: Manage ScadBuddy's own filament inventory - spool types, spools, ta
 ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy. The setting
 `filament_sync` gives each of six data types (`spools`, `weights`, `tags`, `suppliers`,
 `locations`, `presets`) one direction: `off`, `sb_to_bb`, `bb_to_sb` or `two_way`. SB
-writes BB only for a type set to `sb_to_bb` or `two_way`. The defaults pull `spools`,
+writes BB only for a type set to `sb_to_bb` or `two_way`. The sync pass never sends
+`tags`: tags reach BB through the spool refresh's tag drain, so `tags` alone set to push
+gives `nothing_pushes`. The defaults pull `spools`,
 `weights`, `tags` and `presets` and leave `suppliers` and `locations` off
 (`backend/scadbuddy/core/settings.py` `FilamentSync`; plan
 `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`, Decision 3). Override mode, AMS

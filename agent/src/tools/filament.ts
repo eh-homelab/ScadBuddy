@@ -958,14 +958,15 @@ export const filamentTools: Tool[] = [
     description:
       'How the ScadBuddy-to-Bambuddy filament sync stands. `directions` is the stored `filament_sync`: `off`, ' +
       '`sb_to_bb`, `bb_to_sb` or `two_way` for each of `spools`, `weights`, `tags`, `presets`, `suppliers` and ' +
-      '`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or `two_way`. `last_pass_at` is the ' +
+      '`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or `two_way`, never for `tags` (the ' +
+      "spool refresh's tag drain sends those). `last_pass_at` is the " +
       "last pass, `last_error` its error (null when it worked), `last_ok_at` the last pass with no error (a skipped " +
       "one too), `counts` the last pass's (`written`, `failed`, `deferred`, `conflicts`, `unmapped_k`). `errors` " +
       'lists each item whose last write to Bambuddy failed, or was held back (`name_taken`: another Bambuddy row ' +
       "has its name, so it was never sent), with `kind`, its ScadBuddy `sb_id`, its `label` (a spool's `#N`, a " +
       "spool type's code, any other row's name; null when the item is gone), `error`, `attempts` and `at`, " +
       'newest first: this is why a spool is not in Bambuddy. `skipped` says why no pass runs now: ' +
-      '`no_bambuddy` or `nothing_pushes` (no data type is set to push); else null. Reads ScadBuddy only.',
+      '`no_bambuddy` or `nothing_pushes` (no data type but `tags` is set to push); else null. Reads ScadBuddy only.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,
@@ -979,10 +980,11 @@ export const filamentTools: Tool[] = [
     label: 'Sync with Bambuddy now',
     description:
       'Ask for a full ScadBuddy-to-Bambuddy sync pass now. It runs in the background on the print worker: it reads ' +
-      'Bambuddy, then writes it only for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`); ' +
+      'Bambuddy, then writes it only for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`), ' +
+      "never `tags` (the spool refresh's tag drain sends those); " +
       'see filament_sync_status for the directions. Answers `{started: true}` once the pass is asked for; read ' +
       'filament_sync_status afterwards for how it went. 409 `no_bambuddy` with no Bambuddy configured, ' +
-      '`nothing_pushes` when no data type is set to push. 503 when the pass could not be asked for (the settings ' +
+      '`nothing_pushes` when no data type but `tags` is set to push. 503 when the pass could not be asked for (the settings ' +
       'read or the workflow service failed, or took over 5 s; `detail` ends in an error label, `internal` for a ' +
       'failure outside Bambuddy): nothing started, so try again later. Writes Bambuddy to ' +
       'match ScadBuddy, and ScadBuddy (the links and the sync status). Approved first.',

@@ -92,7 +92,7 @@ async def run_pass(
         return result
     async with client_for(settings) as client:
         try:
-            snap = await _read(client, instance, full)
+            snap = await _read(client, instance, full, heartbeat)
         except ApiError as exc:
             result = empty.model_copy(update={"error": error_label(exc)})
             await api.record_pass(result)
@@ -103,26 +103,32 @@ async def run_pass(
     return result
 
 
-async def _read(client: BambuddyClient, instance: str, full: bool) -> BbSnapshot:
+async def _read(
+    client: BambuddyClient, instance: str, full: bool, heartbeat: Callable[[], None]
+) -> BbSnapshot:
     """Bambuddy read once. The spool listing must be read (its `ApiError` ends the pass);
-    any other listing that fails is ``None``, never empty."""
+    any other listing that fails is ``None``, never empty. Each listing heartbeats (review
+    M4): a slow Bambuddy must not time the pass out before its first write."""
     read_at = datetime.now(UTC)
     rows = await client.spool_rows(include_archived=True)
+    heartbeat()
     _, unparsed = parse_rows(rows)
     return BbSnapshot(
         instance=instance,
         full=full,
         spools=[cast("dict[str, Any]", row) for row in rows if isinstance(row, dict)],
         spools_complete=not unparsed,
-        suppliers=await _maybe(client.suppliers(), "suppliers"),
-        locations=await _maybe(client.locations(), "locations"),
-        catalog=await _maybe(client.spool_catalog(), "spool catalog"),
-        filaments=await _maybe(client.filament_catalog(), "filament catalog"),
+        suppliers=await _maybe(client.suppliers(), "suppliers", heartbeat),
+        locations=await _maybe(client.locations(), "locations", heartbeat),
+        catalog=await _maybe(client.spool_catalog(), "spool catalog", heartbeat),
+        filaments=await _maybe(client.filament_catalog(), "filament catalog", heartbeat),
         read_at=read_at,
     )
 
 
-async def _maybe[T](read: Awaitable[list[T]], name: str) -> list[T] | None:
+async def _maybe[T](
+    read: Awaitable[list[T]], name: str, heartbeat: Callable[[], None]
+) -> list[T] | None:
     try:
         return await read
     except (ApiError, ValidationError) as exc:
@@ -132,6 +138,8 @@ async def _maybe[T](read: Awaitable[list[T]], name: str) -> list[T] | None:
             extra={"listing": name, "error": label},
         )
         return None
+    finally:
+        heartbeat()
 
 
 async def _rounds(
@@ -149,6 +157,7 @@ async def _rounds(
         if calls >= WRITE_CAP:
             break
         plan = await api.plan(snap, WRITE_CAP - calls)
+        heartbeat()
         interval_s = plan.interval_s
         deferred = plan.deferred
         conflicts = max(conflicts, plan.conflicts)
@@ -170,6 +179,7 @@ async def _rounds(
             heartbeat()
         calls += len(plan.writes)
         await api.results(snap.instance, plan.writes, results, plan.pass_id)
+        heartbeat()
     return SyncPassResult(
         written=written,
         failed=failed,

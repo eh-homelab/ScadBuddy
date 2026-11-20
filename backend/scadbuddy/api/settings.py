@@ -634,9 +634,14 @@ async def put_settings(
             msg,
             errors=[{"loc": ["body", "storefront_turnstile_secret"], "msg": msg}],
         )
-    sync_touched = "filament_sync" in patch.model_fields_set | set(patch.reset)
+    touched = patch.model_fields_set | set(patch.reset)
+    sync_touched = "filament_sync" in touched
     if sync_touched:
         sync_before = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
+    # Decision 153: a running workflow waits the interval its last pass read, for the
+    # instance it was started for.
+    timer_keys = {"spool_overlay_refresh_seconds", "bambuddy_url"} & touched
+    timer_before = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     try:
         await asyncio.to_thread(store.save, patch)
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
@@ -649,6 +654,14 @@ async def put_settings(
         elif pushes_anything(sync_before):
             # R-T10-3: nothing pushes now. A running workflow is told, so its next pass is
             # `nothing_pushes` and it ends; none is started.
+            state.filament_sync.signal_running_soon()
+    elif pushes_anything(snapshot.runtime.filament_sync):
+        timer_after = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
+        if timer_after.get("bambuddy_url") != timer_before.get("bambuddy_url"):
+            # Another Bambuddy: its own workflow starts now (Decision 153).
+            state.filament_sync.nudge_soon()
+        elif timer_after != timer_before:
+            # A new interval: the running workflow's next pass reads it.
             state.filament_sync.signal_running_soon()
     if "print_auto_import" in patch.model_fields_set:
         # #4699: the watcher takes the prints started from this moment on, not from its

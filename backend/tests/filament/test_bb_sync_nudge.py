@@ -110,8 +110,12 @@ async def test_nudge_without_bambuddy_does_nothing(url: str | None) -> None:
 
 @pytest.mark.parametrize(
     "sync",
-    [FilamentSync(), FilamentSync(spools="off", weights="off", tags="off", presets="off")],
-    ids=["defaults", "all-off"],
+    [
+        FilamentSync(),
+        FilamentSync(spools="off", weights="off", tags="off", presets="off"),
+        FilamentSync(tags="two_way"),
+    ],
+    ids=["defaults", "all-off", "tags-only"],
 )
 async def test_a_nudge_with_nothing_pushing_does_nothing(sync: FilamentSync) -> None:
     """R-T8-2: no workflow when no data type pushes; the answer says why (R-T10-2)."""

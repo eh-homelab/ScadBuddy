@@ -187,12 +187,17 @@ async def test_another_instance_calls_nothing() -> None:
 @respx.mock
 @pytest.mark.parametrize(
     "directions",
-    [FilamentSync(), FilamentSync(spools="bb_to_sb", weights="off", suppliers="off")],
-    ids=["defaults", "pulls-only"],
+    [
+        FilamentSync(),
+        FilamentSync(spools="bb_to_sb", weights="off", suppliers="off"),
+        FilamentSync(tags="two_way"),
+    ],
+    ids=["defaults", "pulls-only", "tags-only"],
 )
 async def test_nothing_pushing_skips_before_any_bambuddy_read(directions: FilamentSync) -> None:
     """R-T8-2: no data type pushes, so the pass reads nothing of Bambuddy, plans nothing
-    and records the pass as skipped."""
+    and records the pass as skipped. ``tags`` alone counts as nothing: the engine never
+    pushes tags (Decision 6; they reach Bambuddy through the refresh's tag drain)."""
     sync = FakeSync(directions=directions)
     _listings()
 
@@ -462,7 +467,21 @@ async def test_every_write_heartbeats() -> None:
 
     await _run(sync, heartbeat=beat)
 
-    assert len(beats) == 3
+    # Five listings, the first plan, three writes, the results, and the empty second plan.
+    assert len(beats) == 5 + 1 + 3 + 1 + 1
+
+
+@respx.mock
+async def test_the_reads_heartbeat_before_the_first_plan() -> None:
+    """Review M4: a slow Bambuddy's five listings and the first plan each heartbeat, so
+    the 60 s heartbeat timeout counts from the last of them, not from the start."""
+    _listings()
+    sync = FakeSync([_plan([])])
+    seen: list[int] = []
+
+    await _run(sync, heartbeat=lambda: seen.append(len(sync.plans)))
+
+    assert seen == [0, 0, 0, 0, 0, 1]
 
 
 @respx.mock

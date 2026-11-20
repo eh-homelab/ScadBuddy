@@ -78,6 +78,18 @@ class SpoolBambuddyLinkedError(ValueError):
         )
 
 
+class SpoolBambuddyCreatingError(SpoolBambuddyLinkedError):
+    """The sync's create of the spool in Bambuddy has no answer yet (#6265 review M9): it
+    may have made a Bambuddy row, which the pull would import as a new spool."""
+
+    def __init__(self) -> None:
+        ValueError.__init__(
+            self,
+            "the spool is being created in Bambuddy and has no answer yet; the next pull"
+            " could bring it back. Try again after the next sync pass, or archive it",
+        )
+
+
 class SpoolTypelessError(ValueError):
     """A spool would name neither a type nor a material."""
 
@@ -615,11 +627,14 @@ class FilamentSpoolStore:
         actor: str,
         ref_kind: str | None = None,
         ref_id: UUID | None = None,
+        at: datetime | None = None,
     ) -> bool:
         """`update` on ``conn``, in the caller's transaction (`filament/csv_import.py`);
         false for no such spool. A row it names that does not exist is the driver's
         `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``edited`` event
-        (an invoice line's, #6266); a retry of one pair books nothing twice."""
+        (an invoice line's, #6266); a retry of one pair books nothing twice. ``at`` is when
+        an archive or restore happened (the pull's: Bambuddy's change time, #6265 review
+        M3); with none it is booked now."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -666,7 +681,7 @@ class FilamentSpoolStore:
                 data={"changes": changes},
             )
         if patch.archived is not None:
-            self._archive(conn, current, patch.archived, actor)
+            self._archive(conn, current, patch.archived, actor, at)
         return True
 
     def presets(self, spool_id: UUID) -> _Presets | None:
@@ -768,7 +783,9 @@ class FilamentSpoolStore:
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
         """Remove a spool that never printed, with its events, tag bindings and Bambuddy
         sync intent and error rows; ``False`` for no such spool. `SpoolBambuddyLinkedError`
-        when a Bambuddy link names it (the next pull would make it again). `SpoolInUseError`
+        when a Bambuddy link names it (the next pull would make it again), and
+        `SpoolBambuddyCreatingError` while its create intent has no answer (no error row):
+        a lost answer's Bambuddy row would come back the same way. `SpoolInUseError`
         when its ledger holds an event of a kind in ``refusing`` (a ``print_started`` or
         ``print_ended`` one; the native
         API's delete refuses ``print_ended`` only, `spools/native.py`)."""
@@ -789,6 +806,13 @@ class FilamentSpoolStore:
                 "SELECT 1 FROM filament_bb_links WHERE spool_id = %s", (spool_id,)
             ).fetchone():
                 raise SpoolBambuddyLinkedError()
+            if conn.execute(
+                "SELECT 1 FROM filament_bb_creates c WHERE c.kind = 'spool' AND c.sb_id = %s"
+                " AND NOT EXISTS (SELECT 1 FROM filament_bb_push_errors e"
+                " WHERE e.kind = 'spool' AND e.sb_id = c.sb_id)",
+                (spool_id,),
+            ).fetchone():
+                raise SpoolBambuddyCreatingError()
             for table in ("filament_spool_events", "filament_tag_bindings"):
                 conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
             # The Bambuddy sync's intent and error rows name the spool (#6265 R-T3-5).
@@ -1098,7 +1122,9 @@ class FilamentSpoolStore:
         _check_temps(spool.effective)
 
     @staticmethod
-    def _archive(conn: Conn, current: Row, archived: bool, actor: str) -> None:
+    def _archive(
+        conn: Conn, current: Row, archived: bool, actor: str, at: datetime | None = None
+    ) -> None:
         if (current["archived_at"] is not None) == archived:
             return
         if archived:
@@ -1113,6 +1139,7 @@ class FilamentSpoolStore:
                     current["id"],
                     "tag_unbound",
                     actor=actor,
+                    at=at,
                     data={"tag_id": closed["tag_id"], "reason": "archived"},
                 )
                 enqueue_tag(conn, closed["tag_id"])
@@ -1128,7 +1155,9 @@ class FilamentSpoolStore:
                 "DELETE FROM filament_bb_push_errors WHERE kind = 'spool' AND sb_id = %s",
                 (current["id"],),
             )
-        ledger.record(conn, current["id"], "archived" if archived else "restored", actor=actor)
+        ledger.record(
+            conn, current["id"], "archived" if archived else "restored", actor=actor, at=at
+        )
 
     @staticmethod
     def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:

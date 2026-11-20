@@ -1633,6 +1633,55 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     kept those SB spools open on purpose; the time rule would archive them all on the
     first pull. Cost: a link seen before Task 9 takes BB's archive or restore only after a
     later change in Bambuddy.
+153. Final review (M5; changes 17 and 134): a settings save that changes
+    `spool_overlay_refresh_seconds` while something pushes sends `signal_running_soon`, so
+    a running workflow's next pass reads the new interval (also from or to 0). A save
+    that changes `bambuddy_url` while something pushes nudges (`nudge_soon`): the new
+    instance's workflow starts, and its plan answers `instance_changed` while the links
+    belong to the old one. A `filament_sync` change in the same save keeps decision 134's
+    rule. Tests: `test_a_save_of_the_interval_signals_a_running_workflow`,
+    `test_a_save_of_the_bambuddy_url_nudges_when_something_pushes`. Cost: the old
+    instance's workflow ends only at its next timer or signal.
+154. Final review (I1; widens 10): the pull also skips a BB supplier or location that no SB
+    row links and whose upper case name is the name an unlinked SB row with an open intent
+    pushes (a location's ` / ` path), counted in `PullReport.claimed`. `apply_results`
+    writes each result's link in a savepoint and turns a `UniqueViolation` into an ignored
+    result, so one result never fails the round's others. Tests:
+    `test_a_pull_between_creates_and_results_leaves_the_rows_to_the_push`,
+    `test_a_link_another_row_holds_is_ignored_not_raised`. Cost: a BB row a person made
+    with the name of a row SB is creating waits for the push's adoption.
+155. Final review (I2; changes 12 and F6): every pull transaction that links a spool, a
+    supplier, a location or an insert type records the instance it read
+    (`bambuddy_pull.record_instance`, `instance_for(bambuddy_url)`) when none is
+    recorded. `adopt_instance` counts every link kind (`ANY_LINK`). Tests:
+    `test_the_pulls_row_links_record_the_instance`,
+    `test_the_pulls_spool_links_record_the_instance`,
+    `test_boot_records_the_instance_of_existing_row_links`.
+156. Final review (I3; changes 125): `pushes_anything` counts only `PUSHED_TYPES`
+    (`bb_sync_models.py`, the plan's types), never `tags`: tags reach Bambuddy through the
+    refresh's tag drain (Decision 6). `tags` alone set to push is `nothing_pushes` in the
+    nudge, the pass, the status and the run route's 409. Tests: the `tags-only` cases of
+    `test_nothing_pushing_skips_before_any_bambuddy_read`,
+    `test_a_nudge_with_nothing_pushing_does_nothing`, `test_run_with_nothing_pushing_is_409`
+    and `test_status_says_why_no_pass_runs`.
+157. Final review (M1, M2): the pull leaves a linked BB row strictly older than the link's
+    `bb_updated_at` alone (read before `results` recorded a newer one), and `_write_seen`
+    moves `bb_seen_at` only when `bb_seen` changes, so a running pass does not take every
+    linked spool as fresh (F11). Tests: `test_a_row_older_than_the_link_is_left_alone`,
+    `test_a_pull_that_sees_nothing_new_keeps_the_seen_time`.
+158. Final review (M3; applies 8): the pull books its own `archived`, `restored` and
+    `moved` events (and an archive's `tag_unbound`) at Bambuddy's change time
+    (`updated_at`, or the later `archived_at`), not at the pull's, so `sb_changed_at`
+    never counts them as an SB change newer than Bambuddy's; but never before the spool's
+    newest event, so the ledger keeps its order (`_bb_event_at`). Test:
+    `test_the_pulls_archive_and_move_are_booked_at_bambuddys_time`. Cost: a Bambuddy
+    change older than the spool's newest event is booked just after that event.
+159. Final review (M4; widens 11): the pass also heartbeats after each Bambuddy listing,
+    each plan and each results call. Test: `test_the_reads_heartbeat_before_the_first_plan`.
+160. Final review (M9; changes R-T3-5): an SB spool whose create intent has no error row (a
+    create with no answer yet) is not deleted (`SpoolBambuddyCreatingError`, a 409): a lost
+    answer's BB row would come back as a new SB spool. A refused create (an error row)
+    still deletes. Test: `test_a_spool_whose_create_has_no_answer_is_not_deleted`.
 
 ## Self-review
 
