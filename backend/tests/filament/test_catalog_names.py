@@ -14,6 +14,7 @@ from scadbuddy.filament.catalog import (
     CATALOGS,
     AliasKeyEmptyError,
     CatalogKeyClashError,
+    CatalogKeyEmptyError,
     CatalogStore,
     catalog_key,
     find_by_key,
@@ -21,9 +22,12 @@ from scadbuddy.filament.catalog import (
     resolve_or_add,
 )
 from scadbuddy.filament.models import (
+    BrandCreate,
+    BrandPatch,
     Effect,
     EffectCreate,
     EffectPatch,
+    MaterialCreate,
     SubtypeCreate,
     SubtypePatch,
 )
@@ -40,6 +44,9 @@ ASCII = [
     "a.b,c;d:e/f\\g|h",
     "!!!",
     "",
+    "PLA+",
+    "Silk++",
+    "+",
     "x\u2013y\u00a0z",  # an en dash and a no-break space are not letters
 ]
 #: Letters outside ASCII: SQL keeps them only under a ctype that classifies them.
@@ -50,6 +57,41 @@ def test_the_key_drops_every_non_alphanumeric_and_upper_cases() -> None:
     assert catalog_key("dual-color") == catalog_key("Dual Color") == "DUALCOLOR"
     assert catalog_key("  tri  color ") == "TRICOLOR"
     assert catalog_key("!!!") == ""
+
+
+def test_a_plus_is_a_word_of_the_key() -> None:
+    """R-6706-17: `PLA+` is not `PLA`, and `Silk+` is not `Silk`; `PLA+` is `PLA Plus`."""
+    assert catalog_key("PLA+") == catalog_key("PLA Plus") == "PLAPLUS"
+    assert catalog_key("PLA+") != catalog_key("PLA")
+    assert catalog_key("Silk+") != catalog_key("Silk")
+
+
+@pg
+def test_a_plus_variant_is_its_own_row(pg_pool: PgPool) -> None:
+    store: Any = CatalogStore(pg_pool)
+    plus = store.create("materials", MaterialCreate(name="PLA+"))
+    silk = store.create("subtypes", SubtypeCreate(name="Silk+"))
+    with pytest.raises(CatalogKeyClashError) as clash:
+        store.create("materials", MaterialCreate(name="pla plus"))
+    assert clash.value.holder_id == plus.id
+    with pg_pool.connection() as conn:
+        pla = find_by_key(conn, "materials", "PLA")
+        assert pla is not None and pla != plus.id
+        assert find_by_key(conn, "materials", "PLA Plus") == plus.id
+        assert find_by_key(conn, "subtypes", "silk+") == silk.id
+        assert find_by_key(conn, "subtypes", "silk") not in (None, silk.id)
+
+
+@pg
+def test_a_name_with_no_key_is_refused_and_never_found(pg_pool: PgPool) -> None:
+    store: Any = CatalogStore(pg_pool)
+    with pytest.raises(CatalogKeyEmptyError):
+        store.create("brands", BrandCreate(name="!!!"))
+    made = store.create("brands", BrandCreate(name="Acme"))
+    with pytest.raises(CatalogKeyEmptyError):
+        store.update("brands", made.id, BrandPatch(name="---"))
+    with pg_pool.connection() as conn:
+        assert find_by_key(conn, "brands", "???") is None
 
 
 @pg

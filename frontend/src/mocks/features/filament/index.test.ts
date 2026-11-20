@@ -260,6 +260,12 @@ describe('the filament mocks', () => {
     expect(await refusal(upsertCatalog('insert-materials', { archived: false }, old.id))).toMatchObject({ status: 409 })
   })
 
+  it('keeps a plus variant apart, and reads + as PLUS (R-6706-17)', async () => {
+    const plus = await upsertCatalog('materials', { name: 'PLA+' })
+    expect(await refusal(upsertCatalog('materials', { name: 'PLA Plus' }))).toMatchObject({ status: 409, material_id: plus.id })
+    expect(await resolveCatalog('materials', 'pla')).toMatchObject({ id: M.PLA })
+  })
+
   it('keeps an archived row’s names and aliases in a catalog with aliases (#6706)', async () => {
     const old = await upsertCatalog('brands', { name: 'Hatchbox' })
     await setCatalogAliases('brands', old.id, ['HB'])

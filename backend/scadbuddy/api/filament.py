@@ -42,9 +42,9 @@ from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
 from scadbuddy.filament.catalog import (
     CATALOGS,
-    AliasKeyEmptyError,
     CatalogExistsError,
     CatalogKeyClashError,
+    CatalogKeyEmptyError,
     CatalogRefError,
     CatalogSpec,
 )
@@ -182,7 +182,9 @@ async def list_catalog(
         "materials, subtypes, brands, categories and effects catalogs a name matches by its "
         "key (letters and digits, any case: `dual-color` is `Dual Color`) against every "
         "name and alias, archived rows too, a subtype's within its material; the 409 then "
-        "names the row that holds it (`<kind>_id`, `<kind>_name`, e.g. `effect_id`)."
+        "names the row that holds it (`<kind>_id`, `<kind>_name`, e.g. `effect_id`); a name "
+        "there with no letter or digit is a 422. `+` counts as `PLUS` (`PLA+` is `PLA Plus`, "
+        "not `PLA`)."
     ),
 )
 async def create_catalog_row(
@@ -192,7 +194,7 @@ async def create_catalog_row(
     parsed = _body(spec.create, body)
     try:
         made = await asyncio.to_thread(filament.catalog.create, kind, parsed)
-    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
+    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(made, kind, UUID(int=0))
 
@@ -206,8 +208,8 @@ async def create_catalog_row(
         "the row off the lists, `false` puts it back; an archived material, subtype, brand, "
         "category or effect keeps its names and aliases, any other row frees its name. 404 "
         "for an unknown kind or row, 409 when another row has the name (by key, as on "
-        "create, naming the holder), 422 for a bad field or a minimum temperature above its "
-        "maximum."
+        "create, naming the holder), 422 for a bad field, a name with no letter or digit "
+        "(those catalogs), or a minimum temperature above its maximum."
     ),
 )
 async def patch_catalog_row(
@@ -217,7 +219,7 @@ async def patch_catalog_row(
     parsed = _body(spec.patch, body)
     try:
         changed = await asyncio.to_thread(filament.catalog.update, kind, row_id, parsed)
-    except (CatalogExistsError, CatalogRefError, TypeTempError) as exc:
+    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
         raise _refused(exc) from None
     return _row(changed, kind, row_id)
 
@@ -257,7 +259,7 @@ async def put_catalog_aliases(
         changed = await asyncio.to_thread(
             filament.catalog.set_aliases, kind, row_id, list(parsed.aliases)
         )
-    except (CatalogExistsError, AliasKeyEmptyError) as exc:
+    except (CatalogExistsError, CatalogKeyEmptyError) as exc:
         raise _refused(exc) from None
     return _row(changed, kind, row_id)
 

@@ -249,3 +249,38 @@ def test_a_writer_that_skips_the_store_still_claims_its_key(pg_conninfo: str) ->
         assert _one(conn, "SELECT brand_id FROM filament_brand_names WHERE key = 'ACME'") == made
         with pytest.raises(psycopg.errors.UniqueViolation):
             conn.execute("INSERT INTO filament_brands (name) VALUES ('a-c-m-e')")
+
+
+def test_a_plus_variant_survives_and_its_spellings_merge(pg_conninfo: str) -> None:
+    """R-6706-17: `PLA+` stays apart from `PLA` and `Silk+` from `Silk`; `PLA Plus` is
+    `PLA+`, so it merges into it."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before(conn)
+        pla = _one(conn, "SELECT id FROM filament_materials WHERE name = 'PLA'")
+        silk = _one(conn, "SELECT id FROM filament_subtypes WHERE name = 'Silk'")
+        plus = _row(conn, "filament_materials", "PLA+", 1, "2026-11-01T00:00:00Z")
+        spelled = _row(conn, "filament_materials", "PLA Plus", 2, "2026-11-02T00:00:00Z")
+        silk_plus = _row(conn, "filament_subtypes", "Silk+", 31, "2026-11-01T00:00:00Z")
+        spool = _one(
+            conn,
+            "INSERT INTO filament_spools (material_id) VALUES (%s) RETURNING id",
+            spelled,
+        )
+
+        migrate(conn)
+
+        keys: dict[str, Any] = dict(
+            conn.execute(
+                "SELECT key, material_id FROM filament_material_names WHERE canonical"
+            ).fetchall()
+        )
+        assert (keys["PLA"], keys["PLAPLUS"]) == (pla, plus)
+        assert _one(conn, "SELECT count(*) FROM filament_materials WHERE id = %s", spelled) == 0
+        assert _one(conn, "SELECT material_id FROM filament_spools WHERE id = %s", spool) == plus
+        subtypes: dict[str, Any] = dict(
+            conn.execute(
+                "SELECT key, subtype_id FROM filament_subtype_names WHERE canonical"
+                " AND material_scope = '00000000-0000-0000-0000-000000000000'"
+            ).fetchall()
+        )
+        assert (subtypes["SILK"], subtypes["SILKPLUS"]) == (silk, silk_plus)

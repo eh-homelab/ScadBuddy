@@ -52,6 +52,14 @@ row.
 - R-6706-16: a subtype moved to a material where its name or one of its aliases meets a
   taken key is a 409 that names the holder, as every other clash does (`detail`,
   `subtype_id`, `subtype_name`).
+- R-6706-17: `+` is a word of the key: the key is
+  `upper(regexp_replace(replace(name, '+', 'PLUS'), '[^[:alnum:]]', '', 'g'))`. `PLA+` and
+  `PLA Plus` share the key `PLAPLUS` (one product); `PLA+` stays apart from `PLA`, and
+  `Silk+` from `Silk`. It replaces R-6706-1's expression in `catalog_key`, `key_sql`, the
+  migration and its trigger.
+- A name or alias with no letter or digit has no key: the trigger refuses such a name
+  (422, `CatalogKeyEmptyError`), the migration neither merges nor keys an existing one,
+  and a lookup never finds a row for it.
 
 Consequences found while building:
 

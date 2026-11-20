@@ -442,8 +442,12 @@ type Aliased = keyof typeof ALIASED
 const isAliased = (kind: string): kind is Aliased => kind in ALIASED
 type AliasedRow = { id: string; name: string; aliases: string[]; material_id?: string | null }
 
-/** `catalog_key`: the letters and digits, upper case. */
-export const catalogKey = (name: string) => name.replace(/[^\p{L}\p{N}]/gu, '').toUpperCase()
+/** `catalog_key`: `+` read as `PLUS` (R-6706-17), then the letters and digits, upper case. */
+export const catalogKey = (name: string) =>
+  name
+    .replace(/\+/g, 'PLUS')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .toUpperCase()
 
 /** The row of `kind` that holds `name`'s key in `scope` (a subtype's material), but `self`'s own names. */
 function keyHolder(kind: Aliased, name: string, scope: string | null, self?: string, skipSelf = true): AliasedRow | undefined {

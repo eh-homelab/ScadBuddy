@@ -1,8 +1,10 @@
 -- Catalog names and aliases (#6706, plan docs/superpowers/plans/2026-11-20-filament-catalog-aliases.md).
 -- The materials, subtypes, brands, categories and effects catalogs each get one table
 -- that holds every row's name and every alias, keyed by
--- `upper(regexp_replace(name, '[^[:alnum:]]', '', 'g'))` (`filament/catalog.py`
--- `catalog_key`), so `Dual Color`, `dual-color` and `DUAL_COLOR` are one key. The
+-- `upper(regexp_replace(replace(name, '+', 'PLUS'), '[^[:alnum:]]', '', 'g'))`
+-- (`filament/catalog.py` `key_sql`), so `Dual Color`, `dual-color` and `DUAL_COLOR` are one
+-- key, and `PLA+` is `PLA Plus` but not `PLA` (R-6706-17). A name with no letter or digit
+-- has no key: the trigger refuses it, and the merge and the fill leave such a row alone. The
 -- primary key keeps a key on one row; a subtype's key is unique within its material
 -- (`material_scope`: its `material_id`, or the nil uuid for a subtype of every material).
 -- A key stays reserved while its row is archived.
@@ -113,7 +115,8 @@ BEGIN
             'CREATE TEMP TABLE catalog_merge AS'
             ' SELECT id AS loser, survivor, name, archived_at IS NULL AS live FROM ('
             '   SELECT id, name, archived_at, first_value(id) OVER ('
-            '     PARTITION BY %s, upper(regexp_replace(name, ''[^[:alnum:]]'', '''', ''g''))'
+            '     PARTITION BY %s, upper(regexp_replace(replace(name, ''+'', ''PLUS''), ''[^[:alnum:]]'', '''', ''g'')),'
+            '       CASE WHEN upper(regexp_replace(replace(name, ''+'', ''PLUS''), ''[^[:alnum:]]'', '''', ''g'')) = '''' THEN id END'
             '     ORDER BY sort_order, created_at, id) AS survivor'
             '   FROM %I) ranked'
             ' WHERE id <> survivor',
@@ -146,14 +149,14 @@ BEGIN
 
         EXECUTE format(
             'INSERT INTO %I (%skey, %I, name, canonical)'
-            ' SELECT %s upper(regexp_replace(name, ''[^[:alnum:]]'', '''', ''g'')), id, name, true'
-            ' FROM %I ON CONFLICT DO NOTHING',
+            ' SELECT %s upper(regexp_replace(replace(name, ''+'', ''PLUS''), ''[^[:alnum:]]'', '''', ''g'')), id, name, true'
+            ' FROM %I WHERE upper(regexp_replace(replace(name, ''+'', ''PLUS''), ''[^[:alnum:]]'', '''', ''g'')) <> '''' ON CONFLICT DO NOTHING',
             c.names, scope_column, c.owner,
             CASE WHEN c.scoped THEN scope || ',' ELSE '' END, c.catalog);
 
         EXECUTE format(
             'INSERT INTO %I (%skey, %I, name, canonical)'
-            ' SELECT %s upper(regexp_replace(m.name, ''[^[:alnum:]]'', '''', ''g'')), m.survivor,'
+            ' SELECT %s upper(regexp_replace(replace(m.name, ''+'', ''PLUS''), ''[^[:alnum:]]'', '''', ''g'')), m.survivor,'
             '   m.name, false'
             ' FROM catalog_merge m JOIN %I s ON s.id = m.survivor ON CONFLICT DO NOTHING',
             c.names, scope_column, c.owner,
@@ -175,10 +178,14 @@ DECLARE
     owner text := TG_ARGV[1];
     scoped boolean := TG_ARGV[2]::boolean;
     nil constant uuid := '00000000-0000-0000-0000-000000000000';
-    new_key text := upper(regexp_replace(NEW.name, '[^[:alnum:]]', '', 'g'));
+    new_key text := upper(regexp_replace(replace(NEW.name, '+', 'PLUS'), '[^[:alnum:]]', '', 'g'));
     new_scope uuid := nil;
     old_scope uuid := nil;
 BEGIN
+    IF new_key = '' THEN
+        RAISE EXCEPTION 'the name % has no letter or digit', NEW.name
+            USING ERRCODE = 'check_violation', TABLE = TG_TABLE_NAME;
+    END IF;
     IF scoped THEN
         new_scope := coalesce((to_jsonb(NEW) ->> 'material_id')::uuid, nil);
     END IF;

@@ -12,7 +12,8 @@ row's name and aliases in a names table of their own (`NameTable`), keyed by
 Color` and `dual-color` are one key. Its primary key keeps a key on one row (a subtype's
 within its material), archived rows included. A trigger claims a row's name in the
 writer's transaction (`20261120T0602Z_filament_catalog_names.sql`); this store writes the
-aliases (`set_aliases`). A clash is `CatalogKeyClashError`, which names the holder. Lookups
+aliases (`set_aliases`). A clash is `CatalogKeyClashError`, which names the holder, and
+a name or alias with no letter or digit is `CatalogKeyEmptyError`. Lookups
 by name resolve through the key (`find_by_key`, `resolve_or_add`). The other catalogs keep
 their partial indexes on ``upper(name)``, which an archive frees; a clash there is
 `CatalogExistsError`.
@@ -40,10 +41,11 @@ NIL = UUID(int=0)
 
 
 def catalog_key(name: str) -> str:
-    """A name's key: its letters and digits, upper case (R-6706-1). The same function as
-    `key_sql`; a character Python would upper-case to two (``ß``) stays as it is, as
-    Postgres keeps it."""
-    return "".join(_upper(char) for char in name if char.isalnum())
+    """A name's key: ``+`` read as ``PLUS`` (R-6706-17: `PLA+` is `PLA Plus`, not `PLA`),
+    then its letters and digits, upper case (R-6706-1). The same function as `key_sql`; a
+    character Python would upper-case to two (``ß``) stays as it is, as Postgres keeps
+    it. Stored keys come only from `key_sql` (R-6706-14)."""
+    return "".join(_upper(char) for char in name.replace("+", "PLUS") if char.isalnum())
 
 
 def _upper(char: str) -> str:
@@ -53,7 +55,7 @@ def _upper(char: str) -> str:
 
 def key_sql(expr: str) -> str:
     """`catalog_key` in SQL, of the SQL expression ``expr``."""
-    return f"upper(regexp_replace({expr}, '[^[:alnum:]]', '', 'g'))"
+    return f"upper(regexp_replace(replace({expr}, '+', 'PLUS'), '[^[:alnum:]]', '', 'g'))"
 
 
 @dataclass(frozen=True)
@@ -155,11 +157,18 @@ class CatalogKeyClashError(CatalogExistsError):
         self.holder_name = holder_name
 
 
-class AliasKeyEmptyError(ValueError):
-    """An alias with no letter or digit: it has no key."""
+class CatalogKeyEmptyError(ValueError):
+    """A name or alias with no letter or digit: it has no key, so it is refused."""
+
+    def __init__(self, name: str, what: str = "name") -> None:
+        super().__init__(f"the {what} {name!r} has no letter or digit")
+
+
+class AliasKeyEmptyError(CatalogKeyEmptyError):
+    """An alias with no key."""
 
     def __init__(self, alias: str) -> None:
-        super().__init__(f"the alias {alias!r} has no letter or digit")
+        super().__init__(alias, "alias")
 
 
 class NoAliasesError(KeyError):
@@ -250,6 +259,12 @@ def _holder(
     return None if row is None else (row["id"], row["name"])
 
 
+def _no_key(exc: errors.CheckViolation, spec: CatalogSpec) -> bool:
+    """Whether the name trigger refused a name with no key."""
+    message = exc.diag.message_primary or ""
+    return spec.names is not None and message.endswith("has no letter or digit")
+
+
 def _is_names(exc: errors.UniqueViolation, spec: CatalogSpec) -> bool:
     return spec.names is not None and exc.diag.table_name == spec.names.table
 
@@ -317,6 +332,10 @@ def resolve_or_add(
             if not _is_names(exc, spec):
                 raise
             continue
+        except errors.CheckViolation as exc:
+            if not _no_key(exc, spec):
+                raise
+            raise CatalogKeyEmptyError(name) from None
         assert made is not None
         new: UUID = made["id"]
         return new
@@ -377,6 +396,10 @@ class CatalogStore:
                 if not _is_names(exc, spec):
                     raise CatalogExistsError() from None
                 raise _clash(conn, spec, [data["name"]], data.get("material_id")) from None
+            except errors.CheckViolation as exc:
+                if not _no_key(exc, spec):
+                    raise
+                raise CatalogKeyEmptyError(data["name"]) from None
             except errors.ForeignKeyViolation:
                 raise CatalogRefError() from None
         assert made is not None
@@ -426,6 +449,10 @@ class CatalogStore:
                 )
                 aliases = list(getattr(was, "aliases", None) or [])
                 raise _clash(conn, spec, [name, *aliases], material, other_than=row_id) from None
+            except errors.CheckViolation as exc:
+                if not _no_key(exc, spec):
+                    raise
+                raise CatalogKeyEmptyError(str(getattr(patch, "name", ""))) from None
             except errors.ForeignKeyViolation:
                 raise CatalogRefError() from None
         return changed
@@ -447,27 +474,25 @@ class CatalogStore:
             conn.execute(
                 f"DELETE FROM {names.table} WHERE {names.owner} = %s AND NOT canonical", (row_id,)
             )
+            scope_insert = "" if scope is None else ", material_scope"
             for alias in (one.strip() for one in aliases):
-                key = conn.execute(f"SELECT {key_sql('%s')} AS key", (alias,)).fetchone()
-                assert key is not None
-                if not key["key"]:
-                    raise AliasKeyEmptyError(alias)
-                columns = ["key", names.owner, "name", "canonical"]
-                values: list[Any] = [key["key"], row_id, alias, False]
-                if scope is not None:
-                    columns.append("material_scope")
-                    values.append(scope)
+                # The key is computed in the INSERT itself (one round trip per alias).
+                values: list[Any] = [alias, row_id, alias] + ([] if scope is None else [scope])
                 try:
                     with conn.transaction():
-                        conn.execute(
-                            f"INSERT INTO {names.table} ({', '.join(columns)})"
-                            f" VALUES ({', '.join('%s' for _ in columns)})",
+                        made = conn.execute(
+                            f"INSERT INTO {names.table} (key, {names.owner}, name, canonical"
+                            f"{scope_insert}) VALUES ({key_sql('%s')}, %s, %s, false"
+                            f"{'' if scope is None else ', %s'}) RETURNING key",
                             values,
-                        )
+                        ).fetchone()
                 except errors.UniqueViolation:
                     held = _holder(conn, names, spec.table, alias, scope)
                     assert held is not None
                     raise CatalogKeyClashError(names.noun, held[0], held[1], alias) from None
+                assert made is not None
+                if not made["key"]:
+                    raise AliasKeyEmptyError(alias)
             return self._read(conn, spec, row_id)
 
     def archive(self, kind: str, row_id: UUID, archived: bool) -> BaseModel | None:
