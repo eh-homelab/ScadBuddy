@@ -720,6 +720,7 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_type_upsert',
   'filament_type_set_presets',
   'filament_type_set_k_values',
+  'filament_type_fill_from_profile',
   'filament_spool_upsert',
   'filament_spool_set_presets',
   'filament_spool_set_k_values',

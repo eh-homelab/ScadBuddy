@@ -674,3 +674,40 @@ describe('filament RFID tools (#6264)', () => {
     expect(firstText(await t.execute(t.parse({}), ctx('outward')))).toEqual(report)
   })
 })
+
+describe('filament_type_fill_from_profile (#6714)', () => {
+  const TYPES = `${BACKEND}/api/v1/filament/types`
+  const fill = { type_id: ROW, code: 'X', filled: { density_g_cm3: '1.32' }, previous: {}, skipped: {}, k_values: [], written: true }
+
+  it('is write tier, never gated', () => {
+    expect(tool('filament_type_fill_from_profile').risk).toBe('write')
+    expect(tool('filament_type_fill_from_profile').gated).toBe(false)
+    expect(tool('filament_type_fill_from_profile').description).toMatch(/empty/)
+  })
+
+  it('fills one type, or every type, and sends refresh and apply as given', async () => {
+    const sent: { url: string; body: unknown }[] = []
+    server.use(
+      http.post(`${TYPES}/fill-from-profile`, async ({ request }) => {
+        sent.push({ url: request.url, body: await request.json() })
+        return HttpResponse.json([fill])
+      }),
+      http.post(`${TYPES}/:id/fill-from-profile`, async ({ request }) => {
+        sent.push({ url: request.url, body: await request.json() })
+        return HttpResponse.json(fill)
+      }),
+    )
+    expect(firstText(await runTool(tool('filament_type_fill_from_profile'), { refresh: true }, ctx()))).toEqual([fill])
+    const one = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: { density_g_cm3: '1.32' }, k_values: true }, ctx())
+    expect(firstText(one)).toEqual(fill)
+    expect(sent).toEqual([
+      { url: `${TYPES}/fill-from-profile`, body: { refresh: true } },
+      { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true } },
+    ])
+  })
+
+  it('refuses apply without a type', async () => {
+    const refused = await runTool(tool('filament_type_fill_from_profile'), { apply: { density_g_cm3: '1.32' } }, ctx())
+    expect(refused.isError).toBe(true)
+  })
+})
