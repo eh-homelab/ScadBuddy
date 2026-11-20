@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { api } from '../../../api/client'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
@@ -128,23 +128,102 @@ describe('Filament (#6262)', () => {
     expect(within(failed).getByRole('link', { name: 'Location 0badc0de' })).toBeInTheDocument()
   })
 
-  it('sync now re-reads the status', async () => {
-    await api.putSettings({ filament_sync: { ...DEFAULT_SYNC, weights: 'two_way' } })
-    let reads = 0
+  /** The sync status reads made so far, counted from msw's request events. */
+  function countStatusReads() {
+    const count = { reads: 0 }
     server.events.on('request:start', ({ request }) => {
-      if (new URL(request.url).pathname === '/api/v1/filament/sync/status') reads += 1
+      if (new URL(request.url).pathname === '/api/v1/filament/sync/status') count.reads += 1
     })
-    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    return count
+  }
+
+  async function startSync() {
+    await api.putSettings({ filament_sync: { ...DEFAULT_SYNC, weights: 'two_way' } })
+    const rendered = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
     const failed = await within(filament).findByRole('list', { name: 'Items not synced' })
     expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('2 attempts')
-    const before = reads
-    await user.click(within(filament).getByRole('button', { name: 'Sync now' }))
-    expect(await within(filament).findByText(/Sync started/)).toBeInTheDocument()
-    await waitFor(() => expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('3 attempts'))
-    expect(reads).toBeGreaterThan(before)
-    server.events.removeAllListeners()
+    await rendered.user.click(within(filament).getByRole('button', { name: 'Sync now' }))
+    // Announced politely: the note is its own live region.
+    expect(await within(filament).findByText(/Sync started/)).toHaveAttribute('aria-live', 'polite')
+    return { ...rendered, filament, failed }
+  }
+
+  it('sync now re-reads the status every 3 s until the pass lands', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const count = countStatusReads()
+    try {
+      const { filament, failed } = await startSync()
+      // The mock's pass lands on the second read after the run, as a background pass would.
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('2 attempts')
+      const before = count.reads
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      await waitFor(() => expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('3 attempts'))
+      expect(within(filament).getByText('Sync finished.')).toBeInTheDocument()
+      expect(count.reads).toBe(before + 1)
+      // Landed: no more reads.
+      await act(() => vi.advanceTimersByTimeAsync(9_000))
+      expect(count.reads).toBe(before + 1)
+    } finally {
+      server.events.removeAllListeners()
+      vi.useRealTimers()
+    }
+  })
+
+  it('says the pass is still running after 60 s with no new pass', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    server.use(http.post('*/api/v1/filament/sync/run', () => HttpResponse.json({ started: true }, { status: 202 })))
+    const count = countStatusReads()
+    try {
+      const { filament } = await startSync()
+      const before = count.reads
+      await act(() => vi.advanceTimersByTimeAsync(60_000))
+      expect(await within(filament).findByText('The pass is still running. Check back later.')).toBeInTheDocument()
+      expect(count.reads - before).toBe(20)
+      await act(() => vi.advanceTimersByTimeAsync(9_000))
+      expect(count.reads - before).toBe(20)
+    } finally {
+      server.events.removeAllListeners()
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops reading the status when the page goes away', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const count = countStatusReads()
+    try {
+      const { unmount } = await startSync()
+      const before = count.reads
+      unmount()
+      await act(() => vi.advanceTimersByTimeAsync(9_000))
+      expect(count.reads).toBe(before)
+    } finally {
+      server.events.removeAllListeners()
+      vi.useRealTimers()
+    }
+  })
+
+  it('links to Connection when no Bambuddy is set up', async () => {
+    server.use(
+      http.post('*/api/v1/filament/sync/run', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'no Bambuddy is configured', code: 'no_bambuddy' }, { status: 409 }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Sync now' }))
+    const alert = await within(filament).findByRole('alert')
+    expect(within(alert).getByRole('link', { name: 'Connection' })).toHaveAttribute('href', expect.stringContaining('/settings/general#connection'))
+  })
+
+  it('names the sync status block for its label', async () => {
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    expect(document.getElementById('filament-sync-status')).not.toBeNull()
+    expect(within(region('Filament')).getByText('Sync status').closest('label')).toHaveAttribute('for', 'filament-sync-status')
   })
 
   it('says what to change when nothing is set to go to Bambuddy', async () => {

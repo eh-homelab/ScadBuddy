@@ -35,5 +35,7 @@ test('sync now starts a pass and lists the item Bambuddy refused', async ({ page
   await filament.getByRole('button', { name: 'Save Filament' }).click()
   await filament.getByRole('button', { name: 'Sync now' }).click()
   await expect(filament.getByText(/Sync started/)).toBeVisible()
+  // The page reads the status every 3 s; the mock's pass lands on the second read.
+  await expect(filament.getByText('Sync finished.')).toBeVisible({ timeout: 15_000 })
   await expect(failed.getByRole('listitem').first()).toContainText('3 attempts')
 })

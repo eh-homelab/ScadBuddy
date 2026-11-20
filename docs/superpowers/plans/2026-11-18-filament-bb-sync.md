@@ -1536,6 +1536,16 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `filament_sync_status`'s descriptions name it. Tests:
     `test_status_labels_each_error_row`, `names an item that is gone by its id`. Cost: none
     known.
+137. Task 11 (R-T11-2): the pass "Sync now" asks for runs in the background, so after a 202
+    the page reads the status every 3 s (`SYNC_POLL_MS`), for at most 60 s
+    (`SYNC_POLL_LIMIT_MS`, 20 reads), until `last_pass_at` differs from its value before
+    the click; then it shows the new pass and "Sync finished.". On the limit it says "The
+    pass is still running. Check back later." Unmounting stops the reads, and "Sync now" is
+    disabled while they run. The mock's pass lands on the second status read after the
+    run, never inside the POST, so a test sees the reads. Tests: `sync now re-reads the
+    status every 3 s until the pass lands`, `says the pass is still running after 60 s with
+    no new pass`, `stops reading the status when the page goes away` (fake timers). Cost: up
+    to 20 extra status reads per click, each a read of two SB tables.
 
 ## Self-review
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { ApiError } from '../../../api/client'
 import {
   getRfidStatus,
@@ -190,15 +190,27 @@ const SKIPPED_TEXT: Record<NonNullable<SyncStatus['skipped']>, string> = {
 }
 
 /** What "Sync now" says when the server refuses it, in plain words. */
-function runProblem(cause: unknown): string {
-  if (!(cause instanceof ApiError)) return 'The server could not be reached. Try again.'
+function runProblem(cause: unknown): ReactNode {
+  if (!(cause instanceof ApiError)) return 'The sync could not be asked for. Try again.'
   if (cause.status === 409 && cause.problem.code === 'no_bambuddy')
-    return 'No Bambuddy is set up. Add its address and API key in Connection, then try again.'
+    return (
+      <>
+        No Bambuddy is set up. Add its address and API key in{' '}
+        <AppLink href="/settings/general#connection" className={LINK}>
+          Connection
+        </AppLink>
+        , then try again.
+      </>
+    )
   if (cause.status === 409 && cause.problem.code === 'nothing_pushes')
     return 'Nothing is set to go to Bambuddy. Set a data type to "ScadBuddy → Bambuddy" or "Both ways", save Filament, then try again.'
   if (cause.status === 503) return 'The sync could not be started. Try again later.'
   return cause.detail
 }
+
+/** R-T11-2: after "Sync now", how often the status is read until the pass lands, and for how long. */
+const SYNC_POLL_MS = 3_000
+const SYNC_POLL_LIMIT_MS = 60_000
 
 function When({ at }: { at: string }) {
   return (
@@ -225,17 +237,56 @@ function countsLine(counts: SyncStatus['counts']): string {
 function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
   const [pending, setPending] = useState(false)
   const [note, setNote] = useState<string | null>(null)
-  const [problem, setProblem] = useState<string | null>(null)
+  const [problem, setProblem] = useState<ReactNode>(null)
+  /** While a pass asked for has not landed: the `last_pass_at` before it. */
+  const [waiting, setWaiting] = useState<{ before: string | null } | null>(null)
   const data = status.data
+  const { setData } = status
+
+  // R-T11-2 — the pass runs in the background: read the status every SYNC_POLL_MS until
+  // `last_pass_at` moves, for at most SYNC_POLL_LIMIT_MS. Unmounting stops it.
+  useEffect(() => {
+    if (!waiting) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let reads = 0
+    const tick = async () => {
+      reads += 1
+      try {
+        const next = await getSyncStatus()
+        if (stopped) return
+        setData(next, { supersede: true })
+        if (next.last_pass_at !== waiting.before) {
+          setNote('Sync finished.')
+          setWaiting(null)
+          return
+        }
+      } catch {
+        if (stopped) return
+      }
+      if (reads * SYNC_POLL_MS >= SYNC_POLL_LIMIT_MS) {
+        setNote('The pass is still running. Check back later.')
+        setWaiting(null)
+        return
+      }
+      timer = setTimeout(() => void tick(), SYNC_POLL_MS)
+    }
+    timer = setTimeout(() => void tick(), SYNC_POLL_MS)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+    }
+  }, [waiting, setData])
 
   async function syncNow() {
     setPending(true)
     setNote(null)
     setProblem(null)
+    const before = data?.last_pass_at ?? null
     try {
       await runSync()
-      setNote('Sync started. It runs in the background; the status below shows how it went.')
-      status.refresh()
+      setNote('Sync started. It runs in the background; this status updates when the pass is done.')
+      setWaiting({ before })
     } catch (cause) {
       setProblem(runProblem(cause))
     } finally {
@@ -244,8 +295,8 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
   }
 
   return (
-    <FieldRow id="filament-sync-now" label="Sync status" help="Each item whose last write to Bambuddy failed stays listed until a later write works.">
-      <div className="flex flex-col gap-2 text-sm">
+    <FieldRow id="filament-sync-status" label="Sync status" help="Each item whose last write to Bambuddy failed stays listed until a later write works.">
+      <div id="filament-sync-status" className="flex flex-col gap-2 text-sm">
         {data && (
           <div role="status" className="flex flex-col gap-1">
             <p>
@@ -294,11 +345,13 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
         )}
         {status.error && <p className="text-warn">The sync status could not be read. Reload the page to try again.</p>}
         <div>
-          <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => void syncNow()}>
+          <Button type="button" size="sm" variant="outline" disabled={pending || waiting !== null} onClick={() => void syncNow()}>
             Sync now
           </Button>
         </div>
-        {note && <p className="text-muted-foreground">{note}</p>}
+        <p role="status" aria-live="polite" className="text-muted-foreground empty:hidden">
+          {note}
+        </p>
         {problem && (
           <p role="alert" className="text-warn">
             {problem}

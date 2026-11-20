@@ -12,8 +12,10 @@ type S = components['schemas']
  * (`backend/scadbuddy/api/filament.py`). The directions are the stored `filament_sync`, and
  * `skipped` is worked out from the settings as the server does: no Bambuddy URL, or no data
  * type set to push. The seed holds one spool Bambuddy refused and one supplier held back
- * because Bambuddy has its name. Each "sync now" is a pass that finishes at once, a minute
- * later than the last, in which the refused spool fails once more. Ids and times are fixed strings.
+ * because Bambuddy has its name. Each "sync now" asks for a pass that, like the server's,
+ * runs in the background: it lands on the second status read after the run (`READS_TO_LAND`),
+ * a minute later than the last, with the refused spool failing once more. Ids and times are
+ * fixed strings.
  */
 
 const BASE = '/api/v1/filament/sync'
@@ -25,12 +27,24 @@ const seedErrors = (): S['SyncError'][] => [
   { kind: 'supplier', sb_id: SUPPLIER.MICRO, label: 'Micro Center', error: 'name_taken', attempts: 1, at: '2026-11-15T06:55:00Z' },
 ]
 
+/** The status reads after a run before its pass lands (R-T11-2): not the first, so a page must read again. */
+const READS_TO_LAND = 2
+
 let passes = 0
 let errors = seedErrors()
+/** Status reads left before the pass asked for lands; null when none is running. */
+let running: number | null = null
 
 export function reset() {
   passes = 0
   errors = seedErrors()
+  running = null
+}
+
+function land() {
+  passes += 1
+  // A held-back row is never sent, so only the refused one is tried again.
+  errors = errors.map((error) => (error.error === 'name_taken' ? error : { ...error, attempts: error.attempts + 1, at: at(passes) }))
 }
 
 const at = (pass: number) => new Date(FIRST_PASS + pass * MINUTE).toISOString()
@@ -60,15 +74,22 @@ function status(): S['SyncStatus'] {
 const conflict = (detail: string, code: string) => problem(409, 'Conflict', detail, { code })
 
 export const handlers = [
-  http.get(`${BASE}/status`, () => HttpResponse.json(status())),
+  http.get(`${BASE}/status`, () => {
+    if (running !== null) {
+      running -= 1
+      if (running === 0) {
+        running = null
+        land()
+      }
+    }
+    return HttpResponse.json(status())
+  }),
   http.post(`${BASE}/run`, () => {
     restoreFilamentSync()
     const reason = skipped()
     if (reason === 'no_bambuddy') return conflict('no Bambuddy is configured', reason)
     if (reason === 'nothing_pushes') return conflict('no data type is set to push to Bambuddy', reason)
-    passes += 1
-    // A held-back row is never sent, so only the refused one is tried again.
-    errors = errors.map((error) => (error.error === 'name_taken' ? error : { ...error, attempts: error.attempts + 1, at: at(passes) }))
+    running ??= READS_TO_LAND
     return HttpResponse.json({ started: true } satisfies S['SyncRun'], { status: 202 })
   }),
 ]
