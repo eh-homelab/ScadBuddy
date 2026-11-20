@@ -367,9 +367,14 @@ class MetricsStore:
         for spool in stocked:
             low[spool.names.material] += spool.low_stock
         reorder = dict.fromkeys(in_stock, 0)
+        type_material: dict[UUID, str | None] = {}
+        for spool in stocked:
+            if spool.type_id is not None:
+                type_material.setdefault(spool.type_id, spool.names.material)
         for kind in _type_forecasts(read, settings, now):
             if kind.reorder_now:
-                reorder[kind.material] = reorder.get(kind.material, 0) + 1
+                name = type_material.get(kind.type_id, kind.material)
+                reorder[name] = reorder.get(name, 0) + 1
         return mm.Snapshot(
             stock=[(*k, r[0], r[1], _money(r[2])) for k, r in stock.items()],
             used=dict(used),
@@ -485,7 +490,7 @@ def _type_forecasts(read: _Read, settings: MetricsSettings, now: datetime) -> li
                 safety_margin_days=margin,
                 reorder_on=reorder,
                 reorder_now=reorder is not None and reorder <= today,
-                low_stock=all(s.low_stock for s in stocked),
+                low_stock=bool(stocked) and all(s.low_stock for s in stocked),
             )
         )
     return sorted(found, key=lambda t: (t.label.upper(), str(t.type_id)))

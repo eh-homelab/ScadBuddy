@@ -1161,11 +1161,12 @@ METRICS_MAX_DAYS = 3 * 365 + 1
 
 def _range(since: date | None, until: date | None, default_days: int) -> tuple[date, date]:
     """``until`` defaults to today (UTC), ``since`` to ``default_days`` before it. 422
-    when ``since`` is not before ``until`` or the range passes `METRICS_MAX_DAYS`."""
+    when ``since`` is after ``until`` (a single day, ``since == until``, is allowed) or
+    the range passes `METRICS_MAX_DAYS`."""
     until = datetime.now(UTC).date() if until is None else until
     since = until - timedelta(days=default_days) if since is None else since
-    if since >= until:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "since must be before until")
+    if since > until:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "since must not be after until")
     if (until - since).days > METRICS_MAX_DAYS:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

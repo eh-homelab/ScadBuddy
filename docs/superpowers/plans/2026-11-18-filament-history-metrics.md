@@ -429,7 +429,7 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
   `GET /api/v1/filament/spools/{spool_id}/history` (404 for no spool);
   `GET /api/v1/filament/forecast`;
   `GET /api/v1/filament/metrics?dimension=&bucket=&since=&until=` (defaults Decision 19;
-  `since` defaults to 180 days before `until`; `until` to today; `since >= until` is 422;
+  `since` defaults to 180 days before `until`; `until` to today; `since > until` is 422 (a single day is allowed);
   a range over 3 years is 422);
   `GET /api/v1/filament/metrics/purchasing?since=&until=` (default the last 365 days).
 

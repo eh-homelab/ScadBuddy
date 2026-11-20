@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
+from typing import Any
+
+from prometheus_client import Gauge
 
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.filament.metrics_models import Snapshot
@@ -46,8 +49,9 @@ def _totals(pairs: Iterable[tuple[str | None, float]]) -> dict[str | None, float
 
 
 def export(metrics: Metrics, snapshot: Snapshot) -> None:
-    """Clear every filament gauge and set it from ``snapshot``: a value that left the
-    snapshot leaves its series. `filament_metrics_up` is the caller's."""
+    """Set every filament gauge from ``snapshot`` and drop a series that left it. The
+    series are built first and the old ones go last, so an exception keeps the last good
+    values. `filament_metrics_up` is the caller's."""
     stock = snapshot.stock
     materials = fold(
         _totals(
@@ -81,34 +85,27 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
     for material, found in snapshot.days_of_stock.items():
         days[mat(material)] = min(found, days.get(mat(material), found))
 
-    gauges = (
-        metrics.filament_stock_grams,
-        metrics.filament_stock_spools,
-        metrics.filament_stock_value,
-        metrics.filament_used_grams,
-        metrics.filament_burn,
-        metrics.filament_days_of_stock,
-        metrics.filament_low_stock_spools,
-        metrics.filament_reorder_types,
-    )
-    for gauge in gauges:
-        gauge.clear()
-    for key, amount in grams.items():
-        metrics.filament_stock_grams.labels(*key).set(amount)
-    for key, amount in spools.items():
-        metrics.filament_stock_spools.labels(*key).set(amount)
-    for material_label, amount in value.items():
-        metrics.filament_stock_value.labels(material_label, snapshot.currency).set(amount)
-    for used_labels, amount in used.items():
-        metrics.filament_used_grams.labels(*used_labels).set(amount)
-    for gauge, values in (
-        (metrics.filament_burn, burn),
-        (metrics.filament_days_of_stock, days),
-        (metrics.filament_low_stock_spools, low),
-        (metrics.filament_reorder_types, reorder),
-    ):
-        for material_label, amount in values.items():
-            gauge.labels(material_label).set(amount)
+    wanted: list[tuple[Gauge, Mapping[Any, float]]] = [
+        (metrics.filament_stock_grams, grams),
+        (metrics.filament_stock_spools, spools),
+        (metrics.filament_stock_value, {(k, snapshot.currency): v for k, v in value.items()}),
+        (metrics.filament_used_grams, used),
+        (metrics.filament_burn, {(k,): v for k, v in burn.items()}),
+        (metrics.filament_days_of_stock, {(k,): v for k, v in days.items()}),
+        (metrics.filament_low_stock_spools, {(k,): v for k, v in low.items()}),
+        (metrics.filament_reorder_types, {(k,): v for k, v in reorder.items()}),
+    ]
+    # Everything is built above. Set first, then drop the series that left: a failure
+    # while setting leaves the last good series, never an empty gauge.
+    for gauge, values in wanted:
+        for labels, amount in values.items():
+            gauge.labels(*labels).set(amount)
+    for gauge, values in wanted:
+        for family in gauge.collect():
+            for sample in family.samples:
+                labels = tuple(sample.labels.values())
+                if labels not in values:
+                    gauge.remove(*labels)
 
 
 def _by_material(
