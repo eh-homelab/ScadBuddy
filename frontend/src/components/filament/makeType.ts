@@ -1,21 +1,20 @@
+import { ApiError } from '../../api/client'
 import {
-  listCatalog,
   patchSpool,
+  resolveCatalog,
   setSpoolKValues,
   setSpoolPresets,
   setTypeKValues,
   setTypePresets,
   upsertCatalog,
   upsertType,
-  type CatalogKind,
+  type AliasedKind,
   type CatalogRows,
   type SpoolDetail,
   type SpoolPatch,
   type SpoolType,
 } from '../../api/filament'
 import type { Filament } from '../../api/types'
-
-const same = (a: string, b: string) => a.trim().toUpperCase() === b.trim().toUpperCase()
 
 /** What `makeTypeFromBook` added to the catalog, then the refusal of the type itself. */
 export class MakeTypeError extends Error {
@@ -29,13 +28,26 @@ export class MakeTypeError extends Error {
 }
 
 /**
- * The row of `kind` named `name` (and, for a subtype, of `materialId`: a subtype's name is
- * unique per material), added when it is missing, as the Bambuddy pull and the CSV import
- * add one. `added` collects what this call made.
+ * #6706 — the row of `kind` whose name or alias has `name`'s key (the server's
+ * `GET /catalog/{kind}/resolve`: any case and punctuation; a subtype is `materialId`'s own,
+ * else one for every material), or `null` for none.
  */
-async function named<K extends CatalogKind>(kind: K, name: string, added: string[], materialId?: string): Promise<CatalogRows[K]> {
-  const rows = await listCatalog(kind)
-  const found = rows.find((row) => same(row.name, name) && (materialId === undefined || (row as { material_id?: string | null }).material_id === materialId))
+async function resolved<K extends AliasedKind>(kind: K, name: string, materialId?: string): Promise<CatalogRows[K] | null> {
+  try {
+    return await resolveCatalog(kind, name, materialId)
+  } catch (cause) {
+    if (cause instanceof ApiError && cause.status === 404) return null
+    throw cause
+  }
+}
+
+/**
+ * The row of `kind` that `name` resolves to, added when there is none, as the Bambuddy
+ * pull and the CSV import add one (a subtype of `materialId`). `added` collects what this
+ * call made.
+ */
+async function named<K extends AliasedKind>(kind: K, name: string, added: string[], materialId?: string): Promise<CatalogRows[K]> {
+  const found = await resolved(kind, name, materialId)
   if (found) return found
   const made = await upsertCatalog(kind, { name, ...(materialId ? { material_id: materialId } : {}) } as Parameters<typeof upsertCatalog<K>>[1])
   added.push(name)
@@ -64,7 +76,8 @@ export async function makeTypeFromBook(row: Filament): Promise<SpoolType> {
   const material = await named('materials', row.material, added)
   const brand = row.brand ? await named('brands', row.brand, added) : null
   const subtype = row.subtype ? await named('subtypes', row.subtype, added, material.id) : null
-  const effect = row.effect ? ((await listCatalog('effects')).find((one) => same(one.name, row.effect!.replace(/-/g, ' '))) ?? null) : null
+  // The book's `dual-color` is the catalog's `Dual Color` by key; an effect is never added.
+  const effect = row.effect ? await resolved('effects', row.effect) : null
   const alpha = row.alpha.toString(16).padStart(2, '0')
   return upsertType({
     code: typeCodeOf(row),
