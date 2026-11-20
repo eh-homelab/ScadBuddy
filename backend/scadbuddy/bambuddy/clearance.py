@@ -11,6 +11,10 @@ https://github.com/bambulab/BambuStudio/blob/79df7ae309be398ed30c9f397c13c9911c2
 This says so before the print, as warnings, and never refuses: Bambuddy's slicer still
 has the last word (``docs/superpowers/specs/2026-10-13-declared-objects-design.md`` §4).
 
+A plate that is one object of several colours (a template's own render, one part per
+colour) gets a warning of its own (#6781): by object has no effect there, and the slicer
+changes filament on every layer.
+
 An object's footprint here is its bounding box on the bed, which holds Bambu's convex
 hull: the check may warn where Bambu Studio would not, never the other way round.
 """
@@ -73,6 +77,10 @@ class PlacedObject:
     name: str
     low: tuple[float, float, float]
     high: tuple[float, float, float]
+    #: The filaments its printed parts use, as ``model_settings.config`` states them
+    #: (a part's own ``extruder``, else its object's); empty when the file states none
+    #: (#6781). A painting's filaments are not among them.
+    extruders: frozenset[int] = frozenset()
 
     @property
     def height(self) -> float:
@@ -234,6 +242,7 @@ def _placed_by_plate(
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
         object_names: dict[str, str] = {}
+        object_extruders: dict[str, frozenset[int]] = {}
         #: Each plate's object ids; ``None`` for a file with no plate list.
         on_plate: dict[int, set[str]] | None = None
         if MODEL_SETTINGS_NAME in names:
@@ -243,6 +252,7 @@ def _placed_by_plate(
                 for entry in obj.findall("metadata"):
                     if entry.get("key") == "name" and obj.get("id"):
                         object_names[obj.get("id", "")] = entry.get("value") or ""
+                object_extruders[obj.get("id", "")] = _stated_extruders(obj)
             listed = plate_settings(config)
             if listed:
                 on_plate = {}
@@ -279,29 +289,82 @@ def _placed_by_plate(
                 object_names.get(object_id) or f"object {number}",
                 (float(low[0]), float(low[1]), float(low[2])),
                 (float(high[0]), float(high[1]), float(high[2])),
+                object_extruders.get(object_id, frozenset()),
             )
             for plate in wanted:
                 placed[plate].append(found)
     return placed
 
 
+def _extruder(element: ET.Element) -> int | None:
+    for entry in element.findall("metadata"):
+        if entry.get("key") == "extruder":
+            value = entry.get("value") or ""
+            return int(value) if value.isascii() and value.isdigit() else None
+    return None
+
+
+def _stated_extruders(obj: ET.Element) -> frozenset[int]:
+    """The filaments ``obj``'s printed parts use (a part with no subtype, or
+    ``normal_part``): each part's own ``extruder``, else the object's (#6781)."""
+    own = _extruder(obj)
+    parts = obj.findall("part")
+    if not parts:
+        return frozenset() if own is None else frozenset({own})
+    stated = (
+        _extruder(part) or own
+        for part in parts
+        if part.get("subtype", "normal_part") == "normal_part"
+    )
+    return frozenset(slot for slot in stated if slot is not None)
+
+
+def one_object_warnings(objects: Sequence[PlacedObject], plate: int) -> list[FilamentWarning]:
+    """#6781: a by-object print of a plate that is one object of several colours. A
+    template's own multi-plate render writes each plate so, one part per colour. By
+    object then has no effect: the slicer prints the plate layer by layer and changes
+    filament on every layer. A warning, never a refusal."""
+    if len(objects) != 1 or len(objects[0].extruders) < 2:
+        return []
+    obj = objects[0]
+    return [
+        FilamentWarning(
+            kind="by-object-one-object",
+            plate_id=plate,
+            message=(
+                f"Plate {plate}: printing by object has no effect here. {obj.name} is one "
+                f"object with {len(obj.extruders)} colours, so the slicer prints it layer "
+                "by layer and changes filament on every layer. To print the pieces one "
+                "at a time, render each piece alone and Arrange them on a plate. Or print "
+                "by layer."
+            ),
+        )
+    ]
+
+
 def check_plates(
     payload: bytes, plates: Sequence[int], clearance: Clearance | None
 ) -> tuple[dict[int, list[PlacedObject]], list[FilamentWarning]]:
-    """Each of ``plates``' placed objects and, with a ``clearance``, what a by-object
-    print of each would hit, naming the plate when there are several. The file is read
-    and its pairs compared in one call, made off the event loop (#3251): the pairs are
-    quadratic in a plate's objects. Raises as :func:`placed_objects_by_plate`."""
+    """Each of ``plates``' placed objects, each plate that is one object of several
+    colours (:func:`one_object_warnings`, #6781) and, with a ``clearance``, what a
+    by-object print of each would hit, naming the plate when there are several. The file
+    is read and its pairs compared in one call, made off the event loop (#3251): the pairs
+    are quadratic in a plate's objects. Raises as :func:`placed_objects_by_plate`."""
     by_plate = placed_objects_by_plate(payload, plates)
-    if clearance is None:
-        return by_plate, []
     several = len(plates) > 1
     warnings = [
         warning
         for plate in plates
-        for warning in clearance_warnings(
-            by_plate[plate], clearance, plate=plate if several else None
-        )
+        for warning in [
+            *one_object_warnings(by_plate[plate], plate),
+            *(
+                []
+                if clearance is None
+                else clearance_warnings(
+                    by_plate[plate], clearance, plate=plate if several else None
+                )
+            ),
+        ]
     ]
     return by_plate, warnings
 

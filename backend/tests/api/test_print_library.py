@@ -63,7 +63,7 @@ from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.printers import linked_printer
 from tests.support.sb_rows import drop_app_sb_presets, seed_app_sb_spools
-from tests.test_clearance import two_objects_3mf
+from tests.test_clearance import one_object_two_colours_3mf, two_objects_3mf
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
@@ -3138,6 +3138,38 @@ def test_a_by_object_check_warns_when_the_toolhead_would_hit_an_object(
     # #2976: by object or not, the file is downloaded as often: once, for the nozzle
     # check, whose read the objects and (#4495) the slots come from.
     assert download.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("overrides", "warned"),
+    [({"print_sequence": "by object"}, True), ({"print_sequence": "by layer"}, False)],
+)
+def test_a_by_object_check_of_one_multi_colour_object_warns_and_names_the_plate(
+    client: TestClient, tmp_path: Path, overrides: dict[str, str], warned: bool
+) -> None:
+    """#6781: a plate that is one object of two colours, printed by object through the
+    generic process overrides. The check warns with the plate id and refuses nothing."""
+    configure(client)
+    library_file(89, content=one_object_two_colours_3mf(tmp_path / "menorah.3mf"))
+    run_routes()
+    # The overrides are checked against the process preset's values (#2998).
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(
+            200, json={"resolved": True, "values": {"print_sequence": "by layer"}}
+        )
+    )
+    sliced = slice_routes()
+
+    check = client.post(
+        "/api/v1/print/library/89/check", json={**body(), "process_overrides": overrides}
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    found = [w for w in check.json()["warnings"] if w["kind"] == "by-object-one-object"]
+    assert [w.get("plate_id") for w in found] == ([1] if warned else [])
+    assert not sliced.called
 
 
 @respx.mock
