@@ -75,7 +75,7 @@ import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { printRunBody, useRunPrint } from '../lib/useRunPrint'
-import { FilamentPicker } from './FilamentPicker'
+import { FilamentPicker, WarningList } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { ColourMatchSwitch } from './print/ColourMatchSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
@@ -957,7 +957,7 @@ export function PrintPicker({
     acceptedFixes: sliced ? NO_IDS : acceptedFixes,
     onRan,
   })
-  const { run, running, runError, refused, result, unanswered } = runPrint
+  const { run, running, runError, runWarnings, refused, result, unanswered } = runPrint
   const queueUrl = result?.bambuddy_url ?? null
   /** #4250 — quote mode: the price book's filaments, and the one chosen per slot. */
   const quoting = quote !== undefined
@@ -2396,6 +2396,7 @@ export function PrintPicker({
                 slicing={previewSlice.slicing}
                 progress={previewSlice.progress}
                 sliceError={previewSlice.error}
+                sliceWarnings={previewSlice.warnings}
                 onReslice={sliced ? null : previewSlice.reslice}
                 canReslice={previewSlice.canReslice}
                 reslicing={previewSlice.reslicing}
@@ -2404,11 +2405,18 @@ export function PrintPicker({
             </div>
           )}
 
-          {runError && (
-            <p role="alert" className="mt-3 text-sm text-destructive">
-              {runError}
-            </p>
-          )}
+          {runError &&
+            (runWarnings.length > 0 ? (
+              // #6737: the plain words lead; the slicer's own text stays, quieter, below them.
+              <div role="alert" className="mt-3 text-sm">
+                <WarningList warnings={runWarnings} testId="run-warnings" />
+                <p className="mt-1 text-xs text-subtle">{runError}</p>
+              </div>
+            ) : (
+              <p role="alert" className="mt-3 text-sm text-destructive">
+                {runError}
+              </p>
+            ))}
           {handingError && (
             <p role="alert" className="mt-3 text-sm text-destructive" data-testid="quote-error">
               {handingError}

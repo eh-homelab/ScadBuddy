@@ -1,7 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { PreviewStarted, PrintRunRequest, SlicePreview } from '../api/types'
+import type { FilamentWarning, PreviewStarted, PrintRunRequest, SlicePreview } from '../api/types'
 import type { PrintSource } from './printSource'
 import { fakeRealtime } from './realtime.fake'
 import { RESLICE_DEBOUNCE_MS, RESLICE_POLL_MS, usePreviewSlice } from './usePreviewSlice'
@@ -297,6 +297,34 @@ describe('usePreviewSlice: Reslice (#4433)', () => {
     expect(result.current.stale).toBe(false)
     expect(result.current.error).toBeNull()
     expect(result.current.result?.print_time_seconds).toBe(90)
+  })
+
+  it('gives the plate-named object-conflict warning of a failed slice, until the next slice starts (#6737)', async () => {
+    const conflict: FilamentWarning = {
+      kind: 'object-conflict',
+      plate_id: 2,
+      message: 'Plate 2: the slicer found the prime tower stands on an object, or objects overlap.',
+    }
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
+    vi.spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce({
+        ...running(null, 'native'),
+        status: 'failed',
+        failure: 'Object conflicts were detected',
+        slice_warnings: [conflict],
+      })
+      .mockResolvedValueOnce(completed('native'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+
+    expect(result.current.error).toBe('Object conflicts were detected')
+    expect(result.current.warnings).toEqual([conflict])
+
+    act(() => result.current.reslice())
+    await advance(0)
+
+    expect(result.current.error).toBeNull()
+    expect(result.current.warnings).toEqual([])
   })
 
   it('keeps the shown slice stale after a Reslice whose start failed', async () => {

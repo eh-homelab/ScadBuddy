@@ -2861,6 +2861,24 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 
+  it('names the plate of a run the slicer refused for an object conflict (#6737)', async () => {
+    const message = 'Plate 1: the slicer found the prime tower stands on an object, or objects overlap.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        title: 'Slice failed',
+        status: 502,
+        detail: 'Object conflicts were detected',
+        warnings: [{ kind: 'object-conflict', plate_id: 1, message }],
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByTestId('run-warnings')).toHaveTextContent(message)
+    expect(screen.getByText('Object conflicts were detected')).toBeInTheDocument()
+  })
+
   it('is remembered for the model once it prints (#4970)', async () => {
     const remember = vi.spyOn(api, 'putModelChoices')
     const { user } = renderPicker()
