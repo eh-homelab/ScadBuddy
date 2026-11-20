@@ -96,7 +96,7 @@ import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SupportsStep } from './print/SupportsStep'
 import { PrimeTowerStep } from './print/PrimeTowerStep'
-import { overriddenTowerKeys } from '../lib/primeTower'
+import { analysisTower, overriddenTowerKeys } from '../lib/primeTower'
 import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { SlicerSettingsEditor } from './print/SlicerSettingsEditor'
@@ -1160,6 +1160,9 @@ export function PrintPicker({
    * prints (#3762 review).
    */
   const printChoices = printChoicesOf(selection)
+  // #6721: plate fit keeps room for a tower over a file that states it off only when the
+  // print turns it on. So the analysis takes the tower that the run takes.
+  const analysisPrimeTower = analysisTower(primeTower, sentProcess)
   const analysisRequest: AnalysisRequest | null =
     choices && printChoices && planReady && !noPlate
       ? {
@@ -1171,6 +1174,7 @@ export function PrintPicker({
           ...plateFields(plate),
           copies: effectiveCopies,
           options: sentOptions,
+          ...(analysisPrimeTower === null ? {} : { prime_tower: analysisPrimeTower }),
         }
       : null
 
