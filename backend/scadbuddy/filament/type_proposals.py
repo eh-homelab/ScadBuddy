@@ -3,8 +3,11 @@ new type for a person to confirm").
 
 `proposals` groups the open (unarchived) spools with no type by brand, material, subtype,
 RGBA, label weight and the ``material_number`` of their newest Bambuddy reading (the
-``data.bb`` of their last ``synced_from_bb`` event; none for a spool with no link). A spool
-with no material, RGBA or label weight is in no group; it is listed with what it lacks.
+``data.bb`` of their last ``synced_from_bb`` event; none for a spool with no link, and none
+for one longer than 128 characters, which a cut would make collide: R-6729-3). A group with
+no ``material_number`` folds into the one group of its other key fields that has one, when
+exactly one does; else it stays apart (R-6729-1). A spool with no material, RGBA or label
+weight is in no group; it is listed with what it lacks.
 Each group proposes a code, named as types are named today: the ``material_number`` when
 there is one (§8.1: it carries the type code, and the pull matches by it first), else
 ``BRAND-MATERIAL-SUBTYPE-COLOUR`` in upper case, with the colour name, else the hex (the
@@ -21,8 +24,13 @@ the key, the colour name most of its spools have, and each other value every one
 shares (category, effect, extra colours, diameter, density, temperatures, insert type; no
 cost, so no price book row). Then each of the group's spools that is still open, untyped
 and of the key gets the type, loses each override equal to the type's value and gets one
-``edited`` event (`FilamentSpoolStore.update_on`). Any other spool is skipped and reported.
-A code an unarchived type holds is `CatalogExistsError`, and nothing is written.
+``edited`` event (`FilamentSpoolStore.update_on`). A spool with no ``material_number`` is
+of a pick whose other key fields it shares (the fold). Any other spool is skipped and
+reported. Per group the answer names the type used, whether the group made it (``made``)
+and whether this request made it (``new``): a group that joined a type an earlier group just
+made has ``new`` and not ``made``, so its own code was not used (R-6729-1). A code an
+unarchived type holds (the ``filament_spool_types_code`` index) is `CatalogExistsError`,
+and nothing is written; any other unique violation propagates (R-6729-2).
 """
 
 from __future__ import annotations
@@ -74,6 +82,8 @@ _SPOOL_ROWS = (
     " ORDER BY e.at DESC, e.seq DESC LIMIT 1) AS material_number FROM filament_spools s"
 )
 _CODE_MAX = 128
+#: The unique index on a type's code: the one violation that is a name clash (R-6729-2).
+_CODE_INDEX = "filament_spool_types_code"
 
 
 def proposals(f: Filament) -> m.TypeProposals:
@@ -92,6 +102,7 @@ def proposals(f: Filament) -> m.TypeProposals:
                 )
             else:
                 groups.setdefault(_key(row), []).append(row)
+        _fold(groups)
         taken = {
             r["code"].upper()
             for r in conn.execute(
@@ -130,6 +141,7 @@ def confirm(f: Filament, body: m.TypeProposalConfirm, *, actor: str) -> m.TypePr
     """Type each picked group's spools, as the module says, in one transaction."""
     wanted = sorted({spool_id for pick in body.groups for spool_id in pick.spool_ids})
     done: list[m.ConfirmedProposal] = []
+    made: set[UUID] = set()
     try:
         with f.spools.transaction() as conn:
             # Every spool first, in id order, as the other writers of several spools lock.
@@ -141,8 +153,10 @@ def confirm(f: Filament, body: m.TypeProposalConfirm, *, actor: str) -> m.TypePr
                 ).fetchall()
             }
             for pick in body.groups:
-                done.append(_confirm_one(conn, f, pick, rows, actor))
-    except errors.UniqueViolation:
+                done.append(_confirm_one(conn, f, pick, rows, actor, made))
+    except errors.UniqueViolation as exc:
+        if exc.diag.constraint_name != _CODE_INDEX:
+            raise
         raise CatalogExistsError() from None
     except errors.ForeignKeyViolation:
         raise CatalogRefError() from None
@@ -150,7 +164,12 @@ def confirm(f: Filament, body: m.TypeProposalConfirm, *, actor: str) -> m.TypePr
 
 
 def _confirm_one(
-    conn: Conn, f: Filament, pick: m.TypeProposalPick, rows: dict[UUID, dict[str, Any]], actor: str
+    conn: Conn,
+    f: Filament,
+    pick: m.TypeProposalPick,
+    rows: dict[UUID, dict[str, Any]],
+    actor: str,
+    made_here: set[UUID],
 ) -> m.ConfirmedProposal:
     want = {k: getattr(pick, k) for k in KEY}
     eligible: list[dict[str, Any]] = []
@@ -165,7 +184,7 @@ def _confirm_one(
             else "typed"
             if row["type_id"] is not None
             else "changed"
-            if dict(zip(KEY, _key(row), strict=True)) != want
+            if not _of_pick(row, want)
             else None
         )
         if reason is not None:
@@ -175,12 +194,13 @@ def _confirm_one(
             eligible.append(row)
     if not eligible:
         return m.ConfirmedProposal(
-            code=pick.code, type_id=None, made=False, typed=[], skipped=skipped
+            code=pick.code, type_id=None, made=False, new=False, typed=[], skipped=skipped
         )
     kind = _match(conn, f, want, _names(conn, want))
     made = kind is None
     if kind is None:
         kind = f.types.create_on(conn, _type_body(pick, eligible))
+        made_here.add(kind.id)
     for row in eligible:
         cleared = {
             c: None for c in OVERRIDABLE if row[c] is not None and row[c] == getattr(kind, c)
@@ -193,13 +213,40 @@ def _confirm_one(
         code=kind.code,
         type_id=kind.id,
         made=made,
+        new=kind.id in made_here,
         typed=[row["id"] for row in eligible],
         skipped=skipped,
     )
 
 
 def _key(row: Row) -> tuple[Any, ...]:
-    return tuple(row[k] for k in KEY)
+    number = row["material_number"]
+    if number is not None and len(number) > _CODE_MAX:
+        number = None
+    return (*(row[k] for k in KEY[:-1]), number)
+
+
+def _fold(groups: dict[tuple[Any, ...], list[Row]]) -> None:
+    """Fold each group with no ``material_number`` into the one group of its other key
+    fields that has one, when exactly one does (R-6729-1)."""
+    numbered: dict[tuple[Any, ...], list[tuple[Any, ...]]] = {}
+    for key in groups:
+        if key[-1] is not None:
+            numbered.setdefault(key[:-1], []).append(key)
+    for key in [k for k in groups if k[-1] is None]:
+        into = numbered.get(key[:-1], [])
+        if len(into) == 1:
+            members = groups[into[0]] + groups.pop(key)
+            groups[into[0]] = sorted(members, key=lambda r: r["number"])
+
+
+def _of_pick(row: Row, want: Mapping[str, Any]) -> bool:
+    """Whether a spool is of a pick's key; one with no ``material_number`` is of any pick
+    whose other key fields it shares (the fold)."""
+    key = dict(zip(KEY, _key(row), strict=True))
+    if key["material_number"] is None:
+        key["material_number"] = want["material_number"]
+    return key == want
 
 
 def _names(conn: Conn, want: Mapping[str, Any]) -> dict[str, Any]:
