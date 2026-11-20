@@ -38,16 +38,27 @@ test('the forecast view lists a type to reorder', async ({ page }) => {
 })
 
 test('the forecast badge follows the table: under the type name exactly when the table scrolls sideways (R-T8-12)', async ({ page }) => {
-  // 680 px is wider than `sm`, yet the table (44 rem) still scrolls inside its container.
+  // 680 px is wider than `sm`, yet the app shell leaves the table's container under its 44 rem, so it scrolls.
   for (const width of [390, 680, 1600]) {
     await page.setViewportSize({ width, height: 900 })
     await page.goto('/filament/spools?view=forecast')
     const table = page.getByRole('table', { name: 'Days of stock by type' })
     await expect(table).toBeVisible()
     const scrolls = await table.evaluate((el) => el.parentElement!.scrollWidth > el.parentElement!.clientWidth + 1)
-    const badge = table.getByRole('row').nth(1).getByRole('cell').first().getByText('Reorder now')
-    if (scrolls) await expect(badge).toBeVisible()
-    else await expect(badge).toBeHidden()
+    const cells = table.getByRole('row').nth(1).getByRole('cell')
+    const underName = cells.first().getByText('Reorder now')
+    const inReorderBy = cells.last().getByText('Reorder now')
+    const date = cells.last().getByText(/^[A-Z][a-z]{2} \d{1,2}, \d{4}$/)
+    // Scrolling: the badge is under the name and "Reorder by" shows the day. Not scrolling: the badge is in "Reorder by".
+    if (scrolls) {
+      await expect(underName).toBeVisible()
+      await expect(inReorderBy).toBeHidden()
+      await expect(date).toBeVisible()
+    } else {
+      await expect(underName).toBeHidden()
+      await expect(inReorderBy).toBeVisible()
+      await expect(date).toBeHidden()
+    }
     if (width === 680) expect(scrolls).toBe(true)
   }
 })

@@ -108,7 +108,8 @@ function Segmented<T extends string>({ label, value, options, title, onChange }:
 /**
  * The consumption as stacked columns. The three values that used most over the last 365 days
  * (`order`) keep their colour in every range, even where another used more in this one; the
- * rest fold into "Other" (R-T8-1).
+ * rest fold into "Other" (R-T8-1). Until the 365-day request returns, the caller passes the
+ * range's own rank, so the colours may change once when it arrives (R-T8-12).
  */
 function Consumption({ metrics, order }: { metrics: InventoryMetrics; order: readonly string[] }) {
   const { bucket, dimension } = metrics
@@ -233,7 +234,7 @@ export function MetricsTab() {
   }, [])
 
   const { range, bucket, dimension } = q
-  // The colours' order: the dimension's values ranked over the widest range, which holds every range (R-T8-1).
+  // The colours' order: the dimension's values ranked over the widest range, which holds every range (R-T8-1). Until it returns, the chart uses the range's own rank (R-T8-12).
   useEffect(() => {
     let live = true
     getMetrics({ ...metricsRange({ range: RANK_RANGE, bucket: 'month', dimension }), bucket: 'month', dimension }).then(
