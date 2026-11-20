@@ -143,6 +143,20 @@ def _pid(pidfile: Path) -> int:
     return int(pidfile.read_text())
 
 
+def _written_pids(*paths: Path) -> list[int]:
+    """The pids that ``paths`` hold. A missing file (renamed while it is read) and an
+    empty one hold none."""
+    pids = []
+    for path in paths:
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            continue
+        if text:
+            pids.append(int(text))
+    return pids
+
+
 def _failed(reason: str) -> float:
     value: float = runner.SANDBOX_FAILED.labels(reason=reason)._value.get()
     return value
@@ -430,17 +444,17 @@ async def test_a_check_past_its_timeout_kills_the_child(tmp_path: Path, sleeper:
             )
         assert not box.busy
     assert _failed("check-timeout") == before + 1
-    # A child that the timeout stopped before its rename left its pid in the partial
-    # file, and one stopped before its write left neither file (#6760). A live child
-    # writes its pid at once, so neither file may appear later (#6766).
+    # A child that the timeout stopped before its open left no file, one stopped before
+    # its write left an empty partial file, and one stopped before its rename left its
+    # pid in the partial file (#6760). A live child writes its pid at once, so a pid
+    # that appears only later means that the child outlived the timeout (#6766).
     partial = sleeper.with_name(f"{sleeper.name}.partial")
-    if not sleeper.exists() and not partial.exists():
+    pids = _written_pids(sleeper, partial)
+    if not pids:
         await asyncio.sleep(1.0)
-        assert not sleeper.exists(), "a child outlived the timeout"
-        assert not partial.exists(), "a child outlived the timeout"
-    for path in (sleeper, partial):
-        if path.exists() and path.read_text():
-            assert _state(_pid(path)) in (None, "Z", "X")
+        assert not _written_pids(sleeper, partial), "a child outlived the timeout"
+    for pid in pids:
+        assert _state(pid) in (None, "Z", "X")
     assert list((tmp_path / "spool").iterdir()) == []
 
 
