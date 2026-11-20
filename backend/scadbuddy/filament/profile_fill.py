@@ -540,18 +540,7 @@ class TypeFiller:
                 result.filled = wanted
                 result.previous = {name: current[name] for name in wanted}
             elif wanted:
-                try:
-                    written = await asyncio.to_thread(
-                        self.types.fill_empty,
-                        row.id,
-                        {str(k): v for k, v in wanted.items()},
-                        actor=actor,
-                    )
-                except TypeTempError as error:
-                    # A person set one end of a range since the read (R-6714-e).
-                    why = f"the type changed meanwhile: {error}"
-                    result.skipped |= dict.fromkeys(wanted, why)
-                    written = None
+                written = await self._fill_empty(row.id, wanted, result, actor)
                 result.filled = {
                     name: value for name, value in wanted.items() if name in (written or {})
                 }
@@ -562,6 +551,40 @@ class TypeFiller:
         else:
             await self._write_k(result, rows, actor)
         return result
+
+    async def _fill_empty(
+        self, type_id: UUID, wanted: dict[Field, Value], result: TypeFill, actor: str
+    ) -> dict[str, Any] | None:
+        """``fill_empty`` of ``wanted``. A person set one end of a range since the read
+        (R-6714-e): re-read the row, drop only the pair that is now backwards (into
+        ``result.skipped``, with the reason) and write the rest once more. A second race
+        skips what is left."""
+        for retry in (True, False):
+            try:
+                return await asyncio.to_thread(
+                    self.types.fill_empty,
+                    type_id,
+                    {str(k): v for k, v in wanted.items()},
+                    actor=actor,
+                )
+            except TypeTempError as error:
+                why = f"the type changed meanwhile: {error}"
+                fresh = await asyncio.to_thread(self.types.get, type_id) if retry else None
+                dropped: dict[Field, str] = {}
+                if fresh is not None:
+                    current = fresh.model_dump()
+                    # A field a person set meanwhile is no longer empty: `fill_empty`
+                    # leaves it, so it takes no part in the range.
+                    for key in [k for k in wanted if current[k] is not None]:
+                        del wanted[key]
+                    dropped = dict.fromkeys(_ranges(current, wanted), why)
+                if not dropped:
+                    result.skipped |= dict.fromkeys(wanted, why)
+                    return None
+                result.skipped |= dropped
+                if not wanted:
+                    return None
+        return None
 
     async def _k_values(
         self, type_id: UUID, reads: _Reads
