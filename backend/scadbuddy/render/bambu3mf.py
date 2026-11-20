@@ -863,7 +863,8 @@ def write_plates_3mf(
     plate, and true or ``None`` one on each plate that changes filament
     (:attr:`PlateParts.tower`). Given, it is stated as ``enable_prime_tower``, with
     ``no_sparse_layers`` as ``wipe_tower_no_sparse_layers``, so :func:`replate_3mf`
-    keeps a tower that is off off. ``None`` states neither, as before.
+    keeps no room for a tower that is off, unless the print turns it on. ``None`` states
+    neither, as before.
     """
     if not plates:
         raise ValueError("a 3MF needs at least one plate")
@@ -1272,6 +1273,7 @@ def replate_3mf(
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
     filament_map: FilamentMap | None = None,
+    tower_on: bool = False,
 ) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
@@ -1280,7 +1282,9 @@ def replate_3mf(
     re-centred on the area every extruder reaches, moved to where that plate sits
     on this printer's project (the plate stride follows the bed, spec §6.4), and
     its prime tower is moved with it. A file whose ``enable_prime_tower`` is ``"0"`` (an
-    Arrange with the tower off, #3770) keeps no room for a tower. Raises
+    Arrange with the tower off, #3770) keeps no room for a tower, unless ``tower_on``:
+    the print turns the tower on, and the slice sends that over the file's ``"0"``, so
+    room is kept as for any other file. Raises
     :class:`~scadbuddy.render.plate.PlateFitError` when a plate cannot fit that
     printer — before the upload, rather than after Bambuddy's slicer has spent a
     minute finding out.
@@ -1320,7 +1324,7 @@ def replate_3mf(
         (json.loads(data) for name, data in entries if name == PROJECT_SETTINGS_NAME), {}
     )
     count = len({each.index for each in laid_out})
-    tower_off = _tower_off(settings)
+    tower_off = _tower_off(settings) and not tower_on
     placements: list[Placement] = []
     transforms: dict[str, str] = {}
     rotation = IDENTITY.rsplit(" ", 3)[0]
@@ -2427,6 +2431,22 @@ def _layout(archive: zipfile.ZipFile) -> Layout:
     except (KeyError, ValueError, ET.ParseError, zipfile.BadZipFile):
         return "author"
     return "scadbuddy"
+
+
+def stated_tower_off(payload: bytes) -> bool:
+    """Whether ``payload`` is laid out by ScadBuddy (:func:`layout_of` ``scadbuddy``) and
+    states the prime tower off (#3770): an Arrange that packed with no room for a tower.
+    The slicer slices with a process preset that replaces the file's own
+    ``enable_prime_tower``, so the print run sends the file's ``"0"`` as a process
+    override (``prime_tower.file_tower_overrides``). Any other file is false."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if _layout(archive) != "scadbuddy":
+                return False
+            settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return False
+    return isinstance(settings, dict) and _tower_off(settings)
 
 
 def part_settings_slots(payload: bytes) -> set[int] | None:

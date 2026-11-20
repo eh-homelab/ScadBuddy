@@ -77,6 +77,33 @@ def prime_tower_overrides(choice: PrimeTowerChoice | None) -> dict[str, str]:
     return wanted
 
 
+def tower_asked(
+    choice: PrimeTowerChoice | None, overrides: Mapping[str, object] | None = None
+) -> bool | None:
+    """Whether the print turns the tower on (true) or off (false), or leaves it to the
+    file and the presets (``None``). The request's ``enable_prime_tower`` override wins
+    over ``choice``, as it does at the slice. A list is read by its first value."""
+    value = (overrides or {}).get("enable_prime_tower")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is not None:
+        return value != "0"
+    return None if choice is None else choice.enabled
+
+
+def file_tower_overrides(
+    stated_off: bool, choice: PrimeTowerChoice | None, overrides: Mapping[str, object] | None
+) -> dict[str, str]:
+    """The process override that keeps a file's stated tower off (#3770). The slicer
+    slices with a process preset that replaces the file's own ``enable_prime_tower``, so
+    a file that states it off (``bambu3mf.stated_tower_off``: an Arrange packed with no
+    room for a tower) gets ``"0"`` here, unless the print itself says on or off
+    (:func:`tower_asked`)."""
+    if stated_off and tower_asked(choice, overrides) is None:
+        return {"enable_prime_tower": "0"}
+    return {}
+
+
 def tower_wanted(
     choice: PrimeTowerChoice | None, overrides: Mapping[str, object] | None = None
 ) -> dict[str, str]:

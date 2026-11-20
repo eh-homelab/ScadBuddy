@@ -48,6 +48,7 @@ from scadbuddy.render.bambu3mf import (
     replate_3mf,
     single_plate,
     state_nozzles,
+    stated_tower_off,
     stl_3mf,
     write_bambu_3mf,
     write_plates_3mf,
@@ -365,6 +366,50 @@ def test_re_placing_a_file_with_the_tower_off_keeps_no_room_for_one(tmp_path: Pa
     assert "wipe_tower_x" not in _settings_of_bytes(moved)
     with pytest.raises(PlateFitError, match="prime tower"):
         replate_3mf(_restated(out.read_bytes(), enable_prime_tower=None), plate_for("H2C"))
+    # Bambu Studio may write the scalar as a list: read by its first value.
+    listed = _restated(out.read_bytes(), enable_prime_tower=["0"])
+    assert "wipe_tower_x" not in _settings_of_bytes(replate_3mf(listed, plate_for("H2C")))
+    assert stated_tower_off(listed)
+
+
+def test_a_print_that_turns_the_tower_on_gets_room_over_the_files_off(tmp_path: Path) -> None:
+    """#3770: the slice sends the print's tower on over the file's "0", so the send keeps
+    room for it, and refuses a plate it does not fit, as for any other file."""
+    crowded = tmp_path / "crowded.3mf"
+    write_plates_3mf(
+        [single_plate(_crowded_parts())],
+        [p.colour for p in _crowded_parts()],
+        crowded,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    with pytest.raises(PlateFitError, match="prime tower"):
+        replate_3mf(crowded.read_bytes(), plate_for("H2C"), tower_on=True)
+    roomy = tmp_path / "roomy.3mf"
+    parts = _parts()
+    write_plates_3mf(
+        [single_plate(parts)], [p.colour for p in parts], roomy, thumbnails=None, prime_tower=False
+    )
+    assert stated_tower_off(roomy.read_bytes())
+    assert "wipe_tower_x" not in _settings_of_bytes(
+        replate_3mf(roomy.read_bytes(), plate_for("H2C"))
+    )
+    moved = _settings_of_bytes(replate_3mf(roomy.read_bytes(), plate_for("H2C"), tower_on=True))
+    tower_x = moved["wipe_tower_x"]
+    assert isinstance(tower_x, list)
+    assert float(tower_x[0]) >= 25.0
+
+
+def test_only_a_scadbuddy_file_that_states_the_tower_off_reads_as_off(written: Path) -> None:
+    assert not stated_tower_off(written.read_bytes())
+    assert not stated_tower_off(_restated(written.read_bytes(), enable_prime_tower=["1"]))
+    # An author's file keeps its own settings: the print run does not restate them.
+    author = _restated(
+        written.read_bytes(), enable_prime_tower=["0"], print_settings_id=["0.20mm Standard"]
+    )
+    assert not stated_tower_off(author)
+    assert not stated_tower_off(b"not a zip")
 
 
 class TestReplate:

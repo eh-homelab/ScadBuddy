@@ -193,6 +193,10 @@ _COVERS_REDRAWN = "#covers"
 #: (:func:`towers_within_reach`, #3770). A copy recorded before can keep that tower,
 #: which the slicer reports as "Object conflicts were detected".
 _TOWER_CLEAR = "#clear"
+#: In a :attr:`Target.key` whose print turns the prime tower on over a file that states it
+#: off (:attr:`Target.tower_on`, #3770): that copy keeps room for the tower, so it is
+#: never reused for a print that leaves the file's tower off, nor the other way round.
+_TOWER_ON = "+tower"
 #: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
 #: written into (``layout_of`` ``as_is``), or a library file with no 3MF to lay out: it
 #: prints as it is, so it cannot carry them.
@@ -257,6 +261,9 @@ class Target:
     #: Process settings for each slot's parts (#5571), written into
     #: ``model_settings.config``. ``None`` writes none.
     part_settings: PartOverrides | None = None
+    #: The print turns the prime tower on over a file that states it off (#3770): the
+    #: layout keeps room for the tower (:func:`replate_3mf` ``tower_on``).
+    tower_on: bool = False
 
     @property
     def key(self) -> str:
@@ -293,6 +300,8 @@ class Target:
             # A file with settings on its parts must not be reused for one without, nor
             # for other settings. Before the colours, so the uncoloured key has it too.
             key = f"{key}{_PART_SETTINGS}{part_settings_digest(self.part_settings)}"
+        if self.tower_on:
+            key = f"{key}{_TOWER_ON}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -315,6 +324,7 @@ class Target:
             nozzle_volume_type=self.nozzle_volume_type,
             filament_map=self.filament_map,
             part_settings=self.part_settings,
+            tower_on=self.tower_on,
         ).key
 
 
@@ -330,6 +340,7 @@ async def target_for(
     filament_map: FilamentMap | None = None,
     model: str | None = None,
     part_settings: PartOverrides | None = None,
+    tower_on: bool = False,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -347,6 +358,7 @@ async def target_for(
     list is not. Without a ``client`` a printer's plate needs it.
 
     ``part_settings`` are the print's settings per slot (#5571), only the print run's.
+    ``tower_on`` is the run's too (:attr:`Target.tower_on`, #3770).
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
@@ -360,6 +372,7 @@ async def target_for(
             flows,
             filament_map,
             part_settings,
+            tower_on,
         )
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is not None and client is None:
@@ -378,11 +391,19 @@ async def target_for(
             flows,
             filament_map,
             part_settings,
+            tower_on,
         )
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
     return Target(
-        _plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map, part_settings
+        _plate_for_model(model),
+        nozzle_diameter,
+        chosen,
+        stats,
+        flows,
+        filament_map,
+        part_settings,
+        tower_on,
     )
 
 
@@ -462,6 +483,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             nozzle_stats=target.nozzle_stats,
             nozzle_volume_type=target.nozzle_volume_type,
             filament_map=target.filament_map,
+            tower_on=target.tower_on,
         )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
