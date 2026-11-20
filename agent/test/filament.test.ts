@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -1012,6 +1013,21 @@ describe('filament type proposal tools (#6701)', () => {
     expect(input.safeParse({ groups: [{ ...group, label_weight_g: 100_001 }] }).success).toBe(false)
     expect(input.safeParse({ groups: [{ ...group, spool_ids: Array(5000).fill(SPOOL) }] }).success).toBe(true)
     expect(input.safeParse({ groups: [{ ...group, spool_ids: Array(5001).fill(SPOOL) }] }).success).toBe(false)
+  })
+
+  it("keeps shown_k_values' item keys equal to the generated TypeKValueCreate (#6762)", () => {
+    // The spec `pnpm gen:api` exported, as in coverage.test.ts.
+    const spec = JSON.parse(readFileSync(new URL('../../backend/openapi.json', import.meta.url), 'utf8')) as {
+      components: { schemas: Record<string, { properties: Record<string, unknown>; required?: string[] }> }
+    }
+    const theirs = spec.components.schemas.TypeKValueCreate!
+    type Item = { properties: Record<string, unknown>; required?: string[] }
+    const json = z.toJSONSchema(z.object(tool('filament_type_fill_from_profile').shape), { io: 'input' }) as unknown as {
+      properties: { shown_k_values: { items: Item } }
+    }
+    const ours = json.properties.shown_k_values.items
+    expect(Object.keys(ours.properties).sort()).toEqual(Object.keys(theirs.properties).sort())
+    expect([...(ours.required ?? [])].sort()).toEqual([...(theirs.required ?? [])].sort())
   })
 
   it("bounds a group's material_number at 128 characters as the backend does (R-6729-6)", () => {

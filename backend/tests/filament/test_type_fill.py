@@ -156,11 +156,12 @@ async def test_a_fill_that_would_leave_a_range_backwards_skips_that_pair(
     assert (row.nozzle_temp_min, row.bed_temp_min) == (None, 55)
 
 
-async def test_a_range_set_meanwhile_skips_that_type_and_the_rest_are_filled(
+async def test_a_range_set_meanwhile_skips_only_its_pair_and_the_rest_are_filled(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R-6714-e: a person sets one end of a range between the read and the row lock; that
-    type's `TypeTempError` is a skip, never a 500, and the types after it are filled."""
+    """R-6714-e (#6762): a person sets one end of a range between the read and the row
+    lock; the `TypeTempError` skips only that pair, never a 500. The type's other fields
+    and the types after it are filled."""
     raced = _type(types, pg_pool, "RACED")
     later = _type(types, pg_pool, "LATER")
     for type_id in (raced, later):
@@ -176,18 +177,14 @@ async def test_a_range_set_meanwhile_skips_that_type_and_the_rest_are_filled(
 
     first, second = await filler.fill(UNLINKED, [raced, later], actor=ACTOR)
 
-    assert (first.filled, first.written) == ({}, False)
-    assert set(first.skipped) == {
-        "nozzle_temp_min",
-        "nozzle_temp_max",
-        "bed_temp_min",
-        "bed_temp_max",
-        "density_g_cm3",
-    }
+    assert first.written
+    assert set(first.filled) == {"bed_temp_min", "bed_temp_max", "density_g_cm3"}
+    assert set(first.skipped) == {"nozzle_temp_min"}
     assert all("changed meanwhile" in why for why in first.skipped.values())
     row = types.get(raced)
     assert row is not None
-    assert (row.nozzle_temp_min, row.nozzle_temp_max, row.density_g_cm3) == (None, 150, None)
+    assert (row.nozzle_temp_min, row.nozzle_temp_max) == (None, 150)
+    assert row.density_g_cm3 == Decimal("1.32")
     assert second.written
     assert second.filled["nozzle_temp_min"] == 190
 

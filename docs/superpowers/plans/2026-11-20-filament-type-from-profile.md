@@ -107,8 +107,10 @@ Posted on #6714.
   `0.40` is `0.4`) when it names the printer, so `0.40` reads the H2C 0.4 mm preset.
 - R-6714-e (#6747): the bulk route's fill catches `TypeTempError` for each type in
   `TypeFiller._one` (a person set one end of a range between the read and the row lock)
-  and records that type's fields in `skipped` with the reason. One type's race never
-  answers 500, and the types after it are still filled.
+  and records the pair that is now backwards in `skipped` with the reason (#6762: it
+  re-reads the row, drops only that pair and writes the other fields once more; a second
+  race skips what is left). One type's race never answers 500, and the types after it are
+  still filled.
 - R-6714-f (#6747): `fill_quietly` takes the filler as a callable, so the profile-fetch
   import's `state.components.get(FILAMENT)` lookup runs inside its guard: nothing after the
   commit fails the import.
