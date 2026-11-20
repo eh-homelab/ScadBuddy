@@ -595,7 +595,7 @@ def _link(
     changes: dict[str, list[Any]] = {}
     type_id: UUID | None = current["type_id"]
     if type_id is None:
-        kind = _match(conn, store, after)
+        kind = match_type(conn, store, after)
         if kind is not None:
             type_id = kind.id
             conn.execute(
@@ -668,7 +668,7 @@ def _backfill_insert_type(conn: Conn, spool_id: UUID, bb: BbSpool) -> list[Any] 
 def _create(
     conn: Conn, store: Filament, bb: BbSpool, after: dict[str, Any], now: datetime, actor: str
 ) -> tuple[UUID, bool]:
-    kind = _match(conn, store, after)
+    kind = match_type(conn, store, after)
     values = _values(conn, after, after.keys() - _NOT_COLUMNS)
     if kind is not None:
         typed = kind.model_dump()
@@ -837,7 +837,7 @@ def _update(
         # A BB unlock never clears a lock SB set.
         del changes["weight_locked"]
     if spool.type_id is None:
-        kind = _match(conn, store, after)
+        kind = match_type(conn, store, after)
         if kind is not None:
             changes["type_id"] = [None, kind.id]
     if insert_id is not None and after["core_weight_catalog_id"] != before.get(
@@ -975,8 +975,9 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = T
 # -- shared ----------------------------------------------------------------------------
 
 
-def _match(conn: Conn, store: Filament, after: dict[str, Any]) -> m.SpoolType | None:
-    """The type BB's values name: by product code, else by identity."""
+def match_type(conn: Conn, store: Filament, after: dict[str, Any]) -> m.SpoolType | None:
+    """The type BB's values name: by product code, else by identity. The type proposals'
+    confirm re-checks with it too (`filament/type_proposals.py`, #6701)."""
     names = {"brand": after["brand"], "material": after["material"], "subtype": after["subtype"]}
     if after["material_number"] is not None:
         kind = store.types.match(
