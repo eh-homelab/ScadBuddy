@@ -40,6 +40,18 @@ row.
   uuid for a subtype with no material. The merge merges only within one scope.
 - R-6706-11: insert types and insert materials are out of scope. Insert types match by
   `bb_catalog_id` first.
+- R-6706-12: an archived row keeps its names and aliases. Adding one of them again is a
+  409; restore the archived row instead.
+- R-6706-13: a lookup by name that meets an archived row's key returns that row. The pull,
+  the CSV import and makeType link to it, and add no new row.
+- R-6706-14: stored keys come only from SQL (`key_sql`, the triggers). Python
+  `catalog_key` is used only against the ASCII price-book values. Under a ctype of plain
+  `C`, SQL drops non-ASCII letters and Python keeps them.
+- R-6706-15: the migration's merge covers all five catalogs. Ledger event JSON that names
+  a deleted row's id is not rewritten.
+- R-6706-16: a subtype moved to a material where its name or one of its aliases meets a
+  taken key is a 409 that names the holder, as every other clash does (`detail`,
+  `subtype_id`, `subtype_name`).
 
 Consequences found while building:
 

@@ -215,6 +215,12 @@ def test_a_subtype_key_is_unique_within_its_material(pg_pool: PgPool) -> None:
         store.update("subtypes", mine.id, SubtypePatch(material_id=petg.id))
     assert moved.value.holder_id == other.id
     store.update("subtypes", other.id, SubtypePatch(name="Glossy PETG"))
+    # Now only an alias meets a key there: the clash still names the holder (R-6706-16).
+    sheen = store.create("subtypes", SubtypeCreate(name="Shiny", material_id=petg.id))
+    with pytest.raises(CatalogKeyClashError) as by_alias:
+        store.update("subtypes", mine.id, SubtypePatch(material_id=petg.id))
+    assert (by_alias.value.holder_id, by_alias.value.holder_name) == (sheen.id, "Shiny")
+    store.update("subtypes", sheen.id, SubtypePatch(name="Sheen"))
     store.update("subtypes", mine.id, SubtypePatch(material_id=petg.id))
     with pg_pool.connection() as conn:
         assert find_by_key(conn, "subtypes", "shiny", material=petg.id) == mine.id

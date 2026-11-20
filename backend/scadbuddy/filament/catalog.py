@@ -227,14 +227,25 @@ def _scope_of(names: NameTable, material: UUID | None) -> UUID | None:
 
 
 def _holder(
-    conn: Conn, names: NameTable, table: str, name: str, scope: UUID | None
+    conn: Conn,
+    names: NameTable,
+    table: str,
+    name: str,
+    scope: UUID | None,
+    *,
+    other_than: UUID | None = None,
 ) -> tuple[UUID, str] | None:
-    """The row that holds ``name``'s key in its scope, and its canonical name."""
+    """The row that holds ``name``'s key in its scope (but ``other_than``), and its
+    canonical name."""
     where = "" if scope is None else " AND n.material_scope = %s"
+    params: list[Any] = [name] if scope is None else [name, scope]
+    if other_than is not None:
+        where += f" AND n.{names.owner} <> %s"
+        params.append(other_than)
     row = conn.execute(
         f"SELECT c.id, c.name FROM {names.table} n JOIN {table} c ON c.id = n.{names.owner}"
         f" WHERE n.key = {key_sql('%s')}{where}",
-        (name,) if scope is None else (name, scope),
+        params,
     ).fetchone()
     return None if row is None else (row["id"], row["name"])
 
@@ -243,14 +254,24 @@ def _is_names(exc: errors.UniqueViolation, spec: CatalogSpec) -> bool:
     return spec.names is not None and exc.diag.table_name == spec.names.table
 
 
-def _clash(conn: Conn, spec: CatalogSpec, name: str, material: UUID | None) -> CatalogExistsError:
-    """The `CatalogKeyClashError` naming who holds ``name``'s key, read after the refused
-    write; the plain error when nobody does by then."""
+def _clash(
+    conn: Conn,
+    spec: CatalogSpec,
+    names: Sequence[str],
+    material: UUID | None,
+    *,
+    other_than: UUID | None = None,
+) -> CatalogExistsError:
+    """The `CatalogKeyClashError` naming who holds the key of the first of ``names`` that
+    another row holds, read after the refused write (a moved subtype brings its name and
+    every alias into the new scope, R-6706-16); the plain error when nobody does by then."""
     assert spec.names is not None
-    held = _holder(conn, spec.names, spec.table, name, _scope_of(spec.names, material))
-    if held is None:
-        return CatalogExistsError()
-    return CatalogKeyClashError(spec.names.noun, held[0], held[1], name)
+    scope = _scope_of(spec.names, material)
+    for name in names:
+        held = _holder(conn, spec.names, spec.table, name, scope, other_than=other_than)
+        if held is not None:
+            return CatalogKeyClashError(spec.names.noun, held[0], held[1], name)
+    return CatalogExistsError()
 
 
 def find_by_key(conn: Conn, kind: str, name: str, *, material: UUID | None = None) -> UUID | None:
@@ -355,7 +376,7 @@ class CatalogStore:
             except errors.UniqueViolation as exc:
                 if not _is_names(exc, spec):
                     raise CatalogExistsError() from None
-                raise _clash(conn, spec, data["name"], data.get("material_id")) from None
+                raise _clash(conn, spec, [data["name"]], data.get("material_id")) from None
             except errors.ForeignKeyViolation:
                 raise CatalogRefError() from None
         assert made is not None
@@ -403,7 +424,8 @@ class CatalogStore:
                     if "material_id" in sent
                     else getattr(was, "material_id", None)
                 )
-                raise _clash(conn, spec, name, material) from None
+                aliases = list(getattr(was, "aliases", None) or [])
+                raise _clash(conn, spec, [name, *aliases], material, other_than=row_id) from None
             except errors.ForeignKeyViolation:
                 raise CatalogRefError() from None
         return changed

@@ -178,3 +178,21 @@ def test_a_catalog_without_aliases_refuses_them(client: TestClient) -> None:
     put = client.put(f"{CATALOG}/insert-materials/{row['id']}/aliases", json={"aliases": ["x"]})
     assert put.status_code == 404, put.text
     assert client.get(f"{CATALOG}/colours/resolve", params={"name": "x"}).status_code == 404
+
+
+def test_a_subtype_moved_onto_a_taken_alias_is_409_naming_the_holder(client: TestClient) -> None:
+    materials = {r["name"]: r["id"] for r in client.get(f"{CATALOG}/materials").json()}
+    mine = client.post(
+        f"{CATALOG}/subtypes", json={"name": "Glossy", "material_id": materials["PLA"]}
+    ).json()
+    client.put(f"{CATALOG}/subtypes/{mine['id']}/aliases", json={"aliases": ["Shiny"]})
+    holder = client.post(
+        f"{CATALOG}/subtypes", json={"name": "shiny", "material_id": materials["PETG"]}
+    ).json()
+    moved = client.patch(
+        f"{CATALOG}/subtypes/{mine['id']}", json={"material_id": materials["PETG"]}
+    )
+    assert moved.status_code == 409, moved.text
+    problem = moved.json()
+    assert (problem["subtype_id"], problem["subtype_name"]) == (holder["id"], "shiny")
+    assert "shiny" in problem["detail"]
