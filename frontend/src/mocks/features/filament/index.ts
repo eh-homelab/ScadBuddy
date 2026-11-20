@@ -1871,6 +1871,11 @@ export const handlers = [
       rfid_duplicate_bb_ids: [],
       archived_deferred: 0,
       archived_deferred_bb_ids: [],
+      claimed: 0,
+      suppliers: 0,
+      locations: 0,
+      moved: 0,
+      conflicts: 0,
     } satisfies S['PullReport']),
   ),
 ]
