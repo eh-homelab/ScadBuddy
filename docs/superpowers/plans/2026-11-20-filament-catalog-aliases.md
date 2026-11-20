@@ -75,6 +75,18 @@ row.
   a keyless subtype keeps its name through a move, and only its aliases move.
 - R-6706-21: `set_aliases` checks `has_key` before each INSERT, so an alias with no key is
   `AliasKeyEmptyError`, never a clash.
+- R-6706-22: the type proposals match by id, not by a round trip through names.
+  `SpoolTypeStore.match_ids` takes the catalog ids a group already holds (or a code alone);
+  `match` by name stays for the pull. A group whose subtype is one for every material,
+  while the material has its own subtype of the same key, and a group with a keyless
+  catalog row, both find their existing type.
+- R-6706-23: the tray reconcile compares a tray's `tray_type` by catalog key
+  (`inventory.material_key` is `catalog_key`) with the keys of the spool's effective
+  material, its name's and its aliases' (`material_names`). A tray that reports an alias
+  or a merged loser's spelling agrees; `PLA+` no longer agrees with `PLA` (R-6706-17). A
+  material with no key is unknown, never a disagreement. The CIEDE2000 colour rule is
+  unchanged. (A material `PETG HF` cannot hold the alias `PETG-HF`: the two share the key
+  `PETGHF`, so the tray agrees by the name's own key.)
 - A name or alias with no letter or digit has no key: the trigger refuses such a name
   (422, `CatalogKeyEmptyError`), the migration neither merges nor keys an existing one,
   and a lookup never finds a row for it.

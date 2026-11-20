@@ -10,10 +10,10 @@ there is one (§8.1: it carries the type code, and the pull matches by it first)
 ``BRAND-MATERIAL-SUBTYPE-COLOUR`` in upper case, with the colour name, else the hex (the
 price book's "Make a type", `frontend/src/components/filament/makeType.ts` `typeCodeOf`).
 A code another type or an earlier group holds takes ``-<label weight>G``, then ``-2``,
-``-3`` ... A group whose key a type matches now names that type (`_match`): the type its
-``material_number`` names when that type is of the group's key, else the type of its
-identity. Groups can share a ``material_number`` and differ in colour or weight; the code
-alone never puts one group on another's type (R-6701-8).
+``-3`` ... A group whose key a type matches now names that type (`_match`, by the key's
+ids, R-6706-22): the type its ``material_number`` names when that type is of the group's
+key, else the type of its identity. Groups can share a ``material_number`` and differ in
+colour or weight; the code alone never puts one group on another's type (R-6701-8).
 
 `confirm` takes the groups a person picked, each with its code, in one transaction. Per
 group it re-checks `_match` and uses a type that matches now; else it makes the type:
@@ -105,7 +105,7 @@ def proposals(f: Filament) -> m.TypeProposals:
             want = dict(zip(KEY, key, strict=True))
             names = _names(conn, want)
             colour = _colour_name(members)
-            kind = _match(conn, f, want, names)
+            kind = _match(conn, f, want)
             if kind is not None:
                 code = kind.code
             else:
@@ -177,7 +177,7 @@ def _confirm_one(
         return m.ConfirmedProposal(
             code=pick.code, type_id=None, made=False, typed=[], skipped=skipped
         )
-    kind = _match(conn, f, want, _names(conn, want))
+    kind = _match(conn, f, want)
     made = kind is None
     if kind is None:
         kind = f.types.create_on(conn, _type_body(pick, eligible))
@@ -213,21 +213,20 @@ def _names(conn: Conn, want: Mapping[str, Any]) -> dict[str, Any]:
     return dict(names)
 
 
-def _match(
-    conn: Conn, f: Filament, want: Mapping[str, Any], names: Mapping[str, Any]
-) -> m.SpoolType | None:
-    """The type the group's key names now. The type its ``material_number`` names counts
-    only when that type is of the key (R-6701-8): `types.match` matches by code alone, and
-    groups that differ in colour or weight can share a ``material_number``."""
-    identity = {"brand": names["brand"], "material": names["material"], "subtype": names["subtype"]}
+def _match(conn: Conn, f: Filament, want: Mapping[str, Any]) -> m.SpoolType | None:
+    """The type the group's key names now, by the key's ids (`types.match_ids`,
+    R-6706-22). The type its ``material_number`` names counts only when that type is of
+    the key (R-6701-8): a code match is by code alone, and groups that differ in colour
+    or weight can share a ``material_number``."""
+    identity = {k: want[k] for k in ("brand_id", "material_id", "subtype_id")}
     if want["material_number"] is not None:
-        kind = f.types.match(
-            code=want["material_number"], rgba="#000000", label_weight_g=0, conn=conn, **identity
+        kind = f.types.match_ids(
+            conn, code=want["material_number"], rgba="#000000", label_weight_g=0, **identity
         )
         if kind is not None and _of_key(kind, want):
             return kind
-    return f.types.match(
-        rgba=want["rgba"], label_weight_g=want["label_weight_g"], conn=conn, **identity
+    return f.types.match_ids(
+        conn, rgba=want["rgba"], label_weight_g=want["label_weight_g"], **identity
     )
 
 

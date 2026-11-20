@@ -330,13 +330,32 @@ class SpoolTypeStore:
         resolved by key against every name and alias (`catalog.find_by_key`, R-6706-19; a
         subtype is the found material's, else one for every material). None, or a name
         with no letter or digit, matches a type with none; a name no row holds matches no
-        type. ``rgba`` is compared with its alpha (six
-        digits are opaque) and ``label_weight_g`` exactly. On ``conn`` when given (a caller
-        in its own transaction, `filament/bambuddy_pull.py`), else on a pooled one."""
+        type (a caller that holds the ids uses `match_ids`). ``rgba`` is compared with its
+        alpha (six digits are opaque) and ``label_weight_g`` exactly. On ``conn`` when
+        given (a caller in its own transaction, `filament/bambuddy_pull.py`), else on a
+        pooled one."""
         if conn is not None:
             return self._match(conn, code, brand, material, subtype, rgba, label_weight_g)
         with self._pool.connection() as pooled:
             return self._match(pooled, code, brand, material, subtype, rgba, label_weight_g)
+
+    @staticmethod
+    def match_ids(
+        conn: Conn,
+        *,
+        code: str | None = None,
+        brand_id: UUID | None,
+        material_id: UUID,
+        subtype_id: UUID | None,
+        rgba: str,
+        label_weight_g: int,
+    ) -> m.SpoolType | None:
+        """`match` for a caller that holds the catalog ids (R-6706-22: the type proposals'
+        groups): ``code`` alone decides when given; else the type of exactly these ids,
+        ``None`` matching a type with none. On ``conn``, in the caller's transaction."""
+        if code is not None:
+            return _by_code(conn, code)
+        return _by_ids(conn, material_id, subtype_id, brand_id, rgba, label_weight_g)
 
     @staticmethod
     def _match(
@@ -349,28 +368,15 @@ class SpoolTypeStore:
         label_weight_g: int,
     ) -> m.SpoolType | None:
         if code is not None:
-            row = conn.execute(
-                f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
-                " WHERE upper(code) = upper(%s) AND archived_at IS NULL",
-                (code,),
-            ).fetchone()
-        else:
-            material_id = _by_key(conn, "materials", material)
-            if material_id is None or material_id is False:
-                return None
-            subtype_id = _by_key(conn, "subtypes", subtype, material=material_id)
-            brand_id = _by_key(conn, "brands", brand)
-            if subtype_id is False or brand_id is False:
-                return None
-            row = conn.execute(
-                f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
-                " WHERE archived_at IS NULL AND material_id = %s"
-                " AND subtype_id IS NOT DISTINCT FROM %s AND brand_id IS NOT DISTINCT FROM %s"
-                " AND rgba = %s AND label_weight_g = %s"
-                " ORDER BY created_at, id LIMIT 1",
-                (material_id, subtype_id, brand_id, normalise_rgba(rgba), label_weight_g),
-            ).fetchone()
-        return None if row is None else m.SpoolType.model_validate(row)
+            return _by_code(conn, code)
+        material_id = _by_key(conn, "materials", material)
+        if material_id is None or material_id is False:
+            return None
+        subtype_id = _by_key(conn, "subtypes", subtype, material=material_id)
+        brand_id = _by_key(conn, "brands", brand)
+        if subtype_id is False or brand_id is False:
+            return None
+        return _by_ids(conn, material_id, subtype_id, brand_id, rgba, label_weight_g)
 
     # -- internals --------------------------------------------------------------------
 
@@ -440,6 +446,36 @@ class SpoolTypeStore:
         ).fetchone()
         assert linked is not None
         return linked
+
+
+def _by_code(conn: Conn, code: str) -> m.SpoolType | None:
+    """The unarchived type of ``code``, in any case."""
+    row = conn.execute(
+        f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
+        " WHERE upper(code) = upper(%s) AND archived_at IS NULL",
+        (code,),
+    ).fetchone()
+    return None if row is None else m.SpoolType.model_validate(row)
+
+
+def _by_ids(
+    conn: Conn,
+    material_id: UUID,
+    subtype_id: UUID | None,
+    brand_id: UUID | None,
+    rgba: str,
+    label_weight_g: int,
+) -> m.SpoolType | None:
+    """The oldest unarchived type of these catalog ids, colour and label weight."""
+    row = conn.execute(
+        f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
+        " WHERE archived_at IS NULL AND material_id = %s"
+        " AND subtype_id IS NOT DISTINCT FROM %s AND brand_id IS NOT DISTINCT FROM %s"
+        " AND rgba = %s AND label_weight_g = %s"
+        " ORDER BY created_at, id LIMIT 1",
+        (material_id, subtype_id, brand_id, normalise_rgba(rgba), label_weight_g),
+    ).fetchone()
+    return None if row is None else m.SpoolType.model_validate(row)
 
 
 def _by_key(
