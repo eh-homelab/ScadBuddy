@@ -11,13 +11,15 @@ the key and the preset's name in the run's ``files``. The import (`import_run`) 
 held files under names of their own (``<sha256>.json``, never a name from the site),
 posts the zip to Bambuddy's local presets, and maps each file to a local preset of its
 name that this run made (absent from the listing kept before its first import) or that an
-earlier fetch bound for the type; a preset of that name a person made is never bound
-(#6625 S1). It merges those ids over the type's preset rows of the fetched keys, reads
+earlier fetch of the type made or bound; a preset of that name a person made is never
+bound (#6625 S1). It merges those ids over the type's preset rows of the fetched keys, reads
 the K values the type's printers hold for an exact filament match, refreshes the kept
 copy of the local presets, and ends the run. Every write of the end is in one transaction with the
-idempotency ledger's row. One run's import runs once at a time (`_import_lock`): a second
-request for the run (the worker's client retrying a slow one) waits, then answers the
-first one's outcome without calling Bambuddy.
+idempotency ledger's row. One run's import runs once at a time: it holds a lease on the
+run row (``import_lease_until``, `_claim`). A second request for the run (the worker's
+client retrying a slow one) polls with short statements, holding no pooled connection,
+then answers the first one's outcome without calling Bambuddy, or claims the lease once
+it has expired (R-PR3).
 """
 
 from __future__ import annotations
@@ -30,12 +32,10 @@ import logging
 import math
 import time
 import zipfile
-from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from functools import partial
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 from uuid import UUID
 
@@ -68,7 +68,13 @@ from scadbuddy.profile_fetch.wire import (
     MissingKey,
     fetch_workflow_id,
 )
-from scadbuddy.profile_fetch.workflow import EXECUTION_TIMEOUT, LONGEST_RUN, NO_WORKER, TOO_LONG
+from scadbuddy.profile_fetch.workflow import (
+    EXECUTION_TIMEOUT,
+    IMPORT_REQUEST_TIMEOUT,
+    LONGEST_RUN,
+    NO_WORKER,
+    TOO_LONG,
+)
 from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
 
 if TYPE_CHECKING:
@@ -83,9 +89,8 @@ Status = Literal["running", "imported", "partial", "failed"]
 HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
-#: The first key of the advisory lock one run's import holds (`_import_lock`), "PFIM".
-IMPORT_LOCK: Final = 0x5046494D
-_LOCK_SQL: Final = "SELECT pg_advisory_lock(%s, hashtext(%s))"
+#: How often a request that finds the run's import lease held looks again (R-PR3).
+LEASE_POLL_SECONDS: float = 2.0
 PROBLEMS: Final = "https://scadbuddy.dev/problems/profile-fetch/"
 RUN_NOT_FOUND: Final = "run_not_found"
 NOT_RUNNING: Final = "not_running"
@@ -743,81 +748,82 @@ async def import_run(
     the type's presets, once per ``key``. A run already ended answers its stored outcome
     and imports nothing. Bambuddy refusing the import (a 4xx: without the settings
     permission it answers 403) ends the run ``failed`` with that reason and sets no
-    preset; Bambuddy down (5xx) raises, so the worker retries with the same key. The whole
-    import holds the run's `_import_lock`, so a request that arrives while another for the
-    run still runs waits for it and then answers its outcome (R-F2)."""
-    pool = state.settings_store.pool
-    async with _import_lock(pool, run_id):
-        return await _import_once(state, run_id, key, failures)
-
-
-@asynccontextmanager
-async def _import_lock(pool: ConnectionPool[Conn], run_id: UUID) -> AsyncIterator[None]:
-    """The run's import lock: a session advisory lock (`IMPORT_LOCK`, the run's id) on a
-    pooled connection of its own (the pool is autocommit), held until the block ends. Not
-    the run row's ``FOR UPDATE``: the import commits the run's ``bambuddy_before`` on its
-    own before it posts the zip (`_keep_before`), so a crash after the post still knows
-    what it made (#6625 S1), and a row lock held through the import would block that
-    write."""
-    getting = asyncio.ensure_future(asyncio.to_thread(pool.getconn))
-    try:
-        conn = await asyncio.shield(getting)
-    except asyncio.CancelledError:
-        # The thread still takes a connection after the cancel: back to the pool with it
-        # once it has one (R-F13). It holds no lock yet.
-        getting.add_done_callback(partial(_put_back, pool))
-        raise
-    try:
-        await asyncio.to_thread(conn.execute, _LOCK_SQL, (IMPORT_LOCK, str(run_id)))
-        yield
-    finally:
-        # Also after a cancel: the unlock waits for a lock wait still running in its
-        # thread (one connection runs one statement at a time), so the lock is never left
-        # held on a connection back in the pool.
-        await asyncio.to_thread(_release, pool, conn, run_id)
-
-
-def _put_back(pool: ConnectionPool[Conn], getting: asyncio.Future[Conn]) -> None:
-    if not getting.cancelled() and getting.exception() is None:
-        pool.putconn(getting.result())
-
-
-def _release(pool: ConnectionPool[Conn], conn: Conn, run_id: UUID) -> None:
-    try:
-        conn.execute("SELECT pg_advisory_unlock(%s, hashtext(%s))", (IMPORT_LOCK, str(run_id)))
-    except BaseException:
-        # A connection that may still hold the lock never goes back to the pool open.
-        conn.close()
-        raise
-    finally:
-        pool.putconn(conn)
-
-
-async def _import_once(
-    state: AppState, run_id: UUID, key: str, failures: list[ExportFailure]
-) -> ImportOutcome:
+    preset; Bambuddy down (5xx) raises, so the worker retries with the same key. The import
+    holds the run's lease (`_claim`), so a request that arrives while another for the run
+    still runs waits for it, holding no pooled connection, and then answers its outcome
+    (R-PR3)."""
     asked = {"failures": [f.model_dump() for f in failures]}
     pool = state.settings_store.pool
 
-    def first() -> tuple[Replay | None, Any, list[dict[str, Any]], set[int]]:
+    def first() -> tuple[Replay | None, Any, datetime | None, list[dict[str, Any]], _Fetched]:
         with pool.connection() as conn:
             replay = stored(conn, "profile-fetch", key, IMPORT_ROUTE, asked)
             if replay is not None:
-                return replay, None, [], set()
+                return replay, None, None, [], _Fetched()
             row = _run(conn, run_id, running=False)
+            if row["status"] != "running":
+                return None, row, None, [], _Fetched()
+            lease = _claim(conn, run_id)
+            if lease is None:
+                return None, None, None, [], _Fetched()
             printers = conn.execute(
                 "SELECT id, name, model, bambuddy_printer_id FROM printers"
                 " WHERE bambuddy_printer_id IS NOT NULL AND model IS NOT NULL"
                 " ORDER BY name, id"
             ).fetchall()
             fetched = _fetched_ids(conn, row["type_id"], run_id)
-        return None, row, printers, fetched
+        return None, row, lease, printers, fetched
 
-    replay, row, printers, fetched = await asyncio.to_thread(first)
-    if replay is not None:
-        return ImportOutcome.model_validate(replay.body)
-    if row["status"] != "running":
-        return _stored_outcome(row)
+    while True:
+        replay, row, lease, printers, fetched = await asyncio.to_thread(first)
+        if replay is not None:
+            return ImportOutcome.model_validate(replay.body)
+        if row is not None and lease is None:
+            return _stored_outcome(row)
+        if lease is not None:
+            break
+        await asyncio.sleep(LEASE_POLL_SECONDS)
+    try:
+        return await _import_once(state, row, key, asked, printers, fetched, failures)
+    finally:
+        # Also after a cancel: the release runs on in its thread.
+        await asyncio.shield(asyncio.to_thread(_release, pool, run_id, lease))
+
+
+def _claim(conn: Conn, run_id: UUID) -> datetime | None:
+    """The run's import lease, until `IMPORT_REQUEST_TIMEOUT` from now, if the run is
+    still running and no other request holds a lease that has not expired; else None."""
+    claimed = conn.execute(
+        "UPDATE filament_profile_fetches SET import_lease_until = now() + %s"
+        " WHERE id = %s AND status = 'running'"
+        " AND (import_lease_until IS NULL OR import_lease_until < now())"
+        " RETURNING import_lease_until",
+        (IMPORT_REQUEST_TIMEOUT, run_id),
+    ).fetchone()
+    return None if claimed is None else claimed["import_lease_until"]
+
+
+def _release(pool: ConnectionPool[Conn], run_id: UUID, lease: datetime) -> None:
+    """Give the lease back, unless it expired and another request has claimed it since."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_profile_fetches SET import_lease_until = NULL"
+            " WHERE id = %s AND import_lease_until = %s",
+            (run_id, lease),
+        )
+
+
+async def _import_once(
+    state: AppState,
+    row: Any,
+    key: str,
+    asked: dict[str, Any],
+    printers: list[dict[str, Any]],
+    fetched: _Fetched,
+    failures: list[ExportFailure],
+) -> ImportOutcome:
+    pool = state.settings_store.pool
+    run_id = row["id"]
     ending = await _import(state, row, failures, printers, fetched)
 
     def finish() -> Replay:
@@ -838,7 +844,8 @@ async def _import_once(
                     entry["preset_id"] = preset.slicer_filament
                 conn.execute(
                     "UPDATE filament_profile_fetches SET status = %s, files = %s, missing = %s,"
-                    " k_values = %s, notes = %s, error = %s, finished_at = now()"
+                    " k_values = %s, notes = %s, error = %s, finished_at = now(),"
+                    " import_lease_until = NULL"
                     " WHERE id = %s",
                     (
                         ending.status,
@@ -858,9 +865,34 @@ async def _import_once(
     return ImportOutcome.model_validate(done.body)
 
 
-def _fetched_ids(conn: Conn, type_id: UUID, run_id: UUID) -> set[int]:
-    """The Bambuddy preset ids the type's preset rows hold that an earlier fetch of the
-    type bound (its ``files`` entry's ``preset_id``), not ones a person chose."""
+@dataclass
+class _Fetched:
+    """What earlier fetches of the type made in Bambuddy (R-PR1)."""
+
+    #: The preset ids an earlier fetch bound, or recorded as made by its import, whatever
+    #: that run's status.
+    ids: set[int] = field(default_factory=set)
+    #: The earlier runs that kept a ``bambuddy_before`` but no ``bambuddy_made``: their
+    #: import may have reached Bambuddy with no listing after it. Each run's before ids,
+    #: and its files' names.
+    unlisted: list[tuple[set[int], set[str]]] = field(default_factory=list)
+
+    def made(self, listing: Sequence[Any]) -> set[int]:
+        """``ids``, and the listed presets an unlisted run's import made: named as one of
+        its files and absent from its ``bambuddy_before``."""
+        return self.ids | {
+            p.id
+            for before, names in self.unlisted
+            for p in listing
+            if p.name in names and p.id not in before
+        }
+
+
+def _fetched_ids(conn: Conn, type_id: UUID, run_id: UUID) -> _Fetched:
+    """The Bambuddy preset ids an earlier fetch of the type made: the type's preset rows
+    that a fetch bound (its ``files`` entry's ``preset_id``), not ones a person chose; the
+    ids each earlier run recorded as its import's (``bambuddy_made``); and the runs whose
+    import was never listed (R-PR1)."""
     rows = conn.execute(
         "SELECT p.slicer_filament FROM filament_spool_type_presets p"
         " WHERE p.type_id = %s AND EXISTS (SELECT 1 FROM filament_profile_fetches f,"
@@ -869,7 +901,20 @@ def _fetched_ids(conn: Conn, type_id: UUID, run_id: UUID) -> set[int]:
         " AND n.entry ->> 'preset_id' = p.slicer_filament)",
         (type_id, run_id),
     ).fetchall()
-    return {int(row["slicer_filament"]) for row in rows if row["slicer_filament"].isdigit()}
+    out = _Fetched(
+        {int(row["slicer_filament"]) for row in rows if row["slicer_filament"].isdigit()}
+    )
+    for run in conn.execute(
+        "SELECT bambuddy_before, bambuddy_made, files FROM filament_profile_fetches"
+        " WHERE type_id = %s AND id <> %s AND bambuddy_before IS NOT NULL",
+        (type_id, run_id),
+    ).fetchall():
+        if run["bambuddy_made"] is not None:
+            out.ids.update(run["bambuddy_made"])
+        else:
+            names = {e["name"] for nozzles in run["files"].values() for e in nozzles.values()}
+            out.unlisted.append((set(run["bambuddy_before"]), names))
+    return out
 
 
 def _stored_outcome(row: Any) -> ImportOutcome:
@@ -901,7 +946,7 @@ async def _import(
     row: Any,
     failures: list[ExportFailure],
     printers: list[dict[str, Any]],
-    fetched: set[int],
+    earlier: _Fetched,
 ) -> _Ending:
     targets = _keys(row["targets"])
     files = [
@@ -954,6 +999,13 @@ async def _import(
                 why = "; ".join(imported.errors) or "it did not say why"
                 return _failed(f"Bambuddy refused the import: {why}", missing)
             listing = await client.local_presets()
+            names = {f.name for f in files}
+            await _keep_made(
+                state,
+                row["id"],
+                [p.id for p in listing.filament if p.id not in before and p.name in names],
+            )
+            fetched = earlier.made(listing.filament)
             made = set(before)
             ending = _Ending(status="imported", missing=[])
             mapped: list[_File] = []
@@ -1022,6 +1074,24 @@ async def _keep_before(state: AppState, run_id: UUID, ids: list[int]) -> list[in
         return kept
 
     return await asyncio.to_thread(write)
+
+
+async def _keep_made(state: AppState, run_id: UUID, ids: list[int]) -> None:
+    """The run's ``bambuddy_made``, in a commit of its own as soon as the import is listed,
+    so a later fetch of the type binds them even if this run fails after it (R-PR1). A
+    retry that lists again adds what it finds."""
+
+    def write() -> None:
+        with state.settings_store.pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "UPDATE filament_profile_fetches SET bambuddy_made ="
+                " (SELECT COALESCE(jsonb_agg(DISTINCT v ORDER BY v), '[]')"
+                " FROM jsonb_array_elements(COALESCE(bambuddy_made, '[]') || %s) AS v)"
+                " WHERE id = %s",
+                (Jsonb(ids), run_id),
+            )
+
+    await asyncio.to_thread(write)
 
 
 def _failed(error: str, missing: dict[tuple[str, str], str]) -> _Ending:

@@ -18,7 +18,11 @@ ALTER TABLE filament_spool_types ADD COLUMN tdfp_id integer CHECK (tdfp_id > 0);
 -- name, and, once imported, the Bambuddy preset id it bound; the blobs are held in
 -- `blob_refs` (holder `profile_fetch`, holder id the run id). `bambuddy_before` is the
 -- filament preset ids Bambuddy listed before the run's first import, so a retry after a
--- lost answer still knows which presets the run made.
+-- lost answer still knows which presets the run made. `bambuddy_made` is the preset ids
+-- the import made (listed after it, absent from `bambuddy_before`, named as one of the
+-- run's files), kept as soon as the import is listed, so a later fetch of the type can
+-- bind them even when this run failed. `import_lease_until` is the lease one import
+-- request holds on the run: another request claims it only once it has expired.
 CREATE TABLE filament_profile_fetches (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     type_id uuid NOT NULL REFERENCES filament_spool_types (id) ON DELETE CASCADE,
@@ -26,6 +30,8 @@ CREATE TABLE filament_profile_fetches (
     targets jsonb NOT NULL DEFAULT '[]',
     files jsonb NOT NULL DEFAULT '{}',
     bambuddy_before jsonb,
+    bambuddy_made jsonb,
+    import_lease_until timestamptz,
     status text NOT NULL DEFAULT 'running'
         CHECK (status IN ('running', 'imported', 'partial', 'failed')),
     missing jsonb NOT NULL DEFAULT '[]',

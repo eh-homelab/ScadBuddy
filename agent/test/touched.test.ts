@@ -589,6 +589,9 @@ describe('extractors', () => {
     expect(TOUCHES_NOTHING.has('filament_type_fetch_profiles')).toBe(true)
     const started = { run: { id: 'r1', type_id: 't1', status: 'running' }, joined: false }
     expect(touches('filament_type_fetch_profiles', { type_id: 't1' }, started)).toEqual([])
+    // R-PR2: the status read can end a stale run, so it is a write tool, classified too.
+    expect(TOUCHES_NOTHING.has('filament_type_profile_fetch')).toBe(true)
+    expect(touches('filament_type_profile_fetch', { type_id: 't1' }, { run: null, gaps: [] })).toEqual([])
   })
 
   it('leaves only the browser click and fill unclassified', () => {

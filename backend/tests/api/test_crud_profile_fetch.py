@@ -10,6 +10,7 @@ import io
 import json
 import re
 import threading
+import time
 import zipfile
 from dataclasses import dataclass
 from decimal import Decimal
@@ -359,6 +360,11 @@ def test_import_posts_one_zip_and_sets_the_type_presets(fetch: Fetch) -> None:
     ]
     run = fetch.run()
     assert (run.status, run.finished_at is not None) == ("imported", True)
+    # R-PR1: what the import made, kept in a commit of its own.
+    [made] = fetch.rows(
+        "SELECT bambuddy_made FROM filament_profile_fetches WHERE id = %s", fetch.run_id
+    )
+    assert made["bambuddy_made"] == [101, 102, 103, 104]
 
 
 def _zip_of(request: httpx.Request) -> bytes:
@@ -460,6 +466,57 @@ def test_a_retry_binds_what_its_lost_first_attempt_made(fetch: Fetch) -> None:
 
     assert r.status_code == 200, r.text
     assert (r.json()["status"], r.json()["presets"]) == ("imported", 4)
+    assert [p[2] for p in fetch.presets()] == ["101", "102", "103", "104"]
+
+
+@respx.mock
+def test_presets_an_unfinished_import_made_are_bound_by_the_next_run(fetch: Fetch) -> None:
+    """R-PR1: Bambuddy takes the zip, then every listing after it answers 5xx until the
+    run fails. The presets it made sit in the next run's own ``bambuddy_before``; that run
+    still binds them, as presets a fetch of this type made."""
+    bodies = put_all(fetch)
+    sent = bb_import(4)
+    names = [name_of(b) for b in bodies]
+    other, made = _rows(["Other"], 40), _rows(names, 101)
+    answers = iter([other])
+
+    def down(request: httpx.Request) -> httpx.Response:
+        rows = next(answers, None)
+        if rows is None:
+            return httpx.Response(502, json={"detail": "Bad Gateway"})
+        return httpx.Response(200, json={"filament": rows, "printer": [], "process": []})
+
+    listing = respx.get(f"{API}/local-presets/").mock(side_effect=down)
+    no_k_profiles()
+    for _ in range(2):
+        assert fetch.import_().status_code == 502
+    [row] = fetch.rows(
+        "SELECT import_lease_until FROM filament_profile_fetches WHERE id = %s", fetch.run_id
+    )
+    assert row["import_lease_until"] is None
+    assert fetch.failed("the import did not finish").status_code == 204
+    assert fetch.presets() == []
+
+    run, _ = ProfileFetches(_state(fetch.client).settings_store.pool, lambda: NOZZLES).open(
+        fetch.type_id, actor="person:test"
+    )
+    fetch.run_id = run.id
+    put_all(fetch)
+    sent.mock(
+        return_value=httpx.Response(
+            200, json={"success": True, "imported": 0, "skipped": 4, "errors": []}
+        )
+    )
+    listing.mock(
+        side_effect=lambda request: httpx.Response(
+            200, json={"filament": other + made, "printer": [], "process": []}
+        )
+    )
+
+    r = fetch.import_(key="k2")
+
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["presets"]) == ("imported", 4), r.text
     assert [p[2] for p in fetch.presets()] == ["101", "102", "103", "104"]
 
 
@@ -692,7 +749,7 @@ def test_a_retried_import_of_an_imported_run_calls_bambuddy_no_more(fetch: Fetch
 @respx.mock
 def test_two_concurrent_imports_of_a_run_call_bambuddy_once(fetch: Fetch) -> None:
     """R-F2: the worker's client retries a slow import with the same key while the first
-    request still runs. The second waits on the run's lock and then answers the first
+    request still runs. The second waits for the run's import lease and then answers the first
     one's outcome: one zip import, one set of listings, never two imports in parallel."""
     bodies = put_all(fetch)
     reached, release = threading.Event(), threading.Event()
@@ -730,43 +787,80 @@ def test_two_concurrent_imports_of_a_run_call_bambuddy_once(fetch: Fetch) -> Non
     assert listing.call_count == 2
 
 
-class _SlowPool:
-    """A pool whose `getconn` waits until ``give`` is set, then hands out ``conn``."""
+@respx.mock
+def test_a_waiting_import_holds_no_pool_connection(fetch: Fetch) -> None:
+    """R-PR3: a request that finds the run's import lease held waits with no pooled
+    connection (it polls with short statements), and the holder holds none while Bambuddy
+    takes its time."""
+    pool = _state(fetch.client).settings_store.pool
+    bodies = put_all(fetch)
+    reached, release = threading.Event(), threading.Event()
 
-    def __init__(self) -> None:
-        self.conn = object()
-        self.asked, self.give = threading.Event(), threading.Event()
-        self.returned: list[object] = []
+    async def slow_import(request: httpx.Request) -> httpx.Response:
+        reached.set()
+        await asyncio.to_thread(release.wait, 30)
+        return httpx.Response(
+            200, json={"success": True, "imported": 4, "skipped": 0, "errors": []}
+        )
 
-    def getconn(self) -> object:
-        self.asked.set()
-        assert self.give.wait(30)
-        return self.conn
+    respx.post(f"{API}/local-presets/import").mock(side_effect=slow_import)
+    local_presets([name_of(b) for b in bodies])
+    no_k_profiles()
 
-    def putconn(self, conn: object) -> None:
-        self.returned.append(conn)
+    def in_use() -> int:
+        stats = pool.get_stats()
+        return int(stats["pool_size"]) - int(stats["pool_available"])
+
+    idle = in_use()
+    replies: dict[str, Any] = {}
+
+    def call(name: str) -> None:
+        replies[name] = fetch.import_()
+
+    first = threading.Thread(target=call, args=("first",))
+    first.start()
+    assert reached.wait(30)
+    second = threading.Thread(target=call, args=("second",))
+    second.start()
+    time.sleep(0.3)
+    samples = []
+    for _ in range(30):
+        samples.append(in_use())
+        time.sleep(0.05)
+    release.set()
+    first.join(timeout=60)
+    second.join(timeout=60)
+    assert replies["second"].json() == replies["first"].json()
+    assert min(samples) == idle, samples
+    assert max(samples) <= idle + 1, samples
 
 
-async def test_a_cancel_while_the_lock_waits_for_a_connection_returns_it() -> None:
-    """R-F13: a request cancelled while `_import_lock` waits for a pooled connection. The
-    thread still gets the connection after the cancel; it goes back to the pool."""
-    pool = _SlowPool()
+@respx.mock
+def test_an_expired_lease_is_claimed(fetch: Fetch, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-PR3: a lease a crashed request left behind holds the import off only until it
+    expires; then the waiting request claims it and imports, and the end clears it."""
+    monkeypatch.setattr(profile_fetch, "LEASE_POLL_SECONDS", 0.05)
+    bodies = put_all(fetch)
+    sent = bb_import(4)
+    local_presets([name_of(b) for b in bodies])
+    no_k_profiles()
+    fetch.rows(
+        "UPDATE filament_profile_fetches SET import_lease_until = now() + interval '1 second'"
+        " WHERE id = %s RETURNING id",
+        fetch.run_id,
+    )
+    began = time.monotonic()
 
-    async def section() -> None:
-        async with profile_fetch._import_lock(pool, UUID(int=1)):  # type: ignore[arg-type]
-            raise AssertionError("never entered")
+    r = fetch.import_()
 
-    task = asyncio.create_task(section())
-    assert await asyncio.to_thread(pool.asked.wait, 30)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    pool.give.set()
-    for _ in range(300):
-        if pool.returned:
-            break
-        await asyncio.sleep(0.01)
-    assert pool.returned == [pool.conn]
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "imported"
+    assert time.monotonic() - began >= 0.5
+    assert sent.call_count == 1
+    [row] = fetch.rows(
+        "SELECT import_lease_until FROM filament_profile_fetches WHERE id = %s", fetch.run_id
+    )
+    assert row["import_lease_until"] is None
 
 
 def test_import_needs_its_key(fetch: Fetch) -> None:

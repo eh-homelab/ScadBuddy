@@ -724,6 +724,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // local presets, no recorded kind either); its run is the type's, read with
   // filament_type_profile_fetch.
   'filament_type_fetch_profiles',
+  // R-PR2: reading the fetch can end a stale run `failed` and cancel its workflow; the run
+  // is still the type's, no recorded kind.
+  'filament_type_profile_fetch',
   'filament_spool_upsert',
   'filament_spool_set_presets',
   'filament_spool_set_k_values',

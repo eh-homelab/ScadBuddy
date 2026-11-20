@@ -307,9 +307,10 @@ export const filamentTools: Tool[] = [
       '`status` (`running`, `imported`, `partial`, `failed`), the keys it could not set (`missing`, each with ' +
       'its reason), its notes, K values set and `error`. `gaps` lists each printer model and nozzle a fetch ' +
       'would export now that the type has no preset for, with the reason its last fetch gave. A run no ' +
-      'profile-fetch worker serves is ended `failed` on this read.',
+      'profile-fetch worker serves is ended `failed` on this read, and its workflow cancelled, so this read ' +
+      'can write. Writes ScadBuddy only.',
     input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
-    risk: 'read',
+    risk: 'write',
     source: SOURCE,
     routes: ['GET /api/v1/filament/types/{type_id}/profile-fetch'],
     handler: async ({ type_id }, { backend }) =>

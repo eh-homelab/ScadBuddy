@@ -183,7 +183,9 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
 
   it.each([
     ['filament_type_fetch_profiles', 'outward', true, ['POST /api/v1/filament/types/{type_id}/profile-fetch']],
-    ['filament_type_profile_fetch', 'read', false, ['GET /api/v1/filament/types/{type_id}/profile-fetch']],
+    // R-PR2: its read can end a stale run and cancel the run's workflow, so it is a write;
+    // only `outward` is gated.
+    ['filament_type_profile_fetch', 'write', false, ['GET /api/v1/filament/types/{type_id}/profile-fetch']],
   ])('%s is %s tier, gated %s, on its route', (name, risk, gated, routes) => {
     expect(tool(name).risk).toBe(risk)
     expect(tool(name).gated).toBe(gated)
