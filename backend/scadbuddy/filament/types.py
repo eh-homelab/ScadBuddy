@@ -9,7 +9,8 @@ in the transaction that writes the type; ``filament_id`` is that row.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from decimal import Decimal
 from typing import Any, cast, get_args
 from uuid import UUID
@@ -203,26 +204,23 @@ class SpoolTypeStore:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
                     return None
-                before = _child_rows(conn, _PRESETS, type_id)
-                conn.execute(
-                    "DELETE FROM filament_spool_type_presets WHERE type_id = %s", (type_id,)
-                )
-                for row in rows:
+                with list_edit(conn, type_id, "presets", actor):
                     conn.execute(
-                        "INSERT INTO filament_spool_type_presets (type_id, printer_model,"
-                        " nozzle_diameter, slicer_filament, slicer_filament_name)"
-                        " VALUES (%s, %s, %s, %s, %s)",
-                        (
-                            type_id,
-                            row.printer_model,
-                            row.nozzle_diameter,
-                            row.slicer_filament,
-                            row.slicer_filament_name,
-                        ),
+                        "DELETE FROM filament_spool_type_presets WHERE type_id = %s", (type_id,)
                     )
-                after = _child_rows(conn, _PRESETS, type_id)
-                if before != after:
-                    _fan_out(conn, type_id, {"presets": [before, after]}, actor)
+                    for row in rows:
+                        conn.execute(
+                            "INSERT INTO filament_spool_type_presets (type_id, printer_model,"
+                            " nozzle_diameter, slicer_filament, slicer_filament_name)"
+                            " VALUES (%s, %s, %s, %s, %s)",
+                            (
+                                type_id,
+                                row.printer_model,
+                                row.nozzle_diameter,
+                                row.slicer_filament,
+                                row.slicer_filament_name,
+                            ),
+                        )
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
         return self.presets(type_id)
@@ -234,30 +232,27 @@ class SpoolTypeStore:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
                     return None
-                before = _child_rows(conn, _K_VALUES, type_id)
-                conn.execute(
-                    "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
-                )
-                for row in rows:
+                with list_edit(conn, type_id, "k_values", actor):
                     conn.execute(
-                        "INSERT INTO filament_spool_type_k_values (type_id, printer_id, extruder,"
-                        " nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id)"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            type_id,
-                            row.printer_id,
-                            row.extruder,
-                            row.nozzle_diameter,
-                            row.nozzle_type,
-                            row.k_value,
-                            row.name,
-                            row.cali_idx,
-                            row.setting_id,
-                        ),
+                        "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
                     )
-                after = _child_rows(conn, _K_VALUES, type_id)
-                if before != after:
-                    _fan_out(conn, type_id, {"k_values": [before, after]}, actor)
+                    for row in rows:
+                        conn.execute(
+                            "INSERT INTO filament_spool_type_k_values (type_id, printer_id,"
+                            " extruder, nozzle_diameter, nozzle_type, k_value, name, cali_idx,"
+                            " setting_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (
+                                type_id,
+                                row.printer_id,
+                                row.extruder,
+                                row.nozzle_diameter,
+                                row.nozzle_type,
+                                row.k_value,
+                                row.name,
+                                row.cali_idx,
+                                row.setting_id,
+                            ),
+                        )
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
         except errors.ForeignKeyViolation:
@@ -459,6 +454,20 @@ def _child_rows(conn: Conn, table: _ChildTable, type_id: UUID) -> list[dict[str,
     return conn.execute(
         f"SELECT {columns} FROM {name} WHERE type_id = %s ORDER BY {order}", (type_id,)
     ).fetchall()
+
+
+@contextmanager
+def list_edit(conn: Conn, type_id: UUID, name: str, actor: str) -> Iterator[None]:
+    """Around a write of the type's ``name`` list (``presets`` or ``k_values``) on
+    ``conn``: when the list's rows differ after it, `_fan_out` that change as ``actor``,
+    in the same transaction. No change writes no event. The Type page's saves and a
+    profile fetch's import (R-T9-3) both go through it."""
+    table = _OWN_LISTS[name]
+    before = _child_rows(conn, table, type_id)
+    yield
+    after = _child_rows(conn, table, type_id)
+    if before != after:
+        _fan_out(conn, type_id, {name: [before, after]}, actor)
 
 
 def _fan_out(conn: Conn, type_id: UUID, changes: dict[str, list[Any]], actor: str) -> None:
