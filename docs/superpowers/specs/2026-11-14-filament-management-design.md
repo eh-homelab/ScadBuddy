@@ -517,7 +517,7 @@ holds each decision and what it costs if wrong.
   (`/spoolbuddy/scale/reading`). With BB→SB sync of weights on, SB reads
   `last_scale_weight` and `last_weighed_at` changes and writes `weighed`.
   As built in #6268: the setting is `filament_sync.weights` (`off` or `bb_to_sb`,
-  on by default). With `off`, the pull books no `bb_scale` weighing and no `bb` weight
+  on by default; #6265 widened it to the four values of §8). With `off`, the pull books no `bb_scale` weighing and no `bb` weight
   reading for a spool SB already tracks. A spool SB has never seen keeps its first `bb`
   reading, because it needs a start weight. A `bb_dried` event is not a weight and is
   still booked. The plan's Decision 3 has the reason.
@@ -571,7 +571,7 @@ holds each decision and what it costs if wrong.
     checked against the stored kind (422 otherwise). Binding with it locks the spool's weight, and
     unbinding never unlocks it; a move ("Move it here") sends `override: false`. Every binding
     change queues the tag in `filament_bb_tag_pending`; the push to Bambuddy (`link-tag`, a 409
-    `tag_already_linked` moves it) runs only with `filament_sync.tags` `sb_to_bb`, SB first and
+    `tag_already_linked` moves it) runs only when `pushes(tags)` (`sb_to_bb` or `two_way`, #6265), SB first and
     Bambuddy second, comparing state before each write. Override mode is one row
     (`filament_rfid_state`), set by `PUT /filament/rfid/override-mode`; `GET /filament/rfid/status`
     reports it, with `blocked` when Bambuddy's auth refuses the setting write. The spool refresh
@@ -612,8 +612,9 @@ else SB proposes a new type for a person to confirm.
 - A Temporal workflow per BB instance. SB events signal it, so a push leaves
   within seconds of the event. A pull runs on a schedule (BB has no webhooks
   for spools in the measured spec).
-- Each push is idempotent: it compares the hash of the fields it owns with the
-  last pushed hash.
+- Each push is idempotent: it compares the fields it owns with Bambuddy's current
+  values; the hash of the last push only lets an event-driven pass skip an item (as
+  built in #6265, Decision 7).
 - Two-way conflicts: the newer change wins, per field. The owner reports no
   conflicts in practice; this rule is enough. BB has one `updated_at` per spool,
   so "newer" compares SB's event time with that value.
@@ -685,6 +686,73 @@ else SB proposes a new type for a person to confirm.
     stopped at a 60 s read timeout and is not used.
 - The sync runs in a worker and calls CRUD routes for SB data, with a service
   credential (§3).
+
+**As built in #6265** (plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`,
+"Decisions this plan makes" and "Decisions made while building"; the decision numbers
+below are the plan's):
+
+- Worker (Decisions 1, 2, 18). The push is the workflow `FilamentBbSync` and its pass
+  activity, on the `bambuddy` queue of the print worker (`scadbuddy-print`). SB's side
+  goes through the API's CRUD area `filament-sync`; the worker holds no database secret
+  (`backend/scadbuddy/workflows/filament_sync.py`, `filament/bb_sync_run.py`). A new
+  workflow type on that queue needs a `Recreate` roll of `scadbuddy-print` (README, "A
+  release that needs `Recreate`"). A Bambuddy key with auth on needs
+  `can_manage_inventory`.
+- Settings (Decisions 3, 4). `filament_sync` holds six data types (`spools`, `weights`,
+  `tags`, `suppliers`, `locations`, `presets`), each `off`, `sb_to_bb`, `bb_to_sb` or
+  `two_way`. `pulls(d)` is `bb_to_sb` or `two_way`; `pushes(d)` is `sb_to_bb` or `two_way`
+  (`core/settings.py` `FilamentSync`). `spools`, `weights`, `tags` and `presets` default to
+  `bb_to_sb`, `suppliers` and `locations` to `off`. A migration rewrote #6264's stored
+  `tags` once: `off` became `bb_to_sb`, `sb_to_bb` became `two_way`
+  (`migrations/20261118T1907Z_filament_sync_tags_values.sql`).
+- Pull stays in the API (Decision 5). BB to SB is still `SpoolRefresh`'s pull
+  (`filament/bambuddy_pull.py`), gated per data type, and now also takes archive state,
+  K values, suppliers and locations. Its Bambuddy reads stay in the CRUD service's pod.
+- Tags (Decision 6). The tag queue and drain of #6264 (`filament_bb_tag_pending`,
+  `rfid_push.drain_tags`) are kept and gated by `pushes(tags)`. The engine never sends
+  `tag_uid` or `tray_uuid`; a new link queues the spool's open tags.
+- Plan (Decisions 7, 8). The plan is state-based: each link keeps `pushed_fields` and the
+  hash only lets an event-driven pass skip an item. A full pass (the timer, or "Sync
+  now") compares with Bambuddy's current rows. Under `two_way` a field is pushed when SB's
+  value differs and Bambuddy still holds what SB last saw there (`bb_seen`), or SB's change
+  time (`bb_sync_plan.sb_changed_at`) is strictly after BB's `updated_at`; ties go to
+  Bambuddy. Under `sb_to_bb` a differing field is always pushed. The pull uses the same
+  `sb_changed_at`.
+- Echo (Decision 9). SB's own write is stored as `bb_seen` and booked as one
+  `synced_from_bb` event with `pushed: true` and no changes, so the pull does not read it
+  as a Bambuddy change.
+- Creates (Decision 10). A create of a spool, supplier, location or catalog entry first
+  stores an intent in `filament_bb_creates`. A later plan adopts a matching Bambuddy row
+  made after the intent started, in place of a second create; the pull skips a BB spool
+  an intent can claim.
+- Bounds (Decision 11). A pass makes at most 4 plan rounds and 200 writes, and the plan
+  route returns at most `200 - written` writes. With work left, the next pass starts at
+  once.
+- Instance (Decision 12). The workflow id carries a hash of the normalised Bambuddy URL.
+  `filament_bb_sync_state.instance` records the instance the links belong to. A pass for
+  another instance plans nothing and reports `instance_changed`, and the sync stays
+  stopped until the links are reset, which is not built.
+- Lifecycle (Decision 13). A spool is created in Bambuddy only when it is unarchived and
+  `pushes(spools)`. Archive and restore are pushed. A 404 on a linked spool, or on the
+  probe of one a complete listing lacks, deletes the link; a partial listing never does.
+- Fields (Decisions 14, 15). The fields each data type carries are in Decision 14. Not
+  pushed: SKU settings (#6270 owns them) and `last_scale_weight`. Supplier links and
+  prices go to Bambuddy only, and are never pulled.
+- Child types (Decision 16). Weights, presets, suppliers per spool and a spool's location
+  act only on spools already linked.
+- Pull widened (Decisions 138-152). The pull reads archived spools and takes BB's archive
+  state, K values, suppliers and locations. It seeds a link's first seen location
+  (`bb_seen.location_id`) and archive state (`bb_seen.archived_at`) with BB's value and
+  moves nothing on that pull, so a link seen before #6265 is not archived or moved on
+  the first pull (Decisions 150 and 152). It never moves a spool out of a printer place.
+- SB writes that do not nudge (Decision 17). The API nudges the workflow after a write
+  on `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py`, and after
+  a settings save that changes `filament_sync`. Capture and `sync_ams_weights`
+  (`filament/capture.py`) and the print worker's CRUD `filament` writes
+  (`…/print-uses/settle`, `bb-to-sb`) do not. They reach Bambuddy on the timer only,
+  against "SB events signal it" above.
+- Status (Decision 19). `GET /filament/sync/status` and `POST /filament/sync/run` show and
+  start a pass; the state is in `filament_bb_sync_state` and `filament_bb_push_errors`.
 
 ## 9. Invoice import flow
 
@@ -882,7 +950,7 @@ that block it (GitHub's blocked-by links hold the same graph).
 | 6 | [#6269](https://github.com/eh-homelab/ScadBuddy/issues/6269) | History timeline, metrics, Grafana panel (§5.7) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
 | 6 | [#6270](https://github.com/eh-homelab/ScadBuddy/issues/6270) | Parity sweep against §11 | all of the above |
 
-As built in #6264: `filament_sync.tags` takes `off` (the default) and `sb_to_bb`. #6265 widens it to the four values of §8.
+As built in #6264: `filament_sync.tags` took `off` (the default) and `sb_to_bb`. As built in #6265: every data type takes the four values of §8 (§8.2, "As built in #6265"), and #6264's stored `tags` values were rewritten once (`off` to `bb_to_sb`, `sb_to_bb` to `two_way`).
 
 [#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) landed in
 [#6211](https://github.com/eh-homelab/ScadBuddy/pull/6211) before [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261); #6261's types write the book's alpha, stops and effect from it.

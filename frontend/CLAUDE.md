@@ -259,8 +259,18 @@ same way, `vite.config.ts`).
   (`TypePage`; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
-  configuration (`pages/settings/sections/filament.tsx`: also "Tags to Bambuddy", which saves
-  `filament_sync.tags` with "Save Filament", and the "RFID override mode" switch with "Apply now", #6264); the old anchors `#native-spools` and
+  configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
+  `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
+  Bambuddy" has one `ChoiceSelect` row per data type (spools and types, weights, tags,
+  suppliers and prices, locations, presets and K values; `SYNC_ROWS`, `SYNC_KINDS` in
+  `pages/settings/values.ts`) with Off, ScadBuddy → Bambuddy, Bambuddy → ScadBuddy or Both
+  ways (newer change wins), saved with "Save Filament" as `filament_sync`; the sync status
+  (`getSyncStatus`, `GET /filament/sync/status`: the last pass, why none runs, and each
+  item whose last write failed or was held back, with `syncErrorText`); and "Sync now"
+  (`runSync`, `POST /filament/sync/run`), after which the status is read again until the
+  pass lands (R-T11-2). It also has the "RFID override mode" switch with "Apply now", #6264;
+  the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
+  `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
   `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,

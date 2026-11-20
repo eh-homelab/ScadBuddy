@@ -1,5 +1,6 @@
-"""Bambuddy's spools pulled into ScadBuddy's own (#6261, spec §8.1, §8.2). Read only:
-nothing here writes to Bambuddy (SB to BB is #6263).
+"""Bambuddy's spools pulled into ScadBuddy's own (#6261, spec §8.1, §8.2). The BB to SB
+side only: nothing here writes to Bambuddy (SB to BB is the sync of #6265,
+`bb_sync_plan.py`, `bb_sync_run.py`).
 
 `pull` takes each BB spool in its own transaction, under an advisory lock on its id, in
 this order:

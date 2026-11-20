@@ -2288,7 +2288,7 @@ checked per run from the settings as they are then (`printers/hot_path.py`
 calls Bambuddy are the housekeeping sweeps and the spool refresh, which pulls Bambuddy's
 spools into ScadBuddy's own (the `scadbuddy-spool-providers-<queue>` Schedule,
 `spool_overlay_refresh_seconds` (restart), 300 s by default; Settings → Printing → Filament, where
-`filament_sync.spools` `off` turns the pull off), on their own traces, and
+a `filament_sync` with no data type set to `bb_to_sb` or `two_way` turns the pull off, #6265), on their own traces, and
 any run whose printer's path is `bambuddy`. The
 dialog's filament step reads the loaded trays from the LAN report, each with the
 ScadBuddy spool it holds (found by its RFID tag or a person's tray link, #6262).
