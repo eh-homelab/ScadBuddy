@@ -264,6 +264,54 @@ class SpoolTypeStore:
             raise CatalogRefError() from None
         return self.k_values(type_id)
 
+    @staticmethod
+    def merge_presets(conn: Conn, type_id: UUID, rows: _Presets) -> None:
+        """``rows`` replace the type's presets of their own keys (printer model and
+        nozzle); its other rows stay. On ``conn``, in the caller's transaction (a profile
+        fetch's import, #6625)."""
+        for row in rows:
+            conn.execute(
+                "INSERT INTO filament_spool_type_presets (type_id, printer_model,"
+                " nozzle_diameter, slicer_filament, slicer_filament_name)"
+                " VALUES (%s, %s, %s, %s, %s)"
+                " ON CONFLICT (type_id, printer_model, nozzle_diameter) DO UPDATE SET"
+                " slicer_filament = EXCLUDED.slicer_filament,"
+                " slicer_filament_name = EXCLUDED.slicer_filament_name",
+                (
+                    type_id,
+                    row.printer_model,
+                    row.nozzle_diameter,
+                    row.slicer_filament,
+                    row.slicer_filament_name,
+                ),
+            )
+
+    @staticmethod
+    def merge_k_values(conn: Conn, type_id: UUID, rows: _KValues) -> None:
+        """``rows`` replace the type's K values of their own keys (printer, extruder and
+        nozzle); its other rows stay. On ``conn``, in the caller's transaction (#6625)."""
+        for row in rows:
+            conn.execute(
+                "INSERT INTO filament_spool_type_k_values (type_id, printer_id, extruder,"
+                " nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (type_id, printer_id, extruder, nozzle_diameter) DO UPDATE SET"
+                " nozzle_type = EXCLUDED.nozzle_type, k_value = EXCLUDED.k_value,"
+                " name = EXCLUDED.name, cali_idx = EXCLUDED.cali_idx,"
+                " setting_id = EXCLUDED.setting_id",
+                (
+                    type_id,
+                    row.printer_id,
+                    row.extruder,
+                    row.nozzle_diameter,
+                    row.nozzle_type,
+                    row.k_value,
+                    row.name,
+                    row.cali_idx,
+                    row.setting_id,
+                ),
+            )
+
     def match(
         self,
         *,

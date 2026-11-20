@@ -95,7 +95,8 @@ ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 #: `/internal/crud/<caller>/` (#5298); the render worker has no other class. The
 #: storefront edge (#5282) reaches only its own, `/internal/crud/storefront/`. The agent
 #: reports the assistant's spend on an order through its own (`crud.agent`, #5330). The
-#: intake worker (#6133) reaches only its own, `/internal/crud/intake/`.
+#: intake worker (#6133) reaches only its own, `/internal/crud/intake/`. The
+#: profile-fetch worker (#6625) reaches only `/internal/crud/profile-fetch/`.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace", "crud.agent"}),
     "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
@@ -103,6 +104,7 @@ SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "render": frozenset({"crud.render"}),
     "storefront": frozenset({"crud.storefront"}),
     "intake": frozenset({"crud.intake"}),
+    "profile-fetch": frozenset({"crud.profile-fetch"}),
 }
 #: The Postgres role of each caller, granted its view when the deployment made it.
 ROLES: Mapping[ServiceCaller, str] = {

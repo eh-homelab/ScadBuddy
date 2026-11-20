@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from psycopg import errors
 from pydantic import ValidationError
 
 from scadbuddy.filament.catalog import CatalogExistsError, CatalogStore
@@ -465,3 +466,61 @@ def test_type_k_value_edit_writes_edited_on_an_inheriting_spool(pg_pool: PgPool)
     assert [Decimal(r["k_value"]) for r in new] == [Decimal("0.02")]
     assert event.data["type_id"] == str(made.id)
     assert event.actor == "user:bo"
+
+
+@pg
+def test_a_type_keeps_its_tdfp_id(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    made = store.create(_body(pg_pool, tdfp_id=30173))
+    assert made.tdfp_id == 30173
+    got = store.get(made.id)
+    assert got is not None
+    assert got.tdfp_id == 30173
+    assert store.create(_body(pg_pool, code="NONE")).tdfp_id is None
+    changed = store.update(made.id, SpoolTypePatch(tdfp_id=5), actor="ann")
+    assert changed is not None
+    assert changed.tdfp_id == 5
+    with pytest.raises(ValueError, match="greater than 0"):
+        _body(pg_pool, tdfp_id=0)
+    with pytest.raises(ValueError, match="greater than 0"):
+        SpoolTypePatch(tdfp_id=0)
+
+
+def _fetch(pool: PgPool, type_id: UUID, status: str) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_profile_fetches (type_id, tdfp_id, targets, status)"
+            " VALUES (%s, 1, '[]', %s)",
+            (type_id, status),
+        )
+
+
+@pg
+def test_one_running_fetch_per_type(pg_pool: PgPool) -> None:
+    made = SpoolTypeStore(pg_pool).create(_body(pg_pool))
+    _fetch(pg_pool, made.id, "running")
+    _fetch(pg_pool, made.id, "failed")
+    with pytest.raises(errors.UniqueViolation):
+        _fetch(pg_pool, made.id, "running")
+
+
+@pg
+def test_deleting_a_fetch_releases_its_blobs(pg_pool: PgPool) -> None:
+    made = SpoolTypeStore(pg_pool).create(_body(pg_pool))
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO filament_profile_fetches (type_id, tdfp_id, targets, status)"
+            " VALUES (%s, 1, '[]', 'imported') RETURNING id",
+            (made.id,),
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES ('pf', %s, %s)",
+            ("profile_fetch", str(row["id"])),
+        )
+        conn.execute("DELETE FROM filament_spool_types WHERE id = %s", (made.id,))
+        held = conn.execute(
+            "SELECT count(*) AS n FROM blob_refs WHERE holder_kind = 'profile_fetch'"
+        ).fetchone()
+    assert held is not None
+    assert held["n"] == 0

@@ -33,6 +33,7 @@ from scadbuddy.filament.invoices import (
     InvoiceRefError,
     InvoiceSupplierArchivedError,
 )
+from scadbuddy.filament.profile_fetch import start_profile_fetches
 from scadbuddy.filament.shopping import ShoppingRefError
 from scadbuddy.filament.suppliers import (
     PriceFromInvoiceError,
@@ -522,14 +523,18 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
         "200 with it and makes nothing more. 404 for no such invoice. 409, with nothing "
         "written, for an invoice with no lines, one of an archived supplier, one not in the "
         "shop's currency, one whose total is more than 0.05 from its lines plus shipping, or a "
-        "line that cannot be confirmed (the message names the line)."
+        "line that cannot be confirmed (the message names the line). After the commit it "
+        "starts a 3DFP preset fetch for each new type that has a `tdfp_id` (`POST "
+        "/filament/types/{type_id}/profile-fetch`); a fetch that cannot start never fails "
+        "the confirm."
     ),
 )
 async def confirm_invoice(
-    filament: FilamentDep, caller: CallerDep, invoice_id: UUID
+    state: StateDep, filament: FilamentDep, caller: CallerDep, invoice_id: UUID
 ) -> pm.InvoiceDetail:
+    who = actor(caller)
     try:
-        done = await asyncio.to_thread(filament.invoices.confirm, invoice_id, actor=actor(caller))
+        done = await asyncio.to_thread(filament.invoices.confirm, invoice_id, actor=who)
     except (
         InvoiceNoLinesError,
         InvoiceCurrencyError,
@@ -540,7 +545,10 @@ async def confirm_invoice(
         raise _conflict(exc) from None
     if done is None:
         raise _no_invoice(invoice_id)
-    return done[0]
+    invoice, _, made = done
+    # After the commit; a failure to start is logged, never the confirm's (Decision 12).
+    await start_profile_fetches(state, made, actor=who)
+    return invoice
 
 
 # -- an invoice's file ------------------------------------------------------------------

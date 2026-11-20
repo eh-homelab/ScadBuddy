@@ -823,6 +823,19 @@ profiles by `GET /api/v1/filament/bambu-colour-codes`, and the diff rule has a
 read, `GET /api/v1/filament/invoices/{id}/candidates`. The skill is
 `plugins/scadbuddy/skills/filament/SKILL.md`.
 
+**As built in #6625** (plan `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`,
+Decisions 1, 9, 11, 12 and "Decisions made while building"). Step 7 is not a flow: a
+Temporal workflow `ProfileFetch` runs on its own queue, `profile-fetch`, and a worker in its
+own pod does the browser part only. The API imports the files into Bambuddy's local presets
+(`POST /local-presets/import`) and sets the type's presets, because the worker holds no
+database secret and no Bambuddy key. The nozzles are the remembered setting
+`profile_fetch_nozzles`. The printer models are the models of SB's printers, and the 3DFP
+printer option is the model string. Invoice confirm starts a fetch for each type it made that
+has a `tdfp_id`; a route, two agent tools and a button start or read one by hand. Step 8's
+check is the read `GET /filament/types/{id}/profile-fetch` (`gaps`: the printer models and
+nozzles with no preset now). The browser's bot-check facts are the skill's, not measured
+again by #6625 (the tests use a replica of the site).
+
 ## 10. UI
 
 New top-level nav item **Filament** (`/filament`), between Library and Orders

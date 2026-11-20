@@ -286,6 +286,7 @@ function spoolType(look: TypeLook): S['SpoolType'] {
     lead_time_days: look.lead_time_days ?? null,
     safety_margin_days: look.safety_margin_days ?? null,
     filament_id: null,
+    tdfp_id: null,
     note: null,
     archived_at: null,
     created_at: AT,
