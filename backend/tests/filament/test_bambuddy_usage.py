@@ -443,6 +443,42 @@ async def test_a_failed_usage_read_leaves_the_pull_standing(
     assert "could not read Bambuddy's usage rows" in caplog.text
 
 
+async def test_a_failed_usage_read_defers_a_new_archived_spool(pg_pool: PgPool) -> None:
+    """R-6707-16: with no usage rows, an archived BB spool is not made: its reading could
+    not be timed after its rows, so a row would be taken off twice. The live spool is
+    made as always, and the next pull that reads the rows makes the archived one."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    spent = bb(id=125, weight_used=600.0, archived_at=_naive(T1), updated_at=_naive(T1)).model_dump(
+        mode="json"
+    )
+    late = T1 + timedelta(hours=1)
+    rows = [
+        usage(id=1, spool_id=125, weight_used=400.0, created_at=_naive(T0)).model_dump(mode="json"),
+        usage(id=2, spool_id=125, weight_used=200.0, created_at=_naive(late)).model_dump(
+            mode="json"
+        ),
+    ]
+    live = bb(id=7).model_dump(mode="json")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[spent, live])
+        usage_route = router.get(f"{BB}/api/v1/inventory/usage")
+        usage_route.respond(503)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        first = await read_and_pull(f, settings)
+        usage_route.respond(json=rows)
+        second = await read_and_pull(f, settings)
+    (made_live,) = first.created_ids
+    assert (first.archived_created, first.archived_deferred) == (0, 1)
+    assert first.archived_deferred_bb_ids == [125]
+    assert [s.id for s in f.spools.list()] == [made_live]
+    (spool,) = second.created_ids
+    assert (second.archived_created, second.archived_deferred) == (1, 0)
+    assert second.usage_booked == 2
+    assert _left(f, spool) == 400
+
+
 async def test_a_failed_archive_read_still_books_the_rows(
     pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:

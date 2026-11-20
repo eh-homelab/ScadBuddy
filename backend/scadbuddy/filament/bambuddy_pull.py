@@ -47,7 +47,9 @@ The pull reads BB's archived spools too (#6707). An archived BB spool takes the 
 as any other: a linked one is pulled as it is today (BB archiving it never archives or
 changes the SB spool), and one whose tag an SB spool holds is linked or skipped as above.
 BB's live spools are pulled first: of a live and an archived BB record with one tag, the
-live one is linked or made, and the archived one is its RFID duplicate (R-6707-13).
+live one is linked or made, and the archived one is its RFID duplicate (R-6707-13). When
+BB's usage rows could not be read, an archived BB spool is not made in that pull; it waits
+for one that has them (``archived_deferred``, R-6707-16).
 
 Catalog names from BB (material, subtype, brand, category, effect) resolve by their upper
 case name, and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
@@ -164,7 +166,10 @@ class PullReport(BaseModel):
     has), so a spool naming one gets no insert type; and the BB spools it left alone
     because they are Bambuddy's copy of a tag a linked SB spool holds
     (``rfid_duplicates``, with their ids). ``archived_created`` counts the spools it made
-    archived because Bambuddy archived them (#6707); they are in ``created`` too."""
+    archived because Bambuddy archived them (#6707); they are in ``created`` too.
+    ``archived_deferred`` counts the archived BB spools it did not make because BB's
+    usage rows could not be read (R-6707-16), with their ids: the next pull that reads
+    them makes those spools."""
 
     created: int = 0
     archived_created: int = 0
@@ -190,6 +195,9 @@ class PullReport(BaseModel):
     #: BB spools made for a tag a linked SB spool holds: no SB spool is made.
     rfid_duplicates: int = 0
     rfid_duplicate_bb_ids: list[int] = Field(default_factory=list)
+    #: Archived BB spools not made yet because the usage rows could not be read.
+    archived_deferred: int = 0
+    archived_deferred_bb_ids: list[int] = Field(default_factory=list)
 
 
 def _text(value: str | None) -> str | None:
@@ -255,6 +263,7 @@ def pull(
     catalog: Sequence[SpoolCatalogEntry] = (),
     weights: bool = True,
     usage: Sequence[SpoolUsage] = (),
+    defer_archived: bool = False,
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
     says, after ``catalog`` (BB's spool catalog) is mapped to insert types. ``now`` is the
@@ -265,7 +274,10 @@ def pull(
     BB's live spools are pulled before its archived ones, so of two BB records with one
     tag the live one is linked or made, and the archived one is its RFID duplicate,
     whatever BB's order (R-6707-13). ``usage`` is BB's usage rows: a spool made archived
-    takes its reading no earlier than its newest row (`_create_archived`)."""
+    takes its reading no earlier than its newest row (`_create_archived`). With
+    ``defer_archived`` (BB's usage rows could not be read) no archived spool is made: its
+    reading could not be timed after its rows, so one would be taken off twice. It waits
+    for a pull that has them (R-6707-16)."""
     report = PullReport()
     newest: dict[int, datetime] = {}
     for row in usage:
@@ -280,7 +292,9 @@ def pull(
         try:
             with store.spools.transaction() as conn:
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
-                outcome = _one(conn, store, bb, now, actor, weights, newest.get(bb.id))
+                outcome = _one(
+                    conn, store, bb, now, actor, weights, newest.get(bb.id), defer_archived
+                )
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
@@ -295,6 +309,9 @@ def pull(
         if what == "duplicate":
             report.rfid_duplicate_bb_ids.append(bb.id)
             continue
+        if what == "archived_deferred":
+            report.archived_deferred_bb_ids.append(bb.id)
+            continue
         assert spool_id is not None  # only a skipped duplicate has none
         if what == "archived_created":
             report.archived_created += 1
@@ -305,6 +322,7 @@ def pull(
     for what in ("created", "linked", "updated", "needs_type", "archived"):
         setattr(report, what, len(getattr(report, f"{what}_ids")))
     report.rfid_duplicates = len(report.rfid_duplicate_bb_ids)
+    report.archived_deferred = len(report.archived_deferred_bb_ids)
     return report
 
 
@@ -390,10 +408,13 @@ def _one(
     actor: str,
     weights: bool = True,
     newest_use: datetime | None = None,
+    defer_archived: bool = False,
 ) -> tuple[str, UUID | None, bool] | None:
     """What came of one BB spool. An archived SB spool, linked or named by the BB
     record's link, is left as it is: never restored, never written to (``archived``).
-    ``newest_use`` is the time of BB's newest usage row of it, if any."""
+    ``newest_use`` is the time of BB's newest usage row of it, if any; with
+    ``defer_archived`` an archived BB spool that would be made is not
+    (``archived_deferred``)."""
     link = conn.execute(
         "SELECT l.spool_id, l.bb_updated_at, s.archived_at IS NOT NULL AS archived"
         " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
@@ -444,6 +465,8 @@ def _one(
         # shows, but it is still the spool Bambuddy added for a tag SB holds.
         return "duplicate", None, False
     if bb.archived_at is not None:
+        if defer_archived:
+            return "archived_deferred", None, False
         made, typeless = _create_archived(conn, store, bb, after, now, actor, newest_use)
         return "archived_created", made, typeless
     made, typeless = _create(conn, store, bb, after, now, actor)
@@ -1217,14 +1240,17 @@ async def read_and_pull(
     read after the pull, and only when a usage row that would book is not booked yet, so
     the rows of a spool this pull made are matched with their archives too. The usage
     read, the query for unbooked rows, the archive read and the booking each fail alone:
-    logged, and the spool pull's report stands."""
+    logged, and the spool pull's report stands. When the usage read fails, no archived
+    BB spool is made in this pull (``archived_deferred``, R-6707-16)."""
     usage: list[SpoolUsage] = []
+    usage_failed = False
     archives: list[Archive] = []
     async with client_for(settings) as client:
         rows = await client.spool_rows(include_archived=True)
         try:
             usage = await client.spool_usage()
         except Exception as error:
+            usage_failed = True
             _failed("could not read Bambuddy's usage rows", error)
     spools, bad = parse_rows(rows)
     catalog = await read_catalog(settings)
@@ -1237,6 +1263,7 @@ async def read_and_pull(
             catalog=catalog or (),
             weights=weights,
             usage=usage,
+            defer_archived=usage_failed,
         )
     )
     report.catalog_failed = report.catalog_failed or catalog is None
