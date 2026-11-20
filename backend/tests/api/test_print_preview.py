@@ -376,6 +376,32 @@ def test_an_unknown_background_slice_is_a_404(client: TestClient, model: str) ->
     assert client.get("/api/v1/print/library/5/preview-slices/12345").status_code == 404
 
 
+@respx.mock
+def test_a_background_slice_with_object_conflicts_names_the_plate(
+    client: TestClient, model: str
+) -> None:
+    """#6732: Bambuddy's slice that Bambu Studio refused with "Object conflicts were
+    detected" (#3770, Knitted Cat) is also one ``object-conflict`` warning for the plate."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    job = Job()
+    job.routes()
+    started = start_slice(client, output_id, body())
+    conflict = (
+        "Object conflicts were detected. Please verify the slicing of all plates in Bambu"
+        " Studio before uploading."
+    )
+    job.body = {**job.body, "status": "failed", "result": None, "error_status": 400}
+    job.body["error_detail"] = conflict
+
+    answer = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9").json()
+
+    assert (answer["status"], answer["failure"]) == ("failed", conflict)
+    [warning] = answer["slice_warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", started["plate_id"])
+
+
 @pytest.fixture(autouse=True)
 def _no_toolpaths_kept() -> Iterator[None]:
     """Toolpaths are kept per process by the slice's row id, which each test's fresh

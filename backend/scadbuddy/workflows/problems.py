@@ -8,6 +8,7 @@ from typing import Any
 
 from temporalio.exceptions import ActivityError, ApplicationError
 
+from scadbuddy.bambuddy.prime_tower import object_conflict_warning
 from scadbuddy.bambuddy.process_overrides import named_key
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRunError
 from scadbuddy.workflows.print_models import FAILED, LAN_UNSURE, REFUSED, SLICE_LOST
@@ -116,6 +117,19 @@ def setting_refused(
         title="Unprocessable Content",
         detail=f"The slicer refused the setting {key}: {problem.detail}",
         extensions={**problem.extensions, "key": key},
+    )
+
+
+def object_conflict(problem: PrintRunError, plate_id: int) -> PrintRunError | None:
+    """``problem``, a failed slice of ``plate_id``, with one ``object-conflict`` warning
+    for the plate as the extension ``warnings`` when its text is Bambu Studio's "Object
+    conflicts were detected" (#6732, ``prime_tower.object_conflict_warning``). The
+    status, title and words stay as they were. ``None`` when it is not that refusal."""
+    warning = object_conflict_warning(problem.detail, plate_id)
+    if warning is None:
+        return None
+    return problem.model_copy(
+        update={"extensions": {**problem.extensions, "warnings": [warning.model_dump(mode="json")]}}
     )
 
 
