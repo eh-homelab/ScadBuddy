@@ -241,6 +241,59 @@ async def test_a_second_race_skips_everything_left(
     assert all("changed meanwhile" in why for why in done.skipped.values())
 
 
+async def test_a_type_deleted_meanwhile_is_not_retried_and_says_why(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6787: the first write races and the re-read finds the type gone. No retry; every
+    wanted field is skipped with the reason."""
+    gone = _type(types, pg_pool, "GONE")
+    _presets(types, gone, ("H2C", "0.4", "GFA05"))
+    calls = 0
+    get = types.get
+
+    def meanwhile(type_id: UUID, values: Any, *, actor: str) -> Any:
+        nonlocal calls
+        calls += 1
+        raise TypeTempError("raced")
+
+    monkeypatch.setattr(types, "fill_empty", meanwhile)
+    monkeypatch.setattr(types, "get", lambda type_id: None if calls else get(type_id))
+
+    (done,) = await filler.fill(UNLINKED, [gone], actor=ACTOR)
+
+    assert calls == 1
+    assert not done.written
+    assert not done.filled
+    assert {"nozzle_temp_min", "bed_temp_min", "density_g_cm3"} <= set(done.skipped)
+    assert set(done.skipped.values()) == {"the type was deleted meanwhile"}
+
+
+async def test_a_type_really_deleted_meanwhile_gets_no_k_values(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6787: the row is deleted between the read and the lock. The fill stops there: no
+    K value is read or written for the gone type, and the result says why."""
+    gone = _type(types, pg_pool, "GONE2")
+    _presets(types, gone, ("H2C", "0.4", "GFA05"))
+    k_calls: list[str] = []
+
+    def meanwhile(type_id: UUID, values: Any, *, actor: str) -> Any:
+        with pg_pool.connection() as conn:
+            conn.execute("DELETE FROM filament_spool_types WHERE id = %s", (type_id,))
+        raise TypeTempError("raced")
+
+    monkeypatch.setattr(types, "fill_empty", meanwhile)
+    for name in ("k_values", "linked_bb_spools", "fill_k_values"):
+        monkeypatch.setattr(types, name, lambda *a, _n=name, **k: k_calls.append(_n))
+
+    (done,) = await filler.fill(LINKED, [gone], actor=ACTOR)
+
+    assert k_calls == []
+    assert not done.written
+    assert done.k_values == []
+    assert set(done.skipped.values()) == {"the type was deleted meanwhile"}
+
+
 async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
 ) -> None:

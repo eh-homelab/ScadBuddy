@@ -46,6 +46,7 @@ from scadbuddy.slicing.profiles import ProfileError
 #: The preset a type is filled from first: the owner's printer and its usual nozzle.
 PRINTER_MODEL = "H2C"
 NOZZLE = Decimal("0.4")
+_DELETED = "the type was deleted meanwhile"
 
 #: The H2C's plates: ``BBL/machine/Bambu Lab H2C.json`` in Bambu Studio 02.08.02.61 says
 #: ``not_support_bed_type: "Cool Plate;Smooth PEI Plate / High Temp Plate"`` (read in the
@@ -545,6 +546,9 @@ class TypeFiller:
                     name: value for name, value in wanted.items() if name in (written or {})
                 }
                 result.written = bool(written)
+                if _DELETED in result.skipped.values():
+                    # The type is gone: no K values to read or write (#6787).
+                    return result
         rows, result.k_reason = await self._k_values(row.id, reads)
         if refresh:
             result.k_values = _rows(row.id, rows)
@@ -559,7 +563,8 @@ class TypeFiller:
         (R-6714-e): re-read the row, drop only the pair that is now backwards (into
         ``result.skipped``, with the reason) and write the rest once more, even when the
         re-read finds no backwards pair. That is the one retry; a second race skips what
-        is left."""
+        is left. A type the re-read finds gone is not retried: every wanted field is
+        skipped as deleted meanwhile (#6787)."""
         for retry in (True, False):
             try:
                 return await asyncio.to_thread(
@@ -574,13 +579,16 @@ class TypeFiller:
                     result.skipped |= dict.fromkeys(wanted, why)
                     return None
                 fresh = await asyncio.to_thread(self.types.get, type_id)
-                if fresh is not None:
-                    current = fresh.model_dump()
-                    # A field a person set meanwhile is no longer empty: `fill_empty`
-                    # leaves it, so it takes no part in the range.
-                    for key in [k for k in wanted if current[k] is not None]:
-                        del wanted[key]
-                    result.skipped |= dict.fromkeys(_ranges(current, wanted), why)
+                if fresh is None:
+                    # The type is gone: no retry, and every wanted field says why.
+                    result.skipped |= dict.fromkeys(wanted, _DELETED)
+                    return None
+                current = fresh.model_dump()
+                # A field a person set meanwhile is no longer empty: `fill_empty`
+                # leaves it, so it takes no part in the range.
+                for key in [k for k in wanted if current[k] is not None]:
+                    del wanted[key]
+                result.skipped |= dict.fromkeys(_ranges(current, wanted), why)
                 if not wanted:
                     return None
         return None

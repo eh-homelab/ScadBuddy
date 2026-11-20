@@ -109,7 +109,7 @@ Posted on #6714.
   `TypeFiller._one` (a person set one end of a range between the read and the row lock)
   and records the pair that is now backwards in `skipped` with the reason (#6762: it
   re-reads the row, drops only that pair and writes the other fields once more, and retries
-  once even when the re-read finds no backwards pair; a second race skips what is left; a
+  once even when the re-read finds no backwards pair; a second race skips what is left; a type the re-read finds gone is not retried, and every wanted field is skipped with "the type was deleted meanwhile", #6787; a
   field a person set between the read and the lock counts as filled by them and is not in
   `skipped`, as on the path with no race). One type's race never answers 500, and the types after it are
   still filled.
