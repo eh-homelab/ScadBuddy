@@ -706,7 +706,8 @@ export function BambuddyRead({
 
   const readMs = readAt ? Date.parse(readAt) : NaN
   // The view read after a failed import reads the log too: a read time later than the one seen
-  // when the press started means Bambuddy answered it, so the warning goes. Both times are the
+  // when the press started means Bambuddy answered it, so the alert goes. The line stays, not as
+  // an alert, while the view's own task read fell back to stored intervals. Both times are the
   // server's, so the browser's clock never decides it.
   const seenMs = failure?.kind === 'unanswered' && failure.seen ? Date.parse(failure.seen) : NaN
   const unanswered = failure?.kind === 'unanswered' && (Number.isNaN(readMs) || (!Number.isNaN(seenMs) && readMs <= seenMs))
@@ -735,7 +736,8 @@ export function BambuddyRead({
           {failure.text}
         </p>
       )}
-      {(unanswered || (stale && failure?.kind !== 'unanswered')) && (
+      {/* The view's own task read fell back to stored intervals: say so whatever the button's last read did. */}
+      {(unanswered || stale) && (
         <p role={unanswered ? 'alert' : undefined} className="text-[13px] text-warn">
           {unansweredText(readAt, now)}
         </p>

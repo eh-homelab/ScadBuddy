@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from scadbuddy.bambuddy.send import towers_within_reach
+from scadbuddy.bambuddy.send import _tower_on, towers_within_reach
 from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
@@ -272,7 +272,10 @@ def test_a_reachable_tower_on_top_of_the_objects_is_moved_beside_them(tmp_path: 
     on its plate's objects is moved beside them before the slice."""
     payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "140"))
     assert tower_reaches((160, 140), H2C, height=20.0)
-    assert not _clear_of_its_objects(payload, (160, 140), 20.0)
+    # The tower overlaps the objects, not only their clearance: the case _tower_on moves.
+    low, high = plate_boxes(payload).boxes[1]
+    objects = Rect(float(low[0]), float(low[1]), float(high[0]), float(high[1]))
+    assert _tower_on((160, 140), PRIME_TOWER_SIDE, 20.0, objects)
 
     moved = towers_within_reach(payload, H2C)
 
