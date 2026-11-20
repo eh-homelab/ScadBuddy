@@ -290,6 +290,10 @@ class SyncPassInput(BaseModel, extra="forbid"):
     interval_s: float = DEFAULT_INTERVAL_S
 
 
+#: Why a pass did nothing: no Bambuddy is configured, or no data type pushes (R-T8-2).
+SkipReason = Literal["no_bambuddy", "nothing_pushes"]
+
+
 class SyncPassResult(BaseModel, extra="forbid"):
     """What one pass did. ``more``: writes were left, so the next pass runs at once
     (Decision 11). ``skipped``: why it did nothing. ``error``: a failed pass's
@@ -306,13 +310,24 @@ class SyncPassResult(BaseModel, extra="forbid"):
     unmapped_k: int = 0
     instance_changed: bool
     interval_s: float
-    skipped: Literal["no_bambuddy", "nothing_pushes"] | None = None
+    skipped: SkipReason | None = None
     error: str | None = None
 
 
 def pushes_anything(sync: FilamentSync) -> bool:
     """True when some data type moves ScadBuddy's data into Bambuddy (R-T8-2)."""
     return any(pushes(getattr(sync, name)) for name in FilamentSync.model_fields)
+
+
+def skip_reason(bambuddy_url: str | None, sync: FilamentSync) -> SkipReason | None:
+    """Why a pass started now would be ``skipped``, by the checks `run_pass` and the
+    nudge make: no ``bambuddy_url``, else no data type that pushes. ``None`` when a pass
+    would run."""
+    if not bambuddy_url:
+        return "no_bambuddy"
+    if not pushes_anything(sync):
+        return "nothing_pushes"
+    return None
 
 
 class FilamentSyncApi(Protocol):
@@ -347,7 +362,8 @@ class SyncError(BaseModel, extra="forbid"):
 class SyncStatus(BaseModel, extra="forbid"):
     """The sync's state (Decision 19): the instance the links belong to, the last pass and
     the last clean one, the last pass's error and counts, the items whose last write
-    failed, and the directions."""
+    failed, and the directions. ``skipped`` is `skip_reason` of the settings now: why no
+    pass runs (the nudge starts none), else ``None``."""
 
     instance: str | None
     last_pass_at: datetime | None
@@ -356,3 +372,10 @@ class SyncStatus(BaseModel, extra="forbid"):
     counts: dict[str, int]
     errors: list[SyncError]
     directions: FilamentSync
+    skipped: SkipReason | None
+
+
+class SyncRun(BaseModel, extra="forbid"):
+    """``POST /filament/sync/run``'s answer: the full pass was asked for."""
+
+    started: Literal[True] = True

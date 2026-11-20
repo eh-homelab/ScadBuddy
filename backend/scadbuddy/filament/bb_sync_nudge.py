@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
-from scadbuddy.filament.bb_sync_models import pushes_anything
+from scadbuddy.filament.bb_sync_models import skip_reason
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ class FilamentSyncNudger:
             async with asyncio.timeout(NUDGE_TIMEOUT):
                 read = await asyncio.to_thread(self.load_settings, NUDGE_SETTINGS)
                 url = read["bambuddy_url"]
-                if not url or not pushes_anything(read["filament_sync"]):
+                if skip_reason(url, read["filament_sync"]) is not None:
                     return
                 instance = instance_for(url)
                 await self.client_getter().start_workflow(

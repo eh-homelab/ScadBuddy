@@ -13,6 +13,9 @@ and the NTAG confirm,
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
 (`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
+`POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
+which writes Bambuddy only for the data types set to push; `GET /filament/sync/status`
+reads how its passes went.
 
 Every 2xx answer to a write here, in `api/filament_purchasing.py` and in
 `api/tray_spools.py` nudges the ScadBuddy-to-Bambuddy sync (`nudge_after_write`, #6265
@@ -47,6 +50,8 @@ from scadbuddy.filament import capture, ntag, rfid_mode
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, Pulls, read_and_pull, try_assignments
+from scadbuddy.filament.bb_sync_models import SyncRun, SyncStatus, skip_reason
+from scadbuddy.filament.bb_sync_results import sync_status
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
@@ -85,9 +90,10 @@ from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
 
-#: The write routes, by route name, that leave Bambuddy to the timer (Decision 17,
-#: R-T8-3): the AMS weights come from the printers' reports, as the capture's do.
-NOT_NUDGED = frozenset({"sync_ams_weights"})
+#: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
+#: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
+#: (Decision 17, R-T8-3), and "Sync now" nudges a full pass itself.
+NOT_NUDGED = frozenset({"sync_ams_weights", "run_filament_sync"})
 
 
 async def nudge_after_write(request: Request, state: StateDep) -> AsyncIterator[None]:
@@ -1277,6 +1283,64 @@ async def reconcile_rfid(
         logger.warning("could not configure the slots", extra={"error": type(error).__name__})
         slots = m.SlotReport(failed=1)
     return m.RfidReconcileReport(mode=mode, tags=tags, slots=slots)
+
+
+@router.get(
+    "/sync/status",
+    response_model=SyncStatus,
+    summary="Bambuddy sync status",
+    description=(
+        "How the ScadBuddy-to-Bambuddy sync stands. `directions` is the stored "
+        "`filament_sync`: one of `off`, `sb_to_bb`, `bb_to_sb` or `two_way` for each of the "
+        "six data types `spools`, `weights`, `tags`, `presets`, `suppliers` and "
+        "`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or "
+        "`two_way`. `instance` is the Bambuddy the links belong to. `last_pass_at` is the "
+        "last pass, `last_error` its error label (null when it worked), and `last_ok_at` the "
+        "last pass with no error, a skipped one too. `counts` is the last pass's: `written`, "
+        "`failed`, `deferred`, `conflicts` and `unmapped_k`. `errors` holds one row per item "
+        "whose last write Bambuddy refused or did not answer: its `kind` (`spool`, "
+        "`supplier`, `location`, `insert_type` or `filament`), its ScadBuddy id (`sb_id`), "
+        "the error label, the failed `attempts` and when (`at`), newest first; a later write "
+        "that works drops the row. `skipped` says why no pass runs now: `no_bambuddy` (no "
+        "Bambuddy is configured) or `nothing_pushes` (no data type is set to push); else "
+        "null. Reads ScadBuddy only."
+    ),
+)
+async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDep) -> SyncStatus:
+    read = await asyncio.to_thread(store.read, {"bambuddy_url", "filament_sync"})
+    sync = read["filament_sync"]
+    return await asyncio.to_thread(
+        sync_status, filament, sync, skip_reason(read["bambuddy_url"], sync)
+    )
+
+
+@router.post(
+    "/sync/run",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SyncRun,
+    summary="Sync with Bambuddy now",
+    description=(
+        "Asks for a full sync pass now: the print worker reads Bambuddy, then writes it only "
+        "for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`); a type "
+        'set to `off` or `bb_to_sb` is never written. Answers 202 `{"started": true}` '
+        "once the pass is asked for; it runs in the background, and "
+        "`GET /filament/sync/status` shows how it went. 409 with `code` `no_bambuddy` when "
+        "no Bambuddy is configured, and `nothing_pushes` when no data type is set to push."
+    ),
+)
+async def run_filament_sync(state: StateDep, store: SettingsStoreDep) -> SyncRun:
+    read = await asyncio.to_thread(store.read, {"bambuddy_url", "filament_sync"})
+    reason = skip_reason(read["bambuddy_url"], read["filament_sync"])
+    if reason == "no_bambuddy":
+        raise ApiError(status.HTTP_409_CONFLICT, "no Bambuddy is configured", code=reason)
+    if reason == "nothing_pushes":
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "no data type is set to push to Bambuddy (filament_sync)",
+            code=reason,
+        )
+    await state.filament_sync.nudge(full=True)
+    return SyncRun()
 
 
 @router.post(

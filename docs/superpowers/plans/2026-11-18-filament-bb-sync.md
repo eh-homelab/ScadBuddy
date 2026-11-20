@@ -1485,6 +1485,23 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     (`Passes.during` signals during a `nothing_pushes` pass; a second pass runs in the same
     run). The code has never run on prod, so `v1` still replays (its passes are never
     skipped) and is not re-recorded; no `workflow.patched`.
+128. Task 10: `SyncStatus.skipped` is `skip_reason(bambuddy_url, filament_sync)`
+    (`bb_sync_models.py`) of the settings now, typed as the pass's own `SkipReason`
+    (`no_bambuddy`, `nothing_pushes`); the nudge (`FilamentSyncNudger.nudge`) uses the same
+    function. It is not a stored column. Why: the nudge starts no workflow in either case, so
+    no pass records it; with the default settings (nothing pushes) no pass has ever run, and
+    with `interval_s` 0 a running workflow never learns that nothing pushes. Cost: none.
+    Test: `test_status_says_why_no_pass_runs`.
+129. Task 10: `POST /filament/sync/run` answers 409 with `code` `no_bambuddy` (the brief's)
+    and also with `code` `nothing_pushes`: the nudge would start nothing, and a 202
+    `{"started": true}` would be false. Test: `test_run_with_nothing_pushing_is_409`.
+130. Task 10: the route awaits `nudge(full=True)` (at most `NUDGE_TIMEOUT`, 5 s). A failed
+    signal is logged by the nudge and the route still answers 202; the timer's full pass
+    makes up for it (Decision 7). The route is in `NOT_NUDGED`, so `nudge_after_write` adds
+    no plain nudge after it. Test: `test_run_nudges_full`.
+131. Task 10: `filament_sync_run` is `outward` (gated, approved first) as
+    `filament_rfid_reconcile` is, and in `TOUCHES_NOTHING` beside it;
+    `filament_sync_status` is `read`.
 
 ## Self-review
 

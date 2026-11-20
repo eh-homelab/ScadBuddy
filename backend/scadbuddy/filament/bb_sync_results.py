@@ -44,8 +44,11 @@ from scadbuddy.filament.bb_sync_models import (
     BbWrite,
     BbWriteResult,
     ResultsReport,
+    SkipReason,
+    SyncError,
     SyncPassResult,
     SyncPlan,
+    SyncStatus,
     json_form,
     seen_row,
     seen_value,
@@ -482,6 +485,34 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
             " last_error = %s, counts = %s",
             (result.error is None, result.error, Jsonb(counts)),
         )
+
+
+def sync_status(
+    store: Filament, directions: FilamentSync, skipped: SkipReason | None
+) -> SyncStatus:
+    """The state row and the error rows (Decision 19), newest error first, with the
+    directions and the skip reason the caller read from the settings."""
+    with store.spools.transaction() as conn:
+        state = conn.execute(
+            "SELECT instance, last_pass_at, last_ok_at, last_error, counts"
+            " FROM filament_bb_sync_state"
+        ).fetchone()
+        errors = conn.execute(
+            "SELECT kind, sb_id, error, attempts, at FROM filament_bb_push_errors"
+            " ORDER BY at DESC, kind, sb_id"
+        ).fetchall()
+    if state is None:
+        raise RuntimeError("filament_bb_sync_state has no row; its migration seeds one")
+    return SyncStatus(
+        instance=state["instance"],
+        last_pass_at=state["last_pass_at"],
+        last_ok_at=state["last_ok_at"],
+        last_error=state["last_error"],
+        counts=state["counts"],
+        errors=[SyncError.model_validate(dict(row)) for row in errors],
+        directions=directions,
+        skipped=skipped,
+    )
 
 
 def adopt_instance(store: Filament, instance: str) -> None:

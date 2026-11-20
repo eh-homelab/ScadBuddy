@@ -502,7 +502,7 @@ export const filamentTools: Tool[] = [
       'Bind an RFID or NFC tag to a spool, by its `tag_uid`, its `tray_uuid`, or both (as a tray reports them). ' +
       'A tag not seen before is made with `kind`. A tag on another spool moves to this one, and a tag this ' +
       "spool had comes off; both spools' ledgers record it. Only what the user says. Writes ScadBuddy; with " +
-      '`filament_sync.tags` `sb_to_bb` it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
+      'tag sync set to push (`sb_to_bb` or `two_way`) it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
     input: z.object({
       spool_id: z.string().uuid(),
       tag_uid: z.string().optional(),
@@ -541,7 +541,7 @@ export const filamentTools: Tool[] = [
     description:
       "Take a tag off the spool it is bound to; the spool's ledger records it. `tag_id` is a binding's " +
       '`tag_id`. 404 when the tag is on no spool. Only what the user says. Writes ScadBuddy and queues the clear for ' +
-      'Bambuddy. With `filament_sync.tags` `sb_to_bb` it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
+      'Bambuddy. With tag sync set to push (`sb_to_bb` or `two_way`) it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
     input: z.object({ tag_id: z.string().uuid() }),
     risk: 'write',
     source: SOURCE,
@@ -700,7 +700,7 @@ export const filamentTools: Tool[] = [
     label: 'Reconcile RFID with Bambuddy now',
     description:
       "Run once what the spool refresh runs, in three steps: bring Bambuddy's auto-add of unknown RFID spools to " +
-      'the override mode; push the queued tag changes (only with `filament_sync.tags` `sb_to_bb`); then configure ' +
+      'the override mode; push the queued tag changes (only with tag sync set to push (`sb_to_bb` or `two_way`)); then configure ' +
       "the AMS slot of each override tag through Bambuddy's slot-configure route (a printer-control write). Each " +
       'step fails alone. Answers the mode status, the tag push counts (`tags`) and the slot counts (`slots`: ' +
       'configured, unchanged, no_preset, no_temps, no_nozzle, failed; null with no Bambuddy). Writes Bambuddy to ' +
@@ -712,6 +712,45 @@ export const filamentTools: Tool[] = [
     summarize: () => 'Reconcile RFID with Bambuddy',
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/filament/rfid/reconcile'), 'reconcile RFID with Bambuddy')),
+  }),
+
+  defineTool({
+    name: 'filament_sync_status',
+    label: 'Read the Bambuddy sync status',
+    description:
+      'How the ScadBuddy-to-Bambuddy filament sync stands. `directions` is the stored `filament_sync`: `off`, ' +
+      '`sb_to_bb`, `bb_to_sb` or `two_way` for each of `spools`, `weights`, `tags`, `presets`, `suppliers` and ' +
+      '`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or `two_way`. `last_pass_at` is the ' +
+      "last pass, `last_error` its error (null when it worked), `last_ok_at` the last pass with no error (a skipped " +
+      "one too), `counts` the last pass's (`written`, `failed`, `deferred`, `conflicts`, `unmapped_k`). `errors` " +
+      'lists each item whose last write to Bambuddy failed (`kind`, its ScadBuddy `sb_id`, `error`, `attempts`, ' +
+      '`at`), newest first: this is why a spool is not in Bambuddy. `skipped` says why no pass runs now: ' +
+      '`no_bambuddy` or `nothing_pushes` (no data type is set to push); else null. Reads ScadBuddy only.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sync/status'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/sync/status'), 'read the Bambuddy sync status')),
+  }),
+
+  defineTool({
+    name: 'filament_sync_run',
+    label: 'Sync with Bambuddy now',
+    description:
+      'Ask for a full ScadBuddy-to-Bambuddy sync pass now. It runs in the background on the print worker: it reads ' +
+      'Bambuddy, then writes it only for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`); ' +
+      'see filament_sync_status for the directions. Answers `{started: true}` once the pass is asked for; read ' +
+      'filament_sync_status afterwards for how it went. 409 `no_bambuddy` with no Bambuddy configured, ' +
+      '`nothing_pushes` when no data type is set to push. Writes Bambuddy to match ScadBuddy, and ScadBuddy (the ' +
+      'links and the sync status). Approved first.',
+    input: z.object({}),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/sync/run'],
+    summarize: () => 'Sync the filament data with Bambuddy now',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/sync/run'), 'sync with Bambuddy')),
   }),
 
   defineTool({
@@ -776,7 +815,7 @@ export const filamentTools: Tool[] = [
     description:
       "Read the spool's Bambuddy record after a write. When it holds a new OpenTag3D tag, bind it to the spool " +
       '(`bound: true`, `tag_uid`); otherwise `bound: false` and nothing changes, so call it again once the ' +
-      'write has finished. Only what the user says. Writes ScadBuddy; with `filament_sync.tags` `sb_to_bb` it also ' +
+      'write has finished. Only what the user says. Writes ScadBuddy; with tag sync set to push (`sb_to_bb` or `two_way`) it also ' +
       'tells Bambuddy of the new binding.',
     input: z.object({ spool_id: z.string().uuid() }),
     risk: 'write',

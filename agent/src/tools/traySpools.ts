@@ -32,7 +32,7 @@ export const traySpoolTools: Tool[] = [
       "RFID tray's spool is the one its tag names; a tagged tray's tag is bound to the spool (one on no spool or " +
       "on an archived spool is taken), and a spool that held another tag is rebound to the tray's. 409 when the " +
       'printer has not reported that tray filled, its tag is on another spool, or its two keys name two different ' +
-      'tags; 404 for an unknown printer or spool. Writes ScadBuddy; with tag sync on (filament_sync.tags), the tag change is then pushed to Bambuddy.',
+      'tags; 404 for an unknown printer or spool. Writes ScadBuddy; with tag sync set to push (`sb_to_bb` or `two_way`), the tag change is then pushed to Bambuddy.',
     input: z.object({
       printer_id: printerId,
       ams_id: amsId,
