@@ -66,15 +66,19 @@ on:
     - cron: "23 7 * * 1"
   workflow_dispatch:
 
-# One run per ref. A newer push supersedes an older one, so cancelling costs
-# nothing but the wasted minutes.
+# One run per ref. On a pull request a newer push supersedes an older one, so
+# cancelling costs nothing but the wasted minutes. Elsewhere a running run
+# finishes (#6806): a push to main selects every lane, so its run is the only
+# one of the full suite, and when each merge cancelled the one before it, 84
+# of 100 main runs never reported (2026-11-20). GitHub still keeps only the
+# newest pending run of the group, so runs do not pile up.
 #
 # `event_name` is in the key so a scheduled or dispatched run on main never
 # cancels a push run on main (or the other way round): they share the ref, and
 # a cancelled push run is a merge whose CI never reported.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
