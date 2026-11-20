@@ -41,9 +41,6 @@ logger = logging.getLogger(__name__)
 SYNC_PASS_ACTIVITY = "filament_bb_sync_pass"
 #: At most this many Bambuddy calls (writes and probes) in one pass (Decision 11).
 WRITE_CAP = 200
-#: At most this many passes back to back on ``more`` in one activity call (R-T4-21,
-#: decision 70); the workflow then waits for its interval.
-MAX_PASSES = 3
 #: The timer's interval a pass reports when it made no plan, unless told another.
 DEFAULT_INTERVAL_S = 300.0
 
@@ -296,32 +293,19 @@ class FilamentSyncActivities:
 
     @activity.defn(name=SYNC_PASS_ACTIVITY)
     async def sync_pass(self, start: SyncPassInput) -> SyncPassResult:
-        """At most `MAX_PASSES` passes back to back while one has ``more`` (R-T4-21). The
-        last one's result has ``more`` cleared, so the workflow waits for its interval,
-        and the limit is logged once."""
-        return await self.passes(start, activity.heartbeat)
+        """One pass (`run_pass`), its ``more`` as the pass left it: the workflow runs the
+        next pass at once, and bounds how many it runs back to back (R-T4-21, R-T7-1)."""
+        return await self.one_pass(start, activity.heartbeat)
 
-    async def passes(self, start: SyncPassInput, heartbeat: Callable[[], None]) -> SyncPassResult:
-        for count in range(1, MAX_PASSES + 1):
-            result = await run_pass(
-                self.api,
-                self.load,
-                instance=start.instance,
-                full=start.full,
-                heartbeat=heartbeat,
-                interval_s=start.interval_s,
-            )
-            if not result.more:
-                return result
-            if count == MAX_PASSES:
-                logger.info(
-                    "the filament sync ran its passes back to back; the rest waits for"
-                    " the interval",
-                    extra={"passes": count, "deferred": result.deferred},
-                )
-                return result.model_copy(update={"more": False})
-            heartbeat()
-        raise AssertionError("unreachable")
+    async def one_pass(self, start: SyncPassInput, heartbeat: Callable[[], None]) -> SyncPassResult:
+        return await run_pass(
+            self.api,
+            self.load,
+            instance=start.instance,
+            full=start.full,
+            heartbeat=heartbeat,
+            interval_s=start.interval_s,
+        )
 
 
 def settings_loader(load: Callable[[], StoredSettings]) -> Callable[[], Awaitable[StoredSettings]]:

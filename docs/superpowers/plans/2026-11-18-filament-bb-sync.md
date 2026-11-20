@@ -561,6 +561,8 @@ cap cut (decision 64); a retry the cap cut is not counted, so retries alone neve
 R-T4-21 (decision 70): Task 7 runs at most 3 passes back to back on `more`. It then waits
 for the normal interval, whatever `deferred` says, and logs once that it hit the limit.
 Test: a fake `FilamentSyncApi` whose `plan` always defers gives 3 passes, then the wait.
+(Changed by decision 108: the activity runs one pass and passes `more` through; this bound
+moves to Task 8.)
 **Carried from Task 5: R-T5-2 (decision 93).** A list `PUT`'s result carries `answer =
 {"k_profiles": rows}` or `{"suppliers": rows}` (Bambuddy's answered list; the preset
 `PUT` needs none), so `results` stores that field with no `GET`. A probe's answer is the
@@ -598,6 +600,13 @@ Test: a fake `FilamentSyncApi` whose `plan` always defers gives 3 passes, then t
   - `test_boot_records_the_instance_of_existing_links` and `test_boot_leaves_the_instance_null_without_links` (`adopt_instance`).
 - [ ] **Step 2-4:** Run, implement, run. Record the history with the test helper the other `*_replay.py` tests use.
 - [ ] **Step 5: Commit** `feat(filament): one sync workflow per Bambuddy, signalled by SB's writes (#6265)`.
+
+**Carried from Task 7: R-T7-1 (decision 108).** The activity `filament_bb_sync_pass` runs one
+pass and returns `more` unchanged. The workflow runs the next pass at once on `more`, at most
+3 passes back to back (R-T4-21, decision 70); it then waits for the normal interval, whatever
+`deferred` says, and logs once that it hit the limit. Test: an activity stub whose result
+always has `more` gives 3 passes, then the wait. R-T7-3 (decision 110): the workflow passes
+its `interval_s` in `SyncPassInput`.
 
 ### Task 9: The pull, widened
 
@@ -1363,6 +1372,29 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_results_of_one_pass_sent_again_add_one_attempt`,
     `test_a_resent_failed_result_is_one_attempt` (local and remote agree). Cost: none known;
     the report of a resent ok create still answers `linked=0`.
+108. Task 7 (R-T7-1; changes 70, carried to Task 8): the activity `filament_bb_sync_pass`
+    runs exactly one pass and returns its `SyncPassResult` with `more` as the pass left it.
+    The bound of decision 70 (at most 3 passes back to back on `more`, then the normal
+    interval, logged once) and "`more` → next pass at once" are the workflow's (Task 8).
+    Test: `test_one_activity_call_is_one_pass_and_keeps_more`. Why: a workflow sees each
+    pass and can count them; an activity that loops hides them. Cost: none.
+109. Task 7 (R-T7-2): a pass whose configured Bambuddy is another instance than the
+    workflow's records nothing (`record_pass` is not called) and returns
+    `instance_changed=True`. Why: the state row belongs to the configured instance, whose
+    own workflow records its passes. Cost: none.
+110. Task 7 (R-T7-3): `run_pass` and `SyncPassInput` take `interval_s` (default 300). A pass
+    that made no plan (skipped, or a failed spool read) reports it back unchanged; Task 8
+    passes it from settings. Why: `spool_overlay_refresh_seconds` is not a `StoredSettings`
+    field. Cost: none.
+111. Task 7 (R-T7-4): `bb_sync_nudge.py` exists from Task 7 with `instance_for` only; Task 8
+    adds the rest of it. Cost: none.
+112. Task 7 (R-T7-5): `put_spool_k_profiles`, `put_spool_presets` and `put_spool_suppliers`
+    return Bambuddy's answered list (`_rows`), not `None`, so a list `PUT`'s result carries
+    it (decision 93). Cost: none; no caller used the old `None`.
+113. Task 7 (R-T7-6): `PUT …/inventory/catalog/{id}` takes the name and the weight both. An
+    insert type update that sends one of them takes the other from this pass's snapshot of
+    the catalog; an entry the pass did not read is a not-ok `internal` result. Cost: an
+    entry Bambuddy changed after the read gets the read value back for that field.
 
 ## Self-review
 

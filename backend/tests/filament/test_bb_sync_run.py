@@ -5,14 +5,12 @@ a fake `FilamentSyncApi`; no call reaches a live Bambuddy."""
 from __future__ import annotations
 
 import json
-import logging
 import re
 from collections.abc import Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
 import httpx
-import pytest
 import respx
 
 from scadbuddy.core.settings import FilamentSync
@@ -28,7 +26,6 @@ from scadbuddy.filament.bb_sync_models import (
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_run import (
-    MAX_PASSES,
     FilamentSyncActivities,
     SyncPassInput,
     run_pass,
@@ -542,19 +539,21 @@ async def test_a_plan_for_another_instance_stops_the_pass() -> None:
 
 
 @respx.mock
-async def test_three_passes_back_to_back_then_the_wait(caplog: pytest.LogCaptureFixture) -> None:
+async def test_one_activity_call_is_one_pass_and_keeps_more() -> None:
+    """R-T7-1: the activity runs one pass and passes ``more`` through; the workflow
+    (Task 8) runs the next pass and bounds them (R-T4-21)."""
     routes = _listings()
-    sync = FakeSync([_plan([], deferred=1) for _ in range(MAX_PASSES + 2)])
-    activities = FilamentSyncActivities(sync, _load)
+    sync = FakeSync([_plan([], deferred=1) for _ in range(3)])
 
-    with caplog.at_level(logging.INFO, logger="scadbuddy.filament.bb_sync_run"):
-        result = await activities.passes(SyncPassInput(instance=INSTANCE, full=False), lambda: None)
+    result = await FilamentSyncActivities(sync, _load).one_pass(
+        SyncPassInput(instance=INSTANCE, full=False, interval_s=60.0), lambda: None
+    )
 
-    assert len(sync.plans) == MAX_PASSES and len(sync.recorded) == MAX_PASSES
-    assert routes["spools"].call_count == MAX_PASSES
-    assert all(r.more for r in sync.recorded)
-    assert result.more is False and result.deferred == 1
-    assert caplog.text.count("back to back") == 1
+    assert len(sync.plans) == 1 and sync.recorded == [result]
+    assert routes["spools"].call_count == 1
+    assert result.more is True and result.deferred == 1
+    [(snap, _)] = sync.plans
+    assert snap.full is False
 
 
 @respx.mock
@@ -562,7 +561,7 @@ async def test_a_pass_with_nothing_left_ends_the_activity() -> None:
     _listings()
     sync = FakeSync()
 
-    result = await FilamentSyncActivities(sync, _load).passes(
+    result = await FilamentSyncActivities(sync, _load).one_pass(
         SyncPassInput(instance=INSTANCE, full=True), lambda: None
     )
 
