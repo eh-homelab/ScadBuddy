@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import subprocess
@@ -18,7 +19,14 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.meshmodel import section
 from scadbuddy.meshmodel.edits import Edit
 from scadbuddy.render import geometry, meshmatch
-from scadbuddy.render.bambu3mf import PlateParts, write_bambu_3mf, write_plates_3mf
+from scadbuddy.render.bambu3mf import (
+    MAX_SETTINGS_BYTES,
+    PROJECT_SETTINGS_NAME,
+    PlateParts,
+    rezipped,
+    write_bambu_3mf,
+    write_plates_3mf,
+)
 from scadbuddy.render.geometry import (
     MAX_REPORTED_EDGES,
     WALL_MIN_SAMPLES,
@@ -323,6 +331,21 @@ def test_a_plate_the_3mf_does_not_have_is_its_own_error(tmp_path: Path) -> None:
     assert (analyze_3mf(single).plate, analyze_3mf(single).plates) == (1, 1)
     with pytest.raises(NoSuchPlateError):
         parts_from_3mf(single, 2)
+
+
+def test_settings_past_the_cap_make_the_3mf_unreadable(tmp_path: Path) -> None:
+    """#6799: the file is untrusted, so its colours are read within
+    `MAX_SETTINGS_BYTES`, as plate fit and the send read them."""
+    path = tmp_path / "model.3mf"
+    write_bambu_3mf([_part(_cube())], path, thumbnails=None)
+    with zipfile.ZipFile(path) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings["padding"] = "x" * MAX_SETTINGS_BYTES
+    path.write_bytes(
+        rezipped(path.read_bytes(), {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+    )
+    with pytest.raises(Unreadable3MFError, match="ArchiveTooLargeError"):
+        parts_from_3mf(path)
 
 
 def test_nothing_to_analyse_is_an_error() -> None:

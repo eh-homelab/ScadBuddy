@@ -47,6 +47,7 @@ from scadbuddy.render.bambu3mf import (
     hint_painted_slots,
     layout_of,
     plate_origin,
+    read_project_settings,
     replate_3mf,
     rezipped,
     state_nozzles,
@@ -583,7 +584,7 @@ def _tower_on(corner: tuple[float, float], tower: TowerFootprint, objects: Rect)
     )
 
 
-def _file_tower(settings: dict[str, object]) -> TowerSettings:
+def file_tower(settings: dict[str, object]) -> TowerSettings:
     """The tower an author's file asks for (#6735): every filament it lists (the plate's
     own are not read, so this is the largest), its ``prime_tower_rib_wall`` (on unless
     it states ``"0"``) and ``prime_tower_width``, and its ``wipe_tower_no_sparse_layers``.
@@ -614,7 +615,7 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     reach, or that stands on that plate's objects or inside their "No sparse layers"
     keep-out, moved beside those objects by #105's rule (:func:`tower_beside`), else
     unchanged (#4014, #3770). Each tower is the one the slicer builds for its plate's
-    height and the file's settings (:func:`tower_footprint`, :func:`_file_tower`, #6735),
+    height and the file's settings (:func:`tower_footprint`, :func:`file_tower`, #6735),
     with the brim it draws (#5545).
 
     An author's file keeps the tower where its printer put it: library file 2440, laid
@@ -633,8 +634,13 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     also moves, to a place clear of them all."""
     if plate.model is None:
         return payload  # no printer chosen: nothing to judge a tower against
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            settings = read_project_settings(archive)
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return payload  # unreadable or past the cap (#6792): the slicer says why
+    if not isinstance(settings, dict):
+        return payload
     xs, ys = settings.get("wipe_tower_x"), settings.get("wipe_tower_y")
     bed = _source_bed(settings)
     if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) != len(ys) or bed is None:
@@ -643,7 +649,7 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         towers = [(float(x), float(y)) for x, y in zip(xs, ys, strict=True)]
     except ValueError:
         return payload
-    asked = _file_tower(settings)
+    asked = file_tower(settings)
     try:
         # Read within the read budget, model settings included: a library file is
         # untrusted, and one this cannot read keeps its towers (claude-review on #4057).
@@ -699,7 +705,7 @@ def _colours_for(payload: bytes, chosen: Sequence[str] | None) -> list[str] | No
     if chosen is None:
         return None
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        current = json.loads(archive.read(PROJECT_SETTINGS_NAME)).get("filament_colour") or []
+        current = read_project_settings(archive).get("filament_colour") or []
     if len(current) != len(chosen):
         logger.warning(
             "the spools chosen are not one per filament of the 3MF; keeping its colours",

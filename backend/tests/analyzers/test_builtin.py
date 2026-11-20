@@ -343,7 +343,7 @@ TWO_COLOURS = output(size=(300, 265, 4), colours=["#FF0000", "#00FF00"])
 
 def test_an_author_file_sizes_the_tower_from_every_filament_it_lists(tmp_path: Path) -> None:
     """#6770: the send sizes an author's tower from every `filament_colour` the file
-    lists (`send._file_tower`), so plate fit does too."""
+    lists (`send.file_tower`), so plate fit does too."""
     written = _four_filaments(tmp_path / "four.3mf")
     author = tmp_path / "author.3mf"
     author.write_bytes(_restated(written.read_bytes(), print_settings_id=["0.20mm Standard"]))
