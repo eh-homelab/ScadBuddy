@@ -359,3 +359,13 @@ def test_a_crashing_analyzer_is_itself_a_diagnostic() -> None:
 def test_every_bundled_analyzer_has_a_unique_id() -> None:
     ids = [analyzer.id for analyzer in builtin.BUILTIN]
     assert len(ids) == len(set(ids))
+
+
+def test_the_tower_is_sized_by_the_outputs_colours() -> None:
+    """#6735: an eight-colour tower on the H2C is 65 mm square, past the 60 mm square
+    reserved before, so a 300 x 245 mm plate that fits two colours does not fit eight."""
+    size = (300, 245, 10)
+    assert _run(PLATE_FIT, output=output(size=size, colours=["#FF0000", "#00FF00"])) == []
+    eight = [f"#0000{n:02X}" for n in range(8)]
+    [found] = _run(PLATE_FIT, output=output(size=size, colours=eight))
+    assert any(e.label == "placement" for e in found.evidence)

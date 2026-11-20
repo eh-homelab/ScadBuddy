@@ -7,7 +7,7 @@ import itertools
 import pytest
 
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.plate import fit_problem, plate_for
+from scadbuddy.render.plate import TowerSettings, fit_problem, plate_for
 from scadbuddy.template import Part
 from scadbuddy.workflows.arrange import GOALS, arrange, geometry_of, order_plates, signature_of
 from scadbuddy.workflows.models import Layout, PackItem, PlateSize, SlotPlan
@@ -145,11 +145,13 @@ def test_by_colour_gives_single_colour_plates_that_need_no_tower() -> None:
 
 
 def test_with_the_tower_off_a_multi_colour_plate_keeps_no_room_for_one() -> None:
-    """#3770: the print's prime tower off frees its corner, so more copies share a plate."""
+    """#3770: the print's prime tower off frees its corner, so more copies share a plate.
+    With it on, the two-filament tower (24 mm square on this one-nozzle plate, #6735)
+    leaves room for 12."""
     two = part("two", 60, 60, "#FF0000", "#00FF00")
     kept = arrange([PackItem(part=two, count=16)], DEFAULT)
     freed = arrange([PackItem(part=two, count=16)], DEFAULT, tower=False)
-    assert [len(p.items) for p in kept.plates] == [8, 8]
+    assert [len(p.items) for p in kept.plates] == [12, 4]
     assert [len(p.items) for p in freed.plates] == [16]
     assert_no_overlap(footprints(freed, {"two": two})[0])
 
@@ -244,3 +246,23 @@ def test_a_plate_the_check_refuses_a_corner_of_still_fills_up(
         assert_no_overlap(rects)
         extent = (max(r[2] for r in rects), max(r[3] for r in rects), 5.0)
         assert fit_problem(extent, geometry, tower=len(colours) > 1) is None
+
+
+def test_no_sparse_layers_keeps_the_keep_out_on_every_plate() -> None:
+    """#6735: with "No sparse layers" the slicer needs about 100 mm between the H2C's
+    tower and any object taller than 4 mm, so fewer copies share a plate, and every
+    plate still passes the check the writer makes."""
+    h2c = PlateSize(key="Bambu Lab H2C", width=300.0, depth=320.0)
+    two = part("two", 40, 40, "#FF0000", "#00FF00", h=10.0)
+    plain = arrange([PackItem(part=two, count=30)], h2c)
+    kept = arrange([PackItem(part=two, count=30)], h2c, no_sparse_layers=True)
+    assert len(kept.plates) > len(plain.plates)
+    geometry = geometry_of(h2c)
+    settings = TowerSettings(filaments=2, no_sparse_layers=True)
+    for rects in footprints(kept, {"two": two}):
+        block = (
+            max(r[2] for r in rects) - min(r[0] for r in rects),
+            max(r[3] for r in rects) - min(r[1] for r in rects),
+            10.0,
+        )
+        assert fit_problem(block, geometry, tower=True, settings=settings) is None

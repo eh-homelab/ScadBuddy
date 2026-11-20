@@ -5,11 +5,16 @@
 - Bed 330 x 320. Extruder areas: left `0..325`, right `25..330`. A multi-colour plate
   where either nozzle may print anything must keep every object inside `25..325`.
 - Wrapping exclusion area `145..251 x 310..326`: only the prime tower is refused there.
-- ScadBuddy's `render/plate.py`: `PRIME_TOWER_SIDE = 60`, `PRIME_TOWER_BRIM = 3`,
+- ScadBuddy's `render/plate.py`: `tower_footprint` (#6735) sizes the tower as Bambu
+  Studio's own estimate does (`Print::wipe_tower_data`, `Print.cpp` L3243-3311 at
+  v02.08.02.61): a rib-wall square of sqrt(volume / 0.2 x 1.5) + 8 / sqrt(2) mm, the
+  volume 45 mm³ per filament plus a nozzle change per two on the H2C, at least the depth
+  for the height (`WipeTower::min_depth_per_height`). `PRIME_TOWER_BRIM = 3`,
   `TOWER_CLEARANCE = 5`, `EDGE_MARGIN = 2`. `bambuddy/send.py` `towers_within_reach`
-  relocates a tower only if a nozzle cannot reach it or it stands on its plate's
-  objects' box (#3770), and leaves an author layout
-  (`print_settings_id` = a real process name such as `0.20mm Standard @BBL H2C`) alone.
+  moves an author layout's tower (`print_settings_id` = a real process name such as
+  `0.20mm Standard @BBL H2C`) only if a nozzle cannot reach it, it stands on its plate's
+  objects' box (#3770), or the file states "No sparse layers" and the tower is inside
+  that keep-out (#6735); otherwise it leaves the layout alone.
 
 ## The "no sparse layers" rule (Bambu Studio `Print.cpp`)
 

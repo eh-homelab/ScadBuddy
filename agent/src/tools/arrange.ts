@@ -120,8 +120,8 @@ export const arrangeTools: Tool[] = [
         "The print's prime tower (#3770), as print_output takes it. `enabled: false` packs with no room kept for " +
           'a tower and writes the file with none, so more fits; a print of it with no prime_tower of its own ' +
           'prints no tower, and one that turns the tower on needs room for it. Omit to keep room for one on each ' +
-          'plate with more than one colour. `no_sparse_layers` is written into the file only; its keep-out is not ' +
-          'packed for.',
+          'plate with more than one colour. `no_sparse_layers` is stated in the file, and each plate keeps the ' +
+          "slicer's \"No sparse layers\" keep-out round its tower (#6735), so fewer parts fit on a plate.",
       ),
     }),
     risk: 'write',

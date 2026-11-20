@@ -244,8 +244,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   or its `process_overrides`) gets room for one instead (`replate_3mf` `tower_on`), or a
   `PlateFitError` when it does not fit. Plate fit (`analyzers/builtin.py` SB4001) judges
   the tower as the send does, by the file and `AnalysisRequest.prime_tower` (the run's
-  tower choice, `api/accepted_fixes.py` `analysis_request`). It does not model the tower's depth or the
-  "no sparse layers" keep-out.
+  tower choice, `api/accepted_fixes.py` `analysis_request`). The tower is `render/plate.py`
+  `tower_footprint` (#6735): Bambu Studio's own estimate from the plate's filaments, the prime
+  volume and the height (a rib-wall square, 36 mm for two filaments on the H2C, 65 mm for
+  eight), and with `wipe_tower_no_sparse_layers` the slicer's keep-out (about 100 mm on the
+  H2C from objects taller than `nozzle_height`, `plate_profiles.py` `TOWER_KEEP_OUTS`).
+  Arrange packs for that keep-out when its `prime_tower` asks for no sparse layers, and the
+  send keeps it when the file states it; the print dialog's own choice does not reach the
+  layout yet (#3770 P3). The process and filament presets are not known there, so it takes
+  BBL's defaults or largest values (0.2 mm layers, 45 mm³ prime volume).
   It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
   by-object plate fails "too close to others" (#6246). A template plate is one object with
   colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
@@ -617,8 +624,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `support_interface_filament` among them; the supports option passes only enable, type and
   build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
   `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
-  and scale, and its tower unless the target's extruders cannot reach it or it stands on
-  its plate's objects' box, #3770 (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  and scale, and its tower unless the target's extruders cannot reach it, it stands on
+  its plate's objects' box (#3770), or the file states "No sparse layers" and the tower is
+  inside that keep-out of them (#6735); the tower is judged at the size the slice builds,
+  `tower_footprint` with the file's filaments and rib wall (`towers_within_reach`, in
+  `bambuddy/send.py` `_laid_out_for`). A sliced file, another
   slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
   draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in

@@ -18,7 +18,29 @@ import zipfile
 
 BED = (330.0, 320.0)
 USABLE_X = (25.0, 325.0)        # both nozzles reach it
-TOWER_SIDE, CLEAR, EDGE = 60.0, 5.0, 2.0
+CLEAR, EDGE = 5.0, 2.0
+# The tower's side: Bambu Studio's estimate before a slice (Print::wipe_tower_data,
+# src/libslic3r/Print.cpp L3243-3311 at v02.08.02.61; backend/scadbuddy/render/plate.py
+# tower_footprint, #6735). A rib-wall square: sqrt(volume / 0.2 mm x 1.5) + 8 / sqrt(2),
+# at least the depth for the height; on the two-nozzle H2C the volume is 45 mm3 per
+# filament plus 12 mm of 1.75 mm filament per two filaments.
+PRIME_VOLUME, CHANGE_LENGTH, LAYER, INFILL_GAP, RIB_WIDTH = 45.0, 12.0, 0.2, 1.5, 8.0
+MIN_DEPTH_PER_HEIGHT = ((5.0, 5.0), (100.0, 20.0), (250.0, 40.0), (350.0, 60.0))
+
+
+def min_depth(height: float) -> float:
+    if height <= MIN_DEPTH_PER_HEIGHT[0][0]:
+        return MIN_DEPTH_PER_HEIGHT[0][1]
+    for (h0, d0), (h1, d1) in zip(MIN_DEPTH_PER_HEIGHT, MIN_DEPTH_PER_HEIGHT[1:]):
+        if height < h1:
+            return d0 + (height - h0) / (h1 - h0) * (d1 - d0)
+    return MIN_DEPTH_PER_HEIGHT[-1][1]
+
+
+def tower_side(filaments: int, height: float) -> float:
+    n = max(filaments, 1)
+    volume = PRIME_VOLUME * n + CHANGE_LENGTH * 3.141592653589793 * 1.75 ** 2 / 4 * (n // 2)
+    return max(min_depth(height), (volume / LAYER * INFILL_GAP) ** 0.5) + RIB_WIDTH / 2 ** 0.5
 # The tower's brim: the larger of prime_tower_brim_width's 3 mm default and Bambu
 # Studio's auto brim (-1, the H2C presets'), height / 100 * 8 mm up to 8 mm
 # (WipeTower::get_auto_brim_by_height; backend/scadbuddy/render/plate.py tower_brim, #5545).
@@ -29,6 +51,11 @@ def tower_brim(height: float) -> float:
     return max(BRIM_MIN, AUTO_BRIM_MAX * min(max(height, 0.0), AUTO_BRIM_FULL_HEIGHT) / AUTO_BRIM_FULL_HEIGHT)
 WRAP_X, WRAP_Y = (145.0, 251.0), (310.0, 326.0)
 NO_SPARSE_RADIUS, NOZZLE_HEIGHT = 96.0, 4.0
+# What Bambu Studio adds to the radius (Print.cpp compacted_wipe_tower_zone and
+# compacted_tower_footprint_padding): less 0.2 mm, plus the spiral lift's reach for the
+# 0.4 mm z_hop (2.43 mm) and 2 x the widest (0.8 mm) nozzle, as ScadBuddy's render/plate.py
+# _keep_out pads it, measured from the tower with its brim.
+NO_SPARSE_KEEP_OUT = NO_SPARSE_RADIUS - 0.2 + 2.43 + 1.6
 H2C_PROCESS, H2C_PRINTER = "0.20mm Standard @BBL H2C", "Bambu Lab H2C 0.4 nozzle"
 
 Mat = tuple  # 12 floats: 3x3 row-major in the 3MF's column order + translation
@@ -103,12 +130,13 @@ def box(pts):
     return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
 
 
-def tower_box(settings):
+def tower_box(settings, height):
     try:
         tx, ty = float(settings["wipe_tower_x"][0]), float(settings["wipe_tower_y"][0])
     except (KeyError, IndexError, TypeError, ValueError):
         return None
-    return (tx, ty, tx + TOWER_SIDE, ty + TOWER_SIDE)
+    side = tower_side(len(settings.get("filament_colour") or ["", ""]), height)
+    return (tx, ty, tx + side, ty + side)
 
 
 def overlaps(a, b, pad=0.0):
@@ -140,7 +168,7 @@ def report(settings, objects, items, no_sparse: bool) -> bool:
         print(f"FAIL objects outside the dual-nozzle area x {USABLE_X[0]:.0f}..{USABLE_X[1]:.0f}, y 0..{BED[1]:.0f}"); ok = False
     else:
         print("ok objects inside the dual-nozzle area")
-    t = tower_box(settings)
+    t = tower_box(settings, g[5] - g[2])
     if t is None:
         print("tower: none declared (a default-pipeline file; the slicer will place one)")
         return ok
@@ -157,8 +185,9 @@ def report(settings, objects, items, no_sparse: bool) -> bool:
     else:
         print(f"ok tower clear of objects (gap {d:.1f} mm)")
     if no_sparse and g[5] - g[2] > NOZZLE_HEIGHT:
-        if d < NO_SPARSE_RADIUS:
-            print(f"FAIL no-sparse-layers rule: objects {g[5] - g[2]:.1f} mm tall need {NO_SPARSE_RADIUS:.0f} mm from the tower, have {d:.1f}"); ok = False
+        need = NO_SPARSE_KEEP_OUT + brim
+        if d < need:
+            print(f"FAIL no-sparse-layers rule: objects {g[5] - g[2]:.1f} mm tall need {need:.0f} mm from the tower, have {d:.1f}"); ok = False
         else:
             print("ok no-sparse-layers rule satisfied")
     return ok
