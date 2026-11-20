@@ -629,7 +629,9 @@ describe('MachineRates actuals follow-up (#6665)', () => {
       ),
     )
     await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
-    expect(await within(panel).findByText(`Bambuddy did not answer. The rate uses the events last read at ${formatLocalTime(Date.parse('2026-11-18T15:00:00'))}.`)).toBeInTheDocument()
+    const line = await within(panel).findByText(`Bambuddy did not answer. The rate uses the events last read at ${formatLocalTime(Date.parse('2026-11-18T15:00:00'))}.`)
+    // A newer read answered, so the line is the stored-intervals note, not an alert.
+    expect(line).not.toHaveAttribute('role', 'alert')
   })
 
   it('says when the page could not read Bambuddy, and which read the rate uses', async () => {
