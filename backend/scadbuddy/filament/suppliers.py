@@ -20,7 +20,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.filament import purchasing_models as pm
-from scadbuddy.filament.bb_sync_models import forget_sync
+from scadbuddy.filament.bb_sync_models import BbLinked, forget_sync
 from scadbuddy.filament.invoice_money import price_per_kg
 
 Conn = Connection[DictRow]
@@ -171,6 +171,43 @@ class SuppliersStore:
                 return self._supplier(conn, supplier_id)
         except errors.UniqueViolation:
             raise SupplierExistsError() from None
+
+    @staticmethod
+    def link_bb_on(
+        conn: Conn, bb_id: int, name: str, values: Mapping[str, Any]
+    ) -> tuple[UUID, BbLinked] | None:
+        """The supplier Bambuddy's supplier ``bb_id`` is, on ``conn`` (#6265 Task 9, the
+        pull): the one linked to it (``found``), else the unlinked, unarchived one of the
+        same upper case name, which takes the link (``linked``), else a new one with
+        ``name`` and ``values`` (``made``). ``None`` when another unarchived supplier holds
+        the name. A link is bookkeeping: it does not move ``updated_at``."""
+        found = conn.execute(
+            "SELECT id FROM filament_suppliers WHERE bb_supplier_id = %s", (bb_id,)
+        ).fetchone()
+        if found is not None:
+            return found["id"], "found"
+        linked = conn.execute(
+            "UPDATE filament_suppliers SET bb_supplier_id = %s WHERE id = (SELECT id"
+            " FROM filament_suppliers WHERE upper(name) = upper(%s) AND archived_at IS NULL"
+            " AND bb_supplier_id IS NULL ORDER BY id LIMIT 1) RETURNING id",
+            (bb_id, name),
+        ).fetchone()
+        if linked is not None:
+            return linked["id"], "linked"
+        if conn.execute(
+            "SELECT 1 FROM filament_suppliers WHERE upper(name) = upper(%s)"
+            " AND archived_at IS NULL",
+            (name,),
+        ).fetchone():
+            return None
+        columns = ["name", "bb_supplier_id", *values]
+        made = conn.execute(
+            f"INSERT INTO filament_suppliers ({', '.join(columns)})"
+            f" VALUES ({', '.join('%s' for _ in columns)}) RETURNING id",
+            [name, bb_id, *values.values()],
+        ).fetchone()
+        assert made is not None
+        return made["id"], "made"
 
     @staticmethod
     def _supplier(conn: Conn, supplier_id: UUID) -> pm.Supplier | None:

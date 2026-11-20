@@ -1308,6 +1308,31 @@ class _Planner:
         return writes
 
 
+def claim_form(desired: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """An unlinked spool's create body and SB's field hashes now, from its desired values
+    with no `Pending` left: what `_Planner.new_spool` sends and compares. The pull (Task 9)
+    uses them to find the BB spool an open intent can claim (`claims`)."""
+    fields = [n for n in desired if n not in _LISTS and n != "archived_at"]
+    compare = {n: compare_form(n, desired[n]) for n in fields}
+    body = {n: body_value(n, desired[n]) for n in fields if n not in _NOT_ON_CREATE}
+    return body, {n: field_hash(v) for n, v in compare.items()}
+
+
+def claims(
+    bb: BbSpool,
+    body: Mapping[str, Any],
+    sent: Mapping[str, str] | None,
+    now: Mapping[str, str],
+    started: datetime,
+) -> bool:
+    """Decision 10: whether the open intent of a create that sent ``body`` (``sent`` its
+    hashes, ``now`` SB's hashes now, `claim_form`) and started at ``started`` can adopt
+    the unlinked BB spool ``bb``, by `_Planner.adoptable`'s rule."""
+    made = None if bb.created_at is None else {"created_at": bb.created_at.isoformat()}
+    raw = {} if made is None else {bb.id: made}
+    return _Planner.adoptable(body, sent, now, [bb], raw, started) is not None
+
+
 def _seen_form(name: str, seen: Mapping[str, Any], k_profiles: Any) -> Any:
     """What SB last saw of ``name`` in a seen copy: `UNSEEN` for a field a seeded copy left
     out (R-T4-22), else `bb_form`."""

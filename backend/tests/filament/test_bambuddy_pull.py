@@ -31,6 +31,7 @@ from scadbuddy.filament.bambuddy_pull import (
     scheduled_pull,
     try_assignments,
 )
+from scadbuddy.filament.bb_sync_models import seen_row
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
@@ -59,6 +60,11 @@ from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY
 from tests.conftest import PgPool
+from tests.filament.test_bb_sync_plan import SPOOLS, _only, _plan, _snap
+from tests.filament.test_bb_sync_plan import _row as _plan_row
+from tests.filament.test_bb_sync_plan import _spool as _plan_spool
+from tests.filament.test_bb_sync_plan import _type as _plan_type
+from tests.filament.test_bb_sync_results import _apply, _bb_now, _created, _ok
 from tests.support.pg_waits import wait_for_blocked
 
 pytestmark = pytest.mark.requires_postgres
@@ -1106,20 +1112,108 @@ def test_an_archived_bb_spool_takes_its_type_or_needs_one(pg_pool: PgPool) -> No
     assert types == {typed: kind.id, untyped: None}
 
 
-def test_reading_archived_rows_changes_nothing_for_a_linked_spool(pg_pool: PgPool) -> None:
-    """#6707 R-6707-3: a linked spool keeps today's behaviour when BB archives it: SB's
-    spool stays open and takes nothing new."""
+def test_a_bb_archive_archives_the_sb_spool(pg_pool: PgPool) -> None:
+    """#6265 Task 9: a linked spool Bambuddy archives is archived in SB, under
+    ``pulls(spools)`` only; Bambuddy's restore after it restores it."""
     f = _filament(pg_pool)
     (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
-    count = len(f.spools.events(made))
     archived = bb(archived_at=_bb_time(-1), updated_at=_bb_time(-1))
-    report = pull(f, [archived], now=NOW)
-    assert (report.created, report.updated, report.archived_created) == (0, 0, 0)
+    assert pull(f, [archived], now=NOW, pulls=Pulls(spools=False)).updated_ids == []
     spool = f.spools.get(made)
-    assert spool is not None
-    assert spool.archived_at is None
-    assert spool.grams_left == 900
+    assert spool is not None and spool.archived_at is None
+    report = pull(f, [archived], now=NOW)
+    assert (report.created, report.updated_ids, report.archived_created) == (0, [made], 0)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.archived_at is not None
+    assert [e.kind for e in f.spools.events(made)][-1] == "archived"
+    # Pulled again, it stays as it is and takes nothing.
+    count = len(f.spools.events(made))
+    assert pull(f, [archived], now=NOW).archived_ids == [made]
     assert len(f.spools.events(made)) == count
+    restored = bb(archived_at=None, updated_at=_bb_time(1))
+    assert pull(f, [restored], now=NOW).updated_ids == [made]
+    spool = f.spools.get(made)
+    assert spool is not None and spool.archived_at is None
+
+
+def test_an_sb_restore_after_the_bb_archive_wins(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
+    archived = bb(archived_at=_bb_time(-1), updated_at=_bb_time(-1))
+    pull(f, [archived], now=NOW)
+    f.spools.archive(made, False, actor="ann")
+    report = pull(f, [archived], now=NOW)
+    assert report.archived_ids == []
+    spool = f.spools.get(made)
+    assert spool is not None and spool.archived_at is None
+
+
+def test_an_sb_archive_is_not_undone_by_a_bb_row_that_was_never_archived(
+    pg_pool: PgPool,
+) -> None:
+    """Bambuddy's row moved, but not its archive state: SB's archive stays."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
+    f.spools.archive(made, True, actor="ann")
+    pull(f, [bb(color_name="Blue", updated_at=_bb_time(1))], now=NOW)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.archived_at is not None
+
+
+async def test_an_unlinked_archived_bb_spool_is_made_archived_with_its_usage(
+    pg_pool: PgPool,
+) -> None:
+    """R-T9-0 (#6707 wins over the brief): an unlinked archived BB spool makes an archived
+    SB spool with its usage, and it stays archived. R-T9-1: only under ``pulls(spools)``.
+    R-T9-2: it takes no weighing, preset or K value."""
+    f = _filament(pg_pool)
+    printer = UUID(int=0)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, model, bambuddy_printer_id)"
+            " VALUES (%s, 'SN1', 'P', 'H2C', 1)",
+            (printer,),
+        )
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    spent = _archived_bb(
+        slicer_filament="GFA00",
+        slicer_filament_name="Bambu PLA Basic",
+        last_scale_weight=400,
+        last_weighed_at="2026-11-12T07:00:00",
+        k_profiles=[{"printer_id": 1, "extruder": 0, "nozzle_diameter": "0.4", "k_value": 0.02}],
+    ).model_dump(mode="json")
+    use = {
+        "id": 1,
+        "spool_id": 125,
+        "weight_used": 600.0,
+        "status": "completed",
+        "created_at": "2026-11-11T08:00:00",
+    }
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[spent])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=[use])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        off = await read_and_pull(f, settings, pulls=Pulls(spools=False))
+        assert (off.created, f.spools.list(include_archived=True)) == (0, [])
+        report = await read_and_pull(f, settings)
+        again = await read_and_pull(f, settings)
+    (made,) = report.created_ids
+    assert (report.archived_created, report.usage_booked) == (1, 1)
+    assert (again.created, again.archived_ids) == (0, [made])
+    spool = f.spools.get(made)
+    assert spool is not None and spool.archived_at == ARCHIVED_AT
+    kinds = [e.kind for e in f.spools.events(made)]
+    assert "weighed" not in kinds
+    assert [e.ref_kind for e in f.spools.events(made) if e.ref_kind == ledger.BB_USAGE] == [
+        ledger.BB_USAGE
+    ]
+    assert _own_presets(pg_pool, made) == []
+    with pg_pool.connection() as conn:
+        k = conn.execute(
+            "SELECT count(*) AS n FROM filament_spool_k_values WHERE spool_id = %s", (made,)
+        ).fetchone()
+    assert k == {"n": 0}
 
 
 def test_an_archived_bb_duplicate_of_a_linked_tag_makes_no_spool(pg_pool: PgPool) -> None:
@@ -2399,3 +2493,135 @@ def test_weights_gates_the_lock_and_the_drying(pg_pool: PgPool) -> None:
     assert spool is not None
     assert spool.weight_locked
     assert [e.kind for e in f.spools.events(made) if e.kind == "dried"] == ["dried"]
+
+
+# -- #6265 Task 9: "newer change wins", the seen copy, intents and the push ---------------
+
+
+def test_a_bb_edit_older_than_an_sb_type_edit_is_not_pulled(pg_pool: PgPool) -> None:
+    """Decision 8, F12: an inherited field's SB change time counts its type's
+    ``updated_at``, on the pull as on the push."""
+    f = _filament(pg_pool)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="GFA00-RED",
+            material_id=_pla(pg_pool),
+            rgba="#FF0000FF",
+            label_weight_g=1000,
+            colour_name="Red",
+        )
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spool_types SET updated_at = now() - interval '5 hours' WHERE id = %s",
+            (kind.id,),
+        )
+    first = bb(material_number="GFA00-RED", updated_at=_bb_time(-3))
+    (made,) = pull(f, [first], now=NOW).created_ids
+    f.types.update(kind.id, SpoolTypePatch(colour_name="Scarlet"))
+    older = bb(material_number="GFA00-RED", color_name="Crimson", updated_at=_bb_time(-1))
+    pull(f, [older], now=NOW)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.effective.colour_name == "Scarlet"
+    # A BB edit after the type's is taken.
+    newer = bb(material_number="GFA00-RED", color_name="Maroon", updated_at=_bb_time(1))
+    pull(f, [newer], now=NOW)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.effective.colour_name == "Maroon"
+
+
+def _link_of(pool: PgPool, spool: UUID) -> dict[str, Any]:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM filament_bb_links WHERE spool_id = %s", (spool,)
+        ).fetchone()
+    assert row is not None
+    return dict(row)
+
+
+def test_the_pull_writes_bb_seen_as_seen_row(pg_pool: PgPool) -> None:
+    """Every pull writes ``bb_seen`` from the row it read, in `seen_row`'s form, merged by
+    R-T4-28: a field SB does not hold (BB's note, which the pull never takes) stays out."""
+    f = _filament(pg_pool)
+    row = bb(note="from bb", updated_at=_bb_time(-2))
+    (made,) = pull(f, [row], now=NOW).created_ids
+    link = _link_of(pg_pool, made)
+    seen = seen_row(row)
+    taken = ("material", "subtype", "brand", "color_name", "rgba", "label_weight", "weight_used")
+    assert {k: link["bb_seen"][k] for k in taken} == {k: seen[k] for k in taken}
+    assert "note" not in link["bb_seen"]
+    assert link["bb_seen_at"] == NOW
+    blue = bb(note="from bb", color_name="Blue", updated_at=_bb_time(-1))
+    pull(f, [blue], now=NOW + timedelta(minutes=1))
+    link = _link_of(pg_pool, made)
+    assert link["bb_seen"]["color_name"] == "Blue"
+    assert link["bb_seen_at"] == NOW + timedelta(minutes=1)
+
+
+def test_the_pull_leaves_a_spool_an_intent_claims(pg_pool: PgPool) -> None:
+    """Decision 10: a BB spool SB's own create made, whose answer was lost, is the push's
+    to adopt; the pull makes no second SB spool of it."""
+    f = _filament(pg_pool)
+    spool = _plan_spool(f, _plan_type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    assert isinstance(create.body, dict)
+    row = _plan_row(60, **create.body) | {"created_at": _bb_time(0)}
+    report = pull(f, [BbSpool.model_validate(row)], now=NOW)
+    assert (report.claimed, report.created, report.linked) == (1, 0, 0)
+    assert [s.id for s in f.spools.list()] == [spool]
+
+
+@pytest.mark.parametrize("newer", ["sb", "bb"])
+def test_push_then_pull_settles(pg_pool: PgPool, newer: str) -> None:
+    """One field changed on both sides: after two rounds (plan, results, pull) both hold
+    the newer value, and a third round writes nothing on either side."""
+    f = _filament(pg_pool)
+    spool, _, answer = _created(pg_pool, f)
+    two_way = SPOOLS.model_copy(update={"spools": "two_way"})
+    if newer == "sb":
+        row = answer | {"color_name": "Teal", "updated_at": _bb_now()}
+        f.spools.update(spool, SpoolPatch(colour_name="Brick"), actor="person")
+    else:
+        f.spools.update(spool, SpoolPatch(colour_name="Brick"), actor="person")
+        row = answer | {"color_name": "Teal", "updated_at": _bb_now(60)}
+    want = "Brick" if newer == "sb" else "Teal"
+    minutes = 0
+
+    def one_round(row: dict[str, Any]) -> tuple[dict[str, Any], int, int, int]:
+        nonlocal minutes
+        writes = _plan(f, _snap([row]), two_way).writes
+        results = []
+        for write in writes:
+            minutes += 1
+            row = row | dict(write.body) | {"updated_at": _bb_now(60 + minutes)}
+            results.append(_ok(write, row))
+        if writes:
+            _apply(f, writes, results)
+        events = len(f.spools.events(spool))
+        report = pull(f, [BbSpool.model_validate(row)], now=datetime.now(UTC))
+        return row, len(writes), report.updated, len(f.spools.events(spool)) - events
+
+    for _ in range(2):
+        row, *_ = one_round(row)
+    sb = f.spools.get(spool)
+    assert sb is not None
+    assert (sb.colour_name, row["color_name"]) == (want, want)
+    assert one_round(row)[1:] == (0, 0, 0)
+
+
+def test_a_persons_edit_the_push_did_not_send_is_pulled(pg_pool: PgPool) -> None:
+    """R-T5-5: the push's echo event holds Bambuddy's whole answer, so a person's
+    Bambuddy edit of a field the push did not send is read from ``bb_seen``."""
+    f = _filament(pg_pool)
+    spool, _, answer = _created(pg_pool, f)
+    two_way = SPOOLS.model_copy(update={"spools": "two_way"})
+    person = answer | {"color_name": "Teal", "updated_at": _bb_now(1)}
+    f.spools.update(spool, SpoolPatch(note="mine"), actor="ann")
+    update = _only(_plan(f, _snap([person]), two_way).writes, "update")
+    assert update.body == {"note": "mine"}
+    after = person | update.body | {"updated_at": _bb_now(2)}
+    _apply(f, [update], [_ok(update, after)])
+    pull(f, [BbSpool.model_validate(after)], now=datetime.now(UTC))
+    sb = f.spools.get(spool)
+    assert sb is not None
+    assert (sb.colour_name, sb.note) == ("Teal", "mine")

@@ -21,7 +21,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.trays import EXTERNAL, unit_label
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
-from scadbuddy.filament.bb_sync_models import forget_sync
+from scadbuddy.filament.bb_sync_models import BbLinked, forget_sync
 from scadbuddy.filament.catalog import CatalogRefError
 
 Conn = Connection[DictRow]
@@ -332,6 +332,51 @@ class LocationStore:
             data={"from": before, "to": location_id}
             | ({} if reason is None else {"reason": reason}),
         )
+
+    @staticmethod
+    def link_bb_on(
+        conn: Conn, bb_id: int, name: str, identifier: str | None
+    ) -> tuple[UUID, BbLinked] | None:
+        """The place Bambuddy's location ``bb_id`` is, on ``conn`` (#6265 Task 9, the pull):
+        the one linked to it (``found``), else the unlinked, unarchived root place of the
+        same upper case name that is no printer's place (F18), which takes the link
+        (``linked``), else a new root place of kind ``Shelf`` with ``name`` and
+        ``identifier`` (``made``). ``None`` when another root place holds the name, or no
+        unarchived kind is named ``Shelf``. A link is bookkeeping: it does not move
+        ``updated_at``."""
+        found = conn.execute(
+            "SELECT id FROM filament_locations WHERE bb_location_id = %s", (bb_id,)
+        ).fetchone()
+        if found is not None:
+            return found["id"], "found"
+        linked = conn.execute(
+            "UPDATE filament_locations SET bb_location_id = %s WHERE id = (SELECT id"
+            " FROM filament_locations WHERE upper(name) = upper(%s) AND parent_id IS NULL"
+            " AND printer_id IS NULL AND archived_at IS NULL AND bb_location_id IS NULL"
+            " ORDER BY id LIMIT 1) RETURNING id",
+            (bb_id, name),
+        ).fetchone()
+        if linked is not None:
+            return linked["id"], "linked"
+        if conn.execute(
+            "SELECT 1 FROM filament_locations WHERE upper(name) = upper(%s) AND parent_id IS NULL"
+            " AND printer_id IS NULL AND archived_at IS NULL",
+            (name,),
+        ).fetchone():
+            return None
+        kind = conn.execute(
+            "SELECT id FROM filament_location_kinds WHERE upper(name) = 'SHELF'"
+            " AND archived_at IS NULL"
+        ).fetchone()
+        if kind is None:
+            return None
+        made = conn.execute(
+            "INSERT INTO filament_locations (name, kind_id, identifier, bb_location_id)"
+            " VALUES (%s, %s, %s, %s) RETURNING id",
+            (name, kind["id"], identifier, bb_id),
+        ).fetchone()
+        assert made is not None
+        return made["id"], "made"
 
     # -- internals --------------------------------------------------------------------
 

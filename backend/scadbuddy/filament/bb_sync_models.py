@@ -35,6 +35,11 @@ from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 #: `filament_bb_push_errors.kind` name them.
 Kind = Literal["spool", "supplier", "location", "insert_type", "filament"]
 
+#: How the pull found the SB row of a Bambuddy supplier or location (Task 9,
+#: `suppliers.SuppliersStore.link_bb_on`, `locations.LocationStore.link_bb_on`): linked
+#: already, linked now by its name, or made.
+BbLinked = Literal["found", "linked", "made"]
+
 #: What one write does. ``probe`` is Decision 13's ``GET spool_row(bb_id)``, with an
 #: empty body.
 Op = Literal[

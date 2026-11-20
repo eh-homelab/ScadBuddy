@@ -1546,6 +1546,70 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     status every 3 s until the pass lands`, `says the pass is still running after 60 s with
     no new pass`, `stops reading the status when the page goes away` (fake timers). Cost: up
     to 20 extra status reads per click, each a read of two SB tables.
+138. Task 9 (R-T9-0, controller ruling; changes the brief): where the brief and #6707
+    differ, #6707 wins. An unlinked archived BB spool makes an archived SB spool
+    (`_create_archived`), with its usage rows booked, and it stays archived. Test:
+    `test_an_unlinked_archived_bb_spool_is_made_archived_with_its_usage`, in place of the
+    brief's `test_an_unlinked_archived_bb_spool_is_not_made`. Why: #6707 merged to main
+    first and imports used-up spools with their history. Cost: none known.
+139. Task 9 (R-T9-0b, controller ruling): in `bambuddy_pull.py` each `has_key(...)` that a
+    key lookup or `resolve_or_add` followed is one `catalog.lookup_key(conn, kind, name,
+    material=...)` (`_resolve`), as `types.py` `_by_key` does: a name with no key is
+    skipped, a found row is used, and only a missing row goes to `resolve_or_add`. The
+    behaviour is the same. `_catalog_id` stays for `csv_import.py`. Why: one query in place
+    of two per name. Cost: none known.
+140. Task 9 (R-T9-1, controller ruling): the archived create runs only under
+    `pulls(spools)`, as every create does. Test: the first `read_and_pull` of
+    `test_an_unlinked_archived_bb_spool_is_made_archived_with_its_usage` (`spools` off
+    makes nothing).
+141. Task 9 (R-T9-2, controller ruling): an archived spool the pull creates takes no
+    weighing, drying, preset or K value. Test: the same test (no `weighed` event, no own
+    preset, no K value).
+142. Task 9: the pull's "newer change wins" (`_sb_newer`) is `sb_changed_at`, but the
+    spool's `created_at`, that rule's fallback, is no SB change on the pull. Why: a spool
+    the pull made took BB's values, and a link keeps the SB spool's own values and records
+    BB's as seen, so only a change after it counts. With the fallback, a BB edit stamped
+    before the spool row was made could never reach it. Cost: none known; on the push the
+    fallback stays.
+143. Task 9: a linked spool takes BB's archive state only when BB's state moved off
+    `bb_seen.archived_at`. With no seen archive state a BB archive is taken by the time
+    rule, and a BB restore is not: a BB row that is live and newer than an SB archive does
+    not show that Bambuddy restored it. BB's change time is the later of `updated_at` and
+    `archived_at`. The pull archives and restores through `update_on` (actor `bambuddy`,
+    the event at now). Tests: `test_a_bb_archive_archives_the_sb_spool`,
+    `test_an_sb_restore_after_the_bb_archive_wins`,
+    `test_an_sb_archive_is_not_undone_by_a_bb_row_that_was_never_archived`. Cost: a link
+    seen before Task 9 with an SB archive and a BB restore stays archived until Bambuddy
+    archives and restores again.
+144. Task 9: `Pulls` gains `suppliers` and `locations`, `False` by default as in
+    `FilamentSync`, so `EVERY` (renamed in its comment to "the defaults") reads no new
+    route. `read_and_pull` reads `GET /inventory/suppliers` only under `pulls.suppliers`
+    and `GET /inventory/locations` only under `pulls.locations`; each read and each row
+    pull fails alone, logged.
+145. Task 9: a supplier or location field with neither a seen value nor a mark (a row
+    linked by its name) follows the rows' `updated_at`: SB's row strictly after BB's keeps
+    SB's value; a tie, or no BB time, takes BB's. A field kept this way gets its seeding
+    marks in `bb_pushed["unseen"]` (R-T4-27), so a later pull or push moves it only on a
+    real change. A link by name does not move `updated_at`. A nested place takes a BB name
+    only when the name keeps its parents' path (`` / ``); a name another SB row holds is
+    not written, logged. An archived SB row is left alone. Tests:
+    `test_a_bb_supplier_links_by_name`, `test_a_field_only_bambuddy_changed_is_pulled`.
+146. Task 9: K values are pulled for a spool with a type too (presets are not, F27): a key
+    whose effective value (the type's) is already BB's gets no row. `bb_k_profiles` takes
+    BB's whole list whenever it changed and presets pull. Tests:
+    `test_bb_k_profiles_become_sb_k_values`, `test_a_persons_k_value_is_kept`.
+147. Task 9: after the push's echo event, a field moved when it is off `bb_seen` or absent
+    from it. When the pull takes nothing, it books no event, so the echo stays the last
+    reading. Cost: while a field stays unseen, each pull reads that row in full again and
+    keeps SB's value by the same rule.
+148. Task 9: `BbSpool` gains `created_at` (`SpoolResponse.created_at`, `sync-routes.json`
+    v1.3.1). The pull finds a claimed BB spool with `bb_sync_plan.claims`, which is
+    `_Planner.adoptable`'s rule, from `claim_form` of the intent spool's desired values
+    under every direction. Test: `test_the_pull_leaves_a_spool_an_intent_claims`.
+149. Task 9: the seen copy of a spool the pull made or linked takes a field only when BB's
+    value is SB's compare value; only `_update` names what it took. Cost: a catalog name SB
+    keeps under another spelling (BB `DUAL-COLOR`, SB `Dual Color`) stays unseen on a new
+    spool until a change of it.
 
 ## Self-review
 

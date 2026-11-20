@@ -1270,8 +1270,12 @@ class Spool(BambuddyModel):
     #: ``data_origin`` in ``tests/bambuddy/recordings/openapi/rfid-routes.json`` (v1.3.1).
     tag_type: str | None = None
     data_origin: str | None = None
+    #: When Bambuddy made the row (``SpoolResponse.created_at``, ``sync-routes.json``,
+    #: v1.3.1): the pull leaves a row made after an open create intent to the push
+    #: (#6265 Decision 10).
+    created_at: datetime | None = None
 
-    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at")
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at", "created_at")
     @classmethod
     def _utc(cls, value: datetime | None) -> datetime | None:
         return as_utc(value)
