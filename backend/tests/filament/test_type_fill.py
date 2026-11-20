@@ -24,7 +24,7 @@ from scadbuddy.filament.models import (
 )
 from scadbuddy.filament.profile_fill import ProfileChangedError, TypeFiller, _rows
 from scadbuddy.filament.spools import FilamentSpoolStore
-from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.filament.types import SpoolTypeStore, TypeTempError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.density import DensityTable
 from scadbuddy.slicing.profiles import Profiles
@@ -187,6 +187,58 @@ async def test_a_range_set_meanwhile_skips_only_its_pair_and_the_rest_are_filled
     assert row.density_g_cm3 == Decimal("1.32")
     assert second.written
     assert second.filled["nozzle_temp_min"] == 190
+
+
+async def test_a_range_put_back_meanwhile_is_still_retried_once(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6776: the first write races, but the re-read finds no backwards pair (the person
+    already put the range back). The fill retries once anyway, so every field is filled."""
+    raced = _type(types, pg_pool, "PUTBACK")
+    _presets(types, raced, ("H2C", "0.4", "GFA05"))
+    fill_empty = types.fill_empty
+    calls = 0
+
+    def meanwhile(type_id: UUID, values: Any, *, actor: str) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TypeTempError("a range was set meanwhile")
+        return fill_empty(type_id, values, actor=actor)
+
+    monkeypatch.setattr(types, "fill_empty", meanwhile)
+
+    (done,) = await filler.fill(UNLINKED, [raced], actor=ACTOR)
+
+    assert calls == 2
+    assert done.written
+    assert "nozzle_temp_min" in done.filled
+    assert not done.skipped
+
+
+async def test_a_second_race_skips_everything_left(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6776: both writes raise `TypeTempError`; nothing is written and every field left
+    goes to `skipped`."""
+    raced = _type(types, pg_pool, "TWICE")
+    _presets(types, raced, ("H2C", "0.4", "GFA05"))
+    calls = 0
+
+    def meanwhile(type_id: UUID, values: Any, *, actor: str) -> Any:
+        nonlocal calls
+        calls += 1
+        raise TypeTempError("raced")
+
+    monkeypatch.setattr(types, "fill_empty", meanwhile)
+
+    (done,) = await filler.fill(UNLINKED, [raced], actor=ACTOR)
+
+    assert calls == 2
+    assert not done.written
+    assert not done.filled
+    assert {"nozzle_temp_min", "bed_temp_min", "density_g_cm3"} <= set(done.skipped)
+    assert all("changed meanwhile" in why for why in done.skipped.values())
 
 
 async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(

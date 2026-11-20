@@ -557,8 +557,9 @@ class TypeFiller:
     ) -> dict[str, Any] | None:
         """``fill_empty`` of ``wanted``. A person set one end of a range since the read
         (R-6714-e): re-read the row, drop only the pair that is now backwards (into
-        ``result.skipped``, with the reason) and write the rest once more. A second race
-        skips what is left."""
+        ``result.skipped``, with the reason) and write the rest once more, even when the
+        re-read finds no backwards pair. That is the one retry; a second race skips what
+        is left."""
         for retry in (True, False):
             try:
                 return await asyncio.to_thread(
@@ -569,19 +570,17 @@ class TypeFiller:
                 )
             except TypeTempError as error:
                 why = f"the type changed meanwhile: {error}"
-                fresh = await asyncio.to_thread(self.types.get, type_id) if retry else None
-                dropped: dict[Field, str] = {}
+                if not retry:
+                    result.skipped |= dict.fromkeys(wanted, why)
+                    return None
+                fresh = await asyncio.to_thread(self.types.get, type_id)
                 if fresh is not None:
                     current = fresh.model_dump()
                     # A field a person set meanwhile is no longer empty: `fill_empty`
                     # leaves it, so it takes no part in the range.
                     for key in [k for k in wanted if current[k] is not None]:
                         del wanted[key]
-                    dropped = dict.fromkeys(_ranges(current, wanted), why)
-                if not dropped:
-                    result.skipped |= dict.fromkeys(wanted, why)
-                    return None
-                result.skipped |= dropped
+                    result.skipped |= dict.fromkeys(_ranges(current, wanted), why)
                 if not wanted:
                     return None
         return None
