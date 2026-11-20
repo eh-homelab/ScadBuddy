@@ -52,6 +52,17 @@ describe('the Metrics tab (#6269)', () => {
     expect(within(region('Days of stock')).getByRole('table', { name: 'Days of stock by type' })).toBeInTheDocument()
   })
 
+  it('opens the consumption table behind "Show the numbers"', async () => {
+    const { user } = render()
+    await within(region('Consumption')).findByRole('img', { name: /140 g in all/ })
+    expect(screen.queryByRole('table', { name: 'Consumption' })).not.toBeInTheDocument()
+    await user.click(within(region('Consumption')).getByText('Show the numbers'))
+    const table = await screen.findByRole('table', { name: 'Consumption' })
+    const petg = within(table).getByText('PETG').closest('tr')
+    expect(petg).not.toBeNull()
+    expect(within(petg as HTMLElement).getByText('120 g')).toBeInTheDocument()
+  })
+
   it('asks again with dimension=brand when the grouping changes to Brand', async () => {
     const seen = metricsRequests()
     const { user } = render()
