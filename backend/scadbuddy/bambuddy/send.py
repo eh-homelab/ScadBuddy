@@ -50,6 +50,7 @@ from scadbuddy.render.bambu3mf import (
     replate_3mf,
     rezipped,
     state_nozzles,
+    stated_value,
     with_part_settings,
 )
 from scadbuddy.render.objects3mf import (
@@ -568,7 +569,13 @@ def _tower_value(value: float) -> str:
 def _tower_on(corner: tuple[float, float], tower: TowerFootprint, objects: Rect) -> bool:
     """Whether ``tower`` (:func:`tower_footprint`, brim included) at ``wipe_tower_x``/``_y``
     ``corner`` overlaps ``objects`` (#3770), or stands closer to them than its "No sparse
-    layers" keep-out (#6735): the two the slicer refuses."""
+    layers" keep-out (#6735): the two the slicer refuses.
+
+    The test uses ``keep_out``, not ``TowerFootprint.clearance``, on purpose (#6757). An
+    author's tower moves only when the slicer refuses it, so a tower 0 to
+    ``TOWER_CLEARANCE`` mm from its objects stays. When the tower moves,
+    :func:`tower_beside` keeps ``clearance``, ScadBuddy's own margin for a place it
+    picks."""
     x, y = corner[0] - tower.brim, corner[1] - tower.brim
     gap = tower.keep_out
     return Rect(x, y, x + tower.size[0], y + tower.size[1]).overlaps(
@@ -576,22 +583,19 @@ def _tower_on(corner: tuple[float, float], tower: TowerFootprint, objects: Rect)
     )
 
 
-def _stated_value(settings: dict[str, object], key: str) -> object:
-    """``settings[key]``, a list read by its first value."""
-    value = settings.get(key)
-    if isinstance(value, list):
-        value = value[0] if value else None
-    return value
-
-
 def _file_tower(settings: dict[str, object]) -> TowerSettings:
     """The tower an author's file asks for (#6735): every filament it lists (the plate's
     own are not read, so this is the largest), its ``prime_tower_rib_wall`` (on unless
-    it states ``"0"``) and ``prime_tower_width``, and its ``wipe_tower_no_sparse_layers``."""
+    it states ``"0"``) and ``prime_tower_width``, and its ``wipe_tower_no_sparse_layers``.
+
+    These are the file's own keys. A native slice loads the process preset with
+    ``--load-settings``, and the preset's keys replace the file's (#6757). So the tower
+    the slice builds can differ from the one judged here: the print's prime tower
+    choice and its process overrides set the keys the slicer uses."""
     colours = settings.get("filament_colour")
     filaments = len(colours) if isinstance(colours, list) and colours else 2
     try:
-        width = float(str(_stated_value(settings, "prime_tower_width") or PRIME_TOWER_SIDE))
+        width = float(str(stated_value(settings, "prime_tower_width") or PRIME_TOWER_SIDE))
     except ValueError:
         width = PRIME_TOWER_SIDE
     if not (math.isfinite(width) and width > 0):
@@ -599,8 +603,8 @@ def _file_tower(settings: dict[str, object]) -> TowerSettings:
         width = PRIME_TOWER_SIDE
     return TowerSettings(
         filaments=filaments,
-        no_sparse_layers=_stated_value(settings, "wipe_tower_no_sparse_layers") == "1",
-        rib_wall=_stated_value(settings, "prime_tower_rib_wall") != "0",
+        no_sparse_layers=stated_value(settings, "wipe_tower_no_sparse_layers") == "1",
+        rib_wall=stated_value(settings, "prime_tower_rib_wall") != "0",
         width=width,
     )
 

@@ -659,9 +659,10 @@ def _flag(value: bool) -> str:
     return "1" if value else "0"
 
 
-def _stated(settings: Mapping[str, Any], key: str) -> object:
+def stated_value(settings: Mapping[str, Any], key: str) -> object:
     """``settings[key]``, a list read by its first value, as Bambu Studio may write a
-    scalar either way."""
+    scalar either way. The send reads an author's tower with it too
+    (``send._file_tower``), so both read a key the same way (#6757)."""
     value = settings.get(key)
     if isinstance(value, list):
         value = value[0] if value else None
@@ -671,12 +672,12 @@ def _stated(settings: Mapping[str, Any], key: str) -> object:
 def _tower_off(settings: Mapping[str, Any]) -> bool:
     """Whether ``project_settings.config`` turns the prime tower off (#3770): the
     writer states it so for an Arrange that packed with no tower."""
-    return _stated(settings, "enable_prime_tower") == "0"
+    return stated_value(settings, "enable_prime_tower") == "0"
 
 
 def _stated_flag(settings: Mapping[str, Any], key: str) -> bool:
     """Whether ``project_settings.config`` turns the coBool ``key`` on (``"1"``)."""
-    return _stated(settings, key) == "1"
+    return stated_value(settings, key) == "1"
 
 
 def _set_towers(settings: dict[str, Any], towers: Sequence[tuple[float, float] | None]) -> None:
@@ -2483,12 +2484,15 @@ def stated_tower_off(payload: bytes) -> bool:
 
 
 def stated_no_sparse_layers(payload: bytes) -> bool:
-    """Whether ``payload`` is laid out by ScadBuddy and states
-    ``wipe_tower_no_sparse_layers`` on: an Arrange asked for it, so :func:`replate_3mf`
-    keeps the slicer's keep-out round the tower (#6735). Any other file is false."""
+    """Whether ``payload`` states ``wipe_tower_no_sparse_layers`` on, read as the send
+    reads it (#6757). A file laid out by ScadBuddy states it when an Arrange asked for
+    it, and :func:`replate_3mf` keeps the slicer's keep-out round the tower (#6735). An
+    author's file keeps it too: the send moves its tower out of the keep-out
+    (``send.towers_within_reach``). A file the send prints as it is (``as_is``) is
+    false."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            if _layout(archive) != "scadbuddy":
+            if _layout(archive) == "as_is":
                 return False
             settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
     except (KeyError, ValueError, zipfile.BadZipFile):
