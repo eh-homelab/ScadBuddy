@@ -1503,6 +1503,7 @@ export const handlers = [
       invalid: 0,
       catalog_failed: false,
       catalog_skipped: 0,
+      names_skipped: 0,
       created_ids: [],
       linked_ids: [],
       updated_ids: [],
