@@ -656,14 +656,12 @@ def _one(
                 _write_seen(conn, run, spool_id, bb, taken)
                 return "archived", spool_id, False
             taken.add("archived_at")
-        changed = _update(
-            conn, store, bb, spool_id, link["bb_updated_at"], now, actor, pulls, skipped, taken
-        )
+        changed = _update(conn, run, bb, spool_id, link["bb_updated_at"], skipped, taken)
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
         booked = _book(conn, spool_id, bb, actor, pulls.weights)
         presets = pulls.presets and _bb_presets(conn, spool_id, bb, actor)
-        k_values = pulls.presets and _bb_k_values(conn, spool_id, bb, actor)
+        k_values = pulls.presets and _bb_k_values(conn, run, spool_id, bb)
         moved = pulls.locations and _follow_location(conn, run, spool_id, bb, taken)
         archived = (
             not link["archived"]
@@ -690,7 +688,7 @@ def _one(
         _book(conn, held_id, bb, actor, pulls.weights)
         if pulls.presets:
             _bb_presets(conn, held_id, bb, actor)
-            _bb_k_values(conn, held_id, bb, actor)
+            _bb_k_values(conn, run, held_id, bb)
         _write_seen(conn, run, held_id, bb, set())
         return "linked", held_id, typeless
     linked_holder = _linked_holder(conn, after)
@@ -727,9 +725,9 @@ def _one(
     _book(conn, made, bb, actor, pulls.weights)
     if pulls.presets:
         _bb_presets(conn, made, bb, actor)
-        _bb_k_values(conn, made, bb, actor)
+        _bb_k_values(conn, run, made, bb)
     if pulls.locations:
-        _follow_location(conn, run, made, bb, set())
+        _follow_location(conn, run, made, bb, set(), new=True)
     _write_seen(conn, run, made, bb, set())
     return "created", made, typeless
 
@@ -1128,13 +1126,10 @@ def _bind(
 
 def _update(
     conn: Conn,
-    store: Filament,
+    run: _Run,
     bb: BbSpool,
     spool_id: UUID,
     pulled_at: datetime | None,
-    now: datetime,
-    actor: str,
-    pulls: Pulls,
     skipped: list[str] | None = None,
     taken: set[str] | None = None,
 ) -> bool:
@@ -1150,6 +1145,7 @@ def _update(
     the link's ``bb_seen`` (or absent from it): the echo holds Bambuddy's whole answer,
     which hides a person's edit of a field the push did not send (R-T5-5). Nothing is
     booked when nothing was taken, so the echo stays the last reading."""
+    store, now, actor, pulls = run.store, run.now, run.actor, run.pulls
     unmoved = bb.updated_at is not None and pulled_at is not None and bb.updated_at <= pulled_at
     # A row BB did not move is read again: its event takes no ref, which the same stamp
     # would otherwise share with the one it replaces (`ledger.record` drops a repeat).
@@ -1253,10 +1249,8 @@ def _update(
         for f in moved
         if pulls.of_field(f) and not _sb_newer(conn, spool_id, _SEEN_NAMES[f], bb_at)
     }
-    material = spool.effective.material_id
-    if "material" in wanted:
-        material = _resolve(conn, "filament_materials", after["material"]) or material
-    values = _values(conn, after, wanted, material=material, skipped=skipped)
+    # `_values` resolves a BB material once, and scopes the subtype by it.
+    values = _values(conn, after, wanted, material=spool.effective.material_id, skipped=skipped)
     current = spool.effective.model_dump() | {"weight_locked": spool.weight_locked}
     changes = {c: [current.get(c), v] for c, v in values.items() if current.get(c) != v}
     if changes.get("weight_locked") == [True, False] and not _lock_from_bb(conn, spool_id):
@@ -1435,7 +1429,10 @@ def _sb_newer(conn: Conn, spool_id: UUID, field: str, bb_at: datetime) -> bool:
 def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[str]) -> None:
     """R-T4-28 (decision 75): merge ``seen_row(bb)`` into the link's ``bb_seen``, at
     ``run.now``. A field goes in when the pull took it (``taken``) or Bambuddy's value is
-    SB's compare value; any other keeps its old seen value, or stays out when unseen."""
+    SB's compare value; any other keeps its old seen value, or stays out when unseen.
+    R-T9-3 and R-T9-5 make two exceptions: a link with no seen location (under
+    ``pulls.locations``) or no seen archive state (under ``pulls.spools``) takes
+    Bambuddy's value as seen, so only a later Bambuddy change moves or archives it."""
     from scadbuddy.filament import bb_sync_plan as plan
 
     seen = seen_row(bb)
@@ -1451,10 +1448,16 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
         for n, v in seen.items()
         if n in taken or (n in sb and plan.bb_form(n, seen, k_rows) == sb[n])
     }
+    seeds = {
+        n: seen[n]
+        for n, on in (("location_id", run.pulls.locations), ("archived_at", run.pulls.spools))
+        if on
+    }
+    # The seeds go first, so a seen value the link holds already wins over them.
     conn.execute(
-        "UPDATE filament_bb_links SET bb_seen = coalesce(bb_seen, '{}'::jsonb) || %s,"
+        "UPDATE filament_bb_links SET bb_seen = %s || coalesce(bb_seen, '{}'::jsonb) || %s,"
         " bb_seen_at = %s WHERE spool_id = %s",
-        (Jsonb(agree), run.now, spool_id),
+        (Jsonb(seeds), Jsonb(agree), run.now, spool_id),
     )
 
 
@@ -1468,16 +1471,14 @@ def _link_seen(conn: Conn, spool_id: UUID) -> dict[str, Any]:
 def _archive_state(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, *, archived: bool) -> bool:
     """Take BB's archive state into the linked SB spool (``archived``: whether it is
     archived now); True when it changed. Only when BB's state moved off what SB last saw
-    (``bb_seen``; with none seen only an archive, never a restore) and the spool's newest
-    ``archived`` or ``restored`` event is not after BB's change (Decision 8)."""
+    (``bb_seen``) and the spool's newest
+    ``archived`` or ``restored`` event is not after BB's change (Decision 8). With no seen
+    state it changes nothing: `_write_seen` seeds it (R-T9-5)."""
     bb_archived = bb.archived_at is not None
     if bb_archived == archived:
         return False
     seen = _link_seen(conn, spool_id)
-    if "archived_at" in seen:
-        if (seen["archived_at"] is not None) == bb_archived:
-            return False
-    elif not bb_archived:
+    if "archived_at" not in seen or (seen["archived_at"] is not None) == bb_archived:
         return False
     times = [t for t in (bb.updated_at, bb.archived_at) if t is not None]
     if _sb_newer(conn, spool_id, "archived_at", max(times) if times else run.now):
@@ -1486,13 +1487,17 @@ def _archive_state(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, *, archiv
     return True
 
 
-def _follow_location(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[str]) -> bool:
+def _follow_location(
+    conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[str], *, new: bool = False
+) -> bool:
     """Move a linked spool to the SB place BB's ``location_id`` is (none: out of every
     place), as Bambuddy's move (`LocationStore.move_on`); True when it moved. Only when
     BB's value moved off what SB last saw, the spool's newest ``moved`` event is not after
     BB's ``updated_at`` (Decision 8), the place is mapped, and the spool is in no
     printer's place (F18: an AMS unit, a tray, the external spool place, a plain printer
-    place)."""
+    place). With no seen location it never moves: `_write_seen` seeds it (R-T9-3). A
+    spool the pull just made (``new``) has none yet, and is placed: a creation, not a
+    move."""
     row = conn.execute(
         "SELECT s.location_id, l.printer_id FROM filament_spools s"
         " LEFT JOIN filament_locations l ON l.id = s.location_id WHERE s.id = %s",
@@ -1512,9 +1517,10 @@ def _follow_location(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: 
         target = found["id"]
     if target == row["location_id"]:
         return False
-    seen = _link_seen(conn, spool_id)
-    if "location_id" in seen and seen["location_id"] == bb.location_id:
-        return False
+    if not new:
+        seen = _link_seen(conn, spool_id)
+        if "location_id" not in seen or seen["location_id"] == bb.location_id:
+            return False
     if _sb_newer(conn, spool_id, "location_id", bb.updated_at or run.now):
         return False
     LocationStore.move_on(conn, spool_id, target, actor=run.actor)
@@ -1527,7 +1533,7 @@ def _k4(value: Any) -> float:
     return round(float(value), 4)
 
 
-def _bb_k_values(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
+def _bb_k_values(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool) -> bool:
     """BB's K-profiles as the spool's own K values, for the printers an SB printer links
     (``bambuddy_printer_id``), by `_bb_presets`' rule: nothing moves unless BB's list
     changed since the link's ``bb_k_profiles`` (which then takes BB's list); a key changes
@@ -1629,7 +1635,7 @@ def _bb_k_values(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
         conn,
         spool_id,
         "synced_from_bb",
-        actor=actor,
+        actor=run.actor,
         data={"bb_spool_id": bb.id, "changes": {"k_values": [before, after]}},
     )
     return True

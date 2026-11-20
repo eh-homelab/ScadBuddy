@@ -1192,9 +1192,8 @@ class _Planner:
         desired = self.desired(sb_id)
         if desired is None:
             return
-        fields = [n for n in desired if n not in _LISTS and n != "archived_at"]
-        compare = {n: compare_form(n, desired[n]) for n in fields}
-        body = {n: body_value(n, desired[n]) for n in fields if n not in _NOT_ON_CREATE}
+        compare, body = _create_form(desired)
+        fields = list(compare)
         # R-T4-31: Bambuddy starts a new spool with an empty preset list.
         made = (
             {"filament_presets": field_hash(compare_form("filament_presets", []))}
@@ -1308,13 +1307,20 @@ class _Planner:
         return writes
 
 
-def claim_form(desired: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
-    """An unlinked spool's create body and SB's field hashes now, from its desired values
-    with no `Pending` left: what `_Planner.new_spool` sends and compares. The pull (Task 9)
-    uses them to find the BB spool an open intent can claim (`claims`)."""
+def _create_form(desired: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A new spool's compare values and create body from its desired values: what
+    `_Planner.new_spool` compares and sends, and so what `claim_form` gives the pull."""
     fields = [n for n in desired if n not in _LISTS and n != "archived_at"]
     compare = {n: compare_form(n, desired[n]) for n in fields}
     body = {n: body_value(n, desired[n]) for n in fields if n not in _NOT_ON_CREATE}
+    return compare, body
+
+
+def claim_form(desired: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """An unlinked spool's create body and SB's field hashes now, from its desired values
+    with no `Pending` left: what `_Planner.new_spool` sends and compares (`_create_form`).
+    The pull (Task 9) uses them to find the BB spool an open intent can claim (`claims`)."""
+    compare, body = _create_form(desired)
     return body, {n: field_hash(v) for n, v in compare.items()}
 
 

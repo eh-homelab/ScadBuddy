@@ -17,11 +17,19 @@ from scadbuddy.bambuddy.models import BbLocation, BbSupplier
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament.bambuddy_pull import Pulls, pull, read_and_pull
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
+from scadbuddy.filament.component import Filament
 from scadbuddy.filament.models import SpoolKValueCreate
 from scadbuddy.filament.purchasing_models import SupplierCreate
 from scadbuddy.library.settings_store import StoredSettings
 from tests.conftest import PgPool
-from tests.filament.test_bambuddy_pull import BB, NOW, _filament, bb
+from tests.filament.test_bambuddy_pull import (
+    BB,
+    NOW,
+    _filament,
+    _forget_seen,
+    _link_seen,
+    bb,
+)
 from tests.filament.test_bb_sync_plan import _kind, _place, _plan, _printer, _put, _snap
 
 pytestmark = pytest.mark.requires_postgres
@@ -218,6 +226,90 @@ def test_a_move_in_sb_after_bbs_is_kept(pg_pool: PgPool) -> None:
     pull(f, [bb(location_id=5, updated_at=_bb_time(-1))], now=NOW, pulls=ROWS, locations=garage)
     spool = f.spools.get(made)
     assert spool is not None and spool.location_id == shelf
+
+
+def test_a_spool_the_pull_makes_takes_bbs_place(pg_pool: PgPool) -> None:
+    """A spool the pull makes is placed where Bambuddy has it: a creation, not a move of
+    an SB spool, so R-T9-3 does not hold it back."""
+    f = _filament(pg_pool)
+    garage = _locations([{"id": 5, "name": "Garage"}])
+    report = pull(f, [bb(location_id=5)], now=NOW, pulls=ROWS, locations=garage)
+    place = _row(pg_pool, "filament_locations", "bb_location_id", 5)
+    (made,) = report.created_ids
+    spool = f.spools.get(made)
+    assert place is not None and spool is not None and spool.location_id == place["id"]
+    assert _link_seen(pg_pool, made)["location_id"] == 5
+
+
+def _unseen_place(pg_pool: PgPool, f: Filament) -> tuple[UUID, UUID]:
+    """A linked spool on an SB shelf whose link has no seen location (a legacy link)."""
+    shelf = _place(pg_pool, f, "Shelf A")
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    _put(pg_pool, made, shelf)
+    _forget_seen(pg_pool, made, "location_id")
+    return made, shelf
+
+
+def test_a_link_with_no_seen_location_is_not_moved_and_is_seeded(pg_pool: PgPool) -> None:
+    """R-T9-3: the first pull of a link with no seen location never moves the SB spool.
+    It seeds the seen location with Bambuddy's."""
+    f = _filament(pg_pool)
+    made, shelf = _unseen_place(pg_pool, f)
+    garage = _locations([{"id": 5, "name": "Garage"}])
+    moved = bb(location_id=5, updated_at=_bb_time(1))
+    report = pull(f, [moved], now=NOW, pulls=ROWS, locations=garage)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id == shelf
+    assert report.moved == 0
+    assert _link_seen(pg_pool, made)["location_id"] == 5
+
+
+def test_a_bb_move_after_the_seeded_place_moves_the_spool(pg_pool: PgPool) -> None:
+    """R-T9-3: once seeded, Bambuddy's next move is a real move off the seen place."""
+    f = _filament(pg_pool)
+    made, _ = _unseen_place(pg_pool, f)
+    places = _locations([{"id": 5, "name": "Garage"}, {"id": 6, "name": "Attic"}])
+    pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS, locations=places)
+    moved = bb(location_id=6, updated_at=_bb_time(2))
+    report = pull(f, [moved], now=NOW, pulls=ROWS, locations=places)
+    attic = _row(pg_pool, "filament_locations", "bb_location_id", 6)
+    spool = f.spools.get(made)
+    assert attic is not None and spool is not None and spool.location_id == attic["id"]
+    assert report.moved == 1
+
+
+def test_a_bb_cleared_location_takes_the_spool_out_of_a_shelf(pg_pool: PgPool) -> None:
+    """R-T9-4: Bambuddy clears a place SB saw, so the SB spool leaves its shelf."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    garage = _locations([{"id": 5, "name": "Garage"}])
+    pull(f, [bb(location_id=5, updated_at=_bb_time(-2))], now=NOW, pulls=ROWS, locations=garage)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id is not None
+    assert _link_seen(pg_pool, made)["location_id"] == 5
+    # After the pull's own move (its event is at the database's now).
+    cleared = bb(location_id=None, updated_at=_bb_time(1))
+    report = pull(f, [cleared], now=NOW, pulls=ROWS, locations=garage)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id is None
+    assert report.moved == 1
+    assert _link_seen(pg_pool, made)["location_id"] is None
+
+
+def test_a_bb_cleared_location_leaves_a_printer_place_alone(pg_pool: PgPool) -> None:
+    """R-T9-4: a place cleared in Bambuddy never takes the SB spool out of a tray."""
+    f = _filament(pg_pool)
+    printer = _printer(pg_pool, bb_id=1)
+    tray = _place(pg_pool, f, "AMS A1", printer=printer, ams=0, tray=1)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    garage = _locations([{"id": 5, "name": "Garage"}])
+    pull(f, [bb(location_id=5, updated_at=_bb_time(-2))], now=NOW, pulls=ROWS, locations=garage)
+    _put(pg_pool, made, tray)
+    cleared = bb(location_id=None, updated_at=_bb_time(1))
+    report = pull(f, [cleared], now=NOW, pulls=ROWS, locations=garage)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id == tray
+    assert report.moved == 0
 
 
 async def test_suppliers_and_locations_pull_while_spools_is_off(pg_pool: PgPool) -> None:

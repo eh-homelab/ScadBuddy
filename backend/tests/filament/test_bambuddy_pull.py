@@ -129,6 +129,25 @@ def _bb_events(f: Filament, spool: UUID) -> list[tuple[str, str | None, float | 
     return [(e.kind, e.source, e.grams_after) for e in f.spools.events(spool)]
 
 
+def _link_seen(pool: PgPool, spool: UUID) -> dict[str, Any]:
+    """The spool link's ``bb_seen``."""
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_seen FROM filament_bb_links WHERE spool_id = %s", (spool,)
+        ).fetchone()
+    assert row is not None
+    return dict(row["bb_seen"] or {})
+
+
+def _forget_seen(pool: PgPool, spool: UUID, field: str) -> None:
+    """Take ``field`` out of the spool link's ``bb_seen``, as a link seen before #6265."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_seen = bb_seen - %s WHERE spool_id = %s",
+            (field, spool),
+        )
+
+
 def test_a_new_bb_spool_becomes_an_sb_spool(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     kind = f.types.create(
@@ -1158,6 +1177,24 @@ def test_an_sb_archive_is_not_undone_by_a_bb_row_that_was_never_archived(
     pull(f, [bb(color_name="Blue", updated_at=_bb_time(1))], now=NOW)
     spool = f.spools.get(made)
     assert spool is not None and spool.archived_at is not None
+
+
+def test_a_link_with_no_seen_archive_state_is_not_archived_and_is_seeded(
+    pg_pool: PgPool,
+) -> None:
+    """R-T9-5: the first pull of a link with no seen archive state never archives or
+    restores the SB spool. It seeds the seen archive state with Bambuddy's, so the same
+    row pulled again changes nothing."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
+    _forget_seen(pg_pool, made, "archived_at")
+    archived = bb(archived_at=_bb_time(-1), updated_at=_bb_time(-1))
+    for _ in range(2):
+        pull(f, [archived], now=NOW)
+        spool = f.spools.get(made)
+        assert spool is not None and spool.archived_at is None
+        assert _link_seen(pg_pool, made)["archived_at"] is not None
+    assert "archived" not in [e.kind for e in f.spools.events(made)]
 
 
 async def test_an_unlinked_archived_bb_spool_is_made_archived_with_its_usage(

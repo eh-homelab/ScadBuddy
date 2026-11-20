@@ -1572,15 +1572,14 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     before the spool row was made could never reach it. Cost: none known; on the push the
     fallback stays.
 143. Task 9: a linked spool takes BB's archive state only when BB's state moved off
-    `bb_seen.archived_at`. With no seen archive state a BB archive is taken by the time
-    rule, and a BB restore is not: a BB row that is live and newer than an SB archive does
-    not show that Bambuddy restored it. BB's change time is the later of `updated_at` and
-    `archived_at`. The pull archives and restores through `update_on` (actor `bambuddy`,
-    the event at now). Tests: `test_a_bb_archive_archives_the_sb_spool`,
+    `bb_seen.archived_at`. With no seen archive state the pull takes none, neither an
+    archive nor a restore, and seeds it (decision 152): a BB row that is live and newer
+    than an SB archive does not show that Bambuddy restored it. BB's change time is the
+    later of `updated_at` and `archived_at`. The pull archives and restores through
+    `update_on` (actor `bambuddy`, the event at now). Tests:
+    `test_a_bb_archive_archives_the_sb_spool`,
     `test_an_sb_restore_after_the_bb_archive_wins`,
-    `test_an_sb_archive_is_not_undone_by_a_bb_row_that_was_never_archived`. Cost: a link
-    seen before Task 9 with an SB archive and a BB restore stays archived until Bambuddy
-    archives and restores again.
+    `test_an_sb_archive_is_not_undone_by_a_bb_row_that_was_never_archived`.
 144. Task 9: `Pulls` gains `suppliers` and `locations`, `False` by default as in
     `FilamentSync`, so `EVERY` (renamed in its comment to "the defaults") reads no new
     route. `read_and_pull` reads `GET /inventory/suppliers` only under `pulls.suppliers`
@@ -1610,6 +1609,30 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     value is SB's compare value; only `_update` names what it took. Cost: a catalog name SB
     keeps under another spelling (BB `DUAL-COLOR`, SB `Dual Color`) stays unseen on a new
     spool until a change of it.
+150. Task 9 (R-T9-3, controller ruling): the pull never moves a linked SB spool whose
+    link has no seen location in `bb_seen` (a link seen before Task 9, or one whose places
+    differed when the pull first wrote its seen copy). That pull only seeds
+    `bb_seen.location_id` with BB's value (`_write_seen`, under `pulls(locations)`), an
+    exception to R-T4-28's equality rule. A later BB move off the seen value is then a
+    real move, by the rule of decision 8. A spool the pull makes is placed in BB's
+    location: a creation, not a move. Tests:
+    `test_a_link_with_no_seen_location_is_not_moved_and_is_seeded`,
+    `test_a_bb_move_after_the_seeded_place_moves_the_spool`,
+    `test_a_spool_the_pull_makes_takes_bbs_place`. Why: the time rule alone moved every
+    linked spool that SB never moved to BB's place on the first pull with `locations` on.
+    Cost: a BB move made before that first pull is not taken.
+151. Task 9 (R-T9-4, controller ruling): when BB clears a spool's `location_id` (seen
+    non-null, now null), the SB spool leaves its place, but never a printer place (F18).
+    Tests: `test_a_bb_cleared_location_takes_the_spool_out_of_a_shelf`,
+    `test_a_bb_cleared_location_leaves_a_printer_place_alone`.
+152. Task 9 (R-T9-5, controller ruling): the pull never archives or restores a linked SB
+    spool whose link has no seen archive state in `bb_seen`. That pull only seeds
+    `bb_seen.archived_at` with BB's value (`_write_seen`, under `pulls(spools)`), as
+    decision 150 does for places. Test:
+    `test_a_link_with_no_seen_archive_state_is_not_archived_and_is_seeded`. Why: R-6707-3
+    kept those SB spools open on purpose; the time rule would archive them all on the
+    first pull. Cost: a link seen before Task 9 takes BB's archive or restore only after a
+    later change in Bambuddy.
 
 ## Self-review
 
