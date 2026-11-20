@@ -115,6 +115,16 @@ That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
 (`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`, with the arm64 digest and its REST
 API asset id `TEMPORAL_CLI_ASSET_ARM64`, the arm64 fallback's URL, #5706), in `ci.yml`'s
 two "Install the Temporal CLI" steps; move all three together.
+Tests marked `requires_chromium` (the 3DFP driver, `tests/profile_fetch/test_site.py`,
+#6625) drive Playwright's Chromium against the local replica in
+`tests/profile_fetch/site/`, never the real site. They skip without that Chromium
+(`uv run --frozen playwright install chromium`) and fail instead when
+`SCADBUDDY_TEST_CHROMIUM_REQUIRED=1`. One of them,
+`test_the_profile_keeps_no_login_after_a_login` (R-F12), drives headed Chromium, since
+headless saves no form data to find: it needs a `DISPLAY` (`xvfb-run -a`, as CI's
+`profile-fetch-image` job runs it) and skips without one unless that variable is set.
+Playwright is pinned exactly in the
+`profile-fetch` dependency group, which `dev` includes.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
@@ -224,6 +234,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
+  It keeps room for a prime tower on each plate with more than one colour, unless the body's
+  `prime_tower` (`bambuddy/prime_tower_choice.py` `PrimeTowerChoice`, print_output's) is
+  `enabled: false`: then it packs and writes no tower and states `enable_prime_tower` `"0"`
+  in the 3MF (#3770). The slicer's process preset replaces the file's own process keys, so
+  the print run sends that "0" as a process override when the print sets no tower of its
+  own (`print_run.plan_run`, `bambu3mf.stated_tower_off`, `prime_tower.file_tower_overrides`),
+  and `replate_3mf` keeps no room at send. A print that turns the tower on (its `prime_tower`
+  or its `process_overrides`) gets room for one instead (`replate_3mf` `tower_on`), or a
+  `PlateFitError` when it does not fit. Plate fit (`analyzers/builtin.py` SB4001) judges
+  the tower as the send does, by the file and `AnalysisRequest.prime_tower` (the run's
+  tower choice, `api/accepted_fixes.py` `analysis_request`). It does not model the tower's depth or the
+  "no sparse layers" keep-out.
   It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
   by-object plate fails "too close to others" (#6246). A template plate is one object with
   colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
@@ -595,8 +617,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `support_interface_filament` among them; the supports option passes only enable, type and
   build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
   `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
-  and scale, and its tower unless the target's extruders cannot reach it
-  (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  and scale, and its tower unless the target's extruders cannot reach it or it stands on
+  its plate's objects' box, #3770 (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
   slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
   draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
@@ -721,7 +743,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
   and the agent's `stop_print_run` and `confirm_plate_clear`.
 - `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
-  2026-11-14): `catalog.py` (configurable catalogs, no code enums), `types.py`
+  2026-11-14): `catalog.py` (configurable catalogs, no code enums; materials, subtypes,
+  brands, categories and effects keep names and aliases in `filament_<kind>_names`, one key
+  space per catalog, a subtype's per material, filled by a trigger and `set_aliases`; every
+  name lookup goes through `find_by_key` or `resolve_or_add`, the type match
+  `SpoolTypeStore.match` included, #6706), `types.py`
   (`effective()`: spool → type → subtype → material, the one resolver; a type links its
   price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
   (instances and tag bindings; every writer locks the tag before the spool; archive closes
@@ -734,12 +760,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
   read-only toward Bambuddy: it writes nothing there, tags go through `rfid_push.py`; `filament_sync.weights` gates the weights it pulls, #6268; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); `scheduled_pull` skips when the setting `filament_sync.spools` is
-  `off`, read per run, #6262 Task 13), `csv_import.py` (the spools CSV import, #6262 Task 15:
+  `off`, read per run, #6262 Task 13; after a pull it runs `reconcile_trays`, #6713), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
   takes no spool number; a write is one transaction, refused whole when a line is an error,
   and its `Idempotency-Key` reply is kept in `crud_requests` under caller `filament`; a
   `location` cell is a `move_on`), `inventory.py` (`read_sb_spools`: which SB spool is in
-  each AMS tray, by tag or by the spool placed there with the tray's fingerprint, and the shelf), `sensors.py` (location sensors, #6268, plan `docs/superpowers/plans/2026-11-18-filament-weights-sensors.md`: `SensorStore`; `apply_ha_states_on` reads Home Assistant's states, which the pull fetches through Bambuddy's `/location-ha-sensors/entities` once per run; `capture_ams_on` runs in a savepoint of `printers/reports.py` `advance_in` and makes an AMS unit's place and its two sensors; a reading is stored when the value changed or after 15 minutes; `repoint_printer_sensors` serves the printer merge; an alert is shown, not sent, #6646), `dry_hours.py` (hours outside dry storage from `moved` events since the last `dried`, and `needs_drying` against the material's `max_hours_outside_dry`), `print_uses.py` (a LAN print's grams as
+  each AMS tray, by tag or by the spool placed there with the tray's fingerprint, and the shelf;
+  `reconcile_trays`, #6713: an untagged tray whose placed spool disagrees with the fresh
+  report (`tray_agreement`: `material_key` and `CLOSE_COLOUR`, alpha ignored) takes the linked,
+  unarchived spool Bambuddy assigns it when that one agrees, both moves by
+  `system:tray-reconcile` with `data.reason`; when neither agrees nothing moves and `view`'s
+  tray carries `mismatch`), `sensors.py` (location sensors, #6268, plan `docs/superpowers/plans/2026-11-18-filament-weights-sensors.md`: `SensorStore`; `apply_ha_states_on` reads Home Assistant's states, which the pull fetches through Bambuddy's `/location-ha-sensors/entities` once per run; `capture_ams_on` runs in a savepoint of `printers/reports.py` `advance_in` and makes an AMS unit's place and its two sensors; a reading is stored when the value changed or after 15 minutes; `repoint_printer_sensors` serves the printer merge; an alert is shown, not sent, #6646), `dry_hours.py` (hours outside dry storage from `moved` events since the last `dried`, and `needs_drying` against the material's `max_hours_outside_dry`), `print_uses.py` (a LAN print's grams as
   ledger events), `prints.py` (a print's open plates and their end: `plate_ended` books the end as a ledger event, #6263), `capture.py` (`reconcile`: a printer report's tray changes become `loaded`, `unloaded`, `moved` and `ams_reading` events, of which `reconcile` books `loaded` and `unloaded`, and `LocationStore.move_on` and `FilamentInventory.place_on` add `moved`, each tray place named by `bambuddy/trays.py` `place_label`; the report write runs it in a savepoint; `sync_ams_weights` books the AMS's `remain` as forced `ams_reading` events, #6268), `bambuddy_usage.py` (Bambuddy's usage rows booked as `bb_usage` events, paired with SB's own plates, on the same spool by `ledger.basis` and, when Bambuddy booked the plate on another spool than SB's estimate, by a covering `print_ended` on the estimate's spool (`_cover`, #6598, in the savepoint of the row's own booking, `data.covered_by` the BB event); `read_and_pull` runs it, so `filament_sync.spools` `off` stops it too). `ntag.py` (NTAG scan, write, confirm and cancel through SpoolBuddy, #6264: `scan` reads `BambuddyClient.next_tag_scan`, a listen on Bambuddy's `WS /api/v1/ws` that joins with `ws_token()`'s token only while Bambuddy's auth is on; `write` queues `queue_tag_write` for the linked BB spool, records the record's `tag_uid` in `filament_ntag_writes` and changes no binding; `confirm` binds the tag the BB record then holds as `ntag_opentag`, only when a write is queued, its `data_origin` is `opentag3d` and its UID differs from that recorded one; the routes `POST /filament/rfid/scan` and `/filament/spools/{id}/ntag/{write,confirm,cancel}` map `NtagNoBambuddySpoolError` and `NtagOverrideOpenError` to a 409 with `code`). `rfid_push.py` (#6264: SB first, Bambuddy second. A binding change queues the tag in `filament_bb_tag_pending` (`enqueue_tag`); `push_pending` drains it only with `filament_sync.tags` `sb_to_bb`, under the try-lock `scadbuddy:filament:rfid_push`, and recomputes SB's wish against Bambuddy's state, never replaying a payload; `error_label` stores `internal` for a non-`ApiError`), `rfid_mode.py` (override mode in the one row `filament_rfid_state`: `reconcile_mode` turns Bambuddy's `auto_add_unknown_rfid` off and restores the saved value; its SQL guards are conditional, and the session advisory lock `scadbuddy:filament:rfid_mode` serialises it, a PUT waiting 5 s then answering `busy`; with no Bambuddy the status is pending, `no Bambuddy`; `blocked` is the mapped `ADMIN_SETTINGS` refusal), `rfid_slots.py` (an override tag's AMS slot configured through Bambuddy's slot-configure route, state-based, under the lock `scadbuddy:filament:rfid_slots`; temperatures fall back to the tray's own, none at all counts `no_temps`; a holder that no longer qualifies gets no write and its `filament_override_slots` row is deleted; a warning after 3 identical reconfigures). The refresh Schedule's step `filament_rfid_reconcile` (`spools/activities.py`) runs the mode, the push and the slots, each failing alone. `read-only toward Bambuddy` above holds for the pull only; `FilamentSync.tags` (`off` by default) is what lets a binding reach Bambuddy; the override mode (`rfid_mode.py`) and the slot step (`rfid_slots.py`, a `configure` call) write Bambuddy whatever `tags` says, and so do the NTAG write and cancel routes. The activity has one `start_to_close_timeout` (6 min) for all three steps, and `drain_tags` takes the rows with the fewest attempts first, so a row that always fails cannot starve the rest. `SpoolRefresh` also runs a capture backstop activity (`spools/activities.py` `capture_backstop_activity`: reconciles SB's own trays from each printer's fresh stored report, not gated by `filament_sync.spools`). Colour is `#RRGGBBAA` (`colour.py`). Routes: `api/filament.py`; the ledger
   route `GET /filament/events` takes `since` (included) and `until` (excluded), so two ranges
   tile, with `spool_id`, `kind`, `source` and a cursor. The price book (the `filaments` rows
@@ -770,12 +801,35 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `colour_codes.py` (`ColourCodes`, Bambu Studio's `filaments_color_codes.json` read from
   `slicer_profiles_dir`/`BBL/filament/`, cached per process; `GET /filament/bambu-colour-codes?code=`
   answers 404 for an unknown code and 503 for a missing table), `InvoiceStore.candidates` (`GET
-  /filament/invoices/{id}/candidates`: per line, the open spools whose own `cost_per_kg` is NULL and
-  which have no invoice line, and the costed ones, matched by effective material and RGBA), and
+  /filament/invoices/{id}/candidates`: per line, the spools (archived ones too, marked `archived`)
+  whose own `cost_per_kg` is NULL and which have no invoice line, and the costed ones, matched by
+  effective material and RGBA; confirm may fill an archived spool, which takes its cost and invoice
+  line only and stays archived, #6707), and
   `InvoicePatch.import_run_id` with the conditional `if_import_run_id` (one UPDATE under the invoice's
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration
   `20261118T0811Z_session_blobs_pdf.sql`) and store it (`crud_agent_blobs.py` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
+- `backend/scadbuddy/profile_fetch/` — the 3DFP profile-fetch worker (#6625, plan
+  `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
+  scadbuddy.profile_fetch` polls the queue `profile-fetch`, serves `/healthz` and `/metrics` on
+  9090, and holds no database secret (it refuses `FORBIDDEN_ENV`, and a `DEBUG` that turns on a
+  Playwright channel; `settings.py`) and no Postgres code (`psycopg` is not in `sys.modules`).
+  `site.py` drives 3dfilamentprofiles.com with a headed Chromium (Playwright for Python, under
+  Xvfb) and maps each failure to a `SiteError` kind (`login_failed`, only when the site sends the browser back to
+  `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, an export over 512 KiB,
+  which the worker refuses from the text's length before it reads the text (`_read_export`,
+  #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
+  `failed` activities and the `SiteHolder` that keeps one signed-in browser; `workflow.py` is
+  the `ProfileFetch` workflow; `wire.py` is the bodies shared with the CRUD routes; `worker.py`
+  sets `RLIMIT_CORE` to 0 and builds `ThreeDfpSite`; `site.py`'s `browser_env` is the allowlisted environment that
+  Chromium launches with (no login, no token path). The API side is `filament/profile_fetch.py`
+  (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
+  `fail_unserved`; the module functions `start_fetch`, `store_file`, `import_run`, `mark_failed`
+  and `end_unserved`; the run is the table `filament_profile_fetches`, its files
+  are `blob_refs` held by kind `profile_fetch`) and `api/crud_profile_fetch.py` (`crud_router(
+  "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
+  and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
+  (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -1647,7 +1701,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   worker's run makes or merges its printer row through `POST
   /api/v1/internal/crud/print/printers/ensure-bambuddy` (`crud/print.py`
   `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29). Routes
-  `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). A slice quote
+  `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). Actuals
+  (#5774, spec `2026-11-17-machine-rate-actuals-design.md`): a linked printer with a
+  profile reads each Bambuddy task's log (`GET /maintenance/items/{id}/history`, the seam's
+  `maintenance_history`, `Read Status`) after the view's live task read, on `POST
+  …/machine-rate/import` and in the sweep `housekeeping_import_maintenance` (the sweeps'
+  Schedule only, behind its patch); each row is kept once as an imported task event
+  (`MachineRateStore.import_events`, source `bambuddy:<history id>`, which a ScadBuddy
+  event may not take), and a read that fails keeps the stored events and
+  `printer_maintenance_reads.read_at` (`events_read_at`). A quote never reads the log. A slice quote
   is priced at the rate of the printer it sliced for (`QuoteRun.machine_rate`,
   `MachineRates.for_quote`: `printer`, else the printer linked to `printer_id`, else the
   default printer) and records `printer` and `machine_rate_breakdown`. A quote's
@@ -1942,7 +2004,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sends it to the shop's check. `Lifecycle.submit_order(firm=...)` records a `storefront`
   quote (`QuoteSource`, no sliced file, so a print slices again) of each firm line, with
   the slice's plates (`storefront_slice_prices.plates`, else one plate of the row's
-  `print_seconds` and `grams`, else none, so job cost reads unknown, never zero). When
+  `print_seconds` and `grams`, else none, so job cost reads unknown, never zero) and the
+  machine rate's breakdown the slice was priced at (`storefront_slice_prices.machine_rate_breakdown`,
+  #5774; never the live rate read again; none on a row stored before it). When
   every open item has one it skips the deposit policy, accepts the items and the order
   as the customer (`_accepted_by_the_last`), and the answer's `pay_now` is true; else
   the deposit policy runs as before. The submit runs under `Payments.run_closing_linked`, so the balance

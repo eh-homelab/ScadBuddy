@@ -7,6 +7,8 @@ import { parseRgba } from '../../../lib/rgba'
 import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
+import { mockSettings } from '../../handlers'
+import { printersState } from '../printers'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 
 type S = components['schemas']
@@ -24,12 +26,61 @@ type S = components['schemas']
 
 const BASE = '/api/v1/filament'
 
+/** #6714 — the slicer profiles the mock fills a type from, by preset id. */
+const PROFILES: Record<string, { name: string; values: Partial<Record<FillField, number | string>>; cost_hint: string }> = {
+  GFA00: { name: 'Bambu PLA Basic @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 190, nozzle_temp_max: 230, bed_temp_min: 35, bed_temp_max: 65, density_g_cm3: '1.26', diameter_mm: '1.75' }, cost_hint: '24.99' },
+  GFG02: { name: 'Bambu PETG HF @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 230, nozzle_temp_max: 260, bed_temp_min: 70, bed_temp_max: 80, density_g_cm3: '1.25', diameter_mm: '1.75' }, cost_hint: '19.99' },
+}
+
+const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+type FillField = (typeof FILL_FIELDS)[number]
+
+/** The type's H2C 0.4 mm preset, else any 0.4 mm one, else the first, and its profile (R-6714-1). */
+function profileOf(type: S['SpoolType']) {
+  const presets = state.typePresets.filter((one) => one.type_id === type.id)
+  const at04 = presets.filter((one) => Number(one.nozzle_diameter) === 0.4)
+  const preset = at04.find((one) => one.printer_model.toUpperCase() === 'H2C') ?? at04[0] ?? presets[0]
+  if (!preset) return null
+  const profile = PROFILES[preset.slicer_filament]
+  return { preset, values: profile?.values ?? null, profile }
+}
+
+/** `TypeFiller.fill` (and `apply`) over the mock's types: empty fields only, a refresh compares. */
+function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Partial<Record<FillField, number | string>>; kValues?: boolean }): S['TypeFill'] {
+  const result: S['TypeFill'] = { type_id: type.id, code: type.code, filled: {}, previous: {}, skipped: {}, k_values: [], written: false }
+  const found = profileOf(type)
+  if (!found) return { ...result, reason: 'the type has no slicer preset' }
+  if (!found.profile) return { ...result, reason: `Bambu Studio 02.08.02.61 has no filament preset ${found.preset.slicer_filament}` }
+  result.source = { preset_id: found.preset.slicer_filament, name: found.profile.name, origin: 'system', printer_model: found.preset.printer_model, nozzle_diameter: found.preset.nozzle_diameter }
+  result.cost_hint = found.profile.cost_hint
+  const at = state.types.findIndex((one) => one.id === type.id)
+  const current = type as unknown as Record<FillField, number | string | null>
+  if (options.apply) {
+    for (const field of Object.keys(options.apply)) result.previous[field] = current[field as FillField]
+    state.types[at] = { ...type, ...options.apply } as S['SpoolType']
+    return { ...result, filled: options.apply, written: Object.keys(options.apply).length > 0 }
+  }
+  for (const [field, value] of Object.entries(found.profile.values)) {
+    const now = current[field as FillField]
+    if (options.refresh ? String(now) !== String(value) : now === null) {
+      result.filled[field] = value
+      if (options.refresh) result.previous[field] = now
+    }
+  }
+  if (!options.refresh && Object.keys(result.filled).length > 0) {
+    state.types[at] = { ...type, ...result.filled } as S['SpoolType']
+    result.written = true
+  }
+  return result
+}
+
 let state: Seed = seed()
 
 export function reset() {
   state = seed()
   imports.clear()
   invoicedLine.clear()
+  fetches.clear()
 }
 
 /** The invoice line each spool `addInvoicedSpools` made was bought on (#6266). */
@@ -43,9 +94,9 @@ const now = () => new Date().toISOString()
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
 
 /** A refusal as `core/problems.py` `problem_response` writes it: every error here. */
-const problem = (status: keyof typeof TITLES, detail: string) =>
+const problem = (status: keyof typeof TITLES, detail: string, extensions: object = {}) =>
   HttpResponse.json(
-    { type: 'about:blank', title: TITLES[status], status, detail },
+    { type: 'about:blank', title: TITLES[status], status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 
@@ -56,10 +107,11 @@ const problem = (status: keyof typeof TITLES, detail: string) =>
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
-  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'note'],
+  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
+  proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived'],
   tag: ['tag_uid', 'tray_uuid', 'kind', 'override'],
   event: ['kind', 'source', 'at', 'grams', 'temp_c', 'hours', 'note'],
@@ -118,6 +170,8 @@ function view(row: SpoolRow): FilamentSpool {
   const pct = effective.low_stock_pct ?? LOW_STOCK_PCT
   return {
     ...row,
+    // The invoice line it was bought on (#6700): a line may fill a spool with none.
+    invoice_line_id: invoicedLine.get(row.id) ?? invoiceRefOf(row.id)?.line_id ?? null,
     effective,
     overridden,
     names: {
@@ -304,6 +358,34 @@ export function inventoryRows(includeArchived = false): FilamentInventorySpool[]
   }))
 }
 
+/**
+ * `GET /filament/inventory`'s trays: the H2C's, one per placed spool. Slot 4's spool (#8,
+ * clear PETG) does not match what the tray reports, grey PETG, so it carries a
+ * `mismatch` (#6713).
+ */
+function inventoryTrays(): S['PrinterTrays'][] {
+  const trays = listed(false).flatMap((row): S['InventoryTray'][] => {
+    const place = trayOf(row)
+    if (!place) return []
+    const spool = view(row)
+    const odd = place.ams_id === 0 && place.tray_id === 3
+    return [
+      {
+        ams_id: place.ams_id,
+        tray_id: place.tray_id,
+        label: `AMS-A slot ${place.tray_id + 1}`,
+        material: odd ? 'PETG' : (spool.names?.material ?? null),
+        rgba: odd ? '#A7AEB2FF' : (spool.effective?.rgba ?? null),
+        spool_id: row.id,
+        spool_number: row.number,
+        found_by: 'link',
+        mismatch: odd ? { reported_type: 'PETG', reported_rgba: '#A7AEB2FF' } : null,
+      },
+    ]
+  })
+  return trays.length ? [{ printer_id: H2C.printer_id, printer_name: H2C.printer_name, trays }] : []
+}
+
 function summary(): S['InventorySummary'] {
   const rows = listed(false).map(view)
   const grams = (spool: FilamentSpool) => spool.grams_left ?? 0
@@ -358,6 +440,7 @@ function readingsOf(sensor: S['Sensor']): S['SensorReading'][] {
 }
 
 const REFUSED = {
+  tdfpId: 'tdfp_id: Input should be a whole number greater than 0 and less than 2147483648',
   catalogExists: 'a row of this catalog already has that name',
   catalogRef: 'a row this one points at does not exist',
   typeless: 'a spool needs a type_id or a material_id',
@@ -365,7 +448,7 @@ const REFUSED = {
   tagUnnamed: 'the tag has no tag_uid or tray_uuid once cleaned',
   tagKeysClash: 'the tag_uid and the tray_uuid name two different tags',
   rowsDuplicate: 'two rows name the same printer and nozzle',
-  locationExists: 'a place with that name or that tray already exists',
+  locationExists: 'a place with that name, that tray or that AMS unit already exists',
   locationCycle: 'a place cannot be its own parent or sit under one of its own',
   moveTarget: "the place to move to does not exist, is archived or is an AMS unit's place",
   badCursor: 'the cursor is not one this ledger gave',
@@ -428,9 +511,45 @@ function cleared(body: Record<string, unknown>, fields: readonly string[]): stri
 const CATALOG_FIELDS = Object.fromEntries(
   Object.entries(seed().catalogs).map(([kind, rows]) => [
     kind,
-    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id'].includes(field))),
+    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases'].includes(field))),
   ]),
 ) as Record<keyof Catalogs, Set<string>>
+
+/**
+ * #6706 — the catalogs with aliases (`filament/catalog.py` `NameTable`) and the noun a
+ * clash names (`<noun>_id`, `<noun>_name`). Their names and aliases share one key space
+ * per catalog (a subtype's within its material), archived rows included.
+ */
+const ALIASED = { materials: 'material', subtypes: 'subtype', brands: 'brand', categories: 'category', effects: 'effect' } as const
+type Aliased = keyof typeof ALIASED
+const isAliased = (kind: string): kind is Aliased => kind in ALIASED
+type AliasedRow = { id: string; name: string; aliases: string[]; material_id?: string | null }
+
+/** `catalog_key`: `+` read as `PLUS` (R-6706-17), then the letters and digits, upper case. */
+export const catalogKey = (name: string) =>
+  name
+    .replace(/\+/g, 'PLUS')
+    .replace(/[^\p{L}\p{N}]/gu, '')
+    .toUpperCase()
+
+/** The row of `kind` that holds `name`'s key in `scope` (a subtype's material), but `self`'s own names. */
+function keyHolder(kind: Aliased, name: string, scope: string | null, self?: string, skipSelf = true): AliasedRow | undefined {
+  const key = catalogKey(name)
+  return (state.catalogs[kind] as AliasedRow[]).find(
+    (row) =>
+      !(skipSelf && row.id === self) &&
+      (kind !== 'subtypes' || (row.material_id ?? null) === scope) &&
+      [row.name, ...row.aliases].some((one) => catalogKey(one) === key),
+  )
+}
+
+function keyClash(kind: Aliased, holder: AliasedRow, name: string): Response {
+  const noun = ALIASED[kind]
+  return problem(409, `the ${noun} '${holder.name}' already has a name or alias that matches '${name}'`, {
+    [`${noun}_id`]: holder.id,
+    [`${noun}_name`]: holder.name,
+  })
+}
 
 const sameName = (a: string, b: unknown) => typeof b === 'string' && a.trim().toUpperCase() === b.trim().toUpperCase()
 
@@ -443,6 +562,12 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
   if (badRef(values, CATALOG_REFS[kind] ?? {})) return problem(422, REFUSED.catalogRef)
   const temps = kind === 'materials' || kind === 'subtypes' ? badTemps(values) : null
   if (temps) return problem(422, temps)
+  if (isAliased(kind)) {
+    // A name takes its key; an archived row keeps its keys (#6706).
+    const holder = typeof values.name === 'string' ? keyHolder(kind, values.name, (values.material_id as string | null | undefined) ?? null, self) : undefined
+    // A rename to one of its own aliases takes that alias's key.
+    return holder ? keyClash(kind, holder, values.name as string) : null
+  }
   // The name indexes are `WHERE archived_at IS NULL`: an archived row holds no name, and
   // restoring one whose name a live row took since is refused.
   if (values.archived_at) return null
@@ -450,7 +575,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
     id: string
     name: string
     archived_at: string | null
-    material_id?: string | null
     manufacturer?: string | null
   }[]
   const taken = rows.some(
@@ -458,8 +582,6 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
       row.id !== self &&
       !row.archived_at &&
       sameName(row.name, values.name) &&
-      // `filament_subtypes_name`: a subtype's name is unique within its material.
-      (kind !== 'subtypes' || (row.material_id ?? null) === (values.material_id ?? null)) &&
       // `filament_colours_name`: a colour's name is unique per manufacturer (none is one).
       (kind !== 'colours' || sameName(row.manufacturer ?? '', values.manufacturer ?? '')),
   )
@@ -472,6 +594,9 @@ function typeRefusal(values: Record<string, unknown>, self?: string): Response |
   if (absent) return problem(422, absent)
   const temps = badTemps(values)
   if (temps) return problem(422, temps)
+  // `filament/models.py` `TdfpId`: a positive whole number below 2^31.
+  const tdfp = values.tdfp_id
+  if (tdfp != null && !(Number.isInteger(tdfp) && (tdfp as number) > 0 && (tdfp as number) < 2 ** 31)) return problem(422, REFUSED.tdfpId)
   if (badRef(values, TYPE_REFS)) return problem(422, REFUSED.catalogRef)
   // `filament_spool_types_code`: upper(code), live types only.
   const taken = !values.archived_at && state.types.some((type) => type.id !== self && !type.archived_at && sameName(type.code, values.code))
@@ -626,6 +751,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     low_stock_pct: null,
     cost_per_kg: null,
     note: null,
+    tdfp_id: null,
     diameter_mm: '1.75',
     ...body,
     id: newId(),
@@ -636,6 +762,144 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
   })
   state.types.push(made)
   return made
+}
+
+// -- type proposals (#6701, `filament/type_proposals.py`) ----------------------------------
+
+/** What a proposal groups by. The mock's spools have no Bambuddy reading, so `material_number` is `null`. */
+const PROPOSAL_KEY = ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g'] as const
+
+/** A spool or a pick, by the key fields; an absent one reads as `null`. */
+type Keyed = { [K in (typeof PROPOSAL_KEY)[number]]?: unknown }
+
+const proposalKey = (row: Keyed) => PROPOSAL_KEY.map((field) => String(row[field] ?? '')).join('|')
+
+/** `type_proposals._match`'s identity match: the first live type of the key. */
+const matchingType = (row: Keyed) =>
+  state.types.find((type) => !type.archived_at && PROPOSAL_KEY.every((field) => (type[field] ?? null) === (row[field] ?? null)))
+
+/** `_base_code`: `BRAND-MATERIAL-SUBTYPE-COLOUR`, upper case, the hex when there is no colour name. */
+function baseCode(row: SpoolRow, colour: string | null): string {
+  const rgba = row.rgba ?? ''
+  const hex = rgba.endsWith('FF') ? rgba.slice(1, 7) : rgba.slice(1)
+  const parts = [nameOf('brands', row.brand_id), nameOf('materials', row.material_id), nameOf('subtypes', row.subtype_id), colour ?? hex]
+  return parts.filter(Boolean).join('-').toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+/** `_colour_name`: the one most of `rows` have, the first one's on a tie. */
+function commonColour(rows: SpoolRow[]): string | null {
+  const counted = new Map<string, number>()
+  for (const row of rows) if (row.colour_name) counted.set(row.colour_name, (counted.get(row.colour_name) ?? 0) + 1)
+  let best: string | null = null
+  for (const [name, count] of counted) if (best === null || count > counted.get(best)!) best = name
+  return best
+}
+
+function typeProposals(): S['TypeProposals'] {
+  const open = state.spools.filter((row) => !row.type_id && !row.archived_at).sort((a, b) => a.number - b.number)
+  const groups = new Map<string, SpoolRow[]>()
+  const ungrouped: S['UngroupedSpool'][] = []
+  for (const row of open) {
+    const missing = (
+      [
+        ['material', row.material_id],
+        ['rgba', row.rgba],
+        ['label_weight_g', row.label_weight_g],
+      ] as const
+    ).flatMap(([name, value]) => (value == null ? [name] : []))
+    if (missing.length) ungrouped.push({ spool_id: row.id, number: row.number, missing })
+    else groups.set(proposalKey(row), [...(groups.get(proposalKey(row)) ?? []), row])
+  }
+  const taken = new Set(state.types.filter((type) => !type.archived_at).map((type) => type.code.toUpperCase()))
+  const ordered = [...groups.values()].sort((a, b) => b.length - a.length || a[0]!.number - b[0]!.number)
+  return {
+    groups: ordered.map((members) => {
+      const first = members[0]!
+      const colour = commonColour(members)
+      const kind = matchingType(first)
+      let code = kind?.code ?? baseCode(first, colour)
+      if (!kind && taken.has(code.toUpperCase())) {
+        const weighed = `${code}-${first.label_weight_g}G`
+        code = weighed
+        for (let n = 2; taken.has(code.toUpperCase()); n++) code = `${weighed}-${n}`
+      }
+      taken.add(code.toUpperCase())
+      return {
+        code,
+        type_id: kind?.id ?? null,
+        brand_id: first.brand_id,
+        material_id: first.material_id!,
+        subtype_id: first.subtype_id,
+        rgba: first.rgba!,
+        label_weight_g: first.label_weight_g!,
+        material_number: null,
+        brand: nameOf('brands', first.brand_id),
+        material: nameOf('materials', first.material_id) ?? '',
+        subtype: nameOf('subtypes', first.subtype_id),
+        colour_name: colour,
+        spool_ids: members.map((row) => row.id),
+        numbers: members.map((row) => row.number),
+        count: members.length,
+      }
+    }),
+    ungrouped,
+  }
+}
+
+/** `confirm`: all or nothing, as the one transaction is. */
+function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult'] | Response {
+  const live = state.types.filter((type) => !type.archived_at).map((type) => type.code.toUpperCase())
+  const codes = picks.map((pick) => pick.code.trim().toUpperCase())
+  if (codes.some((code, at) => codes.indexOf(code) !== at || (live.includes(code) && !matchingType(normalised(picks[at]!)))))
+    return problem(409, 'a spool type already has one of these codes; choose another name')
+  const done: S['ConfirmedProposal'][] = []
+  const madeHere = new Set<string>()
+  for (const raw of picks) {
+    const pick = normalised(raw)
+    const want = proposalKey(pick)
+    const eligible: SpoolRow[] = []
+    const skipped: S['SkippedSpool'][] = []
+    for (const id of new Set(pick.spool_ids)) {
+      const row = state.spools.find((one) => one.id === id)
+      const reason = !row ? 'not_found' : row.archived_at ? 'archived' : row.type_id ? 'typed' : proposalKey(row) !== want ? 'changed' : null
+      if (reason) skipped.push({ spool_id: id, reason })
+      else eligible.push(row!)
+    }
+    if (!eligible.length) {
+      done.push({ code: pick.code, type_id: null, made: false, new: false, typed: [], skipped })
+      continue
+    }
+    let kind = matchingType(eligible[0]!)
+    const made = !kind
+    if (!kind) {
+      const created = createType({
+        code: pick.code.trim(),
+        brand_id: pick.brand_id ?? null,
+        material_id: pick.material_id,
+        subtype_id: pick.subtype_id ?? null,
+        rgba: pick.rgba,
+        label_weight_g: pick.label_weight_g,
+        colour_name: commonColour(eligible),
+      })
+      if (created instanceof Response) return created
+      kind = created
+      madeHere.add(kind.id)
+    }
+    for (const row of eligible) {
+      const changes: Record<string, unknown[]> = { type_id: [null, kind.id] }
+      const next: SpoolRow = { ...row, type_id: kind.id, updated_at: now() }
+      for (const field of OVERRIDABLE) {
+        if (row[field] != null && JSON.stringify(row[field]) === JSON.stringify(kind[field])) {
+          changes[field] = [row[field], null]
+          ;(next as Record<string, unknown>)[field] = null
+        }
+      }
+      state.spools[state.spools.indexOf(row)] = next
+      addEvent(row.id, 'edited', { data: { changes } })
+    }
+    done.push({ code: kind.code, type_id: kind.id, made, new: madeHere.has(kind.id), typed: eligible.map((row) => row.id), skipped })
+  }
+  return { groups: done }
 }
 
 /** A type as the purchasing mocks read it (#6266): its code and label, its label weight, or `null` for none. */
@@ -679,9 +943,7 @@ export function checkTypeProposal(raw: unknown): Response | null {
 export function spoolClaimRefusal(id: string, typeId: string | null): string | null {
   const row = state.spools.find((one) => one.id === id)
   if (!row) return 'does not exist'
-  if (row.archived_at) return 'is archived'
   if (invoicedLine.has(id) || invoiceRefOf(id)) return 'already belongs to an invoice line'
-  if (row.cost_per_kg != null) return 'already has its own cost'
   if (row.type_id != null && row.type_id !== typeId) return 'has another spool type'
   return null
 }
@@ -689,12 +951,21 @@ export function spoolClaimRefusal(id: string, typeId: string | null): string | n
 /** The spool's own label weight in grams, if it has one (`_claimed`: the cost uses it before the type's). */
 export const spoolLabelWeight = (id: string) => state.spools.find((one) => one.id === id)?.label_weight_g ?? null
 
-/** Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`). */
+/**
+ * Fills an existing spool in from an invoice line: its type and cost, and the line it was bought on (`_confirm_line`).
+ * The line's cost replaces a spool's own (#6700); that `edited` event is the caller's. An archived spool takes its
+ * cost and line only: it keeps its type, or none, and stays archived (#6707).
+ */
 export function updateInvoicedSpool(id: string, typeId: string, costPerKg: string, lineId: string): void {
   const at = state.spools.findIndex((one) => one.id === id)
   const row = state.spools[at]!
-  state.spools[at] = { ...row, type_id: typeId, cost_per_kg: costPerKg, updated_at: now() }
-  addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor: `invoice:${lineId}`, data: { changes: { type_id: typeId, cost_per_kg: costPerKg } } })
+  const type = row.archived_at ? row.type_id : typeId
+  state.spools[at] = { ...row, type_id: type, cost_per_kg: costPerKg, updated_at: now() }
+  const changes: Record<string, [unknown, unknown]> = {}
+  if (row.type_id !== type) changes.type_id = [row.type_id, type]
+  if (row.cost_per_kg !== costPerKg) changes.cost_per_kg = [row.cost_per_kg, costPerKg]
+  const actor = row.cost_per_kg == null ? `invoice:${lineId}` : 'mock@example.com'
+  if (Object.keys(changes).length) addEvent(id, 'edited', { ref_kind: 'invoice_line', ref_id: lineId, actor, data: { changes } })
   invoicedLine.set(id, lineId)
 }
 
@@ -721,6 +992,64 @@ export function addInvoicedSpools(typeId: string, count: number, costPerKg: stri
 
 /** `crud/idempotency.py`: each write's key and the body and answer it had. */
 const imports = new Map<string, { body: string; answer: S['ImportPreview'] }>()
+
+// -- 3DFP preset fetch (#6625) ----------------------------------------------------------
+
+/** Each type's last fetch (`ProfileFetches.latest`), by type id. */
+const fetches = new Map<string, S['ProfileFetch']>()
+
+/** `filament/profile_fetch.py` `NO_PRESET`: a gap no run gave a reason for. */
+const NO_PRESET = 'no preset for this printer and nozzle yet'
+const FETCH_NOZZLES = ['0.2', '0.4', '0.6', '0.8'] as const
+
+/** A refusal of the start as `api/filament.py` writes it: a problem typed by its `code`. */
+const fetchRefused = (code: 'no_tdfp_id' | 'no_printer_models', detail: string) =>
+  HttpResponse.json(
+    { type: `https://scadbuddy.dev/problems/profile-fetch/${code}`, title: TITLES[422], status: 422, detail, code },
+    { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+  )
+
+/** `ProfileFetches._targets`: each printer model ScadBuddy's printers have, with the nozzle setting. */
+function fetchTargets(): S['ExportTarget'][] {
+  const nozzles = mockSettings().profile_fetch_nozzles ?? [...FETCH_NOZZLES]
+  const models = [...new Set(printersState().map((printer) => printer.model).filter((model): model is string => !!model))].sort()
+  return models.map((printer_model) => ({ printer_model, nozzles: [...nozzles] }))
+}
+
+/**
+ * The mock has no worker: a running fetch ends `imported` on the next read of it, with
+ * one preset per target key (a Bambuddy local preset id and a 3DFP-style name), as the
+ * API's import writes them.
+ */
+function finishFetch(run: S['ProfileFetch']): S['ProfileFetch'] {
+  if (run.status !== 'running') return run
+  const type = state.types.find((one) => one.id === run.type_id)
+  const made: S['TypePreset'][] = run.targets.flatMap((target, t) =>
+    target.nozzles.map((nozzle, n) => ({
+      type_id: run.type_id,
+      printer_model: target.printer_model,
+      nozzle_diameter: nozzle,
+      slicer_filament: String(9000 + t * 10 + n),
+      slicer_filament_name: `${type?.code ?? 'Filament'} @BBL ${target.printer_model} ${nozzle} nozzle`,
+    })),
+  )
+  const keys = new Set(made.map((row) => `${row.printer_model}|${row.nozzle_diameter}`))
+  state.typePresets = [...state.typePresets.filter((one) => one.type_id !== run.type_id || !keys.has(`${one.printer_model}|${one.nozzle_diameter}`)), ...made]
+  const ended = { ...run, status: 'imported' as const, finished_at: now() }
+  fetches.set(run.type_id, ended)
+  return ended
+}
+
+/** `ProfileFetches.gaps`: each target key the type has no preset for, with its last run's reason. */
+function fetchGaps(typeId: string): S['MissingKey'][] {
+  const have = new Set(state.typePresets.filter((one) => one.type_id === typeId).map((one) => `${one.printer_model}|${one.nozzle_diameter}`))
+  const reasons = new Map((fetches.get(typeId)?.missing ?? []).map((one) => [`${one.printer_model}|${one.nozzle_diameter}`, one.reason]))
+  return fetchTargets().flatMap((target) =>
+    target.nozzles
+      .filter((nozzle) => !have.has(`${target.printer_model}|${nozzle}`))
+      .map((nozzle) => ({ printer_model: target.printer_model, nozzle_diameter: nozzle, reason: reasons.get(`${target.printer_model}|${nozzle}`) ?? NO_PRESET })),
+  )
+}
 
 /** `csv_import.DERIVED_COLUMNS`: dropped from a row. */
 const DERIVED_CSV = new Set(['grams_left', 'last_weighed_g', 'last_weighed_at', 'last_dried_at', 'last_used_at', 'low_stock', 'archived_at'])
@@ -775,7 +1104,6 @@ function csvValue(field: (typeof CSV_PLAIN)[number], text: string): unknown {
   return text
 }
 
-type Named = { id: string; name: string; archived_at: string | null; material_id?: string | null }
 const liveNamed = <T extends { name: string; archived_at: string | null }>(rows: T[], name: string) =>
   rows.filter((row) => !row.archived_at && sameName(row.name, name))
 
@@ -820,10 +1148,15 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
     if (name === null) continue
     const before = shown?.names?.[column] ?? null
     if (before !== null && sameName(before, name)) continue
-    const found = liveNamed(state.catalogs[kind] as Named[], name)
-      .filter((one) => kind !== 'subtypes' || one.material_id === material || one.material_id == null)
-      .sort((a, b) => Number(a.material_id == null) - Number(b.material_id == null))[0]
+    // No letter or digit, so no key: the cell is skipped and the row goes on (R-6706-18).
+    if (catalogKey(name) === '') {
+      changes[column] = [before, name, { skipped: 'no letter or digit' }]
+      continue
+    }
+    // By key, against every name and alias, archived rows too (#6706).
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
     if (column === 'material') material = found?.id ?? null
+    if (found && before !== null && found.name === before) continue
     if (found) {
       changes[column] = [before, found.name]
       values[`${column}_id`] = found.id
@@ -866,7 +1199,7 @@ function importRow(row: Record<string, string | null>, line: number, write: bool
   for (const [column, name] of fresh) {
     const kind = CSV_CATALOGS[column]
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, name, sort_order: 1000, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, name, sort_order: 1000, aliases: [], id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     if (kind === 'subtypes') Object.assign(made, { material_id: (values.material_id as string | undefined) ?? material })
     ;(state.catalogs[kind] as unknown[]).push(made)
     values[`${column}_id`] = made.id
@@ -944,7 +1277,7 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    const made = { ...blank, sort_order: 0, ...body, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),
@@ -960,8 +1293,44 @@ export const handlers = [
     const next = patched(rows[at]!, body)
     const refused = catalogRefusal(kind, next, body, rows[at]!.id)
     if (refused) return refused
+    if (isAliased(kind) && typeof body.name === 'string') {
+      const key = catalogKey(body.name)
+      const own = next as unknown as AliasedRow
+      own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
+    }
     rows[at] = next
     return HttpResponse.json(next)
+  }),
+  http.get(`${BASE}/catalog/:kind/resolve`, ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const url = new URL(request.url)
+    const name = url.searchParams.get('name') ?? ''
+    const material = url.searchParams.get('material_id')
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
+    return found ? HttpResponse.json(found) : problem(404, `no ${kind} row is named '${name}'`)
+  }),
+  http.put(`${BASE}/catalog/:kind/:id/aliases`, async ({ params, request }) => {
+    const kind = String(params.kind)
+    if (!isAliased(kind)) return problem(404, `the ${kind} catalog has no aliases; these do: ${Object.keys(ALIASED).join(', ')}`)
+    const row = (state.catalogs[kind] as AliasedRow[]).find((one) => one.id === params.id)
+    if (!row) return problem(404, `no ${kind} row ${String(params.id)}`)
+    const body = (await request.json()) as { aliases?: unknown }
+    if (!Array.isArray(body.aliases)) return problem(422, 'aliases: Field required')
+    const aliases = body.aliases.map((one) => String(one).trim())
+    if (aliases.some((one) => one === '')) return problem(422, 'aliases: String should have at least 1 character')
+    const empty = aliases.find((one) => catalogKey(one) === '')
+    if (empty !== undefined) return problem(422, `the alias '${empty}' has no letter or digit`)
+    const scope = row.material_id ?? null
+    const taken: string[] = [catalogKey(row.name)]
+    for (const alias of aliases) {
+      const holder = keyHolder(kind, alias, scope, row.id)
+      if (holder) return keyClash(kind, holder, alias)
+      if (taken.includes(catalogKey(alias))) return keyClash(kind, row, alias)
+      taken.push(catalogKey(alias))
+    }
+    row.aliases = [...aliases].sort((a, b) => a.toUpperCase().localeCompare(b.toUpperCase()))
+    return HttpResponse.json(row)
   }),
 
   // -- spool types --
@@ -996,6 +1365,26 @@ export const handlers = [
     state.types[at] = PRICED.some((field) => field in body) ? linkPriceBook(next) : next
     return HttpResponse.json(state.types[at])
   }),
+  // #6714: the fill from a type's slicer profile, over `PROFILES` (`fillType`).
+  http.post(`${BASE}/types/fill-from-profile`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { refresh?: boolean }
+    return HttpResponse.json(state.types.filter((type) => !type.archived_at).map((type) => fillType(type, { refresh: body.refresh === true })))
+  }),
+  http.post(`${BASE}/types/:id/fill-from-profile`, async ({ params, request }) => {
+    const type = state.types.find((one) => one.id === params.id)
+    if (!type) return problem(404, `no spool type ${String(params.id)}`)
+    const body = (await request.json().catch(() => ({}))) as S['FillRequest']
+    if (body.apply) {
+      const unknown = Object.keys(body.apply).find((field) => !(FILL_FIELDS as readonly string[]).includes(field))
+      if (unknown) return problem(422, `apply.${unknown}: Input should be ${FILL_FIELDS.join(', ')}`)
+      const given = profileOf(type)?.values ?? {}
+      for (const [field, value] of Object.entries(body.apply)) {
+        if (String(given[field as FillField]) !== String(value)) return problem(409, `the profile now gives ${field} ${String(given[field as FillField] ?? 'None')}, not ${String(value)}: refresh again`)
+      }
+      return HttpResponse.json(fillType(type, { apply: body.apply as Partial<Record<FillField, number | string>>, kValues: body.k_values === true }))
+    }
+    return HttpResponse.json(fillType(type, { refresh: body.refresh === true }))
+  }),
   http.put(`${BASE}/types/:id/presets`, async ({ params, request }) => {
     const typeId = String(params.id)
     const sent = await request.json()
@@ -1006,6 +1395,38 @@ export const handlers = [
     if (!state.types.some((one) => one.id === typeId)) return problem(404, `no spool type ${typeId}`)
     state.typePresets = [...state.typePresets.filter((one) => one.type_id !== typeId), ...rows]
     return HttpResponse.json(rows)
+  }),
+  http.post(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
+    const typeId = String(params.id)
+    const type = state.types.find((one) => one.id === typeId)
+    if (!type) return problem(404, `no spool type ${typeId}`)
+    const was = fetches.get(typeId)
+    if (was?.status === 'running') return HttpResponse.json({ run: was, joined: true } satisfies S['ProfileFetchStarted'], { status: 202 })
+    if (type.tdfp_id == null) return fetchRefused('no_tdfp_id', 'the type has no 3dfilamentprofiles id')
+    const targets = fetchTargets()
+    if (targets.length === 0) return fetchRefused('no_printer_models', 'no printer has a model to fetch presets for')
+    const run: S['ProfileFetch'] = {
+      id: newId(),
+      type_id: typeId,
+      tdfp_id: type.tdfp_id,
+      status: 'running',
+      targets,
+      missing: [],
+      k_values: 0,
+      notes: [],
+      error: null,
+      started_at: now(),
+      finished_at: null,
+    }
+    fetches.set(typeId, run)
+    return HttpResponse.json({ run, joined: false } satisfies S['ProfileFetchStarted'], { status: 202 })
+  }),
+  http.get(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
+    const typeId = String(params.id)
+    if (!state.types.some((one) => one.id === typeId)) return problem(404, `no spool type ${typeId}`)
+    const was = fetches.get(typeId)
+    const run = was ? finishFetch(was) : null
+    return HttpResponse.json({ run, gaps: fetchGaps(typeId) } satisfies S['ProfileFetchStatus'])
   }),
   http.put(`${BASE}/types/:id/k-values`, async ({ params, request }) => {
     const typeId = String(params.id)
@@ -1295,7 +1716,7 @@ export const handlers = [
   }),
   http.get(`${BASE}/summary`, () => HttpResponse.json(summary())),
   http.get(`${BASE}/inventory`, ({ request }) =>
-    HttpResponse.json({ spools: inventoryRows(flag(request, 'include_archived')), trays: [] } satisfies FilamentInventoryView),
+    HttpResponse.json({ spools: inventoryRows(flag(request, 'include_archived')), trays: inventoryTrays() } satisfies FilamentInventoryView),
   ),
   http.get(`${BASE}/spools/:id/summary`, ({ params }) => {
     const row = findSpool(String(params.id))
@@ -1349,13 +1770,14 @@ export const handlers = [
 
   // -- AMS weights (#6268): the mock books the same three spools, skipping one locked and two on a printing printer --
   http.post(`${BASE}/spools/sync-ams-weights`, () =>
-    HttpResponse.json({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, spools: [spoolId(1), spoolId(4), spoolId(8)] } satisfies S['AmsSyncResult']),
+    HttpResponse.json({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, stale_printers: [], spools: [spoolId(1), spoolId(4), spoolId(8)] } satisfies S['AmsSyncResult']),
   ),
 
   // -- location sensors (#6268) --
   http.get(`${BASE}/sensors`, ({ request }) => {
     const place = new URL(request.url).searchParams.get('location_id')
-    return HttpResponse.json(state.sensors.filter((one) => !one.archived_at && (!place || one.location_id === place)))
+    const live = new Set(state.locations.filter((one) => !one.archived_at).map((one) => one.id))
+    return HttpResponse.json(state.sensors.filter((one) => !one.archived_at && live.has(one.location_id) && (!place || one.location_id === place)))
   }),
   http.get(`${BASE}/sensors/entities`, ({ request }) => {
     const search = (new URL(request.url).searchParams.get('search') ?? '').toLowerCase()
@@ -1412,10 +1834,22 @@ export const handlers = [
     return HttpResponse.json(all.slice(-limit))
   }),
 
+  // -- type proposals (#6701) --
+  http.get(`${BASE}/type-proposals`, () => HttpResponse.json(typeProposals())),
+  http.post(`${BASE}/type-proposals/confirm`, async ({ request }) => {
+    const body = (await request.json()) as { groups?: S['TypeProposalPick'][] }
+    const extra = extraKeys(body, ['groups']) ?? extraKeys(body.groups ?? [], FIELDS.proposalPick)
+    if (extra) return extra
+    if (!Array.isArray(body.groups) || !body.groups.length) return problem(422, 'groups: List should have at least 1 item after validation, not 0')
+    const done = confirmProposals(body.groups)
+    return done instanceof Response ? done : HttpResponse.json(done)
+  }),
+
   // -- the pull: the mock has no Bambuddy spools to pull, so it changes nothing --
   http.post(`${BASE}/bambuddy/import`, () =>
     HttpResponse.json({
       created: 0,
+      archived_created: 0,
       linked: 0,
       updated: 0,
       needs_type: 0,
@@ -1423,6 +1857,7 @@ export const handlers = [
       invalid: 0,
       catalog_failed: false,
       catalog_skipped: 0,
+      names_skipped: 0,
       created_ids: [],
       linked_ids: [],
       updated_ids: [],
@@ -1434,6 +1869,8 @@ export const handlers = [
       usage_unlinked: 0,
       rfid_duplicates: 0,
       rfid_duplicate_bb_ids: [],
+      archived_deferred: 0,
+      archived_deferred_bb_ids: [],
     } satisfies S['PullReport']),
   ),
 ]

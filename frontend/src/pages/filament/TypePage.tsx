@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ShoppingCartIcon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
@@ -21,6 +21,8 @@ import { addShopping } from '../../api/filamentPurchasing'
 import { KValueTable } from '../../components/filament/KValueTable'
 import { kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
+import { ProfileFetchPanel } from '../../components/filament/ProfileFetchPanel'
+import { ProfileFillDialog } from '../../components/filament/ProfileFillDialog'
 import { presetRowsError } from '../../components/filament/presetRows'
 import { PricePanel } from '../../components/filament/purchasing/PricePanel'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
@@ -57,6 +59,8 @@ interface Draft {
   nozzle_temp_max: string
   bed_temp_min: string
   bed_temp_max: string
+  /** 3dfilamentprofiles.com's filament id (#6625). */
+  tdfp_id: string
   note: string
   presets: PresetInput[]
   k_values: TypeKValueInput[]
@@ -82,6 +86,7 @@ const BLANK: Draft = {
   nozzle_temp_max: '',
   bed_temp_min: '',
   bed_temp_max: '',
+  tdfp_id: '',
   note: '',
   presets: [],
   k_values: [],
@@ -110,6 +115,7 @@ function draftOf(type: SpoolTypeDetail): Draft {
     nozzle_temp_max: str(type.nozzle_temp_max),
     bed_temp_min: str(type.bed_temp_min),
     bed_temp_max: str(type.bed_temp_max),
+    tdfp_id: str(type.tdfp_id),
     note: str(type.note),
     presets: type.presets.map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name })),
     k_values: type.k_values.map(({ type_id: _type, ...row }) => row),
@@ -117,6 +123,20 @@ function draftOf(type: SpoolTypeDetail): Draft {
 }
 
 const INTEGER = /^\d+$/
+/** `filament/models.py` `TdfpId`: a positive whole number below 2^31. */
+const TDFP_MAX = 2 ** 31 - 1
+
+/** 3dfilamentprofiles.com's page of a filament (#6625): an outside link, never on ScadBuddy's host. */
+const tdfpUrl = (id: number) => `https://3dfilamentprofiles.com/filament/details/${id}`
+
+/** The draft's 3DFP id, `null` for none, or `undefined` when it is not one. */
+function tdfpOf(text: string): number | null | undefined {
+  const value = text.trim()
+  if (value === '') return null
+  if (!INTEGER.test(value)) return undefined
+  const id = Number(value)
+  return id >= 1 && id <= TDFP_MAX ? id : undefined
+}
 const DECIMAL = /^\d+(\.\d+)?$/
 
 /** The type's own columns a draft makes, or why it cannot be saved. */
@@ -150,6 +170,8 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
     bed_temp_max: whole('maximum bed temperature', draft.bed_temp_max),
   }
   for (const value of Object.values(fields)) if (typeof value === 'string') return value
+  const tdfp = tdfpOf(draft.tdfp_id)
+  if (tdfp === undefined) return `Enter the 3DFP id as a whole number from 1 to ${TDFP_MAX}.`
   const diameter = decimal('filament diameter', draft.diameter_mm)
   const density = decimal('density', draft.density_g_cm3)
   const cost = decimal('cost per kg', draft.cost_per_kg)
@@ -169,6 +191,7 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
     diameter_mm: diameter,
     density_g_cm3: density,
     cost_per_kg: cost,
+    tdfp_id: tdfp,
     note: draft.note.trim() || null,
     ...(fields as { label_weight_g: number; low_stock_pct: number | null; nozzle_temp_min: number | null; nozzle_temp_max: number | null; bed_temp_min: number | null; bed_temp_max: number | null }),
   }
@@ -254,6 +277,7 @@ export function TypePage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [adding, setAdding] = useState(false)
+  const [filling, setFilling] = useState(false)
   const money = useMoney()
 
   useEffect(() => {
@@ -351,6 +375,30 @@ export function TypePage() {
     }
   }
 
+  /**
+   * #6625 — a 3DFP fetch ended: it set the type's presets (and K values) on the server.
+   * Shown at once where this page holds no unsaved edit of them; an edited list is kept,
+   * and Discard changes shows the fetched one.
+   */
+  function fetched() {
+    const before = saved ? draftOf(saved) : BLANK
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+    const edited = !same(draft.presets, before.presets) || !same(draft.k_values, before.k_values)
+    getType(madeId ?? id).then(
+      (fresh) => {
+        const after = draftOf(fresh)
+        setSaved(fresh)
+        setDraft((was) => ({
+          ...was,
+          presets: same(was.presets, before.presets) ? after.presets : was.presets,
+          k_values: same(was.k_values, before.k_values) ? after.k_values : was.k_values,
+        }))
+        if (edited) setNotice('The fetch set new presets. Your unsaved edits to them are kept: discard changes to see the fetched ones.')
+      },
+      (cause: unknown) => setError(`The fetched presets could not be read: ${message(cause)}`),
+    )
+  }
+
   async function addToShopping() {
     if (adding) return
     setAdding(true)
@@ -397,6 +445,7 @@ export function TypePage() {
     )
   }
 
+  const draftTdfp = tdfpOf(draft.tdfp_id)
   const subtypes = lists.subtypes.filter((one) => !one.material_id || one.material_id === draft.material_id)
   const models = [...new Set(lists.printers.map((p) => p.model).filter((m): m is string => !!m))]
   const mine = lists.spools.filter((spool) => spool.type_id === (madeId ?? id))
@@ -420,6 +469,12 @@ export function TypePage() {
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void archive(!saved.archived_at)}>
             {saved.archived_at ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
             {saved.archived_at ? 'Restore' : 'Archive'}
+          </Button>
+        )}
+        {!creating && (
+          <Button type="button" variant="outline" size="sm" disabled={busy || dirty} title={dirty ? 'Save or discard your changes first.' : undefined} onClick={() => setFilling(true)}>
+            <SlidersHorizontalIcon />
+            Fill from slicer profile
           </Button>
         )}
         {!creating && (
@@ -461,6 +516,17 @@ export function TypePage() {
           </Field>
           {text('colour_name', 'Colour name')}
           {text('extra_colours', 'Extra colours', { hint: 'For multi-colour filament: #RRGGBB or #RRGGBBAA, separated by commas.' })}
+          <Field label="3DFP id" htmlFor="type-tdfp_id" hint="The number at the end of the filament's address on 3dfilamentprofiles.com. Fetch from 3DFP, under Slicer presets, uses it.">
+            <div className="flex items-center gap-3">
+              <Input id="type-tdfp_id" className="w-36" inputMode="numeric" value={draft.tdfp_id} onChange={(e) => set('tdfp_id', e.target.value)} />
+              {typeof draftTdfp === 'number' && (
+                <a href={tdfpUrl(draftTdfp)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[13px] underline-offset-4 hover:underline">
+                  Open on 3DFP
+                  <ExternalLinkIcon aria-hidden className="size-3.5" />
+                </a>
+              )}
+            </div>
+          </Field>
         </section>
 
         <div className="flex flex-col gap-6">
@@ -505,6 +571,12 @@ export function TypePage() {
       <section aria-label="Slicer presets" className="mt-6 flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">Slicer presets</h2>
         <p className="text-[12px] text-muted-foreground">The Bambu Studio filament preset to slice with, for each printer model and nozzle.</p>
+        <ProfileFetchPanel
+          typeId={creating ? null : (madeId ?? id)}
+          tdfpId={saved?.tdfp_id ?? null}
+          idEdited={draft.tdfp_id.trim() !== base.tdfp_id}
+          onEnded={fetched}
+        />
         <PresetTable rows={draft.presets} onChange={(rows) => set('presets', rows)} models={models} />
       </section>
 
@@ -554,6 +626,24 @@ export function TypePage() {
             </table>
           </div>
         </section>
+      )}
+
+      {!creating && (
+        <ProfileFillDialog
+          typeId={madeId ?? id}
+          open={filling}
+          onClose={() => setFilling(false)}
+          onApplied={(done) => {
+            setFilling(false)
+            const fields = Object.keys(done.filled).length
+            const parts = [fields > 0 ? `${fields} ${fields === 1 ? 'field' : 'fields'}` : null, done.k_values.length > 0 ? `${done.k_values.length} K ${done.k_values.length === 1 ? 'value' : 'values'}` : null].filter(Boolean)
+            void getType(madeId ?? id).then((fresh) => {
+              setSaved(fresh)
+              setDraft(draftOf(fresh))
+              setNotice(`Filled ${parts.join(' and ')}${done.source ? ` from ${done.source.name}` : ''}.`)
+            }, (cause: unknown) => setError(message(cause)))
+          }}
+        />
       )}
 
       <AlertDialog open={guard.pending !== null} onOpenChange={(next) => !next && guard.stay()}>

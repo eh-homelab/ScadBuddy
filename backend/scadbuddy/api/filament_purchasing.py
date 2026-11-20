@@ -33,6 +33,7 @@ from scadbuddy.filament.invoices import (
     InvoiceRefError,
     InvoiceSupplierArchivedError,
 )
+from scadbuddy.filament.profile_fetch import start_profile_fetches
 from scadbuddy.filament.shopping import ShoppingRefError
 from scadbuddy.filament.suppliers import (
     PriceFromInvoiceError,
@@ -396,10 +397,14 @@ async def get_invoice(filament: FilamentDep, invoice_id: UUID) -> pm.InvoiceDeta
     response_model=list[pm.LineCandidates],
     summary="List the spools each invoice line could update",
     description=(
-        "Per line (by `position`), the open spools whose effective material and exact RGBA "
-        "match the line's type, or its proposed type when it has no type yet: `uncosted` "
-        "(no cost per kg yet) and `costed`. A line with neither type has none. 404 for no "
-        "such invoice."
+        "Per line (by `position`), the spools (archived ones too, marked `archived`) whose "
+        "effective material and exact RGBA match the line's type, or its proposed type when "
+        "it has no type yet: `uncosted` (no cost per kg and no invoice line yet) and "
+        "`costed`. A `costed` spool with no "
+        "`invoice_line_id` may be filled, and the line's cost replaces its own; one with an "
+        "`invoice_line_id` is refused at confirm. Archived (used-up) spools are listed too, "
+        "with `archived` true: a spent spool was still bought. A line with neither type has "
+        "none. 404 for no such invoice."
     ),
 )
 async def invoice_candidates(filament: FilamentDep, invoice_id: UUID) -> list[pm.LineCandidates]:
@@ -513,18 +518,26 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
         "Turns a draft into spools in one transaction: new spool types for lines that propose "
         "one, supplier products by SKU, each line's `quantity` spools (or fewer new ones when "
         "the line fills the spools in `update_spool_ids`) with a `cost_per_kg` from the line's "
-        "allocated cost, and one price point per line. Confirming a confirmed invoice answers "
+        "allocated cost, and one price point per line. A filled spool that has its own cost and "
+        "no invoice line takes the line's cost instead, with one `edited` event by the caller "
+        "that records the old and new `cost_per_kg`. An archived spool takes its cost and "
+        "invoice line only, and stays archived. A spool on another invoice line or of another "
+        "type is refused. Confirming a confirmed invoice answers "
         "200 with it and makes nothing more. 404 for no such invoice. 409, with nothing "
         "written, for an invoice with no lines, one of an archived supplier, one not in the "
         "shop's currency, one whose total is more than 0.05 from its lines plus shipping, or a "
-        "line that cannot be confirmed (the message names the line)."
+        "line that cannot be confirmed (the message names the line). After the commit it "
+        "starts a 3DFP preset fetch for each new type that has a `tdfp_id` (`POST "
+        "/filament/types/{type_id}/profile-fetch`); a fetch that cannot start never "
+        "fails the confirm."
     ),
 )
 async def confirm_invoice(
-    filament: FilamentDep, caller: CallerDep, invoice_id: UUID
+    state: StateDep, filament: FilamentDep, caller: CallerDep, invoice_id: UUID
 ) -> pm.InvoiceDetail:
+    who = actor(caller)
     try:
-        done = await asyncio.to_thread(filament.invoices.confirm, invoice_id, actor=actor(caller))
+        done = await asyncio.to_thread(filament.invoices.confirm, invoice_id, actor=who)
     except (
         InvoiceNoLinesError,
         InvoiceCurrencyError,
@@ -535,7 +548,10 @@ async def confirm_invoice(
         raise _conflict(exc) from None
     if done is None:
         raise _no_invoice(invoice_id)
-    return done[0]
+    invoice, _, made = done
+    # After the commit; a failure to start is logged, never the confirm's (Decision 12).
+    await start_profile_fetches(state, made, actor=who)
+    return invoice
 
 
 # -- an invoice's file ------------------------------------------------------------------

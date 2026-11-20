@@ -62,6 +62,9 @@ const kind = z
   ])
   .describe('Which catalog')
 
+/** #6706 — the catalogs whose rows have aliases (backend `filament/catalog.py` `NameTable`). */
+const aliasedKind = z.enum(['materials', 'subtypes', 'brands', 'categories', 'effects']).describe('Which catalog')
+
 const EVENT_KINDS = [
   'created',
   'loaded',
@@ -93,7 +96,8 @@ export const filamentTools: Tool[] = [
     description:
       "One of ScadBuddy's filament catalogs, in sort order: materials (print and drying defaults, handling " +
       'flags), subtypes, brands, categories, effects, insert-materials, insert-types, colours (a maker\'s named ' +
-      'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`.',
+      'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`. A material, ' +
+      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases).',
     input: z.object({ kind, include_archived: z.boolean().default(false) }),
     risk: 'read',
     source: SOURCE,
@@ -115,8 +119,12 @@ export const filamentTools: Tool[] = [
     description:
       'Add a row to a filament catalog (no `row_id`), or edit one: only the `fields` given change, and `null` ' +
       'clears a nullable one. Every row has `name` and `sort_order`; the other fields depend on the kind ' +
-      '(see filament_catalog_list). `archived: true` takes a row off the lists and frees its name, `false` puts ' +
-      'it back. 409 when another unarchived row has the name. Only what the user says. Writes ScadBuddy only.',
+      '(see filament_catalog_list). `archived: true` takes a row off the lists, `false` puts it back. In the ' +
+      'materials, subtypes, brands, categories and effects catalogs a name is matched by its key (letters and ' +
+      'digits, any case: `dual-color` is `Dual Color`) against every name and alias, archived rows included (a ' +
+      "subtype's within its material); the 409 names the row that holds it. In the other catalogs an archived " +
+      'row frees its name and a 409 means another unarchived row has it. Only what the user says. Writes ' +
+      'ScadBuddy only.',
     input: z.object({
       kind,
       row_id: z.string().uuid().optional().describe("A row's `id` from filament_catalog_list; omit to add"),
@@ -148,6 +156,61 @@ export const filamentTools: Tool[] = [
         ),
       )
     },
+  }),
+
+  defineTool({
+    name: 'filament_catalog_resolve',
+    label: 'Find a filament catalog row by name',
+    description:
+      'The material, subtype, brand, category or effect that a name resolves to, as the Bambuddy and CSV ' +
+      "imports resolve it: by key (letters and digits, any case) against every name and alias, archived rows " +
+      "too. A subtype is `material_id`'s own, else one for every material. A 404 means no row has that name.",
+    input: z.object({
+      kind: aliasedKind,
+      name: z.string().min(1),
+      material_id: z.string().uuid().optional().describe("For a subtype: the material's `id`"),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/catalog/{kind}/resolve'],
+    handler: async ({ kind, name, material_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/catalog/{kind}/resolve', {
+            params: { path: { kind }, query: { name, material_id } },
+          }),
+          `find ${name} in the ${kind} catalog`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_catalog_set_aliases',
+    label: 'Set the aliases of a filament catalog row',
+    description:
+      "Replace a material's, subtype's, brand's, category's or effect's aliases (its other names, which the " +
+      'imports and the price book resolve to it) with `aliases`, the whole list; `[]` removes them all. Each ' +
+      "alias's key (letters and digits, any case) must be free in the catalog: a 409 names the row that holds " +
+      'it, and nothing changes. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      kind: aliasedKind,
+      row_id: z.string().uuid().describe("A row's `id` from filament_catalog_list"),
+      aliases: z.array(z.string().trim().min(1).max(128)).max(64),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['PUT /api/v1/filament/catalog/{kind}/{row_id}/aliases'],
+    summarize: ({ kind, row_id, aliases }) => `Set ${kind} row ${row_id} aliases: ${aliases.join(', ') || 'none'}`,
+    handler: async ({ kind, row_id, aliases }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/filament/catalog/{kind}/{row_id}/aliases', {
+            params: { path: { kind, row_id } },
+            body: { aliases },
+          }),
+          `set the aliases of ${kind} row ${row_id}`,
+        ),
+      ),
   }),
 
   defineTool({
@@ -195,11 +258,26 @@ export const filamentTools: Tool[] = [
       'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
       '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
-      '`archived: true` takes a type off the lists and frees its code. 409 when an unarchived type has the ' +
+      '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
+      "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
+      'fetches its slicer presets by. 409 when an unarchived type has the ' +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
-      fields: z.record(z.string(), z.unknown()).default({}).describe('The type fields to set'),
+      fields: z
+        .object({
+          tdfp_id: z
+            .number()
+            .int()
+            .min(1)
+            .max(2147483647)
+            .nullable()
+            .optional()
+            .describe("The type's filament id on 3dfilamentprofiles.com: a positive integer below 2^31, null clears it"),
+        })
+        .catchall(z.unknown())
+        .default({})
+        .describe('The type fields to set'),
       archived: z.boolean().optional(),
     }),
     risk: 'write',
@@ -222,6 +300,69 @@ export const filamentTools: Tool[] = [
         ),
       )
     },
+  }),
+
+  defineTool({
+    name: 'filament_type_proposals',
+    label: 'Propose spool types for spools that need one',
+    description:
+      'The spool types ScadBuddy proposes for the unarchived spools with no type (spec §8.1), grouped by brand, ' +
+      'material, subtype, RGBA, label weight and the `material_number` of their last Bambuddy reading. Each group ' +
+      'has a proposed `code`, its catalog names, `colour_name`, its `spool_ids`, `numbers` and `count`, and ' +
+      '`type_id` when a type matches it now (confirming uses that type). `ungrouped` lists the spools that lack a ' +
+      'material, an RGBA or a label weight, with what each lacks. Show the groups to the user before ' +
+      'filament_type_proposals_confirm. Writes nothing.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/type-proposals'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/type-proposals'), 'list the type proposals')),
+  }),
+
+  defineTool({
+    name: 'filament_type_proposals_confirm',
+    label: 'Make proposed spool types',
+    description:
+      "Make the spool types of the groups given (from filament_type_proposals: each group's key fields and " +
+      "`spool_ids` as listed, and a `code`: the proposed one or the user's) and type their spools, in one " +
+      'transaction. A type that matches a group now is used instead of a new one. Each spool that is still ' +
+      "unarchived, untyped and of the group gets the type and loses each own value equal to the type's; any other " +
+      'is listed in `skipped` with its reason. Per group, `made` says it made the type and `new` that this call ' +
+      'made it: `new` without `made` means the group joined the type an earlier group just made, so its own ' +
+      '`code` was not used; tell the user. 409 when a type already has one of the codes (nothing is written). ' +
+      'Call it only after the user says yes to these groups and names. Writes ScadBuddy only.',
+    input: z.object({
+      groups: z
+        .array(
+          z.object({
+            brand_id: z.string().uuid().nullable().optional(),
+            material_id: z.string().uuid(),
+            subtype_id: z.string().uuid().nullable().optional(),
+            rgba: z.string().describe('`#RRGGBBAA`, as the proposal lists it'),
+            label_weight_g: z.number().int().positive().max(100_000),
+            material_number: z.string().max(128).nullable().optional(),
+            code: z.string().min(1).max(128).describe("The new type's code: the proposed one, or the user's"),
+            spool_ids: z.array(z.string().uuid()).min(1).max(5000),
+          }),
+        )
+        .min(1)
+        .max(500),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/type-proposals/confirm'],
+    summarize: ({ groups }) => {
+      const spools = groups.reduce((sum, group) => sum + group.spool_ids.length, 0)
+      return `Make ${groups.length} spool type${groups.length === 1 ? '' : 's'} for ${spools} spool${spools === 1 ? '' : 's'}`
+    },
+    handler: async ({ groups }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/type-proposals/confirm', { body: { groups } }),
+          'make the proposed spool types',
+        ),
+      ),
   }),
 
   defineTool({
@@ -253,6 +394,56 @@ export const filamentTools: Tool[] = [
             body: presets,
           }),
           `set the presets of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_type_fetch_profiles',
+    label: "Fetch a spool type's 3DFP presets",
+    description:
+      "Start a fetch of a spool type's slicer presets from 3dfilamentprofiles.com by its `tdfp_id`: " +
+      "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
+      'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
+      "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
+      'where a printer has an exact match. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
+      '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
+      'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
+      '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
+      'fetch could not be started. Writes ScadBuddy and Bambuddy\'s local presets. Approved first.',
+    input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/types/{type_id}/profile-fetch'],
+    summarize: ({ type_id }) => `Fetch the 3DFP presets of spool type ${type_id}`,
+    handler: async ({ type_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/types/{type_id}/profile-fetch', { params: { path: { type_id } } }),
+          `start the 3DFP preset fetch of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_type_profile_fetch',
+    label: "Read a spool type's 3DFP preset fetch",
+    description:
+      "A spool type's last preset fetch from 3dfilamentprofiles.com (`run`, null when it never had one): its " +
+      '`status` (`running`, `imported`, `partial`, `failed`), the keys it could not set (`missing`, each with ' +
+      'its reason), its notes, K values set and `error`. `gaps` lists each printer model and nozzle a fetch ' +
+      'would export now that the type has no preset for, with the reason its last fetch gave. A run no ' +
+      'profile-fetch worker serves is ended `failed` on this read, and its workflow cancelled, so this read ' +
+      'can write. Writes ScadBuddy only.',
+    input: z.object({ type_id: z.string().uuid().describe("A type's `id` from filament_type_list") }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/types/{type_id}/profile-fetch'],
+    handler: async ({ type_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/types/{type_id}/profile-fetch', { params: { path: { type_id } } }),
+          `read the 3DFP preset fetch of spool type ${type_id}`,
         ),
       ),
   }),
@@ -292,6 +483,53 @@ export const filamentTools: Tool[] = [
           `set the K values of spool type ${type_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_type_fill_from_profile',
+    label: 'Fill spool types from their slicer profiles',
+    description:
+      "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
+      'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
+      'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
+      'empty fields (nozzle and bed temperature ranges from the H2C plates, density; the diameter is never empty), ' +
+      'never the cost (`cost_hint` is only a hint), and a type with no K values takes those of its linked Bambuddy ' +
+      "spools. Each result names the fields `filled`, the `source` preset, and a `reason` when the profile could not " +
+      'be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
+      'and writes nothing. With `type_id`, `apply` writes the fields a refresh showed over the type (only after the ' +
+      'user confirms them), and `k_values: true` the K values it showed. 409 when the profile no longer gives an ' +
+      'applied value. Reads Bambuddy, writes ScadBuddy only.',
+    input: z.object({
+      type_id: z.string().uuid().optional().describe("A type's `id`; omit for every type"),
+      refresh: z.boolean().default(false).describe('Answer the differences and write nothing'),
+      apply: z
+        .partialRecord(z.enum(['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm']), z.union([z.number(), z.string()]))
+        .optional()
+        .describe('The confirmed fields and values a refresh showed, to write over the type'),
+      k_values: z.boolean().optional().describe('With `apply`: also write the K values the refresh showed'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/types/fill-from-profile', 'POST /api/v1/filament/types/{type_id}/fill-from-profile'],
+    summarize: ({ type_id, refresh, apply }) =>
+      `${refresh ? 'Compare' : apply ? 'Apply profile values to' : 'Fill'} ${type_id ? `spool type ${type_id}` : 'every spool type'} from the slicer profile`,
+    handler: async ({ type_id, refresh, apply, k_values }, { backend }) => {
+      if (type_id === undefined) {
+        if (apply !== undefined || k_values !== undefined) throw new ToolError('apply and k_values need a type_id')
+        return json(
+          await ok(backend.POST('/api/v1/filament/types/fill-from-profile', { body: { refresh } }), 'fill the spool types from their profiles'),
+        )
+      }
+      return json(
+        await ok(
+          backend.POST('/api/v1/filament/types/{type_id}/fill-from-profile', {
+            params: { path: { type_id } },
+            body: { refresh, ...(apply !== undefined ? { apply } : {}), ...(k_values !== undefined ? { k_values } : {}) },
+          }),
+          `fill spool type ${type_id} from its profile`,
+        ),
+      )
+    },
   }),
 
   defineTool({
@@ -1005,7 +1243,8 @@ export const filamentTools: Tool[] = [
       'Make or change spools from rows of a spools CSV (cells as text, under the export\'s column names: ' +
       `${CSV_COLUMNS.join(', ')}). A row with a \`number\` changes that spool where a cell differs; an empty cell ` +
       'changes nothing. A row with no `number` makes a spool (it needs a `type` code or a `material`). Material, ' +
-      'subtype, brand, category and effect names are added to their catalog when missing; `insert_type`, `type` ' +
+      'subtype, brand, category and effect names resolve by key against every name and alias (`dual-color` is ' +
+      '`Dual Color`) and are added to their catalog when missing; `insert_type`, `type` ' +
       'and `location` must exist (a location is a move). Derived columns (grams_left, last_used_at, ...) are ' +
       'ignored. It previews first and writes only when no line is an error, all rows at once; to see the ' +
       'preview alone, use filament_spool_import_preview. Only what the user says. Writes ScadBuddy only.',
@@ -1043,13 +1282,19 @@ export const filamentTools: Tool[] = [
     name: 'filament_bambuddy_import',
     label: "Import Bambuddy's spools",
     description:
-      "Pull Bambuddy's unarchived spools into ScadBuddy's own inventory once (the spool refresh Schedule also " +
+      "Pull Bambuddy's spools, archived ones too, into ScadBuddy's own inventory once (the spool refresh Schedule also " +
       'does this). A linked spool takes what Bambuddy changed since the last pull, unless ScadBuddy changed that ' +
       'field later. A Bambuddy spool whose tag or record a ScadBuddy spool already holds is linked. Any other ' +
       'becomes a new spool, typed by `material_number`, else by brand, material, subtype, colour and label weight, ' +
       'else left needing a type. An archived ScadBuddy spool is never restored or changed (listed as `archived`). ' +
+      'A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived spool with its usage, counted ' +
+      'in `created` and `archived_created`. When the usage rows cannot be read, such a spool is not made yet ' +
+      '(`archived_deferred`, with its Bambuddy id); a later pull makes it. ' +
       'Returns the counts and ids created, linked, updated, still needing a type and archived, and the Bambuddy ' +
-      'rows it could not read (`invalid`). ' +
+      'rows it could not read (`invalid`) or pull (`failed_bb_ids`). Also: `rfid_duplicates` (Bambuddy spools made ' +
+      'for a tag a linked spool holds, left alone), `catalog_failed` and `catalog_skipped` (Bambuddy\'s spool ' +
+      'catalog), `names_skipped` (catalog names with no letter or digit, left out), and `usage_booked` and ' +
+      '`usage_unlinked` (Bambuddy usage rows booked, and those of an unlinked spool). ' +
       '409 when no Bambuddy is configured. Reads Bambuddy, writes ScadBuddy only.',
     input: z.object({}),
     risk: 'write',
@@ -1067,7 +1312,8 @@ export const filamentTools: Tool[] = [
       "Book the AMS's remaining percent of each spool in a tray now as its grams left. It skips locked spools, " +
       'every spool of a printer that is printing, and printers with no fresh report. Only RFID trays carry a remain ' +
       '%, so other trays are counted as `no_remain`. Returns the counts (`booked`, `locked`, `printing`, ' +
-      '`no_remain`, `stale`) and the `spools` booked. Writes ScadBuddy only.',
+      '`no_remain`, `stale`), the `spools` booked, and `stale_printers`: each printer whose spools are in `stale`, ' +
+      'with its `id` and `name` (`null` when the printer is gone). Name those printers to the user. Writes ScadBuddy only.',
     input: z.object({}),
     risk: 'write',
     source: SOURCE,

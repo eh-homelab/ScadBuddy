@@ -12,6 +12,10 @@ plate once (`ledger.py`, rule 3). A row with no name is booked with ``job`` null
 plates always carry a subtask name, so it is never an SB plate. A row that is not later
 than the spool's first `ledger.BB_SPOOL` event lies inside the reading the link made,
 and is not booked. Nor is a row of an archived SB spool: the pull never writes to one.
+The one exception is a spool the pull made archived because Bambuddy had archived it
+(#6707, its ``archived`` event carries ``data.bb_archived_at``): every row of it is booked,
+the ones before its reading too, so its history and consumption are whole. Its reading is
+BB's own value after those rows, so the anchor rule keeps what is left as BB says.
 
 When Bambuddy books a plate on another SB spool than SB's estimate names, `_cover` books
 a 0 g ``print_ended`` on the estimate's spool, with ``data.covered_by`` the row's event,
@@ -62,27 +66,39 @@ class _Link:
     spool_id: UUID
     archived: bool
     linked_at: datetime | None
+    #: The pull made the spool archived, as Bambuddy had archived it (#6707).
+    made_archived: bool = False
 
 
 def _links(conn: Conn, rows: Sequence[SpoolUsage]) -> dict[int, _Link]:
     """The SB spool linked to each BB spool ``rows`` name, by BB spool id: whether it is
-    archived, and the time of its first `ledger.BB_SPOOL` event."""
+    archived, the time of its first `ledger.BB_SPOOL` event, and whether the pull made it
+    archived (#6707)."""
     found = conn.execute(
         "SELECT l.bb_spool_id, l.spool_id, s.archived_at IS NOT NULL AS archived,"
         " (SELECT min(e.at) FROM filament_spool_events e"
-        " WHERE e.spool_id = l.spool_id AND e.ref_kind = %s) AS linked_at"
+        " WHERE e.spool_id = l.spool_id AND e.ref_kind = %s) AS linked_at,"
+        " EXISTS (SELECT 1 FROM filament_spool_events e WHERE e.spool_id = l.spool_id"
+        " AND e.kind = 'archived' AND e.data ? 'bb_archived_at') AS made_archived"
         " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
         " WHERE l.bb_spool_id = ANY(%s)",
         (ledger.BB_SPOOL, sorted({row.spool_id for row in rows})),
     ).fetchall()
-    return {r["bb_spool_id"]: _Link(r["spool_id"], r["archived"], r["linked_at"]) for r in found}
+    return {
+        r["bb_spool_id"]: _Link(r["spool_id"], r["archived"], r["linked_at"], r["made_archived"])
+        for r in found
+    }
 
 
 def _books(row: SpoolUsage, link: _Link | None) -> bool:
     """Whether ``row`` is one to book: it took grams, its BB spool is linked to an SB
     spool that is not archived (the pull never writes to one), and it is later than the
-    link's reading."""
-    if row.weight_used <= 0 or link is None or link.archived:
+    link's reading. Every row of a spool the pull made archived books (#6707)."""
+    if row.weight_used <= 0 or link is None:
+        return False
+    if link.made_archived:
+        return True
+    if link.archived:
         return False
     return link.linked_at is None or row.created_at > link.linked_at
 

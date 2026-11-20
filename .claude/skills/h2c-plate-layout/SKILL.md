@@ -9,7 +9,8 @@ ScadBuddy renders a model on a generic 256x256 plate unless the output came thro
 an arranged, printer-aware pipeline. Those files carry `print_settings_id: ScadBuddy`,
 a 256x256 `printable_area`, the prime tower wherever the default put it (often
 `98, 5`, under the objects), and every build item translated to the plate centre
-`128, 128`. ScadBuddy's send step relocates a tower only when a nozzle cannot reach it;
+`128, 128`. ScadBuddy's send step relocates a tower only when a nozzle cannot reach it or it
+stands on its plate's objects' box (#3770);
 it keeps an author layout, one whose `print_settings_id` names the H2C process, exactly
 as written. So for the H2C the layout is yours to make, and `scripts/layout_h2c.py` is
 the tool: `report` measures a file, `move` rewrites it.
@@ -47,7 +48,7 @@ From Bambu Studio `src/libslic3r/Print.cpp` (tag `v02.08.02.61`) and the H2C pro
 - Objects print in object-list order, not by position (the sort by position is `#if 0`).
 - Height limit: the last object gets the full printable height. Every other object gets 201 mm (`extruder_clearance_height_to_lid`), or 47.4 mm (`..._height_to_rod`) if a later object overlaps its Y band (its Y range +/- 25 mm, half of `extruder_clearance_dist_to_rod`). Put tall objects last, or in a Y band no later object overlaps.
 - Only `bed_exclude_area` is checked. `wrapping_exclude_area` is not checked by object.
-- A prime tower is still made when timelapse is on or there is more than one filament. Pass `prime_tower: {enabled: false}` in the print or quote call (it becomes `enable_prime_tower: "0"` in the process overrides) to stop it.
+- A prime tower is still made when timelapse is on or there is more than one filament. Pass `prime_tower: {enabled: false}` in the print or quote call (it becomes `enable_prime_tower: "0"` in the process overrides) to stop it. Arrange takes the same `prime_tower`: with `enabled: false` it keeps no room for a tower, so more fits on a plate, and the file states the tower off (#3770). A print or quote of that file with no `prime_tower` of its own sends `enable_prime_tower: "0"`, since the slicer's process preset would otherwise put a tower back. A print with `prime_tower: {enabled: true}` gets room for the tower again, or is refused when the plate cannot fit it.
 
 ## Why the meshes centre the way they do
 

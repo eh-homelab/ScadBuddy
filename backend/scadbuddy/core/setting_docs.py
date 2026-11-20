@@ -750,6 +750,15 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Customer files task queue",
             _TEMPORAL_QUEUE.format(what="the checks of a customer's uploaded files"),
         ),
+        "temporal_task_queue_profile_fetch": SettingDoc(
+            "Profile fetch task queue",
+            _TEMPORAL_QUEUE.format(what="the exports of a type's slicer profiles"),
+        ),
+        "profile_fetch_nozzles": SettingDoc(
+            "Nozzles to fetch from 3DFP",
+            "The nozzle diameters that Fetch from 3DFP exports for each printer model: any"
+            " of 0.2, 0.4, 0.6 and 0.8. At least one.",
+        ),
         "temporal_sdk_metrics_port": SettingDoc(
             "Temporal SDK metrics port",
             "The loopback port where a worker's Temporal SDK exports its metrics, which the"

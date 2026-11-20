@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from tests.api.test_printers import bambuddy_printer, bambuddy_printers, create
 from tests.api.test_send import API, configure
+from tests.bambuddy.conftest import recording
 
 INPUTS: dict[str, Any] = {
     "profile": {
@@ -254,6 +255,7 @@ def test_a_linked_printers_counter_is_bambuddys(client: TestClient, pg_conninfo:
     maintenance = respx.get(f"{API}/maintenance/printers/1").mock(
         return_value=httpx.Response(200, json={"printer_id": 1, "maintenance_items": [item]})
     )
+    respx.get(f"{API}/maintenance/items/31/history").mock(return_value=httpx.Response(200, json=[]))
     client.put(path(row["id"]), json=INPUTS)
     # Linked and LAN-linked: ScadBuddy's count is a check beside Bambuddy's.
     lan_link(pg_conninfo, row["id"], run_seconds=3600)
@@ -329,6 +331,94 @@ def test_an_imported_events_reading_is_not_cleared(client: TestClient, pg_connin
     assert (refused.status_code, refused.json()["code"]) == (422, "imported_event")
     kept = client.get(events(row["id"])).json()["events"][0]
     assert (kept["hours_at"], kept["hours_source"]) == ("40", "bambuddy")
+
+
+PLATE_INPUTS: dict[str, Any] = {
+    "profile": {"labour_rate_per_hour": "30"},
+    "wear_parts": [],
+    "maintenance": [{"task": "Clean Build Plate", "minutes": "10", "priced_by": "actual"}],
+}
+
+
+def linked_plate(client: TestClient) -> tuple[str, respx.Route]:
+    """A printer linked to Bambuddy printer 1, whose one task is prod's Clean Build Plate
+    (item 5), and the route of its log, answering the recorded one (§2.1)."""
+    configure(client)
+    bambuddy_printers(bambuddy_printer(1, "01P00A000000001"))
+    row = create(client)
+    client.put(f"/api/v1/printers/{row['id']}/bambuddy", json={"bambuddy_printer_id": 1})
+    item = {
+        "id": 5,
+        "maintenance_type_name": "Clean Build Plate",
+        "enabled": True,
+        "interval_hours": 25.0,
+        "interval_type": "hours",
+        "current_hours": 510.3425,
+    }
+    respx.get(f"{API}/maintenance/printers/1").mock(
+        return_value=httpx.Response(200, json={"printer_id": 1, "maintenance_items": [item]})
+    )
+    log = respx.get(f"{API}/maintenance/items/5/history").mock(
+        return_value=httpx.Response(200, json=recording("maintenance-history.json"))
+    )
+    return row["id"], log
+
+
+@respx.mock
+def test_the_view_and_the_button_import_bambuddys_log(client: TestClient) -> None:
+    printer, log = linked_plate(client)
+    no_profile = client.post(f"{path(printer)}/import")
+    assert (no_profile.status_code, no_profile.json()["code"]) == (409, "no_machine_rate")
+    assert not log.called
+
+    view = client.put(path(printer), json=PLATE_INPUTS).json()
+    assert log.called
+    assert view["actuals"]["events_read_at"] is not None
+    plate = view["breakdown"]["maintenance"][0]
+    # §3.3's example: 15.00 over 196.6 h.
+    assert (plate["basis"], plate["per_hour"], plate["confidence"]) == ("actual", "0.0763", 100)
+    row = next(r for r in view["actuals"]["rows"] if r["name"] == "Clean Build Plate")
+    assert [e["hours_at"] for e in row["events"]] == ["465.6", "341.9", "304", "269"]
+    assert {e["origin"] for e in row["events"]} == {"bambuddy"}
+
+    read = client.post(f"{path(printer)}/import")
+    assert read.status_code == 200, read.text
+    assert read.json()["actuals"]["events_read_at"] >= view["actuals"]["events_read_at"]
+    listed = client.get(events(printer), params={"kind": "task"}).json()["events"]
+    assert len(listed) == 5
+
+    log.mock(return_value=httpx.Response(403, json={"detail": "no"}))
+    down = client.post(f"{path(printer)}/import")
+    assert (down.status_code, down.json()["code"]) == (503, "log_unavailable")
+    kept = client.get(path(printer)).json()
+    assert kept["actuals"]["events_read_at"] == read.json()["actuals"]["events_read_at"]
+    assert len(client.get(events(printer), params={"kind": "task"}).json()["events"]) == 5
+
+
+def test_the_button_needs_a_linked_printer(client: TestClient) -> None:
+    row = create(client)
+    client.put(path(row["id"]), json=INPUTS)
+    refused = client.post(f"{path(row['id'])}/import")
+    assert (refused.status_code, refused.json()["code"]) == (409, "not_linked")
+    assert client.post(f"{path('nope')}/import").status_code == 404
+
+
+def test_the_imports_source_and_a_time_with_no_zone_are_refused(client: TestClient) -> None:
+    """#6642 review: ``bambuddy:`` is the import's key (§4), and a time with no zone
+    would be read in the server's zone."""
+    row = create(client)
+    client.put(path(row["id"]), json=INPUTS)
+    for taken in ("bambuddy:38", "Bambuddy:38"):
+        refused = client.post(events(row["id"]), json=nozzle(hours_at="10", source=taken))
+        assert refused.status_code == 422, refused.text
+    naive = client.post(events(row["id"]), json=nozzle(hours_at="10", at="2026-11-01T00:00:00"))
+    assert naive.status_code == 422, naive.text
+    aware = client.post(
+        events(row["id"]), json=nozzle(hours_at="10", at="2026-11-01T02:00:00+02:00")
+    )
+    assert aware.status_code == 201, aware.text
+    assert aware.json()["at"].startswith("2026-11-01T00:00:00")
+    assert client.get(events(row["id"])).json()["events"][0]["id"] == aware.json()["id"]
 
 
 def test_a_source_names_one_event_across_both_kinds(client: TestClient) -> None:

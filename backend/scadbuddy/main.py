@@ -210,6 +210,7 @@ from scadbuddy.workflows.housekeeping import (
     LIBRARY_SWEEP,
     LOST_NATIVE_SLICES_SWEEP,
     LOST_SLICES_SWEEP,
+    MAINTENANCE_IMPORT_SWEEP,
     NATIVE_COPIES_SWEEP,
     NATIVE_SLICES_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
@@ -751,6 +752,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sync_bank_deposits() -> None:
         await _heartbeating(_sync_bank_deposits_logged(state))
 
+    @activity.defn(name=MAINTENANCE_IMPORT_SWEEP)
+    async def import_maintenance() -> None:
+        await _heartbeating(_import_maintenance_logged(state))
+
     @activity.defn(name=STOREFRONT_DRAFTS_SWEEP)
     async def sweep_storefront_drafts() -> None:
         await _heartbeating(_sweep_storefront_drafts_logged(state))
@@ -794,6 +799,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         retry_payment_closes,
         settle_payment_captures,
         sync_bank_deposits,
+        import_maintenance,
         sweep_storefront_drafts,
         send_storefront_mail,
         auto_import_prints,
@@ -1444,6 +1450,23 @@ async def _reap_quote_holds_logged(state: AppState) -> None:
         raise
     if dropped:
         logger.info("reaped quote holds", extra={"count": dropped})
+
+
+async def _import_maintenance_logged(state: AppState) -> None:
+    """#5774 (spec 2026-11-17-machine-rate-actuals §3.7): each linked printer's
+    maintenance log read from Bambuddy. A printer Bambuddy does not answer for keeps its
+    stored events and is counted, not raised: the next tick reads it again."""
+    try:
+        read, failed = await state.components.get(ORDERS).machine_rates.read_logs()
+    except Exception:
+        logger.exception("could not import the printers' maintenance logs")
+        raise
+    if read or failed:
+        logger.log(
+            logging.WARNING if failed else logging.DEBUG,
+            "imported the printers' maintenance logs",
+            extra={"read": read, "failed": failed},
+        )
 
 
 async def _reap_run_holds_logged(state: AppState) -> None:

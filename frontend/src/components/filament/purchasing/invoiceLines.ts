@@ -111,9 +111,14 @@ export function confirmCounts(rows: LineDraft[]): { made: number; filled: number
   return { made, filled, prices: rows.length }
 }
 
-/** The unarchived spools with no cost that a line of `typeId` may fill: of that type, or with none. */
+/**
+ * The spools on no invoice line that a line of `typeId` may fill: of that type, or with none.
+ * Those with no cost come first; a costed one's cost is replaced at confirm (#6700). An archived
+ * (used-up) spool is one too: it was still bought, and the confirm leaves it archived (#6707).
+ */
 export function fillable(spools: Spool[], typeId: string, taken: ReadonlySet<string>): Spool[] {
-  return spools.filter((spool) => !spool.archived_at && spool.cost_per_kg === null && !taken.has(spool.id) && (spool.type_id === null || (typeId !== '' && spool.type_id === typeId)))
+  const open = spools.filter((spool) => !spool.invoice_line_id && !taken.has(spool.id) && (spool.type_id === null || (typeId !== '' && spool.type_id === typeId)))
+  return [...open.filter((spool) => spool.cost_per_kg === null), ...open.filter((spool) => spool.cost_per_kg !== null)]
 }
 
 /** The invoice's tax basis from its lines': one shared basis, or "per line"; `null` when no tax. */

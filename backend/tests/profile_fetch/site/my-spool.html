@@ -1,0 +1,100 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>My spool __ID__ | 3D Filament Profiles (replica)</title>
+  </head>
+  <body>
+    <h1>Inland PLA+ White</h1>
+    <!-- 3dfp.mjs `export`: an "Export slicer profile" button opens a [role=dialog] with
+         three comboboxes (slicer, printer, nozzle) whose options are rendered outside the
+         dialog, an acknowledge checkbox, and a "Download" button that clicks a blob:
+         anchor with a download name. -->
+    <button type="button" id="export">Export slicer profile</button>
+    <script>
+      const OPTIONS = __OPTIONS__;
+      const DOWNLOAD = __DOWNLOAD__;
+      const OPTION_DELAY_MS = __OPTION_DELAY_MS__;
+      let dialog = null;
+      let list = null;
+      const closeList = () => {
+        if (list) list.remove();
+        list = null;
+      };
+      document.getElementById("export").onclick = () => {
+        const chosen = [null, null, null];
+        dialog = document.createElement("div");
+        dialog.setAttribute("role", "dialog");
+        ["Slicer", "Printer", "Nozzle"].forEach((label, i) => {
+          const box = document.createElement("button");
+          box.type = "button";
+          box.setAttribute("role", "combobox");
+          box.textContent = "Select " + label;
+          box.onclick = () => {
+            closeList();
+            list = document.createElement("div");
+            list.setAttribute("role", "listbox");
+            document.body.appendChild(list);
+            const shown = list;
+            const fill = () => {
+              if (list !== shown) return;
+              for (const value of OPTIONS[i]) {
+                const option = document.createElement("div");
+                option.setAttribute("role", "option");
+                option.textContent = value;
+                option.onclick = () => {
+                  chosen[i] = value;
+                  box.textContent = value;
+                  closeList();
+                };
+                list.appendChild(option);
+              }
+            };
+            // A client-rendered list can fill a moment after it opens.
+            if (OPTION_DELAY_MS > 0) setTimeout(fill, OPTION_DELAY_MS);
+            else fill();
+          };
+          dialog.appendChild(box);
+        });
+        const ack = document.createElement("button");
+        ack.type = "button";
+        ack.setAttribute("role", "checkbox");
+        ack.setAttribute("aria-checked", "false");
+        ack.setAttribute("aria-label", "I understand these are community profiles");
+        ack.onclick = () =>
+          ack.setAttribute("aria-checked", ack.getAttribute("aria-checked") === "true" ? "false" : "true");
+        dialog.appendChild(ack);
+        const download = document.createElement("button");
+        download.type = "button";
+        download.textContent = "Download profile";
+        download.onclick = async () => {
+          if (ack.getAttribute("aria-checked") !== "true" || chosen.includes(null)) return;
+          const query = new URLSearchParams({ slicer: chosen[0], printer: chosen[1], nozzle: chosen[2] });
+          const answer = await (await fetch("/api/export/__ID__?" + query)).json();
+          // An untrusted page can push to the hook's list itself (#6726).
+          if (DOWNLOAD === "pushed_entry") return void window.__dl.push({ name: answer.name, text: answer.text });
+          if (DOWNLOAD === "pushed_long_name") return void window.__dl.push({ name: "n".repeat(1025), text: answer.text });
+          if (DOWNLOAD === "pushed_number_text") return void window.__dl.push({ name: answer.name, text: 5 });
+          if (DOWNLOAD === "pushed_text") return void window.__dl.push(answer.text);
+          const blob = new Blob([answer.text], { type: "application/json" });
+          const anchor = document.createElement("a");
+          anchor.href = URL.createObjectURL(blob);
+          anchor.download = answer.name;
+          document.body.appendChild(anchor);
+          if (DOWNLOAD === "unhooked") anchor.dispatchEvent(new MouseEvent("click"));
+          else anchor.click();
+        };
+        dialog.appendChild(download);
+        document.body.appendChild(dialog);
+      };
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        if (list) closeList();
+        else if (dialog) {
+          dialog.remove();
+          dialog = null;
+        }
+      });
+    </script>
+  </body>
+</html>

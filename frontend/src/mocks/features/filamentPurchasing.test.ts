@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client'
-import { createSpool, getSpool, listSpools } from '../../api/filament'
+import { createSpool, getSpool, listSpoolEvents, listSpools } from '../../api/filament'
 import {
   addPrice,
   clearShopping,
@@ -211,12 +211,38 @@ describe('the purchasing mocks', () => {
       expect(all.length).toBe(13)
     })
 
-    it('refuses an archived, costed, invoiced or other-type spool, too many ids and a duplicate, naming the line', async () => {
+    it('fills a costed spool with no invoice line and replaces its cost, with one edited event (#6700)', async () => {
       resetMockState()
       const costed = await createSpool({ type_id: T.JADE, cost_per_kg: '10', weight_locked: false })
+      expect(costed.invoice_line_id).toBeNull()
+      const done = await confirmInvoice((await draft([costed.id])).id)
+      expect(done.lines[0]!.spool_ids[0]).toBe(costed.id)
+      const listed = (await listSpools({ includeArchived: true })).find((one) => one.id === costed.id)
+      expect(listed?.invoice_line_id).toBe(done.lines[0]!.id)
+      expect(await getSpool(costed.id)).toMatchObject({ cost_per_kg: '15.0000' })
+      const edited = (await listSpoolEvents(costed.id)).filter((event) => event.kind === 'edited')
+      expect(edited.length).toBe(1)
+      expect(edited[0]!.data).toEqual({ changes: { cost_per_kg: ['10', '15.0000'] } })
+    })
+
+    it('fills an archived spool with the line cost only: it stays archived and keeps its type (#6707)', async () => {
+      resetMockState()
+      const spent = spoolId(19)
+      const before = await getSpool(spent)
+      expect(before.archived_at).not.toBeNull()
+      const done = await confirmInvoice((await draft([spent], 2, T.INLAND_BLACK)).id)
+      const [filled, made] = done.lines[0]!.spool_ids
+      expect(filled).toBe(spent)
+      const after = await getSpool(spent)
+      expect(after.archived_at).toBe(before.archived_at)
+      expect(after.type_id).toBe(before.type_id)
+      expect(after.cost_per_kg).toBe((await getSpool(made!)).cost_per_kg)
+      expect(after.cost_per_kg).not.toBe(before.cost_per_kg)
+    })
+
+    it('refuses an invoiced or other-type spool, too many ids and a duplicate, naming the line', async () => {
+      resetMockState()
       const cases: [string[], string, number?][] = [
-        [[spoolId(19)], 'is archived'],
-        [[costed.id], 'already has its own cost'],
         [[spoolId(1)], 'already belongs to an invoice line'],
         [[spoolId(9)], 'has another spool type'],
         [[spoolId(6), spoolId(6)], 'it names a spool twice'],

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, get_args
 
 import psycopg
 from fastapi import APIRouter, Response, status
@@ -33,7 +33,7 @@ from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.api.storefront_slice import check_profile
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
-from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
+from scadbuddy.bambuddy.models import Folder, NozzleSize, Printer, RackAlgorithm
 from scadbuddy.bambuddy.options import (
     BAMBUDDY_DEFAULTS,
     OptionScope,
@@ -174,6 +174,10 @@ class SettingsView(BaseModel):
     storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
     #: The most colour combinations one prepare of a listing queues (#6237).
     storefront_prepare_cap: int = 256
+    #: The nozzle diameters one profile fetch exports per printer model (#6625).
+    profile_fetch_nozzles: list[NozzleSize] = Field(
+        default_factory=lambda: list(get_args(NozzleSize))
+    )
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
     #: (`starttls`, `implicit` or `none`). The password is sealed apart
     #: (`GET /storefront/mail/password` says whether it is set).

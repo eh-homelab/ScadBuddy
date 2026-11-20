@@ -17,13 +17,14 @@ import { ChoiceSelect } from '../../../components/settings/form'
 import { shortId, timeAgo } from '../../../lib/format'
 import { useAsync, type AsyncState } from '../../../lib/useAsync'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
 import { FieldRow } from '../controls'
 import { docOf } from '../fields'
 import { FieldBadge, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings, type BackendSettings } from '../useBackendSettings'
-import { fieldsOf, SYNC_KINDS, syncParts, syncValue, type SyncDirection, type SyncKind } from '../values'
+import { FETCH_NOZZLES, fieldsOf, nozzlesValue, SYNC_KINDS, syncParts, syncValue, type SyncDirection, type SyncKind } from '../values'
 
 export const id = 'filament'
 export const area: AreaId = 'printing'
@@ -363,6 +364,36 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
 }
 
 /**
+ * #6625 — the nozzles a 3DFP preset fetch exports for each printer model, one checkbox
+ * each. `profile_fetch_nozzles` is held in the form comma-joined and saved with "Save
+ * Filament"; none ticked is refused before the save.
+ */
+function FetchNozzlesRow({ form }: { form: BackendSettings }) {
+  const raw = form.value('profile_fetch_nozzles')
+  const ticked = raw === '' ? [] : raw.split(',')
+  const toggle = (nozzle: string, checked: boolean) =>
+    form.setField('profile_fetch_nozzles', nozzlesValue(checked ? [...ticked, nozzle] : ticked.filter((one) => one !== nozzle)))
+  const doc = docOf(form.settings, 'profile_fetch_nozzles')
+  return (
+    <FieldRow
+      id="setting-profile_fetch_nozzles"
+      {...doc}
+      badge={<FieldBadge form={form} name="profile_fetch_nozzles" />}
+      error={form.errors.profile_fetch_nozzles}
+    >
+      <fieldset id="setting-profile_fetch_nozzles" aria-label={doc.label} className="flex flex-wrap gap-x-5 gap-y-2">
+        {FETCH_NOZZLES.map((nozzle) => (
+          <label key={nozzle} className="flex items-center gap-2 text-sm">
+            <Checkbox aria-label={`${nozzle} mm`} checked={ticked.includes(nozzle)} onCheckedChange={(checked) => toggle(nozzle, checked === true)} />
+            <span className="sb-num">{nozzle} mm</span>
+          </label>
+        ))}
+      </fieldset>
+    </FieldRow>
+  )
+}
+
+/**
  * #6264 — the RFID override mode (Bambuddy stops adding a spool for an RFID tag it does not
  * know). It is an action with a status, not a draft: the switch writes the mode on the server
  * at once, which answers with where Bambuddy stands.
@@ -457,6 +488,7 @@ export function Component() {
       <SyncRows form={form} />
       <SyncStatusRow status={syncStatus} />
       <OverrideRow />
+      <FetchNozzlesRow form={form} />
       <FieldRow
         id="filament-currency"
         label="Currency"

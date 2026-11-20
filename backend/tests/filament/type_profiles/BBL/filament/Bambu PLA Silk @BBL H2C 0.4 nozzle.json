@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Bambu PLA Silk @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "Bambu PLA Silk @base",
+    "setting_id": "GFSA05_22",
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ],
+    "eng_plate_temp": [
+        "60"
+    ]
+}

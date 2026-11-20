@@ -85,7 +85,8 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   // #959 — where the agent's `fetch_asset` (and `POST /models/{slug}/assets/fetch`) may fetch from.
   uploads: ['asset_fetch_domains'],
   // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools and weights in, tags out.
-  filament: ['filament_sync'],
+  // #6625 — and the nozzles a 3DFP preset fetch exports.
+  filament: ['filament_sync', 'profile_fetch_nozzles'],
 }
 
 /** #6265 — the six data types `filament_sync` gives a direction, in the form's order. */
@@ -177,6 +178,15 @@ export function sourcesValue(sources: readonly string[]): string {
   return AUTO_IMPORT_SOURCES.filter((source) => sources.includes(source)).join(',')
 }
 
+/** #6625 — the nozzle diameters a 3DFP preset fetch may export (`bambuddy/models.py` `NozzleSize`). */
+export const FETCH_NOZZLES = ['0.2', '0.4', '0.6', '0.8'] as const
+export type FetchNozzle = (typeof FETCH_NOZZLES)[number]
+
+/** The form's value for a list of nozzles: in `FETCH_NOZZLES` order, comma-joined. */
+export function nozzlesValue(nozzles: readonly string[]): string {
+  return FETCH_NOZZLES.filter((nozzle) => nozzles.includes(nozzle)).join(',')
+}
+
 /** The form's value for a list of printer ids: ascending, comma-joined. */
 export function printerIdsValue(ids: readonly number[]): string {
   return [...new Set(ids)].sort((a, b) => a - b).join(',')
@@ -194,6 +204,7 @@ export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
     return registryIdsValue(settings.print_auto_import_skip_lan_printers ?? [])
+  if (name === 'profile_fetch_nozzles') return nozzlesValue(settings.profile_fetch_nozzles ?? FETCH_NOZZLES)
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
   if (name === 'destination_sort') return settings.destination_sort ?? 'touched'
   if (name === 'activity_follow') {
@@ -230,6 +241,10 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)
   if (name === 'print_auto_import_skip_lan_printers') return raw === '' ? [] : raw.split(',')
+  // #6625 — a fetch with no nozzle would export nothing, so the API needs one.
+  if (name === 'profile_fetch_nozzles') {
+    return raw === '' ? ({ problem: 'Choose at least one nozzle.' } satisfies Problem) : raw.split(',')
+  }
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null

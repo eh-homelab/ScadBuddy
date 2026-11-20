@@ -176,6 +176,25 @@ class MaintenanceStatus(BambuddyModel):
     current_hours: float | None = None
 
 
+class MaintenanceHistoryEntry(BambuddyModel):
+    """One row of ``GET /api/v1/maintenance/items/{item_id}/history``: a task marked done,
+    with the printer's print-hour counter then (``MaintenanceHistoryResponse`` in
+    Bambuddy's ``backend/app/schemas/maintenance.py`` at maziggy/bambuddy@1aa7bce, read
+    2026-11-18; #5774 spec 2026-11-17-machine-rate-actuals §2.1). Bambuddy writes
+    ``performed_at`` with no zone, in UTC (§2.1 "Time zone"), so a naive time is read as
+    UTC."""
+
+    id: int
+    performed_at: datetime
+    hours_at_maintenance: float
+    notes: str | None = None
+
+    @field_validator("performed_at")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 class PrinterMaintenanceOverview(BambuddyModel):
     """``GET /api/v1/maintenance/printers/{id}``: the printer's maintenance tasks, each
     with its interval (``PrinterMaintenanceOverview``, same source)."""
@@ -1063,14 +1082,48 @@ class SliceJob(BambuddyModel):
         return "Bambuddy did not say why"
 
 
+class PresetImport(BambuddyModel):
+    """``POST /api/v1/local-presets/import``'s answer (``ImportResponse``): how many
+    presets of the zip Bambuddy took (#6625)."""
+
+    success: bool
+    imported: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class KProfile(BambuddyModel):
+    """A row of a printer's K table, ``GET /api/v1/printers/{id}/kprofiles/`` (``KProfile``
+    in Bambuddy's schema): the flow-dynamics value the printer holds for one filament and
+    nozzle. ``k_value`` stays a string, as Bambuddy sends it (#6625)."""
+
+    slot_id: int
+    extruder_id: int = 0
+    nozzle_id: str
+    nozzle_diameter: str
+    filament_id: str
+    name: str
+    k_value: str
+    setting_id: str | None = None
+
+
+class KProfileTable(BambuddyModel):
+    """``GET /api/v1/printers/{id}/kprofiles/``'s answer: the rows for one nozzle."""
+
+    profiles: list[KProfile] = Field(default_factory=list)
+    nozzle_diameter: str | None = None
+
+
 class SpoolKProfile(BambuddyModel):
-    """A spool's K-profile, as ``GET /inventory/spools`` nests it: Bambuddy's
-    ``SpoolKProfileResponse`` (``tests/bambuddy/recordings/openapi/sync-routes.json``,
-    v1.3.1). Every field is optional, so a row that carries only ``setting_id`` (#6136)
-    still parses."""
+    """A spool's K-profile, as ``GET /inventory/spools`` nests it: the preset it names
+    (#6136), and the calibration a spool type imports (#6714). The fields are
+    ``SpoolKProfileResponse`` in the live Bambuddy's OpenAPI (read 2026-11-20;
+    ``tests/bambuddy/recordings/openapi/sync-routes.json``, v1.3.1); each is optional
+    here, so a row without them still reads."""
 
     id: int | None = None
     spool_id: int | None = None
+    #: Bambuddy's printer id, which a ScadBuddy printer links (``bambuddy_printer_id``).
     printer_id: int | None = None
     extruder: int | None = None
     nozzle_diameter: str | None = None
@@ -1179,6 +1232,7 @@ class Spool(BambuddyModel):
     category: str | None = None
     storage_location: str | None = None
     location_id: int | None = None
+    #: When Bambuddy archived the spool; naive UTC as its other times, read as UTC (#6707).
     archived_at: datetime | None = None
     #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
     #: nobody entered a price (#785).
@@ -1217,7 +1271,7 @@ class Spool(BambuddyModel):
     tag_type: str | None = None
     data_origin: str | None = None
 
-    @field_validator("updated_at", "last_weighed_at", "last_dried_at")
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at")
     @classmethod
     def _utc(cls, value: datetime | None) -> datetime | None:
         return as_utc(value)

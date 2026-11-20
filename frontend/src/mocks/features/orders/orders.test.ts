@@ -4,7 +4,7 @@ import { DEFAULT_ORDERS_QUERY } from '../../../lib/ordersQuery'
 import { MAZE_SLUG } from '../../fixtures'
 import { resetMockState } from '../../handlers'
 import { MAX_SCAN_PAGES, SCAN_PAGE_SIZE } from './orders'
-import { CUSTOMER_ADA, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS, seedCart, state } from './state'
+import { CUSTOMER_ADA, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS, seedCart, state } from './state'
 
 // The mock answers the lifecycle's refusals as the backend does (orders/lifecycle.py,
 // api/orders.py): 409 problems typed `orders/<slug>` naming the ids in the way, so the
@@ -452,5 +452,19 @@ describe('orders mock · storefront prices (#5283)', () => {
     expect((await api.updateOrderItem(ORDER_DRAFT, item.id, { title: 'Crate', accept: true })).title).toBe('Crate')
     // Unset, the price is left for the customer.
     expect((await api.updateOrderItem(ORDER_DRAFT, item.id, { quantity: 3 })).status).toBe('quoted')
+  })
+})
+
+describe('job cost mock (#5774)', () => {
+  beforeEach(() => resetMockState())
+
+  it("labels today's-rate attempts by their printer's basis and confidence", async () => {
+    const costs = await api.orderCosts(ORDER_CLOSED)
+    const attempts = costs.items.flatMap((i) => i.attempts)
+    const byId = Object.fromEntries(attempts.map((a) => [a.fulfilment_id, [a.machine_rate_basis, a.machine_rate_confidence, a.machine_minor]]))
+    // 3600 s at 0.92 an hour and 1800 s at 0.75, in cents.
+    expect(byId['f0000000-0000-4000-8000-000000000002']).toEqual(['printer_actuals', 66, 92])
+    expect(byId['f0000000-0000-4000-8000-000000000003']).toEqual(['printer_estimate', 33, 38])
+    expect(costs.machine_rate_bases).toEqual(['printer_actuals', 'printer_estimate'])
   })
 })

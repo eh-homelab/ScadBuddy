@@ -256,7 +256,7 @@ same way, `vite.config.ts`).
   button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
   the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind; `NtagPanel` writes an NTAG through a SpoolBuddy
   reader and polls `confirmNtag` every 2 s for 60 s, says `Bound tag <uid>`, offers Cancel after the 60 s too and drops a queued write when the page unmounts, #6264) and `/filament/types/:id`
-  (`TypePage`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
+  (`TypePage`; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
   configuration (`pages/settings/sections/filament.tsx`: also "Tags to Bambuddy", which saves
@@ -269,7 +269,9 @@ same way, `vite.config.ts`).
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
   call), `settings.spec.ts` and `page-titles.spec.ts`. Sensors and weights (#6268):
   `LocationSensors` and `SensorChart` on the Locations tab, `NeedsDrying` and `outsideDry.ts`,
-  and the Spools tab button "Sync weights from AMS".
+  and the Spools tab button "Sync weights from AMS". Type proposals (#6701): `TypeProposals` ("Create types") shows on the Needs-type filter, over
+  `GET /filament/type-proposals` and its confirm; the mocks group the seed's untyped spools (#6 is one
+  group, #7 lacks a label weight).
 - "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
   (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
   `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s

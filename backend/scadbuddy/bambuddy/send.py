@@ -64,6 +64,7 @@ from scadbuddy.render.plate import (
     Rect,
     plate_for,
     tower_beside,
+    tower_brim,
     tower_reaches,
 )
 from scadbuddy.render.provenance import content_key
@@ -187,6 +188,15 @@ _TOWER_BRIM = "#brim"
 #: #6170). A copy recorded before keeps the author's covers, which the slicer copies into
 #: the sliced file, so reusing it would keep Bambuddy's job cover in the wrong colours.
 _COVERS_REDRAWN = "#covers"
+#: Follows :data:`_COVERS_REDRAWN` in every :attr:`Target.key` of a copy laid out since
+#: an author's prime tower that stands on its plate's objects is moved beside them
+#: (:func:`towers_within_reach`, #3770). A copy recorded before can keep that tower,
+#: which the slicer reports as "Object conflicts were detected".
+_TOWER_CLEAR = "#clear"
+#: In a :attr:`Target.key` whose print turns the prime tower on over a file that states it
+#: off (:attr:`Target.tower_on`, #3770): that copy keeps room for the tower, so it is
+#: never reused for a print that leaves the file's tower off, nor the other way round.
+_TOWER_ON = "+tower"
 #: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
 #: written into (``layout_of`` ``as_is``), or a library file with no 3MF to lay out: it
 #: prints as it is, so it cannot carry them.
@@ -251,17 +261,21 @@ class Target:
     #: Process settings for each slot's parts (#5571), written into
     #: ``model_settings.config``. ``None`` writes none.
     part_settings: PartOverrides | None = None
+    #: The print turns the prime tower on over a file that states it off (#3770): the
+    #: layout keeps room for the tower (:func:`replate_3mf` ``tower_on``).
+    tower_on: bool = False
 
     @property
     def key(self) -> str:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
-        It starts with the plate's own key, :data:`_BED_STATED`, :data:`_TOWER_BRIM` and
-        :data:`_COVERS_REDRAWN`, so a copy recorded before #4638, whose file states no bed,
-        before #5545, whose tower leaves no room for a tall plate's brim, or before #6170,
-        whose covers are the author's, is never reused.
+        It starts with the plate's own key, :data:`_BED_STATED`, :data:`_TOWER_BRIM`,
+        :data:`_COVERS_REDRAWN` and :data:`_TOWER_CLEAR`, so a copy recorded before #4638,
+        whose file states no bed, before #5545, whose tower leaves no room for a tall
+        plate's brim, before #6170, whose covers are the author's, or before #3770, whose
+        tower may stand on its objects, is never reused.
         """
-        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}"
+        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}{_TOWER_CLEAR}"
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
@@ -286,6 +300,8 @@ class Target:
             # A file with settings on its parts must not be reused for one without, nor
             # for other settings. Before the colours, so the uncoloured key has it too.
             key = f"{key}{_PART_SETTINGS}{part_settings_digest(self.part_settings)}"
+        if self.tower_on:
+            key = f"{key}{_TOWER_ON}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -308,6 +324,7 @@ class Target:
             nozzle_volume_type=self.nozzle_volume_type,
             filament_map=self.filament_map,
             part_settings=self.part_settings,
+            tower_on=self.tower_on,
         ).key
 
 
@@ -323,6 +340,7 @@ async def target_for(
     filament_map: FilamentMap | None = None,
     model: str | None = None,
     part_settings: PartOverrides | None = None,
+    tower_on: bool = False,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -340,6 +358,7 @@ async def target_for(
     list is not. Without a ``client`` a printer's plate needs it.
 
     ``part_settings`` are the print's settings per slot (#5571), only the print run's.
+    ``tower_on`` is the run's too (:attr:`Target.tower_on`, #3770).
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
@@ -353,6 +372,7 @@ async def target_for(
             flows,
             filament_map,
             part_settings,
+            tower_on,
         )
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is not None and client is None:
@@ -371,11 +391,19 @@ async def target_for(
             flows,
             filament_map,
             part_settings,
+            tower_on,
         )
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
     return Target(
-        _plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map, part_settings
+        _plate_for_model(model),
+        nozzle_diameter,
+        chosen,
+        stats,
+        flows,
+        filament_map,
+        part_settings,
+        tower_on,
     )
 
 
@@ -455,6 +483,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             nozzle_stats=target.nozzle_stats,
             nozzle_volume_type=target.nozzle_volume_type,
             filament_map=target.filament_map,
+            tower_on=target.tower_on,
         )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
@@ -523,18 +552,40 @@ def _tower_value(value: float) -> str:
     return "0" if text in ("", "-0") else text
 
 
+def _tower_on(corner: tuple[float, float], side: float, height: float, objects: Rect) -> bool:
+    """Whether a tower ``side`` wide at ``wipe_tower_x``/``_y`` ``corner``, with the brim
+    the slicer draws for ``height`` (:func:`tower_brim`), overlaps ``objects`` (#3770).
+
+    The tower is judged as a square. The slicer's tower is ``prime_tower_width`` wide,
+    but its depth comes from the prime volume times the filaments, and is often less.
+    So a tower clear of its objects only on the y side can still move: a harmless
+    over-estimate, kept until #3770's shared tower model knows the depth."""
+    brim = tower_brim(height)
+    x, y = corner[0] - brim, corner[1] - brim
+    return Rect(x, y, x + side + 2 * brim, y + side + 2 * brim).overlaps(objects)
+
+
 def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     """``payload`` with each plate's prime tower that ``plate``'s extruders cannot all
-    reach moved beside that plate's objects, by #105's rule (:func:`tower_beside`),
-    else unchanged (#4014). The brim judged round each tower is the one the slicer
-    draws for its plate's height (:func:`tower_brim`, #5545).
+    reach, or that stands on that plate's objects, moved beside those objects by #105's
+    rule (:func:`tower_beside`), else unchanged (#4014, #3770). The brim judged round
+    each tower is the one the slicer draws for its plate's height (:func:`tower_brim`,
+    #5545).
 
     An author's file keeps the tower where its printer put it: library file 2440, laid
     out on an A1 mini, has it at x 15, and an H2C's second extruder reaches nothing
-    below x 25, so every slice failed with "Found G-code in unprintable area". Only an
-    unreachable tower moves; a plate whose objects cannot be read, or that leaves no
-    room, keeps its own, and the slicer says why. The objects are read where the file
-    places them, less their plate's origin on the file's own bed."""
+    below x 25, so every slice failed with "Found G-code in unprintable area". A tower
+    whose square, brim included, overlaps its plate's objects' box makes the slicer
+    report "Object conflicts were detected" (#3770, Knitted Cat). Only such a tower
+    moves; a plate whose objects cannot be read, or that leaves no room, keeps its own,
+    and the slicer says why. A tower is judged even where the file seems to print none
+    (``enable_prime_tower`` ``"0"``, or one filament; claude-review on #6691): the print
+    dialog's choice (#3628) can turn the tower on at slice time, and a smooth timelapse
+    makes one for a single filament (``h2c-plate-layout`` skill), and the send knows
+    neither. Moving a tower that never prints changes only its settings. The objects are read
+    where the file places them, less their plate's origin on the file's own bed. The box
+    is the plate's objects' together, so a tower an author put in a gap between objects
+    also moves, to a place clear of them all."""
     if plate.model is None:
         return payload  # no printer chosen: nothing to judge a tower against
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
@@ -551,20 +602,9 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
     except (TypeError, ValueError):
         side = PRIME_TOWER_SIDE
-    # The widest brim first (#5545): a tower that clears the plate's edges with it
-    # needs no read of the objects. The rest are judged by their plate's height below.
-    unreachable = [
-        index
-        for index, tower in enumerate(towers, start=1)
-        if not tower_reaches(tower, plate, side)
-    ]
-    if not unreachable:
-        return payload
     try:
         # Read within the read budget, model settings included: a library file is
         # untrusted, and one this cannot read keeps its towers (claude-review on #4057).
-        # Every plate's boxes are read, though only the plates in `unreachable` need
-        # theirs: cheap at today's plate counts; read only those if counts grow (#4076).
         read = plate_boxes(payload)
     except UnreadableObjectsError:
         return payload
@@ -573,19 +613,20 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
     )
     moved = list(towers)
-    for index in unreachable:
+    for index, tower in enumerate(towers, start=1):
         if index > count or index not in boxes:
             continue
         low, high = boxes[index]
         height = float(high[2] - low[2])
-        if tower_reaches(towers[index - 1], plate, side, height):
-            continue
         ox, oy = plate_origin(index, count, source)
-        corner = tower_beside(
-            Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)),
-            plate,
-            height,
+        objects = Rect(
+            float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)
         )
+        if tower_reaches(tower, plate, side, height) and not _tower_on(
+            tower, side, height, objects
+        ):
+            continue
+        corner = tower_beside(objects, plate, height)
         if corner is not None:
             moved[index - 1] = corner
     if moved == towers:
@@ -593,7 +634,7 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     settings["wipe_tower_x"] = [_tower_value(x) for x, _ in moved]
     settings["wipe_tower_y"] = [_tower_value(y) for _, y in moved]
     logger.info(
-        "moved the file's prime tower where every extruder reaches",
+        "moved the file's prime tower where every extruder reaches, clear of its objects",
         extra={"printer_model": plate.model, "towers": len(moved)},
     )
     return rezipped(

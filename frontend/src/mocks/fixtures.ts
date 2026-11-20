@@ -1059,6 +1059,7 @@ export const settingsDefaults = {
   storefront_requests_enabled: false,
   storefront_materials: ['PETG', 'PLA'],
   storefront_prepare_cap: 256,
+  profile_fetch_nozzles: ['0.2', '0.4', '0.6', '0.8'],
   // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
   storefront_mail_host: null,
   storefront_mail_port: 587,

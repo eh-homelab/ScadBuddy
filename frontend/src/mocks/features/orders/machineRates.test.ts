@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api, type ApiError } from '../../../api/client'
 import { resetMockState } from '../../handlers'
+import { importBambuddyEvent, setBambuddyLogAnswers, setEventsReadAt } from './machineRates'
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT } from './state'
 
 // #4625 — a printer's machine rate, answered as `api/machine_rates.py` answers it, and a
@@ -71,5 +72,38 @@ describe('machine rate mock (#4625)', () => {
     const quote = await api.quoteItem(ORDER_DRAFT, ITEM_DRAFT, { ...DIALOG, filaments: { '0': FILAMENT_PLA, '1': FILAMENT_PETG } })
     expect(quote.printer).toBe(LINKED)
     expect(quote.machine_rate_breakdown?.rate_per_hour).toBe('3')
+  })
+})
+
+// #6665 — "Read from Bambuddy" and every event, paged.
+describe('machine rate actuals mock (#6665)', () => {
+  beforeEach(() => resetMockState())
+
+  it('reads the log of a linked printer with a profile, and refuses as the route does', async () => {
+    expect((await failure(api.importMachineRate(GARAGE)))?.problem.type).toMatch(/\/not_linked$/)
+    expect((await failure(api.importMachineRate(LINKED)))?.problem.type).toMatch(/\/no_machine_rate$/)
+    await api.setMachineRate(LINKED, { profile: {}, wear_parts: [], maintenance: [] })
+    setEventsReadAt(LINKED, '2026-11-01T10:00:00Z')
+    setBambuddyLogAnswers(false)
+    const down = await failure(api.importMachineRate(LINKED))
+    expect([down?.status, down?.problem.type]).toEqual([503, 'https://scadbuddy.dev/problems/machine-rate/log_unavailable'])
+    expect((await api.machineRate(LINKED)).actuals.events_read_at).toBe('2026-11-01T10:00:00Z')
+    setBambuddyLogAnswers(true)
+    const read = await api.importMachineRate(LINKED)
+    expect(Date.parse(read.actuals.events_read_at!)).toBeGreaterThan(Date.parse('2026-11-01T10:00:00Z'))
+  })
+
+  it('pages back through every event of a row, newest first', async () => {
+    for (let i = 0; i < 55; i++) importBambuddyEvent(LINKED, 'Clean build plate', String(i), `2026-10-01T${String(i % 24).padStart(2, '0')}:${String(i).padStart(2, '0')}:00Z`)
+    importBambuddyEvent(LINKED, 'Lubricate rails', '1')
+    const first = await api.machineRateEvents(LINKED, { kind: 'task', name: 'Clean build plate' })
+    expect(first.events).toHaveLength(50)
+    expect(first.next).toBeTruthy()
+    const second = await api.machineRateEvents(LINKED, { kind: 'task', name: 'Clean build plate', cursor: first.next })
+    expect(second.events).toHaveLength(5)
+    expect(second.next).toBeNull()
+    const all = [...first.events, ...second.events]
+    expect(new Set(all.map((e) => e.id)).size).toBe(55)
+    expect(all.map((e) => e.at)).toEqual([...all.map((e) => e.at)].sort().reverse())
   })
 })

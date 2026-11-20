@@ -15,6 +15,7 @@ expect() {
 expect "true false false true"  backend/scadbuddy/main.py
 expect "true false false true"  models/keychain/model.scad
 expect "true false false true"  test-fixtures/makerworld/manifest.json
+expect "true false false true"  test-fixtures/prime-tower/tower-choice.json
 expect "true false false true"  e2e-stack/compose.yaml
 expect "true false true true"   workers/rust/vectors/slice_plate.json
 expect "true false false true"  frontend/page-csp.txt

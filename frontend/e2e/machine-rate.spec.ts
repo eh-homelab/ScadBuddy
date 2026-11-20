@@ -64,7 +64,43 @@ for (const [width, height] of [
     await expect(items.first()).toContainText('ran 400 h')
     await expect(items.first()).toContainText('logged here')
 
+    // #6665: paging back through every event; all three are in the window here.
+    await wear.getByRole('button', { name: 'Show older events' }).click()
+    await expect(wear.getByText('That is every event.')).toBeVisible()
+    await expect(items).toHaveCount(3)
+
     // Nothing runs off the side of a phone.
+    const overflow = (await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth')) as number
+    expect(overflow).toBeLessThanOrEqual(0)
+
+    // #6665: a delete asks first.
+    await items.first().getByRole('button', { name: 'Delete' }).click()
+    const confirm = page.getByRole('alertdialog')
+    await expect(confirm).toContainText('Delete this replacement of Nozzle?')
+    await confirm.getByRole('button', { name: 'Delete' }).click()
+    await expect(confirm).toBeHidden()
+    await expect(items).toHaveCount(2)
+  })
+
+  // #6665 (spec §5, §9): "Read from Bambuddy" on a linked printer, its refusal in plain words.
+  test(`reads the maintenance log from Bambuddy at ${width} px`, async ({ page }) => {
+    await page.setViewportSize({ width, height })
+    await page.goto('/settings/printing#orders')
+    await page.getByRole('button', { name: 'Machine rate of 3DP-31B-598' }).click()
+    const panel = page.getByRole('region', { name: 'Machine rate of 3DP-31B-598' })
+    const inputs = panel.getByRole('form', { name: 'Machine rate inputs of 3DP-31B-598' })
+
+    await expect(panel.getByTestId('events-read')).toHaveText('Not read from Bambuddy yet')
+    await inputs.getByRole('button', { name: 'Read from Bambuddy' }).click()
+    await expect(panel.getByRole('alert')).toHaveText('Save the machine rate first, then read its maintenance from Bambuddy.')
+
+    await inputs.getByRole('button', { name: 'Add task' }).click()
+    await inputs.getByRole('group', { name: 'Maintenance task 1' }).getByLabel('Task', { exact: true }).fill('Clean build plate')
+    await inputs.getByRole('button', { name: 'Save machine rate' }).click()
+    await inputs.getByRole('button', { name: 'Read from Bambuddy' }).click()
+    await expect(panel.getByTestId('events-read')).toHaveText('Last read just now')
+    await expect(panel.getByRole('alert')).toHaveCount(0)
+
     const overflow = (await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth')) as number
     expect(overflow).toBeLessThanOrEqual(0)
   })

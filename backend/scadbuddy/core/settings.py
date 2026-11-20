@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, get_args
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -18,6 +18,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from scadbuddy.bambuddy.models import NozzleSize
 from scadbuddy.core.config import (
     DEFAULT_ASSET_MAX_COUNT,
     DEFAULT_ASSET_MAX_TOTAL_BYTES,
@@ -638,6 +639,15 @@ class Settings(BaseSettings):
     # (`python -m scadbuddy.intake_worker`, #6133) checks a customer's staged files; the
     # API starts `CustomerFileCheck` on it.
     temporal_task_queue_customer_files: str = "customer-files"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_PROFILE_FETCH: where the profile-fetch worker
+    # (`python -m scadbuddy.profile_fetch`, #6625) exports a type's slicer profiles from
+    # 3dfilamentprofiles.com; the API starts `ProfileFetch` on it.
+    temporal_task_queue_profile_fetch: str = "profile-fetch"
+    # The nozzle diameters one profile fetch exports for each printer model (#6625), each
+    # one of the resolver's sizes. A JSON list: SCADBUDDY_PROFILE_FETCH_NOZZLES='["0.4"]'.
+    profile_fetch_nozzles: list[NozzleSize] = Field(
+        default_factory=lambda: list(get_args(NozzleSize)), min_length=1
+    )
     # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
     # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
     # it off.
@@ -723,6 +733,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_agent_tools",
         "temporal_task_queue_slicer",
         "temporal_task_queue_customer_files",
+        "temporal_task_queue_profile_fetch",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -1003,6 +1014,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Paired with the Temporal address: the API starts flow runs on it, and the"
             " worker that serves it must name the same queue."
         ),
+        "temporal_task_queue_profile_fetch": (
+            "Paired with the Temporal address: the API starts profile fetches on it, and the"
+            " profile-fetch worker must name the same queue."
+        ),
         "temporal_task_queue_agent_tools": (
             "Paired with the agent service's worker, which serves its tools on that queue."
         ),
@@ -1160,6 +1175,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_materials": "live",
         # Read from the store by each prepare of a listing's colours (#6237).
         "storefront_prepare_cap": "live",
+        # Read from the store by each start of a profile fetch (#6625).
+        "profile_fetch_nozzles": "live",
         # Read from the store by each send of the storefront's mail (#5283).
         "storefront_mail_host": "live",
         "storefront_mail_port": "live",

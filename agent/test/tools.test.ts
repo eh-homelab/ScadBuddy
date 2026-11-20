@@ -1892,6 +1892,21 @@ describe('arrange (#1864)', () => {
     expect(firstText(result)).toMatchObject({ job_id: JOB, slug: 'lid', plates: 2, output: { id: ARRANGED } })
   })
 
+  it('sends the prime tower choice, and none when it is omitted (#3770)', async () => {
+    const bodies: Record<string, unknown>[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/arrange`, async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json(job('pending'), { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/${JOB}`, () => HttpResponse.json(job('failed'))),
+    )
+    await runTool(tool('arrange'), { objects: [{ output_id: A }], prime_tower: { enabled: false } }, ctx({ pollIntervalMs: 1 }))
+    await runTool(tool('arrange'), { objects: [{ output_id: A }] }, ctx({ pollIntervalMs: 1 }))
+    expect(bodies[0]).toMatchObject({ prime_tower: { enabled: false } })
+    expect(bodies[1]).not.toHaveProperty('prime_tower')
+  })
+
   it("says the job's warnings, such as a planned spool the arrange did not use (#4684 review)", async () => {
     const warning = 'filament_plan slot 1 (spool 7) is #E4BD68, which no copy prints in: that spool is not used'
     server.use(

@@ -108,6 +108,19 @@ lines 94-135 and `services/virtual_printer/manager.py` lines 44-67, maziggy/bamb
   API-key scope maps to (`core/auth.py` `_APIKEY_SCOPE_BY_PERMISSION`, lines 79-82). The
   reads need `SETTINGS_READ`, which Read Status grants (line 130).
 
+Added for #5774 PR 3 on 2026-11-18, from prod's live Bambuddy **1.3.1**
+(`GET /api/v1/updates/version`) over the pod's loopback, as at the top of this file (a
+`GET`, no key). Nothing was redacted: the body carries no serial, tag or user.
+
+| File | Source |
+|---|---|
+| `maintenance-history.json` | `GET /api/v1/maintenance/items/5/history` (printer 1's Clean Build Plate) |
+
+- **The rows are newest first, and `performed_at` has no zone** (UTC, spec
+  2026-11-17-machine-rate-actuals §2.1). `hours_at_maintenance` is the counter as a float.
+- **An item Bambuddy does not have answers `[]` with 200, not 404**
+  (`GET /api/v1/maintenance/items/99999/history`, same read), as does an item never done.
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the

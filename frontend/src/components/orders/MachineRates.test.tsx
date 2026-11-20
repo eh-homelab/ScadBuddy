@@ -1,8 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
-import { importBambuddyEvent, machineRateEvents, setBambuddyHours, setLanCount } from '../../mocks/features/orders/machineRates'
+import { server } from '../../mocks/server'
+import { importBambuddyEvent, machineRateEvents, setBambuddyHours, setBambuddyLogAnswers, setEventsReadAt, setLanCount } from '../../mocks/features/orders/machineRates'
+import { formatLocalTime } from '../../lib/format'
 import { clearToasts, getToasts } from '../../lib/toast'
 import { renderPage } from '../../test/utils'
 import { MachineRates } from './MachineRates'
@@ -334,6 +337,7 @@ describe('MachineRates actuals (#5774)', () => {
     await user.click(within(item).getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(machineRateEvents(LINKED)[2]).toMatchObject({ cost: '42' }))
     await user.click(await within(wear).findByRole('button', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(machineRateEvents(LINKED)).toHaveLength(2))
     expect(await within(wear).findByText('No replacements logged. Log one when you change this part.')).toBeInTheDocument()
   })
@@ -471,5 +475,241 @@ describe('MachineRates actuals (#5774)', () => {
     await user.click(within(panel).getByRole('button', { name: 'Remove wear part Hardened nozzle' }))
     await user.click(within(panel).getByRole('button', { name: 'Save machine rate' }))
     expect(await within(panel).findByTestId('orphaned')).toHaveTextContent('Events kept for rows removed: Hardened nozzle (1 replacement)')
+  })
+})
+
+// #6665 — the last piece of #5774: "Read from Bambuddy", every event paged, a confirmed delete,
+// and rows keyed by name so an open list stays with its row.
+describe('MachineRates actuals follow-up (#6665)', () => {
+  beforeEach(() => {
+    resetMockState()
+    clearToasts()
+  })
+
+  const linkedNozzle = () =>
+    api.setMachineRate(LINKED, {
+      profile: {},
+      wear_parts: [{ name: 'Nozzle', cost: '35', life_hours: '1000' }],
+      maintenance: [{ task: 'Clean build plate', minutes: '10', consumables: '0' }],
+    })
+
+  async function open(user: ReturnType<typeof renderPage>['user'], name: string) {
+    await user.click(await screen.findByRole('button', { name: `Machine rate of ${name}` }))
+    const panel = await screen.findByRole('region', { name: `Machine rate of ${name}` })
+    await within(panel).findByTestId(/machine-rate-(breakdown|book)/)
+    return panel
+  }
+
+  it('reads the maintenance log from Bambuddy and says when it was last read', async () => {
+    await linkedNozzle()
+    setBambuddyLogAnswers(false)
+    setEventsReadAt(LINKED, new Date(Date.now() - 10 * 60_000).toISOString())
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    expect(within(panel).getByTestId('events-read')).toHaveTextContent('Last read 10 minutes ago')
+    const task = within(panel).getByRole('group', { name: 'Maintenance task 1' })
+    expect(within(task).getByRole('button', { name: 'Done (0)' })).toBeInTheDocument()
+
+    setBambuddyLogAnswers(true)
+    importBambuddyEvent(LINKED, 'Clean build plate', '66.5', '2026-10-01T12:00:00Z')
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    expect(await within(task).findByRole('button', { name: 'Done (1)' })).toBeInTheDocument()
+    expect(within(panel).getByTestId('events-read')).toHaveTextContent('Last read just now')
+    expect(getToasts().map((t) => t.title)).toContain('Maintenance read from Bambuddy')
+  })
+
+  it('keeps unsaved edits when it reads from Bambuddy', async () => {
+    await linkedNozzle()
+    setEventsReadAt(LINKED, '2026-11-01T10:00:00Z')
+    setBambuddyLogAnswers(false)
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    await user.clear(within(panel).getByLabelText('Watts'))
+    await user.type(within(panel).getByLabelText('Watts'), '150')
+    setBambuddyLogAnswers(true)
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    await waitFor(() => expect(within(panel).getByTestId('events-read')).toHaveTextContent('Last read just now'))
+    expect(within(panel).getByLabelText('Watts')).toHaveValue('150')
+  })
+
+  it('says why Bambuddy could not be read, in plain words', async () => {
+    const { user } = renderPage(<MachineRates />)
+    let panel = await open(user, '3DP-31B-598')
+    expect(within(panel).getByTestId('events-read')).toHaveTextContent('Not read from Bambuddy yet')
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    expect(await within(panel).findByText('Save the machine rate first, then read its maintenance from Bambuddy.')).toHaveAttribute('role', 'alert')
+
+    await linkedNozzle()
+    setEventsReadAt(LINKED, '2026-11-18T14:02:00')
+    setBambuddyLogAnswers(false)
+    // Opened again, so the page holds the read time the server now has.
+    await user.click(within(panel).getByRole('button', { name: 'Close' }))
+    panel = await open(user, '3DP-31B-598')
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    expect(await within(panel).findByText(`Bambuddy did not answer. The rate uses the events last read at ${formatLocalTime(Date.parse('2026-11-18T14:02:00'))}.`)).toHaveAttribute('role', 'alert')
+
+    server.use(
+      http.post('/api/v1/printers/:id/machine-rate/import', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/machine-rate/not_linked', title: 'not_linked', status: 409, detail: 'The printer is not linked to Bambuddy: it has no log to read.' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    expect(await within(panel).findByText('This printer is no longer linked to Bambuddy, so there is no maintenance log to read.')).toBeInTheDocument()
+  })
+
+  it('drops "did not answer" once the page reads Bambuddy again', async () => {
+    await linkedNozzle()
+    setEventsReadAt(LINKED, '2026-11-18T14:02:00')
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    // The import times out, and the view read right after it gets an answer.
+    server.use(
+      http.post('/api/v1/printers/:id/machine-rate/import', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/machine-rate/log_unavailable', title: 'log_unavailable', status: 503, detail: 'Bambuddy did not answer.' },
+          { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    await waitFor(() => expect(within(panel).getByTestId('events-read')).toHaveTextContent('Last read just now'))
+    expect(within(panel).queryByText(/Bambuddy did not answer\. The rate uses/)).not.toBeInTheDocument()
+  })
+
+  it('decides "did not answer" on the server\'s read times, never the browser\'s clock', async () => {
+    const unavailable = () =>
+      http.post('/api/v1/printers/:id/machine-rate/import', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/machine-rate/log_unavailable', title: 'log_unavailable', status: 503, detail: 'Bambuddy did not answer.' },
+          { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      )
+    // A server clock behind the browser: the re-read answered, stamped earlier than the browser's now.
+    await linkedNozzle()
+    const behind = new Date(Date.now() - 2 * 3600_000).toISOString()
+    setEventsReadAt(LINKED, behind)
+    setBambuddyLogAnswers(false)
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    const real = await api.machineRate(LINKED)
+    const answered = new Date(Date.parse(behind) + 60_000).toISOString()
+    server.use(unavailable(), http.get('/api/v1/printers/:id/machine-rate', () => HttpResponse.json({ ...real, actuals: { ...real.actuals, events_read_at: answered } })))
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    await waitFor(() => expect(within(panel).getByTestId('events-read').querySelector('time')).toHaveAttribute('dateTime', answered))
+    expect(within(panel).queryByText(/Bambuddy did not answer\. The rate uses/)).not.toBeInTheDocument()
+
+    // A server clock ahead of the browser: the read failed, and its stamp is still the one seen.
+    const ahead = new Date(Date.now() + 3600_000).toISOString()
+    server.use(unavailable(), http.get('/api/v1/printers/:id/machine-rate', () => HttpResponse.json({ ...real, actuals: { ...real.actuals, events_read_at: ahead } })))
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    await waitFor(() => expect(within(panel).getByTestId('events-read').querySelector('time')).toHaveAttribute('dateTime', ahead))
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    expect(await within(panel).findByText(/Bambuddy did not answer\. The rate uses/)).toHaveAttribute('role', 'alert')
+  })
+
+  it('keeps the stored-intervals line when the re-read gets the log but not the tasks', async () => {
+    await linkedNozzle()
+    setEventsReadAt(LINKED, '2026-11-18T14:02:00')
+    setBambuddyLogAnswers(false)
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    const real = await api.machineRate(LINKED)
+    server.use(
+      http.post('/api/v1/printers/:id/machine-rate/import', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/machine-rate/log_unavailable', title: 'log_unavailable', status: 503, detail: 'Bambuddy did not answer.' },
+          { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+      http.get('/api/v1/printers/:id/machine-rate', () =>
+        HttpResponse.json({ ...real, breakdown: { ...real.breakdown, intervals: 'stored' }, actuals: { ...real.actuals, events_read_at: '2026-11-18T15:00:00' } }),
+      ),
+    )
+    await user.click(within(panel).getByRole('button', { name: 'Read from Bambuddy' }))
+    const line = await within(panel).findByText(`Bambuddy did not answer. The rate uses the events last read at ${formatLocalTime(Date.parse('2026-11-18T15:00:00'))}.`)
+    // A newer read answered, so the line is the stored-intervals note, not an alert.
+    expect(line).not.toHaveAttribute('role', 'alert')
+  })
+
+  it('says when the page could not read Bambuddy, and which read the rate uses', async () => {
+    await linkedNozzle()
+    const real = await api.machineRate(LINKED)
+    server.use(
+      http.get('/api/v1/printers/:id/machine-rate', () =>
+        HttpResponse.json({ ...real, breakdown: { ...real.breakdown, intervals: 'stored' }, actuals: { ...real.actuals, events_read_at: '2026-11-18T14:02:00' } }),
+      ),
+    )
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    expect(within(panel).getByText(`Bambuddy did not answer. The rate uses the events last read at ${formatLocalTime(Date.parse('2026-11-18T14:02:00'))}.`)).toBeInTheDocument()
+  })
+
+  it('offers no Bambuddy read on a printer Bambuddy does not track', async () => {
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    expect(within(panel).queryByRole('button', { name: 'Read from Bambuddy' })).toBeNull()
+  })
+
+  it('pages back through every event of a row', async () => {
+    await linkedNozzle()
+    for (let i = 0; i < 55; i++) importBambuddyEvent(LINKED, 'Clean build plate', String(10 * i), `2026-0${1 + Math.floor(i / 28)}-${String(1 + (i % 28)).padStart(2, '0')}T12:00:00Z`)
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    const task = within(panel).getByRole('group', { name: 'Maintenance task 1' })
+    await user.click(within(task).getByRole('button', { name: /^Done \(/ }))
+    const list = () => within(task).getByRole('list', { name: 'Done: Clean build plate' })
+    expect(within(list()).getAllByRole('listitem').length).toBeLessThan(50)
+    await user.click(within(task).getByRole('button', { name: 'Show older events' }))
+    expect(await within(task).findByText(/Older events, not in the rate/)).toBeInTheDocument()
+    await waitFor(() => expect(within(list()).getAllByRole('listitem')).toHaveLength(50))
+    await user.click(within(task).getByRole('button', { name: 'Show more' }))
+    await waitFor(() => expect(within(list()).getAllByRole('listitem')).toHaveLength(55))
+    expect(within(task).getByText('That is every event.')).toBeInTheDocument()
+    expect(within(task).queryByRole('button', { name: 'Show more' })).toBeNull()
+    // Each event once, newest first.
+    const items = within(list()).getAllByRole('listitem')
+    expect(items[0]).toHaveTextContent('2026-02-27')
+    expect(items[54]).toHaveTextContent('2026-01-01')
+  })
+
+  it('asks before it deletes a logged event', async () => {
+    await linkedNozzle()
+    await api.addMachineRateEvent(LINKED, { kind: 'part', name: 'Nozzle', cost: '35', hours_at: '400' })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, '3DP-31B-598')
+    const wear = within(panel).getByRole('group', { name: 'Wear part 1' })
+    await user.click(within(wear).getByRole('button', { name: 'Replacements (1)' }))
+    await user.click(within(wear).getByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('Delete this replacement of Nozzle?')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(machineRateEvents(LINKED)).toHaveLength(1)
+    await user.click(within(wear).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(machineRateEvents(LINKED)).toHaveLength(0))
+  })
+
+  it('keeps an open event list with its row when a row above it is removed', async () => {
+    await api.setMachineRate(GARAGE, {
+      profile: {},
+      wear_parts: [
+        { name: 'Nozzle', cost: '35', life_hours: '1000' },
+        { name: 'Plate', cost: '40', life_hours: '2000' },
+      ],
+      maintenance: [],
+    })
+    await api.addMachineRateEvent(GARAGE, { kind: 'part', name: 'Plate', cost: '40', hours_at: '120' })
+    const { user } = renderPage(<MachineRates />)
+    const panel = await open(user, 'Garage')
+    const plate = within(panel).getByRole('group', { name: 'Wear part 2' })
+    await user.click(within(plate).getByRole('button', { name: 'Replacements (1)' }))
+    expect(within(panel).getByRole('list', { name: 'Replacements: Plate' })).toBeInTheDocument()
+    await user.click(within(panel).getByRole('button', { name: 'Remove wear part Nozzle' }))
+    const moved = within(panel).getByRole('group', { name: 'Wear part 1' })
+    expect(within(moved).getByLabelText('Part')).toHaveValue('Plate')
+    expect(within(moved).getByRole('list', { name: 'Replacements: Plate' })).toBeInTheDocument()
   })
 })

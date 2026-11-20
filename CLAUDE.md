@@ -255,7 +255,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   `slicer-build` stage's cargo-chef dependency layer is kept. Only `build-image.yml`'s
   `slicer` job writes it; `ci.yml`'s `slicer-image` and `hot-path-e2e.yml` only read it,
   which works on fork PRs too because the package is public.
-- No CI job builds arm64. `build-image.yml` (all three images) and `build-go-image.yml`
+- No CI job builds arm64. `build-image.yml` (every image) and `build-go-image.yml`
   publish `linux/amd64` only, and nothing in `build-image.yml` runs on PRs. arm64
   (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
   Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
@@ -276,8 +276,8 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 - Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
   shared with `go-select`) and `select-lanes.sh` (tested by `select-lanes.test.sh`) picks
   the lanes: `backend` (`lfs-fixtures`, `backend-pytest`), `agent_durable`, `rust`
-  (`rust`, `slicer-image`) and `image` (the app image job: any backend change, plus
-  `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
+  (`rust`, `slicer-image`) and `image` (the app image job and `profile-fetch-image`: any
+  backend change, plus `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
   where the lane was needed is a failure. A push, the schedule, a dispatch, the
   Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test

@@ -85,6 +85,7 @@ controls.
 | Flow scripts (Monty) | the projects worker (`backend/scadbuddy/workflows/project.py`) | the interpreter; host functions only; outward calls need an approval | No. |
 | Workflow scripts (QuickJS) | the agent (`agent/src/background/workflowRunner.ts`) | the interpreter; each `agent()` call is a child chat | No. |
 | Template UI modules | the browser | a shadow root; `default-src 'none'; sandbox` on the served files (`backend/scadbuddy/api/template_ui.py:45-49`) | No. |
+| 3dfilamentprofiles.com pages (JavaScript in Chromium) | the profile-fetch worker pod (#6625), a headed Chromium that is a child of the worker | Chromium's own sandbox (the code never passes `--no-sandbox`), an environment allowlist for the browser (`backend/scadbuddy/profile_fetch/site.py` `browser_env`), the pod's egress policy (public 443 only, plan Decision 14). The pod holds the 3DFP login and one `profile-fetch` CRUD credential; the seccomp profile is `Unconfined` for the Chromium container (plan Decision 6, applied by the clusters PR, not measured on prod). | No: the pod holds no database secret. Its credential reaches the area `runs` only. |
 | Remote MCP servers, `http_request` targets | outside the cluster, reached through the agent | the loopback forwarder; results wrapped as untrusted data | No. |
 
 ## Zones
@@ -168,9 +169,14 @@ settings trust the whole pod CIDR: `SCADBUDDY_TRUSTED_PROXIES` and
 
 The CRUD service is the only process with a database secret, and nothing untrusted runs in
 its pod. Every other process calls it over HTTP with a short-lived service credential.
-Untrusted code runs in a pod that holds no secret and has no route to Postgres. The one
-exception is a token that authorizes calls to that sandbox and nothing else (the intake
-sandbox's RPC token, #6133), so a leak reaches nothing beyond the sandbox.
+Untrusted code runs in a pod that holds no secret and has no route to Postgres. There are
+two exceptions. The first is a token that authorizes calls to that sandbox and nothing else
+(the intake sandbox's RPC token, #6133), so a leak reaches nothing beyond the sandbox. The
+second is the profile-fetch worker (#6625): it runs untrusted web content (the pages of
+3dfilamentprofiles.com, in a Chromium that its own sandbox confines) and holds the 3DFP login
+and one `profile-fetch` CRUD credential, but no database secret. That credential reaches only
+the area `runs`, so a renderer exploit reaches the 3DFP account and the runs the API opened,
+not Postgres.
 
 Today (each line into Postgres is a connection; the dotted ones cross into the other
 service's tables; the render, print and projects workers call the API over HTTP, #5298):
@@ -204,6 +210,10 @@ flowchart LR
   A[agent services] -- HTTP + credential --> CRUD
   S[storefront<br/>public host] -- HTTP + credential --> CRUD
   I[intake worker<br/>customer files] -- HTTP + credential --> CRUD
+  subgraph web[Second exception: web content, one CRUD credential, no database secret]
+    F[profile-fetch worker<br/>3DFP web content]
+  end
+  F -- HTTP + credential --> CRUD
   CRUD[CRUD service<br/>the one database role] --> DB[(Postgres<br/>ingress: CRUD only)]
 ```
 
@@ -218,6 +228,7 @@ What changes:
 | agent-durable | the owner role, 0 replicas | no database secret |
 | storefront (#4962, not built yet) | none | no database, Temporal, store or KEK secret; listings, drafts, renders and estimates through `/api/v1/internal/crud/storefront/*`, which scope every draft to the visitor id they are sent (storefront spec §5.1, amended 2026-11-07) |
 | intake worker (#6133) | none: it refuses to start with a database secret or the KEK (`backend/scadbuddy/intake_worker/settings.py`), and holds no store credential | as today: it reads a customer's file only through a URL the CRUD service presigns (of the claim's frozen copy, a key of its own claim attempt, `If-Match` its ETag and its SHA-256 compared where the store gave one), parses it only in a child run by the intake sandbox, a Deployment of its own (`scadbuddy-intake-sandbox`: no ServiceAccount token, proof or database secret, its own `emptyDir`, no network namespace or volume shared with the worker, ingress from the worker's pods only and no egress; the worker hands each file over `POST /check` with the RPC token, `Authorization: Bearer`, from the Secret `scadbuddy-intake-sandbox-rpc` mounted in those two pods only, the one secret the sandbox holds because it authorizes calls to the sandbox and nothing else; 401 before any body byte is read; head and body within 60 s; a box directory per check; through a launcher that gives the parser its own network, mount and PID namespaces with no `/proc`, no capabilities, no new privileges and a seccomp filter, and that fails closed: the sandbox refuses to start where any step is refused; one check per pod at a time, so no other customer's file is there to reach), reads the answer as untrusted (status, echoed id, each length within its cap, the verdict validated, the preview's PNG header checked), and posts the verdict through `/api/v1/internal/crud/intake/*` (spec 2026-11-13 §7) |
+| profile-fetch worker (#6625) | none: it refuses to start with a database secret or the KEK, or with a `DEBUG` that turns on a Playwright channel (`backend/scadbuddy/profile_fetch/settings.py`), imports no Postgres code (`backend/tests/profile_fetch/test_worker.py`), and holds no store credential and no Bambuddy key | as today: it drives a headed Chromium on 3dfilamentprofiles.com, so every page it loads is untrusted web content, in a pod that holds the 3DFP login and one `profile-fetch` CRUD credential only; that credential reaches the area `runs` of `/api/v1/internal/crud/profile-fetch/*`, and only runs the API opened (a file is checked for size, sha256, a JSON preset with a name and no printer or print settings, its G-code keys are dropped, and its key must be one of the run's targets; the API imports it into Bambuddy, the worker never does). Chromium's own sandbox stays on (never `--no-sandbox`), which needs the pod's seccomp `Unconfined` on the Chromium container; the pod runs non-root, with no privilege escalation, no capabilities and a read-only root, and its egress is DNS, the API, Temporal and public TCP 443 only, with the private ranges excepted (plan 2026-11-18-profile-fetch-worker.md Decisions 6, 14; the pod spec is eh-homelab/clusters Task 11). The worker reads the 3DFP login from its secret and types it into the site's login form in the browser, so the browser page holds it for the login; Chromium gets an allowlisted environment with no login and no token path, and no log or error text carries the login. The browser's profile keeps the site's cookies, not the login: the worker turns off Chromium's autofill, form saving, password manager and credentials service before each launch and sets autocomplete off on the login's fields. `backend/tests/profile_fetch/test_site.py` `test_the_profile_keeps_no_login_after_a_login` measures it: after a login to the local replica site in headed Chromium and the browser closed, no file under the profile directory holds the email or the password (UTF-8, UTF-16-LE or URL-encoded); without those changes the email was in `Default/Web Data`, `Default/Login Data` and `Default/Sessions`. The test does not check the profile while the browser runs (R-F12) |
 | API | reads and writes 40 `ai_*` tables and two sequences; applies the agent's migrations (#5299 D6); runs the LSP and openscad | the CRUD service: the only database role, every route authenticated, nothing untrusted in its pod |
 | Postgres | no ingress policy | an ingress policy that admits the CRUD service only |
 

@@ -195,6 +195,14 @@ PAYMENT_CAPTURES_PATCH = "housekeeping-settle-payment-captures"
 #: its own patch; on the sweep Schedule only: it calls Plaid, so it obeys the sweeps switch.
 BANK_DEPOSITS_SWEEP = "housekeeping_sync_bank_deposits"
 BANK_DEPOSITS_PATCH = "housekeeping-sync-bank-deposits"
+#: #5774 (spec 2026-11-17-machine-rate-actuals §3.7): read each linked printer's
+#: maintenance log from Bambuddy (`orders.machine_rate.MachineRates.read_logs`), so the
+#: actuals stay current without a person opening Settings. After the deposit sync, behind
+#: its own patch; on the sweeps' Schedule only, since it calls Bambuddy, as
+#: `PRINTER_SYNC_SWEEP` does (not in `PRUNE_SWEEPS`). Runs in the API's process (the
+#: ``library`` worker), which holds the database.
+MAINTENANCE_IMPORT_SWEEP = "housekeeping_import_maintenance"
+MAINTENANCE_IMPORT_PATCH = "housekeeping-import-maintenance"
 #: #5282: delete the storefront carts idle past ``storefront_draft_ttl_days``
 #: (`orders.lifecycle.Lifecycle.sweep_drafts`: each cart's attachments and their holds,
 #: then the order), then the visitors idle as long with no order and the
@@ -256,6 +264,7 @@ SWEEPS = (
     PAYMENT_CLOSES_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     BANK_DEPOSITS_SWEEP,
+    MAINTENANCE_IMPORT_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
     AUTO_IMPORT_SWEEP,
@@ -371,6 +380,12 @@ PAYMENT_CAPTURES_TIMEOUT = timedelta(minutes=15)
 #: Up to `payments.deposits.MAX_PAGES` (10) pages, read up to `MAX_RESTARTS` + 1 (3) times,
 #: each call at most 20 s (`plaid.TIMEOUT`): 10 minutes, then the matches, and a margin.
 BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)
+#: Per linked printer with a profile, one after another: its task list, then up to
+#: `MAX_ROWS` (50) task logs, each a Bambuddy read of up to 30 s; one printer today. The
+#: sweep stops at `orders.machine_rate.READ_LOGS_BUDGET` (7 min) and leaves the printers
+#: left for the next tick (#6663 review), so a slow Bambuddy never reaches this limit; the
+#: rest is a margin. Not imported, as `GIT_TIMEOUT`'s is not.
+MAINTENANCE_IMPORT_TIMEOUT = timedelta(minutes=10)
 #: Up to 200 carts (`Lifecycle.sweep_drafts`'s limit), each a short transaction of a few
 #: deletes, then two deletes, then the staged files' backstop (a listing of the staging
 #: prefix and at most 1000 rows, one Temporal ``describe`` each, `SWEEP_PASS_BATCHES`).
@@ -431,6 +446,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PAYMENT_CAPTURES_TIMEOUT
     if sweep == BANK_DEPOSITS_SWEEP:
         return BANK_DEPOSITS_TIMEOUT
+    if sweep == MAINTENANCE_IMPORT_SWEEP:
+        return MAINTENANCE_IMPORT_TIMEOUT
     if sweep == STOREFRONT_DRAFTS_SWEEP:
         return STOREFRONT_DRAFTS_TIMEOUT
     if sweep == STOREFRONT_MAIL_SWEEP:
@@ -495,6 +512,8 @@ class Housekeeping:
             if sweep == PAYMENT_CAPTURES_SWEEP and not workflow.patched(PAYMENT_CAPTURES_PATCH):
                 continue
             if sweep == BANK_DEPOSITS_SWEEP and not workflow.patched(BANK_DEPOSITS_PATCH):
+                continue
+            if sweep == MAINTENANCE_IMPORT_SWEEP and not workflow.patched(MAINTENANCE_IMPORT_PATCH):
                 continue
             if sweep == STOREFRONT_DRAFTS_SWEEP and not workflow.patched(STOREFRONT_DRAFTS_PATCH):
                 continue

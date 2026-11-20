@@ -2509,6 +2509,20 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject(wanted))
     await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject(wanted), { timeout: 5000 })
   })
+
+  it('judges the print with the chosen tower, and again when it changes (#6721)', async () => {
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0))
+    expect(bodies.at(-1)?.['request']).not.toHaveProperty('prime_tower')
+
+    await pick(user, screen.getByLabelText('Prime tower'), 'on')
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { prime_tower: { enabled: true } } }))
+    await pick(user, screen.getByLabelText('Prime tower'), 'off')
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { prime_tower: { enabled: false } } }))
+  })
 })
 
 describe('PrintPicker · Supports (#1899)', () => {
@@ -2845,6 +2859,75 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await pick(user, screen.getByLabelText('Print sequence'), 'by layer')
     expect(screen.queryByText(refusal)).toBeNull()
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
+
+  it('names the plate of a run the slicer refused for an object conflict (#6737)', async () => {
+    const message = 'Plate 1: the slicer found the prime tower stands on an object, or objects overlap.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        title: 'Slice failed',
+        status: 502,
+        detail: 'Object conflicts were detected',
+        warnings: [{ kind: 'object-conflict', plate_id: 1, message }],
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByTestId('run-warnings')).toHaveTextContent(message)
+    expect(screen.getByText('Object conflicts were detected')).toBeInTheDocument()
+  })
+
+  it('names the plate of a followed run that fails for an object conflict (#6743)', async () => {
+    const message = 'Plate 2: the slicer found the prime tower stands on an object, or objects overlap.'
+    server.use(
+      http.post('/api/v1/print/outputs/:id/run', () =>
+        HttpResponse.json(
+          {
+            id: 'run-6743',
+            output_id: output.id,
+            status: 'failed',
+            created_at: '2026-09-28T10:00:00Z',
+            finished_at: '2026-09-28T10:00:01Z',
+            result: null,
+            error: {
+              title: 'Slice failed',
+              status: 502,
+              detail: 'Object conflicts were detected',
+              extensions: { warnings: [{ kind: 'object-conflict', plate_id: 2, message }] },
+            },
+            may_have_queued: false,
+            repeated: false,
+          },
+          { status: 202 },
+        ),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByTestId('run-warnings')).toHaveTextContent(message)
+    expect(screen.getByText('Object conflicts were detected')).toBeInTheDocument()
+  })
+
+  it('shows a warning of a kind it does not know in the quiet tone (#6743)', async () => {
+    const message = 'Plate 1: a warning a newer API sends.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        title: 'Slice failed',
+        status: 502,
+        detail: 'The slice failed',
+        warnings: [{ kind: 'from-a-newer-api', plate_id: 1, message }],
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const list = await screen.findByTestId('run-warnings')
+    expect(within(list).getByText(message)).toHaveClass('text-subtle')
   })
 
   it('is remembered for the model once it prints (#4970)', async () => {

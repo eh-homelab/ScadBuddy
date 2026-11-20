@@ -169,6 +169,9 @@ async def test_a_storefront_price_equals_the_back_office_quote_to_the_cent(
     assert row.unit_cost_minor == quote.unit_cost_minor
     assert row.lines == quote.lines
     assert row.printer == "p-1"
+    # The rate that priced the variant is kept with its price, as the quote keeps it, so
+    # the checkout's storefront quote records the same breakdown.
+    assert row.machine_rate_breakdown == quote.machine_rate_breakdown == RATE
     assert (row.print_seconds, row.grams) == (7200, {"0": "22.5", "1": "5.0"})
     assert slicer.subjects == ["storefront_price:" + "a" * 64]
     # #6574: each slot's type's presets reach the slice.
@@ -203,6 +206,8 @@ async def test_a_done_variant_is_never_sliced_again(
     first = await price_variant(run, variant_of(shop))
     again = await price_variant(run, variant_of(shop))
     assert again == first
+    # Priced at the book's rate: no breakdown to keep.
+    assert first.machine_rate_breakdown is None
     assert len(slicer.subjects) == 1
 
 

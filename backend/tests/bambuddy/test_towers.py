@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from scadbuddy.bambuddy.send import towers_within_reach
+from scadbuddy.bambuddy.send import _tower_on, towers_within_reach
 from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
@@ -29,6 +29,7 @@ from scadbuddy.render.plate import (
     TOWER_CLEARANCE,
     Rect,
     plate_for,
+    tower_brim,
     tower_reaches,
 )
 from scadbuddy.render.split import ColourPart
@@ -246,3 +247,70 @@ def _painted(payload: bytes) -> bytes:
                 data = archive.read(name)
                 changed[name] = re.sub(rb"(<triangle [^/]*)/>", rb'\1 paint_color="8"/>', data)
     return rezipped(payload, changed)
+
+
+def _clear_of_its_objects(payload: bytes, corner: tuple[float, float], height: float) -> bool:
+    """Whether a 60 mm tower at ``corner``, with its brim, keeps :data:`TOWER_CLEARANCE`
+    from plate 1's objects, as :func:`tower_beside` places one (the #4014 test above)."""
+    low, high = plate_boxes(payload).boxes[1]
+    brim = tower_brim(height)
+    x0, y0 = corner[0] - brim, corner[1] - brim
+    side = PRIME_TOWER_SIDE + 2 * brim
+    return not Rect(x0, y0, x0 + side, y0 + side).overlaps(
+        Rect(
+            float(low[0]) - TOWER_CLEARANCE,
+            float(low[1]) - TOWER_CLEARANCE,
+            float(high[0]) + TOWER_CLEARANCE,
+            float(high[1]) + TOWER_CLEARANCE,
+        )
+    )
+
+
+def test_a_reachable_tower_on_top_of_the_objects_is_moved_beside_them(tmp_path: Path) -> None:
+    """#3770: Knitted Cat sliced with "Object conflicts were detected": the tower stood
+    on the objects. Every extruder reaches (160, 140), so #4014's rule kept it; a tower
+    on its plate's objects is moved beside them before the slice."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "140"))
+    assert tower_reaches((160, 140), H2C, height=20.0)
+    # The tower overlaps the objects, not only their clearance: the case _tower_on moves.
+    read = plate_boxes(payload)
+    (low, high), (ox, oy) = read.boxes[1], plate_origin(1, read.count, H2C)
+    objects = Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
+    assert _tower_on((160, 140), PRIME_TOWER_SIDE, 20.0, objects)
+
+    moved = towers_within_reach(payload, H2C)
+
+    corner = _towers(moved)[0]
+    assert corner != (160.0, 140.0)
+    assert tower_reaches(corner, H2C, height=20.0)
+    assert _clear_of_its_objects(moved, corner, 20.0)
+
+
+def test_a_tower_on_objects_that_leave_no_room_stays(tmp_path: Path) -> None:
+    """With nowhere clear to go the author's tower stays, and the slicer says why."""
+    slab = trimesh.creation.box(extents=(300, 320, 5))
+    eye = trimesh.creation.box(extents=(4, 4, 4))
+    out = tmp_path / "slab.3mf"
+    write_plates_3mf(
+        [
+            PlateParts(
+                (ColourPart(1, "Slab", "#D3CFB5", slab), ColourPart(2, "Eye", "#27272C", eye)),
+                (1, 2),
+            )
+        ],
+        ["#D3CFB5", "#27272C"],
+        out,
+        thumbnails=None,
+    )
+    payload = out.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings.update(
+        printable_area=["0x0", "330x0", "330x320", "0x320"],
+        wipe_tower_x=["160"],
+        wipe_tower_y=["140"],
+        prime_tower_width="60",
+    )
+    crowded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+
+    assert towers_within_reach(crowded, H2C) is crowded

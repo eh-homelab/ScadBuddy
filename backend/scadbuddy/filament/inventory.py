@@ -12,6 +12,12 @@ The fingerprint keeps the alpha byte (`SeenTray.rgba`, from the report's
 
 The shelf is every unarchived spool that no printer's latest report resolves as held
 (plan F6): a spool placed at a tray whose report no longer matches is on the shelf.
+
+An untagged tray's placed spool must also agree with what the tray reports (#6713,
+`tray_agreement`). The scheduled pull reconciles it (`reconcile_trays`): where it does not
+and Bambuddy assigns the tray a linked, unarchived spool that does, that spool moves in and
+the placed one moves to no place. Where neither agrees, nothing moves, and the tray view
+carries a ``mismatch`` (`view`).
 """
 
 from __future__ import annotations
@@ -19,17 +25,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Final, Literal, Protocol
 from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.filaments import colour_distance
 from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
-from scadbuddy.bambuddy.trays import place_label, seen_trays, tray_label
+from scadbuddy.bambuddy.trays import CLOSE_COLOUR, place_label, seen_trays, tray_label
 from scadbuddy.filament import models as m
+from scadbuddy.filament.catalog import catalog_key
 from scadbuddy.filament.colour import normalise_rgba
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
@@ -44,21 +53,27 @@ from scadbuddy.filament.presets import PoolSpoolPresets, effective_presets
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore, report_status
+from scadbuddy.printers.status import is_fresh
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.models import SeenTray, clean_tag_uid, clean_tray_uuid
 
 __all__ = [
+    "RECONCILE_ACTOR",
     "FilamentInventory",
     "FilamentInventorySpool",
     "PoolSbSpoolReads",
     "SbSpoolReads",
     "TrayHolder",
+    "TrayMove",
     "TrayNotFilledError",
     "TrayPlace",
     "TrayTagClashError",
     "TrayView",
+    "material_key",
+    "material_names",
     "read_sb_spools",
     "route_trays",
+    "tray_agreement",
     "tray_fingerprint",
 ]
 
@@ -68,6 +83,118 @@ Conn = Connection[DictRow]
 FoundBy = TrayFoundBy
 #: Each tray place's spools with a fingerprint, newest placement first.
 _Placed = Mapping[tuple[UUID, int, int], list[tuple[UUID, str]]]
+
+
+#: Who a tray reconcile's moves name (#6713).
+RECONCILE_ACTOR: Final = "system:tray-reconcile"
+
+
+def material_key(name: str | None) -> str:
+    """A material name as a tray's ``tray_type`` is compared with it (#6713): its catalog
+    key (`catalog.catalog_key`, R-6706-23), so ``PETG-CF`` and ``petg cf`` are one key and
+    ``PLA+`` is not ``PLA``. Bambu's ``tray_type`` values are ASCII, where the Python key
+    is the SQL one (R-6706-14)."""
+    return catalog_key(name or "")
+
+
+def material_names(conn: Conn) -> dict[UUID, frozenset[str]]:
+    """Every material's stored keys, its name's and its aliases' (#6706), by id."""
+    keys: dict[UUID, set[str]] = {}
+    for row in conn.execute("SELECT material_id, key FROM filament_material_names"):
+        keys.setdefault(row["material_id"], set()).add(row["key"])
+    return {material: frozenset(found) for material, found in keys.items()}
+
+
+def tray_agreement(
+    spool: m.Spool, tray: SeenTray, keys: Mapping[UUID, frozenset[str]]
+) -> bool | None:
+    """Whether ``spool`` agrees with what ``tray`` reports (#6713): the tray's
+    `material_key` is a key of the spool's effective material, its name's or an
+    alias's (``keys``, `material_names`, R-6706-23), and its colour is within
+    `CLOSE_COLOUR` of the tray's (CIEDE2000, the cut-off an untagged tray's spools are
+    matched by, `bambuddy/trays.py` `close_spools`), alpha ignored (`colour_distance`
+    drops it). ``None`` when either side has no material (or the material's name has no
+    key), or the materials match and either side has no colour: unknown, which is never
+    a disagreement."""
+    reported = material_key(tray.material)
+    material = spool.effective.material_id
+    own = keys.get(material, frozenset()) if material is not None else frozenset()
+    if not reported or not own:
+        return None
+    if reported not in own:
+        return False
+    distance = colour_distance(spool.effective.rgba, tray.rgba or tray.colour)
+    return None if distance is None else distance <= CLOSE_COLOUR
+
+
+@dataclass(frozen=True)
+class TrayMove:
+    """One tray `FilamentInventory.reconcile_trays` set right: the spool it moved to no
+    place, and the spool it put in the tray."""
+
+    printer_id: UUID
+    ams_id: int
+    tray_id: int
+    removed: UUID
+    placed: UUID
+
+
+def _untagged(tray: SeenTray) -> bool:
+    return tray.tray_uuid is None and tray.tag_uid is None
+
+
+def _verdict(
+    tray: SeenTray,
+    holder: m.Spool | None,
+    found_by: FoundBy | None,
+    assigned: m.Spool | None,
+    keys: Mapping[UUID, frozenset[str]],
+) -> Literal["move", "mismatch"] | None:
+    """What an untagged tray's placed spool (``found_by`` ``"link"``) needs (#6713):
+    ``"move"`` when it disagrees with the tray and ``assigned`` (Bambuddy's assignment's
+    linked, unarchived SB spool, else ``None``) agrees; ``"mismatch"`` when it disagrees
+    and ``assigned`` does not agree; else ``None``. A tagged tray, and one resolved by
+    its tag, need nothing."""
+    if holder is None or found_by != "link" or not _untagged(tray):
+        return None
+    if tray_agreement(holder, tray, keys) is not False:
+        return None
+    if assigned is not None and assigned.id != holder.id and tray_agreement(assigned, tray, keys):
+        return "move"
+    return "mismatch"
+
+
+def _assigned_trays(
+    assignments: Sequence[SpoolAssignment], printers: Mapping[str, PrinterRow]
+) -> dict[tuple[UUID, int, int], int]:
+    """The Bambuddy spool each registry tray is assigned, by ``(printer_id, ams_id,
+    tray_id)``: each Bambuddy spool's last row (Bambuddy keeps history rows, as `rows`
+    reads them). A tray two spools' last rows name is left out: Bambuddy does not say
+    which is there."""
+    by_bambuddy = {
+        row.bambuddy_printer_id: UUID(row.id)
+        for row in printers.values()
+        if row.bambuddy_printer_id is not None
+    }
+    trays: dict[tuple[UUID, int, int], set[int]] = {}
+    for assignment in {a.spool_id: a for a in assignments}.values():
+        printer_id = by_bambuddy.get(assignment.printer_id)
+        if printer_id is not None:
+            key = (printer_id, assignment.ams_id, assignment.tray_id)
+            trays.setdefault(key, set()).add(assignment.spool_id)
+    return {key: next(iter(ids)) for key, ids in trays.items() if len(ids) == 1}
+
+
+def _reason(tray: SeenTray, holder: m.Spool, assigned: m.Spool) -> str:
+    """A reconcile move's ``data.reason``: what the tray reports, what the placed spool
+    is, and what Bambuddy assigns."""
+    return (
+        f"{tray_label(tray.ams_id, tray.tray_id)} reports {tray.material}"
+        f" {tray.rgba or tray.colour or 'with no colour'}; #{holder.number} is"
+        f" {holder.names.material or 'no material'}"
+        f" {holder.effective.rgba or 'with no colour'}, and Bambuddy assigns"
+        f" #{assigned.number} there"
+    )
 
 
 class TrayNotFilledError(ValueError):
@@ -191,11 +318,14 @@ class FilamentInventory:
         *,
         actor: str,
         at: datetime | None = None,
+        reason: str | None = None,
     ) -> m.SpoolEvent | None:
         """Put ``spool_id`` in the tray place ``location_id`` and remember what ``seen``
-        shows there (`LocationStore.move_on`, then ``tray_fingerprint``); `link` and
-        `filament/capture.py` call it."""
-        moved = LocationStore.move_on(conn, spool_id, location_id, actor=actor, at=at)
+        shows there (`LocationStore.move_on`, then ``tray_fingerprint``); `link`,
+        `reconcile_trays` and `filament/capture.py` call it."""
+        moved = LocationStore.move_on(
+            conn, spool_id, location_id, actor=actor, at=at, reason=reason
+        )
         conn.execute(
             "UPDATE filament_spools SET tray_fingerprint = %s WHERE id = %s",
             (tray_fingerprint(seen.material, seen.rgba or seen.colour), spool_id),
@@ -315,6 +445,50 @@ class FilamentInventory:
             )
         return found
 
+    def reconcile_trays(self, bb_assignments: Sequence[SpoolAssignment]) -> list[TrayMove]:
+        """Set right each untagged tray, of a registry printer's fresh report
+        (`is_fresh`), whose placed spool disagrees with what the tray reports, where
+        Bambuddy's assignment (``bb_assignments``, `_assigned_trays`) names a linked,
+        unarchived SB spool that agrees (`_verdict`, #6713): the placed spool moves to no
+        place and the assigned one into the tray, each with a ``moved`` event by
+        `RECONCILE_ACTOR` whose ``data.reason`` says why. An assigned spool that another
+        reported tray holds stays where it is. Nothing else moves. The moves made."""
+        printers = {row.id: row for row in PrinterStore(self._pool, None).list()}
+        assigned = _assigned_trays(bb_assignments, printers)
+        if not assigned:
+            return []
+        spools = {spool.id: spool for spool in self._spools.list()}
+        with self._pool.connection() as conn:
+            keys = _Keys(conn)
+            materials = material_names(conn)
+            links: dict[int, UUID] = {
+                row["bb_spool_id"]: row["spool_id"]
+                for row in conn.execute("SELECT spool_id, bb_spool_id FROM filament_bb_links")
+            }
+        reported = self._reported(printers, fresh_at=datetime.now(UTC))
+        resolved = [
+            (printer_id, tray, *keys.hold(printer_id, tray))
+            for printer_id, trays in reported
+            for tray in trays
+        ]
+        held = {spool_id for _, _, spool_id, _ in resolved if spool_id is not None}
+        moved: list[TrayMove] = []
+        for printer_id, tray, holder_id, found_by in resolved:
+            bb_id = assigned.get((printer_id, tray.ams_id, tray.tray_id))
+            sb_id = None if bb_id is None else links.get(bb_id)
+            candidate = None if sb_id is None or sb_id in held else spools.get(sb_id)
+            holder = None if holder_id is None else spools.get(holder_id)
+            if _verdict(tray, holder, found_by, candidate, materials) != "move":
+                continue
+            assert holder is not None and candidate is not None
+            row = printers[str(printer_id)]
+            if self._swap(row.name, printer_id, tray, holder, candidate):
+                moved.append(
+                    TrayMove(printer_id, tray.ams_id, tray.tray_id, holder.id, candidate.id)
+                )
+                held.add(candidate.id)
+        return moved
+
     def tray_presets(self) -> dict[UUID, str]:
         """Each SB spool a registry printer's latest report holds (`_Keys.hold`), by the
         preset id (``tray_info_idx``) that tray reports: the last step of a price-book
@@ -340,14 +514,33 @@ class FilamentInventory:
         """Every SB spool with its tray (:meth:`rows`, placed by ``bb_assignments`` where no
         report holds it), and each registry printer's reported trays with the SB spool
         each holds, as its latest stored report shows them (`_Keys.hold`), by printer name
-        (#6262 Task 9)."""
+        (#6262 Task 9). An untagged tray whose placed spool disagrees with it, where
+        ``bb_assignments`` names no linked, unarchived spool that agrees, carries a
+        ``mismatch`` (#6713, `_verdict`)."""
         rows = self.rows(include_archived=include_archived, bb_assignments=bb_assignments)
         numbers = {row.spool.id: row.spool.number for row in rows}
+        own = {row.spool.id: row.spool for row in rows}
+        by_bb = {
+            row.bb_spool_id: row.spool
+            for row in rows
+            if row.bb_spool_id is not None and row.spool.archived_at is None
+        }
         with self._pool.connection() as conn:
             keys = _Keys(conn)
+            materials = material_names(conn)
         printers = {row.id: row for row in PrinterStore(self._pool, None).list()}
+        assigned = _assigned_trays(bb_assignments, printers)
+        reported = self._reported(printers)
+        # An assigned spool another reported tray holds is not the assigned tray's
+        # (`reconcile_trays` leaves it there too).
+        held = {
+            spool_id
+            for printer_id, seen in reported
+            for spool_id, _ in (keys.hold(printer_id, tray) for tray in seen)
+            if spool_id is not None
+        }
         found: list[m.PrinterTrays] = []
-        for printer_id, seen in self._reported(printers):
+        for printer_id, seen in reported:
             row = printers[str(printer_id)]
             trays: list[m.InventoryTray] = []
             for tray in seen:
@@ -355,6 +548,15 @@ class FilamentInventory:
                 if spool_id is not None and spool_id not in numbers:
                     # Archived since the read above: `_Keys` reads unarchived ones only.
                     spool_id, found_by = None, None
+                bb_id = assigned.get((printer_id, tray.ams_id, tray.tray_id))
+                candidate = None if bb_id is None else by_bb.get(bb_id)
+                verdict = _verdict(
+                    tray,
+                    None if spool_id is None else own[spool_id],
+                    found_by,
+                    None if candidate is None or candidate.id in held else candidate,
+                    materials,
+                )
                 trays.append(
                     m.InventoryTray(
                         ams_id=tray.ams_id,
@@ -365,6 +567,11 @@ class FilamentInventory:
                         spool_id=spool_id,
                         spool_number=None if spool_id is None else numbers[spool_id],
                         found_by=found_by,
+                        mismatch=m.TrayMismatch(
+                            reported_type=tray.material, reported_rgba=tray.rgba
+                        )
+                        if verdict == "mismatch" and tray.material
+                        else None,
                     )
                 )
             found.append(m.PrinterTrays(printer_id=row.id, printer_name=row.name, trays=trays))
@@ -532,18 +739,60 @@ class FilamentInventory:
 
     # -- internals --------------------------------------------------------------------
 
+    def _swap(
+        self, name: str, printer_id: UUID, tray: SeenTray, holder: m.Spool, assigned: m.Spool
+    ) -> bool:
+        """`reconcile_trays`'s two moves for one tray, in one transaction: ``holder`` to no
+        place, ``assigned`` into the tray. Locks as `link` does: the tray's advisory lock,
+        then both spools by id. False, with nothing written, when the tray no longer holds
+        ``holder`` by its placement or either spool is archived since the read: the next
+        pass looks again."""
+        reason = _reason(tray, holder, assigned)
+        place = self._locations.ensure_ams(
+            printer_id,
+            tray.ams_id,
+            tray.tray_id,
+            label=place_label(name, tray.ams_id, tray.tray_id),
+        )
+        with self._pool.connection() as conn, conn.transaction():
+            _tray_lock(conn, printer_id, tray.ams_id, tray.tray_id)
+            locked = conn.execute(
+                "SELECT id FROM filament_spools WHERE id = ANY(%s) AND archived_at IS NULL"
+                " ORDER BY id FOR UPDATE",
+                ([holder.id, assigned.id],),
+            ).fetchall()
+            if len(locked) != 2 or self.holder_on(conn, printer_id, tray) != (holder.id, "link"):
+                return False
+            LocationStore.move_on(conn, holder.id, None, actor=RECONCILE_ACTOR, reason=reason)
+            self.place_on(conn, assigned.id, place.id, tray, actor=RECONCILE_ACTOR, reason=reason)
+        logger.info(
+            "moved a tray's placed spool out for the one Bambuddy assigns",
+            extra={
+                "printer_id": str(printer_id),
+                "ams_id": tray.ams_id,
+                "tray_id": tray.tray_id,
+                "removed": holder.number,
+                "placed": assigned.number,
+            },
+        )
+        return True
+
     def _others(self, printer_id: UUID) -> list[tuple[UUID, list[SeenTray]]]:
         """Every other registry printer's trays, as its latest stored report shows them."""
         rows = {row.id: row for row in PrinterStore(self._pool, None).list()}
         return [(other, trays) for other, trays in self._reported(rows) if other != printer_id]
 
-    def _reported(self, rows: Mapping[str, PrinterRow]) -> list[tuple[UUID, list[SeenTray]]]:
+    def _reported(
+        self, rows: Mapping[str, PrinterRow], *, fresh_at: datetime | None = None
+    ) -> list[tuple[UUID, list[SeenTray]]]:
         """The trays of each printer among ``rows`` that has a stored report, as its latest
-        report shows them."""
+        report shows them; with ``fresh_at``, only a report fresh then (`is_fresh`)."""
         now = datetime.now(UTC)
         found: list[tuple[UUID, list[SeenTray]]] = []
         for printer_id, report in PrinterReportStore(self._pool).all().items():
             row = rows.get(printer_id)
+            if fresh_at is not None and not is_fresh(report[1], fresh_at):
+                continue
             if row is not None:
                 found.append((UUID(printer_id), seen_trays(report_status(row, report, now=now))))
         return found

@@ -32,21 +32,37 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import time
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal, Self
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.orders.integrations import MaintenanceTask, NotLinkedError, OrderIntegrations
+from scadbuddy.orders.integrations import (
+    MaintenanceDone,
+    MaintenanceTask,
+    NotLinkedError,
+    OrderIntegrations,
+)
 from scadbuddy.orders.models import (
     ActualWhy,
     HoursSource,
@@ -200,6 +216,41 @@ NOTES_MAX = 1000
 #: A writer's key, so a retry writes once.
 Source = Annotated[str, Field(min_length=1, max_length=200)]
 EventName = Annotated[str, Field(min_length=1, max_length=100)]
+#: An imported task event's ``source`` is this and its Bambuddy history id (§4): the
+#: import's key, which no ScadBuddy event may take.
+IMPORT_SOURCE = "bambuddy:"
+#: An imported event's ``created_by``.
+IMPORTED_BY = "bambuddy"
+#: The bounds of an imported row's ``bambuddy_history_id integer``.
+INT32_MIN, INT32_MAX = -(2**31), 2**31 - 1
+#: The least ``hours_at_maintenance`` that rounds to 1e9, past ``numeric(10, 1)``.
+HOURS_AT_LIMIT = 999_999_999.95
+#: #6663 review: the seconds the housekeeping sweep (:meth:`MachineRates.read_logs`) may
+#: spend reading logs, well inside its activity's start-to-close
+#: (`workflows.housekeeping.MAINTENANCE_IMPORT_TIMEOUT`, 10 min). It starts no printer
+#: past it and cuts a read that runs past it; the printers left wait for the next tick.
+READ_LOGS_BUDGET = 7 * 60.0
+
+
+def storable_task(name: str) -> bool:
+    """Whether a Bambuddy task name fits ``printer_maintenance_events.task`` (``CHECK
+    (length(task) BETWEEN 1 AND 100)``) and can be sent as text: no NUL, and UTF-8 (a
+    JSON reply can hold a lone surrogate). A row of any other name is skipped."""
+    if not 1 <= len(name) <= 100 or "\x00" in name:
+        return False
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def storable_notes(notes: str | None) -> str | None:
+    """A Bambuddy note as ``notes`` can keep it: its NULs dropped, a lone surrogate as
+    ``?``, then cut to `NOTES_MAX` (``CHECK (length(notes) <= 1000)``)."""
+    if notes is None:
+        return None
+    return notes.replace("\x00", "").encode(errors="replace").decode()[:NOTES_MAX]
 
 
 class MachineRateEvent(BaseModel):
@@ -236,16 +287,24 @@ class MachineRateEventCreate(BaseModel):
 
     kind: EventKind
     name: EventName
-    #: When it was done; now when left out.
-    at: datetime | None = None
+    #: When it was done, with its zone; now when left out.
+    at: AwareDatetime | None = None
     hours_at: Reading | None = None
     hours_used: Hours | None = None
     minutes: Tenths | None = None
     consumables: Amount | None = None
     cost: Amount | None = None
     notes: str | None = Field(default=None, max_length=NOTES_MAX)
-    #: A retry with the same ``source`` returns the first event (200).
+    #: A retry with the same ``source`` returns the first event (200). Never
+    #: ``bambuddy:…``, the import's key (§4).
     source: Source | None = None
+
+    @field_validator("source")
+    @classmethod
+    def _not_imported(cls, value: str | None) -> str | None:
+        if value is not None and value.lower().startswith(IMPORT_SOURCE):
+            raise ValueError(f"a source starting {IMPORT_SOURCE!r} is the Bambuddy import's")
+        return value
 
     @model_validator(mode="after")
     def _fields(self) -> Self:
@@ -828,6 +887,8 @@ class Stored:
     logged: list[MachineRateEvent] = field(default_factory=list)
     #: How many events each kind and name has, all of them.
     counts: dict[tuple[EventKind, str], int] = field(default_factory=dict)
+    #: #5774 PR 3 (§3.7): when the printer's Bambuddy log was last read in full.
+    events_read_at: datetime | None = None
 
     @property
     def window(self) -> int:
@@ -935,7 +996,13 @@ class MachineRateStore:
                 f"{where} GROUP BY printer, kind, name",
                 args,
             ).fetchall()
+            reads = conn.execute(
+                f"SELECT printer, read_at FROM printer_maintenance_reads{where}", args
+            ).fetchall()
             found = self._held(profiles, parts, tasks, logged, counts)
+            for r in reads:
+                held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
+                held.events_read_at = r["read_at"]
             # A row whose skipped gaps walked past what was read is read whole.
             for printer, held in found.items():
                 for kind, name in _cut_short(held):
@@ -1203,6 +1270,80 @@ class MachineRateStore:
         assert found is not None
         return _event(found), written > 0
 
+    def import_events(
+        self,
+        printer: str,
+        bambuddy_printer_id: int,
+        done: Sequence[tuple[str, MaintenanceDone]],
+    ) -> int | None:
+        """Bambuddy's log rows (task name, row) kept as imported task events, each once by
+        its ``bambuddy:<history id>`` source (§3.7, §4), and the read stamped
+        (``events_read_at``), in one transaction under the printer's event lock. A row
+        read again, or whose source a ScadBuddy event holds, writes nothing, and one past
+        the columns' bounds (its history id, its counter or its task name,
+        `storable_task`) is skipped; a note is kept as `storable_notes` gives it. How many it
+        wrote; None, writing nothing, once the printer no longer links
+        ``bambuddy_printer_id`` (unlinked, or linked to another since the read began)."""
+        key = printer_uuid(printer)
+        if key is None:
+            return None
+        written = 0
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:machine-rate-events:'"
+                " || %s, 0))",
+                (str(key),),
+            )
+            # Held while it writes, so an unlink waits for it, or it sees the unlink.
+            linked = conn.execute(
+                "SELECT bambuddy_printer_id FROM printers WHERE id = %s FOR SHARE", (key,)
+            ).fetchone()
+            if linked is None or linked["bambuddy_printer_id"] != bambuddy_printer_id:
+                return None
+            for task, row in done:
+                if (
+                    not storable_task(task)
+                    or not INT32_MIN <= row.history_id <= INT32_MAX
+                    or not math.isfinite(row.hours_at)
+                    or row.hours_at >= HOURS_AT_LIMIT
+                ):
+                    # Past the columns' bounds (`task`'s length, `bambuddy_history_id
+                    # integer`, `hours_at numeric(10, 1)`), or no number or text: skipped.
+                    continue
+                hours: Decimal | None = None
+                if row.hours_at >= 0:
+                    # A counter below 0 (a negative offset typed in Bambuddy) is no
+                    # reading: the event opens and closes no gap.
+                    hours = reading(row.hours_at)
+                source = f"{IMPORT_SOURCE}{row.history_id}"
+                written += conn.execute(
+                    "INSERT INTO printer_maintenance_events (id, printer, task, performed_at,"
+                    " hours_at, hours_source, notes, origin, bambuddy_history_id, source,"
+                    " created_by) SELECT %s, %s, %s, %s, %s, %s, %s, 'bambuddy', %s, %s, %s"
+                    " WHERE NOT EXISTS (SELECT 1 FROM printer_wear_replacements"
+                    " WHERE printer = %s AND source = %s) ON CONFLICT DO NOTHING",
+                    (
+                        uuid.uuid4(),
+                        key,
+                        task,
+                        row.at,
+                        hours,
+                        None if hours is None else "bambuddy",
+                        storable_notes(row.notes),
+                        row.history_id,
+                        source,
+                        IMPORTED_BY,
+                        key,
+                        source,
+                    ),
+                ).rowcount
+            conn.execute(
+                "INSERT INTO printer_maintenance_reads (printer, read_at) VALUES (%s, now())"
+                " ON CONFLICT (printer) DO UPDATE SET read_at = excluded.read_at",
+                (key,),
+            )
+        return written
+
     def event_by_source(self, printer: str, source: str) -> MachineRateEvent | None:
         key = printer_uuid(printer)
         if key is None:
@@ -1462,8 +1603,8 @@ class ActualsView(BaseModel):
     window: int = DEFAULT_WINDOW
     rows: list[RowActuals] = Field(default_factory=list)
     orphaned: list[Orphan] = Field(default_factory=list)
-    #: When the events were last read from Bambuddy's log; null until it is read (the
-    #: import is #5774 PR 3).
+    #: When the events were last read from Bambuddy's log in full; null until then, and
+    #: kept as it was by a read that failed (§3.7).
     events_read_at: datetime | None = None
 
 
@@ -1559,7 +1700,47 @@ def actuals_view(breakdown: MachineRateBreakdown, stored: Stored) -> ActualsView
         window=window,
         rows=rows,
         orphaned=[Orphan(kind=k, name=n, events=c) for k, n, c in orphaned],
+        events_read_at=stored.events_read_at,
     )
+
+
+#: What a Bambuddy read raises when Bambuddy does not answer usefully: a refusal, a reply
+#: that does not validate, is not JSON or is not text. Any other ValueError is a bug.
+UNANSWERED = (ApiError, NotLinkedError, ValidationError, json.JSONDecodeError, UnicodeDecodeError)
+
+
+#: How a read of a printer's Bambuddy log ended: ``read`` and kept; ``unanswered`` (the
+#: task list or the log could not be read, or the store refused the log); ``unlinked``
+#: (the printer no longer links the Bambuddy printer read, so nothing was kept).
+LogRead = Literal["read", "unanswered", "unlinked"]
+
+
+@dataclass
+class PricedRate:
+    """A printer's rate now, the tasks read from Bambuddy for it (None: none read), and
+    how its Bambuddy log read ended (None: not asked, not linked or no profile)."""
+
+    breakdown: MachineRateBreakdown
+    tasks: list[MaintenanceTask] | None = None
+    log: LogRead | None = None
+
+
+@dataclass
+class MoneyRates:
+    """:meth:`MachineRates.money_rates`: the machine-rate fields of ``costs.CostRates``,
+    named as they are there."""
+
+    #: The fallback for an attempt naming no registry printer.
+    machine_rate_per_hour: str
+    printer_rates: dict[str, str]
+    serial_rates: dict[str, str]
+    #: #5774 (§6): profiled printers only; one missing is priced at the book's rate.
+    printer_actuals: dict[str, bool]
+    serial_actuals: dict[str, bool]
+    printer_confidence: dict[str, int | None]
+    serial_confidence: dict[str, int | None]
+    #: The default printer whose rate the fallback is; None: the fallback is the book's.
+    default_printer: str | None = None
 
 
 class MachineRates:
@@ -1582,12 +1763,13 @@ class MachineRates:
         (and keeps their intervals); without it, or when Bambuddy does not answer, the
         stored intervals price it (``intervals`` ``stored``). A printer with no profile
         is the book's rate."""
-        return (await self._priced(row, live=live))[0]
+        return (await self._priced(row, live=live)).breakdown
 
-    async def _priced(
-        self, row: PrinterRow, *, live: bool
-    ) -> tuple[MachineRateBreakdown, list[MaintenanceTask] | None]:
-        """:meth:`breakdown`, and the tasks it read from Bambuddy (None: none read)."""
+    async def _priced(self, row: PrinterRow, *, live: bool, read_log: bool = False) -> PricedRate:
+        """:meth:`breakdown`, and the tasks it read from Bambuddy. With ``read_log`` (the
+        Settings view, its button and the sweep, never a quote: §3.7), a linked printer
+        with a profile also reads its Bambuddy log after the live task read, and the rate
+        prices with what that read added."""
         runtime = (await asyncio.to_thread(self.settings.snapshot)).runtime
         stored = await asyncio.to_thread(self.store.stored, row.id)
         if stored.profile is None:
@@ -1598,9 +1780,10 @@ class MachineRates:
                 rate_per_hour=runtime.pricing_machine_rate_per_hour,
                 currency=runtime.orders_currency,
             )
-            return book, None
+            return PricedRate(book)
         tasks: list[MaintenanceTask] | None = None
         intervals: IntervalSource = "typed"
+        log: LogRead | None = None
         if row.bambuddy_printer_id is not None:
             intervals = "stored"
             if live:
@@ -1610,6 +1793,8 @@ class MachineRates:
                 await asyncio.to_thread(
                     self.store.remember_intervals, row.id, row.bambuddy_printer_id, tasks
                 )
+            if read_log:
+                log = "unanswered" if tasks is None else await self._read_log(row, tasks, stored)
         rate = compute(
             stored.profile,
             stored.wear,
@@ -1624,7 +1809,7 @@ class MachineRates:
             read_tasks=stored.read_tasks if intervals == "stored" else None,
             events=stored.events,
         )
-        return rate, tasks
+        return PricedRate(rate, tasks, log)
 
     async def _read_tasks(self, row: PrinterRow) -> list[MaintenanceTask] | None:
         """A linked printer's tasks read from Bambuddy now; None when it does not answer."""
@@ -1632,15 +1817,7 @@ class MachineRates:
             return None
         try:
             return await self.integrations.maintenance_tasks(row.bambuddy_printer_id)
-        except (
-            ApiError,
-            NotLinkedError,
-            ValidationError,
-            json.JSONDecodeError,
-            UnicodeDecodeError,
-        ):
-            # A reply that does not validate, is not JSON or is not text is Bambuddy not
-            # answering usefully. Any other ValueError is a bug.
+        except UNANSWERED:
             logger.warning(
                 "Bambuddy's maintenance tasks could not be read; the stored intervals price"
                 " the machine rate",
@@ -1648,27 +1825,135 @@ class MachineRates:
             )
             return None
 
+    async def _read_log(
+        self, row: PrinterRow, tasks: Sequence[MaintenanceTask], stored: Stored
+    ) -> LogRead:
+        """The log of each task Bambuddy names for the printer (at most `MAX_ROWS`), read
+        whole, then kept (§3.7), and how that ended. A read that fails, or one the printer
+        was unlinked during, keeps nothing and leaves ``events_read_at`` as it was.
+        ``stored`` takes the events it added."""
+        assert row.bambuddy_printer_id is not None
+        items: dict[int, str] = {}
+        for task in tasks:
+            if task.item_id is not None and len(items) < MAX_ROWS and storable_task(task.task):
+                items[task.item_id] = task.task
+        try:
+            logs = await self.integrations.maintenance_history(list(items))
+        except UNANSWERED:
+            logger.warning(
+                "Bambuddy's maintenance log could not be read; the stored events price the"
+                " machine rate",
+                extra={"printer": row.id},
+            )
+            return "unanswered"
+        done = [
+            (items[item], entry)
+            for item, entries in logs.items()
+            if item in items
+            for entry in entries
+        ]
+        try:
+            written = await asyncio.to_thread(
+                self.store.import_events, row.id, row.bambuddy_printer_id, done
+            )
+        except (psycopg.DataError, psycopg.IntegrityError):
+            # A row the bounds checks in `import_events` miss: the stored events price the
+            # rate, and the view, the button and the sweep never fail on it.
+            logger.exception(
+                "Bambuddy's maintenance log could not be kept; the stored events price the"
+                " machine rate",
+                extra={"printer": row.id},
+            )
+            return "unanswered"
+        if written is None:
+            return "unlinked"
+        if written:
+            fresh = await asyncio.to_thread(self.store.stored, row.id)
+            if fresh.profile is not None:
+                stored.logged, stored.counts = fresh.logged, fresh.counts
+        return "read"
+
+    async def read_log(self, row: PrinterRow) -> LogRead | None:
+        """The sweep's read of one printer's Bambuddy log (:meth:`read_logs`, §3.7), and
+        how it ended. None, reading nothing, for a printer not linked or with no profile
+        (the rate then lists no task). The view and its button read the log in
+        :meth:`view`, through the same :meth:`_priced`."""
+        return (await self._priced(row, live=True, read_log=True)).log
+
+    async def read_logs(self, *, clock: Callable[[], float] = time.monotonic) -> tuple[int, int]:
+        """The housekeeping sweep (§3.7): the log of every printer linked to Bambuddy
+        with a profile, one after another through :meth:`read_log`. Each fails alone: any
+        error is logged and counted, and the next printer is read. How many were read and
+        how many failed; a printer unlinked during its read is neither. Bounded by
+        `READ_LOGS_BUDGET` on ``clock``: no printer starts past it, and a read still
+        running then is cut (a write already sent still commits); those printers are
+        neither read nor failed, logged, and left for the next tick."""
+        if not self.integrations.linked:
+            return 0, 0
+        read = failed = 0
+        rows = await asyncio.to_thread(self.printers.list)
+        linked = [row for row in rows if row.bambuddy_printer_id is not None]
+        deadline = clock() + READ_LOGS_BUDGET
+        for index, row in enumerate(linked):
+            left = deadline - clock()
+            if left <= 0:
+                self._past_deadline(len(linked) - index)
+                break
+            try:
+                async with asyncio.timeout(left):
+                    log = await self.read_log(row)
+            except TimeoutError:
+                self._past_deadline(len(linked) - index)
+                break
+            except Exception:
+                logger.exception(
+                    "a printer's maintenance log could not be imported",
+                    extra={"printer": row.id},
+                )
+                failed += 1
+                continue
+            if log == "read":
+                read += 1
+            elif log == "unanswered":
+                failed += 1
+        return read, failed
+
+    @staticmethod
+    def _past_deadline(skipped: int) -> None:
+        logger.warning(
+            "the maintenance log sweep reached its deadline; the printers left are read on"
+            " the next tick",
+            extra={"skipped": skipped, "budget_s": READ_LOGS_BUDGET},
+        )
+
     def stored_rates(self) -> dict[str, str]:
         """Every profiled printer's rate from its stored intervals, by registry id: no
         Bambuddy call, for the money view (job cost spec §4.1). Blocking."""
-        return self._stored_rates()[0]
+        return {printer: rate.rate_per_hour for printer, rate in self._stored_rates()[0].items()}
 
-    def _stored_rates(self) -> tuple[dict[str, str], dict[str, str]]:
-        """:meth:`stored_rates`, and the same rates by each printer's serial."""
+    def _stored_rates(
+        self,
+    ) -> tuple[dict[str, MachineRateBreakdown], dict[str, MachineRateBreakdown]]:
+        """Each profiled printer's stored breakdown (:meth:`stored_rates`), by registry id
+        and by serial."""
         runtime = self.settings.snapshot().runtime
-        by_id: dict[str, str] = {}
-        by_serial: dict[str, str] = {}
+        by_id: dict[str, MachineRateBreakdown] = {}
+        by_serial: dict[str, MachineRateBreakdown] = {}
         for printer, stored in self.store.stored_all().items():
             if stored.profile is None:
                 continue
-            rate = self._stored_rate(stored, runtime.pricing_labour_rate_per_hour)
+            rate = self._stored_breakdown(stored, runtime.pricing_labour_rate_per_hour)
             by_id[printer] = rate
             if stored.serial is not None:
                 by_serial[stored.serial] = rate
         return by_id, by_serial
 
+    @classmethod
+    def _stored_rate(cls, stored: Stored, default_labour: str) -> str:
+        return cls._stored_breakdown(stored, default_labour).rate_per_hour
+
     @staticmethod
-    def _stored_rate(stored: Stored, default_labour: str) -> str:
+    def _stored_breakdown(stored: Stored, default_labour: str) -> MachineRateBreakdown:
         assert stored.profile is not None
         return compute(
             stored.profile,
@@ -1680,7 +1965,7 @@ class MachineRates:
             intervals="stored",
             read_tasks=stored.stored_reads,
             events=stored.events,
-        ).rate_per_hour
+        )
 
     def check_rate(self, printer: str | None, printer_id: int | None) -> str | None:
         """The stored rate of the printer a quote names (:meth:`resolve`), with no
@@ -1695,23 +1980,40 @@ class MachineRates:
         labour = self.settings.snapshot().runtime.pricing_labour_rate_per_hour
         return self._stored_rate(stored, labour)
 
-    def money_rates(self) -> tuple[str, dict[str, str], dict[str, str]]:
+    def money_rates(self) -> MoneyRates:
         """The money view's machine rates (job cost spec §4.1), for an attempt with no
         quote's rate: every registry printer's, by id and by serial (a printer merged
         away is found by the serial it kept), its stored rate (:meth:`stored_rates`) or,
         with no profile, the book's ``machine_rate_per_hour`` (§6.2); and the fallback for
         an attempt naming no registry printer: the configured default printer's rate,
-        else the book's. The fallback, by registry id, by serial. Blocking."""
-        rates, by_serial = self._stored_rates()
+        else the book's. #5774 (§6): each profiled printer's ``actuals`` and
+        ``confidence`` beside its rate. Blocking."""
+        stored, stored_by_serial = self._stored_rates()
         book = self.settings.snapshot().runtime.pricing_machine_rate_per_hour
+        money = MoneyRates(
+            machine_rate_per_hour=book,
+            printer_rates={p: r.rate_per_hour for p, r in stored.items()},
+            serial_rates={s: r.rate_per_hour for s, r in stored_by_serial.items()},
+            printer_actuals={p: r.actuals for p, r in stored.items()},
+            serial_actuals={s: r.actuals for s, r in stored_by_serial.items()},
+            printer_confidence={p: r.confidence for p, r in stored.items()},
+            serial_confidence={s: r.confidence for s, r in stored_by_serial.items()},
+        )
         for row in self.printers.list():
-            rates.setdefault(row.id, book)
-            by_serial.setdefault(row.serial, rates[row.id])
-        fallback = book
+            money.printer_rates.setdefault(row.id, book)
+            # A serial already in the maps (`_stored_rates`, read before this list: after a
+            # merge or a serial change between the two reads, another row's) keeps that
+            # profiled row's rate, actuals and confidence; this row adds none of its own.
+            # So a serial's basis and confidence are always those of the rate it reads.
+            money.serial_rates.setdefault(row.serial, money.printer_rates[row.id])
+            if row.id in stored and row.serial not in stored_by_serial:
+                money.serial_actuals[row.serial] = stored[row.id].actuals
+                money.serial_confidence[row.serial] = stored[row.id].confidence
         default = self.resolve(None, None)
-        if default is not None:
-            fallback = rates.get(default.id, book)
-        return fallback, rates, by_serial
+        if default is not None and default.id in stored:
+            money.machine_rate_per_hour = money.printer_rates[default.id]
+            money.default_printer = default.id
+        return money
 
     def resolve(self, printer: str | None, printer_id: int | None) -> PrinterRow | None:
         """The registry printer a quote is priced for (§6.2): the one it names, else the
@@ -1743,14 +2045,42 @@ class MachineRates:
         row = await asyncio.to_thread(self.resolve, printer, printer_id)
         return None if row is None else await self.breakdown(row)
 
-    async def view(self, printer: str) -> MachineRateView | None:
-        """None for a printer the registry does not hold."""
+    async def view(self, printer: str, *, require_log: bool = False) -> MachineRateView | None:
+        """None for a printer the registry does not hold. A linked printer with a profile
+        reads its Bambuddy log after the live task read (§3.7); one that cannot be read
+        keeps the stored events, unless ``require_log`` (the "Read from Bambuddy" button):
+        then a refusal says why (409 ``not_linked``, also for a printer unlinked during the
+        read or with no Bambuddy configured, 409 ``no_machine_rate``, 503
+        ``log_unavailable``, also for a log the store refused)."""
         row = await asyncio.to_thread(self.printers.get, printer)
         if row is None:
             return None
+        if require_log and (row.bambuddy_printer_id is None or not self.integrations.linked):
+            # A row that still names a Bambuddy printer while no Bambuddy is configured
+            # has no log to read either: 409, not 503 ``log_unavailable``.
+            raise refusal(
+                409, "not_linked", "The printer is not linked to Bambuddy: it has no log to read."
+            )
         # The breakdown first: its live read keeps Bambuddy's intervals, which the
-        # inputs then show.
-        breakdown, tasks = await self._priced(row, live=True)
+        # inputs then show, and its log read adds the events the view lists.
+        priced = await self._priced(row, live=True, read_log=True)
+        breakdown, tasks = priced.breakdown, priced.tasks
+        if require_log and priced.log is None:
+            raise refusal(
+                409,
+                "no_machine_rate",
+                "The printer has no machine rate inputs yet: set them, then read its log.",
+            )
+        if require_log and priced.log == "unlinked":
+            raise refusal(
+                409, "not_linked", "The printer is not linked to Bambuddy: it has no log to read."
+            )
+        if require_log and priced.log == "unanswered":
+            raise refusal(
+                503,
+                "log_unavailable",
+                "Bambuddy did not answer. The rate uses the events last read.",
+            )
         stored = await asyncio.to_thread(self.store.stored, row.id)
         inputs = None
         names: list[str] = []

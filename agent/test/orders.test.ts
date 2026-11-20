@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { z } from 'zod'
 import { setupServer } from 'msw/node'
@@ -1517,6 +1518,240 @@ describe('machine rate tools (#4625)', () => {
     ])
     await expect(tool('machine_rate_set').execute({ printer: PRINTER }, ctx())).rejects.toThrow(ToolError)
     await expect(tool('machine_rate_set').execute({ printer: PRINTER, inputs: INPUTS, remove: true }, ctx())).rejects.toThrow(ToolError)
+  })
+
+  // #6665: everything the Settings page sets. Left out, the PUT keeps the stored value.
+  it('sends priced_by per row, actuals_window and lan_hours_offset, and leaves them out when not given', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/printers/${PRINTER}/machine-rate`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(VIEW)
+      }),
+    )
+    const actuals = {
+      profile: { ...INPUTS.profile, actuals_window: 5, lan_hours_offset: '120.5' },
+      wear_parts: [{ ...INPUTS.wear_parts[0], priced_by: 'actual' }],
+      maintenance: [{ ...INPUTS.maintenance[0], priced_by: 'estimate' }],
+    }
+    await tool('machine_rate_set').execute({ printer: PRINTER, inputs: actuals }, ctx())
+    await tool('machine_rate_set').execute({ printer: PRINTER, inputs: INPUTS }, ctx())
+    expect(sent).toEqual([actuals, INPUTS])
+    const wear = sent[1] as typeof INPUTS
+    expect(Object.keys(wear.profile)).not.toContain('actuals_window')
+    expect(Object.keys(wear.profile)).not.toContain('lan_hours_offset')
+    expect(Object.keys(wear.wear_parts[0]!)).not.toContain('priced_by')
+  })
+
+  it('checks priced_by, actuals_window and lan_hours_offset', () => {
+    const accepts = (inputs: Record<string, unknown>) => {
+      try {
+        tool('machine_rate_set').parse({ printer: PRINTER, inputs })
+        return true
+      } catch {
+        return false
+      }
+    }
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 1, lan_hours_offset: '0' } })).toBe(true)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 20 } })).toBe(true)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 0 } })).toBe(false)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 21 } })).toBe(false)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 2.5 } })).toBe(false)
+    expect(accepts({ ...INPUTS, profile: { lan_hours_offset: '-1' } })).toBe(false)
+    expect(accepts({ ...INPUTS, wear_parts: [{ ...INPUTS.wear_parts[0], priced_by: 'actual' }] })).toBe(true)
+    expect(accepts({ ...INPUTS, wear_parts: [{ ...INPUTS.wear_parts[0], priced_by: 'guess' }] })).toBe(false)
+    expect(accepts({ ...INPUTS, maintenance: [{ ...INPUTS.maintenance[0], priced_by: 'actual' }] })).toBe(true)
+    expect(accepts({ ...INPUTS, maintenance: [{ ...INPUTS.maintenance[0], priced_by: 'guess' }] })).toBe(false)
+  })
+
+  it('names the new fields in its description', () => {
+    for (const field of ['priced_by', 'actuals_window', 'lan_hours_offset']) expect(tool('machine_rate_set').description).toContain(field)
+  })
+})
+
+// #5774 (spec 2026-11-17-machine-rate-actuals §5, §10): a printer's logged maintenance and
+// replaced parts, listed, added and corrected; machine_rate_get shows the actuals.
+describe('machine rate event tools (#5774)', () => {
+  const PRINTER = '00000000-0000-4000-8000-000000000001'
+  const EVENT = 'e0000000-0000-4000-8000-000000000002'
+  const events = `${BACKEND}/api/v1/printers/${PRINTER}/machine-rate/events`
+  const LOGGED = {
+    id: EVENT,
+    kind: 'part',
+    name: 'Nozzle',
+    at: '2026-11-18T10:00:00Z',
+    hours_at: '402',
+    hours_source: 'lan_watch',
+    cost: '20',
+    origin: 'scadbuddy',
+    source: 'agent:x',
+    created_at: '2026-11-18T10:00:00Z',
+    created_by: 'agent',
+  }
+
+  it('lists with read; adds and corrects with write (they reach no printer and no customer)', () => {
+    expect(['machine_rate_events_list', 'machine_rate_event_add', 'machine_rate_event_update'].map((n) => tool(n).risk)).toEqual([
+      'read',
+      'write',
+      'write',
+    ])
+    expect(tool('machine_rate_events_list').routes).toEqual(['GET /api/v1/printers/{printer_id}/machine-rate/events'])
+    expect(tool('machine_rate_event_add').routes).toEqual(['POST /api/v1/printers/{printer_id}/machine-rate/events'])
+    expect(tool('machine_rate_event_update').routes).toEqual(['PATCH /api/v1/printers/{printer_id}/machine-rate/events/{event_id}'])
+    // No delete tool: deleting an event is a person's correction (§5).
+    expect(ALL_TOOLS.some((t) => t.routes?.includes('DELETE /api/v1/printers/{printer_id}/machine-rate/events/{event_id}'))).toBe(false)
+  })
+
+  it('checks each schema', () => {
+    const accepts = (name: string, args: Record<string, unknown>): boolean => {
+      try {
+        tool(name).parse(args)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const list = 'machine_rate_events_list'
+    expect(accepts(list, { printer: PRINTER, kind: 'part', name: 'Nozzle', limit: 200 })).toBe(true)
+    expect(accepts(list, { printer: PRINTER, kind: 'tool' })).toBe(false)
+    expect(accepts(list, { printer: PRINTER, limit: 201 })).toBe(false)
+    const add = 'machine_rate_event_add'
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', hours_used: '640' })).toBe(true)
+    expect(accepts(add, { printer: PRINTER, kind: 'task', name: 'Lubricate rods', minutes: '15', consumables: '0.5' })).toBe(true)
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: '', cost: '20' })).toBe(false)
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '-1' })).toBe(false)
+    // The counter's source is the route's to record, never the caller's (§3.2).
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', hours_source: 'typed' })).toBe(false)
+    expect(accepts(add, { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', notes: 'x'.repeat(1001) })).toBe(false)
+    const update = 'machine_rate_event_update'
+    expect(accepts(update, { printer: PRINTER, event_id: EVENT, minutes: null, notes: 'redone' })).toBe(true)
+    // An imported event's time, counter source and Bambuddy id stay as read (§5).
+    expect(accepts(update, { printer: PRINTER, event_id: EVENT, performed_at: '2026-11-18T10:00:00Z' })).toBe(false)
+    expect(accepts(update, { printer: PRINTER, event_id: EVENT, bambuddy_history_id: 3 })).toBe(false)
+  })
+
+  it('lists a printer’s events a page at a time', async () => {
+    let url = ''
+    const page = { events: [LOGGED], next: 'c1' }
+    server.use(
+      http.get(events, ({ request }) => {
+        url = request.url
+        return HttpResponse.json(page)
+      }),
+    )
+    const answer = await tool('machine_rate_events_list').execute({ printer: PRINTER, kind: 'part', name: 'Nozzle', cursor: 'c0' }, ctx())
+    expect(firstText(answer)).toEqual(page)
+    const query = new URL(url).searchParams
+    expect([query.get('kind'), query.get('name'), query.get('cursor')]).toEqual(['part', 'Nozzle', 'c0'])
+  })
+
+  it('adds an event, keyed so a retry of the call writes once', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.post(events, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(LOGGED, { status: 201 })
+      }),
+    )
+    const keyed = { ...ctx(), callKey: 'call-1' }
+    const body = { printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20' } as const
+    expect(firstText(await tool('machine_rate_event_add').execute(body, keyed))).toEqual(LOGGED)
+    await tool('machine_rate_event_add').execute(body, keyed)
+    await tool('machine_rate_event_add').execute({ ...body, source: 'form:7', hours_at: '12.5' }, ctx())
+    const [first, again, given] = sent as Record<string, unknown>[]
+    expect(first).toEqual({ kind: 'part', name: 'Nozzle', cost: '20', source: first?.source })
+    expect(String(first?.source)).toMatch(/^agent:[0-9a-f]{64}$/)
+    expect(again?.source).toBe(first?.source)
+    expect(given).toEqual({ kind: 'part', name: 'Nozzle', cost: '20', hours_at: '12.5', source: 'form:7' })
+  })
+
+  it('refuses an event its kind cannot hold before it asks the backend', async () => {
+    const add = tool('machine_rate_event_add')
+    await expect(add.execute({ printer: PRINTER, kind: 'part', name: 'Nozzle' }, ctx())).rejects.toThrow('cost')
+    await expect(add.execute({ printer: PRINTER, kind: 'part', name: 'Nozzle', cost: '20', minutes: '5' }, ctx())).rejects.toThrow(
+      'minutes',
+    )
+    await expect(add.execute({ printer: PRINTER, kind: 'task', name: 'Lubricate rods', cost: '1' }, ctx())).rejects.toThrow('cost')
+  })
+
+  it('refuses exactly the shapes the backend rule refuses, in its words (#6667 review)', async () => {
+    // The tool's kind checks copy `MachineRateEventCreate._fields`. The rule as it reads
+    // now is pinned here, so a change to it fails this test until the tool's copy (and
+    // the shapes below) change with it.
+    const source = readFileSync(new URL('../../backend/scadbuddy/orders/machine_rate.py', import.meta.url), 'utf8')
+    const model = source.slice(source.indexOf('class MachineRateEventCreate('))
+    const rule = / {4}def _fields\(self\) -> Self:\n([\s\S]*?)\n {8}return self\n/.exec(model)?.[1]
+    expect(rule?.split('\n').map((line) => line.trim())).toEqual([
+      'if self.kind == "part":',
+      'if self.cost is None:',
+      'raise ValueError("a replaced part needs its cost")',
+      'if self.minutes is not None or self.consumables is not None:',
+      'raise ValueError("a replaced part takes no minutes or consumables")',
+      'elif self.cost is not None or self.hours_used is not None:',
+      'raise ValueError("a task takes no cost or hours_used")',
+    ])
+    const sent: unknown[] = []
+    server.use(
+      http.post(events, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(LOGGED, { status: 201 })
+      }),
+    )
+    const part = { printer: PRINTER, kind: 'part', name: 'Nozzle' } as const
+    const task = { printer: PRINTER, kind: 'task', name: 'Lubricate rods' } as const
+    // Each shape the rule refuses, with the rule's own message: the tool refuses it too,
+    // with the same words, and sends nothing.
+    const refused: [Record<string, unknown>, string][] = [
+      [part, 'a replaced part needs its cost'],
+      [{ ...part, hours_used: '640' }, 'a replaced part needs its cost'],
+      [{ ...part, cost: '20', minutes: '5' }, 'a replaced part takes no minutes or consumables'],
+      [{ ...part, cost: '20', consumables: '1' }, 'a replaced part takes no minutes or consumables'],
+      [{ ...task, cost: '1' }, 'a task takes no cost or hours_used'],
+      [{ ...task, hours_used: '640' }, 'a task takes no cost or hours_used'],
+    ]
+    const add = tool('machine_rate_event_add')
+    for (const [args, message] of refused) {
+      await expect(add.execute(args, ctx())).rejects.toThrow(new ToolError(message))
+    }
+    expect(sent).toEqual([])
+    // Each shape the rule lets through reaches the backend.
+    const allowed: Record<string, unknown>[] = [
+      { ...part, cost: '20' },
+      { ...part, cost: '20', hours_used: '640' },
+      task,
+      { ...task, minutes: '15', consumables: '0.5' },
+    ]
+    for (const args of allowed) await add.execute(args, ctx())
+    expect(sent).toHaveLength(allowed.length)
+  })
+
+  it('corrects the fields given, a null clearing one', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${events}/${EVENT}`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(LOGGED)
+      }),
+    )
+    const answer = await tool('machine_rate_event_update').execute({ printer: PRINTER, event_id: EVENT, minutes: null, notes: 'redone' }, ctx())
+    expect(firstText(answer)).toEqual(LOGGED)
+    expect(sent).toEqual({ minutes: null, notes: 'redone' })
+    await expect(tool('machine_rate_event_update').execute({ printer: PRINTER, event_id: EVENT }, ctx())).rejects.toThrow(ToolError)
+  })
+
+  it('machine_rate_get shows the actuals, their confidences and the counter', async () => {
+    const view = {
+      printer: PRINTER,
+      printer_name: 'H2C',
+      inputs: null,
+      breakdown: { source: 'profile', rate_per_hour: '0.68', actuals: true, actuals_window: 3, confidence: 66 },
+      actuals: { rows: [{ kind: 'part', name: 'Nozzle', have: 2, need: 3, confidence: 66 }], events_read_at: null, orphaned: [] },
+      counter: { source: 'lan_watch', hours: '102', lan_watch: { hours: '102', run_hours: '2', offset_hours: '100' } },
+    }
+    server.use(http.get(`${BACKEND}/api/v1/printers/${PRINTER}/machine-rate`, () => HttpResponse.json(view)))
+    expect(firstText(await tool('machine_rate_get').execute({ printer: PRINTER }, ctx()))).toEqual(view)
+    const described = tool('machine_rate_get').description
+    for (const word of ['actuals', 'confidence', 'counter', 'machine_rate_events_list']) expect(described).toContain(word)
   })
 })
 

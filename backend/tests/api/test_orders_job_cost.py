@@ -11,10 +11,13 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api import orders as orders_api
 from tests.api.test_customers import create as create_customer
+from tests.api.test_machine_rates import INPUTS as MACHINE_INPUTS
+from tests.api.test_machine_rates import path as machine_path
 from tests.api.test_orders import create_order, pin_created
 from tests.api.test_orders_lifecycle import fulfil, quote_and_accept
 from tests.api.test_orders_reopen import item_of
 from tests.api.test_orders_unfulfil import accepted_order
+from tests.api.test_printers import create as create_printer
 from tests.api.test_versions import SLUG
 
 pytestmark = pytest.mark.requires_git
@@ -294,3 +297,54 @@ def test_the_profit_report_and_its_rows_orders(client: TestClient, pg_conninfo: 
     assert client.get("/api/v1/orders/reports/profit?nope=1").status_code == 400
     assert client.get("/api/v1/orders?product=nope").status_code == 422
     assert client.get("/api/v1/orders?currency=usd").status_code == 422
+
+
+def test_each_attempt_says_which_machine_rate_priced_it(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#5774 (machine-rate actuals spec §6): an attempt on a printer whose rate prices a
+    part from its actual is `printer_actuals` with that rate's confidence; one naming no
+    printer, with no default printer, is the book's."""
+    printer = create_printer(client)["id"]
+    inputs = {
+        **MACHINE_INPUTS,
+        "profile": {**MACHINE_INPUTS["profile"], "actuals_window": 1},
+        "wear_parts": [{**MACHINE_INPUTS["wear_parts"][0], "priced_by": "actual"}],
+    }
+    assert client.put(machine_path(printer), json=inputs).status_code == 200
+    logged = client.post(
+        f"{machine_path(printer)}/events",
+        json={"kind": "part", "name": "Nozzle", "cost": "20", "hours_used": "400"},
+    )
+    assert logged.status_code == 201, logged.text
+    order_id, [item_id] = accepted_order(client)
+    made = [
+        client.post(
+            f"/api/v1/orders/{order_id}/items/{item_id}/fulfilments",
+            json={"quantity": 0, "outcome": "failed"},
+        ).json()["id"]
+        for _ in range(2)
+    ]
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET actual_seconds = 3600 WHERE id = ANY(%s)", (made,)
+        )
+        conn.execute(
+            "UPDATE order_item_fulfilments SET printer = %s WHERE id = %s", (printer, made[0])
+        )
+
+    costs = client.get(f"/api/v1/orders/{order_id}/costs").json()
+
+    by_id = {a["fulfilment_id"]: a for a in costs["items"][0]["attempts"]}
+    on_printer, unplaced = by_id[made[0]], by_id[made[1]]
+    # Nozzle 20 / 400 = 0.05 in place of 0.07: 0.68 an hour, an hour.
+    assert on_printer["machine_minor"] == 68
+    assert (on_printer["machine_rate_basis"], on_printer["machine_rate_confidence"]) == (
+        "printer_actuals",
+        100,
+    )
+    assert (unplaced["machine_rate_basis"], unplaced["machine_rate_confidence"]) == (
+        "price_book",
+        None,
+    )
+    assert costs["machine_rate_bases"] == ["price_book", "printer_actuals"]

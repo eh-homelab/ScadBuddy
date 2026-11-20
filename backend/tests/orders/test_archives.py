@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +36,7 @@ from scadbuddy.orders.integrations import (
     ArchiveMedia,
     CopiedMedia,
     LocalDensity,
+    MaintenanceDone,
     MaintenanceTask,
     MediaTooLargeError,
 )
@@ -74,6 +75,11 @@ class Archives:
         raise AssertionError("not asked")
 
     async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+        raise AssertionError("not asked")
+
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
         raise AssertionError("not asked")
 
     async def project_exists(self, project_id: int) -> bool:

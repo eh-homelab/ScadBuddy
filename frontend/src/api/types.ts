@@ -557,6 +557,7 @@ export type LanCount = Schemas['LanCount']
 export type MachineRateEvent = Schemas['MachineRateEvent']
 export type MachineRateEventCreate = Schemas['MachineRateEventCreate']
 export type MachineRateEventPatch = Schemas['MachineRateEventPatch']
+export type MachineRateEventPage = Schemas['MachineRateEventPage']
 /** The inputs as sent: a field with a default may be left out. Decimals are strings. */
 export type MachineRateInputs = {
   profile: Partial<Schemas['CostProfile']>

@@ -13,11 +13,14 @@ import {
   importSpools,
   listEvents,
   listLocations,
+  listSensors,
   listSpools,
   listTags,
   moveSpool,
   patchSpool,
   unbindTag,
+  resolveCatalog,
+  setCatalogAliases,
   upsertCatalog,
   upsertLocation,
   upsertType,
@@ -26,7 +29,7 @@ import {
   type SpoolTypeCreate,
 } from '../../../api/filament'
 import { resetMockState } from '../../handlers'
-import { B, H2C, IT, L, LK, M, spoolId, T, TAG } from './seed'
+import { B, H2C, IT, L, LK, M, SENSOR, spoolId, T, TAG } from './seed'
 
 // #6262 Task 14 — the Filament section's mock API over its seed, through the client.
 
@@ -37,8 +40,10 @@ async function refusal(call: Promise<unknown>) {
     (cause: unknown) => cause,
   )
   expect(error).toBeInstanceOf(ApiError)
-  const { status, title, detail } = (error as ApiError).problem
-  return { status, title, detail }
+  // The problem without its `type`: a refusal's extensions (#6706's holder) come along.
+  const rest: Record<string, unknown> = { ...(error as ApiError).problem }
+  delete rest.type
+  return rest
 }
 
 const NEW_SPOOL = { weight_locked: false } as SpoolCreate
@@ -247,19 +252,37 @@ describe('the filament mocks', () => {
   })
 
   it('refuses to restore a catalog row whose name a live row has taken since', async () => {
-    const old = await upsertCatalog('brands', { name: 'Hatchbox' })
-    await upsertCatalog('brands', { archived: true }, old.id)
+    const old = await upsertCatalog('insert-materials', { name: 'Foam' })
+    await upsertCatalog('insert-materials', { archived: true }, old.id)
     // An archived row holds no name: the index is `WHERE archived_at IS NULL`.
-    await upsertCatalog('brands', { name: 'HATCHBOX' })
-    expect(await upsertCatalog('brands', { sort_order: 5 }, old.id)).toMatchObject({ sort_order: 5 })
-    expect(await refusal(upsertCatalog('brands', { archived: false }, old.id))).toMatchObject({ status: 409 })
+    await upsertCatalog('insert-materials', { name: 'FOAM' })
+    expect(await upsertCatalog('insert-materials', { sort_order: 5 }, old.id)).toMatchObject({ sort_order: 5 })
+    expect(await refusal(upsertCatalog('insert-materials', { archived: false }, old.id))).toMatchObject({ status: 409 })
+  })
+
+  it('keeps a plus variant apart, and reads + as PLUS (R-6706-17)', async () => {
+    const plus = await upsertCatalog('materials', { name: 'PLA+' })
+    expect(await refusal(upsertCatalog('materials', { name: 'PLA Plus' }))).toMatchObject({ status: 409, material_id: plus.id })
+    expect(await resolveCatalog('materials', 'pla')).toMatchObject({ id: M.PLA })
+  })
+
+  it('keeps an archived row’s names and aliases in a catalog with aliases (#6706)', async () => {
+    const old = await upsertCatalog('brands', { name: 'Hatchbox' })
+    await setCatalogAliases('brands', old.id, ['HB'])
+    await upsertCatalog('brands', { archived: true }, old.id)
+    for (const name of ['hatch-box', 'h.b']) {
+      expect(await refusal(upsertCatalog('brands', { name }))).toMatchObject({ status: 409, brand_id: old.id, brand_name: 'Hatchbox' })
+    }
+    expect(await resolveCatalog('brands', 'hb')).toMatchObject({ id: old.id })
   })
 
   it('refuses a catalog row whose name is taken, whose reference is missing, or that clears its name', async () => {
-    expect(await refusal(upsertCatalog('brands', { name: 'bambu lab' }))).toEqual({
+    expect(await refusal(upsertCatalog('brands', { name: 'bambu-lab' }))).toEqual({
       status: 409,
       title: 'Conflict',
-      detail: 'a row of this catalog already has that name',
+      detail: "the brand 'Bambu Lab' already has a name or alias that matches 'bambu-lab'",
+      brand_id: B.BAMBU,
+      brand_name: 'Bambu Lab',
     })
     expect(await refusal(upsertCatalog('subtypes', { name: 'Glow', material_id: B.BAMBU }))).toMatchObject({
       status: 422,
@@ -279,7 +302,7 @@ describe('the filament mocks', () => {
   it('refuses a place whose name is taken, whose kind is missing, or that would sit under itself', async () => {
     expect(await refusal(upsertLocation({ name: 'Shelf A', kind_id: LK.SHELF, parent_id: L.WORKSHOP, sort_order: 0 }))).toMatchObject({
       status: 409,
-      detail: 'a place with that name or that tray already exists',
+      detail: 'a place with that name, that tray or that AMS unit already exists',
     })
     expect(await refusal(upsertLocation({ name: 'Shelf B', kind_id: L.WORKSHOP, sort_order: 0 }))).toMatchObject({
       status: 422,
@@ -377,5 +400,19 @@ describe('extra keys in a write body (every body model of `filament/models.py` f
   ]
   it.each(cases)('refuses it on %s', async (_name, method, path, payload) => {
     expect(await refusal(request(path, { method, body: payload }))).toMatchObject({ status: 422, detail: expect.stringContaining('Extra inputs are not permitted') })
+  })
+})
+
+describe('the sensors list (#6684)', () => {
+  it('leaves out the sensors of an archived place, as the backend does', async () => {
+    resetMockState()
+    expect((await listSensors()).map((one) => one.id)).toContain(SENSOR.BOX_HUMIDITY)
+    expect((await listSensors(L.DRY_BOX)).map((one) => one.id)).toContain(SENSOR.BOX_HUMIDITY)
+    await upsertLocation({ archived: true }, L.DRY_BOX)
+    const ids = (await listSensors()).map((one) => one.id)
+    expect(ids).not.toContain(SENSOR.BOX_HUMIDITY)
+    expect(ids).not.toContain(SENSOR.BOX_TEMP)
+    expect(ids).toContain(SENSOR.SHELF_HUMIDITY)
+    expect(await listSensors(L.DRY_BOX)).toEqual([])
   })
 })

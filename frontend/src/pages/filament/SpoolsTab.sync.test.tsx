@@ -11,19 +11,33 @@ afterEach(() => clearToasts())
 
 describe('the weights sync result in words', () => {
   it('names what it did and each kind it skipped, with the count', () => {
-    expect(syncText({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0 })).toEqual({ title: 'Synced 3 spools', detail: 'Skipped 1 locked, 2 on a printing printer.' })
+    expect(syncText({ booked: 3, locked: 1, printing: 2, no_remain: 0, stale: 0, stale_printers: [] })).toEqual({ title: 'Synced 3 spools', detail: 'Skipped 1 locked, 2 on a printing printer.' })
   })
 
   it('uses the singular, and leaves out a count of zero', () => {
-    expect(syncText({ booked: 1, locked: 0, printing: 0, no_remain: 1, stale: 0 })).toEqual({ title: 'Synced 1 spool', detail: 'Skipped 1 with no AMS weight.' })
+    expect(syncText({ booked: 1, locked: 0, printing: 0, no_remain: 1, stale: 0, stale_printers: [] })).toEqual({ title: 'Synced 1 spool', detail: 'Skipped 1 with no AMS weight.' })
   })
 
   it('says when nothing was synced and nothing was skipped', () => {
-    expect(syncText({ booked: 0, locked: 0, printing: 0, no_remain: 0, stale: 0 })).toEqual({ title: 'Synced 0 spools', detail: 'No spool is loaded in an AMS.' })
+    expect(syncText({ booked: 0, locked: 0, printing: 0, no_remain: 0, stale: 0, stale_printers: [] })).toEqual({ title: 'Synced 0 spools', detail: 'No spool is loaded in an AMS.' })
   })
 
-  it('names a stale report', () => {
-    expect(syncText({ booked: 2, locked: 0, printing: 0, no_remain: 0, stale: 4 })).toEqual({ title: 'Synced 2 spools', detail: 'Skipped 4 whose printer has not reported lately.' })
+  it('names a stale report and its printers (#6679)', () => {
+    const stale_printers = [
+      { id: '00000000-0000-0000-0000-000000000001', name: 'H2C' },
+      { id: '00000000-0000-0000-0000-000000000002', name: 'P1S' },
+    ]
+    expect(syncText({ booked: 2, locked: 0, printing: 0, no_remain: 0, stale: 4, stale_printers })).toEqual({
+      title: 'Synced 2 spools',
+      detail: 'Skipped 4 whose printer has not reported lately (H2C, P1S).',
+    })
+  })
+
+  it('names a printer with no name by its short id', () => {
+    const stale_printers = [{ id: '0badc0de-0000-0000-0000-000000000001', name: null }]
+    expect(syncText({ booked: 0, locked: 0, printing: 0, no_remain: 0, stale: 1, stale_printers }).detail).toBe(
+      'Skipped 1 whose printer has not reported lately (printer 0badc0de).',
+    )
   })
 })
 
@@ -41,7 +55,7 @@ describe('the Sync weights from AMS button', () => {
     server.use(
       http.post('/api/v1/filament/spools/sync-ams-weights', async () => {
         await new Promise<void>((resolve) => (release = resolve))
-        return HttpResponse.json({ booked: 0, locked: 0, printing: 0, no_remain: 0, stale: 0, spools: [] })
+        return HttpResponse.json({ booked: 0, locked: 0, printing: 0, no_remain: 0, stale: 0, stale_printers: [], spools: [] })
       }),
     )
     const { user } = renderPage(<SpoolsTab />)

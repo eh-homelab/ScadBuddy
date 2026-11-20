@@ -36,6 +36,7 @@ export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
 export AGENT_DURABLE_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent-durable
 export SLICER_IMAGE=ghcr.io/eh-homelab/scadbuddy-slicer
 export SANDBOX_IMAGE=ghcr.io/eh-homelab/scadbuddy-sandbox
+export PROFILE_FETCH_IMAGE=ghcr.io/eh-homelab/scadbuddy-profile-fetch
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
@@ -44,6 +45,7 @@ export MANIFEST_AGENT_DURABLE=applications/scadbuddy/scadbuddy-agent-durable.yam
 export MANIFEST_SLICER=applications/scadbuddy/scadbuddy-slicer.yaml
 export MANIFEST_STOREFRONT=applications/scadbuddy/scadbuddy-storefront.yaml
 export MANIFEST_INTAKE=applications/scadbuddy/scadbuddy-intake.yaml
+export MANIFEST_PROFILE_FETCH=applications/scadbuddy/scadbuddy-profile-fetch.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_DIR=clusters/prod/scadbuddy/grafana
 # What the step before it found: deploy/grafana exists at REVISION (its files
@@ -56,7 +58,8 @@ AGENT_DIGEST="sha256:$(printf '4%.0s' {1..64})"
 AGENT_DURABLE_DIGEST="sha256:$(printf '5%.0s' {1..64})"
 SLICER_DIGEST="sha256:$(printf '7%.0s' {1..64})"
 SANDBOX_DIGEST="sha256:$(printf '9%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST
+PROFILE_FETCH_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -68,6 +71,8 @@ slicer_old="$SLICER_IMAGE:sha-3333333@sha256:$(printf '8%.0s' {1..64})"
 slicer_pinned="$SLICER_IMAGE:$VERSION@$SLICER_DIGEST"
 sandbox_old="$SANDBOX_IMAGE:sha-3333333@sha256:$(printf 'a%.0s' {1..64})"
 sandbox_pinned="$SANDBOX_IMAGE:$VERSION@$SANDBOX_DIGEST"
+pf_old="$PROFILE_FETCH_IMAGE:sha-3333333@sha256:$(printf 'c%.0s' {1..64})"
+pf_pinned="$PROFILE_FETCH_IMAGE:$VERSION@$PROFILE_FETCH_DIGEST"
 failures=0
 
 fail() {
@@ -136,6 +141,7 @@ run() {
   [ $# -lt 4 ] || printf '%s\n' "$4" > "$work/repo/$MANIFEST_PROJECTS"
   [ -z "${durable_manifest:-}" ] || printf '%s\n' "$durable_manifest" > "$work/repo/$MANIFEST_AGENT_DURABLE"
   [ -z "${slicer_manifest:-}" ] || printf '%s\n' "$slicer_manifest" > "$work/repo/$MANIFEST_SLICER"
+  [ -z "${pf_manifest:-}" ] || printf '%s\n' "$pf_manifest" > "$work/repo/$MANIFEST_PROFILE_FETCH"
   [ -z "${extra_path:-}" ] || printf '%s\n' "$extra_content" > "$work/repo/$extra_path"
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   [ -z "${vendored:-}" ] || vendor_dir
@@ -390,6 +396,47 @@ else
 fi
 slicer_manifest=
 
+# 8a. The profile-fetch worker (#6625), pinned exactly as the slicer is: its own
+#     file, optional until clusters has it; a build with no image keeps the pin.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^profile_fetch=none$' "$work/out" || fail "no profile-fetch file: output is not none"
+else
+  fail "no profile-fetch file: step failed: $(grep '::error' "$work/log")"
+fi
+pf_manifest=$(deployment scadbuddy-profile-fetch "$pf_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "profile-fetch: api image not pinned"
+  has_line "$pf_pinned" "$MANIFEST_PROFILE_FETCH" || fail "profile-fetch: image not pinned"
+  grep -q '^profile_fetch=pinned$' "$work/out" || fail "profile-fetch: output is not pinned"
+  grep -q "$MANIFEST_PROFILE_FETCH" "$work/out" || fail "profile-fetch: not among the changed files"
+else
+  fail "profile-fetch: step failed: $(grep '::error' "$work/log")"
+fi
+if PROFILE_FETCH_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "profile-fetch, no image: api image not pinned"
+  has_line "$pf_old" "$MANIFEST_PROFILE_FETCH" || fail "profile-fetch, no image: old pin was not kept"
+  grep -q '^profile_fetch=kept$' "$work/out" || fail "profile-fetch, no image: output is not kept"
+  grep -q '::warning.*keeping the profile-fetch pin' "$work/log" || fail "profile-fetch, no image: no warning: $(cat "$work/log")"
+  grep -q "$MANIFEST_PROFILE_FETCH" "$work/out" && fail "profile-fetch, no image: kept file listed as changed"
+else
+  fail "profile-fetch, no image: step failed: $(grep '::error' "$work/log")"
+fi
+pf_manifest=$(deployment scadbuddy-profile-fetch "$pf_old" "$pf_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "two profile-fetch lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one profile-fetch image line, found 2' "$work/log" \
+    || fail "two profile-fetch lines: wrong error: $(grep '::error' "$work/log")"
+fi
+pf_manifest=$(deployment scadbuddy-profile-fetch "ghcr.io/eh-homelab/other:1")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "profile-fetch file without its line: step passed, expected an error"
+else
+  grep -q 'expected exactly one profile-fetch image line, found 0' "$work/log" \
+    || fail "profile-fetch file without its line: wrong error: $(grep '::error' "$work/log")"
+fi
+pf_manifest=
+
 # 8b. Every other file that runs the agent is pinned too, found by the image
 #     (#5037): the agent's worker Deployment, scadbuddy-agent-worker.yaml.
 worker_path=applications/scadbuddy/scadbuddy-agent-worker.yaml
@@ -460,6 +507,8 @@ stale_fails "agent-durable outside its files" applications/scadbuddy/scadbuddy-e
   "$(deployment scadbuddy-extra "$durable")" "names $durable, $not_moved"
 stale_fails "slicer outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
   "$(deployment scadbuddy-extra "$slicer_old")" "names $slicer_old, $not_moved"
+stale_fails "profile-fetch outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
+  "$(deployment scadbuddy-extra "$pf_old")" "names $pf_old, $not_moved"
 stale_fails "an overlay images: entry" clusters/prod/scadbuddy/images.yaml \
   "$(printf '%s\n' 'images:' "  - name: $IMAGE" "    newName: $IMAGE:sha-1111111")" "names $IMAGE:sha-1111111, $not_moved"
 stale_fails "an alias of an old pin" applications/scadbuddy/scadbuddy-alias.yaml \

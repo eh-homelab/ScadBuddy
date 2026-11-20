@@ -1,8 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Link, Route, Routes, useLocation } from 'react-router'
-import { describe, expect, it } from 'vitest'
-import { getType, listTypes } from '../../api/filament'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { getType, listTypes, startProfileFetch, upsertType } from '../../api/filament'
 import { listShopping, patchSupplier } from '../../api/filamentPurchasing'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
@@ -336,5 +336,101 @@ describe('the prices panel', () => {
     await user.type(screen.getByLabelText('Product page'), 'javascript:alert(1)')
     await user.click(screen.getByRole('button', { name: 'Add product' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('must start with http')
+  })
+
+  it('fills from the slicer profile: shows the diff, and writes only the rows kept', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Fill from slicer profile' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fill from slicer profile' })
+    expect(within(dialog).getByText(/Bambu PLA Basic @BBL H2C 0.4 nozzle/)).toBeInTheDocument()
+    const diff = within(dialog).getByRole('table', { name: 'Changes from the profile' })
+    const density = within(diff).getByRole('row', { name: /Density/ })
+    expect(density).toHaveTextContent('Empty')
+    expect(density).toHaveTextContent('1.26')
+    // The diameter already matches, so it is not offered; the cost is a hint only.
+    expect(within(diff).queryByRole('row', { name: /Diameter/ })).toBeNull()
+    expect(within(dialog).getByText(/24.99/)).toBeInTheDocument()
+    await user.click(within(density).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Apply 4 changes' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    const type = await getType(T.JADE)
+    expect([type.nozzle_temp_min, type.nozzle_temp_max, type.bed_temp_min, type.bed_temp_max, type.density_g_cm3]).toEqual([190, 230, 35, 65, null])
+    expect(screen.getByLabelText('Nozzle temperature, min (°C)')).toHaveValue('190')
+    expect(await screen.findByText('Filled 4 fields from Bambu PLA Basic @BBL H2C 0.4 nozzle.')).toBeInTheDocument()
+  })
+
+  it('says why a type cannot be filled from a profile', async () => {
+    const { user } = render(`/filament/types/${T.MISTLETOE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Fill from slicer profile' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fill from slicer profile' })
+    expect(await within(dialog).findByText(/the type has no slicer preset/)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: /^Apply/ })).toBeNull()
+  })
+
+  it('asks to save first while there are unsaved edits', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await user.type(await screen.findByLabelText('Colour name'), 'x')
+    expect(screen.getByRole('button', { name: 'Fill from slicer profile' })).toBeDisabled()
+  })
+})
+
+describe('the 3DFP id and fetch (#6625)', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('saves a 3DFP id with the PATCH and links to its page on 3DFP', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    const field = screen.getByLabelText('3DFP id')
+    expect(screen.queryByRole('link', { name: 'Open on 3DFP' })).not.toBeInTheDocument()
+    await user.type(field, '1234')
+    const link = screen.getByRole('link', { name: 'Open on 3DFP' })
+    expect(link).toHaveAttribute('href', 'https://3dfilamentprofiles.com/filament/details/1234')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    // The fetch uses the saved id: an unsaved one says to save first.
+    expect(screen.getByRole('button', { name: 'Fetch from 3DFP' })).toHaveAccessibleDescription('Save the type first: the fetch uses the saved 3DFP id.')
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect((await getType(T.JADE)).tdfp_id).toBe(1234))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Fetch from 3DFP' })).toBeEnabled())
+  })
+
+  it('refuses a 3DFP id that is not a whole number from 1 to 2147483647', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.type(screen.getByLabelText('3DFP id'), '2147483648')
+    expect(screen.queryByRole('link', { name: 'Open on 3DFP' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter the 3DFP id as a whole number from 1 to 2147483647.')
+    expect((await getType(T.JADE)).tdfp_id).toBeNull()
+  })
+
+  it('shows the presets a fetch set once it ends, and keeps an unsaved edit of another field', async () => {
+    await upsertType({ tdfp_id: 1234 }, T.JADE)
+    await startProfileFetch(T.JADE)
+    // The page opens on a running fetch that the mock ends on its next read, 10 s later.
+    server.use(
+      http.get('*/api/v1/filament/types/:id/profile-fetch', ({ params }) => {
+        server.resetHandlers()
+        return HttpResponse.json({
+          run: { id: '00000000-0000-4000-8000-00000000fe01', type_id: String(params.id), tdfp_id: 1234, status: 'running', targets: [{ printer_model: 'H2C', nozzles: ['0.2', '0.4', '0.6', '0.8'] }], missing: [], k_values: 0, notes: [], error: null, started_at: '2026-11-18T12:00:00Z', finished_at: null },
+          gaps: [],
+        })
+      }),
+    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    const last = await screen.findByRole('status', { name: 'Last fetch' })
+    expect(last).toHaveTextContent('Running')
+    await user.clear(screen.getByLabelText('Colour name'))
+    await user.type(screen.getByLabelText('Colour name'), 'Jade')
+    await vi.advanceTimersByTimeAsync(10_000)
+    await waitFor(() => expect(last).toHaveTextContent('Imported'))
+    const table = screen.getByRole('table', { name: 'Slicer presets' })
+    await waitFor(() => expect(within(table).getAllByDisplayValue('H2C')).toHaveLength(4))
+    for (const nozzle of ['0.2', '0.4', '0.6', '0.8']) expect(within(table).getByDisplayValue(nozzle)).toBeInTheDocument()
+    expect(screen.getByLabelText('Colour name')).toHaveValue('Jade')
   })
 })

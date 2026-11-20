@@ -116,6 +116,16 @@ def test_a_name_is_unique_under_its_parent(pg_pool: PgPool) -> None:
         _place(store, pg_pool, "a")
 
 
+def test_a_second_place_for_an_ams_unit_names_the_unit(pg_pool: PgPool) -> None:
+    """#6679 item 1: the 409 for a second hand-made place of one AMS unit says so."""
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    unit = LocationCreate(name="AMS A", kind_id=_kind(pg_pool), printer_id=printer, ams_id=0)
+    store.create(unit)
+    with pytest.raises(LocationExistsError, match="that AMS unit"):
+        store.create(unit.model_copy(update={"name": "AMS B"}))
+
+
 def test_a_move_is_a_ledger_event(pg_pool: PgPool) -> None:
     store = LocationStore(pg_pool)
     first, second = _place(store, pg_pool, "A"), _place(store, pg_pool, "B")

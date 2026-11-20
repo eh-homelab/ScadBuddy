@@ -119,10 +119,12 @@ from scadbuddy.bambuddy.part_settings import (
 )
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
+    file_tower_overrides,
     not_resliced,
     prime_tower_overrides,
     prime_tower_warnings,
     template_keys_dropped,
+    tower_asked,
     tower_dropped,
 )
 from scadbuddy.bambuddy.print_source import (
@@ -216,6 +218,7 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartSettingsUnwritableError,
     part_settings_slots,
+    stated_tower_off,
 )
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
@@ -3614,6 +3617,14 @@ async def plan_run(
     # #2998: nor any process override; a key the preset lacks is said, and sent.
     tower_warnings += await _override_warnings(request, process, read)
     tower_dropped = template_keys_dropped(request.prime_tower)
+    # An Arrange with the tower off states it in the file (#3770), but the slicer's process
+    # preset replaces the file's own `enable_prime_tower`: the "0" goes as an override
+    # unless the print says on or off, and a print that says on gets room for the tower.
+    asked = tower_asked(request.prime_tower, request.overrides())
+    # Not a second download: `fetched_3mf` is the source's one fetch (`_fetch`), kept per
+    # source and shared with `file_to_print` and its upload below.
+    fetched = await source.fetched_3mf(client)
+    stated_off = fetched is not None and await asyncio.to_thread(stated_tower_off, fetched)
     # The plan's sides (one chosen by hand, or each Track Switch inlet's, #4272) are
     # kept only in a file of one plate (#3955 review): the map it pins is read by a slice
     # of the whole file, which for more plates prints them all.
@@ -3655,6 +3666,7 @@ async def plan_run(
         # #5571: the same copy for the quote, the background slice and the print; with
         # the template's own under the request's (#5626).
         part_settings=overrides_of(await run_part_settings(source, request, client)),
+        tower_on=stated_off and asked is True,
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
@@ -3755,6 +3767,7 @@ async def plan_run(
                     if (k not in SUPPORT_KEYS or isinstance(v, list)) and k not in tower_dropped
                 },
                 **supports,
+                **file_tower_overrides(stated_off, request.prime_tower, request.overrides()),
                 **prime_tower_overrides(request.prime_tower),
                 **(
                     {}

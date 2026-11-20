@@ -362,6 +362,9 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   price_book_fill_densities: () => [],
   // A printer's machine rate (#4625) is a record of its own, edited on the Settings page.
   machine_rate_set: () => [],
+  // Its events (#5774) are part of the same record.
+  machine_rate_event_add: () => [],
+  machine_rate_event_update: () => [],
   // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's
   // analyzer panel and list_analyzer_decisions show them, and an apply sends nothing.
   apply_analyzer_fix: () => [],
@@ -714,9 +717,20 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
+  'filament_catalog_set_aliases',
   'filament_type_upsert',
+  // #6701: the proposed types a person confirmed, and their spools' `edited` events.
+  'filament_type_proposals_confirm',
   'filament_type_set_presets',
   'filament_type_set_k_values',
+  'filament_type_fill_from_profile',
+  // #6625: a 3DFP preset fetch sets the type's presets and K values (and imports Bambuddy
+  // local presets, no recorded kind either); its run is the type's, read with
+  // filament_type_profile_fetch.
+  'filament_type_fetch_profiles',
+  // R-PR2: reading the fetch can end a stale run `failed` and cancel its workflow; the run
+  // is still the type's, no recorded kind.
+  'filament_type_profile_fetch',
   'filament_spool_upsert',
   'filament_spool_set_presets',
   'filament_spool_set_k_values',

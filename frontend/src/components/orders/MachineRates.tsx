@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { api } from '../../api/client'
+import { api, newRequestId } from '../../api/client'
 import type { MachineRateBreakdown, MachineRateInputs, MachineRateView, MaintenancePart, PrinterRow, RowActuals, WearPartRate } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -7,16 +7,22 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { DataTable, type Column } from '../records/DataTable'
 import { refusalText } from './refusal'
-import { EventList, FigurePair, LogEventForm, PrintHours, type Kind, type PricedBy } from './MachineRateActuals'
+import { BambuddyRead, EventList, FigurePair, LogEventForm, PrintHours, type Kind, type PricedBy } from './MachineRateActuals'
 import { AMOUNT, decimal, placesText, TENTHS } from './machineRateNumbers'
 
 type Profile = { purchase_price: string; life_hours: string; watts: string; kwh_price: string; labour_rate_per_hour: string; actuals_window: string; lan_hours_offset: string }
-/** `saved`: the row's name as stored, so a rename moves its events (`renamed_from`); null for a new row. */
-type Wear = { name: string; cost: string; life_hours: string; priced_by: PricedBy; saved: string | null }
-type Task = { task: string; minutes: string; consumables: string; interval_hours: string; priced_by: PricedBy; saved: string | null }
+/**
+ * `saved`: the row's name as stored, so a rename moves its events (`renamed_from`); null for a new row.
+ * `key`: the row's React key, its stored name or a draft id (#6665), so an open event list stays with
+ * its row when a row above it is removed.
+ */
+type Wear = { name: string; cost: string; life_hours: string; priced_by: PricedBy; saved: string | null; key: string }
+type Task = { task: string; minutes: string; consumables: string; interval_hours: string; priced_by: PricedBy; saved: string | null; key: string }
 type Draft = { profile: Profile; wear: Wear[]; maintenance: Task[] }
 
 const DEFAULT_WINDOW = 3
+/** A new row's key; `newRequestId`, not `crypto.randomUUID`: plain http and Bambuddy's iframe have no secure context. */
+const draftKey = () => `new:${newRequestId()}`
 const EMPTY_PROFILE: Profile = { purchase_price: '', life_hours: '', watts: '', kwh_price: '', labour_rate_per_hour: '', actuals_window: String(DEFAULT_WINDOW), lan_hours_offset: '' }
 
 function draftOf(view: MachineRateView): Draft {
@@ -33,7 +39,7 @@ function draftOf(view: MachineRateView): Draft {
       actuals_window: String(p.actuals_window ?? DEFAULT_WINDOW),
       lan_hours_offset: p.lan_hours_offset ?? '',
     },
-    wear: (inputs.wear_parts ?? []).map((w) => ({ name: w.name, cost: w.cost, life_hours: w.life_hours, priced_by: w.priced_by ?? 'estimate', saved: w.name })),
+    wear: (inputs.wear_parts ?? []).map((w) => ({ name: w.name, cost: w.cost, life_hours: w.life_hours, priced_by: w.priced_by ?? 'estimate', saved: w.name, key: `saved:${w.name}` })),
     maintenance: (inputs.maintenance ?? []).map((m) => ({
       task: m.task,
       minutes: m.minutes,
@@ -41,6 +47,7 @@ function draftOf(view: MachineRateView): Draft {
       interval_hours: m.interval_hours ?? '',
       priced_by: m.priced_by ?? 'estimate',
       saved: m.task,
+      key: `saved:${m.task}`,
     })),
   }
 }
@@ -318,12 +325,22 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
             />
             <span className="text-muted-foreground">An actual prices once this many gaps or replacements are logged; until then the estimate prices.</span>
           </div>
+          {linked && view.data && (
+            <BambuddyRead
+              printerId={printer.id}
+              readAt={view.data.actuals.events_read_at}
+              stale={view.data.breakdown.intervals === 'stored'}
+              // The answer is the view: shown in place, the unsaved edits kept.
+              onRead={(next) => view.setData(next, { supersede: true })}
+              onUnanswered={() => view.refresh()}
+            />
+          )}
           <fieldset className="flex flex-col gap-2">
             <legend className="mb-1 text-xs font-medium">Wear parts</legend>
             {current.wear.length > 0 && (
               <div className="flex flex-col divide-y rounded-md border">
                 {current.wear.map((w, index) => (
-                  <div key={index} className="flex flex-col gap-2 p-2" role="group" aria-label={`Wear part ${index + 1}`}>
+                  <div key={w.key} className="flex flex-col gap-2 p-2" role="group" aria-label={`Wear part ${index + 1}`}>
                     <div className="flex flex-wrap items-end gap-2">
                       <Input aria-label="Part" className="w-40" placeholder="Nozzle" value={w.name} onChange={(e) => edit((was) => ({ ...was, wear: was.wear.map((x, i) => (i === index ? { ...x, name: e.target.value } : x)) }))} />
                       <Input aria-label="Cost" className="w-24" inputMode="decimal" placeholder="35" value={w.cost} onChange={(e) => edit((was) => ({ ...was, wear: was.wear.map((x, i) => (i === index ? { ...x, cost: e.target.value } : x)) }))} />
@@ -347,7 +364,7 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
                 ))}
               </div>
             )}
-            <Button type="button" size="xs" variant="outline" className="self-start" onClick={() => edit((was) => ({ ...was, wear: [...was.wear, { name: '', cost: '', life_hours: '', priced_by: 'estimate', saved: null }] }))}>
+            <Button type="button" size="xs" variant="outline" className="self-start" onClick={() => edit((was) => ({ ...was, wear: [...was.wear, { name: '', cost: '', life_hours: '', priced_by: 'estimate', saved: null, key: draftKey() }] }))}>
               Add wear part
             </Button>
           </fieldset>
@@ -370,7 +387,7 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
                 {current.maintenance.map((m, index) => {
                   const rate = m.saved ? taskRates.get(m.saved) : undefined
                   return (
-                    <div key={index} className="flex flex-col gap-2 p-2" role="group" aria-label={`Maintenance task ${index + 1}`}>
+                    <div key={m.key} className="flex flex-col gap-2 p-2" role="group" aria-label={`Maintenance task ${index + 1}`}>
                       <div className="flex flex-wrap items-end gap-2">
                         <Input
                           aria-label="Task"
@@ -422,7 +439,7 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
               size="xs"
               variant="outline"
               className="self-start"
-              onClick={() => edit((was) => ({ ...was, maintenance: [...was.maintenance, { task: '', minutes: '', consumables: '', interval_hours: '', priced_by: 'estimate', saved: null }] }))}
+              onClick={() => edit((was) => ({ ...was, maintenance: [...was.maintenance, { task: '', minutes: '', consumables: '', interval_hours: '', priced_by: 'estimate', saved: null, key: draftKey() }] }))}
             >
               Add task
             </Button>

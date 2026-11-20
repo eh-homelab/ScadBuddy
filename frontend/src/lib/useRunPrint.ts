@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
   ChoicesView,
+  FilamentWarning,
   PartSettingsMap,
   PrintOptions,
   PrintRunRequest,
@@ -14,6 +15,7 @@ import type {
   SupportsChoice,
   RackAlgorithm,
   SlotChoice,
+  Problem,
 } from '../api/types'
 import { type PlateChoice, plateFields, plateKey } from './plateChoice'
 import { apiParts, samePartSettings } from './partSettings'
@@ -22,6 +24,25 @@ import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
 import type { PrintSelection } from './usePrintChoices'
+
+const NO_WARNINGS: FilamentWarning[] = []
+
+/**
+ * #6737 — the `warnings` extension of a failed run's problem (`problems.object_conflict`):
+ * the warnings that say in plain words why the run failed. Only an entry with a kind and a
+ * message is kept.
+ */
+function problemWarnings(problem: Problem): FilamentWarning[] {
+  const { warnings } = problem
+  if (!Array.isArray(warnings)) return NO_WARNINGS
+  return warnings.filter(
+    (warning): warning is FilamentWarning =>
+      typeof warning === 'object' &&
+      warning !== null &&
+      typeof (warning as FilamentWarning).kind === 'string' &&
+      typeof (warning as FilamentWarning).message === 'string',
+  )
+}
 
 interface RunInput {
   /** #313 — an output or a library file. */
@@ -193,6 +214,8 @@ export function useRunPrint({
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
   const [runError, setRunError] = useState<string | null>(null)
+  /** #6737 — the warnings a refused run's problem carries, such as the plate-named `object-conflict`. */
+  const [runWarnings, setRunWarnings] = useState<FilamentWarning[]>(NO_WARNINGS)
   /** Only a 422 — these choices cannot resolve — keeps Print disabled until one changes. */
   const [refused, setRefused] = useState(false)
   const [result, setResult] = useState<PrintRunResult | null>(null)
@@ -213,6 +236,7 @@ export function useRunPrint({
   // A refused run was refused for *these* choices; any change is worth another try.
   useEffect(() => {
     setRunError(null)
+    setRunWarnings(NO_WARNINGS)
     setRefused(false)
   }, [
     nozzles,
@@ -301,6 +325,7 @@ export function useRunPrint({
     following.current = controller
     setRunning(true)
     setRunError(null)
+    setRunWarnings(NO_WARNINGS)
     setRefused(false)
     try {
       const body: RegistryRunRequest = {
@@ -346,6 +371,7 @@ export function useRunPrint({
         return
       }
       setRunError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
+      setRunWarnings(cause instanceof ApiError ? problemWarnings(cause.problem) : NO_WARNINGS)
       // Anything else (a refusal, nothing upstream took it) is worth retrying as it stands.
       setRefused(cause instanceof ApiError && cause.status === 422)
     } finally {
@@ -356,10 +382,11 @@ export function useRunPrint({
   function reset() {
     following.current?.abort()
     setRunError(null)
+    setRunWarnings(NO_WARNINGS)
     setRefused(false)
     setResult(null)
     setUnanswered(null)
   }
 
-  return { run, running, runError, refused, result, unanswered, reset }
+  return { run, running, runError, runWarnings, refused, result, unanswered, reset }
 }

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { spoolId } from '../src/mocks/features/filament/seed'
+import { spoolId, T } from '../src/mocks/features/filament/seed'
 import { SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
 
 // #6262 — the Filament section against the msw API (`src/mocks/features/filament/`): the
@@ -129,6 +129,27 @@ test.describe('the spool page at 390 px', () => {
 // page per label, a sheet packs three labels on one page.
 const pages = (pdf: Buffer) => (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) ?? []).length
 
+// #6625 — a type's 3DFP id, then "Fetch from 3DFP": the mock has no worker, so the run ends
+// `imported` on the panel's next read, 10 s after the start, with one preset per nozzle.
+test('sets a 3DFP id, fetches the presets, and shows the run imported with four nozzle rows', async ({ page }) => {
+  await page.goto(`/filament/types/${T.JADE}`)
+  const fetchButton = page.getByRole('button', { name: 'Fetch from 3DFP' })
+  await expect(fetchButton).toBeDisabled()
+  await page.getByLabel('3DFP id').fill('1234')
+  await expect(page.getByRole('link', { name: 'Open on 3DFP' })).toHaveAttribute('href', 'https://3dfilamentprofiles.com/filament/details/1234')
+  await page.getByRole('button', { name: 'Save type' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible()
+  await expect(fetchButton).toBeEnabled()
+
+  await fetchButton.click()
+  const last = page.getByRole('status', { name: 'Last fetch' })
+  await expect(last).toContainText('Running')
+  await expect(last).toContainText('Imported', { timeout: 20_000 })
+  const presets = page.getByRole('table', { name: 'Slicer presets' })
+  await expect(presets.getByRole('row', { name: /^Preset H2C / })).toHaveCount(4)
+  for (const nozzle of ['0.2', '0.4', '0.6', '0.8']) await expect(presets.getByRole('row', { name: `Preset H2C ${nozzle}`, exact: true })).toBeVisible()
+})
+
 test('the labels page prints one roll page per label, and a sheet on one page', async ({ page }) => {
   await page.goto(`/filament/labels?ids=${[1, 2, 3].map(spoolId).join(',')}`)
   await expect(page.getByTestId('label')).toHaveCount(3)
@@ -137,3 +158,42 @@ test('the labels page prints one roll page per label, and a sheet on one page', 
   await page.getByRole('radio', { name: 'Sheet' }).click()
   expect(pages(await page.pdf({ preferCSSPageSize: true }))).toBe(1)
 })
+
+// #6701 — "Create types" on the Needs-type filter, at a phone's width: the proposed type is
+// renamed and created, the spool leaves the filter, and the page never scrolls sideways.
+test.describe('the Create types panel at 390 px', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('creates a proposed type and types its spool', async ({ page }) => {
+    await page.goto('/filament/spools?needs_type=true')
+    const panel = page.getByRole('region', { name: 'Create types' })
+    const row = panel.getByRole('listitem', { name: 'PLA-TEAL' })
+    await expect(row).toContainText('1 spool: #6')
+    await expect(panel.getByRole('list', { name: 'Not enough to propose a type' })).toContainText('#7 needs a label weight')
+    const [scroll, client] = (await page.evaluate('[document.documentElement.scrollWidth, document.documentElement.clientWidth]')) as [number, number]
+    expect(scroll).toBeLessThanOrEqual(client)
+
+    await row.getByRole('textbox', { name: 'Type name' }).fill('Teal PLA')
+    await row.getByRole('button', { name: 'Create' }).click()
+    await expect(page.getByText('Created Teal PLA for 1 spool.')).toBeVisible()
+    await expect(panel.getByRole('listitem', { name: 'PLA-TEAL' })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: '#6', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: '#7', exact: true }).first()).toBeVisible()
+  })
+})
+
+// #6704 — the spool page scrolls in its own container only; the document must not scroll too.
+for (const size of [
+  { width: 1440, height: 900 },
+  { width: 390, height: 844 },
+]) {
+  test(`the spool page scrolls once, not the document, at ${size.width}x${size.height}`, async ({ page }) => {
+    await page.setViewportSize(size)
+    await page.goto(spoolUrl(1))
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    const sizes = await page.evaluate<{ scrollHeight: number; clientHeight: number }>(
+      '({ scrollHeight: document.scrollingElement.scrollHeight, clientHeight: document.scrollingElement.clientHeight })',
+    )
+    expect(sizes.scrollHeight).toBeLessThanOrEqual(sizes.clientHeight)
+  })
+}

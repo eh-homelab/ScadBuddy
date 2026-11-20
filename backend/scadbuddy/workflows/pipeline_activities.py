@@ -96,6 +96,7 @@ def pack_layout(req: PackRequest) -> Layout:
             plan=req.filament_plan,
             colours=req.colours,
             allow_own=req.allow_own,
+            tower=req.prime_tower is None or req.prime_tower.enabled,
         )
     except PackError as error:
         raise ApplicationError(str(error), type=PACK_REFUSED, non_retryable=True) from None

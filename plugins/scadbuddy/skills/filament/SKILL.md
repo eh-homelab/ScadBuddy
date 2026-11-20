@@ -19,6 +19,8 @@ Sources, relative to the root of
   the invoice import.
 - `docs/superpowers/plans/2026-11-18-filament-invoice-import.md` (#6267): the
   decisions of the import, and "Decisions made while building".
+- `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md` (#6625): the 3DFP
+  profile-fetch worker, for "Profiles".
 - `.claude/skills/filament-intake/SKILL.md`: the owner's rules for receipts. It
   is the source of the diff, cost and colour-code rules below. It still drives
   the BB-era scripts, so use it for 3dfilamentprofiles work (see "Profiles").
@@ -54,17 +56,21 @@ id. A session that is idle is waiting for the person; it is not finished.
 
 Read the file in the first message. Do not look for it with a tool.
 
-Tools, in the order you use them. A candidate spool has an empty own cost and
-no invoice line:
+Tools, in the order you use them. A candidate spool has no invoice line. An
+uncosted one has an empty own cost too; a costed one has its own cost:
 
 1. `filament_invoice_get`: the draft as it stands.
 2. `filament_bambu_colour` with the five-digit `code` of a Bambu SKU: `name`,
    `rgba`, `fila_type`, `fila_id`. A 404 means the table does not have the code.
    Say so and ask the person for the colour. A 503 means this install has no
    table. Never invent an RGBA.
-3. `filament_invoice_candidates`: for each line, the open spools whose own cost
+3. `filament_invoice_candidates`: for each line, the spools whose own cost
    is empty and which match the line's type (or proposed type) by material and
-   RGBA exactly, and the spools that have a cost already.
+   RGBA exactly, and the spools that have a cost already. A costed spool names
+   its `invoice_line_id`, if it has one. Archived (used-up) spools are listed
+   too, with `archived: true`. A line may fill an archived spool: the spool
+   takes its cost and invoice line, and stays archived. A spent spool was still
+   bought, so fill it when the invoice is that purchase.
 4. `filament_invoice_upsert`: write the draft (the header, the lines, each
    line's type and `update_spool_ids`). Edit the draft you were given. Never make
    a second invoice.
@@ -78,8 +84,14 @@ no invoice line:
    - A spool with no cost that matches a line is that purchase. The line
      updates it. An RFID tag often created that spool (`data_origin:
      rfid_auto` in BB).
-   - A spool that has a cost belongs to an earlier purchase. A matching line is
-     a new spool.
+   - Offer uncosted candidates first, then costed ones.
+   - A costed spool with no `invoice_line_id` may be this purchase. The
+     Bambuddy import gave most spools a cost. Offer to link it to the line.
+     Show the person its old cost per kg and the new one. Put it in
+     `update_spool_ids` only when the person says yes. The confirm replaces its
+     cost and writes an `edited` event with both costs (#6700).
+   - A spool that has an `invoice_line_id` belongs to another invoice. Never
+     offer it. The confirm refuses it (409).
    - A line of quantity N that covers one uncosted spool and new ones is one
      update plus N-1 new spools.
    - When it is ambiguous, ask the person. Do not guess between "the same
@@ -108,8 +120,9 @@ no invoice line:
    - A multi-colour silk's subtype follows the SKU: `A05-M*` is Dual Color and
      `A05-T*` is Tri Color.
 5. **Other brands:** propose a new type with its 3dfilamentprofiles.com (3DFP)
-   id and its hex as the RGBA. Say that the nozzle presets are still to fetch
-   (see "Profiles").
+   id set as `tdfp_id` and its hex as the RGBA. Confirm starts the preset fetch
+   for each new type that has a `tdfp_id` (see "Profiles"). Without a `tdfp_id`
+   no fetch starts.
 6. **Never confirm for the person.** Show the totals, the spools to create, and
    the spools to update. Wait for a yes.
 7. If the person corrects a line in the chat or on the page, edit the same draft.
@@ -122,21 +135,79 @@ no invoice line:
   refuses a larger difference (409).
 - No spool from the invoice is missing a cost.
 - Every new type has a colour.
+- Every new type has a preset for each nozzle of each printer model (filament
+  spec §9, step 8). Read `filament_type_profile_fetch` for each new type after
+  the confirm (see "Profiles"), and report each gap to the person.
 
 ## Profiles
 
-The fetch of slicer profiles from 3DFP needs a real browser, behind a Vercel bot
-check. SB has no worker for it yet: it is #6625. Until it lands, this session
-does not fetch profiles. For a non-Bambu line, the session proposes the type with
-its 3DFP id and hex, and tells the person that the presets are still to fetch.
+A worker fetches a type's slicer presets from 3DFP. 3DFP sits behind a Vercel bot
+check, so the worker drives a real Chromium. It exports one Bambu Studio preset per
+printer model that SB's printers have and per nozzle in the setting
+`profile_fetch_nozzles` (default 0.2, 0.4, 0.6, 0.8). SB imports them into BB's
+local presets, sets them as the type's presets for those keys, and sets K values
+from the printers' K tables where one matches exactly. An old K value of a fetched
+key that the new preset does not match is removed, and the run's `notes` name it.
+The fetched keys replace the type's presets for those keys. The type's other presets stay. A spool's own presets
+still win.
+
+1. **Set the id.** The fetch needs the type's `tdfp_id`: a positive integer below
+   2^31. Set it with `filament_type_upsert`, or in the invoice line's proposed
+   type. A type without it gets 422 `no_tdfp_id`.
+2. **Confirm starts the fetch.** The invoice confirm starts one for each new type
+   that has a `tdfp_id`. To fetch by hand (an older type, or after a failure), use
+   `filament_type_fetch_profiles`. It writes BB's local presets, so it asks for
+   approval first. A start while a fetch runs joins it (`joined: true`).
+3. **Read the result.** Call `filament_type_profile_fetch` with the type's `id`. It
+   answers the last `run` (`status`: `running`, `imported`, `partial` or `failed`;
+   `missing`, each key with its reason; `notes`; `error`) and `gaps`. How long a run
+   takes was not measured on the real site. The README gives the bounds: 20 min per
+   export attempt, and a queued export may wait up to 6 h because the worker exports
+   one run at a time. Read again, and do not start a second fetch.
+4. **Report the gaps.** `gaps` is every printer model and nozzle that the type has
+   no preset for now. It can list keys even after an `imported` run, for example
+   when a printer model was added after it. Name each gap and its reason to the
+   person. Do not hide a `partial` run, and do not set a preset by hand to
+   hide a gap.
+5. **Know the refusals.** 422 `no_tdfp_id` (set the id), 422 `no_printer_models`
+   (no printer has a model: tell the person to set one in Settings → Printing →
+   Printers), 503 (the fetch could not be started: say so, and try again later).
+   A run that no worker serves ends `failed` with "no profile-fetch worker picked
+   the fetch up". Tell the person; the worker is a Deployment they run. A run
+   still open after 25 h ends `failed` with "the fetch did not end within 25 h;
+   start it again": offer to start it again. A run
+   whose export waited 6 h in the queue ends `failed` with "no profile-fetch
+   worker started the fetch within 6 h: none is running, or it is busy with other
+   fetches". Tell the person to check both: whether the worker's Deployment runs,
+   and whether other fetches (an invoice's many types) kept it busy. Do not start
+   the fetch again until they know which.
+6. **Preset names.** BB keeps a preset it already has (plan Decision 22, #6625; it
+   rests on the plan's reading of Bambuddy's `POST /local-presets/import`, which
+   answers `skipped`, and no test of #6625 ran against a live Bambuddy). A fetched preset binds only
+   to a BB preset that this fetch made or that an earlier fetch of the type made. A
+   BB preset of the same name that no fetch of this type made (a hand-made one, or
+   one another type's fetch made) leaves the key missing, and the run is `partial`.
+   Tell the person; do not delete their preset.
+
+The fetch only reads 3DFP and writes SB and BB's local presets. Never start a
+fetch to test a change, and never write a preset to BB by hand to fill a gap.
 For the BB-era scripts (`intake.py`, `3dfp.mjs`), use
 `.claude/skills/filament-intake/SKILL.md`.
 
 ## Where a fact comes from
 
 - The 3DFP bot check, its 429 and 403 answers, and the `GFA17` gap are stated
-  in `.claude/skills/filament-intake/SKILL.md`, which gives no date or method for
-  them. #6267 did not measure them again. Check one before you rely on it.
-- The candidate rule ("uncosted") and the 404 and 503 answers of the colour
-  route are SB's code and its tests: `backend/tests/filament/test_invoice_candidates.py`
-  and `backend/tests/filament/test_colour_codes.py`.
+  in `.claude/skills/filament-intake/SKILL.md`, which gives a date only for the 403
+  (since 2026-11-01) and no method for any of them. Neither #6267 nor #6625 measured them against the real site: the worker's
+  tests drive a local replica, never 3DFP. Check one before you rely on it.
+- The worker's behaviour (what it exports, the run statuses, the gaps, the
+  binding rule for preset names) is in `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`
+  ("Decisions this plan makes" and "Decisions made while building", #6625) and
+  the code it describes: `backend/scadbuddy/filament/profile_fetch.py`,
+  `backend/scadbuddy/profile_fetch/`. The routes are
+  `POST` and `GET /api/v1/filament/types/{type_id}/profile-fetch`.
+- The candidate rule ("uncosted", and a costed spool with no invoice line) and
+  the 404 and 503 answers of the colour route are SB's code and its tests:
+  `backend/tests/filament/test_invoice_candidates.py`,
+  `backend/tests/filament/test_invoice_confirm.py` and
+  `backend/tests/filament/test_colour_codes.py`.

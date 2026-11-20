@@ -229,6 +229,7 @@ import type {
   OrderAttachmentRole,
   MachineRateEvent,
   MachineRateEventCreate,
+  MachineRateEventPage,
   MachineRateEventPatch,
   MachineRateInputs,
   MachineRateView,
@@ -2847,6 +2848,17 @@ export const api = {
     request<MachineRateView>(`/printers/${seg(printerId)}/machine-rate`, { method: 'PUT', body: JSON.stringify(body) }),
   /** The printer is priced at the price book's machine rate again. */
   deleteMachineRate: (printerId: string) => request<void>(`/printers/${seg(printerId)}/machine-rate`, { method: 'DELETE' }),
+  /**
+   * #6665 — "Read from Bambuddy": reads the printer's maintenance log now and answers the view.
+   * 409 `not_linked` or `no_machine_rate`, 503 `log_unavailable` (the stored events stay).
+   */
+  importMachineRate: (printerId: string) => request<MachineRateView>(`/printers/${seg(printerId)}/machine-rate/import`, { method: 'POST' }),
+  /** #6665 — one row's every event, newest first, a page at a time (`next`: the page after). */
+  machineRateEvents: (printerId: string, query: { kind: 'task' | 'part'; name: string; cursor?: string | null }) => {
+    const params = new URLSearchParams({ kind: query.kind, name: query.name })
+    if (query.cursor) params.set('cursor', query.cursor)
+    return request<MachineRateEventPage>(`/printers/${seg(printerId)}/machine-rate/events?${params}`)
+  },
   /**
    * #5774 (spec 2026-11-17 §5) — a maintenance task done or a wear part replaced, logged here.
    * With no `hours_at`, the backend fills it from the printer's counter; a retry with the same

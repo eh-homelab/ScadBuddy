@@ -27,6 +27,11 @@ export type TypePresetInput = Schemas['TypePresetCreate']
 export type TypePreset = Schemas['TypePreset']
 export type TypeKValueInput = Schemas['TypeKValueCreate']
 export type TypeKValue = Schemas['TypeKValue']
+export type TypeFill = Schemas['TypeFill']
+export type FillRequest = Schemas['FillRequest']
+/** The type fields a slicer profile fills (#6714, `filament/profile_fill.py` `Field`). */
+export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+export type FillField = (typeof FILL_FIELDS)[number]
 export type Location = Schemas['Location']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
@@ -49,6 +54,11 @@ export type FilamentInventoryView = Schemas['FilamentInventoryView']
 export type CsvRow = Schemas['CsvRow']
 export type ImportPreview = Schemas['ImportPreview']
 export type ImportRowResult = Schemas['ImportRowResult']
+export type TypeProposals = Schemas['TypeProposals']
+export type TypeProposal = Schemas['TypeProposal']
+export type UngroupedSpool = Schemas['UngroupedSpool']
+export type TypeProposalPick = Schemas['TypeProposalPick']
+export type TypeProposalResult = Schemas['TypeProposalResult']
 
 /** Each catalog kind (`filament/catalog.py` `CATALOGS`) and the row it holds. */
 export interface CatalogRows {
@@ -69,8 +79,17 @@ export type CatalogKind = keyof CatalogRows
  * carry, so this is the row's own fields, all optional, and `archived`.
  */
 export type CatalogInput<K extends CatalogKind> = Partial<
-  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id'>
+  Omit<CatalogRows[K], 'id' | 'created_at' | 'updated_at' | 'archived_at' | 'bb_catalog_id' | 'aliases'>
 > & { archived?: boolean }
+
+/**
+ * #6706 — the catalogs whose rows have aliases (`filament/catalog.py` `NameTable`): each
+ * name and alias is a key (letters and digits, any case) no other name or alias of the
+ * catalog has, a subtype's within its material.
+ */
+export const ALIASED_KINDS = ['materials', 'subtypes', 'brands', 'categories', 'effects'] as const
+export type AliasedKind = (typeof ALIASED_KINDS)[number]
+export const isAliasedKind = (kind: CatalogKind): kind is AliasedKind => (ALIASED_KINDS as readonly string[]).includes(kind)
 
 const BASE = '/filament'
 const seg = encodeURIComponent
@@ -216,12 +235,57 @@ export const setTypePresets = (id: string, rows: TypePresetInput[]) =>
 export const setTypeKValues = (id: string, rows: TypeKValueInput[]) =>
   request<TypeKValue[]>(`${BASE}/types/${seg(id)}/k-values`, json('PUT', rows))
 
+/**
+ * #6714 — fills the type's empty fields from its slicer profile. `refresh` answers the profile's
+ * values that differ and writes nothing; `apply` writes the fields a person confirmed (409 when
+ * the profile no longer gives one), and with `k_values` the K values the refresh showed.
+ */
+export const fillTypeFromProfile = (id: string, body: FillRequest = {}) =>
+  request<TypeFill>(`${BASE}/types/${seg(id)}/fill-from-profile`, json('POST', body))
+
+/** #6714 — fills every type's empty fields from its slicer profile; `refresh` only compares. */
+export const fillTypesFromProfile = (body: { refresh?: boolean } = {}) =>
+  request<TypeFill[]>(`${BASE}/types/fill-from-profile`, json('POST', body))
+
+/** #6701 — the types proposed for the spools that need one, and the spools in no group. */
+export const listTypeProposals = () => request<TypeProposals>(`${BASE}/type-proposals`)
+
+/** #6701 — makes (or reuses) each picked group's type and types its spools, in one transaction. */
+export const confirmTypeProposals = (groups: TypeProposalPick[]) =>
+  request<TypeProposalResult>(`${BASE}/type-proposals/confirm`, json('POST', { groups }))
+
+// -- 3DFP preset fetch (#6625) ---------------------------------------------------------
+
+export type ProfileFetch = Schemas['ProfileFetch']
+export type ProfileFetchStarted = Schemas['ProfileFetchStarted']
+export type ProfileFetchStatus = Schemas['ProfileFetchStatus']
+export type MissingKey = Schemas['MissingKey']
+
+/**
+ * Starts a fetch of the type's presets from 3dfilamentprofiles.com (its saved `tdfp_id`),
+ * or joins the one that runs (`joined`). 422 `no_tdfp_id` or `no_printer_models`; 503 when
+ * the fetch could not be started.
+ */
+export const startProfileFetch = (typeId: string) =>
+  request<ProfileFetchStarted>(`${BASE}/types/${seg(typeId)}/profile-fetch`, { method: 'POST' })
+
+/** The type's last fetch (`run`, null when it never had one) and the keys it has no preset for (`gaps`). */
+export const getProfileFetch = (typeId: string) => request<ProfileFetchStatus>(`${BASE}/types/${seg(typeId)}/profile-fetch`)
+
 // -- catalogs, locations ----------------------------------------------------------------
 
 export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeArchived?: boolean } = {}) =>
   request<CatalogRows[K][]>(`${BASE}/catalog/${seg(kind)}${query({ include_archived: options.includeArchived || undefined })}`)
 
 /** Adds a row, or with `id` changes one (only the fields sent). */
+/** Replace a row's aliases; a key another name or alias holds is a 409 that names the holder. */
+export const setCatalogAliases = <K extends AliasedKind>(kind: K, id: string, aliases: string[]) =>
+  request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}/${seg(id)}/aliases`, json('PUT', { aliases }))
+
+/** The row whose name or alias has `name`'s key (a subtype: `materialId`'s own, else one for every material); 404 for none. */
+export const resolveCatalog = <K extends AliasedKind>(kind: K, name: string, materialId?: string) =>
+  request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}/resolve${query({ name, material_id: materialId })}`)
+
 export const upsertCatalog = <K extends CatalogKind>(kind: K, body: CatalogInput<K>, id?: string) =>
   id === undefined
     ? request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}`, json('POST', body))

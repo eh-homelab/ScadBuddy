@@ -12,6 +12,7 @@ every ``settings.changed``, so setting the URL later lights it up without a rest
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -161,6 +162,17 @@ class MaintenanceTask(BaseModel):
     current_hours: float | None = None
 
 
+class MaintenanceDone(BaseModel):
+    """One row of a task's log in Bambuddy (``MaintenanceHistoryResponse``), in orders'
+    own shape (#5774 spec 2026-11-17-machine-rate-actuals §2.1, §3.7): when the task was
+    marked done (UTC) and the printer's print-hour counter then."""
+
+    history_id: int
+    at: datetime
+    hours_at: float
+    notes: str | None = None
+
+
 #: What of an archive can be copied: an attempt's finish photo and timelapse (§8.2), or
 #: the printed file itself, which a past print's item copies into the native library
 #: (#4777, order operations spec §3.2).
@@ -234,6 +246,14 @@ class OrderIntegrations(Protocol):
         (#4625). :class:`NotLinkedError` without a Bambuddy."""
         ...
 
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
+        """Each task's log by its item id (#5774 §3.7), every one read or the call raises:
+        a read that fails leaves the stored events as they are. :class:`NotLinkedError`
+        without a Bambuddy."""
+        ...
+
     async def project_exists(self, project_id: int) -> bool:
         """Whether Bambuddy still has project ``project_id`` (#5263: one deleted there is
         made again). :class:`NotLinkedError` without a Bambuddy."""
@@ -271,6 +291,11 @@ class NotLinked:
         raise NotLinkedError
 
     async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+        raise NotLinkedError
+
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
         raise NotLinkedError
 
     async def project_exists(self, project_id: int) -> bool:

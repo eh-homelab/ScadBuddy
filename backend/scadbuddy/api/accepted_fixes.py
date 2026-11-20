@@ -30,6 +30,8 @@ from scadbuddy.api.deps import (
     UploadsDep,
     downloads_of,
 )
+from scadbuddy.bambuddy.prime_tower import tower_asked
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.filament.component import FilamentDep
@@ -44,7 +46,7 @@ Amend = Callable[[PrintRunRequest], Awaitable[PrintRunRequest]]
 
 def analysis_request(request: PrintRunRequest) -> AnalysisRequest:
     """The run's request as the analyzers take it: the same printer, plan, choices,
-    plates, copies and options."""
+    plates, copies, options and prime tower."""
     return AnalysisRequest(
         printer_id=request.printer_id,
         printer=request.printer,
@@ -56,7 +58,17 @@ def analysis_request(request: PrintRunRequest) -> AnalysisRequest:
         copies=request.copies,
         options=request.options,
         path=request.path,
+        prime_tower=_tower_choice(request),
     )
+
+
+def _tower_choice(request: PrintRunRequest) -> PrimeTowerChoice | None:
+    """The run's prime tower with its ``enable_prime_tower`` override folded in, as the
+    run reads it (``prime_tower.tower_asked``, #3770)."""
+    asked = tower_asked(request.prime_tower, request.overrides())
+    if asked is None or (request.prime_tower is not None and request.prime_tower.enabled == asked):
+        return request.prime_tower
+    return PrimeTowerChoice(enabled=asked)
 
 
 @dataclass(frozen=True)

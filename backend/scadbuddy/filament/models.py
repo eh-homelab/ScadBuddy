@@ -56,6 +56,7 @@ Grams = Annotated[float, Field(ge=0, le=1_000_000)]
 LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
 Cost = Annotated[Decimal, Field(ge=0, lt=100_000_000)]
+TdfpId = Annotated[int, Field(gt=0, lt=2**31)]
 Colours = Annotated[list[Rgba], Field(max_length=16)]
 #: How far past the server's clock a person's ``at`` may be (their clock may run ahead).
 FUTURE_SKEW = timedelta(minutes=5)
@@ -91,6 +92,19 @@ class _Catalog(_Row):
     archived_at: datetime | None
 
 
+class _Aliased(_Catalog):
+    """A row of a catalog with aliases (#6706): its other names, canonical name aside,
+    each a key no other name or alias of the catalog has (`filament/catalog.py`)."""
+
+    aliases: list[str] = Field(default_factory=list)
+
+
+class AliasesPut(_In):
+    """The whole alias list of a row: trimmed, none empty (#6706, R-6706-6)."""
+
+    aliases: Annotated[list[Name], Field(max_length=64)]
+
+
 # -- the plain catalogs: brand, category, effect, insert material --------------------
 
 
@@ -112,7 +126,7 @@ class BrandCreate(_NamedCreate): ...
 class BrandPatch(_NamedPatch): ...
 
 
-class Brand(_Catalog): ...
+class Brand(_Aliased): ...
 
 
 class CategoryCreate(_NamedCreate): ...
@@ -121,7 +135,7 @@ class CategoryCreate(_NamedCreate): ...
 class CategoryPatch(_NamedPatch): ...
 
 
-class Category(_Catalog): ...
+class Category(_Aliased): ...
 
 
 class EffectCreate(_NamedCreate): ...
@@ -130,7 +144,7 @@ class EffectCreate(_NamedCreate): ...
 class EffectPatch(_NamedPatch): ...
 
 
-class Effect(_Catalog): ...
+class Effect(_Aliased): ...
 
 
 class InsertMaterialCreate(_NamedCreate): ...
@@ -197,7 +211,7 @@ class MaterialPatch(_Patch):
     archived: bool | None = None
 
 
-class Material(_Catalog):
+class Material(_Aliased):
     family: str | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -243,7 +257,7 @@ class SubtypePatch(_Patch):
     archived: bool | None = None
 
 
-class Subtype(_Catalog):
+class Subtype(_Aliased):
     material_id: UUID | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -503,6 +517,7 @@ class SpoolTypeCreate(_In):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    tdfp_id: TdfpId | None = None
     note: Note | None = None
 
 
@@ -527,6 +542,7 @@ class SpoolTypePatch(_Patch):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
+    tdfp_id: TdfpId | None = None
     note: Note | None = None
     archived: bool | None = None
 
@@ -552,6 +568,7 @@ class SpoolType(_Row):
     low_stock_pct: int | None
     cost_per_kg: Decimal | None
     filament_id: str | None
+    tdfp_id: int | None
     note: str | None
     archived_at: datetime | None
 
@@ -675,6 +692,98 @@ class EffectiveKValue(BaseModel):
     cali_idx: int | None
     setting_id: str | None
     overridden: bool
+
+
+# -- type proposals (#6701, spec §8.1) --------------------------------------------------
+
+
+class TypeProposal(BaseModel):
+    """A type proposed for the open spools that need one and share its key: brand,
+    material, subtype, RGBA, label weight and the ``material_number`` of their last
+    Bambuddy reading (none when it is longer than 128 characters; spools with none fold into
+    the one group of their other fields that has one). ``code`` is the proposed name;
+    ``type_id`` names a type that matches the key now (the confirm uses it, and makes none).
+    The names are the catalog rows'."""
+
+    code: str
+    type_id: UUID | None
+    brand_id: UUID | None
+    material_id: UUID
+    subtype_id: UUID | None
+    rgba: Rgba
+    label_weight_g: int
+    material_number: Text | None
+    brand: str | None
+    material: str
+    subtype: str | None
+    colour_name: str | None
+    spool_ids: list[UUID]
+    numbers: list[int]
+    count: int
+
+
+ProposalField = Literal["material", "rgba", "label_weight_g"]
+
+
+class UngroupedSpool(BaseModel):
+    """An open spool that needs a type but lacks a value a proposal needs."""
+
+    spool_id: UUID
+    number: int
+    missing: list[ProposalField]
+
+
+class TypeProposals(BaseModel):
+    groups: list[TypeProposal]
+    ungrouped: list[UngroupedSpool]
+
+
+class TypeProposalPick(_In):
+    """One proposal a person confirms: its key, the spools it named and the code to give
+    the type (the proposed one, or the person's)."""
+
+    brand_id: UUID | None = None
+    material_id: UUID
+    subtype_id: UUID | None = None
+    rgba: Rgba
+    label_weight_g: LabelWeight
+    material_number: Text | None = None
+    code: Name
+    spool_ids: list[UUID] = Field(min_length=1, max_length=5000)
+
+
+class TypeProposalConfirm(_In):
+    groups: list[TypeProposalPick] = Field(min_length=1, max_length=500)
+
+
+SkipReason = Literal["not_found", "archived", "typed", "changed"]
+
+
+class SkippedSpool(BaseModel):
+    """A spool a confirm left alone: gone, archived, typed meanwhile, or no longer of the
+    proposal's key."""
+
+    spool_id: UUID
+    reason: SkipReason
+
+
+class ConfirmedProposal(BaseModel):
+    """What a confirm did with one proposal: the type it used (``None`` when no spool was
+    left to type), ``made`` when this group made it, ``new`` when this request made it (by
+    this group or an earlier one: ``new`` and not ``made`` means the group joined another
+    group's new type, and its own code was not used), the spools it typed and those it
+    skipped."""
+
+    code: str
+    type_id: UUID | None
+    made: bool
+    new: bool
+    typed: list[UUID]
+    skipped: list[SkippedSpool]
+
+
+class TypeProposalResult(BaseModel):
+    groups: list[ConfirmedProposal]
 
 
 # -- spools ---------------------------------------------------------------------------
@@ -809,6 +918,9 @@ class Spool(_Row):
     last_dried_hours: Decimal | None
     last_used_at: datetime | None
     archived_at: datetime | None
+    #: The invoice line the spool was bought on, if any. An invoice line may fill a spool
+    #: with none, costed or not; one with a line is refused (#6700).
+    invoice_line_id: UUID | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
@@ -875,10 +987,20 @@ class FilamentInventorySpool(BaseModel):
     presets: list[EffectivePreset] = Field(default_factory=list)
 
 
+class TrayMismatch(BaseModel):
+    """What the printer reports in an untagged tray whose placed spool does not agree
+    with it, where Bambuddy assigns no spool that does (#6713, `FilamentInventory.view`):
+    the tray's ``tray_type`` and its ``#RRGGBBAA``. Nothing moves; a person checks."""
+
+    reported_type: str
+    reported_rgba: str | None = None
+
+
 class InventoryTray(BaseModel):
     """One filled tray a registry printer's latest report shows (#6262 Task 9): its label,
     the material and ``#RRGGBBAA`` it reports, and the SB spool it holds
-    (`FilamentInventory.view`), with how that spool was found."""
+    (`FilamentInventory.view`), with how that spool was found, and ``mismatch`` when that
+    spool, placed in an untagged tray, does not agree with what the tray reports (#6713)."""
 
     ams_id: int
     tray_id: int
@@ -889,6 +1011,7 @@ class InventoryTray(BaseModel):
     spool_id: UUID | None = None
     spool_number: int | None = None
     found_by: TrayFoundBy | None = None
+    mismatch: TrayMismatch | None = None
 
 
 class PrinterTrays(BaseModel):
@@ -1318,6 +1441,14 @@ class LedgerRow(SpoolEvent):
     spool_number: int
 
 
+class StalePrinter(BaseModel):
+    """A printer whose spools an AMS sync counted as ``stale`` (#6679)."""
+
+    id: UUID
+    #: Its name; ``None`` when the printer has no row.
+    name: str | None = None
+
+
 class AmsSyncResult(BaseModel):
     """What one sync of the AMS's weights did (#6268). Each spool in a printer's tray place is
     in one count; a spool elsewhere is in none, and so is one placed in a tray while the
@@ -1332,6 +1463,8 @@ class AmsSyncResult(BaseModel):
     no_remain: int = 0
     #: Spools in a printer with no report or no row, or a report too old or unreadable.
     stale: int = 0
+    #: The printers whose spools are in ``stale``, by id, each once.
+    stale_printers: list[StalePrinter] = Field(default_factory=list)
     #: The spools booked.
     spools: list[UUID] = Field(default_factory=list)
 

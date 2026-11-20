@@ -109,6 +109,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'mixed-flows': 'text-warn',
   // #4272 — a Track Switch inlet feeding both extruders, by a side chosen by hand.
   'inlet-shared': 'text-warn',
+  // #6732 — the slicer refused a plate with "Object conflicts were detected".
+  'object-conflict': 'text-warn',
 }
 
 /**
@@ -187,12 +189,20 @@ function needLabel(slot: SlotNeed, copies: number, stale: boolean): string {
   return stale ? `${label}, from the last slice` : label
 }
 
+/**
+ * #6743 — a warning's tone. A kind this build does not know yet (a newer API) still
+ * shows, in the quiet tone, rather than with no class.
+ */
+function warningTone(kind: string): string {
+  return (WARNING_TONE as Partial<Record<string, string>>)[kind] ?? 'text-subtle'
+}
+
 export function WarningList({ warnings, testId }: { warnings: FilamentWarning[]; testId: string }) {
   if (warnings.length === 0) return null
   return (
     <ul className="mt-1.5 space-y-0.5 text-xs" data-testid={testId}>
       {warnings.map((warning, index) => (
-        <li key={`${warning.kind}-${warning.slot_id ?? 'plate'}-${index}`} className={WARNING_TONE[warning.kind]}>
+        <li key={`${warning.kind}-${warning.slot_id ?? 'plate'}-${index}`} className={warningTone(warning.kind)}>
           {warning.message}
         </li>
       ))}

@@ -359,6 +359,37 @@ describe('Filament (#6262)', () => {
     expect(mockSettings().filament_default_cost_per_kg).toBe('24.50')
   })
 
+  it('saves the 3DFP fetch nozzles with Save Filament, and shows them again on the next visit (#6625)', async () => {
+    const first = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const nozzles = () => within(region('Filament')).getByRole('group', { name: 'Nozzles to fetch from 3DFP' })
+    for (const size of ['0.2', '0.4', '0.6', '0.8']) expect(within(nozzles()).getByRole('checkbox', { name: `${size} mm` })).toBeChecked()
+    await first.user.click(within(nozzles()).getByRole('checkbox', { name: '0.2 mm' }))
+    await first.user.click(within(nozzles()).getByRole('checkbox', { name: '0.8 mm' }))
+    // Nothing moves until the section is saved.
+    expect(mockSettings().profile_fetch_nozzles).toEqual(['0.2', '0.4', '0.6', '0.8'])
+    await first.user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().profile_fetch_nozzles).toEqual(['0.4', '0.6']))
+    first.unmount()
+
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    expect(within(nozzles()).getByRole('checkbox', { name: '0.2 mm' })).not.toBeChecked()
+    expect(within(nozzles()).getByRole('checkbox', { name: '0.4 mm' })).toBeChecked()
+    expect(within(nozzles()).getByRole('checkbox', { name: '0.6 mm' })).toBeChecked()
+    expect(within(nozzles()).getByRole('checkbox', { name: '0.8 mm' })).not.toBeChecked()
+  })
+
+  it('does not save the 3DFP fetch nozzles with none ticked', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const nozzles = within(region('Filament')).getByRole('group', { name: 'Nozzles to fetch from 3DFP' })
+    for (const size of ['0.2', '0.4', '0.6', '0.8']) await user.click(within(nozzles).getByRole('checkbox', { name: `${size} mm` }))
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    expect(await within(region('Filament')).findByText('Choose at least one nozzle.')).toBeInTheDocument()
+    expect(mockSettings().profile_fetch_nozzles).toEqual(['0.2', '0.4', '0.6', '0.8'])
+  })
+
   it('has no section for the spool inventory or ScadBuddy\'s spools', () => {
     const titles = SECTION_REGISTRY.map((section) => section.title)
     expect(titles).not.toContain('Spool inventory')
