@@ -61,6 +61,7 @@ from scadbuddy.workflows.print_models import (
     lan_sequence_id,
 )
 from scadbuddy.workflows.printing import LanSequenceWorkflow, PrintRunWorkflow
+from scadbuddy.workflows.slicing_activities import _run_failed
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
 from tests.support.fake_lan import FakeLan, needs_fake_lan, running_fake_lan
@@ -230,6 +231,8 @@ class NativeFake(Fake):
         self.plate_clear = False
         #: The run each `slice_run` was asked to hold its file for (#6122), in turn.
         self.holds_for: list[str | None] = []
+        #: The failures the next `slice_run` calls raise, in turn (#6736).
+        self.slice_failures: list[ApplicationError] = []
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
@@ -263,6 +266,8 @@ class NativeFake(Fake):
     async def slice_run(self, input: SliceRunInput) -> NativeSliced:
         self.calls.append(f"slice_run:{input.plate_id}")
         self.holds_for.append(input.run_id)
+        if self.slice_failures:
+            raise self.slice_failures.pop(0)
         # A slice swept since the last `slice_run` is sliced again, into a new blob.
         key = self.slice_keys.pop(0) if self.slice_keys else BLOB
         return NativeSliced(slice_id=5, preset_key="k", sliced_blob_key=key)
@@ -370,11 +375,13 @@ async def _run(
     gates: dict[str, asyncio.Event] | None = None,
     slice_keys: list[str] | None = None,
     plate_clear: bool = False,
+    slice_failures: list[ApplicationError] | None = None,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
     fake.gates = gates or {}
     fake.slice_keys = list(slice_keys or [])
+    fake.slice_failures = list(slice_failures or [])
     fake.plates = plates or [1]
     fake.copies = copies
     fake.unrecorded = unrecorded or set()
@@ -490,6 +497,27 @@ async def test_native_run_records_print_error(
     assert error is not None and "refused the print" in error.detail
     assert len(fake_lan.project_files()) == 1
     assert fake.outcomes == []
+
+
+async def test_a_native_slice_with_object_conflicts_records_one_warning_naming_the_plate(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6736: the native slicer's "Object conflicts were detected" failure
+    (`slice_run`'s `_run_failed`) reaches `_slice` as the Bambuddy one does: the run's
+    error keeps its problem and carries one `object-conflict` warning for the plate."""
+    detail = (
+        "Object conflicts were detected. Please verify the slicing of all plates in"
+        " Bambu Studio before uploading."
+    )
+    failure = _run_failed(422, "The slice failed", detail)
+    fake, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(), plates=[2], slice_failures=[failure]
+    )
+    assert run.status == "failed" and run.error is not None
+    assert (run.error.status, run.error.detail) == (422, detail)
+    [warning] = run.error.extensions["warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", 2)
+    assert fake.lan_prints == 0
 
 
 async def test_a_plan_with_an_inventory_spool_fails_before_the_start(
