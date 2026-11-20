@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import { RefreshCwIcon } from 'lucide-react'
-import type { NozzlePlan, SlicePreview, SlotChoice, SlotNeed, SpoolOption } from '../../api/types'
+import type { FilamentWarning, NozzlePlan, SlicePreview, SlotChoice, SlotNeed, SpoolOption } from '../../api/types'
 import { formatDuration, normalizeHex } from '../../lib/format'
 import { spoolLabel } from '../../lib/filaments'
 import { Button } from '@/components/ui/button'
@@ -8,6 +8,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { WarningList } from '../FilamentPicker'
 import { PlateScene } from './PlateScene'
 import { Swatch } from './Swatch'
 
@@ -157,6 +158,11 @@ type Props = {
   progress?: number | null
   sliceError: string | null
   /**
+   * #6737 — the warnings that came with a failed slice, such as the plate-named
+   * `object-conflict`: they say in plain words why it failed, above the slicer's own text.
+   */
+  sliceWarnings?: FilamentWarning[]
+  /**
    * #4433 — slice the choices on screen again, with no finished slice reused. No button
    * without it (a file sliced already has nothing to slice).
    */
@@ -216,6 +222,7 @@ export function PreviewPane({
   slicing,
   progress = null,
   sliceError,
+  sliceWarnings = [],
   onReslice = null,
   canReslice = false,
   reslicing = false,
@@ -345,11 +352,20 @@ export function PreviewPane({
           ) : null}
         </div>
         {/* #4433: beside the Reslice button, which stays enabled for a retry. */}
-        {sliceError && (
-          <p role="alert" className="mt-1 text-[12px] text-warn" data-testid="slice-error">
-            {sliceError}
-          </p>
-        )}
+        {sliceError &&
+          (sliceWarnings.length > 0 ? (
+            // #6737: the plain words lead; the slicer's own text stays, quieter, below them.
+            <div role="alert" className="mt-1">
+              <WarningList warnings={sliceWarnings} testId="slice-warnings" />
+              <p className="mt-1 text-[11px] text-subtle" data-testid="slice-error">
+                {sliceError}
+              </p>
+            </div>
+          ) : (
+            <p role="alert" className="mt-1 text-[12px] text-warn" data-testid="slice-error">
+              {sliceError}
+            </p>
+          ))}
         {slice ? (
           <dl className={`mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 ${stale ? 'opacity-60' : ''}`} data-stale={stale}>
             {slice.print_time_seconds != null && (

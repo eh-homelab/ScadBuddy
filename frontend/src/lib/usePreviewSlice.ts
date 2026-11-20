@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, type Slicer } from '../api/client'
-import type { NozzlePlan, PrintRunRequest, SlicePreview } from '../api/types'
+import type { FilamentWarning, NozzlePlan, PrintRunRequest, SlicePreview } from '../api/types'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { getRealtime } from './realtime'
 import { useDebounced } from './useDebounced'
@@ -42,6 +42,11 @@ export interface PreviewSliceState {
   toolpathUrl: string | null
   error: string | null
   /**
+   * #6737 — the warnings that came with a failed slice, such as the plate-named
+   * `object-conflict`. Empty when the slice did not fail or said nothing more.
+   */
+  warnings: FilamentWarning[]
+  /**
    * #4433 — slice the choices on screen again, with no finished slice reused. `result`
    * stays, marked stale, until the new one lands.
    */
@@ -67,6 +72,7 @@ interface Shown {
 }
 
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
+const NO_WARNINGS: FilamentWarning[] = []
 
 /**
  * #2169 — the print dialog's automatic reslice. After the choices settle the run's own
@@ -88,6 +94,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
   const [slicing, setSlicing] = useState(false)
   const [progress, setProgress] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [warnings, setWarnings] = useState<FilamentWarning[]>(NO_WARNINGS)
   const [reslicing, setReslicing] = useState(false)
   // #4433 — each Reslice bumps `forced`; the run that sees a new value asks for a fresh slice.
   const [forced, setForced] = useState(0)
@@ -110,6 +117,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     setReslicing(fresh)
     setProgress(null)
     setError(null)
+    setWarnings(NO_WARNINGS)
     const follow = (jobId: number, plan: NozzlePlan | null, slicer: Slicer) => {
       const realtime = getRealtime()
       let ended = false
@@ -147,6 +155,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
           else {
             supersede()
             setError(answer.failure ?? 'The slice failed.')
+            setWarnings(answer.slice_warnings ?? NO_WARNINGS)
           }
         } catch (cause) {
           if (ended) return
@@ -209,6 +218,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     progress: slicing && wanted !== null && wanted === key ? progress : null,
     toolpathUrl,
     error,
+    warnings,
     reslice,
     canReslice: wanted !== null && wanted === key && !slicing && source !== undefined,
     reslicing: reslicing && slicing && wanted !== null,
