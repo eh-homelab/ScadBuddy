@@ -147,6 +147,7 @@ def test_a_failed_export_keeps_the_last_good_gauges(monkeypatch: pytest.MonkeyPa
     stock = _samples(metrics, "scadbuddy_filament_stock_grams")
     assert {dict(labels)["material"] for labels in stock} == {"PLA", "PETG"}
     assert 'material="PETG"' in metrics.exposition().decode()
+    assert next(v for k, v in stock.items() if dict(k)["material"] == "PETG") == 800.0
 
 
 def test_days_of_stock_of_folded_materials_is_the_soonest() -> None:

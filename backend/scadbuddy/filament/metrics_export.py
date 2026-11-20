@@ -101,10 +101,12 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
         for labels, amount in values.items():
             gauge.labels(*labels).set(amount)
     for gauge, values in wanted:
+        # Sample labels are always str; the keys in `wanted` may not be.
+        keep = {tuple(str(p) for p in key) for key in values}
         for family in gauge.collect():
             for sample in family.samples:
                 labels = tuple(sample.labels.values())
-                if labels not in values:
+                if labels not in keep:
                     gauge.remove(*labels)
 
 
