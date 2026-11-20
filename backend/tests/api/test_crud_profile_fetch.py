@@ -5,13 +5,16 @@ Bambuddy as one zip, and sets the type's presets and K values. Bambuddy is respx
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
+import itertools
 import json
 import re
 import threading
 import time
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -788,13 +791,38 @@ def test_two_concurrent_imports_of_a_run_call_bambuddy_once(fetch: Fetch) -> Non
 
 
 @respx.mock
-def test_a_waiting_import_holds_no_pool_connection(fetch: Fetch) -> None:
+def test_a_waiting_import_holds_no_pool_connection(
+    fetch: Fetch, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """R-PR3: a request that finds the run's import lease held waits with no pooled
     connection (it polls with short statements), and the holder holds none while Bambuddy
-    takes its time."""
+    takes its time. Each checkout of the pool is timed: over the wait, the time any
+    connection is checked out stays a small part of it (a held connection would fill it)."""
+    monkeypatch.setattr(profile_fetch, "LEASE_POLL_SECONDS", 0.1)
     pool = _state(fetch.client).settings_store.pool
     bodies = put_all(fetch)
     reached, release = threading.Event(), threading.Event()
+    lock = threading.Lock()
+    open_since: dict[int, float] = {}
+    held: list[float] = []
+    ids = itertools.count()
+    real_connection = pool.connection
+
+    @contextlib.contextmanager
+    def timed(*args: Any, **kwargs: Any) -> Iterator[Any]:
+        token = next(ids)
+        began = time.monotonic()
+        with lock:
+            open_since[token] = began
+        try:
+            with real_connection(*args, **kwargs) as conn:
+                yield conn
+        finally:
+            with lock:
+                del open_since[token]
+                held.append(time.monotonic() - began)
+
+    monkeypatch.setattr(pool, "connection", timed)
 
     async def slow_import(request: httpx.Request) -> httpx.Response:
         reached.set()
@@ -806,12 +834,6 @@ def test_a_waiting_import_holds_no_pool_connection(fetch: Fetch) -> None:
     respx.post(f"{API}/local-presets/import").mock(side_effect=slow_import)
     local_presets([name_of(b) for b in bodies])
     no_k_profiles()
-
-    def in_use() -> int:
-        stats = pool.get_stats()
-        return int(stats["pool_size"]) - int(stats["pool_available"])
-
-    idle = in_use()
     replies: dict[str, Any] = {}
 
     def call(name: str) -> None:
@@ -822,17 +844,22 @@ def test_a_waiting_import_holds_no_pool_connection(fetch: Fetch) -> None:
     assert reached.wait(30)
     second = threading.Thread(target=call, args=("second",))
     second.start()
-    time.sleep(0.3)
-    samples = []
-    for _ in range(30):
-        samples.append(in_use())
-        time.sleep(0.05)
+
+    def busy() -> tuple[float, int]:
+        with lock:
+            now = time.monotonic()
+            return sum(held) + sum(now - t for t in open_since.values()), len(held)
+
+    wait = 1.5
+    before, polls_before = busy()
+    time.sleep(wait)
+    after, polls_after = busy()
     release.set()
     first.join(timeout=60)
     second.join(timeout=60)
     assert replies["second"].json() == replies["first"].json()
-    assert min(samples) == idle, samples
-    assert max(samples) <= idle + 1, samples
+    assert polls_after - polls_before >= 3, (polls_before, polls_after)
+    assert after - before < wait / 4, (before, after)
 
 
 @respx.mock
