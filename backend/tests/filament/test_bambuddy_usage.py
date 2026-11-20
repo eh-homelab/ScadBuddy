@@ -325,6 +325,23 @@ async def test_an_archived_bb_spool_with_a_row_after_its_updated_at_keeps_bbs_va
     assert got is not None and got.archived_at == T1
 
 
+def test_an_archived_bb_spools_link_keeps_bbs_own_updated_at(pg_pool: PgPool) -> None:
+    """R-6707-17: a later usage row times the reading only. The link keeps BB's own
+    ``updated_at``, so once a person unarchives the spool in SB, a BB edit made after that
+    time (but before the row) still reaches SB."""
+    f = _filament(pg_pool)
+    late = T1 + timedelta(hours=1)
+    spent = {"id": 125, "weight_used": 600.0, "archived_at": _naive(T1)}
+    rows = [usage(id=2, spool_id=125, weight_used=200.0, created_at=_naive(late))]
+    (spool,) = pull(f, [bb(**spent, updated_at=_naive(T1))], now=NOW, usage=rows).created_ids
+    f.spools.archive(spool, False, actor="ann")
+    edited = bb(**spent, updated_at=_naive(T1 + timedelta(minutes=30)), color_name="Crimson")
+    report = pull(f, [edited], now=NOW)
+    assert report.updated_ids == [spool]
+    got = f.spools.get(spool)
+    assert got is not None and got.colour_name == "Crimson"
+
+
 def test_a_spool_archived_in_sb_still_books_no_earlier_usage(pg_pool: PgPool) -> None:
     """Only a spool the pull made archived books the rows before its reading: one a person
     archived keeps the rule of any linked spool."""

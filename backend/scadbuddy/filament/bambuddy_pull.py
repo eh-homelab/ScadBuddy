@@ -798,12 +798,19 @@ def _create_archived(
     BB may not move ``updated_at`` for every change, so a usage row (``newest_use``) can
     be later than it. BB's ``weight_used`` holds that row already, so the reading is timed
     at the later of the two: every row lies before it, and none is taken off it again
-    (R-6707-14)."""
+    (R-6707-14). That time only times the reading: the link keeps BB's own ``updated_at``,
+    so a BB edit after it still reaches the spool if a person unarchives it (R-6707-17)."""
     archived_at = bb.archived_at
     assert archived_at is not None
-    if newest_use is not None and (bb.updated_at is None or newest_use > bb.updated_at):
+    real = bb.updated_at
+    if newest_use is not None and (real is None or newest_use > real):
         bb = bb.model_copy(update={"updated_at": newest_use})
     spool_id, typeless = _create(conn, store, bb, after, now, actor, archived=True)
+    if bb.updated_at != real:
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_updated_at = %s WHERE spool_id = %s",
+            (real or now, spool_id),
+        )
     conn.execute(
         "UPDATE filament_spools SET archived_at = %s, updated_at = now() WHERE id = %s",
         (archived_at, spool_id),
