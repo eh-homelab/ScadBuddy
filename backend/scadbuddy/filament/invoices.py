@@ -259,20 +259,12 @@ class InvoiceStore:
         if invoice is None:
             return None
         open_spools = self._spools.list()
-        with self._pool.connection() as conn:
-            bought = {
-                r["id"]: r["invoice_line_id"]
-                for r in conn.execute(
-                    "SELECT id, invoice_line_id FROM filament_spools"
-                    " WHERE cost_per_kg IS NOT NULL OR invoice_line_id IS NOT NULL"
-                ).fetchall()
-            }
         found: _Candidates = []
         for line in invoice.lines:
             key = self._line_key(line)
             matching = [
                 (
-                    s.id in bought,
+                    s.cost_per_kg is not None or s.invoice_line_id is not None,
                     pm.SpoolBrief(
                         id=s.id,
                         number=s.number,
@@ -281,7 +273,7 @@ class InvoiceStore:
                         rgba=s.effective.rgba,
                         cost_per_kg=s.effective.cost_per_kg,
                         grams_left=s.grams_left,
-                        invoice_line_id=bought.get(s.id),
+                        invoice_line_id=s.invoice_line_id,
                     ),
                 )
                 for s in open_spools

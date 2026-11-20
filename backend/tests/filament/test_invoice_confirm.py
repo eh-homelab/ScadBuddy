@@ -204,6 +204,19 @@ def test_a_line_fills_a_costed_spool_and_replaces_its_cost(shop: Shop) -> None:
     assert edited[0].data["changes"] == {"cost_per_kg": ["9.0000", "42.8000"]}
 
 
+def test_the_spool_list_names_each_spools_invoice_line(shop: Shop) -> None:
+    """R-6700-7: the invoice page offers a costed spool with no invoice line, never one on
+    another invoice; the list says which is which."""
+    type_id = shop.type_id()
+    costed = shop.spools.create(SpoolCreate(type_id=type_id, cost_per_kg=D("9")), actor="ann").id
+    assert {s.id: s.invoice_line_id for s in shop.spools.list()} == {costed: None}
+    invoice = shop.one(
+        type_id, quantity=1, unit_price=D(40), line_subtotal=D(40), update_spool_ids=[costed]
+    )
+    done, _ = _confirm(shop, invoice)
+    assert {s.id: s.invoice_line_id for s in shop.spools.list()} == {costed: done.lines[0].id}
+
+
 def test_a_costed_spool_of_a_line_that_is_refused_keeps_its_cost(shop: Shop) -> None:
     type_id = shop.type_id()
     costed = shop.spools.create(SpoolCreate(type_id=type_id, cost_per_kg=D("9")), actor="ann").id
