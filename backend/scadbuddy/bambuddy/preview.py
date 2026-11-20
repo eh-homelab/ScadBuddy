@@ -33,8 +33,10 @@ from scadbuddy.bambuddy import toolpath
 from scadbuddy.bambuddy.catalogue import Catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import ReuseSlice, SlicePlan, slice_request
+from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import SliceJob
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
+from scadbuddy.bambuddy.prime_tower import object_conflict_warning
 from scadbuddy.bambuddy.print_run import (
     NATIVE_SLICER_UNAVAILABLE,
     PlannedRun,
@@ -101,12 +103,23 @@ class SlicePreview(BaseModel):
     #: A native slice's total percent while it runs; ``None`` before its first beat.
     progress: int | None = None
     warnings: list[str] = Field(default_factory=list)
+    #: ScadBuddy's structured reading of the slice's ``failure`` (#6732): one
+    #: ``object-conflict`` for the plate when the slicer refused it with "Object
+    #: conflicts were detected" (`prime_tower.object_conflict_warning`).
+    slice_warnings: list[FilamentWarning] = Field(default_factory=list)
     slicer: Literal["bambuddy", "native"] = "bambuddy"
     #: #265: the API process follows this running slice and publishes its next change on
     #: ``preview-slice:<slicer>:<job id>`` (`preview_follow/follows.py`). False when it
     #: does not (too many slices followed at once): the caller then reads on a timer.
     #: None from a read that does not say (not through the route).
     followed: bool | None = None
+
+
+def failure_warnings(failure: str | None, plate_id: int) -> list[FilamentWarning]:
+    """:attr:`SlicePreview.slice_warnings` for a slice of ``plate_id`` that ended with
+    ``failure``, on either slicer."""
+    warning = object_conflict_warning(failure, plate_id)
+    return [] if warning is None else [warning]
 
 
 async def _planned(
@@ -505,7 +518,12 @@ async def read_preview(
     job = await _still_sliced(client, uploads, row) if row is not None else None
     if row is None or job is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no background slice {job_id}")
-    answer = SlicePreview(job_id=job_id, status=str(job.status), failure=job.failure)
+    answer = SlicePreview(
+        job_id=job_id,
+        status=str(job.status),
+        failure=job.failure,
+        slice_warnings=failure_warnings(job.failure, row.plate_id),
+    )
     sliced = job.result.library_file_id if job.result else None
     if job.status != "completed" or job.result is None or sliced is None:
         return answer

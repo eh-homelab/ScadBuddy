@@ -13,7 +13,7 @@
     <button type="button" id="export">Export slicer profile</button>
     <script>
       const OPTIONS = __OPTIONS__;
-      const UNHOOKED = __UNHOOKED__;
+      const DOWNLOAD = __DOWNLOAD__;
       const OPTION_DELAY_MS = __OPTION_DELAY_MS__;
       let dialog = null;
       let list = null;
@@ -71,12 +71,17 @@
           if (ack.getAttribute("aria-checked") !== "true" || chosen.includes(null)) return;
           const query = new URLSearchParams({ slicer: chosen[0], printer: chosen[1], nozzle: chosen[2] });
           const answer = await (await fetch("/api/export/__ID__?" + query)).json();
+          // An untrusted page can push to the hook's list itself (#6726).
+          if (DOWNLOAD === "pushed_entry") return void window.__dl.push({ name: answer.name, text: answer.text });
+          if (DOWNLOAD === "pushed_long_name") return void window.__dl.push({ name: "n".repeat(1025), text: answer.text });
+          if (DOWNLOAD === "pushed_number_text") return void window.__dl.push({ name: answer.name, text: 5 });
+          if (DOWNLOAD === "pushed_text") return void window.__dl.push(answer.text);
           const blob = new Blob([answer.text], { type: "application/json" });
           const anchor = document.createElement("a");
           anchor.href = URL.createObjectURL(blob);
           anchor.download = answer.name;
           document.body.appendChild(anchor);
-          if (UNHOOKED) anchor.dispatchEvent(new MouseEvent("click"));
+          if (DOWNLOAD === "unhooked") anchor.dispatchEvent(new MouseEvent("click"));
           else anchor.click();
         };
         dialog.appendChild(download);

@@ -46,8 +46,24 @@ def test_the_shared_file_has_the_cases_it_must() -> None:
         for v in _vectors()
         if "process_overrides" in v
     ]
-    for wanted in ("0", "1", True, False, 0, 1, ["0"], []):
-        assert any(type(value) is type(wanted) and value == wanted for value in values), wanted
+    # JSON text tells False from 0 and 0 from 0.0, also inside a list.
+    present = {json.dumps(value) for value in values}
+    wanted: tuple[Any, ...] = (
+        "0",
+        "1",
+        True,
+        False,
+        0,
+        1,
+        0.0,
+        ["0"],
+        [False],
+        [0],
+        ["1", "0"],
+        [],
+    )
+    for value in wanted:
+        assert json.dumps(value) in present, value
 
 
 @pytest.mark.parametrize("vector", _vectors(), ids=lambda v: str(v["case"]))

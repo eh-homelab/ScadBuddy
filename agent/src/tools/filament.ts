@@ -279,7 +279,9 @@ export const filamentTools: Tool[] = [
       "`spool_ids` as listed, and a `code`: the proposed one or the user's) and type their spools, in one " +
       'transaction. A type that matches a group now is used instead of a new one. Each spool that is still ' +
       "unarchived, untyped and of the group gets the type and loses each own value equal to the type's; any other " +
-      'is listed in `skipped` with its reason. 409 when a type already has one of the codes (nothing is written). ' +
+      'is listed in `skipped` with its reason. Per group, `made` says it made the type and `new` that this call ' +
+      'made it: `new` without `made` means the group joined the type an earlier group just made, so its own ' +
+      '`code` was not used; tell the user. 409 when a type already has one of the codes (nothing is written). ' +
       'Call it only after the user says yes to these groups and names. Writes ScadBuddy only.',
     input: z.object({
       groups: z
@@ -289,10 +291,10 @@ export const filamentTools: Tool[] = [
             material_id: z.string().uuid(),
             subtype_id: z.string().uuid().nullable().optional(),
             rgba: z.string().describe('`#RRGGBBAA`, as the proposal lists it'),
-            label_weight_g: z.number().int().positive(),
-            material_number: z.string().nullable().optional(),
+            label_weight_g: z.number().int().positive().max(100_000),
+            material_number: z.string().max(128).nullable().optional(),
             code: z.string().min(1).max(128).describe("The new type's code: the proposed one, or the user's"),
-            spool_ids: z.array(z.string().uuid()).min(1),
+            spool_ids: z.array(z.string().uuid()).min(1).max(5000),
           }),
         )
         .min(1)

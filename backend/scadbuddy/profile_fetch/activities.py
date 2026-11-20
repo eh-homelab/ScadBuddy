@@ -5,10 +5,10 @@ credential (plan Decision 7), and 3dfilamentprofiles.com through `site.ThreeDfpS
 `ProfileFetchActivities.export` signs in when the browser is new, adds the filament to My
 Spools, and exports each target, PUTting each file's bytes as it comes, named by their
 sha256 (``PUT …/runs/{id}/files/{sha256}?printer_model=&nozzle=``). A key the dialog does
-not offer (``option_missing``), a file over `MAX_FILE_BYTES` (the page's hook refuses it,
-``file_too_large``, and the size is checked here again) and a file the API refuses (422) are
-that key's failure, reported; the other keys go on. Any other failure of the site
-fails the attempt: `site_failure` keeps Decision 13's retry classes and puts only the
+not offer (``option_missing``), a file over `MAX_FILE_BYTES` (the cap is held
+in `site.py` `_read_export`, beside the page's hook, ``file_too_large``) and a file the API
+refuses (422) are that key's failure, reported; the other keys go on. Any other failure of
+the site fails the attempt: `site_failure` keeps Decision 13's retry classes and puts only the
 driver's own fixed text in the error, never the exception it came from, so neither the
 email nor the password reaches Temporal's history or the run's ``error``.
 `import_` asks the API to import the run, and `failed` posts why the workflow gave up. A

@@ -1318,3 +1318,31 @@ async def test_a_slice_refusal_naming_a_requested_override_is_recorded_as_a_422_
     assert run.error.extensions["key"] == "wall_loops"
     assert run.error.detail == f"The slicer refused the setting wall_loops: {refused.detail}"
     assert fake.calls[-1].startswith("fail:422:")
+
+
+async def test_a_slice_with_object_conflicts_records_one_warning_naming_the_plate(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    # #6732: Bambu Studio's "Object conflicts were detected" refusal (#3770) keeps its
+    # problem, and the run's error also carries one `object-conflict` warning for the plate.
+    refused = PrintRunError(
+        status=502,
+        title="Bad Gateway",
+        detail=(
+            "Bambuddy failed to slice the plate: Object conflicts were detected. Please verify"
+            " the slicing of all plates in Bambu Studio before uploading."
+        ),
+        extensions={"slice_job_id": 9},
+    )
+    fake.slice_errors = [ApplicationError(refused.detail, refused, type=FAILED, non_retryable=True)]
+    fake.plates = [3]
+    arg = run_input()
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "failed" and run.error is not None
+    assert (run.error.status, run.error.detail) == (502, refused.detail)
+    assert run.error.extensions["slice_job_id"] == 9
+    [warning] = run.error.extensions["warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", 3)
+    assert fake.slice_starts == 1

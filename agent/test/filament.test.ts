@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
@@ -886,7 +887,7 @@ describe('filament type proposal tools (#6701)', () => {
       code: 'PLA Red',
       spool_ids: [SPOOL],
     }
-    const result = { groups: [{ code: 'PLA Red', type_id: TYPE, made: true, typed: [SPOOL], skipped: [] }] }
+    const result = { groups: [{ code: 'PLA Red', type_id: TYPE, made: true, new: true, typed: [SPOOL], skipped: [] }] }
     const bodies: unknown[] = []
     server.use(
       http.post(`${PROPOSALS}/confirm`, async ({ request }) => {
@@ -900,6 +901,22 @@ describe('filament type proposal tools (#6701)', () => {
     expect(tool('filament_type_proposals_confirm').summarize({ groups: [group] })).toBe(
       'Make 1 spool type for 1 spool',
     )
+  })
+
+  it("bounds a group's label weight and spools as the backend does (R-6729-4)", () => {
+    const input = z.object(tool('filament_type_proposals_confirm').shape)
+    const group = { material_id: MATERIAL, rgba: '#FF0000', label_weight_g: 100_000, code: 'X', spool_ids: [SPOOL] }
+    expect(input.safeParse({ groups: [group] }).success).toBe(true)
+    expect(input.safeParse({ groups: [{ ...group, label_weight_g: 100_001 }] }).success).toBe(false)
+    expect(input.safeParse({ groups: [{ ...group, spool_ids: Array(5000).fill(SPOOL) }] }).success).toBe(true)
+    expect(input.safeParse({ groups: [{ ...group, spool_ids: Array(5001).fill(SPOOL) }] }).success).toBe(false)
+  })
+
+  it("bounds a group's material_number at 128 characters as the backend does (R-6729-6)", () => {
+    const input = z.object(tool('filament_type_proposals_confirm').shape)
+    const group = { material_id: MATERIAL, rgba: '#FF0000', label_weight_g: 1000, code: 'X', spool_ids: [SPOOL] }
+    expect(input.safeParse({ groups: [{ ...group, material_number: 'N'.repeat(128) }] }).success).toBe(true)
+    expect(input.safeParse({ groups: [{ ...group, material_number: 'N'.repeat(129) }] }).success).toBe(false)
   })
 
   it('says when a code is taken', async () => {

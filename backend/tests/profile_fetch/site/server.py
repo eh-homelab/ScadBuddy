@@ -43,8 +43,19 @@ class Replica:
     #: How long an opened combobox waits before it shows its options.
     option_delay_ms: int = 0
     #: ``unhooked`` starts the download with a synthetic click event, which the driver's
-    #: blob hook (it patches ``HTMLAnchorElement.prototype.click``) does not see.
-    download: Literal["hooked", "unhooked"] = "hooked"
+    #: blob hook (it patches ``HTMLAnchorElement.prototype.click``) does not see. The page's
+    #: own script can also bypass the hook and push to ``window.__dl`` itself (#6726):
+    #: ``pushed_entry`` pushes ``{name, text}`` with no ``tooLarge`` flag, ``pushed_text``
+    #: pushes the bare text, an entry that is not an object, ``pushed_long_name`` an entry
+    #: whose name is over 1024 characters, ``pushed_number_text`` one whose text is a number.
+    download: Literal[
+        "hooked",
+        "unhooked",
+        "pushed_entry",
+        "pushed_text",
+        "pushed_long_name",
+        "pushed_number_text",
+    ] = "hooked"
     sessions: set[str] = field(default_factory=set)
     in_spools: set[int] = field(default_factory=set)
     logins: int = 0
@@ -144,7 +155,7 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                             ID=str(tdfp_id),
                             IN_SPOOLS="true" if tdfp_id in site.in_spools else "false",
                             OPTIONS=json.dumps(site.options),
-                            UNHOOKED="true" if site.download == "unhooked" else "false",
+                            DOWNLOAD=json.dumps(site.download),
                             OPTION_DELAY_MS=str(site.option_delay_ms),
                         ),
                     )

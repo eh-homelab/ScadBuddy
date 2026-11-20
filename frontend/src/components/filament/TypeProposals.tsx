@@ -33,14 +33,25 @@ const rowKey = (group: TypeProposal) => group.spool_ids[0]!
 
 const hexOf = (rgba: string) => (rgba.endsWith('FF') ? rgba.slice(0, 7) : rgba)
 
-/** What one confirm did, in one line: each type made or used, then each spool skipped. */
-function doneText(result: TypeProposalResult, numbers: Map<string, number>): string {
+/**
+ * What one confirm did, in one line: each type made or used, then each spool skipped. A row
+ * that joined the type another row of this confirm just created says so, with the name it
+ * sent (`sent`, by row), so a typed name is never dropped silently (R-6729-1).
+ */
+function doneText(result: TypeProposalResult, sent: string[], numbers: Map<string, number>): string {
   const lines: string[] = []
   const skipped: string[] = []
-  for (const group of result.groups) {
+  for (const [at, group] of result.groups.entries()) {
     if (group.typed.length) {
       const spools = plural(group.typed.length, 'spool')
-      lines.push(group.made ? `Created ${group.code} for ${spools}.` : `Typed ${spools} as ${group.code}.`)
+      const name = sent[at]
+      lines.push(
+        group.made
+          ? `Created ${group.code} for ${spools}.`
+          : group.new
+            ? `Typed ${spools} as ${group.code}, which another row created${name && name !== group.code ? `; the name ${name} was not used` : ''}.`
+            : `Typed ${spools} as ${group.code}.`,
+      )
     }
     for (const one of group.skipped) skipped.push(`#${numbers.get(one.spool_id) ?? '?'}: ${SKIPPED[one.reason] ?? one.reason}`)
   }
@@ -88,20 +99,19 @@ export function TypeProposals({ onDone }: { onDone: (text: string) => void }) {
     setBusy(true)
     setError(null)
     try {
-      const result = await confirmTypeProposals(
-        groups.map((group) => ({
-          brand_id: group.brand_id,
-          material_id: group.material_id,
-          subtype_id: group.subtype_id,
-          rgba: group.rgba,
-          label_weight_g: group.label_weight_g,
-          material_number: group.material_number,
-          code: nameOf(group).trim(),
-          spool_ids: group.spool_ids,
-        })),
-      )
+      const picks = groups.map((group) => ({
+        brand_id: group.brand_id,
+        material_id: group.material_id,
+        subtype_id: group.subtype_id,
+        rgba: group.rgba,
+        label_weight_g: group.label_weight_g,
+        material_number: group.material_number,
+        code: nameOf(group).trim(),
+        spool_ids: group.spool_ids,
+      }))
+      const result = await confirmTypeProposals(picks)
       const numbers = new Map(groups.flatMap((group) => group.spool_ids.map((id, at) => [id, group.numbers[at]!] as const)))
-      onDone(doneText(result, numbers))
+      onDone(doneText(result, picks.map((pick) => pick.code), numbers))
       await load()
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The types could not be created. Try again.')

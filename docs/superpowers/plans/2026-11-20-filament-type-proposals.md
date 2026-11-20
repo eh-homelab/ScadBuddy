@@ -46,6 +46,28 @@ person says yes) confirms each group.
   falls back to the identity match, or the confirm makes the new type. Groups can share a
   `material_number` and differ in colour or weight (Bambuddy's product code can be shared
   across colours), and each gets its own type, confirmed together or one at a time.
+- R-6729-1 (#6729, finding 1): in `proposals`, a group with no `material_number` folds
+  into the one group that has the same key fields (brand, material, subtype, RGBA, label
+  weight) and a `material_number`, when exactly one such group exists. Otherwise the
+  groups stay separate. `confirm`'s answer says, for each group, which type it landed on
+  (`code`, `type_id`), whether that group made it (`made`) and whether this request made
+  it (`new`). When a group joined a type that another group in the same request had just
+  made (`new` and not `made`), the UI (`TypeProposals.tsx`) says so in a line, with the
+  name the row sent, so a typed name is never dropped silently.
+- R-6729-2 (#6729, finding 2): only a violation of the `filament_spool_types_code`
+  constraint (`exc.diag.constraint_name`) becomes the 409. Any other unique violation
+  propagates.
+- R-6729-3 (#6729, finding 3): `TypeProposal.material_number` is capped at the same 128
+  that `TypeProposalPick` uses. A longer Bambuddy code is proposed with no code, not cut
+  short: a cut code could collide.
+- R-6729-4 (#6729, finding 4): the agent tool's zod schema bounds `label_weight_g` at
+  100000 and `spool_ids` at 5000 items, matching the backend.
+- R-6729-5 (#6729, the PR's concern 2): `confirm` lets a spool with no `material_number`
+  match a numbered pick only under the fold's own rule: among the open untyped spools now
+  in the database, exactly one numbered group has the same five key fields, and it is the
+  pick's. Otherwise that spool comes back as `changed`, as before.
+- R-6729-6 (#6729, the PR's concern 4): the agent tool's `material_number` takes
+  `.max(128)`, matching the backend.
 
 ## Builder's calls
 

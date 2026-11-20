@@ -773,6 +773,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
   if (codes.some((code, at) => codes.indexOf(code) !== at || (live.includes(code) && !matchingType(normalised(picks[at]!)))))
     return problem(409, 'a spool type already has one of these codes; choose another name')
   const done: S['ConfirmedProposal'][] = []
+  const madeHere = new Set<string>()
   for (const raw of picks) {
     const pick = normalised(raw)
     const want = proposalKey(pick)
@@ -785,7 +786,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
       else eligible.push(row!)
     }
     if (!eligible.length) {
-      done.push({ code: pick.code, type_id: null, made: false, typed: [], skipped })
+      done.push({ code: pick.code, type_id: null, made: false, new: false, typed: [], skipped })
       continue
     }
     let kind = matchingType(eligible[0]!)
@@ -802,6 +803,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
       })
       if (created instanceof Response) return created
       kind = created
+      madeHere.add(kind.id)
     }
     for (const row of eligible) {
       const changes: Record<string, unknown[]> = { type_id: [null, kind.id] }
@@ -815,7 +817,7 @@ function confirmProposals(picks: S['TypeProposalPick'][]): S['TypeProposalResult
       state.spools[state.spools.indexOf(row)] = next
       addEvent(row.id, 'edited', { data: { changes } })
     }
-    done.push({ code: kind.code, type_id: kind.id, made, typed: eligible.map((row) => row.id), skipped })
+    done.push({ code: kind.code, type_id: kind.id, made, new: madeHere.has(kind.id), typed: eligible.map((row) => row.id), skipped })
   }
   return { groups: done }
 }

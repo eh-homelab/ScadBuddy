@@ -167,6 +167,36 @@ _UNKNOWN_EFFECT: dict[str, tuple[str, str]] = {
 }
 
 
+#: The start of Bambu Studio's refusal of a plate whose objects collide: its CLI's
+#: ``cli_errors`` for ``CLI_OBJECT_COLLISION_IN_LAYER_PRINT`` (-64) and
+#: ``CLI_OBJECT_COLLISION_IN_SEQ_PRINT`` (-63, "... when using print-by-object mode"),
+#: which ``print->validate`` gives for a prime tower on an object or objects that
+#: overlap (``src/BambuStudio.cpp`` at v02.08.02.61, lines 163-164 and 6994-7007). The
+#: plate fails: the slicer writes no file.
+OBJECT_CONFLICT_TEXT = "Object conflicts were detected"
+_BY_OBJECT_TEXT = "print-by-object"
+
+
+def object_conflict_warning(failure: str | None, plate_id: int) -> FilamentWarning | None:
+    """One ``object-conflict`` warning for ``plate_id`` when a slice's ``failure`` is
+    Bambu Studio's "Object conflicts were detected" (#6732, #3770 P4), else ``None``.
+    The native slicer and Bambuddy's both pass the CLI's text on in their failure, so
+    the text is matched, never a return code that only the native worker keeps."""
+    if not failure or OBJECT_CONFLICT_TEXT.casefold() not in failure.casefold():
+        return None
+    if _BY_OBJECT_TEXT in failure.casefold():
+        fix = "Move the objects further apart, as a print by object needs room round each."
+        what = "objects too close together for a print by object"
+    else:
+        fix = "Move the prime tower clear of the objects, or move the objects apart."
+        what = "the prime tower stands on an object, or objects overlap"
+    return FilamentWarning(
+        kind="object-conflict",
+        plate_id=plate_id,
+        message=f"Plate {plate_id}: the slicer found {what}. {fix}",
+    )
+
+
 #: A sliced file past this is not read for its prime tower, as the dialog bounds it.
 MAX_SLICED_BYTES = 128 * 1024 * 1024
 

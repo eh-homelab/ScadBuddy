@@ -694,8 +694,10 @@ class EffectiveKValue(BaseModel):
 class TypeProposal(BaseModel):
     """A type proposed for the open spools that need one and share its key: brand,
     material, subtype, RGBA, label weight and the ``material_number`` of their last
-    Bambuddy reading. ``code`` is the proposed name; ``type_id`` names a type that matches
-    the key now (the confirm uses it, and makes none). The names are the catalog rows'."""
+    Bambuddy reading (none when it is longer than 128 characters; spools with none fold into
+    the one group of their other fields that has one). ``code`` is the proposed name;
+    ``type_id`` names a type that matches the key now (the confirm uses it, and makes none).
+    The names are the catalog rows'."""
 
     code: str
     type_id: UUID | None
@@ -704,7 +706,7 @@ class TypeProposal(BaseModel):
     subtype_id: UUID | None
     rgba: Rgba
     label_weight_g: int
-    material_number: str | None
+    material_number: Text | None
     brand: str | None
     material: str
     subtype: str | None
@@ -760,12 +762,16 @@ class SkippedSpool(BaseModel):
 
 
 class ConfirmedProposal(BaseModel):
-    """What a confirm did with one proposal: the type it used (``made`` when it made it;
-    ``None`` when no spool was left to type), the spools it typed and those it skipped."""
+    """What a confirm did with one proposal: the type it used (``None`` when no spool was
+    left to type), ``made`` when this group made it, ``new`` when this request made it (by
+    this group or an earlier one: ``new`` and not ``made`` means the group joined another
+    group's new type, and its own code was not used), the spools it typed and those it
+    skipped."""
 
     code: str
     type_id: UUID | None
     made: bool
+    new: bool
     typed: list[UUID]
     skipped: list[SkippedSpool]
 

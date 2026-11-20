@@ -57,13 +57,42 @@ BLOB_WAIT_MS: float = 15_000
 OPTION_WAIT_MS: float = 5_000
 #: The title of Vercel's check page (it answers 429; the skill's SKILL.md).
 CHECKPOINT_TITLE: Final = "Vercel Security Checkpoint"
+#: The longest exported file name, in UTF-16 units, the worker reads from the page.
+MAX_NAME_CHARS: Final = 1024
+#: What the worker reads of the hook's first entry before its text: the entry's type, the
+#: hook's flag, and the name's and the text's lengths (-1 for a value that is not a string).
+EXPORT_SHAPE: Final = """() => {
+  const e = window.__dl[0];
+  const kind = e === null ? 'null' : Array.isArray(e) ? 'array' : typeof e;
+  if (kind !== 'object') return { kind };
+  const name = e.name;
+  const text = e.text;
+  return {
+    kind,
+    tooLarge: e.tooLarge === true,
+    name: typeof name === 'string' ? name.length : -1,
+    text: typeof text === 'string' ? text.length : -1,
+  };
+}"""
+#: The entry's name and text, each read once and returned only within the caps, so an
+#: entry whose getters answer differently on a second read still sends no larger text.
+EXPORT_READ: Final = """() => {
+  const e = window.__dl[0];
+  const name = e.name;
+  const text = e.text;
+  if (typeof name !== 'string' || typeof text !== 'string') return null;
+  if (name.length > __NAME__ || text.length > __MAX__) return null;
+  return { name, text };
+}""".replace("__NAME__", str(MAX_NAME_CHARS)).replace("__MAX__", str(MAX_FILE_BYTES))
 
 #: `3dfp.mjs`'s hook: Chromium died on the export's blob download intermittently ("Target
 #: page, context or browser has been closed"), so the page reads the blob itself. One
-#: change from `3dfp.mjs`: a text longer than `MAX_FILE_BYTES` UTF-16 units is refused in
-#: the page (``tooLarge``), so an untrusted page cannot push a file of any size through CDP
-#: into the worker (R-F7). A UTF-8 file is at least as many bytes as its text has units,
-#: so no file under the API's byte cap is refused here.
+#: change from `3dfp.mjs`: a text longer than `MAX_FILE_BYTES` UTF-16 units is marked
+#: ``tooLarge`` in the page, a first filter only. The page is untrusted and its own scripts
+#: can push to ``window.__dl``, so the cap that holds is the worker's (`_read_export`): it
+#: reads an entry's type and lengths first and its text only when they are within the caps
+#: (R-F7, #6726). A UTF-8 file is at least as many bytes as its text has units, so no file
+#: under the API's byte cap is refused here.
 BLOB_HOOK: Final = """() => {
   window.__dl = [];
   const click = HTMLAnchorElement.prototype.click;
@@ -308,7 +337,7 @@ class ThreeDfpSite:
         spool's own page, open "Export slicer profile", pick `SLICER`, the model and
         ``"<nozzle> mm"``, acknowledge, download, and read the blob the hook kept.
         `SiteError` ``option_missing`` when the dialog does not offer one of the three,
-        and ``file_too_large`` when the page's hook refused the file (`BLOB_HOOK`)."""
+        and ``file_too_large`` when the file is over `MAX_FILE_BYTES` (`_read_export`)."""
         page = self.page
         try:
             # The per-spool page, not the My Spools list: a list row that groups several
@@ -342,12 +371,7 @@ class ThreeDfpSite:
             await page.evaluate("() => { window.__dl = []; }")
             await dialog.get_by_role("button", name=re.compile(r"^Download")).click()
             await page.wait_for_function("() => window.__dl.length > 0", timeout=BLOB_WAIT_MS)
-            download = await page.evaluate("() => window.__dl[0]")
-            if download.get("tooLarge"):
-                raise SiteError(
-                    "file_too_large",
-                    f"the exported file of {printer_model} {nozzle} mm is larger than 512 KiB",
-                )
+            name, text = await self._read_export(printer_model, nozzle)
             await page.keyboard.press("Escape")
             await self._pause(600)
         except SiteError:
@@ -366,8 +390,45 @@ class ThreeDfpSite:
             ) from None
         logger.info("exported 3DFP filament %d for %s %s mm", tdfp_id, printer_model, nozzle)
         # As `3dfp.mjs` names its file: the site's name with every "/" made "-".
-        name = str(download["name"]).replace("/", "-")
-        return ExportedFile(name=name, text=str(download["text"]))
+        return ExportedFile(name=name.replace("/", "-"), text=text)
+
+    async def _read_export(self, printer_model: str, nozzle: str) -> tuple[str, str]:
+        """The hook's first entry, as its name and text. The page is untrusted and can push
+        any entry, so its type and lengths are read first (`EXPORT_SHAPE`), and its text
+        only when it is an object whose name and text are strings within `MAX_NAME_CHARS`
+        and `MAX_FILE_BYTES` (`EXPORT_READ`): an oversized text never crosses CDP into the
+        worker (#6726). `SiteError` ``file_too_large`` for a text over the cap, ``browser``
+        for an entry of any other shape."""
+        too_large = SiteError(
+            "file_too_large",
+            f"the exported file of {printer_model} {nozzle} mm is larger than 512 KiB",
+        )
+        malformed = SiteError(
+            "browser", f"the page's export of {printer_model} {nozzle} mm is not a file"
+        )
+        shape = await self.page.evaluate(EXPORT_SHAPE)
+        if not isinstance(shape, dict) or shape.get("kind") != "object":
+            raise malformed
+        if shape.get("tooLarge") is True:
+            raise too_large
+        name_length, text_length = shape.get("name"), shape.get("text")
+        if not isinstance(name_length, int) or not isinstance(text_length, int):
+            raise malformed
+        if not 0 <= name_length <= MAX_NAME_CHARS or text_length < 0:
+            raise malformed
+        if text_length > MAX_FILE_BYTES:
+            raise too_large
+        download = await self.page.evaluate(EXPORT_READ)
+        if not isinstance(download, dict):
+            raise malformed
+        name, text = download.get("name"), download.get("text")
+        if not isinstance(name, str) or not isinstance(text, str):
+            raise malformed
+        if len(name) > MAX_NAME_CHARS:
+            raise malformed
+        if len(text) > MAX_FILE_BYTES:
+            raise too_large
+        return name, text
 
     # -- steps ----------------------------------------------------------------------------
 

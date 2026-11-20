@@ -500,7 +500,9 @@ async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCr
     summary="Propose spool types for the spools that need one",
     description=(
         "Groups the unarchived spools with no type by brand, material, subtype, RGBA, label "
-        "weight and the `material_number` of their last Bambuddy reading (spec §8.1). Each "
+        "weight and the `material_number` of their last Bambuddy reading (spec §8.1; none "
+        "when it is longer than 128 characters). A group with no `material_number` folds into "
+        "the one group of its other fields that has one, when exactly one does. Each "
         "group has a proposed `code` (the `material_number`, else `BRAND-MATERIAL-SUBTYPE-"
         "COLOUR`; one another type holds takes `-<label weight>G`), its catalog names, its "
         "spools and their count, and `type_id` when a type matches it now. The largest group "
@@ -523,7 +525,10 @@ async def list_type_proposals(filament: FilamentDep) -> m.TypeProposals:
         "spool shares; no cost). Each named spool that is still unarchived, untyped and of "
         "the key gets the type, loses each override equal to the type's value, and gets one "
         "`edited` event under the caller's name. Any other spool is in `skipped` with its "
-        "reason (`not_found`, `archived`, `typed`, `changed`). 409 when an unarchived type "
+        "reason (`not_found`, `archived`, `typed`, `changed`). Per group, `made` says it "
+        "made the type and `new` that this request made it: `new` without `made` means the "
+        "group joined a type an earlier group just made, so its `code` was not used. 409 "
+        "when an unarchived type "
         "has one of the codes (nothing is written), 422 for a bad body."
     ),
 )

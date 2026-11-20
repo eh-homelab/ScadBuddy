@@ -820,8 +820,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Playwright channel; `settings.py`) and no Postgres code (`psycopg` is not in `sys.modules`).
   `site.py` drives 3dfilamentprofiles.com with a headed Chromium (Playwright for Python, under
   Xvfb) and maps each failure to a `SiteError` kind (`login_failed`, only when the site sends the browser back to
-  `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, which the page's blob hook
-  refuses over 512 KiB, `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
+  `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, an export over 512 KiB,
+  which the worker refuses from the text's length before it reads the text (`_read_export`,
+  #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
   `failed` activities and the `SiteHolder` that keeps one signed-in browser; `workflow.py` is
   the `ProfileFetch` workflow; `wire.py` is the bodies shared with the CRUD routes; `worker.py`
   sets `RLIMIT_CORE` to 0 and builds `ThreeDfpSite`; `site.py`'s `browser_env` is the allowlisted environment that
