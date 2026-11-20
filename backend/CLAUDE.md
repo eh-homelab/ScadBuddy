@@ -746,7 +746,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   2026-11-14): `catalog.py` (configurable catalogs, no code enums; materials, subtypes,
   brands, categories and effects keep names and aliases in `filament_<kind>_names`, one key
   space per catalog, a subtype's per material, filled by a trigger and `set_aliases`; every
-  name lookup goes through `find_by_key` or `resolve_or_add`, #6706), `types.py`
+  name lookup goes through `find_by_key` or `resolve_or_add`, the type match
+  `SpoolTypeStore.match` included, #6706), `types.py`
   (`effective()`: spool → type → subtype → material, the one resolver; a type links its
   price-book row by identity, alpha included, and never rewrites a found row), `spools.py`
   (instances and tag bindings; every writer locks the tag before the spool; archive closes

@@ -182,10 +182,6 @@ DECLARE
     new_scope uuid := nil;
     old_scope uuid := nil;
 BEGIN
-    IF new_key = '' THEN
-        RAISE EXCEPTION 'the name % has no letter or digit', NEW.name
-            USING ERRCODE = 'check_violation', TABLE = TG_TABLE_NAME;
-    END IF;
     IF scoped THEN
         new_scope := coalesce((to_jsonb(NEW) ->> 'material_id')::uuid, nil);
     END IF;
@@ -196,6 +192,19 @@ BEGIN
         IF NEW.name IS NOT DISTINCT FROM OLD.name AND new_scope = old_scope THEN
             RETURN NULL;
         END IF;
+        -- A row the fill left without a key (R-6706-14) keeps its name through a move: it
+        -- has no canonical key to write, only its aliases move.
+        IF new_key = '' AND NEW.name IS NOT DISTINCT FROM OLD.name THEN
+            EXECUTE format('UPDATE %I SET material_scope = $2 WHERE %I = $1', names, owner)
+                USING NEW.id, new_scope;
+            RETURN NULL;
+        END IF;
+    END IF;
+    IF new_key = '' THEN
+        RAISE EXCEPTION 'the name % has no letter or digit', NEW.name
+            USING ERRCODE = 'check_violation', TABLE = TG_TABLE_NAME;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
         EXECUTE format('DELETE FROM %I WHERE %I = $1 AND canonical', names, owner)
             USING NEW.id;
         IF new_scope <> old_scope THEN

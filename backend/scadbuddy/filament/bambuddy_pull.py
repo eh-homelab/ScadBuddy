@@ -40,7 +40,8 @@ this order:
 
 Catalog names from BB (material, subtype, brand, category, effect) resolve by their key
 against every name and alias of the catalog (#6706, `catalog.find_by_key`: `DUAL-COLOR` is
-`Dual Color`), and are added when missing. BB's spool catalog (``GET /inventory/catalog``,
+`Dual Color`), and are added when missing. A spool's type by identity resolves them the
+same way (`SpoolTypeStore.match`, R-6706-19). BB's spool catalog (``GET /inventory/catalog``,
 `BambuddyClient.spool_catalog`) is mapped once per pull (`_insert_types`): an entry is the
 insert type that has its id as ``bb_catalog_id``, else the unlinked one of the same upper
 case name (now linked), else a new one (its weight, no insert material). A type that

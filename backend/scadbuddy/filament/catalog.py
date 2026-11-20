@@ -483,23 +483,22 @@ class CatalogStore:
             )
             scope_insert = "" if scope is None else ", material_scope"
             for alias in (one.strip() for one in aliases):
-                # The key is computed in the INSERT itself (one round trip per alias).
+                # Refused before its INSERT, so an alias with no key is never a clash.
+                if not has_key(conn, alias):
+                    raise AliasKeyEmptyError(alias)
                 values: list[Any] = [alias, row_id, alias] + ([] if scope is None else [scope])
                 try:
                     with conn.transaction():
-                        made = conn.execute(
+                        conn.execute(
                             f"INSERT INTO {names.table} (key, {names.owner}, name, canonical"
                             f"{scope_insert}) VALUES ({key_sql('%s')}, %s, %s, false"
-                            f"{'' if scope is None else ', %s'}) RETURNING key",
+                            f"{'' if scope is None else ', %s'})",
                             values,
-                        ).fetchone()
+                        )
                 except errors.UniqueViolation:
                     held = _holder(conn, names, spec.table, alias, scope)
                     assert held is not None
                     raise CatalogKeyClashError(names.noun, held[0], held[1], alias) from None
-                assert made is not None
-                if not made["key"]:
-                    raise AliasKeyEmptyError(alias)
             return self._read(conn, spec, row_id)
 
     def archive(self, kind: str, row_id: UUID, archived: bool) -> BaseModel | None:

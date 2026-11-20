@@ -187,6 +187,94 @@ def test_a_bb_spool_matched_by_identity_takes_the_type(pg_pool: PgPool) -> None:
     assert made.overridden == []
 
 
+def test_a_bb_spool_spelled_as_an_alias_takes_the_type(pg_pool: PgPool) -> None:
+    """R-6706-19: the identity match resolves each name by key, as the field values do, so
+    an alias or another spelling of a name links the type it describes."""
+    f = _filament(pg_pool)
+    pull(f, [bb(id=1, tray_uuid=None, tag_uid=None)], now=NOW)
+    brand = _ids(f, "brands")["Bambu Lab"]
+    f.catalog.set_aliases("brands", brand, ["BBL"])
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="PLA-RED",
+            material_id=_pla(pg_pool),
+            brand_id=brand,
+            subtype_id=_ids(f, "subtypes")["Basic"],
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
+    )
+    spellings = [
+        bb(id=2, brand="BBL", tray_uuid=None, tag_uid=None),
+        bb(
+            id=3, brand="BAMBU-LAB", subtype="basic", material="p.l.a", tray_uuid=None, tag_uid=None
+        ),
+    ]
+    report = pull(f, spellings, now=NOW)
+    assert (report.created, report.needs_type) == (2, 0)
+    for made_id in report.created_ids:
+        made = f.spools.get(made_id)
+        assert made is not None and made.type_id == kind.id
+
+
+def test_a_bb_spool_spelled_as_a_merged_loser_takes_the_type(pg_pool: PgPool) -> None:
+    """R-6706-19: after the migration merges `PETG-HF` into `PETG HF`, Bambuddy still
+    sends the loser's spelling; it links the survivor's type."""
+    f = _filament(pg_pool)
+    pull(f, [bb(id=1, material="PETG HF", subtype=None, tray_uuid=None, tag_uid=None)], now=NOW)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="PETGHF-RED",
+            material_id=_ids(f, "materials")["PETG HF"],
+            brand_id=_ids(f, "brands")["Bambu Lab"],
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
+    )
+    report = pull(
+        f, [bb(id=2, material="PETG-HF", subtype=None, tray_uuid=None, tag_uid=None)], now=NOW
+    )
+    made = f.spools.get(report.created_ids[0])
+    assert made is not None and made.type_id == kind.id
+
+
+def test_a_bb_name_with_no_key_matches_as_none_and_an_unknown_one_matches_nothing(
+    pg_pool: PgPool,
+) -> None:
+    """R-6706-19: a subtype with no letter or digit counts as no subtype (R-6706-18); a
+    keyed brand no row holds matches no type."""
+    f = _filament(pg_pool)
+    pull(f, [bb(id=1, subtype=None, tray_uuid=None, tag_uid=None)], now=NOW)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="PLA-RED",
+            material_id=_pla(pg_pool),
+            brand_id=_ids(f, "brands")["Bambu Lab"],
+            rgba="#FF0000",
+            label_weight_g=1000,
+        )
+    )
+    with pg_pool.connection() as conn:
+        found = f.types.match(
+            brand="Bambu Lab",
+            material="PLA",
+            subtype="---",
+            rgba="#FF0000",
+            label_weight_g=1000,
+            conn=conn,
+        )
+        assert found is not None and found.id == kind.id
+        unknown = f.types.match(
+            brand="Nobody",
+            material="PLA",
+            subtype=None,
+            rgba="#FF0000",
+            label_weight_g=1000,
+            conn=conn,
+        )
+        assert unknown is None
+
+
 def test_a_bb_spool_whose_tag_sb_holds_is_linked_not_duplicated(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     held = f.spools.create(

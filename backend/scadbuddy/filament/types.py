@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any, cast, get_args
+from typing import Any, Literal, cast, get_args
 from uuid import UUID
 
 from psycopg import Connection, errors
@@ -25,6 +25,8 @@ from scadbuddy.filament.catalog import (
     CatalogRefError,
     catalog_key,
     check_temps,
+    find_by_key,
+    has_key,
 )
 from scadbuddy.filament.catalog import (
     TypeTempError as TypeTempError,
@@ -324,8 +326,11 @@ class SpoolTypeStore:
         conn: Conn | None = None,
     ) -> m.SpoolType | None:
         """The unarchived type a product description names. ``code`` alone decides when
-        given (case-insensitive); else brand, material and subtype are catalog names (any
-        case; none matches a type with none), ``rgba`` is compared with its alpha (six
+        given (case-insensitive); else brand, material and subtype are catalog names, each
+        resolved by key against every name and alias (`catalog.find_by_key`, R-6706-19; a
+        subtype is the found material's, else one for every material). None, or a name
+        with no letter or digit, matches a type with none; a name no row holds matches no
+        type. ``rgba`` is compared with its alpha (six
         digits are opaque) and ``label_weight_g`` exactly. On ``conn`` when given (a caller
         in its own transaction, `filament/bambuddy_pull.py`), else on a pooled one."""
         if conn is not None:
@@ -350,18 +355,20 @@ class SpoolTypeStore:
                 (code,),
             ).fetchone()
         else:
-            columns = ", ".join(f"t.{c}" for c in m.SpoolType.model_fields)
+            material_id = _by_key(conn, "materials", material)
+            if material_id is None or material_id is False:
+                return None
+            subtype_id = _by_key(conn, "subtypes", subtype, material=material_id)
+            brand_id = _by_key(conn, "brands", brand)
+            if subtype_id is False or brand_id is False:
+                return None
             row = conn.execute(
-                f"SELECT {columns} FROM filament_spool_types t"
-                " JOIN filament_materials mat ON mat.id = t.material_id"
-                " LEFT JOIN filament_subtypes sub ON sub.id = t.subtype_id"
-                " LEFT JOIN filament_brands b ON b.id = t.brand_id"
-                " WHERE t.archived_at IS NULL AND upper(mat.name) = upper(%s)"
-                " AND upper(coalesce(sub.name, '')) = upper(coalesce(%s, ''))"
-                " AND upper(coalesce(b.name, '')) = upper(coalesce(%s, ''))"
-                " AND t.rgba = %s AND t.label_weight_g = %s"
-                " ORDER BY t.created_at, t.id LIMIT 1",
-                (material, subtype, brand, normalise_rgba(rgba), label_weight_g),
+                f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types"
+                " WHERE archived_at IS NULL AND material_id = %s"
+                " AND subtype_id IS NOT DISTINCT FROM %s AND brand_id IS NOT DISTINCT FROM %s"
+                " AND rgba = %s AND label_weight_g = %s"
+                " ORDER BY created_at, id LIMIT 1",
+                (material_id, subtype_id, brand_id, normalise_rgba(rgba), label_weight_g),
             ).fetchone()
         return None if row is None else m.SpoolType.model_validate(row)
 
@@ -433,6 +440,18 @@ class SpoolTypeStore:
         ).fetchone()
         assert linked is not None
         return linked
+
+
+def _by_key(
+    conn: Conn, kind: str, name: str | None, *, material: UUID | None = None
+) -> UUID | Literal[False] | None:
+    """The catalog row ``name`` names by key (`find_by_key`); ``None`` for no name or one
+    with no letter or digit (it counts as none, R-6706-18), ``False`` when no row holds
+    its key."""
+    if name is None or not has_key(conn, name):
+        return None
+    found = find_by_key(conn, kind, name, material=material)
+    return False if found is None else found
 
 
 def _book_effect(conn: Conn, effect_id: UUID | None) -> FilamentEffect | None:

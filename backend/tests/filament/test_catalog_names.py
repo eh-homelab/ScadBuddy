@@ -267,3 +267,43 @@ def test_a_subtype_key_is_unique_within_its_material(pg_pool: PgPool) -> None:
     with pg_pool.connection() as conn:
         assert find_by_key(conn, "subtypes", "shiny", material=petg.id) == mine.id
         assert find_by_key(conn, "subtypes", "shiny", material=pla.id) is None
+
+
+@pg
+def test_two_aliases_with_no_key_are_refused_as_empty_not_as_a_clash(pg_pool: PgPool) -> None:
+    """R-6706-21: an alias with no key is refused before it is written."""
+    store: Any = CatalogStore(pg_pool)
+    made = _effect(store, "Matte Sheen")
+    with pytest.raises(AliasKeyEmptyError):
+        store.set_aliases("effects", made.id, ["--", "??"])
+    assert store.get("effects", made.id).aliases == []
+
+
+def _keyless(conn: psycopg.Connection[Any], table: str, trigger: str, name: str) -> UUID:
+    """A row whose name has no key, as the migration leaves one (R-6706-14): the name
+    trigger is off for its insert."""
+    with conn.transaction():
+        conn.execute(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}")
+        row = conn.execute(f"INSERT INTO {table} (name) VALUES (%s) RETURNING id", (name,))
+        made = row.fetchone()
+        conn.execute(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}")
+    assert made is not None
+    return UUID(str(made["id"]))
+
+
+@pg
+def test_a_keyless_row_takes_a_patch_that_keeps_its_name(pg_pool: PgPool) -> None:
+    """R-6706-20: a row with no key is refused only when a write gives it a new name."""
+    store: Any = CatalogStore(pg_pool)
+    pla = next(r for r in store.list("materials") if r.name == "PLA")
+    with pg_pool.connection() as conn:
+        brand = _keyless(conn, "filament_brands", "filament_brands_claim_name", "!!!")
+        subtype = _keyless(conn, "filament_subtypes", "filament_subtypes_claim_name", "***")
+    got = store.update("brands", brand, BrandPatch(name="!!!", sort_order=5))
+    assert got is not None and (got.name, got.sort_order) == ("!!!", 5)
+    moved = store.update("subtypes", subtype, SubtypePatch(name="***", material_id=pla.id))
+    assert moved is not None and moved.material_id == pla.id
+    with pytest.raises(CatalogKeyEmptyError):
+        store.update("brands", brand, BrandPatch(name="???"))
+    renamed = store.update("brands", brand, BrandPatch(name="Acme Two"))
+    assert renamed is not None and renamed.name == "Acme Two"

@@ -63,6 +63,18 @@ row.
   preview marks the cell `{"skipped": "no letter or digit"}` beside `{"new": true}`. The
   catalog routes still refuse such a name with 422. (`+` alone is not such a name: it
   keys to `PLUS`, R-6706-17.)
+- R-6706-19: `SpoolTypeStore.match` (the pull's and the type proposals' identity match)
+  resolves names by key. The material by `find_by_key`; the subtype scoped to the found
+  material, else with no material; the brand by `find_by_key`. The type then matches by
+  `material_id`, `subtype_id` and `brand_id`. A name that resolves to nothing matches no
+  type; a name with no key counts as none (R-6706-18). So an alias, or a merged loser's
+  spelling (`PETG-HF` after a merge into `PETG HF`), links the existing type. No other
+  name lookup on the five catalogs bypasses the key (insert types stay out, R-6706-11).
+- R-6706-20: the name trigger checks for an empty key only after its "name and scope
+  unchanged" return. A row the fill left without a key takes a PATCH that keeps its name;
+  a keyless subtype keeps its name through a move, and only its aliases move.
+- R-6706-21: `set_aliases` checks `has_key` before each INSERT, so an alias with no key is
+  `AliasKeyEmptyError`, never a clash.
 - A name or alias with no letter or digit has no key: the trigger refuses such a name
   (422, `CatalogKeyEmptyError`), the migration neither merges nor keys an existing one,
   and a lookup never finds a row for it.
