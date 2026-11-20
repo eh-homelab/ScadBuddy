@@ -1519,6 +1519,54 @@ describe('machine rate tools (#4625)', () => {
     await expect(tool('machine_rate_set').execute({ printer: PRINTER }, ctx())).rejects.toThrow(ToolError)
     await expect(tool('machine_rate_set').execute({ printer: PRINTER, inputs: INPUTS, remove: true }, ctx())).rejects.toThrow(ToolError)
   })
+
+  // #6665: everything the Settings page sets. Left out, the PUT keeps the stored value.
+  it('sends priced_by per row, actuals_window and lan_hours_offset, and leaves them out when not given', async () => {
+    const sent: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/printers/${PRINTER}/machine-rate`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(VIEW)
+      }),
+    )
+    const actuals = {
+      profile: { ...INPUTS.profile, actuals_window: 5, lan_hours_offset: '120.5' },
+      wear_parts: [{ ...INPUTS.wear_parts[0], priced_by: 'actual' }],
+      maintenance: [{ ...INPUTS.maintenance[0], priced_by: 'estimate' }],
+    }
+    await tool('machine_rate_set').execute({ printer: PRINTER, inputs: actuals }, ctx())
+    await tool('machine_rate_set').execute({ printer: PRINTER, inputs: INPUTS }, ctx())
+    expect(sent).toEqual([actuals, INPUTS])
+    const wear = sent[1] as typeof INPUTS
+    expect(Object.keys(wear.profile)).not.toContain('actuals_window')
+    expect(Object.keys(wear.profile)).not.toContain('lan_hours_offset')
+    expect(Object.keys(wear.wear_parts[0]!)).not.toContain('priced_by')
+  })
+
+  it('checks priced_by, actuals_window and lan_hours_offset', () => {
+    const accepts = (inputs: Record<string, unknown>) => {
+      try {
+        tool('machine_rate_set').parse({ printer: PRINTER, inputs })
+        return true
+      } catch {
+        return false
+      }
+    }
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 1, lan_hours_offset: '0' } })).toBe(true)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 20 } })).toBe(true)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 0 } })).toBe(false)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 21 } })).toBe(false)
+    expect(accepts({ ...INPUTS, profile: { actuals_window: 2.5 } })).toBe(false)
+    expect(accepts({ ...INPUTS, profile: { lan_hours_offset: '-1' } })).toBe(false)
+    expect(accepts({ ...INPUTS, wear_parts: [{ ...INPUTS.wear_parts[0], priced_by: 'actual' }] })).toBe(true)
+    expect(accepts({ ...INPUTS, wear_parts: [{ ...INPUTS.wear_parts[0], priced_by: 'guess' }] })).toBe(false)
+    expect(accepts({ ...INPUTS, maintenance: [{ ...INPUTS.maintenance[0], priced_by: 'actual' }] })).toBe(true)
+    expect(accepts({ ...INPUTS, maintenance: [{ ...INPUTS.maintenance[0], priced_by: 'guess' }] })).toBe(false)
+  })
+
+  it('names the new fields in its description', () => {
+    for (const field of ['priced_by', 'actuals_window', 'lan_hours_offset']) expect(tool('machine_rate_set').description).toContain(field)
+  })
 })
 
 // #5774 (spec 2026-11-17-machine-rate-actuals §5, §10): a printer's logged maintenance and
