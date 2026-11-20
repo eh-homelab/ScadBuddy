@@ -1435,7 +1435,8 @@ async def move_spool(
     response_model=PullReport,
     summary="Import Bambuddy's spools",
     description=(
-        "Read Bambuddy's unarchived spools and pull them into ScadBuddy's own, once (the spool "
+        "Read Bambuddy's spools, archived ones too, and pull them into ScadBuddy's own, once "
+        "(the spool "
         "refresh Schedule does the same). A BB spool already linked takes the fields BB changed "
         "since the last pull, unless ScadBuddy changed that field later; a change of what is "
         "left is a `bb` reading unless the spool's weight is locked. "
@@ -1448,6 +1449,9 @@ async def move_spool(
         "for a tag a linked ScadBuddy spool holds makes no spool (`rfid_duplicates` and "
         "`rfid_duplicate_bb_ids` name it, and it stays skipped). Never writes to Bambuddy. "
         "An archived ScadBuddy spool is never restored or changed; it is listed as `archived`. "
+        "A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived "
+        "spool (Bambuddy's archive time, what is left, its usage rows), counted in `created` "
+        "and in `archived_created`; Bambuddy archiving a linked spool changes nothing. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
         "still needing a type and archived, the BB spool ids it could not pull, the count "
         "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "

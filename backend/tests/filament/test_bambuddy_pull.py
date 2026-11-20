@@ -1019,6 +1019,161 @@ def test_a_linked_spool_archived_in_sb_takes_nothing(pg_pool: PgPool) -> None:
     assert len(f.spools.events(made)) == count
 
 
+ARCHIVED_AT = datetime(2026, 11, 12, 8, 0, tzinfo=UTC)
+
+
+def _archived_bb(**over: Any) -> BbSpool:
+    """A BB spool Bambuddy archived before any pull saw it (#6707: BB 125, used up)."""
+    return bb(
+        **{
+            "id": 125,
+            "weight_used": 1020.93,
+            "archived_at": "2026-11-12T08:00:00",
+            "updated_at": "2026-11-12T08:00:00",
+        }
+        | over
+    )
+
+
+def test_an_archived_unlinked_bb_spool_is_made_archived(pg_pool: PgPool) -> None:
+    """#6707: Bambuddy's archived spool comes in archived, at BB's time, linked, with what
+    is left as BB says (never below 0), and is never offered for loading."""
+    f = _filament(pg_pool)
+    report = pull(f, [_archived_bb()], now=NOW)
+    (made,) = report.created_ids
+    assert (report.created, report.archived_created, report.archived) == (1, 1, 0)
+    assert f.spools.list() == []
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.archived_at == ARCHIVED_AT
+    assert spool.grams_left == 0
+    # An archived spool holds no tag: the tag is free to re-use.
+    assert f.spools.open_binding(made) is None
+    events = f.spools.events(made)
+    assert [e.kind for e in events] == ["created", "synced_from_bb", "archived"]
+    assert (events[0].source, events[0].grams_after) == ("bb", 0)
+    assert events[-1].at == ARCHIVED_AT
+    with pg_pool.connection() as conn:
+        link = conn.execute(
+            "SELECT bb_spool_id FROM filament_bb_links WHERE spool_id = %s", (made,)
+        ).fetchone()
+    assert link == {"bb_spool_id": 125}
+
+
+def test_a_second_pull_of_an_archived_bb_spool_makes_nothing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [_archived_bb()], now=NOW).created_ids
+    count = len(f.spools.events(made))
+    again = pull(f, [_archived_bb()], now=NOW)
+    assert (again.created, again.archived_created, again.archived_ids) == (0, 0, [made])
+    assert len(f.spools.events(made)) == count
+    with pg_pool.connection() as conn:
+        spools = conn.execute("SELECT count(*) AS n FROM filament_spools").fetchone()
+    assert spools == {"n": 1}
+
+
+def test_an_archived_bb_spool_keeps_what_is_left_and_no_label_is_none_left(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    unlabelled = {"id": 126, "label_weight": 0, "tray_uuid": None, "tag_uid": None}
+    left, none = pull(
+        f, [_archived_bb(weight_used=250.0), _archived_bb(**unlabelled)], now=NOW
+    ).created_ids
+    assert [(s.id, s.grams_left) for s in f.spools.list(include_archived=True)] == [
+        (left, 750),
+        (none, 0),
+    ]
+
+
+def test_an_archived_bb_spool_takes_its_type_or_needs_one(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    kind = f.types.create(
+        SpoolTypeCreate(
+            code="GFA00-RED", material_id=_pla(pg_pool), rgba="#FF0000FF", label_weight_g=1000
+        )
+    )
+    other = {"id": 126, "brand": "Other", "tray_uuid": None, "tag_uid": None}
+    report = pull(f, [_archived_bb(material_number="GFA00-RED"), _archived_bb(**other)], now=NOW)
+    typed, untyped = report.created_ids
+    assert report.needs_type_ids == [untyped]
+    types = {s.id: s.type_id for s in f.spools.list(include_archived=True)}
+    assert types == {typed: kind.id, untyped: None}
+
+
+def test_reading_archived_rows_changes_nothing_for_a_linked_spool(pg_pool: PgPool) -> None:
+    """#6707 R-6707-3: a linked spool keeps today's behaviour when BB archives it: SB's
+    spool stays open and takes nothing new."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
+    count = len(f.spools.events(made))
+    archived = bb(archived_at=_bb_time(-1), updated_at=_bb_time(-1))
+    report = pull(f, [archived], now=NOW)
+    assert (report.created, report.updated, report.archived_created) == (0, 0, 0)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.archived_at is None
+    assert spool.grams_left == 900
+    assert len(f.spools.events(made)) == count
+
+
+def test_an_archived_bb_duplicate_of_a_linked_tag_makes_no_spool(pg_pool: PgPool) -> None:
+    """A BB spool Bambuddy added for a tag a linked SB spool holds stays skipped when it is
+    archived too (#6264): no second spool, archived or not, for one physical spool."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb()], now=NOW).created_ids
+    report = pull(f, [bb(), _archived_bb(id=8, weight_used=0.0)], now=NOW)
+    assert (report.created, report.rfid_duplicate_bb_ids) == (0, [8])
+    assert [s.id for s in f.spools.list(include_archived=True)] == [made]
+
+
+def test_the_live_bb_record_of_a_tag_is_linked_before_an_archived_one(pg_pool: PgPool) -> None:
+    """R-6707-13: when an archived and a live BB record carry one tag, the live one is
+    linked to the SB spool that holds it, and the archived one is the RFID duplicate,
+    even when BB lists the archived one first. So the live record's weight reaches SB."""
+    f = _filament(pg_pool)
+    held = f.spools.create(
+        SpoolCreate(material_id=_pla(pg_pool), grams_left=500, note="mine"), actor="ann"
+    )
+    f.spools.bind_tag(held.id, tray_uuid=TRAY, kind="bambu_mifare", actor="ann")
+    report = pull(f, [_archived_bb(id=8), bb(id=9)], now=NOW)
+    assert (report.linked_ids, report.rfid_duplicate_bb_ids) == ([held.id], [8])
+    assert (report.created, report.archived_created) == (0, 0)
+    with pg_pool.connection() as conn:
+        link = conn.execute(
+            "SELECT bb_spool_id FROM filament_bb_links WHERE spool_id = %s", (held.id,)
+        ).fetchone()
+    assert link == {"bb_spool_id": 9}
+    (spool,) = f.spools.list(include_archived=True)
+    assert (spool.id, spool.archived_at) == (held.id, None)
+
+
+def test_an_archived_bb_record_of_a_live_records_tag_makes_no_spool(pg_pool: PgPool) -> None:
+    """R-6707-13: with no SB spool holding the tag, the live record is made and the
+    archived copy of its tag is skipped, whatever BB's order."""
+    f = _filament(pg_pool)
+    report = pull(f, [_archived_bb(id=8), bb(id=9)], now=NOW)
+    (made,) = report.created_ids
+    assert (report.archived_created, report.rfid_duplicate_bb_ids) == (0, [8])
+    assert [(s.id, s.archived_at) for s in f.spools.list(include_archived=True)] == [(made, None)]
+
+
+async def test_the_pull_reads_bambuddys_archived_spools(pg_pool: PgPool) -> None:
+    """#6707 R-6707-1: the import and the Schedule's pull ask for the archived rows."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock() as router:
+        spools = router.get(
+            f"{BB}/api/v1/inventory/spools", params={"include_archived": "true"}
+        ).respond(json=[_archived_bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=[])
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        report = await read_and_pull(f, settings)
+        assert (report.created, report.archived_created) == (1, 1)
+        assert await scheduled_pull(f, lambda: settings, FilamentSync) == "pulled"
+        assert spools.call_count == 2
+
+
 def test_two_bb_spools_with_one_tag_make_one_spool_and_count_the_second(
     pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:

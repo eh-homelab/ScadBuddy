@@ -801,8 +801,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `colour_codes.py` (`ColourCodes`, Bambu Studio's `filaments_color_codes.json` read from
   `slicer_profiles_dir`/`BBL/filament/`, cached per process; `GET /filament/bambu-colour-codes?code=`
   answers 404 for an unknown code and 503 for a missing table), `InvoiceStore.candidates` (`GET
-  /filament/invoices/{id}/candidates`: per line, the open spools whose own `cost_per_kg` is NULL and
-  which have no invoice line, and the costed ones, matched by effective material and RGBA), and
+  /filament/invoices/{id}/candidates`: per line, the spools (archived ones too, marked `archived`)
+  whose own `cost_per_kg` is NULL and which have no invoice line, and the costed ones, matched by
+  effective material and RGBA; confirm may fill an archived spool, which takes its cost and invoice
+  line only and stays archived, #6707), and
   `InvoicePatch.import_run_id` with the conditional `if_import_run_id` (one UPDATE under the invoice's
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration

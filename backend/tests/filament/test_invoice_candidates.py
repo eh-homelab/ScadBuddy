@@ -48,7 +48,8 @@ def test_candidates_split_uncosted_and_costed(pg_pool: PgPool) -> None:
     )
     (line,) = _candidates(shop, invoice.id)
     assert line.position == invoice.lines[0].position
-    assert [s.number for s in line.uncosted] == [bare]
+    # An archived spool was still bought (#6707 R-6707-12): it is listed, marked archived.
+    assert [(s.number, s.archived) for s in line.uncosted] == [(bare, False), (gone.number, True)]
     assert [s.number for s in line.costed] == [priced]
     assert line.costed[0].cost_per_kg == D("21.5")
     # A costed spool with no invoice line may still be filled (#6700, R-6700-1).

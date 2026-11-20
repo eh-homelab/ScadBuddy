@@ -251,6 +251,106 @@ async def test_a_pull_books_bambuddys_usage_rows(pg_pool: PgPool) -> None:
     assert event.data["bb_archive_id"] == 248
 
 
+async def test_an_archived_bb_spool_comes_in_with_its_usage(pg_pool: PgPool) -> None:
+    """#6707: a BB spool Bambuddy archived before any pull is made archived, and its usage
+    rows are booked (with their archive) under the reading it was made with, which still
+    sets what is left. A second pull makes and books nothing."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    done = T1 + timedelta(minutes=5)
+    spent = bb(
+        id=125, weight_used=1020.93, archived_at=_naive(done), updated_at=_naive(done)
+    ).model_dump(mode="json")
+    rows = [
+        usage(id=1, spool_id=125, weight_used=600.0, created_at=_naive(T0)).model_dump(mode="json"),
+        usage(id=2, spool_id=125, weight_used=420.93).model_dump(mode="json"),
+    ]
+    ended = _naive(T1 + timedelta(seconds=0.9))
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[spent])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(
+            json=[{"id": 248, "printer_id": 1, "completed_at": ended}]
+        )
+        report = await read_and_pull(f, settings)
+        again = await read_and_pull(f, settings)
+    (spool,) = report.created_ids
+    assert (report.archived_created, report.usage_booked, report.usage_unlinked) == (1, 2, 0)
+    events = _usage_events(f, spool)
+    assert sorted((e.ref_id, e.delta_g) for e in events) == [("1", -600.0), ("2", -420.93)]
+    assert {e.ref_id: e.data["bb_archive_id"] for e in events} == {"1": None, "2": 248}
+    got = f.spools.get(spool)
+    assert got is not None and got.archived_at == done
+    assert _left(f, spool) == 0
+    assert (again.created, again.archived_created, again.usage_booked) == (0, 0, 0)
+    assert len(_usage_events(f, spool)) == 2
+
+
+async def test_an_archived_bb_spool_with_a_row_after_its_updated_at_keeps_bbs_value(
+    pg_pool: PgPool,
+) -> None:
+    """R-6707-14: BB may not move ``updated_at`` for every change, so a usage row can be
+    later than it. BB's ``weight_used`` holds that row already, so grams left stays
+    label - used (1000 - 600), and that row is not taken off again."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    spent = bb(id=125, weight_used=600.0, archived_at=_naive(T1), updated_at=_naive(T1)).model_dump(
+        mode="json"
+    )
+    late = T1 + timedelta(hours=1)
+    rows = [
+        usage(id=1, spool_id=125, weight_used=400.0, created_at=_naive(T0)).model_dump(mode="json"),
+        usage(id=2, spool_id=125, weight_used=200.0, created_at=_naive(late)).model_dump(
+            mode="json"
+        ),
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[spent])
+        router.get(f"{BB}/api/v1/inventory/usage").respond(json=rows)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        report = await read_and_pull(f, settings)
+    (spool,) = report.created_ids
+    assert report.usage_booked == 2
+    assert _left(f, spool) == 400
+    # The row keeps its own time; the reading and the archive are not earlier than it.
+    events = f.spools.events(spool)
+    assert {e.ref_id: e.at for e in events if e.ref_kind == ledger.BB_USAGE} == {
+        "1": T0,
+        "2": late,
+    }
+    assert [e.at for e in events if e.kind in ("created", "archived")] == [late, late]
+    got = f.spools.get(spool)
+    assert got is not None and got.archived_at == T1
+
+
+def test_an_archived_bb_spools_link_keeps_bbs_own_updated_at(pg_pool: PgPool) -> None:
+    """R-6707-17: a later usage row times the reading only. The link keeps BB's own
+    ``updated_at``, so once a person unarchives the spool in SB, a BB edit made after that
+    time (but before the row) still reaches SB."""
+    f = _filament(pg_pool)
+    late = T1 + timedelta(hours=1)
+    spent = {"id": 125, "weight_used": 600.0, "archived_at": _naive(T1)}
+    rows = [usage(id=2, spool_id=125, weight_used=200.0, created_at=_naive(late))]
+    (spool,) = pull(f, [bb(**spent, updated_at=_naive(T1))], now=NOW, usage=rows).created_ids
+    f.spools.archive(spool, False, actor="ann")
+    edited = bb(**spent, updated_at=_naive(T1 + timedelta(minutes=30)), color_name="Crimson")
+    report = pull(f, [edited], now=NOW)
+    assert report.updated_ids == [spool]
+    got = f.spools.get(spool)
+    assert got is not None and got.colour_name == "Crimson"
+
+
+def test_a_spool_archived_in_sb_still_books_no_earlier_usage(pg_pool: PgPool) -> None:
+    """Only a spool the pull made archived books the rows before its reading: one a person
+    archived keeps the rule of any linked spool."""
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    f.spools.archive(spool, True, actor="ann")
+    assert _book(f, [usage(created_at=_naive(T0 - timedelta(hours=1)))]).booked == 0
+
+
 async def test_the_archive_read_reaches_back_to_the_oldest_row_booked(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     spool = _linked(f)
@@ -358,6 +458,42 @@ async def test_a_failed_usage_read_leaves_the_pull_standing(
         report = await read_and_pull(f, settings)
     assert (report.created, report.usage_booked) == (1, 0)
     assert "could not read Bambuddy's usage rows" in caplog.text
+
+
+async def test_a_failed_usage_read_defers_a_new_archived_spool(pg_pool: PgPool) -> None:
+    """R-6707-16: with no usage rows, an archived BB spool is not made: its reading could
+    not be timed after its rows, so a row would be taken off twice. The live spool is
+    made as always, and the next pull that reads the rows makes the archived one."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    spent = bb(id=125, weight_used=600.0, archived_at=_naive(T1), updated_at=_naive(T1)).model_dump(
+        mode="json"
+    )
+    late = T1 + timedelta(hours=1)
+    rows = [
+        usage(id=1, spool_id=125, weight_used=400.0, created_at=_naive(T0)).model_dump(mode="json"),
+        usage(id=2, spool_id=125, weight_used=200.0, created_at=_naive(late)).model_dump(
+            mode="json"
+        ),
+    ]
+    live = bb(id=7).model_dump(mode="json")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[spent, live])
+        usage_route = router.get(f"{BB}/api/v1/inventory/usage")
+        usage_route.respond(503)
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        first = await read_and_pull(f, settings)
+        usage_route.respond(json=rows)
+        second = await read_and_pull(f, settings)
+    (made_live,) = first.created_ids
+    assert (first.archived_created, first.archived_deferred) == (0, 1)
+    assert first.archived_deferred_bb_ids == [125]
+    assert [s.id for s in f.spools.list()] == [made_live]
+    (spool,) = second.created_ids
+    assert (second.archived_created, second.archived_deferred) == (1, 0)
+    assert second.usage_booked == 2
+    assert _left(f, spool) == 400
 
 
 async def test_a_failed_archive_read_still_books_the_rows(

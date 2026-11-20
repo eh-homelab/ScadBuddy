@@ -41,7 +41,7 @@ Row = Mapping[str, Any]
 _Ids = list[UUID]
 _Invoices = list[pm.Invoice]
 _Candidates = list[pm.LineCandidates]
-_Claimed = list[tuple[UUID, int | None, Decimal | None]]
+_Claimed = list[tuple[UUID, int | None, Decimal | None, bool]]
 _Made = dict[str, tuple[UUID, int]]
 _SKU_MAX = 128
 _LINE_BOUNDS = "a line is out of range: its spool list, its total or the invoice total"
@@ -249,16 +249,17 @@ class InvoiceStore:
         return pm.Invoice.model_validate(fields)
 
     def candidates(self, invoice_id: UUID) -> _Candidates | None:
-        """Per line, the open (unarchived) spools that match its type, or its proposed
-        type, by effective material and exact RGBA, split by whether the spool's own purchase
-        is known: an own cost or an invoice line. A type's cost is a default, not a
-        purchase. A costed spool names its invoice line, if it has one: one without may be
-        filled, and the line's cost replaces its own (#6700). A line with neither type has
-        none. None for no such invoice (#6267)."""
+        """Per line, the spools that match its type, or its proposed type, by effective
+        material and exact RGBA, split by whether the spool's own purchase is known: an own
+        cost or an invoice line. A type's cost is a default, not a purchase. A costed spool
+        names its invoice line, if it has one: one without may be filled, and the line's cost
+        replaces its own (#6700). An archived spool is listed too, marked: a used-up spool
+        was still bought (#6707). A line with neither type has none. None for no such invoice
+        (#6267)."""
         invoice = self.get(invoice_id)
         if invoice is None:
             return None
-        open_spools = self._spools.list()
+        spools = self._spools.list(include_archived=True)
         found: _Candidates = []
         for line in invoice.lines:
             key = self._line_key(line)
@@ -274,9 +275,10 @@ class InvoiceStore:
                         cost_per_kg=s.effective.cost_per_kg,
                         grams_left=s.grams_left,
                         invoice_line_id=s.invoice_line_id,
+                        archived=s.archived_at is not None,
                     ),
                 )
-                for s in open_spools
+                for s in spools
                 if key is not None and (s.effective.material_id, s.effective.rgba) == key
             ]
             found.append(
@@ -603,15 +605,21 @@ class InvoiceStore:
         known = self._claimed(conn, line, type_id)
         touched: _Ids = []
         try:
-            for spool_id, own_label_g, own_cost in known:
+            for spool_id, own_label_g, own_cost, archived in known:
                 grams = own_label_g or label_g
                 cost = spool_cost_per_kg(line["allocated_cost"], line["quantity"], grams)
+                # An archived spool takes its cost and line only, and stays archived (#6707).
+                patch = (
+                    m.SpoolPatch(cost_per_kg=cost)
+                    if archived
+                    else m.SpoolPatch(type_id=type_id, cost_per_kg=cost)
+                )
                 # A spool with its own cost is replaced at the person's word (#6700), so its
                 # `edited` event, which records the old and new cost, is theirs.
                 self._spools.update_on(
                     conn,
                     spool_id,
-                    m.SpoolPatch(type_id=type_id, cost_per_kg=cost),
+                    patch,
                     actor=who if own_cost is None else actor,
                     ref_kind=_REF_KIND,
                     ref_id=line["id"],
@@ -742,8 +750,9 @@ class InvoiceStore:
     @staticmethod
     def _claimed(conn: Conn, line: Row, type_id: UUID) -> _Claimed:
         """The spools the line fills in, each with its own label weight and its own cost, if
-        it has them; every one is checked first (Decision 11). A spool with its own cost but
-        no invoice line is filled, and the line's cost replaces its own (#6700, R-6700-1)."""
+        it has them, and whether it is archived; every one is checked first (Decision 11). A
+        spool with its own cost but no invoice line is filled, and the line's cost replaces
+        its own (#6700, R-6700-1). An archived (used-up) spool may be filled too (#6707)."""
         position: int = line["position"]
         ids: _Ids = line["update_spool_ids"]
         if not ids:
@@ -767,14 +776,19 @@ class InvoiceStore:
             row = rows.get(spool_id)
             if row is None:
                 reason = "does not exist"
-            elif row["archived_at"] is not None:
-                reason = "is archived"
             elif row["invoice_line_id"] is not None:
                 reason = "already belongs to an invoice line"
             elif row["type_id"] is not None and row["type_id"] != type_id:
                 reason = "has another spool type"
             else:
-                known.append((spool_id, row["label_weight_g"], row["cost_per_kg"]))
+                known.append(
+                    (
+                        spool_id,
+                        row["label_weight_g"],
+                        row["cost_per_kg"],
+                        row["archived_at"] is not None,
+                    )
+                )
                 continue
             raise InvoiceLineError(position, f"spool {spool_id} {reason}")
         return known

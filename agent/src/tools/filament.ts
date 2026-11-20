@@ -1239,13 +1239,19 @@ export const filamentTools: Tool[] = [
     name: 'filament_bambuddy_import',
     label: "Import Bambuddy's spools",
     description:
-      "Pull Bambuddy's unarchived spools into ScadBuddy's own inventory once (the spool refresh Schedule also " +
+      "Pull Bambuddy's spools, archived ones too, into ScadBuddy's own inventory once (the spool refresh Schedule also " +
       'does this). A linked spool takes what Bambuddy changed since the last pull, unless ScadBuddy changed that ' +
       'field later. A Bambuddy spool whose tag or record a ScadBuddy spool already holds is linked. Any other ' +
       'becomes a new spool, typed by `material_number`, else by brand, material, subtype, colour and label weight, ' +
       'else left needing a type. An archived ScadBuddy spool is never restored or changed (listed as `archived`). ' +
+      'A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived spool with its usage, counted ' +
+      'in `created` and `archived_created`. When the usage rows cannot be read, such a spool is not made yet ' +
+      '(`archived_deferred`, with its Bambuddy id); a later pull makes it. ' +
       'Returns the counts and ids created, linked, updated, still needing a type and archived, and the Bambuddy ' +
-      'rows it could not read (`invalid`). ' +
+      'rows it could not read (`invalid`) or pull (`failed_bb_ids`). Also: `rfid_duplicates` (Bambuddy spools made ' +
+      'for a tag a linked spool holds, left alone), `catalog_failed` and `catalog_skipped` (Bambuddy\'s spool ' +
+      'catalog), `names_skipped` (catalog names with no letter or digit, left out), and `usage_booked` and ' +
+      '`usage_unlinked` (Bambuddy usage rows booked, and those of an unlinked spool). ' +
       '409 when no Bambuddy is configured. Reads Bambuddy, writes ScadBuddy only.',
     input: z.object({}),
     risk: 'write',

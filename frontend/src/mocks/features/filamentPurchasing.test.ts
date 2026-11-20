@@ -225,10 +225,24 @@ describe('the purchasing mocks', () => {
       expect(edited[0]!.data).toEqual({ changes: { cost_per_kg: ['10', '15.0000'] } })
     })
 
-    it('refuses an archived, invoiced or other-type spool, too many ids and a duplicate, naming the line', async () => {
+    it('fills an archived spool with the line cost only: it stays archived and keeps its type (#6707)', async () => {
+      resetMockState()
+      const spent = spoolId(19)
+      const before = await getSpool(spent)
+      expect(before.archived_at).not.toBeNull()
+      const done = await confirmInvoice((await draft([spent], 2, T.INLAND_BLACK)).id)
+      const [filled, made] = done.lines[0]!.spool_ids
+      expect(filled).toBe(spent)
+      const after = await getSpool(spent)
+      expect(after.archived_at).toBe(before.archived_at)
+      expect(after.type_id).toBe(before.type_id)
+      expect(after.cost_per_kg).toBe((await getSpool(made!)).cost_per_kg)
+      expect(after.cost_per_kg).not.toBe(before.cost_per_kg)
+    })
+
+    it('refuses an invoiced or other-type spool, too many ids and a duplicate, naming the line', async () => {
       resetMockState()
       const cases: [string[], string, number?][] = [
-        [[spoolId(19)], 'is archived'],
         [[spoolId(1)], 'already belongs to an invoice line'],
         [[spoolId(9)], 'has another spool type'],
         [[spoolId(6), spoolId(6)], 'it names a spool twice'],

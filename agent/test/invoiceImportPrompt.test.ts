@@ -17,6 +17,12 @@ describe('invoiceImportPrompt', () => {
     expect(prompt).toMatch(/uncosted candidates first, then costed ones/i)
   })
 
+  // #6707 R-6707-12: a used-up spool was still bought.
+  it('lets a line fill an archived (used-up) spool, which stays archived', () => {
+    expect(prompt).toMatch(/archived \(used-up\) spool/i)
+    expect(prompt).toMatch(/stays archived/i)
+  })
+
   it('never links a spool that already has an invoice line', () => {
     expect(prompt).toMatch(/never offer a spool that has an invoice_line_id/i)
   })
