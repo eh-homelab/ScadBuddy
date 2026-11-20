@@ -10,6 +10,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
@@ -252,6 +253,9 @@ class PackRequest(BaseModel):
     #: False (Arrange): always pack onto plates, even one object with one copy, so the
     #: writer applies `colours`. True keeps phase 4's shortcut for a pipeline's lone part.
     allow_own: bool = True
+    #: Arrange's prime tower (#3770): ``enabled`` false reserves no tower on any plate;
+    #: omitted reserves one on each plate with more than one colour.
+    prime_tower: PrimeTowerChoice | None = None
 
 
 class OutputRequest(BaseModel):
@@ -270,6 +274,9 @@ class OutputRequest(BaseModel):
     #: The filament order to keep (slot N = colours[N-1]); Arrange passes the order the
     #: plan was chosen against. Empty: first appearance, as phase 4 wrote it.
     colours: list[str] = Field(default_factory=list)
+    #: Arrange's prime tower (#3770), as `PackRequest` packed for: the writer places
+    #: and states it the same way.
+    prime_tower: PrimeTowerChoice | None = None
 
 
 #: `pipeline_version` of an arranged output's record: no template code ran.
@@ -293,6 +300,10 @@ class ArrangeInputs(BaseModel):
     #: What the request asked for that the arrange leaves out (a planned spool whose
     #: colour no copy prints in): the job's `warnings` (`api/jobs.py` `_job_status`).
     notes: list[str] = Field(default_factory=list)
+    #: The print's prime tower (#3770): ``enabled`` false packs and writes no tower;
+    #: omitted (every job queued before it) reserves one per plate with more than one
+    #: colour.
+    prime_tower: PrimeTowerChoice | None = None
 
 
 class OutputRef(BaseModel):

@@ -77,6 +77,13 @@ dev = [
     "moto[server]>=5.1",
     "types-aiobotocore[s3]>=2.21,<4",
     "pyftpdlib[ssl]>=2.2",
+    # The 3DFP driver's tests and mypy need Playwright for Python (not its browser).
+    {include-group = "profile-fetch"},
+]
+# The profile-fetch worker's browser driver (#6625, plan Decision 4): only its image
+# installs this group, so the app image does not carry Playwright. Pinned exactly.
+profile-fetch = [
+    "playwright==1.64.1",
 ]
 
 [tool.ruff]
@@ -122,6 +129,7 @@ markers = [
     "rack_injects_errors: the test injects a non-API error into a rack fallback (the pick, the /check preview, the usage read, or the store's seen, picks and settle writes) on purpose; it blinds the guard to every fallback in the test, so inject an expected type (ApiError, psycopg.OperationalError) instead when that proves the same point",
     "requires_fixtures: needs the Git LFS files under test-fixtures/ (git lfs pull), or SCADBUDDY_TEST_FIXTURES naming where they are",
     "requires_slicer_profiles: needs Bambu Studio's BBL profiles under SCADBUDDY_SLICER_PROFILES_DIR (the app and test images ship them at /opt/slicer-profiles)",
+    "requires_chromium: needs Playwright's Chromium (`uv run playwright install chromium`); skips without it, fails when SCADBUDDY_TEST_CHROMIUM_REQUIRED=1",
     "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER (a temporal CLI) or a temporal CLI on PATH",
     "sb_offset(n): `recorded_sb_spools` numbers each SB spool as its Bambuddy id plus n, so a route that passes an SB number to Bambuddy unmapped fails (#6262 Task 7 review I5)",
     "agent_migrations: the app applies the agent's migrations at start, as in production (#5299); without it the tests' apps skip them (tests/conftest.py)",

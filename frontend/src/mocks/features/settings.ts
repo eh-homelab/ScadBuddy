@@ -238,6 +238,13 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'filament_sync' && !String((value as { weights?: unknown } | null)?.weights ?? 'bb_to_sb').match(/^(off|bb_to_sb)$/)) {
       return refused(name, "Input should be 'off' or 'bb_to_sb'")
     }
+    // #6625 — `profile_fetch_nozzles`: the resolver's sizes, at least one, each once.
+    if (name === 'profile_fetch_nozzles' && value !== null) {
+      const list = Array.isArray(value) ? (value as unknown[]) : []
+      if (list.length === 0) return refused(name, 'List should have at least 1 item after validation, not 0')
+      if (list.some((one) => !['0.2', '0.4', '0.6', '0.8'].includes(String(one)))) return refused(name, "Input should be '0.2', '0.4', '0.6' or '0.8'")
+      if (new Set(list).size !== list.length) return refused(name, 'Value error, profile_fetch_nozzles lists each nozzle once')
+    }
     if (name === 'filament_low_stock_pct' && typeof value === 'number' && value > 100) {
       return refused(name, 'Input should be less than or equal to 100')
     }

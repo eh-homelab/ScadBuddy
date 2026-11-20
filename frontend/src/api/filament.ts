@@ -214,6 +214,24 @@ export const listTypeProposals = () => request<TypeProposals>(`${BASE}/type-prop
 export const confirmTypeProposals = (groups: TypeProposalPick[]) =>
   request<TypeProposalResult>(`${BASE}/type-proposals/confirm`, json('POST', { groups }))
 
+// -- 3DFP preset fetch (#6625) ---------------------------------------------------------
+
+export type ProfileFetch = Schemas['ProfileFetch']
+export type ProfileFetchStarted = Schemas['ProfileFetchStarted']
+export type ProfileFetchStatus = Schemas['ProfileFetchStatus']
+export type MissingKey = Schemas['MissingKey']
+
+/**
+ * Starts a fetch of the type's presets from 3dfilamentprofiles.com (its saved `tdfp_id`),
+ * or joins the one that runs (`joined`). 422 `no_tdfp_id` or `no_printer_models`; 503 when
+ * the fetch could not be started.
+ */
+export const startProfileFetch = (typeId: string) =>
+  request<ProfileFetchStarted>(`${BASE}/types/${seg(typeId)}/profile-fetch`, { method: 'POST' })
+
+/** The type's last fetch (`run`, null when it never had one) and the keys it has no preset for (`gaps`). */
+export const getProfileFetch = (typeId: string) => request<ProfileFetchStatus>(`${BASE}/types/${seg(typeId)}/profile-fetch`)
+
 // -- catalogs, locations ----------------------------------------------------------------
 
 export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeArchived?: boolean } = {}) =>
