@@ -1,3 +1,5 @@
+import { fromScaled } from '../../../lib/decimal'
+
 /** The smallest round number at or above `max` (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 × 10ⁿ). */
 export function niceMax(max: number): number {
   if (!(max > 0)) return 1
@@ -23,4 +25,17 @@ export function yScale(values: readonly number[]): { lo: number; hi: number; gri
     const lo = floor === min ? floor - half : floor
     if (lo + 2 * half >= max) return { lo, hi: lo + 2 * half, grid: [lo, lo + half, lo + 2 * half] }
   }
+}
+
+/**
+ * An axis tick (a round number `niceMax` and `yScale` give: a whole count of a power of ten)
+ * as its exact decimal string, so money text goes through `lib/decimal.ts` and never
+ * `toFixed` (R-T8-2). The float's last-bit noise (`0.30000000000000004`) is dropped.
+ */
+export function tickDecimal(value: number): string {
+  for (let places = 0; places < 8; places++) {
+    const scaled = value * 10 ** places
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-6) return fromScaled(BigInt(Math.round(scaled)), places)
+  }
+  return fromScaled(BigInt(Math.round(value * 1e8)), 8)
 }

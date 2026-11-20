@@ -18,6 +18,10 @@ import {
   groupSpools,
   readQuery,
   readStoredColumns,
+  rememberedSpoolsView,
+  rememberingSpoolsView,
+  rememberSpoolsView,
+  setRememberingSpoolsView,
   sortSpools,
   storeColumns,
   writeQuery,
@@ -27,6 +31,7 @@ import {
   type SpoolsStatus,
 } from '../../components/filament/spoolsQuery'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -117,13 +122,25 @@ const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 
 
 /**
  * #6262 — the Spools tab: the inventory in tiles, then every spool as a dense table, as
- * cards or as a forecast (#6269: when each runs out, and the types to reorder), filtered, grouped and sorted from the URL (`spoolsQuery.ts`). Select spools to
+ * cards or as a forecast (#6269: when each runs out, and the types to reorder), filtered, grouped and sorted from the URL (`spoolsQuery.ts`).
+ * "Remember my view" makes a visit with no query open the last view (R-T8-10). Select spools to
  * archive, restore, delete, move or type them; export what is shown as CSV, or import a
  * CSV (`SpoolImport`).
  */
 export function SpoolsTab() {
   const [params, setParams] = useSearchParams()
-  const q = useMemo(() => readQuery(params, readStoredColumns() ?? DEFAULT_COLUMNS), [params])
+  const [restore, setRestore] = useState(() => (params.size === 0 ? rememberedSpoolsView() : null))
+  const [keeping, setKeeping] = useState(rememberingSpoolsView)
+  const q = useMemo(() => {
+    const read = readQuery(params, readStoredColumns() ?? DEFAULT_COLUMNS)
+    return params.size === 0 && restore ? { ...read, view: restore } : read
+  }, [params, restore])
+
+  useEffect(() => {
+    if (restore === null) return
+    setRestore(null)
+    if (params.size === 0) setParams(writeQuery(q), { replace: true })
+  }, [restore, params, setParams, q])
   const [data, setData] = useState<Loaded | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
@@ -155,6 +172,7 @@ export function SpoolsTab() {
     const merged = { ...q, ...next }
     for (const key of Object.keys(next) as (keyof SpoolsQuery)[]) if (next[key] === undefined) delete merged[key]
     setParams(writeQuery(merged), { replace: true })
+    if (next.view) rememberSpoolsView(next.view)
   }
 
   const typeCodes = useMemo(() => new Map((data?.types ?? []).map((type) => [type.id, type.code])), [data])
@@ -255,6 +273,17 @@ export function SpoolsTab() {
             <CalendarClockIcon className="size-4" />
           </button>
         </div>
+        <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <Switch
+            size="sm"
+            checked={keeping}
+            onCheckedChange={(on) => {
+              setKeeping(on)
+              setRememberingSpoolsView(on, q.view)
+            }}
+          />
+          Remember my view
+        </label>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="outline">
@@ -415,7 +444,7 @@ export function SpoolsTab() {
         />
       )}
       {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} />}
-      {data && shown.length > 0 && q.view === 'forecast' && <SpoolForecast spools={shown} />}
+      {data && q.view === 'forecast' && <SpoolForecast spools={shown} />}
 
       <SpoolImport
         open={importing}

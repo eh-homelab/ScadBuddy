@@ -5,6 +5,7 @@ import { getForecast, getMetrics, getPurchasingMetrics, type Forecast, type Inve
 import { BarList } from '../../components/filament/charts/BarList'
 import { ColumnChart, type Column, type ColumnSeries } from '../../components/filament/charts/ColumnChart'
 import { LineChart } from '../../components/filament/charts/LineChart'
+import { tickDecimal } from '../../components/filament/charts/scale'
 import { TD, TH } from '../../components/filament/formClasses'
 import {
   BUCKETS,
@@ -35,13 +36,35 @@ import { cn } from '@/lib/utils'
 const DIMENSION_TITLES: Record<Dimension, string> = { material: 'Material', brand: 'Brand', type: 'Type', supplier: 'Supplier', location: 'Location' }
 const BUCKET_TITLES: Record<MetricsBucket, string> = { week: 'Weeks', month: 'Months' }
 const WASTE_TITLES = { material: 'By material', type: 'By type', printer: 'By printer' } as const
-/** The categorical series in their fixed order (`index.css` `--sb-series-*`); every value past them folds into "Other". */
-const SERIES_COLOURS = ['text-series-1', 'text-series-2', 'text-series-3', 'text-series-4'] as const
+/**
+ * The categorical series in their fixed order (`index.css` `--sb-series-*`): the palette's
+ * first three slots, its all-pairs cap, because zero segments are skipped and any two can
+ * touch (R-T8-4). Every value past them folds into "Other".
+ */
+const SERIES_COLOURS = ['text-series-1', 'text-series-2', 'text-series-3'] as const
 const OTHER = '__other__'
+/** The range the colours are ranked over: the widest, so every range's values are in it (R-T8-1). */
+const RANK_RANGE = '365d'
 
 const g = (value: number) => `${grams(value)} g`
 const percent = (rate: number) => `${Math.round(rate * 100)}%`
 const message = (cause: unknown, what: string) => (cause instanceof ApiError ? cause.detail : `${what} could not be loaded. Try again.`)
+
+/** A price day's epoch ms (UTC midnight) as its calendar day, wherever the viewer is (R-T8-3). */
+const priceDayText = (at: number) => new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+const priceDayTitle = (at: number) => dayText(new Date(at).toISOString().slice(0, 10))
+
+/** The dimension's values by their grams used, most first: the order that gives each its colour. */
+function ranked(metrics: InventoryMetrics): string[] {
+  const totals = new Map<string, { name: string; used: number }>()
+  for (const row of metrics.consumption) {
+    const key = row.key ?? ''
+    const found = totals.get(key) ?? { name: row.label, used: 0 }
+    found.used += row.used_g
+    totals.set(key, found)
+  }
+  return [...totals.entries()].sort((a, b) => b[1].used - a[1].used || a[1].name.localeCompare(b[1].name)).map(([key]) => key)
+}
 
 const bucketLabel = (iso: string, bucket: MetricsBucket) =>
   new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, bucket === 'month' ? { month: 'short', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' })
@@ -82,9 +105,14 @@ function Segmented<T extends string>({ label, value, options, title, onChange }:
   )
 }
 
-/** The consumption as stacked columns: the four values that used most, in fixed colours, and the rest as "Other". */
-function Consumption({ metrics }: { metrics: InventoryMetrics }) {
+/**
+ * The consumption as stacked columns. The three values that used most over the last 365 days
+ * (`order`) keep their colour in every range, even where another used more in this one; the
+ * rest fold into "Other" (R-T8-1).
+ */
+function Consumption({ metrics, order }: { metrics: InventoryMetrics; order: readonly string[] }) {
   const { bucket, dimension } = metrics
+  const slots = order.slice(0, SERIES_COLOURS.length)
   const totals = new Map<string, { name: string; used: number }>()
   for (const row of metrics.consumption) {
     const key = row.key ?? ''
@@ -92,12 +120,13 @@ function Consumption({ metrics }: { metrics: InventoryMetrics }) {
     found.used += row.used_g
     totals.set(key, found)
   }
-  const ranked = [...totals.entries()].sort((a, b) => b[1].used - a[1].used || a[1].name.localeCompare(b[1].name))
-  const kept = ranked.slice(0, SERIES_COLOURS.length)
-  const folded = ranked.slice(SERIES_COLOURS.length)
-  const series: (ColumnSeries & { used: number })[] = kept.map(([key, one], i) => ({ id: key, name: one.name, colour: SERIES_COLOURS[i]!, used: one.used }))
+  const series: (ColumnSeries & { used: number })[] = slots.flatMap((key, i) => {
+    const one = totals.get(key)
+    return one ? [{ id: key, name: one.name, colour: SERIES_COLOURS[i]!, used: one.used }] : []
+  })
+  const folded = [...totals.entries()].filter(([key]) => !slots.includes(key))
   if (folded.length > 0) series.push({ id: OTHER, name: `Other (${folded.length})`, colour: 'text-series-other', used: folded.reduce((sum, [, one]) => sum + one.used, 0) })
-  const seriesOf = (key: string | null) => (kept.some(([one]) => one === (key ?? '')) ? (key ?? '') : OTHER)
+  const seriesOf = (key: string | null) => (slots.includes(key ?? '') ? (key ?? '') : OTHER)
 
   const columns: Column[] = bucketsBetween(metrics.since, metrics.until, bucket).map((first) => {
     const values: Record<string, number> = {}
@@ -169,9 +198,10 @@ export function MetricsTab() {
   const [keeping, setKeeping] = useState(rememberingMetrics)
   const money = useMoney()
   const [metrics, setMetrics] = useState<InventoryMetrics | null>(null)
+  const [rank, setRank] = useState<{ dimension: Dimension; order: string[] } | null>(null)
   const [purchasing, setPurchasing] = useState<PurchasingMetrics | null>(null)
   const [forecast, setForecast] = useState<Forecast | null>(null)
-  const [errors, setErrors] = useState<Partial<Record<'metrics' | 'purchasing' | 'forecast', string>>>({})
+  const [errors, setErrors] = useState<Partial<Record<'metrics' | 'rank' | 'purchasing' | 'forecast', string>>>({})
 
   const q: MetricsQuery = params.size === 0 && restore ? restore : parseMetricsQuery(params)
 
@@ -203,6 +233,22 @@ export function MetricsTab() {
   }, [])
 
   const { range, bucket, dimension } = q
+  // The colours' order: the dimension's values ranked over the widest range, which holds every range (R-T8-1).
+  useEffect(() => {
+    let live = true
+    getMetrics({ ...metricsRange({ range: RANK_RANGE, bucket: 'month', dimension }), bucket: 'month', dimension }).then(
+      (found) => {
+        if (!live) return
+        setRank({ dimension, order: ranked(found) })
+        setErrors(({ rank: _gone, ...rest }) => rest)
+      },
+      (cause) => live && setErrors((now) => ({ ...now, rank: message(cause, 'The consumption') })),
+    )
+    return () => {
+      live = false
+    }
+  }, [dimension])
+
   useEffect(() => {
     let live = true
     const span = metricsRange({ range, bucket, dimension })
@@ -241,6 +287,7 @@ export function MetricsTab() {
     return [...totals.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   }, [spend])
 
+  const priceUntil = Date.parse(`${metricsRange({ range, bucket: 'month', dimension: 'material' }).until}T00:00:00Z`)
   const stockValue = metrics?.stock.reduce<string | null>((sum, row) => (row.value == null ? sum : sum == null ? row.value : addDecimals(sum, row.value)), null) ?? null
   const span = metrics ? `${dayText(metrics.since)} to ${dayText(metrics.until)}` : `the last ${rangeDays(range)} days`
   const loading = <p className="text-[13px] text-muted-foreground">Loading…</p>
@@ -319,7 +366,8 @@ export function MetricsTab() {
         </Section>
 
         <Section id="metrics-consumption" title="Consumption" note={`Grams the plates used, ${span}, per ${bucket}.`}>
-          {metrics ? <Consumption metrics={metrics} /> : !errors.metrics && loading}
+          {problem(errors.rank)}
+          {metrics && rank?.dimension === metrics.dimension ? <Consumption metrics={metrics} order={rank.order} /> : !errors.metrics && !errors.rank && loading}
         </Section>
       </div>
 
@@ -361,7 +409,8 @@ export function MetricsTab() {
                 const last = series.points[series.points.length - 1]!
                 const first = series.points[0]!
                 const name = `${series.type_label} at ${series.supplier_name}`
-                const price = (value: number) => money.format(value.toFixed(2), series.currency)
+                // Text comes from the decimal strings, never a float (R-T8-2): an axis tick is a round number `tickDecimal` writes exactly.
+                const tick = (value: number) => money.format(tickDecimal(value), series.currency)
                 return (
                   <li key={`${series.type_id}|${series.supplier_id}|${series.currency}`} className="flex min-w-0 flex-col gap-1">
                     <div className="flex items-baseline justify-between gap-3 text-[13px]">
@@ -372,10 +421,13 @@ export function MetricsTab() {
                       <span className="shrink-0 font-medium tabular-nums">{money.format(last.price_per_kg, series.currency)}/kg</span>
                     </div>
                     <LineChart
-                      points={series.points.map((point) => ({ at: Date.parse(`${point.on_date}T00:00:00Z`), value: Number(point.price_per_kg) }))}
+                      points={series.points.map((point) => ({ at: Date.parse(`${point.on_date}T00:00:00Z`), value: Number(point.price_per_kg), text: `${money.format(point.price_per_kg, series.currency)}/kg` }))}
                       label={`${name}, price per kg: ${money.format(first.price_per_kg, series.currency)} on ${dayText(first.on_date)}${series.points.length > 1 ? ` to ${money.format(last.price_per_kg, series.currency)} on ${dayText(last.on_date)}` : ''}`}
-                      formatValue={price}
+                      formatValue={tick}
+                      formatTime={priceDayText}
+                      formatPointTime={priceDayTitle}
                       step
+                      until={priceUntil}
                       width={320}
                       height={90}
                     />

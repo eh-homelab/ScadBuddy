@@ -10,6 +10,17 @@ import { RgbaSwatch } from './RgbaSwatch'
 import { SpoolLink } from './SpoolLink'
 import { grams } from './spoolsQuery'
 
+const NUMBER = 'tabular-nums whitespace-nowrap'
+
+function ReorderNow({ className }: { className?: string }) {
+  return (
+    <span className={`items-center gap-1 rounded-full border border-warn/50 bg-warn/10 px-2 py-0.5 text-[12px] font-medium whitespace-nowrap text-warn ${className ?? ''}`}>
+      <TriangleAlertIcon aria-hidden="true" className="size-3" />
+      Reorder now
+    </span>
+  )
+}
+
 const daysText = (value: number | null | undefined) => (value == null ? '—' : `${Math.floor(value)} ${Math.floor(value) === 1 ? 'day' : 'days'}`)
 
 /**
@@ -63,26 +74,28 @@ export function TypeForecastTable({ types, windowDays }: { types: readonly TypeF
                     {row.material ?? 'No material'}, {row.spools} {row.spools === 1 ? 'spool' : 'spools'}
                     {row.low_stock && row.spools > 0 ? ', all low' : ''}
                   </span>
+                  {/* Below `sm` the table scrolls sideways, so the badge sits here, in view (R-T8-6). */}
+                  {row.reorder_now && <ReorderNow className="mt-1 inline-flex sm:hidden" />}
                 </td>
-                <td className={`${TD} text-right tabular-nums`}>{grams(row.grams_left)} g</td>
-                <td className={`${TD} text-right tabular-nums`}>{burnText(row.burn_g_per_day)}</td>
+                <td className={`${TD} text-right ${NUMBER}`}>{grams(row.grams_left)} g</td>
+                <td className={`${TD} text-right ${NUMBER}`}>{burnText(row.burn_g_per_day)}</td>
                 <td className={TD}>
                   <div className="flex items-center gap-2">
-                    <span className="w-16 shrink-0 tabular-nums">{daysText(row.days_of_stock)}</span>
+                    <span className={`w-16 shrink-0 ${NUMBER}`}>{daysText(row.days_of_stock)}</span>
                     {row.days_of_stock != null && <Runway row={row} scale={scale} />}
                   </div>
                 </td>
-                <td className={`${TD} tabular-nums`}>{dayText(row.empty_on)}</td>
+                <td className={`${TD} ${NUMBER}`}>{dayText(row.empty_on)}</td>
                 <td className={TD}>
                   {row.reorder_now ? (
-                    <span className="inline-flex items-center gap-1 rounded-full border border-warn/50 bg-warn/10 px-2 py-0.5 text-[12px] font-medium text-warn">
-                      <TriangleAlertIcon aria-hidden="true" className="size-3" />
-                      Reorder now
-                    </span>
+                    <>
+                      <ReorderNow className="hidden sm:inline-flex" />
+                      <span className={`sm:hidden ${NUMBER}`}>{dayText(row.reorder_on)}</span>
+                    </>
                   ) : (
-                    <span className="tabular-nums">{dayText(row.reorder_on)}</span>
+                    <span className={NUMBER}>{dayText(row.reorder_on)}</span>
                   )}
-                  <span className="block text-[12px] text-muted-foreground">
+                  <span className="block text-[12px] whitespace-nowrap text-muted-foreground">
                     {row.lead_time_days} d lead, {row.safety_margin_days} d margin
                   </span>
                 </td>
@@ -101,7 +114,8 @@ export function TypeForecastTable({ types, windowDays }: { types: readonly TypeF
 
 /**
  * #6269 — the Spools tab's forecast view (spec §10): each shown spool's burn and empty day,
- * soonest first, then the type rows with "Reorder now" (`TypeForecastTable`).
+ * soonest first, then the type rows with "Reorder now" (`TypeForecastTable`). The type rows
+ * show even when the filters keep no spool, and the tab says so above (R-T8-8).
  */
 export function SpoolForecast({ spools }: { spools: readonly Spool[] }) {
   const [forecast, setForecast] = useState<Forecast | null>(null)
@@ -130,48 +144,50 @@ export function SpoolForecast({ spools }: { spools: readonly Spool[] }) {
   const rows = forecast.spools.filter((row) => byId.has(row.spool_id)).sort(bySpoolEmpty)
   return (
     <div className="flex flex-col gap-5">
-      <section aria-labelledby="forecast-spools" className="flex flex-col gap-2">
-        <h2 id="forecast-spools" className="text-sm font-semibold tracking-tight">
-          When each spool runs out
-        </h2>
-        {rows.length === 0 ? (
-          <p className="text-[13px] text-muted-foreground">No spool in this view is in stock.</p>
-        ) : (
-          <div className="overflow-x-auto rounded-md border">
-            <table aria-label="Spool forecast" className="w-full min-w-[30rem] text-[13px]">
-              <thead className="bg-muted/40 text-left text-[12px] text-muted-foreground">
-                <tr>
-                  <th className={TH}>Spool</th>
-                  <th className={`${TH} text-right`}>Left</th>
-                  <th className={`${TH} text-right`}>Burn</th>
-                  <th className={TH}>Empty around</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => {
-                  const spool = byId.get(row.spool_id)!
-                  return (
-                    <tr key={row.spool_id} data-spool={row.number} className="border-t">
-                      <td className={TD}>
-                        <span className="flex items-center gap-2">
-                          <RgbaSwatch rgba={spool.effective?.rgba ?? '#FFFFFFFF'} size="sm" gramsLeft={spool.grams_left} labelWeight={spool.effective?.label_weight_g} />
-                          <SpoolLink spool={spool} className="font-medium hover:underline">
-                            #{row.number}
-                          </SpoolLink>
-                          <span className="truncate text-muted-foreground">{[spool.names?.material, spool.effective?.colour_name].filter(Boolean).join(' ')}</span>
-                        </span>
-                      </td>
-                      <td className={`${TD} text-right tabular-nums`}>{row.grams_left == null ? '—' : `${grams(row.grams_left)} g`}</td>
-                      <td className={`${TD} text-right tabular-nums`}>{burnText(row.burn_g_per_day)}</td>
-                      <td className={`${TD} tabular-nums`}>{row.empty_on ? dayText(row.empty_on) : row.burn_g_per_day == null ? `No prints in ${forecast.window_days} days` : '—'}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+      {spools.length > 0 && (
+        <section aria-labelledby="forecast-spools" className="flex flex-col gap-2">
+          <h2 id="forecast-spools" className="text-sm font-semibold tracking-tight">
+            When each spool runs out
+          </h2>
+          {rows.length === 0 ? (
+            <p className="text-[13px] text-muted-foreground">No spool in this view is in stock.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-md border">
+              <table aria-label="Spool forecast" className="w-full min-w-[30rem] text-[13px]">
+                <thead className="bg-muted/40 text-left text-[12px] text-muted-foreground">
+                  <tr>
+                    <th className={TH}>Spool</th>
+                    <th className={`${TH} text-right`}>Left</th>
+                    <th className={`${TH} text-right`}>Burn</th>
+                    <th className={TH}>Empty around</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => {
+                    const spool = byId.get(row.spool_id)!
+                    return (
+                      <tr key={row.spool_id} data-spool={row.number} className="border-t">
+                        <td className={TD}>
+                          <span className="flex items-center gap-2">
+                            <RgbaSwatch rgba={spool.effective?.rgba ?? '#FFFFFFFF'} size="sm" gramsLeft={spool.grams_left} labelWeight={spool.effective?.label_weight_g} />
+                            <SpoolLink spool={spool} className="font-medium hover:underline">
+                              #{row.number}
+                            </SpoolLink>
+                            <span className="truncate text-muted-foreground">{[spool.names?.material, spool.effective?.colour_name].filter(Boolean).join(' ')}</span>
+                          </span>
+                        </td>
+                        <td className={`${TD} text-right ${NUMBER}`}>{row.grams_left == null ? '—' : `${grams(row.grams_left)} g`}</td>
+                        <td className={`${TD} text-right ${NUMBER}`}>{burnText(row.burn_g_per_day)}</td>
+                        <td className={`${TD} ${NUMBER}`}>{row.empty_on ? dayText(row.empty_on) : row.burn_g_per_day == null ? `No prints in ${forecast.window_days} days` : '—'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
       <section aria-labelledby="forecast-types" className="flex flex-col gap-2">
         <h2 id="forecast-types" className="text-sm font-semibold tracking-tight">
           When to reorder each type

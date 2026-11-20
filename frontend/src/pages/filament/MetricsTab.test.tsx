@@ -1,6 +1,7 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { T } from '../../mocks/features/filament/seed'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
@@ -90,7 +91,7 @@ describe('the Metrics tab (#6269)', () => {
     render()
     const table = await within(region('Days of stock')).findByRole('table', { name: 'Days of stock by type' })
     const row = within(table).getByRole('link', { name: 'BL-PETG-HF-TRANSLUCENT-ORANGE' }).closest('tr')!
-    expect(within(row).getByText('Reorder now')).toBeInTheDocument()
+    expect(within(row).getAllByText('Reorder now').length).toBeGreaterThan(0)
   })
 
   it('keeps the view across a remount while "Remember my view" is on', async () => {
@@ -102,6 +103,100 @@ describe('the Metrics tab (#6269)', () => {
     render()
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Range' })).getByRole('button', { name: '90 days' })).toHaveAttribute('aria-pressed', 'true'))
     expect(within(screen.getByRole('group', { name: 'Columns per' })).getByRole('button', { name: 'Weeks' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it("keeps a value's colour when the range changes: colours follow the 365-day rank (R-T8-1)", async () => {
+    // PLA uses most in the last 90 days, PETG over the year: ranked by the range, PLA would be blue at 90 days and orange at 365.
+    server.use(
+      http.get('*/api/v1/filament/metrics', ({ request }) => {
+        const url = new URL(request.url)
+        const since = url.searchParams.get('since')!
+        const consumption = [
+          ...(since < '2026-04-01' ? [{ bucket: '2026-03-01', key: 'petg', label: 'PETG', used_g: 450, wasted_g: 0 }] : []),
+          { bucket: '2026-11-01', key: 'petg', label: 'PETG', used_g: 50, wasted_g: 0 },
+          { bucket: '2026-11-01', key: 'pla', label: 'PLA', used_g: 100, wasted_g: 0 },
+        ]
+        return HttpResponse.json({ currency: 'USD', dimension: 'material', bucket: 'month', since, until: url.searchParams.get('until'), stock: [], consumption, waste: [] })
+      }),
+    )
+    const swatch = async (name: string) => {
+      const legend = await within(region('Consumption')).findByRole('list', { name: 'Consumption by material' })
+      return within(legend).getByText(name).closest('li')!.querySelector('span[aria-hidden="true"]')!.getAttribute('class')
+    }
+    const { user } = render('/filament/metrics?range=90d')
+    await within(region('Consumption')).findByRole('img', { name: /150 g in all/ })
+    const pla = await swatch('PLA')
+    const petg = await swatch('PETG')
+    expect(petg).toContain('text-series-1')
+    await user.click(within(screen.getByRole('group', { name: 'Range' })).getByRole('button', { name: '365 days' }))
+    await within(region('Consumption')).findByRole('img', { name: /600 g in all/ })
+    expect(await swatch('PLA')).toBe(pla)
+    expect(await swatch('PETG')).toBe(petg)
+  })
+
+  describe('a price line', () => {
+    const zone = process.env.TZ
+    beforeEach(() => {
+      server.use(
+        http.get('*/api/v1/filament/metrics/purchasing', () =>
+          HttpResponse.json({
+            prices: [
+              {
+                type_id: T.PINK,
+                type_label: 'BL-PLA-BASIC-HOT-PINK',
+                supplier_id: SUPPLIER.BAMBU,
+                supplier_name: 'Bambu Lab',
+                currency: 'USD',
+                points: [
+                  { on_date: '2026-10-07', price_per_kg: '15.91' },
+                  { on_date: '2026-11-10', price_per_kg: '17.305' },
+                ],
+              },
+            ],
+            spend: [],
+          }),
+        ),
+      )
+    })
+    afterEach(() => {
+      if (zone === undefined) delete process.env.TZ
+      else process.env.TZ = zone
+    })
+
+    const chart = () => within(region('Prices')).findByRole('img', { name: /^BL-PLA-BASIC-HOT-PINK at Bambu Lab/ })
+    /** The Hot Pink chart, with the pointer at `clientX` of its 320-wide box. */
+    async function hover(clientX: number) {
+      const svg = await chart()
+      svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 90, right: 320, bottom: 90, x: 0, y: 0, toJSON: () => ({}) })
+      fireEvent.pointerMove(svg, { clientX, clientY: 40 })
+      return svg
+    }
+    /** The hover tooltip: the chart's one `aria-hidden` box outside its SVG. */
+    const tip = () => [...region('Prices').querySelectorAll('div[aria-hidden="true"]')].find((one) => one.closest('svg') === null)
+
+    it('shows the decimal price in the tooltip, as the headline does (R-T8-2)', async () => {
+      render()
+      await hover(320)
+      await waitFor(() => expect(tip()).toHaveTextContent('$17.305/kg'))
+      expect(within(region('Prices')).getAllByText('$17.305/kg')).toHaveLength(2)
+    })
+
+    it('dates a price on its calendar day for a viewer west of UTC (R-T8-3)', async () => {
+      process.env.TZ = 'America/New_York'
+      render()
+      const svg = await hover(0)
+      await waitFor(() => expect(tip()).toHaveTextContent('Oct 7, 2026'))
+      expect(tip()).not.toHaveTextContent('Oct 6')
+      expect([...svg.querySelectorAll('text')].map((one) => one.textContent)).toContain('Oct 7')
+    })
+
+    it("holds the last price on to the range's last day (R-T8-7)", async () => {
+      render()
+      const svg = await chart()
+      // After its last change the step goes level to the plot's right edge (320 - 8), the range's `until`.
+      expect(svg.querySelector('path[data-line]')!.getAttribute('d')).toMatch(/V[\d.]+ H312\.0$/)
+      expect([...svg.querySelectorAll('text')].map((one) => one.textContent)).toContain('Nov 18')
+    })
   })
 
   it('opens the default view after a remount while "Remember my view" is off', async () => {

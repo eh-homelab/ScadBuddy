@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { LineChart } from './LineChart'
-import { niceMax } from './scale'
+import { niceMax, tickDecimal } from './scale'
 
 const points = [
   { at: Date.parse('2026-11-01T00:00:00Z'), value: 1000 },
@@ -70,5 +70,9 @@ describe('the line chart', () => {
 
   it('rounds the top of the scale up to a round number', () => {
     expect([niceMax(995), niceMax(268), niceMax(1000), niceMax(0)]).toEqual([1000, 300, 1000, 1])
+  })
+
+  it('writes a tick as its exact decimal string, dropping the float noise (R-T8-2)', () => {
+    expect([tickDecimal(17.5), tickDecimal(0.1 + 0.2), tickDecimal(1200), tickDecimal(0)]).toEqual(['17.5', '0.3', '1200', '0'])
   })
 })

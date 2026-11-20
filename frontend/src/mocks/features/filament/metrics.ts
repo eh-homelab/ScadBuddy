@@ -1,7 +1,7 @@
 import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
 import type { FilamentSpool } from '../../../api/types'
-import { addDecimals, divDecimal, mulDecimal } from '../../../lib/decimal'
+import { addDecimals, divDecimal, fromScaled, toScaled } from '../../../lib/decimal'
 // Cycles (`handlers.ts` loads every feature; the purchasing mock imports the Filament one): only inside functions.
 import { mockSettings } from '../../handlers'
 import { purchasingMetrics } from '../filamentPurchasing'
@@ -137,11 +137,16 @@ function printerOf(input: Input, plate: MockPlate): [string | null, string] {
   return [plate.printer_id, input.printers.get(plate.printer_id) ?? plate.printer_id]
 }
 
-/** `_value`'s grams × cost per kg, in thousandths of the currency: the stock rows sum them and divide once. */
+/**
+ * `_value`'s grams × cost per kg, in thousandths of the currency: the stock rows sum them and
+ * divide once. The grams are exact, as `Decimal(str(grams_left))` reads them (R-T8-9).
+ */
 function milliValue(spool: FilamentSpool, defaultCost: string | null): string | null {
   const cost = spool.effective?.cost_per_kg ?? defaultCost
   if (cost == null || spool.grams_left == null) return null
-  return mulDecimal(cost, Math.round(spool.grams_left))
+  const grams = String(spool.grams_left)
+  const scale = (text: string) => text.split('.')[1]?.length ?? 0
+  return fromScaled(toScaled(cost, scale(cost)) * toScaled(grams, scale(grams)), scale(cost) + scale(grams))
 }
 
 const bucketOf = (iso: string, bucket: Bucket) => {

@@ -39,12 +39,15 @@ describe('the forecast view (#6269)', () => {
     const rows = within(types).getAllByRole('row').slice(1)
     // Reorder now first: the orange type runs out on 2027-03-15, and its 30 days of lead time and 90 of margin put its reorder day on 2026-11-15.
     expect(rows[0]!.dataset.type).toBe(T.ORANGE)
-    expect(within(rows[0]!).getByText('Reorder now')).toBeInTheDocument()
+    // The badge is in the "Reorder by" cell, and (shown below `sm` only) under the type's name (R-T8-6).
+    const cells = within(rows[0]!).getAllByRole('cell')
+    expect(within(cells[0]!).getByText('Reorder now')).toBeInTheDocument()
+    expect(within(cells.at(-1)!).getByText('Reorder now')).toBeInTheDocument()
     expect(within(rows[0]!).getByText('117 days')).toBeInTheDocument()
     expect(within(rows[0]!).getByText('30 d lead, 90 d margin')).toBeInTheDocument()
     // The pink type: 7 days of lead time and 3 of margin, the settings', before 2027-04-16.
     expect(rows[1]!.dataset.type).toBe(T.PINK)
     expect(within(rows[1]!).getByText('Apr 6, 2027')).toBeInTheDocument()
-    expect(within(types).getAllByText('Reorder now')).toHaveLength(1)
+    expect(rows.filter((row) => within(row).queryAllByText('Reorder now').length > 0)).toHaveLength(1)
   })
 })
