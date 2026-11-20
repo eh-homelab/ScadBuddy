@@ -1436,8 +1436,8 @@ class RemoteFilamentSync:
     """`filament/bb_sync_models.py` `FilamentSyncApi` over ``…/print/filament/sync`` (area
     ``filament-sync``, #6265 Task 6): the plan, what Bambuddy answered, and a pass's
     state row. Each is natural, so each is sent again on the client's retries: a plan
-    finds the intent it recorded, a result sent again finds its item recorded and is
-    ignored, and the pass row is set, not added to."""
+    finds the intent it recorded, results sent again carry the plan's ``pass_id`` and add
+    no attempt (R-T6-5), and the pass row is set, not added to."""
 
     def __init__(self, client: CrudClient) -> None:
         self._client = client
@@ -1448,10 +1448,14 @@ class RemoteFilamentSync:
         return SyncPlan.model_validate(response.json())
 
     async def results(
-        self, instance: str, writes: Sequence[BbWrite], results: Sequence[BbWriteResult]
+        self,
+        instance: str,
+        writes: Sequence[BbWrite],
+        results: Sequence[BbWriteResult],
+        pass_id: str | None = None,
     ) -> ResultsReport:
         body = ResultsRequest(
-            instance=instance, writes=list(writes), results=list(results)
+            instance=instance, writes=list(writes), results=list(results), pass_id=pass_id
         ).model_dump(mode="json")
         response = await self._client.request("POST", f"{BASE}/filament/sync/results", json=body)
         return ResultsReport.model_validate(response.json())

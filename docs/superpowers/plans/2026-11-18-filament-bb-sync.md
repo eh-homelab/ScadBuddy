@@ -565,6 +565,8 @@ Test: a fake `FilamentSyncApi` whose `plan` always defers gives 3 passes, then t
 {"k_profiles": rows}` or `{"suppliers": rows}` (Bambuddy's answered list; the preset
 `PUT` needs none), so `results` stores that field with no `GET`. A probe's answer is the
 `spool_row` it read. Test: `test_a_list_put_answer_names_its_field`.
+**Carried from Task 6: R-T6-5 (decision 107).** Each plan round's `SyncPlan.pass_id` goes back in
+`results(..., pass_id)` for that round's results, resends included.
 
 ### Task 8: The workflow, the nudge and the boot start
 
@@ -1339,12 +1341,9 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
      location reads, 2 reference reads). Cost: a person's SB edit made during the call is
      not seen by the call's later results; it only decides whether an unsent field of
      the answer is stored as seen, so no push goes blind.
-103. Task 6 (R-T6-1, review M-1): `/results` keeps no Idempotency-Key. `apply_results` adds no
-    attempt when the item's error row has the same error and is younger than
-    `RESEND_WINDOW_S` (30 s, the CRUD client's retry budget), and keeps its `at`: that is the
-    same write sent again. Test: `test_a_resent_failed_result_is_one_attempt`. Cost: a real
-    second failure of the same error within 30 s (back-to-back `more` passes) counts once.
-    The report of a resent ok create still answers `linked=0`.
+103. Task 6 (R-T6-1, review M-1; superseded by R-T6-5): `/results` keeps no Idempotency-Key.
+    A failed result sent again after a lost answer must not raise the item's attempts again.
+    The first fix was a 30 s window, replaced by R-T6-5's exact pass identity (decision 107).
 104. Task 6 (R-T6-2, review M-2): no code change. A skipped pass with no error sets
     `last_ok_at`, as Decision 19 says. The status UI must not read it as "last sync".
 105. Task 6 (R-T6-3, review M-3): `test_remote_and_local_give_the_same_plan` compares a
@@ -1353,6 +1352,17 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 106. Task 6 (R-T6-4, review M-4): the area test in `test_crud_filament.py` checks membership
     only, and its docstring no longer says "appended last". The tail asserts of the later
     areas check the order.
+107. Task 6 (R-T6-5, re-review): the plan answer carries a `pass_id` (`SyncPlan.pass_id`,
+    made by `LocalFilamentSync.plan` for each plan round: a server-made `uuid4().hex`), and
+    `ResultsRequest.pass_id` and `apply_results(..., pass_id=None)` carry it back.
+    `filament_bb_push_errors.last_pass_id text` (in the unmerged migration
+    `20261118T2112Z_filament_bb_sync.sql`) holds the round that last wrote the row. A failed
+    result of a round whose id the row holds adds no attempt and keeps `at`; another round
+    with the same error adds one, with no time window; a `None` id is a round of its own.
+    Task 7 sends the plan's `pass_id` with that round's results. Tests:
+    `test_results_of_one_pass_sent_again_add_one_attempt`,
+    `test_a_resent_failed_result_is_one_attempt` (local and remote agree). Cost: none known;
+    the report of a resent ok create still answers `linked=0`.
 
 ## Self-review
 

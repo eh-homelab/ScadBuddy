@@ -263,14 +263,18 @@ async def test_remote_and_local_give_the_same_plan(store: SettingsStore, crud: C
     with store.pool.connection() as conn:
         conn.execute("DELETE FROM filament_bb_creates")
     remote = await RemoteFilamentSync(crud).plan(snap, 2)
-    assert planned == remote
+    assert planned.pass_id and remote.pass_id and planned.pass_id != remote.pass_id
+    assert planned.model_copy(update={"pass_id": None}) == remote.model_copy(
+        update={"pass_id": None}
+    )
     assert len(remote.writes) == 2 and remote.deferred == 1
     # Results go the same way: the same refused write answers the same non-empty report
     # either way, and the second does not count as another attempt (R-T6-1).
     refused = [BbWriteResult(key=remote.writes[0].key, ok=False, error="timeout")]
     expected = ResultsReport(failed=1)
-    assert await local.results(INSTANCE, remote.writes, refused) == expected
-    assert await RemoteFilamentSync(crud).results(INSTANCE, remote.writes, refused) == expected
+    assert await local.results(INSTANCE, remote.writes, refused, remote.pass_id) == expected
+    sync = RemoteFilamentSync(crud)
+    assert await sync.results(INSTANCE, remote.writes, refused, remote.pass_id) == expected
     assert _attempts(store) == [1]
     await local.record_pass(_pass())
     assert _state(store)["last_error"] is None
@@ -280,17 +284,33 @@ async def test_remote_and_local_give_the_same_plan(store: SettingsStore, crud: C
 async def test_a_resent_failed_result_is_one_attempt(
     store: SettingsStore, crud: CrudClient
 ) -> None:
-    """R-T6-1: the route has no Idempotency-Key, so a failed result sent again after a
-    lost answer must not raise the item's attempts a second time."""
+    """R-T6-5: the route has no Idempotency-Key, so a failed result sent again with its
+    plan's `pass_id` adds no attempt; another plan's, with the same error and no ageing,
+    adds one. The local and remote paths agree."""
     _spools(store, 1)
     remote = RemoteFilamentSync(crud)
-    plan = await remote.plan(_snapshot(), 200)
-    (write,) = plan.writes
+    local = LocalFilamentSync(filament_on(store.pool), store)
+    first = await remote.plan(_snapshot(), 200)
+    (write,) = first.writes
+    assert first.pass_id
     refused = [BbWriteResult(key=write.key, ok=False, error="timeout")]
-    assert await remote.results(INSTANCE, plan.writes, refused) == ResultsReport(failed=1)
-    assert await remote.results(INSTANCE, plan.writes, refused) == ResultsReport(failed=1)
+    assert await remote.results(INSTANCE, first.writes, refused, first.pass_id) == (
+        ResultsReport(failed=1)
+    )
+    assert await remote.results(INSTANCE, first.writes, refused, first.pass_id) == (
+        ResultsReport(failed=1)
+    )
+    assert await local.results(INSTANCE, first.writes, refused, first.pass_id) == (
+        ResultsReport(failed=1)
+    )
     assert _attempts(store) == [1]
-    # Another error is a new attempt.
-    other = [BbWriteResult(key=write.key, ok=False, error="refused", status=422)]
-    await remote.results(INSTANCE, plan.writes, other)
+    # The next pass plans the same write again (its intent is open: the pass is later).
+    second = await local.plan(_snapshot(), 200)
+    assert second.pass_id and second.pass_id != first.pass_id
+    await local.results(INSTANCE, first.writes, refused, second.pass_id)
     assert _attempts(store) == [2]
+    await remote.results(INSTANCE, first.writes, refused, second.pass_id)
+    assert _attempts(store) == [2]
+    # A result with no pass id is a pass of its own.
+    await remote.results(INSTANCE, first.writes, refused)
+    assert _attempts(store) == [3]

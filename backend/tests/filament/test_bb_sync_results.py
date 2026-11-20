@@ -70,9 +70,15 @@ def _answer(bb_id: int, **over: Any) -> dict[str, Any]:
 
 
 def _apply(
-    f: Filament, writes: list[BbWrite], results: list[BbWriteResult], instance: str = INSTANCE
+    f: Filament,
+    writes: list[BbWrite],
+    results: list[BbWriteResult],
+    instance: str = INSTANCE,
+    pass_id: str | None = None,
 ) -> ResultsReport:
-    return apply_results(f, writes, results, instance=instance, now=datetime.now(UTC))
+    return apply_results(
+        f, writes, results, instance=instance, now=datetime.now(UTC), pass_id=pass_id
+    )
 
 
 def _ok(write: BbWrite, answer: dict[str, Any] | None, bb_id: int | None = None) -> BbWriteResult:
@@ -321,12 +327,6 @@ def test_a_failure_keeps_the_hashes_and_counts_attempts(pg_pool: PgPool) -> None
     _link(pg_pool, spool, 50, pushed={"note": field_hash("old")})
     write = _write("spool", spool, "update", 50, {"note": "new"}, {"note": field_hash("new")})
     assert _apply(f, [write], [_refused(write)]).failed == 1
-    # The same refusal again at once is the write sent again (R-T6-1); a later pass's is
-    # another attempt.
-    _apply(f, [write], [_refused(write)])
-    assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", 1)]
-    with pg_pool.connection() as conn:
-        conn.execute("UPDATE filament_bb_push_errors SET at = now() - interval '1 minute'")
     _apply(f, [write], [_refused(write)])
     assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", 2)]
     link = _link_row(pg_pool, spool)
@@ -680,3 +680,16 @@ def test_results_read_each_kinds_rows_once(
     report = _apply(f, writes, results)
     assert (report.linked, report.updated) == (3, 2)
     assert calls == {"locations": 1, "refs": 1}
+
+
+def test_results_of_one_pass_sent_again_add_one_attempt(pg_pool: PgPool) -> None:
+    """R-T6-5: the same plan round's refusal again adds no attempt, whatever the time
+    between; another round's adds one at once, with no ageing; a round with no id is
+    its own."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50, pushed={"note": field_hash("old")})
+    write = _write("spool", spool, "update", 50, {"note": "new"}, {"note": field_hash("new")})
+    for pass_id, attempts in (("a", 1), ("a", 1), ("b", 2), ("b", 2), (None, 3), (None, 4)):
+        _apply(f, [write], [_refused(write)], pass_id=pass_id)
+        assert _errors(pg_pool) == [("spool", spool, "bambuddy-refused:422", attempts)]

@@ -27,7 +27,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -71,10 +71,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 Conn = Connection[DictRow]
-
-#: How long a repeated error for one item counts as the same write sent again, not a new
-#: attempt: the CRUD client's retry budget (`crud/client.py` `UNAVAILABLE_BUDGET`, R-T6-1).
-RESEND_WINDOW_S = 30.0
 
 #: Who the push's ``synced_from_bb`` event names.
 ACTOR = "system:bambuddy-sync"
@@ -154,6 +150,7 @@ def apply_results(
     *,
     instance: str,
     now: datetime,
+    pass_id: str | None = None,
 ) -> ResultsReport:
     """Record what Bambuddy answered to ``plan_writes``, as the module says, each result
     in a transaction of its own. ``now`` is the stored seen copies' ``bb_seen_at``.
@@ -165,8 +162,11 @@ def apply_results(
     seen copy; an ``ok`` probe the seen copy only. A list ``PUT``'s ``answer`` is
     ``{field: rows}`` (``k_profiles`` or ``suppliers``) or the spool's whole row (R-T3-6).
     A failed write's 404 on a linked item drops the link and its error row, except a
-    list ``PUT``'s; any other failure upserts the item's error row (``attempts + 1``,
-    ``at = now()``) and keeps its hashes and intent (R-T4-18). The state row's instance
+    list ``PUT``'s; any other failure upserts the item's error row and keeps its hashes and
+    intent (R-T4-18). The upsert adds an attempt and sets ``at = now()``, unless the row's
+    ``last_pass_id`` is ``pass_id`` (the plan round these results answer): results sent
+    again after a lost answer count once (R-T6-5). A ``None`` ``pass_id`` is a round of
+    its own, so it always adds one. The state row's instance
     is set by the first result that links anything (Decision 12), and results for
     another instance are all ignored."""
     report = ResultsReport()
@@ -183,7 +183,7 @@ def apply_results(
                 ).fetchone()
                 if state is not None and state["instance"] not in (None, instance):
                     raise _IgnoredError("the links belong to another Bambuddy")
-                outcome = _apply(conn, write, result, instance, now, reads)
+                outcome = _apply(conn, write, result, instance, now, reads, pass_id)
         except _IgnoredError as why:
             logger.warning(
                 "a Bambuddy sync result is ignored",
@@ -202,6 +202,7 @@ def _apply(
     instance: str,
     now: datetime,
     reads: _Reads,
+    pass_id: str | None,
 ) -> Outcome | None:
     item = _item(conn, write)
     linked: int | None = item["bb_id"]
@@ -223,19 +224,18 @@ def _apply(
         if result.status == 404 and linked is not None and write.op in _GONE_ON_404:
             _unlink(conn, write)
             return "unlinked"
-        # The same error again within `RESEND_WINDOW_S` is a resend (the CRUD client sends
-        # a POST again after a lost answer, R-T6-1): it adds no attempt and keeps ``at``.
+        # The same plan round's results again (the CRUD client sends a POST again after a
+        # lost answer) add no attempt and keep ``at`` (R-T6-5).
         conn.execute(
-            "INSERT INTO filament_bb_push_errors (kind, sb_id, error) VALUES (%s, %s, %s)"
+            "INSERT INTO filament_bb_push_errors (kind, sb_id, error, last_pass_id)"
+            " VALUES (%s, %s, %s, %s)"
             " ON CONFLICT (kind, sb_id) DO UPDATE SET error = EXCLUDED.error,"
             " attempts = filament_bb_push_errors.attempts + CASE WHEN"
-            " filament_bb_push_errors.error = EXCLUDED.error AND"
-            " filament_bb_push_errors.at > now() - make_interval(secs => %s)"
-            " THEN 0 ELSE 1 END,"
-            " at = CASE WHEN filament_bb_push_errors.error = EXCLUDED.error AND"
-            " filament_bb_push_errors.at > now() - make_interval(secs => %s)"
-            " THEN filament_bb_push_errors.at ELSE now() END",
-            (write.kind, write.sb_id, result.error or "internal", RESEND_WINDOW_S, RESEND_WINDOW_S),
+            " filament_bb_push_errors.last_pass_id = EXCLUDED.last_pass_id THEN 0 ELSE 1 END,"
+            " at = CASE WHEN filament_bb_push_errors.last_pass_id = EXCLUDED.last_pass_id"
+            " THEN filament_bb_push_errors.at ELSE now() END,"
+            " last_pass_id = EXCLUDED.last_pass_id",
+            (write.kind, write.sb_id, result.error or "internal", pass_id),
         )
         return "failed"
     bb_id = _answered_id(write, result)
@@ -504,10 +504,16 @@ class LocalFilamentSync:
                 limit=limit,
             )
 
-        return await asyncio.to_thread(run)
+        planned = await asyncio.to_thread(run)
+        # One id per plan round (R-T6-5): the worker sends it back with the round's results.
+        return planned.model_copy(update={"pass_id": uuid4().hex})
 
     async def results(
-        self, instance: str, writes: Sequence[BbWrite], results: Sequence[BbWriteResult]
+        self,
+        instance: str,
+        writes: Sequence[BbWrite],
+        results: Sequence[BbWriteResult],
+        pass_id: str | None = None,
     ) -> ResultsReport:
         return await asyncio.to_thread(
             apply_results,
@@ -516,6 +522,7 @@ class LocalFilamentSync:
             results,
             instance=instance,
             now=datetime.now(UTC),
+            pass_id=pass_id,
         )
 
     async def record_pass(self, result: SyncPassResult) -> None:

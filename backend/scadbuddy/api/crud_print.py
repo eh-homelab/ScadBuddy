@@ -1897,8 +1897,9 @@ async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
     ),
 )
 async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsReport:
-    """Natural: a result sent again finds its item linked or recorded, and is ignored."""
-    return await sync.results(body.instance, body.writes, body.results)
+    """Natural: a result sent again finds its item linked or recorded and is ignored, and a
+    refusal sent again with the plan's `pass_id` adds no attempt (R-T6-5)."""
+    return await sync.results(body.instance, body.writes, body.results, body.pass_id)
 
 
 @router.post(

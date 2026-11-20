@@ -62,6 +62,9 @@ CREATE TABLE filament_bb_push_errors (
     error text NOT NULL,
     attempts integer NOT NULL DEFAULT 1,
     at timestamptz NOT NULL DEFAULT now(),
+    -- The plan round whose results last wrote this row (R-T6-5): a result of the same
+    -- round adds no attempt, so a resend after a lost answer counts once.
+    last_pass_id text,
     PRIMARY KEY (kind, sb_id)
 );
 

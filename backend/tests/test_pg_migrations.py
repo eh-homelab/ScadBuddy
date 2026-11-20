@@ -918,6 +918,7 @@ def test_the_bb_sync_migration_adds_the_sync_columns_and_tables(pg_conninfo: str
             "error",
             "attempts",
             "at",
+            "last_pass_id",
         }
         with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
             conn.execute(

@@ -227,7 +227,8 @@ class SyncPlan(BaseModel, extra="forbid"):
     ``conflicts``: fields of suppliers, locations, insert types and filament entries that
     both sides changed since SB last saw them, so neither side's value is pushed
     (R-T4-33). Also whether the snapshot's instance is not the links' one (Decision 12), and the
-    directions and timer interval the plan read."""
+    directions and timer interval the plan read. ``pass_id``: made by the route for this plan
+    round; the worker sends it back with the round's results (R-T6-5)."""
 
     writes: list[BbWrite]
     deferred: int
@@ -238,6 +239,7 @@ class SyncPlan(BaseModel, extra="forbid"):
     instance_changed: bool = False
     directions: FilamentSync
     interval_s: float
+    pass_id: str | None = None
 
 
 class PlanRequest(BaseModel, extra="forbid"):
@@ -262,11 +264,13 @@ class ResultsReport(BaseModel, extra="forbid"):
 class ResultsRequest(BaseModel, extra="forbid"):
     """The results route's body: the Bambuddy the answers came from, the writes of the
     plan round (`apply_results` checks each against the links, the plan is not kept) and
-    what Bambuddy answered to each."""
+    what Bambuddy answered to each. ``pass_id``: the plan's, so results sent again
+    count once (R-T6-5)."""
 
     instance: str
     writes: list[BbWrite]
     results: list[BbWriteResult]
+    pass_id: str | None = None
 
 
 class SyncPassResult(BaseModel, extra="forbid"):
@@ -294,7 +298,11 @@ class FilamentSyncApi(Protocol):
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan: ...
 
     async def results(
-        self, instance: str, writes: Sequence[BbWrite], results: Sequence[BbWriteResult]
+        self,
+        instance: str,
+        writes: Sequence[BbWrite],
+        results: Sequence[BbWriteResult],
+        pass_id: str | None = None,
     ) -> ResultsReport: ...
 
     async def record_pass(self, result: SyncPassResult) -> None: ...
