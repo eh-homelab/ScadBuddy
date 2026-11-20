@@ -889,3 +889,4 @@ above carries each one.
 27. F27: Task 7 creates `charts/LineChart.tsx`, `GramsChart` wraps it, and Task 8 reuses it. Changed: Tasks 7, 8.
 28. F28: The history route returns events newest first by `(at, seq)`, as `ledger.page` does. Changed: Decision 17, Tasks 4, 5, 7.
 29. F29: The metrics models are plain `BaseModel`, as `InventorySummary` is. Changed: Task 3.
+30. R-T9-2 (invoice link in the ledger): The `edited` event of an invoice confirm records the invoice link, `invoice_line_id: [None, id]`, alongside the cost change (Decision 12), because the history view uses it to name the invoice. `test_a_line_fills_a_costed_spool_and_replaces_its_cost` (#6700) expects both keys.

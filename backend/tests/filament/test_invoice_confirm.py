@@ -217,7 +217,10 @@ def test_a_line_fills_a_costed_spool_and_replaces_its_cost(shop: Shop) -> None:
     assert len(edited) == 1
     assert edited[0].actor == "ann"
     assert (edited[0].ref_kind, edited[0].ref_id) == ("invoice_line", str(line.id))
-    assert edited[0].data["changes"] == {"cost_per_kg": ["9.0000", "42.8000"]}
+    assert edited[0].data["changes"] == {
+        "cost_per_kg": ["9.0000", "42.8000"],
+        "invoice_line_id": [None, str(line.id)],
+    }
 
 
 def test_the_spool_list_names_each_spools_invoice_line(shop: Shop) -> None:
