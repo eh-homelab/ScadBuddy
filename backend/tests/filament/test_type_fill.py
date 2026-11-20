@@ -268,6 +268,32 @@ async def test_a_type_deleted_meanwhile_is_not_retried_and_says_why(
     assert set(done.skipped.values()) == {"the type was deleted meanwhile"}
 
 
+async def test_a_type_really_deleted_meanwhile_gets_no_k_values(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6787: the row is deleted between the read and the lock. The fill stops there: no
+    K value is read or written for the gone type, and the result says why."""
+    gone = _type(types, pg_pool, "GONE2")
+    _presets(types, gone, ("H2C", "0.4", "GFA05"))
+    k_calls: list[str] = []
+
+    def meanwhile(type_id: UUID, values: Any, *, actor: str) -> Any:
+        with pg_pool.connection() as conn:
+            conn.execute("DELETE FROM filament_spool_types WHERE id = %s", (type_id,))
+        raise TypeTempError("raced")
+
+    monkeypatch.setattr(types, "fill_empty", meanwhile)
+    for name in ("k_values", "linked_bb_spools", "fill_k_values"):
+        monkeypatch.setattr(types, name, lambda *a, _n=name, **k: k_calls.append(_n))
+
+    (done,) = await filler.fill(LINKED, [gone], actor=ACTOR)
+
+    assert k_calls == []
+    assert not done.written
+    assert done.k_values == []
+    assert set(done.skipped.values()) == {"the type was deleted meanwhile"}
+
+
 async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
 ) -> None:

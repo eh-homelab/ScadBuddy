@@ -46,6 +46,7 @@ from scadbuddy.slicing.profiles import ProfileError
 #: The preset a type is filled from first: the owner's printer and its usual nozzle.
 PRINTER_MODEL = "H2C"
 NOZZLE = Decimal("0.4")
+_DELETED = "the type was deleted meanwhile"
 
 #: The H2C's plates: ``BBL/machine/Bambu Lab H2C.json`` in Bambu Studio 02.08.02.61 says
 #: ``not_support_bed_type: "Cool Plate;Smooth PEI Plate / High Temp Plate"`` (read in the
@@ -545,6 +546,9 @@ class TypeFiller:
                     name: value for name, value in wanted.items() if name in (written or {})
                 }
                 result.written = bool(written)
+                if _DELETED in result.skipped.values():
+                    # The type is gone: no K values to read or write (#6787).
+                    return result
         rows, result.k_reason = await self._k_values(row.id, reads)
         if refresh:
             result.k_values = _rows(row.id, rows)
@@ -577,7 +581,7 @@ class TypeFiller:
                 fresh = await asyncio.to_thread(self.types.get, type_id)
                 if fresh is None:
                     # The type is gone: no retry, and every wanted field says why.
-                    result.skipped |= dict.fromkeys(wanted, "the type was deleted meanwhile")
+                    result.skipped |= dict.fromkeys(wanted, _DELETED)
                     return None
                 current = fresh.model_dump()
                 # A field a person set meanwhile is no longer empty: `fill_empty`
