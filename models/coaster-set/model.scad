@@ -153,7 +153,7 @@ BED_Y = 320;
 // A multi-colour plate needs room for the prime tower (#1048). ScadBuddy
 // reserves it against one edge of the plate (backend render/plate.py): the
 // tower, its 3 mm brim each side, 5 mm to the parts and 2 mm to the edge. The
-// tower grows with the colours (#6735); a 60 mm square holds it for up to seven
+// tower grows with the colours (#6735); a 60 mm square holds it for up to six
 // on the H2C. So the parts must leave this much free across the plate's width or
 // its depth.
 TOWER = 60 + 2 * 3 + 5 + 2;

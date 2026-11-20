@@ -25,7 +25,7 @@ H2C plate (300 × 320 mm with both nozzles), in the squarest arrangement. A
 plate with more than one colour also leaves room for the prime tower:
 ScadBuddy reserves it against one edge (the tower, its 3 mm brim each side,
 5 mm to the parts and 2 mm to the edge). The tower grows with the colours
-(#6735); the template keeps a 60 mm square for it, which holds up to seven
+(#6735); the template keeps a 60 mm square for it, which holds up to six
 colours on the H2C, so the parts stay within
 227 × 320 or 300 × 247 mm (#1048). Six 95 mm coasters fit a plate with the
 tower, nine without it. Alternating colours count as a second colour even with

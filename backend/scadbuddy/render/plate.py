@@ -649,7 +649,8 @@ def tower_beside(
     plate's cutouts, as :func:`place_on_plate` puts one beside a centred object; None
     when no edge has room. ``height`` is the tallest object's, which sets the brim
     (:func:`tower_brim`) and, with ``settings``, the tower's size
-    (:func:`tower_footprint`); ``None`` reserves the largest."""
+    (:func:`tower_footprint`). A ``height`` of ``None`` reserves the largest brim and
+    keep-out; ``settings`` of ``None`` sizes the tower for the default two filaments."""
     tower = tower_footprint(plate, height, settings)
     for side, strip, _remainder in _tower_sides(_tower_inset(plate), plate.usable, tower):
         corner = _tower_corner(side, strip, object_rect, plate, tower)

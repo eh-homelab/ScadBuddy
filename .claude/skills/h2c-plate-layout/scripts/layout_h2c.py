@@ -53,8 +53,9 @@ WRAP_X, WRAP_Y = (145.0, 251.0), (310.0, 326.0)
 NO_SPARSE_RADIUS, NOZZLE_HEIGHT = 96.0, 4.0
 # What Bambu Studio adds to the radius (Print.cpp compacted_wipe_tower_zone and
 # compacted_tower_footprint_padding): less 0.2 mm, plus the spiral lift's reach for the
-# 0.4 mm z_hop (2.43 mm) and 2 x the 0.4 mm nozzle, measured from the tower with its brim.
-NO_SPARSE_KEEP_OUT = NO_SPARSE_RADIUS - 0.2 + 2.43 + 0.8
+# 0.4 mm z_hop (2.43 mm) and 2 x the widest (0.8 mm) nozzle, as ScadBuddy's render/plate.py
+# _keep_out pads it, measured from the tower with its brim.
+NO_SPARSE_KEEP_OUT = NO_SPARSE_RADIUS - 0.2 + 2.43 + 1.6
 H2C_PROCESS, H2C_PRINTER = "0.20mm Standard @BBL H2C", "Bambu Lab H2C 0.4 nozzle"
 
 Mat = tuple  # 12 floats: 3x3 row-major in the 3MF's column order + translation
