@@ -28,6 +28,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = [
     "CONTENT_TYPE_LATEST",
+    "FILAMENT_SERIES",
     "ROLE_SERIES",
     "FilamentCollector",
     "HttpMetrics",
@@ -676,18 +677,72 @@ class Metrics:
         return generate_latest(self.registry)
 
 
+#: The filament series (#6785): name, help, labels. `FilamentCollector` exposes them and
+#: `filament/metrics_export.py` fills them; `lint-dashboard.sh` reads this table as the
+#: declared series a dashboard may use.
+FILAMENT_SERIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "scadbuddy_filament_stock_grams",
+        "Grams left on the spools in stock, by material, brand and location kind.",
+        ("material", "brand", "location_kind"),
+    ),
+    (
+        "scadbuddy_filament_stock_spools",
+        "Spools in stock, by material, brand and location kind.",
+        ("material", "brand", "location_kind"),
+    ),
+    (
+        "scadbuddy_filament_stock_value",
+        "What the grams in stock cost, by material, in the shop's currency.",
+        ("material", "currency"),
+    ),
+    (
+        "scadbuddy_filament_used_grams",
+        "Grams of every plate ever booked, by material and outcome; read with delta().",
+        ("material", "outcome"),
+    ),
+    (
+        "scadbuddy_filament_burn_grams_per_day",
+        "Grams a day used over the burn window, by material.",
+        ("material",),
+    ),
+    (
+        "scadbuddy_filament_days_of_stock",
+        "Days the stock lasts at the burn rate, by material; none with no use. A"
+        " folded `other` has its soonest material's days.",
+        ("material",),
+    ),
+    (
+        "scadbuddy_filament_low_stock_spools",
+        "Spools in stock below the low-stock threshold, by material.",
+        ("material",),
+    ),
+    (
+        "scadbuddy_filament_reorder_types",
+        "Spool types whose reorder date (the empty date less lead time and safety"
+        " margin) is today or past, by material.",
+        ("material",),
+    ),
+)
+
+
 class FilamentCollector(Collector):
     """The filament series (#6785): the metric families of the last good snapshot. `swap`
     replaces the one reference to the whole tuple, so a scrape sees the old snapshot or
     the new one, never a mix, and a failed export leaves the old one whole."""
 
-    def __init__(self, families: tuple[Metric, ...] = ()) -> None:
-        self._families = families
+    def __init__(self, families: Iterable[Metric] | None = None) -> None:
+        # Empty families to start, so `# HELP` and `# TYPE` show before the first snapshot.
+        self._families = tuple(
+            families
+            if families is not None
+            else (GaugeMetricFamily(n, d, labels=ls) for n, d, ls in FILAMENT_SERIES)
+        )
 
     def swap(self, families: Iterable[Metric]) -> None:
         self._families = tuple(families)
 
-    def collect(self) -> Iterable[Metric]:
+    def collect(self) -> Iterator[Metric]:
         # One read of the reference: a swap during the yield changes nothing here.
         yield from self._families
 

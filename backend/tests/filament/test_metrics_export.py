@@ -7,8 +7,9 @@ from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
+from prometheus_client.core import GaugeMetricFamily
 
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import FILAMENT_SERIES, FilamentCollector, Metrics
 from scadbuddy.filament import metrics_export
 from scadbuddy.filament.metrics_models import Snapshot
 
@@ -169,7 +170,7 @@ def test_a_failed_export_keeps_the_whole_previous_snapshot(
 
 
 def _fail_on_last(count: int) -> Callable[..., object]:
-    real = metrics_export.GaugeMetricFamily
+    real = GaugeMetricFamily
     made: list[object] = []
 
     def make(*args: object, **kwargs: object) -> object:
@@ -189,7 +190,7 @@ def test_a_collect_during_an_export_sees_the_old_snapshot(
     metrics_export.export(metrics, old)
     before = _all(metrics)
     seen: list[dict[str, dict[tuple[tuple[str, str], ...], float]]] = []
-    real = metrics_export.GaugeMetricFamily
+    real = GaugeMetricFamily
     made: list[object] = []
 
     def make(*args: object, **kwargs: object) -> object:
@@ -248,3 +249,10 @@ def test_a_real_value_named_like_a_fold_label_never_shares_its_series() -> None:
     stock = [("PLA", "other", "Shelf", 1, 500.0, None), ("PLA", None, "Shelf", 1, 100.0, None)]
     metrics_export.export(metrics, _snapshot(stock=stock))
     assert _brand_values(metrics, "scadbuddy_filament_stock_grams") == {"other*", "none"}
+
+
+def test_a_fresh_collector_exposes_every_series_before_the_first_snapshot() -> None:
+    """Empty families keep `# HELP` and `# TYPE` in the exposition (#6785)."""
+    families = list(FilamentCollector().collect())
+    assert [f.name for f in families] == [n for n, _, _ in FILAMENT_SERIES]
+    assert all(not f.samples for f in families)

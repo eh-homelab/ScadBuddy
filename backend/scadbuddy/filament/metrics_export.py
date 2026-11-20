@@ -15,7 +15,7 @@ from typing import Any
 
 from prometheus_client.core import GaugeMetricFamily, Metric
 
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import FILAMENT_SERIES, Metrics
 from scadbuddy.filament.metrics_models import Snapshot
 
 #: Values of one label kept by name; the rest are summed as ``other``.
@@ -87,62 +87,20 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
     for material, found in snapshot.days_of_stock.items():
         days[mat(material)] = min(found, days.get(mat(material), found))
 
-    wanted: list[tuple[str, str, tuple[str, ...], Mapping[Any, float]]] = [
-        (
-            "scadbuddy_filament_stock_grams",
-            "Grams left on the spools in stock, by material, brand and location kind.",
-            ("material", "brand", "location_kind"),
-            grams,
-        ),
-        (
-            "scadbuddy_filament_stock_spools",
-            "Spools in stock, by material, brand and location kind.",
-            ("material", "brand", "location_kind"),
-            spools,
-        ),
-        (
-            "scadbuddy_filament_stock_value",
-            "What the grams in stock cost, by material, in the shop's currency.",
-            ("material", "currency"),
-            {(k, snapshot.currency): v for k, v in value.items()},
-        ),
-        (
-            "scadbuddy_filament_used_grams",
-            "Grams of every plate ever booked, by material and outcome; read with delta().",
-            ("material", "outcome"),
-            used,
-        ),
-        (
-            "scadbuddy_filament_burn_grams_per_day",
-            "Grams a day used over the burn window, by material.",
-            ("material",),
-            {(k,): v for k, v in burn.items()},
-        ),
-        (
-            "scadbuddy_filament_days_of_stock",
-            "Days the stock lasts at the burn rate, by material; none with no use. A"
-            " folded `other` has its soonest material's days.",
-            ("material",),
-            {(k,): v for k, v in days.items()},
-        ),
-        (
-            "scadbuddy_filament_low_stock_spools",
-            "Spools in stock below the low-stock threshold, by material.",
-            ("material",),
-            {(k,): v for k, v in low.items()},
-        ),
-        (
-            "scadbuddy_filament_reorder_types",
-            "Spool types whose reorder date (the empty date less lead time and safety"
-            " margin) is today or past, by material.",
-            ("material",),
-            {(k,): v for k, v in reorder.items()},
-        ),
-    ]
+    wanted: dict[str, Mapping[Any, float]] = {
+        "scadbuddy_filament_stock_grams": grams,
+        "scadbuddy_filament_stock_spools": spools,
+        "scadbuddy_filament_stock_value": {(k, snapshot.currency): v for k, v in value.items()},
+        "scadbuddy_filament_used_grams": used,
+        "scadbuddy_filament_burn_grams_per_day": {(k,): v for k, v in burn.items()},
+        "scadbuddy_filament_days_of_stock": {(k,): v for k, v in days.items()},
+        "scadbuddy_filament_low_stock_spools": {(k,): v for k, v in low.items()},
+        "scadbuddy_filament_reorder_types": {(k,): v for k, v in reorder.items()},
+    }
     families: list[Metric] = []
-    for name, documentation, labelnames, values in wanted:
+    for name, documentation, labelnames in FILAMENT_SERIES:
         family = GaugeMetricFamily(name, documentation, labels=labelnames)
-        for labels, amount in values.items():
+        for labels, amount in wanted[name].items():
             family.add_metric([str(p) for p in labels], amount)
         families.append(family)
     # The one write: everything above is built, so a failure never reaches the collector.

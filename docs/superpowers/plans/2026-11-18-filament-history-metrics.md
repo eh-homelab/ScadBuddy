@@ -75,7 +75,8 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
    existing tracing setup". The backend has no OTel meter provider: every metric is a
    prometheus_client series in `core/metrics.py` at `GET /metrics`, the dashboards read
    Prometheus, and `lint-dashboard.sh` accepts only series declared there. So the filament
-   numbers are `Gauge`s in that registry. Cost if wrong: a later move to an OTel meter
+   numbers are declared there as the `FILAMENT_SERIES` table, which the lint reads, and a
+   collector exposes them (Decision 3, #6785). Cost if wrong: a later move to an OTel meter
    renames nine series.
 3. **The gauges come from a snapshot, refreshed at most every 60 s per process**
    (`FILAMENT_METRICS_MAX_AGE = 60.0`), in a thread, as the store-usage gauges are. One
@@ -525,8 +526,9 @@ rulings bind: `2026-11-14-filament-data-model.md`, `2026-11-15-filament-capture.
 
 **Interfaces:**
 - Consumes: `MetricsStore.snapshot()`.
-- Produces, in `Metrics.__init__` (API role only; not in `ROLE_SERIES`), all `Gauge`:
-  `scadbuddy_filament_metrics_up` (no labels);
+- Produces, in `Metrics.__init__` (API role only; not in `ROLE_SERIES`), `scadbuddy_filament_metrics_up` (a `Gauge`, no
+  labels) and, as the module-level `FILAMENT_SERIES` table of `(name, help, labels)`
+  that `FilamentCollector` exposes (#6785):
   `scadbuddy_filament_stock_grams` and `scadbuddy_filament_stock_spools`
   `["material", "brand", "location_kind"]`;
   `scadbuddy_filament_stock_value` `["material", "currency"]`;
