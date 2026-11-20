@@ -273,7 +273,12 @@ def tower_footprint(
         depth += PRIME_TOWER_RIB_WIDTH / math.sqrt(2)
         width = depth
     else:
-        width = settings.width
+        # A width of 0 or less (or not finite) is no width: the default, not a division.
+        width = (
+            settings.width
+            if math.isfinite(settings.width) and settings.width > 0
+            else PRIME_TOWER_SIDE
+        )
         depth = max(least, volume / (LAYER_HEIGHT * width) * PRIME_TOWER_INFILL_GAP)
     keep_out = _keep_out(plate, height) if settings.no_sparse_layers else 0.0
     return TowerFootprint(width, depth, tower_brim(height), keep_out)

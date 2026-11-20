@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import tempfile
 import weakref
 import zipfile
@@ -592,6 +593,9 @@ def _file_tower(settings: dict[str, object]) -> TowerSettings:
     try:
         width = float(str(_stated_value(settings, "prime_tower_width") or PRIME_TOWER_SIDE))
     except ValueError:
+        width = PRIME_TOWER_SIDE
+    if not (math.isfinite(width) and width > 0):
+        # The file is untrusted: "0", a negative or "nan" is read as no width stated.
         width = PRIME_TOWER_SIDE
     return TowerSettings(
         filaments=filaments,

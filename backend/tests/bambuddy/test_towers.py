@@ -356,3 +356,15 @@ def test_a_tower_with_its_rib_wall_off_is_judged_at_the_files_width(tmp_path: Pa
     flat = _stated(payload, prime_tower_rib_wall="0", prime_tower_width="60")
 
     assert _towers(towers_within_reach(flat, H2C))[0] != (262.0, 150.0)
+
+
+def test_a_file_that_states_no_tower_width_is_judged_at_the_default(tmp_path: Path) -> None:
+    """#6735 review: a file is untrusted. A ``prime_tower_width`` of "0", a negative or a
+    non-finite one, with the rib wall off, is judged at the default width, as a missing
+    one is, not divided by. The send keeps working."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "140"))
+    default = _towers(towers_within_reach(_stated(payload, prime_tower_rib_wall=["0"]), H2C))
+
+    for width in (["0"], "-5", "nan", "inf"):
+        stated = _stated(payload, prime_tower_rib_wall=["0"], prime_tower_width=width)
+        assert _towers(towers_within_reach(stated, H2C)) == default, width
