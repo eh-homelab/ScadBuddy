@@ -541,12 +541,12 @@ class TypeFiller:
                 result.filled = wanted
                 result.previous = {name: current[name] for name in wanted}
             elif wanted:
-                written = await self._fill_empty(row.id, wanted, result, actor)
+                written, deleted = await self._fill_empty(row.id, wanted, result, actor)
                 result.filled = {
                     name: value for name, value in wanted.items() if name in (written or {})
                 }
                 result.written = bool(written)
-                if _DELETED in result.skipped.values():
+                if deleted:
                     # The type is gone: no K values to read or write (#6787).
                     return result
         rows, result.k_reason = await self._k_values(row.id, reads)
@@ -558,31 +558,34 @@ class TypeFiller:
 
     async def _fill_empty(
         self, type_id: UUID, wanted: dict[Field, Value], result: TypeFill, actor: str
-    ) -> dict[str, Any] | None:
-        """``fill_empty`` of ``wanted``. A person set one end of a range since the read
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """``fill_empty`` of ``wanted``, and whether the type is gone. A person set one end
+        of a range since the read
         (R-6714-e): re-read the row, drop only the pair that is now backwards (into
         ``result.skipped``, with the reason) and write the rest once more, even when the
         re-read finds no backwards pair. That is the one retry; a second race skips what
         is left. A type the re-read finds gone is not retried: every wanted field is
-        skipped as deleted meanwhile (#6787)."""
+        skipped as deleted meanwhile and the flag is true (#6787, #6800), which the caller
+        stops on, not on the reason text."""
         for retry in (True, False):
             try:
-                return await asyncio.to_thread(
+                written = await asyncio.to_thread(
                     self.types.fill_empty,
                     type_id,
                     {str(k): v for k, v in wanted.items()},
                     actor=actor,
                 )
+                return written, False
             except TypeTempError as error:
                 why = f"the type changed meanwhile: {error}"
                 if not retry:
                     result.skipped |= dict.fromkeys(wanted, why)
-                    return None
+                    return None, False
                 fresh = await asyncio.to_thread(self.types.get, type_id)
                 if fresh is None:
                     # The type is gone: no retry, and every wanted field says why.
                     result.skipped |= dict.fromkeys(wanted, _DELETED)
-                    return None
+                    return None, True
                 current = fresh.model_dump()
                 # A field a person set meanwhile is no longer empty: `fill_empty`
                 # leaves it, so it takes no part in the range.
@@ -590,8 +593,8 @@ class TypeFiller:
                     del wanted[key]
                 result.skipped |= dict.fromkeys(_ranges(current, wanted), why)
                 if not wanted:
-                    return None
-        return None
+                    return None, False
+        return None, False
 
     async def _k_values(
         self, type_id: UUID, reads: _Reads
