@@ -17,6 +17,7 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.filament import models as m
 from scadbuddy.filament.profile_fill import (
     Unread,
+    canonical_nozzle,
     choose_preset,
     cost_hint,
     profile_values,
@@ -170,3 +171,17 @@ async def test_a_local_preset_bambuddy_refuses_or_cannot_reach_is_a_reason(
     read = await read_profile(preset("H2C", "0.4", "2"), table, None)
     assert isinstance(read, Unread)
     assert "no Bambuddy" in read.reason
+
+
+@pytest.mark.parametrize(
+    ("stored", "canonical"),
+    [("0.40", "0.4"), ("0.4", "0.4"), (" 0.6 ", "0.6"), ("1.0", "1"), ("wide", "wide")],
+)
+def test_a_nozzle_is_spelled_as_the_presets_spell_it(stored: str, canonical: str) -> None:
+    assert canonical_nozzle(stored) == canonical
+
+
+async def test_a_nozzle_stored_as_040_reads_the_h2c_04_preset(table: DensityTable) -> None:
+    read = await read_profile(preset("H2C", "0.40"), table, None)
+    assert not isinstance(read, Unread)
+    assert read.source.name == "Bambu PLA Silk @BBL H2C 0.4 nozzle"

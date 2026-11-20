@@ -18,6 +18,7 @@ from scadbuddy.filament.models import (
     SpoolCreate,
     SpoolTypeCreate,
     SpoolTypePatch,
+    TypeKValue,
     TypePreset,
 )
 from scadbuddy.filament.profile_fill import ProfileChangedError, TypeFiller
@@ -312,3 +313,43 @@ async def test_a_fill_never_writes_over_a_value_set_meanwhile(
     assert types.fill_k_values(UUID(int=1), []) is None
     with pytest.raises(ValueError, match="not a profile field"):
         types.fill_empty(type_id, {"cost_per_kg": 1})
+
+
+def test_fill_k_values_checks_under_the_lock_that_set_k_values_takes(
+    types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """R-6714-c: a K-values write that lands while the fill waits for the row is kept."""
+    import threading
+
+    type_id = _type(types, pg_pool)
+    with pg_pool.connection() as conn:
+        printer = UUID(int=0x6714)
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, 'S6714', 'Garage')", (printer,)
+        )
+    row = TypeKValue(
+        type_id=type_id,
+        printer_id=printer,
+        extruder=0,
+        nozzle_diameter="0.4",
+        nozzle_type=None,
+        k_value=Decimal("0.02"),
+        name=None,
+        cali_idx=None,
+        setting_id=None,
+    )
+    answers: list[Any] = []
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute("SELECT id FROM filament_spool_types WHERE id = %s FOR UPDATE", (type_id,))
+        thread = threading.Thread(target=lambda: answers.append(types.fill_k_values(type_id, [])))
+        thread.start()
+        thread.join(timeout=1)
+        assert thread.is_alive()
+        holder.execute(
+            "INSERT INTO filament_spool_type_k_values (type_id, printer_id, extruder,"
+            " nozzle_diameter, k_value) VALUES (%s, %s, 0, '0.4', %s)",
+            (type_id, printer, row.k_value),
+        )
+    thread.join(timeout=30)
+    assert answers == [None]
+    assert [k.k_value for k in types.k_values(type_id)] == [Decimal("0.02")]

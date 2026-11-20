@@ -247,10 +247,25 @@ class SpoolTypeStore:
     def set_k_values(self, type_id: UUID, rows: _KValues) -> _KValues | None:
         """The type's pressure-advance values, replaced by ``rows``; ``None`` for no such
         type."""
+        return self._replace_k_values(type_id, rows, only_if_none=False)
+
+    def _replace_k_values(
+        self, type_id: UUID, rows: _KValues, *, only_if_none: bool
+    ) -> _KValues | None:
+        """`set_k_values`'s one transaction under the type's row lock; with
+        ``only_if_none`` it writes only while the type has no K values (#6714, R-6714-c),
+        checked under that same lock, and answers ``None`` when it has some."""
         try:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
                     return None
+                if only_if_none:
+                    has = conn.execute(
+                        "SELECT 1 FROM filament_spool_type_k_values WHERE type_id = %s LIMIT 1",
+                        (type_id,),
+                    ).fetchone()
+                    if has is not None:
+                        return None
                 conn.execute(
                     "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
                 )
@@ -302,17 +317,8 @@ class SpoolTypeStore:
 
     def fill_k_values(self, type_id: UUID, rows: _KValues) -> _KValues | None:
         """`set_k_values`, only while the type has none (#6714); ``None`` when it has some
-        or does not exist."""
-        with self._orders.transaction() as conn:
-            if self._row(conn, type_id, lock=True) is None:
-                return None
-            has = conn.execute(
-                "SELECT 1 FROM filament_spool_type_k_values WHERE type_id = %s LIMIT 1",
-                (type_id,),
-            ).fetchone()
-            if has is not None:
-                return None
-        return self.set_k_values(type_id, rows)
+        or does not exist. The check and the write are one transaction (R-6714-c)."""
+        return self._replace_k_values(type_id, rows, only_if_none=True)
 
     def linked_bb_spools(self, type_id: UUID) -> _Ids:
         """The Bambuddy spool ids the type's spools are linked to, the newest spool's

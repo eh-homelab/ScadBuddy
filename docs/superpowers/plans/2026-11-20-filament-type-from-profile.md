@@ -94,6 +94,17 @@ Posted on #6714.
   The type page has "Fill from slicer profile", which shows the diff and asks to confirm
   each row (and the K values, sent as `apply` with `k_values: true`); the types list has
   "Fill from slicer profiles", which fills empty fields and lists what it did per type.
+- R-6714-a (supersedes the create and invoice-confirm parts of R-6714-6): `POST
+  /filament/types` and an invoice confirm no longer fill, because a type made has no
+  preset and nothing to read. A type is filled when its first presets arrive: in
+  `PUT /filament/types/{id}/presets` for a type with none, and in the 3DFP profile-fetch
+  import (`profile_fetch.py`, after its commit) for a type with none. Empty fields only.
+- R-6714-b: the fill after a write runs after the commit. A fill that raises is logged
+  (`fill_quietly`, label `error` = the exception's class name) and never fails the request.
+- R-6714-c: `fill_k_values` checks that the type has no K values and writes them in one
+  transaction, under the row lock `set_k_values` takes (`_replace_k_values`).
+- R-6714-d: `read_profile` spells the nozzle as the presets do (`canonical_nozzle`:
+  `0.40` is `0.4`) when it names the printer, so `0.40` reads the H2C 0.4 mm preset.
 - R-6714-8: tests use respx and fixture profile JSON; they never call a live service.
 
 ## Tasks
@@ -103,7 +114,7 @@ Posted on #6714.
 2. `filament/profile_fill.py`: the preset choice, the mapping, the reads (local preset,
    tree), the fill, the refresh and the apply, the K value import.
 3. Routes: `POST /filament/types/{id}/fill-from-profile`,
-   `POST /filament/types/fill-from-profile`; the create hooks.
+   `POST /filament/types/fill-from-profile`; the fill after a type's first presets (R-6714-a).
 4. Frontend: the API client, the type page button and dialog, the types list bulk
    action, MSW mocks.
 5. Agent: `filament_type_fill_from_profile` tool, write tier, `touched.ts`.

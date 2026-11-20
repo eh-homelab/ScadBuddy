@@ -76,6 +76,7 @@ from scadbuddy.filament.profile_fill import (
     FillRequest,
     ProfileChangedError,
     TypeFill,
+    fill_quietly,
 )
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
@@ -268,30 +269,18 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
         "its alpha), a `label_weight_g` and optional print values a spool inherits. With a "
         "`cost_per_kg` it also writes the price book row of its material, subtype, brand, "
         "colour and alpha (`filament_id`), which takes its stops and effect when it is new "
-        "(#6209). A type made is filled from its slicer profile as "
-        "`POST /filament/types/{type_id}/fill-from-profile` fills it (#6714). 409 when an "
+        "(#6209). A type made has no preset, so nothing is filled yet: it is filled from its "
+        "slicer profile when its first presets arrive (`PUT /filament/types/{type_id}/presets`, "
+        "or a 3DFP preset fetch's import, #6714). 409 when an "
         "unarchived type has the code, 422 for a bad field, a row it "
         "points at that does not exist, or a minimum temperature above its maximum."
     ),
 )
-async def create_type(
-    filament: FilamentDep, store: SettingsStoreDep, body: m.SpoolTypeCreate
-) -> m.SpoolType:
+async def create_type(filament: FilamentDep, body: m.SpoolTypeCreate) -> m.SpoolType:
     try:
-        made = await asyncio.to_thread(filament.types.create, body)
+        return await asyncio.to_thread(filament.types.create, body)
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
-    return await _filled(filament, store, made)
-
-
-async def _filled(filament: Filament, store: SettingsStore, made: m.SpoolType) -> m.SpoolType:
-    """A type just made, filled from its slicer profile (#6714, R-6714-6): its empty
-    fields and, when it has none, its K values. A type with no preset is unchanged."""
-    settings = await asyncio.to_thread(store.load)
-    (done,) = await filament.filler.fill(settings, [made.id])
-    if not done.written:
-        return made
-    return await asyncio.to_thread(filament.types.get, made.id) or made
 
 
 _FILL_DESCRIPTION = (
@@ -421,8 +410,7 @@ async def put_type_presets(
     if saved and not had:
         # A type's first presets come right after it is made (makeTypeFromSpool, the type
         # page): it is filled from them then (R-6714-6), never on a later change.
-        settings = await asyncio.to_thread(store.load)
-        await filament.filler.fill(settings, [type_id])
+        await fill_quietly(filament.filler, store.load, [type_id])
     return saved
 
 

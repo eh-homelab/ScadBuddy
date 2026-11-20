@@ -24,6 +24,7 @@ takes the ``k_profiles`` of the Bambuddy spools its spools are linked to.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -63,6 +64,9 @@ Field = Literal[
 Value = int | Decimal
 
 
+logger = logging.getLogger(__name__)
+
+
 class ProfileSource(BaseModel):
     """The preset a type was filled from: the type's preset row and the profile read."""
 
@@ -97,6 +101,15 @@ def _nozzle(value: str) -> Decimal | None:
         return Decimal(value)
     except InvalidOperation:
         return None
+
+
+def canonical_nozzle(value: str) -> str:
+    """A nozzle diameter as the presets and printer names spell it: ``0.40`` is ``0.4``
+    (R-6714-d); text that is no number stays as it is."""
+    number = _nozzle(value.strip())
+    if number is None or not number.is_finite():
+        return value
+    return format(number.normalize(), "f")
 
 
 def choose_preset(presets: Sequence[m.TypePreset]) -> m.TypePreset | None:
@@ -204,7 +217,7 @@ async def read_profile(
     profiles = None if table is None else table.profiles
     if table is None or profiles is None:
         return Unread(f"this image has no slicer profiles to read preset {preset_id} from")
-    printer = f"Bambu Lab {preset.printer_model} {preset.nozzle_diameter} nozzle"
+    printer = f"Bambu Lab {preset.printer_model} {canonical_nozzle(preset.nozzle_diameter)} nozzle"
     name = table.preset_name(preset_id, printer)
     if name is None:
         return Unread(f"Bambu Studio {profiles.version} has no filament preset {preset_id}")
@@ -341,6 +354,20 @@ async def _bambuddy(settings: StoredSettings) -> AsyncIterator[BambuddyClient | 
         return
     async with BambuddyClient(config) as client:
         yield client
+
+
+async def fill_quietly(
+    filler: TypeFiller, load: Callable[[], StoredSettings], type_ids: Sequence[UUID]
+) -> None:
+    """``filler.fill`` after a write has committed: a failure is logged with its error
+    label and never fails the request that wrote (R-6714-b)."""
+    try:
+        await filler.fill(await asyncio.to_thread(load), list(type_ids))
+    except Exception as error:
+        logger.warning(
+            "could not fill the types from their slicer profiles",
+            extra={"error": type(error).__name__},
+        )
 
 
 @dataclass

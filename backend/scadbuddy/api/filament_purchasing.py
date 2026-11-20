@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from scadbuddy.api import media as media_api
-from scadbuddy.api.deps import PathsDep, SettingsStoreDep, StateDep
+from scadbuddy.api.deps import PathsDep, StateDep
 from scadbuddy.api.filament import actor
 from scadbuddy.api.order_attachments import INERT, NOSNIFF
 from scadbuddy.auth.component import CallerDep
@@ -525,17 +525,12 @@ async def delete_invoice(filament: FilamentDep, invoice_id: UUID) -> Response:
         "shop's currency, one whose total is more than 0.05 from its lines plus shipping, or a "
         "line that cannot be confirmed (the message names the line). After the commit it "
         "starts a 3DFP preset fetch for each new type that has a `tdfp_id` (`POST "
-        "/filament/types/{type_id}/profile-fetch`), and fills every new type from its slicer "
-        "profile (`POST /filament/types/fill-from-profile`); a fetch that cannot start never "
+        "/filament/types/{type_id}/profile-fetch`); a fetch that cannot start never "
         "fails the confirm."
     ),
 )
 async def confirm_invoice(
-    state: StateDep,
-    filament: FilamentDep,
-    store: SettingsStoreDep,
-    caller: CallerDep,
-    invoice_id: UUID,
+    state: StateDep, filament: FilamentDep, caller: CallerDep, invoice_id: UUID
 ) -> pm.InvoiceDetail:
     who = actor(caller)
     try:
@@ -553,10 +548,6 @@ async def confirm_invoice(
     invoice, _, made = done
     # After the commit; a failure to start is logged, never the confirm's (Decision 12).
     await start_profile_fetches(state, made, actor=who)
-    if made:
-        # The types the lines proposed are filled from their slicer profiles, as every
-        # type made is (#6714, R-6714-6).
-        await filament.filler.fill(await asyncio.to_thread(store.load), list(made))
     return invoice
 
 

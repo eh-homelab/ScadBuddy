@@ -128,11 +128,7 @@ def test_the_bulk_route_fills_every_type_and_reports_each(client: TestClient) ->
     assert all(one["written"] is False for one in preview)
 
 
-def test_an_invoice_confirm_fills_the_types_it_makes(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A proposed type has no presets yet, so the fill finds nothing to write; what is
-    checked is that the confirm asks for it, for the type it made only."""
+def _spy_fill(monkeypatch: pytest.MonkeyPatch) -> list[list[UUID]]:
     asked: list[list[UUID]] = []
     fill = TypeFiller.fill
 
@@ -141,6 +137,24 @@ def test_an_invoice_confirm_fills_the_types_it_makes(
         return await fill(self, settings, type_ids, **kwargs)
 
     monkeypatch.setattr(TypeFiller, "fill", spy)
+    return asked
+
+
+def test_setting_presets_on_an_empty_type_fills_its_fields(client: TestClient) -> None:
+    made = _type(client)
+    assert made["nozzle_temp_min"] is None
+    assert made["density_g_cm3"] is None
+    assert client.put(f"{TYPES}/{made['id']}/presets", json=SILK_04).status_code == 200
+    row = client.get(f"{TYPES}/{made['id']}").json()
+    assert (row["nozzle_temp_min"], row["bed_temp_max"], row["density_g_cm3"]) == (190, 60, "1.320")
+
+
+def test_a_type_made_or_an_invoice_confirmed_is_not_filled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A type made has no preset, so it is filled when its presets arrive (R-6714-a),
+    not by the route that makes it."""
+    asked = _spy_fill(monkeypatch)
     supplier = client.post("/api/v1/filament/suppliers", json={"name": "Acme"}).json()["id"]
     kept = _type(client, code="KEPT")
     proposed = {
@@ -149,7 +163,6 @@ def test_an_invoice_confirm_fills_the_types_it_makes(
         "rgba": "#000000",
         "label_weight_g": 1000,
     }
-    asked.clear()
     lines = [
         {"description": "new", "quantity": 1, "unit_price": "20.00", "proposed_type": proposed},
         {"description": "kept", "quantity": 1, "unit_price": "20.00", "type_id": kept["id"]},
@@ -163,5 +176,20 @@ def test_an_invoice_confirm_fills_the_types_it_makes(
     assert invoice.status_code == 201, invoice.text
     done = client.post(f"/api/v1/filament/invoices/{invoice.json()['id']}/confirm")
     assert done.status_code == 200, done.text
-    made = next(line["type_id"] for line in done.json()["lines"] if line["description"] == "new")
-    assert asked == [[UUID(made)]]
+    assert asked == []
+
+
+def test_a_fill_that_raises_after_the_presets_are_saved_is_logged_not_raised(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def boom(self: TypeFiller, settings: Any, type_ids: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(TypeFiller, "fill", boom)
+    made = _type(client)
+    with caplog.at_level("WARNING"):
+        put = client.put(f"{TYPES}/{made['id']}/presets", json=SILK_04)
+    assert put.status_code == 200, put.text
+    assert [row["slicer_filament"] for row in put.json()] == ["GFA05"]
+    [warning] = [r for r in caplog.records if r.levelname == "WARNING" and hasattr(r, "error")]
+    assert warning.error == "RuntimeError"
