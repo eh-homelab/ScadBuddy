@@ -310,6 +310,34 @@ export function inventoryRows(includeArchived = false): FilamentInventorySpool[]
   }))
 }
 
+/**
+ * `GET /filament/inventory`'s trays: the H2C's, one per placed spool. Slot 4's spool (#8,
+ * clear PETG) does not match what the tray reports, grey PETG, so it carries a
+ * `mismatch` (#6713).
+ */
+function inventoryTrays(): S['PrinterTrays'][] {
+  const trays = listed(false).flatMap((row): S['InventoryTray'][] => {
+    const place = trayOf(row)
+    if (!place) return []
+    const spool = view(row)
+    const odd = place.ams_id === 0 && place.tray_id === 3
+    return [
+      {
+        ams_id: place.ams_id,
+        tray_id: place.tray_id,
+        label: `AMS-A slot ${place.tray_id + 1}`,
+        material: odd ? 'PETG' : (spool.names?.material ?? null),
+        rgba: odd ? '#A7AEB2FF' : (spool.effective?.rgba ?? null),
+        spool_id: row.id,
+        spool_number: row.number,
+        found_by: 'link',
+        mismatch: odd ? { reported_type: 'PETG', reported_rgba: '#A7AEB2FF' } : null,
+      },
+    ]
+  })
+  return trays.length ? [{ printer_id: H2C.printer_id, printer_name: H2C.printer_name, trays }] : []
+}
+
 function summary(): S['InventorySummary'] {
   const rows = listed(false).map(view)
   const grams = (spool: FilamentSpool) => spool.grams_left ?? 0
@@ -1502,7 +1530,7 @@ export const handlers = [
   }),
   http.get(`${BASE}/summary`, () => HttpResponse.json(summary())),
   http.get(`${BASE}/inventory`, ({ request }) =>
-    HttpResponse.json({ spools: inventoryRows(flag(request, 'include_archived')), trays: [] } satisfies FilamentInventoryView),
+    HttpResponse.json({ spools: inventoryRows(flag(request, 'include_archived')), trays: inventoryTrays() } satisfies FilamentInventoryView),
   ),
   http.get(`${BASE}/spools/:id/summary`, ({ params }) => {
     const row = findSpool(String(params.id))

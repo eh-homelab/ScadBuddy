@@ -634,6 +634,7 @@ def test_inventory_route_lists_sb_spools(client: TestClient, pg_conninfo: str) -
                     "spool_id": white["id"],
                     "spool_number": white["number"],
                     "found_by": "tag",
+                    "mismatch": None,
                 }
             ],
         }

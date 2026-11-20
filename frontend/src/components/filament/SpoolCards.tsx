@@ -1,3 +1,4 @@
+import { CheckTray, type TrayCheck } from './CheckTray'
 import { NeedsDrying } from './NeedsDrying'
 import { SpoolLink } from './SpoolLink'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -10,13 +11,15 @@ interface Props {
   groups: SpoolGroup[]
   selected: ReadonlySet<string>
   onSelect: (ids: string[], on: boolean) => void
+  /** The spools whose tray reports something else, by id (#6713). */
+  checks?: ReadonlyMap<string, TrayCheck>
 }
 
 /**
  * #6262 — the spools as cards: each spool's chip large, with its grams ring, so a shelf of
  * colours (and which are translucent) reads at a glance.
  */
-export function SpoolCards({ groups, selected, onSelect }: Props) {
+export function SpoolCards({ groups, selected, onSelect, checks }: Props) {
   return (
     <div className="space-y-4">
       {groups.map((group) => (
@@ -54,6 +57,7 @@ export function SpoolCards({ groups, selected, onSelect }: Props) {
                     </p>
                     <NeedsType spool={spool} />
                     <NeedsDrying spool={spool} />
+                    <CheckTray check={checks?.get(spool.id)} />
                   </div>
                 </li>
               )
