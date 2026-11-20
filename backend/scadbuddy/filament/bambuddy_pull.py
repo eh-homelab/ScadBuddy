@@ -695,12 +695,8 @@ def _one(
                 _write_seen(conn, run, spool_id, bb, taken)
                 return "archived", spool_id, False
             taken.add("archived_at")
-        changed = _update(conn, run, bb, spool_id, link["bb_updated_at"], skipped, taken)
-        # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
-        # once each.
-        booked = _book(conn, spool_id, bb, actor, pulls.weights)
-        presets = pulls.presets and _bb_presets(conn, spool_id, bb, actor)
-        k_values = pulls.presets and _bb_k_values(conn, run, spool_id, bb)
+        # The move and the archive first, before this pull books any event at its own
+        # time, so `_bb_event_at` books them at Bambuddy's (#6265 decision 158).
         moved = pulls.locations and _follow_location(conn, run, spool_id, bb, taken)
         archived = (
             not link["archived"]
@@ -709,6 +705,14 @@ def _one(
         )
         if archived:
             taken.add("archived_at")
+        changed = _update(
+            conn, run, bb, spool_id, link["bb_updated_at"], skipped, taken, archived=archived
+        )
+        # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
+        # once each.
+        booked = _book(conn, spool_id, bb, actor, pulls.weights)
+        presets = pulls.presets and _bb_presets(conn, spool_id, bb, actor)
+        k_values = pulls.presets and _bb_k_values(conn, run, spool_id, bb)
         _write_seen(conn, run, spool_id, bb, taken)
         if link["archived"] or changed or booked or presets or k_values or moved or archived:
             return "updated", spool_id, False
@@ -1171,11 +1175,14 @@ def _update(
     pulled_at: datetime | None,
     skipped: list[str] | None = None,
     taken: set[str] | None = None,
+    *,
+    archived: bool = False,
 ) -> bool:
     """True when a field of the SB spool changed: a column, its type or insert type, its
     tag binding or its weight (a ``bb`` reading). With ``pulls.spools`` False no field,
     type or insert type moves; ``pulls.weights`` gates the ``bb`` reading and
-    ``weight_locked``, ``pulls.tags`` the binding of a tag BB names. A field of a type
+    ``weight_locked``, ``pulls.tags`` the binding of a tag BB names, which a spool this
+    pull just archived (``archived``) does not take: its archive unbound its tags. A field of a type
     that does not pull keeps its last value in the recorded reading (`_seen`), so the pull
     after the type is switched on reads it, BB's row moved or not. A catalog name with no
     key goes in ``skipped``. The `seen_row` names of the fields it took go in ``taken``.
@@ -1254,6 +1261,7 @@ def _update(
     keys = (after["tag_uid"], after["tray_uuid"])
     retag = (
         pulls.tags
+        and not archived
         and keys != (before.get("tag_uid"), before.get("tray_uuid"))
         and keys != (None, None)
     )

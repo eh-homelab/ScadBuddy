@@ -11,11 +11,11 @@ test('a saved sync direction is remembered after a reload', async ({ page }) => 
   const suppliers = filament.getByRole('combobox', { name: 'Suppliers and prices' })
   await expect(suppliers).toHaveText('Off')
   // The seed sets nothing to push; once the save lands, the status is read again and says nothing.
-  await expect(filament.getByText('No pass runs: no data type is set to send to Bambuddy.')).toBeVisible()
+  await expect(filament.getByText('No pass runs: no data type but tags is set to send to Bambuddy (tags go with the refresh).')).toBeVisible()
   await suppliers.click()
   await page.getByRole('option', { name: 'ScadBuddy → Bambuddy' }).click()
   await filament.getByRole('button', { name: 'Save Filament' }).click()
-  await expect(filament.getByText('No pass runs: no data type is set to send to Bambuddy.')).toHaveCount(0)
+  await expect(filament.getByText('No pass runs: no data type but tags is set to send to Bambuddy (tags go with the refresh).')).toHaveCount(0)
 
   await page.reload()
   await expect(filament.getByRole('combobox', { name: 'Suppliers and prices' })).toHaveText('ScadBuddy → Bambuddy')
@@ -30,8 +30,9 @@ test('sync now starts a pass and lists the item Bambuddy refused', async ({ page
   await filament.getByRole('button', { name: 'Sync now' }).click()
   await expect(filament.getByRole('alert')).toContainText('Nothing is set to go to Bambuddy.')
 
-  await filament.getByRole('combobox', { name: 'Tags' }).click()
-  await page.getByRole('option', { name: 'Both ways (newer change wins)' }).click()
+  // Tags alone are not enough: they go with the refresh, not the sync pass.
+  await filament.getByRole('combobox', { name: 'Suppliers and prices' }).click()
+  await page.getByRole('option', { name: 'ScadBuddy → Bambuddy' }).click()
   await filament.getByRole('button', { name: 'Save Filament' }).click()
   await filament.getByRole('button', { name: 'Sync now' }).click()
   await expect(filament.getByText(/Sync started/)).toBeVisible()

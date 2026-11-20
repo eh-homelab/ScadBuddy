@@ -854,9 +854,11 @@ async def patch_spool(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a spool",
     description=(
-        "Only a spool that never printed and has no Bambuddy link: its ledger and tag "
-        "bindings go with it. 404 for no such spool, 409 when its ledger holds a print or "
-        "Bambuddy links it (the next pull would make it again); archive it instead."
+        "Only a spool that never printed, has no Bambuddy link and is not being created in "
+        "Bambuddy: its ledger and tag bindings go with it. 404 for no such spool, 409 when "
+        "its ledger holds a print, Bambuddy links it, or the sync's create of it in "
+        "Bambuddy is open (failed or unanswered ones included; the next pull would make "
+        "it again); archive it instead."
     ),
 )
 async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
@@ -1653,7 +1655,8 @@ async def run_filament_sync(state: StateDep) -> SyncRun:
     if reason == "nothing_pushes":
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            "no data type is set to push to Bambuddy (filament_sync)",
+            "no data type the sync pushes is set to push to Bambuddy (filament_sync; tags"
+            " go with the refresh)",
             code=reason,
         )
     return SyncRun()

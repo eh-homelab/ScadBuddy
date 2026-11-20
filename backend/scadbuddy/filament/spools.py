@@ -79,14 +79,16 @@ class SpoolBambuddyLinkedError(ValueError):
 
 
 class SpoolBambuddyCreatingError(SpoolBambuddyLinkedError):
-    """The sync's create of the spool in Bambuddy has no answer yet (#6265 review M9): it
-    may have made a Bambuddy row, which the pull would import as a new spool."""
+    """The sync's create of the spool in Bambuddy is open (#6265 review M9): its intent
+    exists, with or without an error row. A refusal, a timeout and a lost answer each
+    leave an error row, so an error row does not prove that Bambuddy made no row; a row
+    it made would come back from the pull as a new spool."""
 
     def __init__(self) -> None:
         ValueError.__init__(
             self,
-            "the spool is being created in Bambuddy and has no answer yet; the next pull"
-            " could bring it back. Try again after the next sync pass, or archive it",
+            "the spool is being created in Bambuddy, which may already hold it, and the"
+            " next pull would bring it back; archive it instead",
         )
 
 
@@ -782,10 +784,11 @@ class FilamentSpoolStore:
 
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
         """Remove a spool that never printed, with its events, tag bindings and Bambuddy
-        sync intent and error rows; ``False`` for no such spool. `SpoolBambuddyLinkedError`
+        sync error row; ``False`` for no such spool. `SpoolBambuddyLinkedError`
         when a Bambuddy link names it (the next pull would make it again), and
-        `SpoolBambuddyCreatingError` while its create intent has no answer (no error row):
-        a lost answer's Bambuddy row would come back the same way. `SpoolInUseError`
+        `SpoolBambuddyCreatingError` while it has a create intent, with or without an
+        error row: a timeout or a lost answer also leaves an error row, and the Bambuddy
+        row such a create made would come back the same way. `SpoolInUseError`
         when its ledger holds an event of a kind in ``refusing`` (a ``print_started`` or
         ``print_ended`` one; the native
         API's delete refuses ``print_ended`` only, `spools/native.py`)."""
@@ -807,19 +810,18 @@ class FilamentSpoolStore:
             ).fetchone():
                 raise SpoolBambuddyLinkedError()
             if conn.execute(
-                "SELECT 1 FROM filament_bb_creates c WHERE c.kind = 'spool' AND c.sb_id = %s"
-                " AND NOT EXISTS (SELECT 1 FROM filament_bb_push_errors e"
-                " WHERE e.kind = 'spool' AND e.sb_id = c.sb_id)",
+                "SELECT 1 FROM filament_bb_creates WHERE kind = 'spool' AND sb_id = %s",
                 (spool_id,),
             ).fetchone():
                 raise SpoolBambuddyCreatingError()
             for table in ("filament_spool_events", "filament_tag_bindings"):
                 conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
-            # The Bambuddy sync's intent and error rows name the spool (#6265 R-T3-5).
-            for table in ("filament_bb_creates", "filament_bb_push_errors"):
-                conn.execute(
-                    f"DELETE FROM {table} WHERE kind = 'spool' AND sb_id = %s", (spool_id,)
-                )
+            # The Bambuddy sync's error row names the spool (#6265 R-T3-5); it has no
+            # intent here (review M9).
+            conn.execute(
+                "DELETE FROM filament_bb_push_errors WHERE kind = 'spool' AND sb_id = %s",
+                (spool_id,),
+            )
             conn.execute("DELETE FROM filament_spools WHERE id = %s", (spool_id,))
         return True
 

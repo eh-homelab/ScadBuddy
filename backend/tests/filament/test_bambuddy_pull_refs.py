@@ -433,3 +433,39 @@ def test_the_pulls_archive_and_move_are_booked_at_bambuddys_time(pg_pool: PgPool
         assert sb_changed_at(conn, made, "location_id") == at
         # Booked just after the move, which came first: the ledger keeps its order.
         assert at < sb_changed_at(conn, made, "archived_at") <= at + timedelta(microseconds=1)
+
+
+def test_a_pull_books_its_move_and_archive_before_its_own_events(pg_pool: PgPool) -> None:
+    """Decision 158: one Bambuddy change can move and archive a spool and change its
+    K-profiles. The K values' event is booked at the pull's own time, after Bambuddy's
+    change, so the move and the archive are booked first: at Bambuddy's time, not just
+    after that event, where `sb_changed_at` would count them as a newer SB change."""
+    from scadbuddy.filament.bb_sync_plan import sb_changed_at
+
+    f = _filament(pg_pool)
+    _printer(pg_pool, bb_id=1)
+    first = bb(k_profiles=[_k(1, 0.02)], updated_at=_bb_time(-3))
+    (made,) = pull(f, [first], now=NOW).created_ids
+    garage = _locations([{"id": 5, "name": "Garage"}])
+    pull(f, [first], now=NOW, pulls=ROWS, locations=garage)
+    # Bambuddy's change: after every event so far, before the next pull's own events.
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT clock_timestamp() AS at").fetchone()
+    assert row is not None
+    at: datetime = row["at"]
+    when = at.astimezone(UTC).replace(tzinfo=None).isoformat()
+    changed = bb(location_id=5, archived_at=when, updated_at=when, k_profiles=[_k(1, 0.03)])
+    pull(f, [changed], now=NOW, pulls=ROWS, locations=garage)
+
+    spool = f.spools.get(made)
+    assert spool is not None and spool.archived_at is not None and spool.location_id is not None
+    with pg_pool.connection() as conn:
+        k_at = conn.execute(
+            "SELECT max(at) AS at FROM filament_spool_events WHERE spool_id = %s"
+            " AND kind = 'synced_from_bb' AND data -> 'changes' ? 'k_values'",
+            (made,),
+        ).fetchone()
+        assert k_at is not None and k_at["at"] > at
+        assert sb_changed_at(conn, made, "location_id") == at
+        # Just after the move, which came first; both before the K values' event.
+        assert at < sb_changed_at(conn, made, "archived_at") <= at + timedelta(microseconds=1)

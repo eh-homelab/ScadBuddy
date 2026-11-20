@@ -7,9 +7,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 from psycopg.types.json import Jsonb
 
+from scadbuddy.bambuddy.errors import map_transport
 from scadbuddy.bambuddy.models import BbLocation, BbSupplier
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync
@@ -28,7 +30,8 @@ from scadbuddy.filament.models import (
     SpoolTypePatch,
 )
 from scadbuddy.filament.purchasing_models import SupplierCreate, SupplierPatch
-from scadbuddy.filament.spools import SpoolBambuddyCreatingError
+from scadbuddy.filament.rfid_push import error_label
+from scadbuddy.filament.spools import SpoolBambuddyCreatingError, SpoolBambuddyLinkedError
 from tests.conftest import PgPool
 from tests.filament.test_bb_sync_plan import (
     INSTANCE,
@@ -277,20 +280,16 @@ def test_a_spool_whose_link_was_dropped_can_be_deleted(pg_pool: PgPool) -> None:
     assert f.spools.delete(spool) is True
 
 
-def test_deleting_a_spool_removes_its_intent_and_error_rows(pg_pool: PgPool) -> None:
-    f = _filament(pg_pool)
-    spool = _spool(f, _type(f))
-    create = _only(_plan(f, _snap([])).writes, "create")
-    _apply(f, [create], [_refused(create)])
-    assert _intents(pg_pool) == [("spool", spool)] and len(_errors(pg_pool)) == 1
-    assert f.spools.delete(spool) is True
-    assert _intents(pg_pool) == [] and _errors(pg_pool) == []
+def _timed_out(write: BbWrite) -> BbWriteResult:
+    """What `bb_sync_run._call` records when Bambuddy's answer did not come in time."""
+    exc = map_transport(httpx.ReadTimeout("no answer"), what="create a spool")
+    return BbWriteResult(key=write.key, ok=False, error=error_label(exc))
 
 
 def test_a_spool_whose_create_has_no_answer_is_not_deleted(pg_pool: PgPool) -> None:
     """Review M9: the create may have made a Bambuddy row whose answer was lost. Deleting
     the spool would drop the intent, and the pull would then import that row as a new SB
-    spool, so the delete is refused until an answer (a link or a refusal) comes."""
+    spool, so the delete is refused while the intent is open."""
     f = _filament(pg_pool)
     spool = _spool(f, _type(f))
     _only(_plan(f, _snap([])).writes, "create")
@@ -298,6 +297,49 @@ def test_a_spool_whose_create_has_no_answer_is_not_deleted(pg_pool: PgPool) -> N
         f.spools.delete(spool)
     assert _intents(pg_pool) == [("spool", spool)]
     assert f.spools.get(spool) is not None
+
+
+@pytest.mark.parametrize("answer", ["timeout", "internal", "refused"])
+def test_a_spool_whose_create_failed_is_not_deleted(pg_pool: PgPool, answer: str) -> None:
+    """Review M9: a timed-out or `internal` create (the write may have reached Bambuddy)
+    leaves an error row as a refusal does, and the intent stays. The delete is refused
+    while the intent is open, error row or not."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    result = {
+        "timeout": _timed_out(create),
+        "internal": BbWriteResult(key=create.key, ok=False, error="internal"),
+        "refused": _refused(create),
+    }[answer]
+    assert _apply(f, [create], [result]).failed == 1
+    assert _intents(pg_pool) == [("spool", spool)] and len(_errors(pg_pool)) == 1
+    with pytest.raises(SpoolBambuddyCreatingError):
+        f.spools.delete(spool)
+    assert f.spools.get(spool) is not None
+    assert _intents(pg_pool) == [("spool", spool)] and len(_errors(pg_pool)) == 1
+
+
+def test_a_spool_deletes_once_its_create_intent_is_closed(pg_pool: PgPool) -> None:
+    """Review M9: the next full pass (Sync now) retries a timed-out create, and its answer
+    closes the intent and links the spool. The delete is then refused for the link
+    only, and once Bambuddy's row is gone (a probe's 404 drops the link) it works."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    first = _only(_plan(f, _snap([])).writes, "create")
+    _apply(f, [first], [_timed_out(first)])
+    retry = _only(_plan(f, _snap([])).writes, "create")
+    answer = _answer(60, **_body(retry))
+    assert _apply(f, [retry], [_ok(retry, answer, 60)]).linked == 1
+    assert _intents(pg_pool) == [] and _errors(pg_pool) == []
+    with pytest.raises(SpoolBambuddyLinkedError) as refused:
+        f.spools.delete(spool)
+    assert not isinstance(refused.value, SpoolBambuddyCreatingError)
+    probe = _write("spool", spool, "probe", 60)
+    _apply(f, [probe], [_refused(probe, 404)])
+    assert f.spools.delete(spool) is True
+    assert f.spools.get(spool) is None
+    assert _intents(pg_pool) == [] and _errors(pg_pool) == []
 
 
 def test_archiving_an_item_clears_its_sync_errors(pg_pool: PgPool) -> None:

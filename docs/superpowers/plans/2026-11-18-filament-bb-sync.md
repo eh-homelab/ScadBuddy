@@ -1676,12 +1676,25 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     newest event, so the ledger keeps its order (`_bb_event_at`). Test:
     `test_the_pulls_archive_and_move_are_booked_at_bambuddys_time`. Cost: a Bambuddy
     change older than the spool's newest event is booked just after that event.
+    Re-review residual: a linked spool's pull books the move and the archive before its
+    other events (its fields, weighings, presets, K values), so none of the pull's own
+    events moves them later; a spool it archives takes no new tag. Test:
+    `test_a_pull_books_its_move_and_archive_before_its_own_events`.
 159. Final review (M4; widens 11): the pass also heartbeats after each Bambuddy listing,
     each plan and each results call. Test: `test_the_reads_heartbeat_before_the_first_plan`.
-160. Final review (M9; changes R-T3-5): an SB spool whose create intent has no error row (a
-    create with no answer yet) is not deleted (`SpoolBambuddyCreatingError`, a 409): a lost
-    answer's BB row would come back as a new SB spool. A refused create (an error row)
-    still deletes. Test: `test_a_spool_whose_create_has_no_answer_is_not_deleted`.
+160. Final review (M9; changes R-T3-5 and 89): an SB spool with a create intent is not deleted
+    (`SpoolBambuddyCreatingError`, a 409), whether or not the intent has an error row: a
+    lost answer (a timeout or transport error, or `internal`, `bb_sync_run._call`) also
+    leaves an error row and keeps the intent (`bb_sync_results._apply`), and the BB row
+    such a create made would come back as a new SB spool. The intent closes only when a
+    later pass's answer links the spool (or the plan expires it); the link then refuses
+    the delete until it goes. So `delete` removes the spool's error row only, and an
+    archived spool's intent stays until a pass after its restore closes it (89 said
+    "restored or deleted"). These tests replace
+    `test_deleting_a_spool_removes_its_intent_and_error_rows`:
+    `test_a_spool_whose_create_has_no_answer_is_not_deleted`,
+    `test_a_spool_whose_create_failed_is_not_deleted`,
+    `test_a_spool_deletes_once_its_create_intent_is_closed`.
 
 ## Self-review
 

@@ -89,7 +89,7 @@ export const handlers = [
     restoreFilamentSync()
     const reason = skipped()
     if (reason === 'no_bambuddy') return conflict('no Bambuddy is configured', reason)
-    if (reason === 'nothing_pushes') return conflict('no data type but tags is set to push to Bambuddy', reason)
+    if (reason === 'nothing_pushes') return conflict('no data type the sync pushes is set to push to Bambuddy (filament_sync; tags go with the refresh)', reason)
     running ??= READS_TO_LAND
     return HttpResponse.json({ started: true } satisfies S['SyncRun'], { status: 202 })
   }),
