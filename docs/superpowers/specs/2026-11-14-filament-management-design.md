@@ -240,6 +240,13 @@ Children:
 - `sku_settings`: lead time days, safety margin. BB parity with
   `FilamentSkuSettings`.
 
+  As built in #6269 (plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,
+  Decision 9): `sku_settings` is two columns of `spool_types`, `lead_time_days` and
+  `safety_margin_days` (whole days, 0 to 365, null means the setting), with the settings
+  `filament_lead_time_days` (7) and `filament_safety_margin_days` (3). A type's reorder day
+  is its empty day minus both, and "reorder now" means that day is today or past. There is
+  no separate table.
+
 The existing price book (`filaments`, `20261022T1704Z_filaments.sql`) has the
 same identity (material, subtype, brand, colour). It becomes a view over
 `spool_types` and the newest price points, so quotes and job cost keep working.
@@ -452,6 +459,36 @@ BB has a flat list (`/inventory/locations`) plus location sensors
 The same numbers go out as OpenTelemetry metrics with the existing tracing
 setup, and a Filament panel joins the Grafana dashboards (`deploy/CLAUDE.md`).
 Low-cardinality labels only: material, brand, location, not the spool id.
+
+**As built in #6269** (plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`;
+the numbers are its decisions):
+- Prometheus gauges, not an OTel meter (2): the backend has no meter provider, every metric
+  is a `prometheus_client` series in `core/metrics.py`, and the dashboards read Prometheus.
+  The gauges come from one inventory snapshot, refreshed at most every 60 s per process.
+- Labels are catalog names (4): `material`, `brand` and `location_kind` are the catalog
+  rows' `name`, because those tables have no code column. A rename of a material, brand or
+  location kind starts a new series. A label has at most 20 values; the rest fold into
+  `other`, and null is `none`. A material that crosses rank 20 makes a one-day step in
+  "Used per day" and in `other`; the totals stay right. A real value named `other` or
+  `none` is exported as `other*` or `none*`.
+- Consumption is a cumulative gauge (5): `scadbuddy_filament_used_grams{material,outcome}`
+  is the grams of every plate booked; the panels use `delta` over the range, after a
+  `max by` across API pods.
+- A plate is counted by §5.5 rule 3 with no anchor (6), by `metrics.plates`: BB's usage row
+  wins over SB's estimate, a `covered` plate counts 0 here (its grams are on another
+  spool), and an open estimate counts 0 g until the print ends.
+- Waste is the grams of failed and cancelled plates (7); an SB-only failed plate books 0 g.
+- Burn rate (8) is the grams of plates that ended inside the window
+  (`filament_burn_window_days`, default 30) over the window's days, or over the spool's age
+  when it is younger, never under 1 day. A type's or material's burn is that of the union
+  of its spools' plates, born at the oldest spool.
+- A type edit fans out (11): a change to an overridable field, a preset or a K value writes
+  one `edited` event on each unarchived spool that does not override it.
+- The chart shows what SB believed then (13): each event stores `grams_before`; the value
+  after an event is the next event's `grams_before`. Over 500 points thin out, and the
+  anchors, plates and last point stay.
+- The AMS error (14) pairs each scale reading with the newest earlier AMS reading (not
+  while printing, within 24 h, no plate that took grams between).
 
 ### 5.8 Purchasing
 

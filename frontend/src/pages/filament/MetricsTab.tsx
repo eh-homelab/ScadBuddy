@@ -367,7 +367,7 @@ export function MetricsTab() {
 
         <Section id="metrics-consumption" title="Consumption" note={`Grams the plates used, ${span}, per ${bucket}.`}>
           {problem(errors.rank)}
-          {metrics && rank?.dimension === metrics.dimension ? <Consumption metrics={metrics} order={rank.order} /> : !errors.metrics && !errors.rank && loading}
+          {metrics ? <Consumption metrics={metrics} order={rank?.dimension === metrics.dimension ? rank.order : ranked(metrics)} /> : !errors.metrics && loading}
         </Section>
       </div>
 

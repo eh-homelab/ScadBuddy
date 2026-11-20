@@ -134,6 +134,32 @@ describe('the Metrics tab (#6269)', () => {
     expect(await swatch('PETG')).toBe(petg)
   })
 
+  it('draws the consumption as soon as the range request returns, before the 365-day rank does (R-T8-12)', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('*/api/v1/filament/metrics', async ({ request }) => {
+        const url = new URL(request.url)
+        const since = url.searchParams.get('since')!
+        const until = url.searchParams.get('until')!
+        if (Date.parse(until) - Date.parse(since) > 300 * 86_400_000) await held
+        return HttpResponse.json({
+          currency: 'USD',
+          dimension: 'material',
+          bucket: 'month',
+          since,
+          until,
+          stock: [],
+          consumption: [{ bucket: '2026-11-01', key: 'pla', label: 'PLA', used_g: 100, wasted_g: 0 }],
+          waste: [],
+        })
+      }),
+    )
+    render()
+    expect(await within(region('Consumption')).findByRole('img', { name: /100 g in all/ })).toBeInTheDocument()
+    release()
+  })
+
   describe('a price line', () => {
     const zone = process.env.TZ
     beforeEach(() => {

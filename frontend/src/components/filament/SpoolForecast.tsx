@@ -51,7 +51,7 @@ export function TypeForecastTable({ types, windowDays }: { types: readonly TypeF
   const scale = niceMax(Math.min(365, Math.max(0, ...forecastable.map((row) => Math.max(row.days_of_stock!, (row.lead_time_days + row.safety_margin_days) * 1.5)))))
   return (
     <div className="flex flex-col gap-2">
-      <div className="overflow-x-auto rounded-md border">
+      <div className="@container overflow-x-auto rounded-md border">
         <table aria-label="Days of stock by type" className="w-full min-w-[44rem] text-[13px]">
           <thead className="bg-muted/40 text-left text-[12px] text-muted-foreground">
             <tr>
@@ -74,8 +74,8 @@ export function TypeForecastTable({ types, windowDays }: { types: readonly TypeF
                     {row.material ?? 'No material'}, {row.spools} {row.spools === 1 ? 'spool' : 'spools'}
                     {row.low_stock && row.spools > 0 ? ', all low' : ''}
                   </span>
-                  {/* Below `sm` the table scrolls sideways, so the badge sits here, in view (R-T8-6). */}
-                  {row.reorder_now && <ReorderNow className="mt-1 inline-flex sm:hidden" />}
+                  {/* Narrower than the table's 44 rem, its container scrolls sideways, so the badge sits here, in view (R-T8-6, R-T8-12). */}
+                  {row.reorder_now && <ReorderNow className="mt-1 hidden @max-[44rem]:inline-flex" />}
                 </td>
                 <td className={`${TD} text-right ${NUMBER}`}>{grams(row.grams_left)} g</td>
                 <td className={`${TD} text-right ${NUMBER}`}>{burnText(row.burn_g_per_day)}</td>
@@ -89,8 +89,8 @@ export function TypeForecastTable({ types, windowDays }: { types: readonly TypeF
                 <td className={TD}>
                   {row.reorder_now ? (
                     <>
-                      <ReorderNow className="hidden sm:inline-flex" />
-                      <span className={`sm:hidden ${NUMBER}`}>{dayText(row.reorder_on)}</span>
+                      <ReorderNow className="inline-flex @max-[44rem]:hidden" />
+                      <span className={`hidden @max-[44rem]:inline ${NUMBER}`}>{dayText(row.reorder_on)}</span>
                     </>
                   ) : (
                     <span className={NUMBER}>{dayText(row.reorder_on)}</span>

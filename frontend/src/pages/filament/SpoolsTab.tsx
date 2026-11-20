@@ -363,7 +363,7 @@ export function SpoolsTab() {
             </DropdownMenuContent>
           </DropdownMenu>
         )}
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex flex-wrap gap-2">
           <Button size="sm" asChild>
             <Link to="/filament/spools/new">
               <PlusIcon /> New spool
