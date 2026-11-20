@@ -1059,7 +1059,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `more`. It then waits for the normal interval, whatever `deferred` says, and logs once
     that it hit the limit. Why: decisions 68 and 69 close the known loops, and this bound
     closes the unknown ones. Cost: work left over after 3 passes waits one interval.
-71. (changed by 74, 76, 77, 78 and 83) Task 4 (R-T4-22, re-review I-2; replaces 65): on a full
+71. (changed by 74, 76, 77, 78, 83 and 101) Task 4 (R-T4-22, re-review I-2; replaces 65): on a full
     pass, `plan` seeds the missing
     seen copy of a linked row whose `bb_seen` is NULL: a spool link (`filament_bb_links`),
     a supplier, a location or an insert type. It sets `bb_seen` from the snapshot's current
@@ -1278,9 +1278,10 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     made before the push, is hidden from the pull until Bambuddy changes the field again;
     the push keeps it `UNSEEN` (R-T4-28), so neither side overwrites the other. Task 9's
     pull, which reads `bb_seen`, can take it.
-91. Task 5 (build): `results` ignores every result while the state row's instance is set
+91. (changed by the Task 5 review's I-1) Task 5 (build): `results` ignores every result while the state row's instance is set
     and is not the call's (Decision 12); an ignored result and an `ok` probe count nothing
-    in `ResultsReport`; an answer must parse as the write's kind and carry its Bambuddy id.
+    in `ResultsReport` (a probe writes nothing to Bambuddy, so it also keeps the item's
+    error row; test `test_a_probe_that_finds_the_spool_keeps_the_link`); an answer must parse as the write's kind and carry its Bambuddy id.
     SB's compare value for the merge is computed for every data type. The event's actor is
     `system:bambuddy-sync`. R-T4-12, measured with `GET /api/v1/inventory/spools` on the
     live Bambuddy on 2026-11-20 (no key, 106 rows): `last_dried_at` is naive ISO text with
@@ -1301,7 +1302,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 96. Task 5 (R-T5-5, concern 5; carried to Task 9): decision 90 is accepted. The echo
     event's `bb` is `snapshot(answer)` whole, as Decision 9 says. Task 9's pull reads
     `bb_seen` for the fields SB did not send.
-97. Task 5 (R-T5-6, concern 6; changes 44): the adoption of a spool after a lost create
+97. (changed by 100) Task 5 (R-T5-6, concern 6; changes 44): the adoption of a spool after a lost create
     matches Bambuddy's rows against the intent's stored `sent` hashes (decision 85), in the
     fields behind `snapshot`'s values (`bb_sync_plan._ADOPT_FIELDS`, tags aside) that the
     create sent, and against SB's current body only when the intent has no `sent`. The
@@ -1313,6 +1314,31 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     binding constraint (no blind push).
 99. Task 5 (R-T5-8, concern 8): noted. R-T4-12 stands unchanged; the live GET-only read
     was taken on 2026-11-20 (decision 91).
+
+100. Task 5 (R-T5-9, review M-1; changes 97): `adoptable` accepts a field whose Bambuddy
+     hash is the intent's `sent` hash or the hash of SB's current compare value. The
+     second is what an adoption sent before its own answer was lost too, so a double-lost
+     answer still adopts the row and makes no duplicate. Test:
+     `test_a_double_lost_answer_still_adopts` (seen to fail first: it planned a create).
+     Cost: none known.
+101. Task 5 (R-T5-10, review M-2; changes 71): `filament_bb_links.bb_seeded boolean NOT
+     NULL DEFAULT false` (this branch's unmerged migration) says the link holds a full seen
+     copy: set by seeding and by any answer that is a whole spool row (a create, an
+     adoption, an update, archive, restore or probe), never by a list `PUT`'s one-field
+     answer. A full pass seeds every link whose `bb_seeded` is false, merging the seeded
+     fields over what the copy holds and keeping its later `bb_seen_at`. Why: a list `PUT`
+     on a link with no seen copy stored `{"suppliers": …}`, and seeding then never ran
+     (it read "`bb_seen` is not NULL" as "seeded"). Test:
+     `test_a_list_put_on_an_unseeded_link_leaves_it_to_seeding` (seen to fail first).
+     Cost: none known.
+102. Task 5 (R-T5-11, review M-3): one `apply_results` call reads each row kind's desired
+     values and the spool references (`BbRefs`) once (`bb_sync_results._Reads`), not once
+     per result; a link the call makes is added to the references it holds. Test:
+     `test_results_read_each_kinds_rows_once` counts the reads with `monkeypatch` (not a
+     SQL query count, which would break on any unrelated query); seen to fail first (3
+     location reads, 2 reference reads). Cost: a person's SB edit made during the call is
+     not seen by the call's later results; it only decides whether an unsent field of
+     the answer is stored as seen, so no push goes blind.
 
 ## Self-review
 

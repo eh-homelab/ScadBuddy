@@ -972,7 +972,7 @@ class _Planner:
         by_id = {bb.id: bb for bb in good}
         raw = {row.get("id"): row for row in self.snap.spools}
         rows = self.conn.execute(
-            "SELECT s.id, s.archived_at, l.bb_spool_id, l.pushed_fields, l.bb_seen,"
+            "SELECT s.id, s.archived_at, l.bb_spool_id, l.pushed_fields, l.bb_seen, l.bb_seeded,"
             " l.bb_seen_at, l.bb_updated_at, l.bb_k_profiles"
             " FROM filament_spools s LEFT JOIN filament_bb_links l ON l.spool_id = s.id"
             " ORDER BY s.number"
@@ -1078,10 +1078,12 @@ class _Planner:
                     " WHERE spool_id = %s",
                     (Jsonb({"filament_presets": digest}), sb_id),
                 )
-        if seen is None and self.full:
-            seen, seeded_k = self.seed_spool(sb_id, compare, now, current, current_k)
+        if not row["bb_seeded"] and self.full:
+            # R-T5-10: a link with no full seen copy (none at all, or only the one field
+            # a list ``PUT`` answered) is seeded; the field it holds stays.
+            seen, seeded_k = self.seed_spool(sb_id, seen, compare, now, current, current_k)
             seen_k = seeded_k if seen_k is None else seen_k
-            seen_at = self.snap.read_at
+            seen_at = max(seen_at or self.snap.read_at, self.snap.read_at)
         before = None if seen is None else {n: _seen_form(n, seen, seen_k) for n in compare}
         names = self.changed(
             compare,
@@ -1137,29 +1139,33 @@ class _Planner:
     def seed_spool(
         self,
         sb_id: UUID,
+        old: Mapping[str, Any] | None,
         compare: Mapping[str, Any],
         now: Mapping[str, Any],
         current: Mapping[str, Any],
         current_k: Any,
     ) -> tuple[dict[str, Any], Any]:
-        """R-T4-22: a link with no ``bb_seen`` takes Bambuddy's row from this full
-        snapshot as its seen copy, at ``snap.read_at``, in the fields whose value is SB's
-        (the K-profiles too when they agree). A field that differs stays out of it, so it
-        is `UNSEEN` and no push goes blind."""
+        """R-T4-22: a link with no full seen copy (``bb_seeded`` false) takes Bambuddy's row
+        from this full snapshot as its seen copy, at ``snap.read_at`` (or the copy's later
+        time), in the fields whose value is SB's (the K-profiles too when they agree),
+        over ``old`` (what a list ``PUT``'s answer stored, R-T5-10). A field that differs
+        stays out of it, so it is `UNSEEN` and no push goes blind."""
         seen = {
             n: current[n]
             for n, v in compare.items()
             if n in current and n in now and now[n] == v and n != "k_profiles"
         }
+        merged = dict(old or {}) | seen
         agree_k = "k_profiles" in now and now["k_profiles"] == compare["k_profiles"]
         seen_k = json_form([k.model_dump() for k in current_k or ()]) if agree_k else None
         self.conn.execute(
-            "UPDATE filament_bb_links SET bb_seen = %s, bb_seen_at = %s,"
+            "UPDATE filament_bb_links SET bb_seen = %s,"
+            " bb_seen_at = greatest(bb_seen_at, %s), bb_seeded = true,"
             " bb_k_profiles = coalesce(bb_k_profiles, %s)"
-            " WHERE spool_id = %s AND bb_seen IS NULL",
-            (Jsonb(seen), self.snap.read_at, None if seen_k is None else Jsonb(seen_k), sb_id),
+            " WHERE spool_id = %s AND NOT bb_seeded",
+            (Jsonb(merged), self.snap.read_at, None if seen_k is None else Jsonb(seen_k), sb_id),
         )
-        return seen, seen_k
+        return merged, seen_k
 
     def direction(self, field: str) -> SyncDirection:
         """A spool field's direction: its data type's (Decision 14)."""
@@ -1200,6 +1206,7 @@ class _Planner:
             found = self.adoptable(
                 body,
                 self.sent.get(("spool", sb_id)),
+                {n: field_hash(v) for n, v in compare.items()},
                 unlinked_bb,
                 raw,
                 self.intents["spool", sb_id],
@@ -1245,6 +1252,7 @@ class _Planner:
     def adoptable(
         body: Mapping[str, Any],
         sent: Mapping[str, str] | None,
+        now: Mapping[str, str],
         unlinked_bb: Sequence[BbSpool],
         raw: Mapping[Any, dict[str, Any]],
         started: datetime,
@@ -1252,7 +1260,9 @@ class _Planner:
         """The unlinked BB spool a lost create made (Decision 10), made after the intent
         started (with the clocks' skew) when Bambuddy says when. It holds what the create
         sent (``sent``, its field hashes) in the fields `snapshot` reads, so an SB edit
-        made since does not hide it (R-T5-6). An intent with no ``sent`` matches the
+        made since does not hide it (R-T5-6). A field may also hold SB's value now (its
+        hash in ``now``): what an adoption sent before its own answer was lost (R-T5-9).
+        An intent with no ``sent`` matches the
         `snapshot` values of the current create ``body`` instead, tags aside (SB sends
         none)."""
         want = _adopt_form(BbSpool.model_validate({"id": 0, **body}))
@@ -1265,7 +1275,7 @@ class _Planner:
                     continue
             if checked is not None and sent is not None:
                 held = seen_row(bb)
-                if all(field_hash(held.get(n)) == sent[n] for n in checked):
+                if all(field_hash(held.get(n)) in (sent[n], now.get(n)) for n in checked):
                     return bb
             elif _adopt_form(bb) == want:
                 return bb
@@ -1490,15 +1500,6 @@ ROW_KINDS: dict[str, RowKind] = {
     ),
     "filament": RowKind("filament_spool_types", "bb_filament_id", _FILAMENT_FIELDS, _filaments),
 }
-
-
-def row_desired(conn: Conn, kind: str, sb_id: UUID) -> dict[str, Any] | None:
-    """What SB wants Bambuddy's row of ``kind`` to hold for ``sb_id``, in the compare
-    form; ``None`` when SB pushes no such row (a printer place, no such id)."""
-    for item in ROW_KINDS[kind].items(conn):
-        if item.sb_id == sb_id:
-            return item.desired
-    return None
 
 
 def plan(

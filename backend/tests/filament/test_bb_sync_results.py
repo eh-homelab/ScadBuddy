@@ -11,6 +11,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.filament import bb_sync_plan
 from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
@@ -34,6 +35,7 @@ from tests.filament.test_bb_sync_plan import (
     _intents,
     _kind,
     _link,
+    _matching,
     _only,
     _plan,
     _row,
@@ -248,7 +250,8 @@ def test_a_probe_that_finds_the_spool_keeps_the_link(pg_pool: PgPool) -> None:
     spool = _spool(f, _type(f))
     _link(pg_pool, spool, 50)
     probe = _write("spool", spool, "probe", 50)
-    _apply(f, [probe], [_ok(probe, _answer(50))])
+    # A probe writes nothing to Bambuddy, so it counts nothing (decision 91, R-T5 I-1).
+    assert _apply(f, [probe], [_ok(probe, _answer(50))]) == ResultsReport()
     link = _link_row(pg_pool, spool)
     assert link is not None and link["bb_spool_id"] == 50
     assert link["bb_seen"] is not None and link["bb_seen_at"] is not None
@@ -605,3 +608,69 @@ def test_a_filament_entrys_answer_is_stored_as_seen(pg_pool: PgPool) -> None:
     assert row is not None
     assert row["bb_filament_id"] == 8 and row["bb_seen_at"] is not None
     assert row["bb_seen"]["color_hex"] == "#FF0000"
+
+
+def test_a_list_put_on_an_unseeded_link_leaves_it_to_seeding(pg_pool: PgPool) -> None:
+    """R-T5-10: a list ``PUT`` answers one field. On a link with no full seen copy it does
+    not stand for one: the next full pass still seeds the fields that agree."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    _link(pg_pool, spool, 50)
+    write = _write("spool", spool, "suppliers", 50, [], {"suppliers": field_hash([])})
+    _apply(f, [write], [_ok(write, {"suppliers": []})])
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_seeded"] is False
+    _plan(f, _snap([_matching(pg_pool, spool, 50)]))
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_seeded"] is True
+    assert {"material", "color_name"} <= set(link["bb_seen"])
+    assert link["bb_seen"]["suppliers"] == []
+
+
+def test_results_read_each_kinds_rows_once(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-T5-11: one `apply_results` call reads a kind's rows, and the spool references,
+    once, not once per result."""
+    f = _filament(pg_pool)
+    shelf = _kind(f, "Shelf")
+    places = [
+        f.locations.create(LocationCreate(name=f"Shelf {n}", kind_id=shelf)).id for n in "ABC"
+    ]
+    calls = {"locations": 0, "refs": 0}
+    kind = bb_sync_plan.ROW_KINDS["location"]
+
+    def items(conn: Any) -> Any:
+        calls["locations"] += 1
+        return kind.items(conn)
+
+    real_read = bb_sync_plan.BbRefs.read
+
+    def read(conn: Any) -> Any:
+        calls["refs"] += 1
+        return real_read(conn)
+
+    monkeypatch.setitem(
+        bb_sync_plan.ROW_KINDS,
+        "location",
+        bb_sync_plan.RowKind(kind.table, kind.bb_column, kind.readable, items),
+    )
+    monkeypatch.setattr(bb_sync_plan.BbRefs, "read", staticmethod(read))
+    writes, results = [], []
+    for n, place in enumerate(places):
+        with pg_pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO filament_bb_creates (kind, sb_id) VALUES ('location', %s)", (place,)
+            )
+        write = _write("location", place, "create", None, {"name": f"Shelf {'ABC'[n]}"})
+        writes.append(write)
+        results.append(_ok(write, {"id": 10 + n, "name": f"Shelf {'ABC'[n]}"}, 10 + n))
+    spools = [_spool(f, _type(f, code=f"GFA00-{n}")) for n in range(2)]
+    for n, spool in enumerate(spools):
+        _link(pg_pool, spool, 50 + n)
+        write = _write("spool", spool, "update", 50 + n, {"note": None}, {"note": "h"})
+        writes.append(write)
+        results.append(_ok(write, _answer(50 + n)))
+    report = _apply(f, writes, results)
+    assert (report.linked, report.updated) == (3, 2)
+    assert calls == {"locations": 1, "refs": 1}

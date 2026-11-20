@@ -179,7 +179,8 @@ def _link(
     with pool.connection() as conn:
         conn.execute(
             "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, pushed_fields,"
-            " bb_seen, bb_seen_at, bb_k_profiles) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            " bb_seen, bb_seen_at, bb_k_profiles, bb_seeded)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 spool,
                 bb_id,
@@ -188,6 +189,7 @@ def _link(
                 None if seen is None else Jsonb(seen),
                 seen_at,
                 None if k is None else Jsonb(k),
+                seen is not None,
             ),
         )
 
@@ -1513,3 +1515,18 @@ def test_an_sb_edit_after_a_lost_create_adopts_instead_of_creating_again(
     (write,) = _plan(f, _snap([row], read_at=_later())).writes
     assert (write.op, write.bb_id, write.sb_id) == ("update", 60, spool)
     assert write.body == {"color_name": "Brick"}
+
+
+def test_a_double_lost_answer_still_adopts(pg_pool: PgPool) -> None:
+    """R-T5-9: the create's answer was lost, the retry's adoption sent SB's later colour
+    and its answer was lost too. Bambuddy's row now holds SB's current value, not the
+    sent one: it is still adopted, not created again."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    f.spools.update(spool, SpoolPatch(colour_name="Brick"), actor="person")
+    made = (datetime.now(UTC) + timedelta(seconds=1)).replace(tzinfo=None).isoformat()
+    assert isinstance(create.body, dict)
+    row = _row(60, **(create.body | {"color_name": "Brick"}), created_at=made)
+    (write,) = _plan(f, _snap([row], read_at=_later())).writes
+    assert (write.op, write.bb_id, write.body) == ("update", 60, {})

@@ -887,9 +887,14 @@ def test_the_bb_sync_migration_adds_the_sync_columns_and_tables(pg_conninfo: str
     and spool types, the create intents and the push errors."""
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn)
-        assert {"pushed_fields", "bb_seen", "bb_seen_at", "bb_k_profiles", "pushed_hash"} <= (
-            _table_columns(conn, "filament_bb_links")
-        )
+        assert {
+            "pushed_fields",
+            "bb_seen",
+            "bb_seen_at",
+            "bb_k_profiles",
+            "bb_seeded",
+            "pushed_hash",
+        } <= (_table_columns(conn, "filament_bb_links"))
         for table, bb_id in (
             ("filament_suppliers", "bb_supplier_id"),
             ("filament_locations", "bb_location_id"),

@@ -12,7 +12,10 @@ ALTER TABLE filament_bb_links
     ADD COLUMN pushed_fields jsonb NOT NULL DEFAULT '{}',
     ADD COLUMN bb_seen jsonb,
     ADD COLUMN bb_seen_at timestamptz,
-    ADD COLUMN bb_k_profiles jsonb;
+    ADD COLUMN bb_k_profiles jsonb,
+    -- `bb_seen` is a full copy (seeded, or stored from a whole row's answer), not only the
+    -- one field a list PUT answered: until then a full pass seeds the link (R-T5-10).
+    ADD COLUMN bb_seeded boolean NOT NULL DEFAULT false;
 
 -- Each SB row the sync makes or links in Bambuddy names its BB row, and keeps the hashes
 -- of what it pushed and what it last saw there.

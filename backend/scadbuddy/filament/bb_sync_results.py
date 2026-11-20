@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from psycopg import Connection
@@ -53,7 +54,6 @@ from scadbuddy.filament.bb_sync_plan import (
     desired_and_unmapped,
     k_form,
     pendings,
-    row_desired,
     row_seen,
 )
 from scadbuddy.filament.component import Filament
@@ -101,11 +101,39 @@ _ROW_MODELS: dict[str, type[BbSupplier | BbLocation | SpoolCatalogEntry | Catalo
 
 Outcome = Literal["linked", "updated", "failed", "unlinked"]
 
+#: The spool references a linked row of each kind gives (`BbRefs`).
+_REF_FIELDS = {"supplier": "suppliers", "location": "locations", "insert_type": "insert_types"}
+
+
+@dataclass
+class _Reads:
+    """What one `apply_results` call reads of SB once, not once per result (R-T5-11):
+    each row kind's desired values, and the spool references, which a link this call
+    makes is added to."""
+
+    rows: dict[str, dict[UUID, dict[str, Any]]] = field(default_factory=dict)
+    refs: BbRefs | None = None
+
+    def desired(self, conn: Conn, kind: str, sb_id: UUID) -> dict[str, Any] | None:
+        if kind not in self.rows:
+            self.rows[kind] = {item.sb_id: item.desired for item in ROW_KINDS[kind].items(conn)}
+        return self.rows[kind].get(sb_id)
+
+    def bb_refs(self, conn: Conn) -> BbRefs:
+        if self.refs is None:
+            self.refs = BbRefs.read(conn)
+        return self.refs
+
+    def linked(self, kind: str, sb_id: UUID, bb_id: int) -> None:
+        if self.refs is not None and kind in _REF_FIELDS:
+            ids = cast("dict[UUID, int]", getattr(self.refs, _REF_FIELDS[kind]))
+            ids[sb_id] = bb_id
+
 
 class ResultsReport(BaseModel, extra="forbid"):
     """What `apply_results` did: the items it linked, the other items whose write it
     recorded, the items whose write failed, and the links a 404 dropped. An ignored
-    result and an ``ok`` probe count in none of them."""
+    result and an ``ok`` probe (it writes nothing to Bambuddy) count in none of them."""
 
     linked: int = 0
     updated: int = 0
@@ -140,6 +168,7 @@ def apply_results(
     is set by the first result that links anything (Decision 12), and results for
     another instance are all ignored."""
     report = ResultsReport()
+    reads = _Reads()
     writes = {write.key: write for write in plan_writes}
     for result in results:
         write = writes.get(result.key)
@@ -152,20 +181,26 @@ def apply_results(
                 ).fetchone()
                 if state is not None and state["instance"] not in (None, instance):
                     raise _IgnoredError("the links belong to another Bambuddy")
-                outcome = _apply(conn, write, result, instance, now)
+                outcome = _apply(conn, write, result, instance, now, reads)
         except _IgnoredError as why:
             logger.warning(
                 "a Bambuddy sync result is ignored",
                 extra={"key": result.key, "reason": str(why)},
             )
             continue
-        setattr(report, outcome, getattr(report, outcome) + 1)
+        if outcome is not None:
+            setattr(report, outcome, getattr(report, outcome) + 1)
     return report
 
 
 def _apply(
-    conn: Conn, write: BbWrite, result: BbWriteResult, instance: str, now: datetime
-) -> Outcome:
+    conn: Conn,
+    write: BbWrite,
+    result: BbWriteResult,
+    instance: str,
+    now: datetime,
+    reads: _Reads,
+) -> Outcome | None:
     item = _item(conn, write)
     linked: int | None = item["bb_id"]
     intent = conn.execute(
@@ -195,15 +230,20 @@ def _apply(
         return "failed"
     bb_id = _answered_id(write, result)
     if write.kind == "spool":
-        _spool(conn, write, result, item, bb_id, now)
+        _spool(conn, write, result, item, bb_id, now, reads)
     else:
-        _row(conn, write, result, item, bb_id, now)
+        _row(conn, write, result, item, bb_id, now, reads)
+    if write.op == "probe":
+        # A probe writes nothing to Bambuddy: it counts nothing, and the item's last
+        # write keeps its error row.
+        return None
     conn.execute(
         "DELETE FROM filament_bb_push_errors WHERE kind = %s AND sb_id = %s",
         (write.kind, write.sb_id),
     )
     if linked is not None:
         return "updated"
+    reads.linked(write.kind, write.sb_id, bb_id)
     conn.execute(
         "DELETE FROM filament_bb_creates WHERE kind = %s AND sb_id = %s",
         (write.kind, write.sb_id),
@@ -299,6 +339,7 @@ def _spool(
     item: Mapping[str, Any],
     bb_id: int,
     now: datetime,
+    reads: _Reads,
 ) -> None:
     answer = result.answer or {}
     bb: BbSpool | None = None
@@ -320,7 +361,7 @@ def _spool(
             seen = {"suppliers": seen_value("suppliers", rows)}
         elif field == "k_profiles" and isinstance(rows, list):
             k_rows = json_form(rows)
-    sb = _spool_compare(conn, write.sb_id)
+    sb = _spool_compare(conn, write.sb_id, reads.bb_refs(conn))
     merged = _merge(
         item["bb_seen"], seen, write, lambda n, _v: n in sb and bb_form(n, seen, k_rows) == sb[n]
     )
@@ -336,8 +377,8 @@ def _spool(
     if item["bb_id"] is None:
         conn.execute(
             "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at,"
-            " pushed_fields, bb_seen, bb_seen_at, bb_k_profiles)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            " pushed_fields, bb_seen, bb_seen_at, bb_k_profiles, bb_seeded)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true)",
             (
                 write.sb_id,
                 bb_id,
@@ -358,9 +399,11 @@ def _spool(
     else:
         conn.execute(
             "UPDATE filament_bb_links SET pushed_fields = pushed_fields || %s, bb_seen = %s,"
-            " bb_seen_at = %s, bb_k_profiles = %s, bb_updated_at = coalesce(%s, bb_updated_at)"
-            " WHERE spool_id = %s",
-            (Jsonb(write.hashes), Jsonb(merged), now, k_json, moved, write.sb_id),
+            " bb_seen_at = %s, bb_k_profiles = %s, bb_updated_at = coalesce(%s, bb_updated_at),"
+            " bb_seeded = bb_seeded OR %s WHERE spool_id = %s",
+            # A whole row's answer merged in is a full copy; a list's one field is not
+            # (R-T5-10), so a full pass still seeds such a link.
+            (Jsonb(write.hashes), Jsonb(merged), now, k_json, moved, bb is not None, write.sb_id),
         )
     if bb is not None and write.op in _ECHOED:
         # Decision 9: the pull compares with the newest event's ``bb``, so the row SB's
@@ -378,10 +421,10 @@ def _spool(
         )
 
 
-def _spool_compare(conn: Conn, spool_id: UUID) -> dict[str, Any]:
+def _spool_compare(conn: Conn, spool_id: UUID, refs: BbRefs) -> dict[str, Any]:
     """SB's values of the spool in the compare form, for every data type; a field that
     names a row Bambuddy has no id for is left out."""
-    desired, _ = desired_and_unmapped(conn, spool_id, BbRefs.read(conn), _EVERY)
+    desired, _ = desired_and_unmapped(conn, spool_id, refs, _EVERY)
     return {n: compare_form(n, v) for n, v in desired.items() if next(pendings(v), None) is None}
 
 
@@ -392,6 +435,7 @@ def _row(
     item: Mapping[str, Any],
     bb_id: int,
     now: datetime,
+    reads: _Reads,
 ) -> None:
     kind = ROW_KINDS[write.kind]
     try:
@@ -401,7 +445,7 @@ def _row(
     if answer.id != bb_id:
         raise _IgnoredError("the answer is another Bambuddy row")
     seen = row_seen(answer, kind.readable)
-    sb = row_desired(conn, write.kind, write.sb_id) or {}
+    sb = reads.desired(conn, write.kind, write.sb_id) or {}
     merged = _merge(item["bb_seen"], seen, write, lambda n, v: n in sb and sb[n] == v)
     conn.execute(
         f"UPDATE {kind.table} SET {kind.bb_column} = %s, bb_pushed = bb_pushed || %s,"
