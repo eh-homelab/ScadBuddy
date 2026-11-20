@@ -14,6 +14,7 @@ import trimesh
 from scadbuddy.bambuddy import clearance
 from scadbuddy.bambuddy.clearance import (
     PlacedObject,
+    check_plates,
     clearance_for,
     clearance_warnings,
     placed_objects,
@@ -285,3 +286,84 @@ async def test_a_run_s_clearance_is_judged_against_its_resolved_printer(tmp_path
     assert len(await judged("Bambu Lab H2C")) == 1
     # A run accepted before the model was kept is judged as before.
     assert len(await judged(None)) == 1
+
+
+def _plate_3mf(out: Path, plates: list[PlateParts]) -> bytes:
+    write_plates_3mf(plates, ["#FF6AC1", "#00AEEF"], out, thumbnails=None, model_name="menorah")
+    return out.read_bytes()
+
+
+def _part(index: int, x: float = 0.0) -> ColourPart:
+    return ColourPart(
+        index,
+        f"Part {index}",
+        "#FF6AC1" if index == 1 else "#00AEEF",
+        trimesh.creation.box(extents=(20, 20, 10), transform=_at(x, 10)),
+    )
+
+
+def one_object_two_colours_3mf(out: Path) -> bytes:
+    """One plate that is one object of two colour parts, as a template's own render
+    writes it (#6781)."""
+    return _plate_3mf(out, [PlateParts((_part(1), _part(2, 30)), (1, 2))])
+
+
+def test_a_plate_of_one_multi_colour_object_warns_that_by_object_does_nothing(
+    tmp_path: Path,
+) -> None:
+    """#6781: a template's multi-plate render writes each plate as one object with a part
+    per colour. By object has no effect there, and the slicer swaps filament every layer."""
+    one_object = PlateParts((_part(1), _part(2, 30)), (1, 2))
+    payload = _plate_3mf(tmp_path / "menorah.3mf", [one_object, one_object])
+
+    _, warnings = check_plates(payload, [2], None)
+
+    [warning] = warnings
+    assert warning.kind == "by-object-one-object"
+    assert warning.plate_id == 2
+    assert warning.message.startswith("Plate 2: ")
+    assert "2 colours" in warning.message
+    assert "Arrange" in warning.message
+    assert "by layer" in warning.message
+
+
+def test_one_colour_objects_and_plates_of_several_objects_say_nothing_of_it(
+    tmp_path: Path,
+) -> None:
+    """#6781: one object of one colour prints the same either way, and several objects
+    are what by object is for."""
+    single_colour = PlateParts((_part(1),), (1,))
+    two_objects = PlateParts((_part(1), _part(2, 80)), (1, 2), (1, 2))
+    payload = _plate_3mf(tmp_path / "mixed.3mf", [single_colour, two_objects])
+
+    _, warnings = check_plates(payload, [1, 2], None)
+
+    assert warnings == []
+
+
+async def test_only_a_by_object_print_gets_the_one_object_warning(tmp_path: Path) -> None:
+    """#6781: by object through the generic process overrides warns; by layer does not."""
+    payload = one_object_two_colours_3mf(tmp_path / "menorah.3mf")
+
+    class Source:
+        print_settings: ClassVar[dict[str, Any]] = {}
+
+        async def fetched_3mf(self, client: object) -> bytes:
+            return payload
+
+    async def kinds(sequence: str) -> list[str]:
+        prepared = PreparedRun(
+            plate_ids=[1],
+            printer_id=1,
+            catalogue=None,
+            printer_status=None,
+            printer_model="Bambu Lab H2C",
+        )
+        request = PrintRunRequest.model_construct(process_overrides={"print_sequence": sequence})
+        _, warnings = await _sequence_clearance(
+            cast(Any, None), cast(PrintSource, Source()), request, prepared
+        )
+        return [warning.kind for warning in warnings]
+
+    assert await kinds("by object") == ["by-object-one-object"]
+    assert await kinds("by layer") == []

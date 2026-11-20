@@ -256,7 +256,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
   by-object plate fails "too close to others" (#6246). A template plate is one object with
   colour parts (#6245), so by-object slicing does nothing useful on it: render each piece
-  alone and arrange the pieces, which makes each one its own object (#956).
+  alone and arrange the pieces, which makes each one its own object (#956). The print check
+  says so: a by-object print of a plate that is one object of several filaments gets a
+  `by-object-one-object` warning with the plate id, never a refusal (`bambuddy/clearance.py`
+  `one_object_warnings`, #6781).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,

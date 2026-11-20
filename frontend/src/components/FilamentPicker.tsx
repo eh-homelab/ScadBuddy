@@ -111,6 +111,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'inlet-shared': 'text-warn',
   // #6732 — the slicer refused a plate with "Object conflicts were detected".
   'object-conflict': 'text-warn',
+  // #6781 — by object on a plate that is one object of several colours: it has no effect.
+  'by-object-one-object': 'text-warn',
 }
 
 /**

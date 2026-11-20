@@ -134,6 +134,9 @@ WarningKind = Literal[
     # #6732 — the slicer refused a plate with "Object conflicts were detected": the
     # prime tower stands on an object, or objects overlap. Names the plate.
     "object-conflict",
+    # #6781 — a by-object print of a plate that is one object of several colours: by
+    # object has no effect, and the slicer changes filament on every layer. Names the plate.
+    "by-object-one-object",
 ]
 
 
