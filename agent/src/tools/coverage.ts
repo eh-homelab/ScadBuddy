@@ -497,14 +497,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'agent reads profiles with get_filament_profiles and applies one through print_output, whose run ' +
       'warns (profile-not-applied) when one cannot apply.',
   },
-  ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(
-    (operation) => ({
-      operation,
-      reason:
-        "The print dialog's check before Print (#755). An agent's print_output run makes the same refusals " +
-        'itself, as a 422 with the same words, before anything is uploaded, so a separate check adds nothing.',
-    }),
-  ),
   ...(
     [
       'GET /api/v1/print/library/{file_id}/thumbnail',

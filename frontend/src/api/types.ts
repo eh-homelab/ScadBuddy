@@ -216,6 +216,9 @@ export type ProcessOverrides = NonNullable<PrintRunRequest['process_overrides']>
 export type ProcessValues = Schemas['ProcessValues']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
+/** #6758 — the prime tower judged before the slice, with its fix as process overrides. */
+export type TowerCheck = Schemas['TowerCheck']
+export type TowerConflict = Schemas['TowerConflict']
 export type PrintRun = Schemas['PrintRun']
 /** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
 export type Operation = Schemas['Operation']

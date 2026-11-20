@@ -167,6 +167,7 @@ from scadbuddy.bambuddy.supports import (
     wanted_settings,
     without_overridden,
 )
+from scadbuddy.bambuddy.tower_check import TowerCheck, tower_check
 from scadbuddy.bambuddy.trays import (
     colour_word,
     tray_colours,
@@ -220,6 +221,7 @@ from scadbuddy.render.bambu3mf import (
     part_settings_slots,
     stated_tower_off,
 )
+from scadbuddy.render.plate import plate_for
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
 from scadbuddy.slicing.values import values_for
@@ -986,6 +988,10 @@ class PrintCheck(BaseModel):
     #: prints with ``process_part_settings``. ``None`` when that is ``None``, or when the
     #: template sets nothing.
     slot_part_settings: PartSettingsMap | None = None
+    #: The prime tower on each plate printed, judged before the slice by the tower this
+    #: request chooses (#6758, :func:`check_tower`), with a fix the dialog and the agent
+    #: send as process overrides. ``None`` when there is no tower to judge.
+    prime_tower: TowerCheck | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
         lambda self, handler: parts_set_only(
@@ -1376,6 +1382,34 @@ def _names_a_printer(
     )
 
 
+async def check_tower(
+    client: BambuddyClient | None,
+    source: PrintSource,
+    request: PrintRunRequest,
+    printer_model: str | None,
+) -> TowerCheck | None:
+    """The prime tower of ``source`` for ``request`` on a ``printer_model``, judged before
+    the slice (#6758, :func:`~scadbuddy.bambuddy.tower_check.tower_check`): the tower the
+    request chooses (``prime_tower``, ``process_overrides``) over the template's
+    ``print_settings``, on the file as the run lays it out, for the plates it prints. It
+    reads the source's one fetch, which the check reads anyway. ``None`` for a sliced
+    file, one with no bytes to lay out, or no printer model."""
+    if source.is_sliced or printer_model is None:
+        return None
+    payload = await source.fetched_3mf(client)
+    if payload is None:
+        return None
+    return await asyncio.to_thread(
+        tower_check,
+        payload,
+        plate_for(printer_model),
+        choice=request.prime_tower,
+        overrides=request.overrides(),
+        template=source.print_settings,
+        plates=request.asked_plates(),
+    )
+
+
 async def check_print(
     client: BambuddyClient | None,
     source: PrintSource,
@@ -1695,6 +1729,8 @@ async def check_print(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # #6758: the tower the request chooses, judged before the slice.
+        prime_tower=await check_tower(client, source, request, prepared.printer_model),
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
         **(await _part_baselines(source, process, read, client) if process_values else {}),
     )
@@ -1920,6 +1956,8 @@ async def _native_check(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # #6758: the tower the request chooses, judged before the slice.
+        prime_tower=await check_tower(None, source, request, prepared.printer_model),
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
         **(await _part_baselines(source, process, read, None) if process_values else {}),
     )

@@ -68,6 +68,7 @@ import { trashFiledMockLibraryFiles } from './features/library'
 import { attachmentsOf } from './features/printAttachments'
 import { printersState } from './features/printers'
 import { mockRackCheck, mockRackPicks } from './features/rack'
+import { mockTowerCheck } from './towerCheck'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -3629,13 +3630,15 @@ export const handlers = [
   http.post(`${base}/print/outputs/:id/check`, async ({ params, request }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
     // #836 — the mock H2C's rack preview, so the dialog's rack step can be exercised.
-    const body = (await request.json()) as { rack_position?: number | null }
+    const body = (await request.json()) as PrintRunRequest
     // #5627 — the process's own part settings, which "Settings for this colour" opens on,
     // only for a check that asks for them.
     const asked = new URL(request.url).searchParams.get('process_values') === 'true'
     return HttpResponse.json({
       ...mockRackCheck(body.rack_position ?? null),
       process_part_settings: asked ? MOCK_PROCESS_PARTS : null,
+      // #6758 — the prime tower judged before the slice.
+      prime_tower: mockTowerCheck(body),
     })
   }),
 
