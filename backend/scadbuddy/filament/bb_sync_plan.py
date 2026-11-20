@@ -1197,7 +1197,13 @@ class _Planner:
         )
         self.creating.add(("spool", sb_id))
         if state == "old":
-            found = self.adoptable(body, unlinked_bb, raw, self.intents["spool", sb_id])
+            found = self.adoptable(
+                body,
+                self.sent.get(("spool", sb_id)),
+                unlinked_bb,
+                raw,
+                self.intents["spool", sb_id],
+            )
             if found is not None:
                 unlinked_bb.remove(found)
                 current = seen_row(found)
@@ -1238,22 +1244,30 @@ class _Planner:
     @staticmethod
     def adoptable(
         body: Mapping[str, Any],
+        sent: Mapping[str, str] | None,
         unlinked_bb: Sequence[BbSpool],
         raw: Mapping[Any, dict[str, Any]],
         started: datetime,
     ) -> BbSpool | None:
-        """The unlinked BB spool a lost create made (Decision 10): its `snapshot` values
-        (``material_number`` among them) are the create body's, tags aside (SB sends
-        none), and it was made after the intent started (with the clocks' skew), when
-        Bambuddy says when."""
+        """The unlinked BB spool a lost create made (Decision 10), made after the intent
+        started (with the clocks' skew) when Bambuddy says when. It holds what the create
+        sent (``sent``, its field hashes) in the fields `snapshot` reads, so an SB edit
+        made since does not hide it (R-T5-6). An intent with no ``sent`` matches the
+        `snapshot` values of the current create ``body`` instead, tags aside (SB sends
+        none)."""
         want = _adopt_form(BbSpool.model_validate({"id": 0, **body}))
+        checked = None if sent is None else _ADOPT_FIELDS & sent.keys()
         for bb in unlinked_bb:
             made = (raw.get(bb.id) or {}).get("created_at")
             if isinstance(made, str):
                 at = as_utc(datetime.fromisoformat(made))
                 if at < started - _CLOCK_SKEW:
                     continue
-            if _adopt_form(bb) == want:
+            if checked is not None and sent is not None:
+                held = seen_row(bb)
+                if all(field_hash(held.get(n)) == sent[n] for n in checked):
+                    return bb
+            elif _adopt_form(bb) == want:
                 return bb
         return None
 
@@ -1305,6 +1319,15 @@ def row_seen(row: Any, readable: frozenset[str]) -> dict[str, Any]:
     copy (R-T4-11)."""
     data = row.model_dump()
     return {k: _row_form(k, json_form(data.get(k))) for k in readable}
+
+
+#: The spool fields, by BB's names, behind the `snapshot` values an adoption matches
+#: (tags aside): what a lost create's row must still hold as the create sent it.
+_ADOPT_FIELDS = frozenset(
+    {"material", "subtype", "brand", "category", "effect_type", "color_name", "rgba",
+     "extra_colors", "label_weight", "cost_per_kg", "nozzle_temp_min", "nozzle_temp_max",
+     "weight_locked", "weight_used", "material_number", "core_weight_catalog_id"}
+)  # fmt: skip
 
 
 def _adopt_form(bb: BbSpool) -> dict[str, Any]:

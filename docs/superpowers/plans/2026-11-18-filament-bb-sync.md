@@ -561,6 +561,10 @@ cap cut (decision 64); a retry the cap cut is not counted, so retries alone neve
 R-T4-21 (decision 70): Task 7 runs at most 3 passes back to back on `more`. It then waits
 for the normal interval, whatever `deferred` says, and logs once that it hit the limit.
 Test: a fake `FilamentSyncApi` whose `plan` always defers gives 3 passes, then the wait.
+**Carried from Task 5: R-T5-2 (decision 93).** A list `PUT`'s result carries `answer =
+{"k_profiles": rows}` or `{"suppliers": rows}` (Bambuddy's answered list; the preset
+`PUT` needs none), so `results` stores that field with no `GET`. A probe's answer is the
+`spool_row` it read. Test: `test_a_list_put_answer_names_its_field`.
 
 ### Task 8: The workflow, the nudge and the boot start
 
@@ -612,6 +616,7 @@ Test: a fake `FilamentSyncApi` whose `plan` always defers gives 3 passes, then t
   - `pulls(suppliers)`: each BB supplier → the SB supplier with its `bb_supplier_id`, else the unlinked one of the same upper case name (now linked), else a new one; a linked one takes BB's changed fields by Decision 8's rule against `updated_at`. Spool supplier links are not pulled (Decision 15).
   - `pulls(locations)`: each BB location → the SB location with its `bb_location_id`, else an unlinked root location that is not a printer place (`is_printer_place`) with the same upper case name, else a new root location of kind `Shelf`; a linked spool's BB `location_id` change moves the SB spool (`LocationStore.move_on`, actor `bambuddy`) when it changed since `bb_seen` and the spool's newest `moved` event is not later than BB's `updated_at`, and never out of a printer place (an AMS unit, a tray, the external spool place, a plain printer place).
   - A BB spool that an open `filament_bb_creates` intent can claim (Decision 10) is skipped and counted in `PullReport.claimed`.
+  - **Carried from Task 5: R-T5-5 (decision 96).** The push's `synced_from_bb` event holds `snapshot(answer)` whole, so a person's Bambuddy edit to a field SB's write did not send is hidden from the event's `before`. The pull reads `filament_bb_links.bb_seen` (merged under R-T4-28, where such a field stays out or keeps its old value) for those fields, so it can take that edit by its own rule. Test: `test_a_persons_edit_the_push_did_not_send_is_pulled`.
 
 - [ ] **Step 1: Failing tests:** `test_a_bb_archive_archives_the_sb_spool`, `test_an_sb_restore_after_the_bb_archive_wins`, `test_an_unlinked_archived_bb_spool_is_not_made`, `test_bb_k_profiles_become_sb_k_values`, `test_a_persons_k_value_is_kept`, `test_a_bb_supplier_links_by_name`, `test_a_bb_location_becomes_a_root_shelf`, `test_a_spool_in_a_printer_place_is_not_moved_by_bambuddy` (a tray and the external spool place), `test_suppliers_and_locations_pull_while_spools_is_off`, `test_a_bb_edit_older_than_an_sb_type_edit_is_not_pulled` (an inherited field: the type's `updated_at` after BB's `updated_at` keeps SB's value), `test_the_pull_writes_bb_seen_as_seen_row`, `test_the_pull_leaves_a_spool_an_intent_claims`, `test_push_then_pull_settles` (Task 4 plan + Task 5 results + this pull over one field changed on both sides: after two rounds both sides hold the newer value and a third round writes nothing), and `test_suppliers_off_reads_no_suppliers` (respx: no `GET /inventory/suppliers`).
 - [ ] **Step 2-4:** Run, implement, run. Run the whole `tests/filament` folder: #6261-#6268's pull tests must still pass.
@@ -901,7 +906,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     in SB), `type` its material, `color_hex` the first 7 of `rgba`, temperatures the type's
     own, `cost_per_kg` only when set. Why: Decision 14 names the rows, not their bodies.
     Cost: a filament entry's name is a product code, not a display name.
-44. (changed by 50 and 85) Task 4: a spool's adoption matches `bambuddy_pull.snapshot` (tags left out, SB sends
+44. (changed by 50, 85 and 97) Task 4: a spool's adoption matches `bambuddy_pull.snapshot` (tags left out, SB sends
     none) of BB's row with that of a `BbSpool` built from the create body, and BB's raw
     `created_at` (which `BbSpool` drops) must be no earlier than the intent less 5 s when
     the row has one. An old intent while the listing is partial waits (`deferred`). The
@@ -1282,6 +1287,32 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     microseconds (38 rows), which `json_form` keeps; `quoted_price_per_kg` is a plain
     number (2 decimals in the 4 priced links of 5, one null); `note`, `subtype` and
     `color_name` are text or null, never `""`. So `seen_value` needs no change.
+
+92. Task 5 (R-T5-1, concern 1): decision 89 is accepted. Archiving a spool keeps its intent
+    and drops its error row. Why: restoring an archived spool must not make a duplicate in
+    Bambuddy. Cost: an archived spool's intent row lingers.
+93. Task 5 (R-T5-2, concern 2; carried to Task 7): decision 87 is accepted. `results`
+    makes no `GET`, and a list `PUT`'s answer is stored for its one field. Task 7 sends
+    `{"k_profiles": rows}` or `{"suppliers": rows}` as the answer. Cost: none known.
+94. Task 5 (R-T5-3, concern 3): decision 88 is accepted. A list `PUT`'s 404 does not
+    unlink; the probe (#6688's path) unlinks a truly deleted spool one pass later. Cost:
+    one wasted pass.
+95. Task 5 (R-T5-4, concern 4): decision 86 is accepted. A create's answer is stored whole.
+96. Task 5 (R-T5-5, concern 5; carried to Task 9): decision 90 is accepted. The echo
+    event's `bb` is `snapshot(answer)` whole, as Decision 9 says. Task 9's pull reads
+    `bb_seen` for the fields SB did not send.
+97. Task 5 (R-T5-6, concern 6; changes 44): the adoption of a spool after a lost create
+    matches Bambuddy's rows against the intent's stored `sent` hashes (decision 85), in the
+    fields behind `snapshot`'s values (`bb_sync_plan._ADOPT_FIELDS`, tags aside) that the
+    create sent, and against SB's current body only when the intent has no `sent`. The
+    `created_at` window stays. Why: an SB edit made between the lost create and the retry
+    must not make a duplicate. Test:
+    `test_an_sb_edit_after_a_lost_create_adopts_instead_of_creating_again` (seen to fail
+    first: it planned a second create). Cost: none beyond the test.
+98. Task 5 (R-T5-7, concern 7): decision 85's liveness costs are accepted under the
+    binding constraint (no blind push).
+99. Task 5 (R-T5-8, concern 8): noted. R-T4-12 stands unchanged; the live GET-only read
+    was taken on 2026-11-20 (decision 91).
 
 ## Self-review
 

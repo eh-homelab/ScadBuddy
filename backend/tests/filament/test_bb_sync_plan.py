@@ -1495,3 +1495,21 @@ def test_a_filament_entry_is_seeded_with_its_marks(pg_pool: PgPool) -> None:
     assert seen_at is not None
     marks = _bb_pushed(pg_pool, "filament_spool_types", kind)[UNSEEN_KEY]
     assert set(marks) == {"density"}
+
+
+def test_an_sb_edit_after_a_lost_create_adopts_instead_of_creating_again(
+    pg_pool: PgPool,
+) -> None:
+    """R-T5-6: SB changed a snapshot field (the colour name) after a create whose answer
+    was lost. The retry matches Bambuddy's row against what the create sent, so it adopts
+    that row and sends the change, and makes no duplicate."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    create = _only(_plan(f, _snap([])).writes, "create")
+    f.spools.update(spool, SpoolPatch(colour_name="Brick"), actor="person")
+    made = (datetime.now(UTC) + timedelta(seconds=1)).replace(tzinfo=None).isoformat()
+    assert isinstance(create.body, dict)
+    row = _row(60, **create.body, created_at=made)
+    (write,) = _plan(f, _snap([row], read_at=_later())).writes
+    assert (write.op, write.bb_id, write.sb_id) == ("update", 60, spool)
+    assert write.body == {"color_name": "Brick"}
