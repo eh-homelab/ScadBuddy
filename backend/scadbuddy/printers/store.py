@@ -364,6 +364,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
         "printer",
         repoint=_repoint_rate_events("printer_wear_replacements"),
     ),
+    # #5774 PR 3: when the printer's Bambuddy log was last read; the kept printer's stays.
+    PrinterReference("printer_maintenance_reads", "printer", unique=True),
     # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on, and its
     # job key (#6045).
     PrinterReference("print_lan_imports", "printer", repoint=_repoint_lan_imports),

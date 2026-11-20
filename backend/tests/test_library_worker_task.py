@@ -295,6 +295,8 @@ async def test_a_failing_sweep_fails_its_activity(
                 mail=SimpleNamespace(send_queued=_broken(OSError("the database is gone"))),
                 # #4699: the print watcher's floor, read before Bambuddy is.
                 floor=_broken_async,
+                # #5774: the printers' maintenance logs, read from Bambuddy.
+                machine_rates=SimpleNamespace(read_logs=_broken_async),
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),

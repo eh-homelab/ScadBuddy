@@ -27,6 +27,9 @@ import { printersState } from '../printers'
  * replaced), each row's actual over the last N usable gaps (`task_actual`, `part_actual`),
  * its confidence, `priced_by`, and the printer's counter: Bambuddy's (`setBambuddyHours`,
  * null when Bambuddy does not answer), ScadBuddy's own LAN count (`setLanCount`), or none.
+ *
+ * Job cost does not read a rate saved here for the two fixture printers in `costs.ts`
+ * `TODAYS_PRINTER_RATES`: that table wins, so saving their rate leaves job cost unchanged.
  */
 
 /** Bambuddy's maintenance tracker for the linked printer, as `GET /maintenance/printers/{id}` lists it. */

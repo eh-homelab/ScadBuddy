@@ -605,8 +605,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `support_interface_filament` among them; the supports option passes only enable, type and
   build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
   `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its placement
-  and scale, and its tower unless the target's extruders cannot reach it
-  (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
+  and scale, and its tower unless the target's extruders cannot reach it or it stands on
+  its plate's objects' box, #3770 (`towers_within_reach`, in `bambuddy/send.py` `_laid_out_for`). A sliced file, another
   slicer's, or one past the caps (`layout_of` `as_is`) prints as it is. The headless CLI
   draws no plate covers (its GLFW is Wayland-only) and copies the input's (#6170).
   `workflows/slicing.py` is `SliceWorkflow` on the `library` queue (activities in
@@ -1677,7 +1677,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   worker's run makes or merges its printer row through `POST
   /api/v1/internal/crud/print/printers/ensure-bambuddy` (`crud/print.py`
   `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29). Routes
-  `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). A slice quote
+  `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). Actuals
+  (#5774, spec `2026-11-17-machine-rate-actuals-design.md`): a linked printer with a
+  profile reads each Bambuddy task's log (`GET /maintenance/items/{id}/history`, the seam's
+  `maintenance_history`, `Read Status`) after the view's live task read, on `POST
+  …/machine-rate/import` and in the sweep `housekeeping_import_maintenance` (the sweeps'
+  Schedule only, behind its patch); each row is kept once as an imported task event
+  (`MachineRateStore.import_events`, source `bambuddy:<history id>`, which a ScadBuddy
+  event may not take), and a read that fails keeps the stored events and
+  `printer_maintenance_reads.read_at` (`events_read_at`). A quote never reads the log. A slice quote
   is priced at the rate of the printer it sliced for (`QuoteRun.machine_rate`,
   `MachineRates.for_quote`: `printer`, else the printer linked to `printer_id`, else the
   default printer) and records `printer` and `machine_rate_breakdown`. A quote's
