@@ -14,6 +14,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.accepted_fixes import analysis_request
 from scadbuddy.bambuddy import send
 from scadbuddy.bambuddy.prime_tower import (
     PRIME_TOWER_KEYS,
@@ -22,6 +23,7 @@ from scadbuddy.bambuddy.prime_tower import (
     prime_tower_overrides,
     tower_asked,
 )
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import replate_3mf
 from tests.api.test_filament_profiles import preset_values
@@ -288,6 +290,31 @@ def test_whether_the_print_asks_for_a_tower(
     choice: PrimeTowerChoice | None, request_overrides: dict[str, Any], asked: bool | None
 ) -> None:
     assert tower_asked(choice, request_overrides) is asked
+
+
+@pytest.mark.parametrize(
+    ("extra", "wanted"),
+    [
+        ({}, None),
+        ({"prime_tower": {"enabled": True, "no_sparse_layers": True}}, (True, True)),
+        # The request's override wins, as `tower_asked` reads it at the run.
+        ({"process_overrides": {"enable_prime_tower": "1"}}, (True, None)),
+        (
+            {
+                "prime_tower": {"enabled": True, "no_sparse_layers": True},
+                "process_overrides": {"enable_prime_tower": "0"},
+            },
+            (False, None),
+        ),
+    ],
+)
+def test_the_analysis_judges_the_runs_tower(
+    extra: dict[str, Any], wanted: tuple[bool, bool | None] | None
+) -> None:
+    """#3770: plate fit (SB4001) gets the run's tower choice, so it refuses what the send
+    refuses."""
+    tower = analysis_request(PrintRunRequest.model_validate({**body(), **extra})).prime_tower
+    assert (None if tower is None else (tower.enabled, tower.no_sparse_layers)) == wanted
 
 
 @pytest.mark.parametrize(

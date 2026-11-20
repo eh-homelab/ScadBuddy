@@ -232,7 +232,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   own (`print_run.plan_run`, `bambu3mf.stated_tower_off`, `prime_tower.file_tower_overrides`),
   and `replate_3mf` keeps no room at send. A print that turns the tower on (its `prime_tower`
   or its `process_overrides`) gets room for one instead (`replate_3mf` `tower_on`), or a
-  `PlateFitError` when it does not fit. It does not model the tower's depth or the
+  `PlateFitError` when it does not fit. Plate fit (`analyzers/builtin.py` SB4001) judges
+  the tower as the send does, by the file and `AnalysisRequest.prime_tower` (the run's
+  tower choice, `api/accepted_fixes.py` `analysis_request`). It does not model the tower's depth or the
   "no sparse layers" keep-out.
   It packs with `packing.py` `GAP_MM` (5 mm) and ignores Bambu's by-object clearance, so a
   by-object plate fails "too close to others" (#6246). A template plate is one object with

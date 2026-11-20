@@ -3621,6 +3621,8 @@ async def plan_run(
     # preset replaces the file's own `enable_prime_tower`: the "0" goes as an override
     # unless the print says on or off, and a print that says on gets room for the tower.
     asked = tower_asked(request.prime_tower, request.overrides())
+    # Not a second download: `fetched_3mf` is the source's one fetch (`_fetch`), kept per
+    # source and shared with `file_to_print` and its upload below.
     fetched = await source.fetched_3mf(client)
     stated_off = fetched is not None and await asyncio.to_thread(stated_tower_off, fetched)
     # The plan's sides (one chosen by hand, or each Track Switch inlet's, #4272) are
