@@ -256,3 +256,10 @@ def test_a_fresh_collector_exposes_every_series_before_the_first_snapshot() -> N
     families = list(FilamentCollector().collect())
     assert [f.name for f in families] == [n for n, _, _ in FILAMENT_SERIES]
     assert all(not f.samples for f in families)
+
+
+def test_every_series_row_has_an_export_entry() -> None:
+    """A new `FILAMENT_SERIES` row exports an empty family until it has data (#6785)."""
+    metrics = Metrics()
+    metrics_export.export(metrics, _snapshot())
+    assert [f.name for f in metrics.filament.collect()] == [n for n, _, _ in FILAMENT_SERIES]

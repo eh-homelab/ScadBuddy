@@ -100,7 +100,7 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
     families: list[Metric] = []
     for name, documentation, labelnames in FILAMENT_SERIES:
         family = GaugeMetricFamily(name, documentation, labels=labelnames)
-        for labels, amount in wanted[name].items():
+        for labels, amount in wanted.get(name, {}).items():
             family.add_metric([str(p) for p in labels], amount)
         families.append(family)
     # The one write: everything above is built, so a failure never reaches the collector.

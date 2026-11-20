@@ -158,6 +158,15 @@ check 'a series renamed in the FILAMENT_SERIES table fails the dashboard that re
   "$(run | cut -d'|' -f1)"
 
 good
+sed -i 's/"scadbuddy_filament_stock_grams",/"scadbuddy_filament_stock_grams", "no labels",/' "$r/backend/scadbuddy/core/metrics.py"
+out="$(run | cut -d'|' -f1)"
+check 'a FILAMENT_SERIES row that is not a 3-tuple fails and is named (#6785)' \
+  "1:" "${out%%:*}:"
+msg="$("$script" "$r" 2>&1 || true)"
+check 'the malformed row message names the table' \
+  "yes" "$(grep -q 'metrics.py: FILAMENT_SERIES row at line [0-9]* is not' <<< "$msg" && echo yes || echo no)"
+
+good
 edit '(.panels[] | select(.id == 6) | .targets[0].expr) |= sub("by \\(le, stage\\)"; "by (le, stages)")'
 check 'a by() label the metric does not declare fails' \
   "1:$f: panel 6 target A: by (le, stages): \"stages\" is not a label of the series the query reads" \
