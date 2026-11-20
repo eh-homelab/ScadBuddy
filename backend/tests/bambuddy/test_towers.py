@@ -122,7 +122,8 @@ def test_a_tower_every_extruder_reaches_is_left_where_its_author_put_it(tmp_path
 def test_a_file_whose_settings_pass_the_cap_keeps_its_towers(tmp_path: Path) -> None:
     """#6792: the file is untrusted, so the send reads `project_settings.config` within
     `MAX_SETTINGS_BYTES`, as plate fit does. Past the cap the file keeps its towers,
-    and the slicer says why, rather than the send reading it whole."""
+    and the slicer says why, rather than the send reading it whole. Defence in depth:
+    the send's `layout_of` already reads such a file as `as_is` and never calls this."""
     payload = _laid_out_on_an_a1_mini(tmp_path)
     assert towers_within_reach(payload, H2C) is not payload  # (15, 145): moved
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
@@ -130,6 +131,12 @@ def test_a_file_whose_settings_pass_the_cap_keeps_its_towers(tmp_path: Path) -> 
     settings["padding"] = "x" * MAX_SETTINGS_BYTES
     padded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
     assert towers_within_reach(padded, H2C) is padded
+
+
+def test_a_file_whose_settings_are_not_json_keeps_its_towers(tmp_path: Path) -> None:
+    payload = _laid_out_on_an_a1_mini(tmp_path)
+    damaged = rezipped(payload, {PROJECT_SETTINGS_NAME: b"{not json"})
+    assert towers_within_reach(damaged, H2C) is damaged
 
 
 def test_no_printer_chosen_moves_no_tower(tmp_path: Path) -> None:
