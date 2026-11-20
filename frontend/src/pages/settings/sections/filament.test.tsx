@@ -197,7 +197,8 @@ describe('Filament (#6262)', () => {
       const { unmount } = await startSync()
       const before = count.reads
       unmount()
-      await act(() => vi.advanceTimersByTimeAsync(9_000))
+      // Five intervals: a poll left running would read the status again (twice, until the mock pass lands).
+      await act(() => vi.advanceTimersByTimeAsync(15_000))
       expect(count.reads).toBe(before)
     } finally {
       server.events.removeAllListeners()
