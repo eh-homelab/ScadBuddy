@@ -500,6 +500,14 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
   renamed in SB, so the plan pushes only the child's name. `apply_results` stores the
   answer (`identifier` `B7`). The child's `bb_seen` has no `identifier`, and the next
   full pass (and every later one) plans no write that carries `identifier`.
+- R-T4-32 (decision 82): an adoption by name of a row a person made has a body without
+  SB's differing fields, and its hashes leave them out; the plan has already stored their
+  marks in `bb_pushed["unseen"]` of the unlinked SB row (the key is there even when empty).
+  `results` links the row (its intent says it is an adoption), merges the write's hashes
+  with `||` (keeping `unseen`), and stores the answer under R-T4-28 with no old copy: a
+  differing field stays out of `bb_seen`. Test: an adoption of BB location `B7` by SB
+  location `A1` under `two_way`, then `apply_results`; the next full pass plans no write
+  that carries `identifier`.
 
 ### Task 6: CRUD routes for the print worker
 
@@ -541,6 +549,7 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
   - `test_an_unparsed_row_marks_the_listing_partial` (`spools_complete is False`).
   - `test_a_probe_404_comes_back_as_not_found` (respx `GET /inventory/spools/{id}` 404 → not-ok, `status == 404`).
   - `test_every_write_heartbeats`.
+  - **Carried from Task 4: R-T4-33 (decision 83).** `SyncPassResult.conflicts` is the largest `SyncPlan.conflicts` of the pass's rounds (every round plans from one snapshot, so a sum would count a field once per round). Test: `test_conflicts_are_counted_once_per_pass` (two rounds each with `conflicts == 1` → the result has `conflicts == 1`).
 - [ ] **Step 2-4:** Run, implement, run.
 - [ ] **Step 5: Commit** `feat(filament): a sync pass on the print worker (#6265)`.
 
@@ -598,6 +607,7 @@ Test: a fake `FilamentSyncApi` whose `plan` always defers gives 3 passes, then t
   - `read_and_pull` reads `spool_rows(include_archived=True)`. A linked BB spool whose `archived_at` is set archives the SB spool, and a cleared one restores it, under `pulls(spools)` and Decision 8's rule against the SB spool's newest `archived`/`restored` event. An unlinked archived BB spool makes no SB spool.
   - Every pull writes `filament_bb_links.bb_seen = seen_row(row)` and `bb_seen_at = now` from the row it read (the same shape `results` writes), under R-T4-28's merge rule below.
   - **Carried from Task 4: R-T4-28 (decision 75).** A pull's `bb_seen` write is a merge, not a swap. A field the pull took into SB goes in (SB now holds it). A field the pull did not take goes in only when Bambuddy's value equals SB's compare value. Every other field keeps its old seen value, or stays out when it was unseen, and its mark in `bb_pushed["unseen"]` stays. This holds for spool links, suppliers and locations. Test: `test_a_pull_that_does_not_take_a_field_leaves_it_unseen` (a seeded location whose BB identifier differs; a pull that takes no identifier leaves `identifier` out of `bb_seen`, and the next plan pushes no identifier).
+  - **Carried from Task 4: R-T4-33 (decision 83).** For suppliers and locations (and every row kind the pull takes), when SB and Bambuddy both changed the same field since `bb_seen` (both moved off the seen value; or, for a field the seen copy leaves out, both hashes moved off the mark in `bb_pushed["unseen"]`), the pull takes nothing for that field, whatever `updated_at` says. SB's row time cannot show when SB changed one field, so neither side's change is proven older. The field keeps SB's value, stays out of the merged `bb_seen` (R-T4-28), and is counted in `PullReport.conflicts`. Test: `test_a_field_both_sides_changed_is_not_pulled` (a location seen as `A1`, SB `C3`, Bambuddy `B7` with an `updated_at` after SB's: SB keeps `C3`, `conflicts == 1`).
   - `pulls(presets)`: BB `k_profiles` → SB spool K values for printers mapped by `bambuddy_printer_id`, by `_bb_presets`' rule (only SB rows that still equal `filament_bb_links.bb_k_profiles` are replaced; a person's rows stay).
   - `pulls(suppliers)`: each BB supplier → the SB supplier with its `bb_supplier_id`, else the unlinked one of the same upper case name (now linked), else a new one; a linked one takes BB's changed fields by Decision 8's rule against `updated_at`. Spool supplier links are not pulled (Decision 15).
   - `pulls(locations)`: each BB location → the SB location with its `bb_location_id`, else an unlinked root location that is not a printer place (`is_printer_place`) with the same upper case name, else a new root location of kind `Shelf`; a linked spool's BB `location_id` change moves the SB spool (`LocationStore.move_on`, actor `bambuddy`) when it changed since `bb_seen` and the spool's newest `moved` event is not later than BB's `updated_at`, and never out of a printer place (an AMS unit, a tray, the external spool place, a plain printer place).
@@ -858,7 +868,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 38. Task 4: a `PATCH` that sends `weight_used` always sends `weight_locked` too, with its
     hash. Why: Bambuddy locks the weight otherwise (`write_semantics.spool_update_partial`).
     Cost: none known.
-39. (changed by 78) Task 4: the K-profiles compare in `k_form` (`printer_id`, `extruder`,
+39. (changed by 78 and 81) Task 4: the K-profiles compare in `k_form` (`printer_id`, `extruder`,
     `nozzle_diameter`, `k_value` to 4 decimals, sorted) with the snapshot row's
     `k_profiles`, or `bb_k_profiles` when `bb_seen_at` is after `read_at`; the last seen
     value under `two_way` is `bb_k_profiles`. The preset list (`PUT …/filament-presets`)
@@ -871,7 +881,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     a row `results` stored this pass) lets SB's change win. Why: an archived spool is off
     the lists; there is no BB time to compare. Cost: a field edited on an archived spool
     reaches Bambuddy only after a restore.
-41. Task 4: suppliers, locations, insert types and filament catalog entries compare field
+41. (changed by 82) Task 4: suppliers, locations, insert types and filament catalog entries compare field
     by field with BB's listing (suppliers `name`, `website`, `customer_number`, `note`;
     locations `name`, `identifier`; catalog `name`, `weight`; filament `name`, `type`,
     `brand`, `color_hex` upper case, `density`; the rest of a `FilamentCreate` by hash).
@@ -1002,7 +1012,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Bambuddy's form for each, so no field flaps.
 62. Task 4 (R-T4-13, concern 5): linked non-spool rows that Bambuddy deleted are follow-up
     #6688. Task 5 drops a link on any 404 on a linked item.
-63. (changed by 78) Task 4 (R-T4-14, concerns 6 and 7): the one-time `PUT []` per linked spool with no
+63. (changed by 78 and 81) Task 4 (R-T4-14, concerns 6 and 7): the one-time `PUT []` per linked spool with no
     preset is accepted. Tests written after the code are accepted, given decision 56. The
     commit title stays, because the squash title decides.
 64. Task 4 (R-T4-15, fix round 2): `more` counts only non-retry work the cap cut. `take` does
@@ -1044,7 +1054,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `more`. It then waits for the normal interval, whatever `deferred` says, and logs once
     that it hit the limit. Why: decisions 68 and 69 close the known loops, and this bound
     closes the unknown ones. Cost: work left over after 3 passes waits one interval.
-71. (changed by 74, 77 and 78) Task 4 (R-T4-22, re-review I-2; replaces 65): on a full
+71. (changed by 74, 77, 78 and 83) Task 4 (R-T4-22, re-review I-2; replaces 65): on a full
     pass, `plan` seeds the missing
     seen copy of a linked row whose `bb_seen` is NULL: a spool link (`filament_bb_links`),
     a supplier, a location or an insert type. It sets `bb_seen` from the snapshot's current
@@ -1081,7 +1091,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     time and SB's change is strictly after it (decision 53): that push is not blind. Why:
     the ruling's reason is R-T4-4 ("never overwrite a value without knowing it is newer"),
     and both cases know. Cost: none known.
-74. Task 4 (R-T4-27, re-review 2 I-1): suppliers, locations and insert types have one SB
+74. (changed by 83) Task 4 (R-T4-27, re-review 2 I-1): suppliers, locations and insert types have one SB
     change time per row, so it never shows that SB changed one field. At seeding, `plan`
     records each field the seen copy leaves out in `bb_pushed` under the reserved key
     `unseen` (`bb_sync_plan.UNSEEN_KEY`): `{field: {"sb": <SB's field_hash>, "bb":
@@ -1112,7 +1122,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 76. Task 4 (R-T4-29): decision 69 names filament catalog entries; Task 5's carry list gains
     R-T4-25 (their `bb_seen` columns and seeding). Decision 53's "keep this cost" lasts only
     until Task 5.
-77. Task 4 (fix round 4, the whole-plan check): under `two_way`, `decide` no longer lets SB
+77. (changed by 80) Task 4 (fix round 4, the whole-plan check): under `two_way`, `decide` no longer lets SB
     win when Bambuddy's value moved off the seen one and Bambuddy's row has no time
     (catalog and filament entries, a supplier or location row without `updated_at`). Its
     age is unknown, so SB's value is not pushed over it. A value `results` stored in this
@@ -1121,7 +1131,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_value_bambuddy_changed_with_no_time_is_not_overwritten`. Cost: under `two_way`
     such a field keeps Bambuddy's value until SB takes it (Task 9's pull, where it pulls)
     or a later SB change finds Bambuddy's value unmoved.
-78. Task 4 (fix round 4, the whole-plan check; changes 63 for `two_way`): Bambuddy's spool
+78. (changed by 81) Task 4 (fix round 4, the whole-plan check; changes 63 for `two_way`): Bambuddy's spool
     rows do not carry the preset list, so a legacy link does not know Bambuddy's list.
     Under `presets` = `two_way` a link that never pushed the list and has no seen copy
     plans no preset write, and seeding stores SB's hash of the list in `pushed_fields`, so
@@ -1130,12 +1140,75 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     decision 63. Test: `test_a_legacy_link_does_not_put_an_empty_preset_list_under_two_way`.
     Cost: a preset list SB holds and Bambuddy lacks at seeding reaches Bambuddy only after
     SB changes it.
-79. Task 4 (fix round 4, the whole-plan check): a copy `results` stored in this pass
+79. (changed by 80) Task 4 (fix round 4, the whole-plan check): a copy `results` stored in this pass
     (`bb_seen_at` after `read_at`) is read over the snapshot's row, field by field, for
     every kind and for spools. Under R-T4-28 it holds only the fields its write sent; a
     field it lacks takes the snapshot's value, not "missing" (which compared by hash and
     pushed SB's value blind). Test: `test_a_fresh_seen_copy_without_a_field_reads_the_snapshot`.
     Cost: none known.
+80. Task 4 (R-T4-30, re-review 3 I-A; replaces 79's rule): decision 79's premise is false.
+    Under R-T4-28 a copy `results` stored in this pass also keeps the old seen value of
+    every field its write did not send and its answer did not match. So the overlay takes
+    a stored value over the snapshot's value only when it equals SB's current compare
+    value (the write sent it and SB has not changed it since, or the answer matched SB).
+    Every other field reads the snapshot's value: rows with no row time (`bb_now`),
+    spools with the answer's time (`linked_spool`). The K-profiles follow the same rule;
+    a spool absent from the snapshot whose stored K-profiles are not SB's plans no K write
+    in that round. Decision 77's "a value `results` stored in this pass still compares as
+    seen" now holds only for such a value. Why: the overlay read the old seen value as
+    "Bambuddy now", so round 2 pushed SB's older value over Bambuddy's newer one
+    (re-review 3's scenario). Tests:
+    `test_round_two_reads_bambuddys_newer_value_over_an_old_seen_one` (rows),
+    `test_round_two_reads_a_spools_newer_note_over_an_old_seen_one` (spools). Cost: a field
+    whose stored value is stale is not pushed until the next pass, and for a row kind that
+    round counts it in `conflicts` (decision 83) when SB changed it again after the write.
+81. Task 4 (R-T4-31, re-review 3 I-B; changes 39, 63 and 78): under `presets` = `two_way`
+    the preset-list `PUT` is gated on "`filament_presets` is not in `pushed_fields`" alone,
+    not on `bb_seen` being NULL. Such a link plans no preset write, on any pass, and a
+    full pass records SB's hash in `pushed_fields` (bookkeeping), so the list pushes when
+    SB changes it. A create (and the adoption of a lost create's spool) carries the hash
+    of `[]` in its hashes when `presets` pushes, because Bambuddy starts a new spool with
+    an empty list. `seed_spool` no longer records the hash; the gate does. Why: a link
+    seeded while `presets` was `off` and then switched to `two_way`, or a link the pull
+    made (Task 9), still sent a blind `PUT`. Decision 78's "a link SB created (its seen
+    copy stored by `results`) pushes the list" treated "has a seen copy" as "SB created
+    it", which is false. Build choice: the `[]` hash is recorded only when `presets`
+    pushes at creation; a spool created while `presets` was off then has no hash, and the
+    gate covers it after a switch. Tests:
+    `test_a_seeded_link_does_not_put_its_preset_list_after_a_switch`,
+    `test_a_create_records_bambuddys_empty_preset_list`. Cost: a link's first preset push
+    waits until SB changes its presets.
+82. Task 4 (R-T4-32, re-review 3 open path a; changes 41): under `two_way`, adopting by name
+    a Bambuddy row a person made (no intent) sends none of SB's differing readable fields;
+    the adoption body holds only what already agrees (often `{}`), and its hashes leave the
+    differing fields out. The plan records their seeding marks
+    (`bb_pushed["unseen"]` `{field: {"sb": …, "bb": …}}`, decision 74) on the SB row, as
+    seeding does, so the link then acts as a seeded one. Decision 41's accepted cost ("a
+    BB row of the same name that a person made becomes SB's") is withdrawn. An adoption
+    with an intent (SB's lost create) still sends SB's values; `sb_to_bb` keeps pushing
+    every difference (decision 73). Build addition: the adoption records an intent so
+    `results` can link it (decision 41), and a lost answer's retry would then find that
+    intent and push. So the marks are stored even when empty, and an unlinked row whose
+    `bb_pushed` holds `unseen` (`_Item.marked`) keeps the person's path whatever intent
+    it has. Why: the binding constraint (no blind push), and the adopted row's values are
+    the person's. Tests: `test_adopting_a_row_a_person_made_pushes_no_differing_field`
+    (both paths, and a lost answer's retry),
+    `test_a_person_made_row_with_no_difference_stays_the_persons`. Cost: SB's differing
+    values reach Bambuddy only after SB changes them again.
+83. Task 4 (R-T4-33, re-review 3 open path b; changes 71 and 74; carried to Tasks 7 and 9):
+    under `two_way`, when SB and Bambuddy both changed the same field of a supplier,
+    location, insert type or filament entry (a seen field: both moved off the seen value;
+    an `UNSEEN` field with a mark: both hashes moved off the mark's), `_row_wins` returns
+    False whatever the row times. Nothing is pushed, and the plan counts the field in
+    `SyncPlan.conflicts`. `SyncPassResult.conflicts` carries it (Task 7). Task 9's pull
+    applies the same rule: nothing is pulled. Why: a row's `updated_at` cannot show when
+    SB changed one field (any column or a parent's move sets it), so it cannot prove SB's
+    change newer, and the constraint forbids overwriting a change not proven older.
+    Re-review 3 measured a case where SB's value was provably older. Tests:
+    `test_a_field_both_sides_changed_is_a_conflict`, and
+    `test_a_seeded_field_bambuddy_changed_again_is_not_pushed_blind` (its second assertion
+    now expects no write and one conflict). Cost: such a field stays different until a
+    person edits it on one side; the count makes this visible.
 
 ## Self-review
 

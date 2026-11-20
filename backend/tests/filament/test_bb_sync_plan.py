@@ -1145,15 +1145,16 @@ def test_the_reserved_key_is_no_field_name() -> None:
 
 def test_a_seeded_field_bambuddy_changed_again_is_not_pushed_blind(pg_pool: PgPool) -> None:
     """Bambuddy changed the seeded field again (``B7`` to ``B9``) and has no time: its
-    value's age is unknown, so SB's later change is not pushed over it. With a Bambuddy
-    time older than SB's change, SB's change is newer and is pushed."""
+    value's age is unknown, so SB's later change is not pushed over it. A Bambuddy time
+    older than SB's row time changes nothing: the row time does not show when SB changed
+    the identifier, so both sides changed it, and the plan counts a conflict (R-T4-33)."""
     f = _filament(pg_pool)
     shelf, sync, _ = _shelf_seeded(pg_pool, f, {"id": 4, "name": "Shelf A", "identifier": "B7"})
     f.locations.update(shelf, LocationPatch(identifier="C3"))
     moved = {"id": 4, "name": "Shelf A", "identifier": "B9"}
     assert _plan(f, _snap([], locations=[moved]), sync).writes == []
-    (update,) = _plan(f, _snap([], locations=[moved | {"updated_at": _ago(30)}]), sync).writes
-    assert update.body == {"identifier": "C3"}
+    result = _plan(f, _snap([], locations=[moved | {"updated_at": _ago(30)}]), sync)
+    assert (result.writes, result.conflicts) == ([], 1)
 
 
 def test_a_seen_field_bambuddy_changed_is_not_pushed_for_another_sb_change(
@@ -1231,3 +1232,166 @@ def test_a_legacy_link_does_not_put_an_empty_preset_list_under_two_way(pg_pool: 
     assert link["pushed_fields"]["filament_presets"] == field_hash(
         compare_form("filament_presets", _desired(pg_pool, spool, sync)["filament_presets"])
     )
+
+
+# -- fix round 5: R-T4-30 to R-T4-33 -------------------------------------------------
+
+
+def test_round_two_reads_bambuddys_newer_value_over_an_old_seen_one(pg_pool: PgPool) -> None:
+    """R-T4-30 (re-review 3 I-A), rows: round 1 pushed the name, and ``results`` merged its
+    answer (R-T4-28). The copy keeps the old seen identifier ``A1``, because Bambuddy's
+    ``B7`` is not SB's ``C3``. Round 2 plans from the same snapshot. The old seen value is
+    not SB's value, so it does not stand over the snapshot's ``B7``, and SB's ``C3`` is not
+    pushed over Bambuddy's newer value."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf Z", kind_id=_kind(f, "Shelf"), identifier="C3")
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = 4, bb_seen = %s,"
+            " bb_seen_at = now(), bb_pushed = %s WHERE id = %s",
+            (
+                Jsonb({"name": "Shelf Z", "identifier": "A1"}),
+                Jsonb({"name": field_hash("Shelf Z")}),
+                shelf.id,
+            ),
+        )
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    bb = {"id": 4, "name": "Shelf A", "identifier": "B7", "updated_at": _ago(5)}
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    assert _plan(f, _snap([], locations=[bb], read_at=read_at), sync).writes == []
+
+
+def test_round_two_reads_a_spools_newer_note_over_an_old_seen_one(pg_pool: PgPool) -> None:
+    """R-T4-30 (re-review 3 I-A), spools: the merged copy keeps the old seen note, and the
+    snapshot holds Bambuddy's newer one. SB's note changed before round 1's answer, so it
+    is not pushed over Bambuddy's note in round 2."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    f.spools.update(spool, SpoolPatch(note="SB's note"), actor="person")
+    two_way = SPOOLS.model_copy(update={"spools": "two_way"})
+    row = _matching(pg_pool, spool, 50, two_way)
+    _link(pg_pool, spool, 50, seen=seen_row(BbSpool.model_validate(row | {"note": "Old note"})))
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_seen_at = now(), bb_updated_at = now()"
+            " WHERE spool_id = %s",
+            (spool,),
+        )
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    snap = _snap([row | {"note": "BB's note", "updated_at": _ago(5)}], read_at=read_at)
+    assert _plan(f, snap, two_way).writes == []
+
+
+def _presets_two_way_after_off(pg_pool: PgPool, f: Filament) -> tuple[UUID, FilamentSync, Any]:
+    """A link seeded by a full pass while ``presets`` was ``off``, then ``presets`` set to
+    ``two_way``."""
+    spool = _spool(f, _type(f))
+    off = SPOOLS.model_copy(update={"spools": "two_way", "presets": "off"})
+    row = _matching(pg_pool, spool, 50, off)
+    _link(pg_pool, spool, 50)
+    assert _plan(f, _snap([row]), off).writes == []
+    assert _seen(pg_pool, "filament_bb_links", "spool_id", spool)[0] is not None
+    return spool, off.model_copy(update={"presets": "two_way"}), row
+
+
+def test_a_seeded_link_does_not_put_its_preset_list_after_a_switch(pg_pool: PgPool) -> None:
+    """R-T4-31 (re-review 3 I-B): the link has a seen copy but never pushed the preset
+    list, so SB does not know Bambuddy's list. Neither an event pass nor a full pass puts
+    SB's list over it; a full pass records SB's hash."""
+    f = _filament(pg_pool)
+    spool, sync, row = _presets_two_way_after_off(pg_pool, f)
+    assert "presets" not in [w.op for w in _plan(f, _snap([row], full=False), sync).writes]
+    assert "presets" not in [w.op for w in _plan(f, _snap([row]), sync).writes]
+    with pg_pool.connection() as conn:
+        link = conn.execute(
+            "SELECT pushed_fields FROM filament_bb_links WHERE spool_id = %s", (spool,)
+        ).fetchone()
+    assert link is not None
+    assert link["pushed_fields"]["filament_presets"] == field_hash(
+        compare_form("filament_presets", _desired(pg_pool, spool, sync)["filament_presets"])
+    )
+
+
+def test_a_create_records_bambuddys_empty_preset_list(pg_pool: PgPool) -> None:
+    """R-T4-31: Bambuddy starts a new spool with an empty preset list, so the create's
+    hashes hold the hash of ``[]``; the list then pushes by hash when SB's differs."""
+    f = _filament(pg_pool)
+    _spool(f, _type(f))
+    sync = SPOOLS.model_copy(update={"presets": "two_way"})
+    create = _only(_plan(f, _snap([]), sync).writes, "create")
+    assert create.hashes["filament_presets"] == field_hash(compare_form("filament_presets", []))
+
+
+@pytest.mark.parametrize("intent", [False, True], ids=["person-made", "sb-made"])
+def test_adopting_a_row_a_person_made_pushes_no_differing_field(
+    pg_pool: PgPool, intent: bool
+) -> None:
+    """R-T4-32 (re-review 3 open path a): under ``two_way``, an unlinked SB location adopts
+    Bambuddy's row of the same name. With no intent a person made that row, so its
+    differing identifier is not sent; the adoption records the seeding marks instead. With
+    an old intent SB made the row (a lost answer), and SB's value is sent."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1")
+    )
+    if intent:
+        with pg_pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO filament_bb_creates (kind, sb_id, started_at)"
+                " VALUES ('location', %s, now() - interval '1 hour')",
+                (shelf.id,),
+            )
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    bb = [{"id": 4, "name": "Shelf A", "identifier": "B7"}]
+    (write,) = _plan(f, _snap([], locations=bb), sync).writes
+    assert (write.op, write.bb_id) == ("update", 4)
+    assert _intents(pg_pool) == [("location", shelf.id)]
+    if intent:
+        assert write.body == {"identifier": "A1"}
+        return
+    assert write.body == {}
+    assert write.hashes == {"name": field_hash("Shelf A")}
+    marks = {UNSEEN_KEY: {"identifier": {"sb": field_hash("A1"), "bb": field_hash("B7")}}}
+    assert _bb_pushed(pg_pool, "filament_locations", shelf.id) == marks
+    # The answer was lost: the adoption's own intent does not make the row SB's.
+    (again,) = _plan(f, _snap([], locations=bb), sync).writes
+    assert (again.bb_id, again.body) == (4, {})
+
+
+def test_a_person_made_row_with_no_difference_stays_the_persons(pg_pool: PgPool) -> None:
+    """R-T4-32: an adoption with nothing to hold back still marks the row as a person's.
+    When its answer is lost and a person then changes the row in Bambuddy, the retry
+    does not push SB's value over it."""
+    f = _filament(pg_pool)
+    f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1"))
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    (write,) = _plan(
+        f, _snap([], locations=[{"id": 4, "name": "Shelf A", "identifier": "A1"}]), sync
+    ).writes
+    assert write.body == {}
+    bb = [{"id": 4, "name": "Shelf A", "identifier": "B7"}]
+    (again,) = _plan(f, _snap([], locations=bb), sync).writes
+    assert (again.bb_id, again.body) == (4, {})
+
+
+def test_a_field_both_sides_changed_is_a_conflict(pg_pool: PgPool) -> None:
+    """R-T4-33 (re-review 3 open path b): SB and Bambuddy both moved the identifier off
+    the seen ``A1``. SB's row time is after Bambuddy's, but it does not show when SB
+    changed the identifier, so nothing is pushed and the plan counts one conflict."""
+    f = _filament(pg_pool)
+    shelf = f.locations.create(
+        LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"), identifier="A1")
+    )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = 4, bb_seen = %s,"
+            " bb_seen_at = now() - interval '1 hour' WHERE id = %s",
+            (Jsonb({"name": "Shelf A", "identifier": "A1"}), shelf.id),
+        )
+    f.locations.update(shelf.id, LocationPatch(identifier="C3"))
+    sync = SPOOLS.model_copy(update={"spools": "off", "locations": "two_way"})
+    bb = {"id": 4, "name": "Shelf A", "identifier": "B7", "updated_at": _ago(30)}
+    result = _plan(f, _snap([], locations=[bb]), sync)
+    assert (result.writes, result.conflicts) == ([], 1)

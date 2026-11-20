@@ -213,7 +213,9 @@ class SyncPlan(BaseModel, extra="forbid"):
     a create only on a full one. ``blocked``: a read this pass did not get holds it (a
     partial spool listing, a listing not read). Neither sets ``more`` (R-T4-1).
     ``unmapped_k``: K values left out for a printer with no Bambuddy id (Decision 14).
-    Also whether the snapshot's instance is not the links' one (Decision 12), and the
+    ``conflicts``: fields of suppliers, locations, insert types and filament entries that
+    both sides changed since SB last saw them, so neither side's value is pushed
+    (R-T4-33). Also whether the snapshot's instance is not the links' one (Decision 12), and the
     directions and timer interval the plan read."""
 
     writes: list[BbWrite]
@@ -221,6 +223,7 @@ class SyncPlan(BaseModel, extra="forbid"):
     failed: int = 0
     blocked: int = 0
     unmapped_k: int = 0
+    conflicts: int = 0
     instance_changed: bool = False
     directions: FilamentSync
     interval_s: float
@@ -238,12 +241,14 @@ class SyncPassResult(BaseModel, extra="forbid"):
     """What one pass did. ``more``: writes were left, so the next pass runs at once
     (Decision 11). ``skipped``: why it did nothing. ``error``: a failed pass's
     ``error_label``; `record_pass` sets ``last_error`` from it, and ``last_ok_at`` only
-    when it is ``None`` (Decision 19, F7)."""
+    when it is ``None`` (Decision 19, F7). ``conflicts``: the largest ``SyncPlan.conflicts``
+    of the pass's rounds (R-T4-33)."""
 
     written: int
     failed: int
     deferred: int
     more: bool
+    conflicts: int = 0
     instance_changed: bool
     interval_s: float
     skipped: Literal["no_bambuddy", "nothing_pushes"] | None = None
