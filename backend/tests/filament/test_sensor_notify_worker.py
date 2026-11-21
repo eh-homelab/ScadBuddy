@@ -145,7 +145,7 @@ async def test_the_activity_sends_through_the_api_it_was_given(pg_pool: PgPool) 
 async def test_the_pull_no_longer_sends(pg_pool: PgPool) -> None:
     """Decision 40: the API's pull makes no Bambuddy call for a notification."""
     from scadbuddy.core.settings import FilamentSync
-    from scadbuddy.filament.bambuddy_pull import scheduled_pull
+    from tests.filament.pull_support import scheduled_pull
     from tests.filament.test_bambuddy_pull import _filament
 
     f = _filament(pg_pool)

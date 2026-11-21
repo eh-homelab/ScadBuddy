@@ -170,7 +170,7 @@ def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> Non
     response = crud.request("GET", "/api/v1/internal/crud/print/areas")
     areas = response.json()["areas"]
     # Appended, so an older API's list is a prefix of a newer one's.
-    assert areas[:18] == [
+    assert areas[:19] == [
         "settings",
         "runs",
         "operations",
@@ -191,4 +191,4 @@ def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> Non
         "filament-sync",
         "filament-pull",
     ]
-    assert len(areas) >= 18 and "sensor-notify" in areas
+    assert "sensor-notify" in areas[19:]
