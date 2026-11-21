@@ -64,6 +64,10 @@ settle (`filament/print_uses.py` `PrintUses`), each of which takes an
 ``Idempotency-Key`` of its own, a new UUID per call: each answers what that call
 booked.
 
+`RemoteSensorNotifications` (area ``sensor-notify``, #6646) claims the sensors' queued
+alert notifications and ends each after its Bambuddy call: the claim under an
+``Idempotency-Key`` of its own per call, the end natural.
+
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
@@ -181,7 +185,14 @@ from scadbuddy.filament.bb_sync_models import (
     SyncPassResult,
     SyncPlan,
 )
-from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayView
+from scadbuddy.filament.models import (
+    ClaimedNotification,
+    EffectivePreset,
+    FilamentInventorySpool,
+    NotificationClaim,
+    NotificationEnd,
+    TrayView,
+)
 from scadbuddy.filament.print_uses import SlotUse
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
@@ -1527,6 +1538,33 @@ class RemoteBbPull:
 
     async def reconcile_trays(self, body: TraysBody) -> int:
         return TraysReconciled.model_validate(await self._post("/trays", body)).moved
+
+
+class RemoteSensorNotifications:
+    """`filament/sensor_notify.py` `SensorNotificationsApi` over
+    ``…/print/filament/sensor-notifications`` (area ``sensor-notify``, #6646): a claim
+    takes an ``Idempotency-Key`` of its own, a new UUID per call, which the client sends
+    again on its retries, so a claim whose answer was lost answers the rows it claimed; an
+    end is natural."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def claim(self, limit: int) -> list[ClaimedNotification]:
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/filament/sensor-notifications/claim",
+            json=NotificationClaim(limit=limit).model_dump(mode="json"),
+            idempotency_key=uuid.uuid4().hex,
+        )
+        return [ClaimedNotification.model_validate(row) for row in response.json()]
+
+    async def end(self, row_id: UUID, end: NotificationEnd) -> None:
+        await self._client.request(
+            "POST",
+            f"{BASE}/filament/sensor-notifications/{row_id}/end",
+            json=end.model_dump(mode="json", exclude_none=True),
+        )
 
 
 class RemotePrintUses:
