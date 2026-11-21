@@ -182,6 +182,21 @@ export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
  */
 export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
 
+export type LinksResetCounts = Schemas['LinksResetCounts']
+export type LinksResetPreview = Schemas['LinksResetPreview']
+export type LinksResetDone = Schemas['LinksResetDone']
+
+/** #6773 — what a reset of the Bambuddy links would delete, and the instance they belong to. Reads only. */
+export const getResetPreview = () => request<LinksResetPreview>(`${BASE}/sync/reset-links`)
+
+/**
+ * #6773 — deletes the Bambuddy links of `confirmInstance` (the preview's `instance`), then a full pass
+ * links the configured Bambuddy afresh. 409 with `code` `confirm_mismatch`, `same_instance` or
+ * `nothing_to_reset` when it deletes nothing.
+ */
+export const resetSyncLinks = (confirmInstance: string) =>
+  request<LinksResetDone>(`${BASE}/sync/reset-links`, json('POST', { confirm_instance: confirmInstance }))
+
 /**
  * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with
  * `status: 'timeout'`. The request stays open that long: pass a `signal` to stop waiting.

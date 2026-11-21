@@ -1,8 +1,10 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { api } from '../../../api/client'
+import { getSyncStatus } from '../../../api/filament'
 import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
+import { linkOtherBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -299,6 +301,82 @@ describe('Filament (#6262)', () => {
     const filament = region('Filament')
     await user.click(await within(filament).findByRole('button', { name: 'Sync now' }))
     expect(await within(filament).findByRole('alert')).toHaveTextContent('The sync could not be started. Try again later.')
+  })
+
+  describe('Reset Bambuddy links (#6773)', () => {
+    async function withSync() {
+      await api.putSettings({ filament_sync: { ...DEFAULT_SYNC, spools: 'two_way' } })
+      const rendered = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+      await seeded()
+      return { ...rendered, filament: region('Filament') }
+    }
+
+    it('is not offered while the links belong to the configured Bambuddy', async () => {
+      const { filament } = await withSync()
+      await within(filament).findByRole('button', { name: 'Sync now' })
+      expect(within(filament).queryByRole('button', { name: 'Reset Bambuddy links' })).toBeNull()
+    })
+
+    it('names what it deletes, says no ScadBuddy spool goes, resets the instance it read and waits for the pass', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld')
+      let sent: unknown
+      server.events.on('request:start', ({ request }) => {
+        if (request.method === 'POST' && request.url.endsWith('/filament/sync/reset-links')) void request.clone().json().then((body) => (sent = body))
+      })
+      try {
+        const { user, filament } = await withSync()
+        expect(await within(filament).findByText(/The links belong to another Bambuddy/)).toBeInTheDocument()
+        await user.click(within(filament).getByRole('button', { name: 'Reset Bambuddy links' }))
+        const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+        expect(dialog).toHaveTextContent('No ScadBuddy spool, type, supplier or location is deleted')
+        const items = within(within(dialog).getByRole('list', { name: 'What the reset deletes' })).getAllByRole('listitem')
+        expect(items.map((item) => item.textContent)).toEqual([
+          '12 spool links',
+          '4 spool type links',
+          '1 insert type link',
+          '2 supplier links',
+          '3 location links',
+          '1 unfinished create',
+          '2 listed sync errors',
+        ])
+        await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+        expect(sent).toEqual({ confirm_instance: '0ld0ld0ld0ld' })
+        expect(await within(filament).findByText('22 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
+        expect(within(filament).queryByRole('button', { name: 'Reset Bambuddy links' })).toBeNull()
+        expect(within(filament).queryByRole('list', { name: 'Items not synced' })).toBeNull()
+      } finally {
+        server.events.removeAllListeners()
+      }
+    })
+
+    it('keeps everything when the person cancels', async () => {
+      linkOtherBambuddy()
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+      expect(within(filament).getByRole('button', { name: 'Reset Bambuddy links' })).toBeInTheDocument()
+      expect((await getSyncStatus()).instance_changed).toBe(true)
+    })
+
+    it('says nothing was deleted when the links changed since the dialog opened', async () => {
+      linkOtherBambuddy()
+      server.use(
+        http.post('*/api/v1/filament/sync/reset-links', () =>
+          HttpResponse.json(
+            { type: 'about:blank', title: 'Conflict', status: 409, detail: 'confirm_instance is not the instance the links belong to', code: 'confirm_mismatch' },
+            { status: 409 },
+          ),
+        ),
+      )
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('The links changed since this dialog opened. Nothing was deleted.')
+    })
   })
 
   it('switches the RFID override mode on and says Bambuddy no longer adds unknown spools', async () => {

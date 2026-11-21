@@ -752,6 +752,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_rfid_reconcile',
   // #6265: "Sync now" writes Bambuddy and the sync's links and status, no recorded kind.
   'filament_sync_run',
+  // #6773: the links' reset deletes the sync's links and asks for a pass, no recorded kind.
+  'filament_sync_reset_links',
   'filament_spool_ntag_write',
   'filament_spool_ntag_confirm',
   'filament_spool_ntag_cancel',

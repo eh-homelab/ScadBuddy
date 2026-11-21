@@ -342,3 +342,38 @@ async def test_a_resent_failed_result_is_one_attempt(
     # A result with no pass id is a pass of its own.
     await remote.results(INSTANCE, first.writes, refused, None)
     assert _attempts(store) == [3]
+
+
+@pg
+async def test_a_pass_of_another_bambuddy_plans_and_records_nothing(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """#6773: after a reset the state row names no instance, so a pass the old Bambuddy's
+    workflow still runs must not create SB's spools there or link them again: a plan or
+    results call for another instance than the configured Bambuddy's does nothing, by the
+    route and in-process."""
+    (spool,) = _spools(store, 1)
+    store.save(SettingsPatch(bambuddy_url="https://new-bambuddy.test"))
+    local = LocalFilamentSync(filament_on(store.pool), store)
+    remote = RemoteFilamentSync(crud)
+    for sync in (local, remote):
+        planned = await sync.plan(_snapshot(), 200)
+        assert planned.instance_changed and planned.writes == []
+    with store.pool.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM filament_bb_creates").fetchone() == {"n": 0}
+    write = BbWrite(
+        key=f"spool:{spool}:create",
+        kind="spool",
+        sb_id=spool,
+        op="create",
+        bb_id=None,
+        body={},
+        hashes={},
+    )
+    made = [BbWriteResult(key=write.key, ok=True, bb_id=7, answer={"id": 7})]
+    for sync in (local, remote):
+        assert await sync.results(INSTANCE, [write], made, None) == ResultsReport()
+    with store.pool.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM filament_bb_links").fetchone() == {"n": 0}
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    assert state == {"instance": None}

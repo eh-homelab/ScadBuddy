@@ -16,6 +16,11 @@ type S = components['schemas']
  * runs in the background: it lands on the second status read after the run (`READS_TO_LAND`),
  * at that read's time, with the refused spool failing once more. Ids and the seed's times
  * are fixed strings.
+ *
+ * #6773 — `GET`/`POST /api/v1/filament/sync/reset-links`. By default the links belong to the
+ * configured Bambuddy; `linkOtherBambuddy` makes them another's (`instance_changed`), as after a
+ * change of the Bambuddy URL. The reset checks `confirm_instance` as the server does, deletes the
+ * links, the intents and the error rows, and asks for a pass that lands as "Sync now"'s does.
  */
 
 const BASE = '/api/v1/filament/sync'
@@ -33,16 +38,46 @@ let lastPassAt = FIRST_PASS
 let errors = seedErrors()
 /** Status reads left before the pass asked for lands; null when none is running. */
 let running: number | null = null
+/** The other Bambuddy the links belong to (#6773); null while they belong to the configured one. */
+let otherInstance: string | null = null
+/** No links at all, after a reset and before the pass that links the new Bambuddy. */
+let unlinked = false
+
+/** What the seed's links number when they belong to another Bambuddy. */
+const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, intents: 1, ignored: 0 }
 
 export function reset() {
   lastPassAt = FIRST_PASS
   errors = seedErrors()
   running = null
+  otherInstance = null
+  unlinked = false
+}
+
+/** #6773 — the links now belong to `instance`, not the configured Bambuddy, so the sync is stopped. */
+export function linkOtherBambuddy(instance = '0ld0ld0ld0ld') {
+  otherInstance = instance
+  unlinked = false
+}
+
+/** The configured Bambuddy's instance, as `instance_for` would name it (the mock uses the URL). */
+const configured = () => mockSettings().bambuddy_url ?? null
+
+function linksInstance(): string | null {
+  if (unlinked) return null
+  return otherInstance ?? configured()
+}
+
+function resetCounts(): S['LinksResetCounts'] {
+  if (unlinked) return { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+  return { ...SEED_LINKS, errors: errors.length }
 }
 
 function land() {
   // Now, as the server's pass ends after the run that asked for it (the page waits for a later one).
   lastPassAt = new Date().toISOString()
+  // A pass after a reset links the configured Bambuddy.
+  unlinked = false
   // A held-back row is never sent, so only the refused one is tried again.
   errors = errors.map((error) => (error.error === 'name_taken' ? error : { ...error, attempts: error.attempts + 1, at: lastPassAt }))
 }
@@ -58,8 +93,10 @@ function skipped(): S['SyncStatus']['skipped'] {
 function status(): S['SyncStatus'] {
   restoreFilamentSync()
   const settings = mockSettings()
+  const instance = linksInstance()
   return {
-    instance: settings.bambuddy_url ?? null,
+    instance,
+    instance_changed: instance !== null && configured() !== null && instance !== configured(),
     last_pass_at: lastPassAt,
     last_ok_at: lastPassAt,
     last_error: null,
@@ -90,5 +127,21 @@ export const handlers = [
     if (reason === 'nothing_pushes') return conflict('no data type the sync pushes is set to push to Bambuddy (filament_sync; tags go with the refresh)', reason)
     running ??= READS_TO_LAND
     return HttpResponse.json({ started: true } satisfies S['SyncRun'], { status: 202 })
+  }),
+  http.get(`${BASE}/reset-links`, () =>
+    HttpResponse.json({ instance: linksInstance(), configured_instance: configured(), counts: resetCounts() } satisfies S['LinksResetPreview']),
+  ),
+  http.post(`${BASE}/reset-links`, async ({ request }) => {
+    const body = (await request.json()) as S['LinksResetRequest']
+    const instance = linksInstance()
+    if (instance === null) return conflict('no Bambuddy instance is recorded, so no link belongs to one', 'nothing_to_reset')
+    if (instance === configured()) return conflict('the links belong to the configured Bambuddy; nothing to reset', 'same_instance')
+    if (body.confirm_instance !== instance) return conflict('confirm_instance is not the instance the links belong to', 'confirm_mismatch')
+    const deleted = resetCounts()
+    otherInstance = null
+    unlinked = true
+    errors = []
+    running ??= READS_TO_LAND
+    return HttpResponse.json({ instance, deleted } satisfies S['LinksResetDone'])
   }),
 ]

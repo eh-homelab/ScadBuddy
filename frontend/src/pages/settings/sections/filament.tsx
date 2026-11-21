@@ -1,11 +1,15 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { ApiError } from '../../../api/client'
 import {
+  getResetPreview,
   getRfidStatus,
   getSyncStatus,
   reconcileRfid,
+  resetSyncLinks,
   runSync,
   setOverrideMode,
+  type LinksResetCounts,
+  type LinksResetPreview,
   type RfidReconcileReport,
   type RfidStatus,
   type SyncError,
@@ -16,7 +20,17 @@ import { spoolPath } from '../../../components/filament/spoolsQuery'
 import { ChoiceSelect } from '../../../components/settings/form'
 import { shortId, timeAgo } from '../../../lib/format'
 import { useAsync, type AsyncState } from '../../../lib/useAsync'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { Spinner } from '@/components/ui/spinner'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
 import { FieldRow } from '../controls'
@@ -230,6 +244,141 @@ function countsLine(counts: SyncStatus['counts']): string {
   return `${parts.join(', ')}.`
 }
 
+/** #6773 — each thing a reset of the Bambuddy links deletes, in the order the dialog lists it. */
+const RESET_ROWS: { key: keyof LinksResetCounts; one: string; many: string }[] = [
+  { key: 'spools', one: 'spool link', many: 'spool links' },
+  { key: 'filaments', one: 'spool type link', many: 'spool type links' },
+  { key: 'insert_types', one: 'insert type link', many: 'insert type links' },
+  { key: 'suppliers', one: 'supplier link', many: 'supplier links' },
+  { key: 'locations', one: 'location link', many: 'location links' },
+  { key: 'intents', one: 'unfinished create', many: 'unfinished creates' },
+  { key: 'errors', one: 'listed sync error', many: 'listed sync errors' },
+  { key: 'ignored', one: 'ignored Bambuddy spool', many: 'ignored Bambuddy spools' },
+]
+
+/** What a refused reset says, in plain words. */
+function resetProblem(cause: unknown): string {
+  if (!(cause instanceof ApiError)) return 'The reset could not be sent. Try again.'
+  switch (cause.status === 409 ? cause.problem.code : undefined) {
+    case 'confirm_mismatch':
+      return 'The links changed since this dialog opened. Nothing was deleted. Close it and try again.'
+    case 'same_instance':
+      return 'The links already belong to the Bambuddy that is set up now. Nothing was deleted.'
+    case 'nothing_to_reset':
+      return 'There are no Bambuddy links to reset.'
+    default:
+      return cause.detail
+  }
+}
+
+/**
+ * #6773 — after the Bambuddy URL changes, the links (Bambuddy ids) belong to the old Bambuddy and
+ * the sync stops (`instance_changed`). "Reset Bambuddy links" reads what a reset would delete
+ * (`GET /filament/sync/reset-links`), names it in a confirm dialog, and resets only the instance
+ * that dry run read, so a stale page cannot reset another Bambuddy's links. No ScadBuddy row is
+ * deleted. Then a full pass links the new Bambuddy afresh.
+ */
+function ResetLinks({ onReset }: { onReset: (deleted: number) => void }) {
+  const [opening, setOpening] = useState(false)
+  const [preview, setPreview] = useState<LinksResetPreview | null>(null)
+  const [resetting, setResetting] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+
+  async function open() {
+    setOpening(true)
+    setProblem(null)
+    try {
+      setPreview(await getResetPreview())
+    } catch (cause) {
+      setProblem(cause instanceof ApiError ? cause.detail : 'What a reset deletes could not be read. Try again.')
+    } finally {
+      setOpening(false)
+    }
+  }
+
+  async function reset() {
+    if (!preview?.instance) return
+    setResetting(true)
+    setProblem(null)
+    try {
+      const done = await resetSyncLinks(preview.instance)
+      setPreview(null)
+      onReset(RESET_ROWS.slice(0, 5).reduce((sum, row) => sum + done.deleted[row.key], 0))
+    } catch (cause) {
+      setProblem(resetProblem(cause))
+    } finally {
+      setResetting(false)
+    }
+  }
+
+  const rows = preview ? RESET_ROWS.filter((row) => preview.counts[row.key] > 0) : []
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-warn">
+        The links belong to another Bambuddy than the one set up now, so the sync is stopped. Reset the links to link the new
+        Bambuddy.
+      </p>
+      <div>
+        <Button type="button" size="sm" variant="outline" disabled={opening} onClick={() => void open()}>
+          {opening ? <Spinner /> : 'Reset Bambuddy links'}
+        </Button>
+      </div>
+      {problem && !preview && (
+        <p role="alert" className="text-warn">
+          {problem}
+        </p>
+      )}
+      <AlertDialog open={preview !== null} onOpenChange={(next) => !next && !resetting && setPreview(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reset the Bambuddy links?</AlertDialogTitle>
+            <AlertDialogDescription>
+              ScadBuddy forgets which Bambuddy rows its own rows match. No ScadBuddy spool, type, supplier or location is
+              deleted, and nothing is deleted in either Bambuddy.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {preview && (
+            <div className="flex flex-col gap-2 text-sm">
+              {rows.length > 0 ? (
+                <>
+                  <p>This deletes:</p>
+                  <ul aria-label="What the reset deletes" className="list-disc pl-5">
+                    {rows.map((row) => (
+                      <li key={row.key}>
+                        <span className="sb-num">{preview.counts[row.key]}</span>{' '}
+                        {preview.counts[row.key] === 1 ? row.one : row.many}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p>No link is left; this clears the old Bambuddy so the sync can start again.</p>
+              )}
+              <p className="text-muted-foreground">
+                Then the sync links the new Bambuddy afresh. A spool is linked to the Bambuddy spool that holds its RFID tag. When
+                suppliers and locations come from Bambuddy, each is linked to the Bambuddy row of the same name. Other spools are created on the side the sync sends
+                them to, so a spool with no tag can end up twice.
+              </p>
+            </div>
+          )}
+          {problem && (
+            <p role="alert" className="text-sm text-warn">
+              {problem}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resetting}>Cancel</AlertDialogCancel>
+            {/* Not an AlertDialogAction: the dialog stays open until the reset answers. */}
+            <Button variant="destructive" onClick={() => void reset()} disabled={resetting || !preview?.instance}>
+              {resetting ? <Spinner /> : 'Reset links'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  )
+}
+
 /**
  * #6265 — how the sync stands (`GET /filament/sync/status`): the last pass and the last clean
  * one, why no pass runs, and each item whose last write failed or was held back. "Sync now"
@@ -281,6 +430,14 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
     }
   }, [waiting, setData])
 
+  /** #6773 — the reset nudged a full pass: say so, show the status without the old links, and wait for that pass. */
+  function resetDone(deleted: number) {
+    setProblem(null)
+    setNote(`${plural(deleted, 'link', 'links')} reset. A full pass now links the new Bambuddy.`)
+    if (data) setData({ ...data, instance: null, instance_changed: false, errors: [] }, { supersede: true })
+    setWaiting({ since: new Date().toISOString() })
+  }
+
   async function syncNow() {
     setPending(true)
     setNote(null)
@@ -319,6 +476,7 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
             {data.skipped && <p className="text-muted-foreground">{SKIPPED_TEXT[data.skipped]}</p>}
           </div>
         )}
+        {data?.instance_changed && <ResetLinks onReset={resetDone} />}
         {data && data.errors.length > 0 && (
           <ul aria-label="Items not synced" className="flex flex-col gap-2">
             {data.errors.map((error) => {

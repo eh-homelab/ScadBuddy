@@ -1082,7 +1082,9 @@ export const filamentTools: Tool[] = [
       'How the ScadBuddy-to-Bambuddy filament sync stands. `directions` is the stored `filament_sync`: `off`, ' +
       '`sb_to_bb`, `bb_to_sb` or `two_way` for each of `spools`, `weights`, `tags`, `presets`, `suppliers` and ' +
       '`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or `two_way`, never for `tags` (the ' +
-      "spool refresh's tag drain sends those). `last_pass_at` is the " +
+      "spool refresh's tag drain sends those). `instance` is the Bambuddy the links belong to; `instance_changed` " +
+      'is true when that is not the configured Bambuddy, and the sync is then stopped until ' +
+      'filament_sync_reset_links resets the links. `last_pass_at` is the ' +
       "last pass, `last_error` its error (null when it worked), `last_ok_at` the last pass with no error (a skipped " +
       "one too), `counts` the last pass's (`written`, `failed`, `deferred`, `conflicts`, `unmapped_k`). `errors` " +
       'lists each item whose last write to Bambuddy failed, or was held back (`name_taken`: another Bambuddy row ' +
@@ -1118,6 +1120,42 @@ export const filamentTools: Tool[] = [
     summarize: () => 'Sync the filament data with Bambuddy now',
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/filament/sync/run'), 'sync with Bambuddy')),
+  }),
+
+  defineTool({
+    name: 'filament_sync_reset_links',
+    label: 'Reset the Bambuddy links',
+    description:
+      'After the Bambuddy URL changed, the links (Bambuddy ids) belong to the old Bambuddy and the sync is stopped: ' +
+      'filament_sync_status says `instance_changed: true`. This deletes, in one transaction, every spool link, the ' +
+      'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
+      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then it asks ' +
+      'for a full pass, which links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
+      'is deleted. Afterwards a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
+      'spools are created on the side the sync sends them to, so tell the user an untagged spool can end up twice. ' +
+      '`confirm_instance` must be the instance the links belong to: filament_sync_status `instance`. Answers the ' +
+      'instance and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
+      '`filaments`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
+      "links' instance, `same_instance` when they belong to the configured Bambuddy, `nothing_to_reset` when no " +
+      'instance is recorded; each deletes nothing. Approved first.',
+    input: z.object({
+      confirm_instance: z
+        .string()
+        .min(1)
+        .max(64)
+        .describe('The instance the links belong to, as filament_sync_status `instance` gives it'),
+    }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/sync/reset-links'],
+    summarize: ({ confirm_instance }) => `Reset the Bambuddy links of instance ${confirm_instance}`,
+    handler: async ({ confirm_instance }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/sync/reset-links', { body: { confirm_instance } }),
+          'reset the Bambuddy links',
+        ),
+      ),
   }),
 
   defineTool({
