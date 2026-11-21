@@ -22,17 +22,16 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
     _WARNED_DUPLICATES,
-    InstanceChangedError,
     Pulls,
     pull,
-    read_and_pull,
     read_assignments,
-    read_catalog,
-    read_ha_sensors,
-    scheduled_pull,
     try_assignments,
 )
+from scadbuddy.filament.bb_pull_apply import pull_start
+from scadbuddy.filament.bb_pull_models import PullInstanceChangedError, PullOutcome, PullStart
+from scadbuddy.filament.bb_pull_run import read_catalog
 from scadbuddy.filament.bb_sync_models import seen_row
+from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
@@ -61,7 +60,9 @@ from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY
+from scadbuddy.spools.activities import filament_pull_activity
 from tests.conftest import PgPool
+from tests.filament.pull_support import read_and_pull, read_ha_sensors, scheduled_pull
 from tests.filament.test_bb_sync_plan import SPOOLS, _only, _plan, _snap
 from tests.filament.test_bb_sync_plan import _row as _plan_row
 from tests.filament.test_bb_sync_plan import _spool as _plan_spool
@@ -753,9 +754,55 @@ async def test_a_scheduled_pull_with_bambuddy_down_is_a_logged_no_op(
     assert f.spools.list() == []
 
 
+class _Execute:
+    """`bb_pull_apply.execute_pull` as the spool refresh's activity calls it: records each
+    start and answers ``answer`` (or raises it)."""
+
+    def __init__(self, answer: PullOutcome | Exception) -> None:
+        self.answer = answer
+        self.starts: list[PullStart] = []
+
+    async def __call__(self, start: PullStart) -> PullOutcome:
+        self.starts.append(start)
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+async def test_the_spool_refresh_activity_reads_no_bambuddy(pg_pool: PgPool) -> None:
+    """#6772: the API's activity has the print worker read Bambuddy (``FilamentBbPull``)
+    and answers its outcome; the API itself calls no Bambuddy (respx refuses any call)."""
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    execute = _Execute(PullOutcome(outcome="pulled"))
+    run = filament_pull_activity(f, lambda: settings, FilamentSync, execute)
+    with respx.mock() as router:
+        assert await run() == "pulled"
+        assert not router.calls
+    (start,) = execute.starts
+    assert (start.instance, start.pulls) == (instance_for(BB), Pulls())
+    assert start.pull_id.startswith("filament-bb-pull-")
+    assert (start.ha, start.reconcile, start.strict) == (False, True, False)
+
+
+async def test_the_spool_refresh_activity_skips_and_fails_as_before(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    idle = _Execute(PullOutcome(outcome="pulled"))
+    assert await filament_pull_activity(f, StoredSettings, FilamentSync, idle)() == "skipped"
+    nothing = filament_pull_activity(f, lambda: settings, lambda: NOTHING_PULLS, idle)
+    assert await nothing() == "skipped"
+    assert idle.starts == []
+    down = _Execute(RuntimeError("Temporal is out of reach"))
+    assert await filament_pull_activity(f, lambda: settings, FilamentSync, down)() == "failed"
+    worker = _Execute(PullOutcome(outcome="failed"))
+    assert await filament_pull_activity(f, lambda: settings, FilamentSync, worker)() == "failed"
+
+
 async def test_a_pull_of_another_bambuddy_is_skipped(pg_pool: PgPool) -> None:
     """#6845 R-6845-5: while the links belong to another Bambuddy than the configured one,
-    the Schedule's pull reads no spool and writes nothing to a linked spool."""
+    the Schedule's pull reads no spool, and a body the worker read anyway is refused, so
+    nothing is written to a linked spool."""
     f = _filament(pg_pool)
     (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW, instance="0ld0ld0ld0ld").created_ids
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
@@ -766,7 +813,7 @@ async def test_a_pull_of_another_bambuddy_is_skipped(pg_pool: PgPool) -> None:
         router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
         assert await scheduled_pull(f, lambda: settings, FilamentSync) == "skipped"
         assert not spools.called
-        with pytest.raises(InstanceChangedError):
+        with pytest.raises(PullInstanceChangedError):
             await read_and_pull(f, settings)
     spool = f.spools.get(made)
     assert spool is not None
@@ -1801,7 +1848,7 @@ async def test_a_slow_catalog_read_is_none_within_its_timeout(
         await asyncio.sleep(30)
         return httpx.Response(200, json=[])
 
-    monkeypatch.setattr("scadbuddy.filament.bambuddy_pull.CATALOG_TIMEOUT", 0.2)
+    monkeypatch.setattr("scadbuddy.filament.bb_pull_run.CATALOG_TIMEOUT", 0.2)
     respx.get(f"{BB}/api/v1/inventory/catalog").mock(side_effect=hang)
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
     assert await read_catalog(settings) is None
@@ -2108,12 +2155,16 @@ async def test_a_non_numeric_state_marks_unreachable(pg_pool: PgPool, state: str
 
 
 async def test_no_ha_sensor_means_no_read(pg_pool: PgPool) -> None:
+    """The API asks the worker for Home Assistant's states only while a sensor is set up
+    (#6772: `pull_start` decides, the worker reads)."""
     f = _filament(pg_pool)
     settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
-    with respx.mock(assert_all_called=False) as router:
-        route = router.get(ENTITIES).respond(json=[])
-        await read_ha_sensors(f, settings, NOW)
-        assert not route.called
+    assert await pull_start(f, lambda: settings, lambda: NOTHING_PULLS) is None
+    start = await pull_start(f, lambda: settings, FilamentSync)
+    assert start is not None and start.ha is False
+    _ha_sensor(pg_pool, "sensor.a")
+    start = await pull_start(f, lambda: settings, lambda: NOTHING_PULLS)
+    assert start is not None and (start.ha, start.pulls) == (True, None)
 
 
 async def test_a_failed_ha_read_never_fails_the_pull(

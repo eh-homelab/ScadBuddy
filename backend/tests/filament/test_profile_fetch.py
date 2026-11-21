@@ -12,7 +12,13 @@ import pytest
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import TypeKValue, TypePreset
-from scadbuddy.filament.profile_fetch import FetchRefusedError, ProfileFetches, clean_preset
+from scadbuddy.filament.profile_fetch import (
+    FetchRefusedError,
+    ProfileFetches,
+    _Ending,
+    _merge_k_values,
+    clean_preset,
+)
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.profile_fetch.wire import ExportTarget, MissingKey
@@ -217,3 +223,36 @@ def test_clean_preset_refuses_what_is_not_a_filament_preset(over: dict[str, obje
     with pytest.raises(ApiError) as caught:
         clean_preset(json.dumps(doc).encode())
     assert caught.value.status == 422
+
+
+def test_a_kept_k_value_of_the_same_number_leaves_no_note(pg_pool: PgPool) -> None:
+    """#6866: ``0.0200`` stored and ``0.02`` fetched agree, so only a real disagreement
+    is noted."""
+    printer = UUID(_printer(pg_pool, "H2C", 1))
+    type_id = _type(pg_pool)
+
+    def k(value: str) -> TypeKValue:
+        return TypeKValue(
+            type_id=type_id,
+            printer_id=printer,
+            extruder=0,
+            nozzle_diameter="0.4",
+            nozzle_type=None,
+            k_value=Decimal(value),
+            name=None,
+            cali_idx=None,
+            setting_id=None,
+        )
+
+    types = SpoolTypeStore(pg_pool)
+    with pg_pool.connection() as conn, conn.transaction():
+        types.merge_k_values(conn, type_id, [k("0.0200")])
+        conn.execute(
+            "UPDATE filament_spool_type_k_values SET source = 'person' WHERE type_id = %s",
+            (type_id,),
+        )
+    for fetched, notes in (("0.02", 0), ("0.03", 1)):
+        ending = _Ending(status="imported", missing=[], k_values=[k(fetched)])
+        with pg_pool.connection() as conn, conn.transaction():
+            _merge_k_values(conn, type_id, ending)
+        assert len(ending.notes) == notes

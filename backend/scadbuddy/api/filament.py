@@ -2,9 +2,9 @@
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
 their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Some routes reach
-Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`,
-`filament/bambuddy_pull.py`), the list of Home Assistant entities
-(`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
+Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`, whose Bambuddy reads
+the print worker makes since #6772, `filament/bambuddy_pull.py`), the list of Home Assistant
+entities (`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
 Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind,
 and the NTAG confirm,
 `filament/rfid_push.py`, #6264) tells Bambuddy only while ``filament_sync.tags`` pushes
@@ -40,6 +40,7 @@ from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.models import HaEntity, SpoolAssignment
 from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
 from scadbuddy.crud.idempotency import (
@@ -53,13 +54,19 @@ from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import (
-    InstanceChangedError,
     PullReport,
     Pulls,
+    links_elsewhere,
     parse_rows,
-    read_and_pull,
     try_assignments,
 )
+from scadbuddy.filament.bb_pull_apply import (
+    execute_pull,
+    forget_actor,
+    new_pull_id,
+    remember_actor,
+)
+from scadbuddy.filament.bb_pull_models import PullStart
 from scadbuddy.filament.bb_sync_models import (
     LinksResetDone,
     LinksResetPreview,
@@ -1644,6 +1651,14 @@ async def move_spool(
     return moved
 
 
+#: The import's 503 when the route did not see the print worker's read end: it may still
+#: be pulling, so a person checks before importing again (Decision 183).
+IMPORT_UNFINISHED = (
+    "the print worker did not finish the import in time; it may still be running, so check"
+    " the spools before importing again"
+)
+
+
 @router.post(
     "/bambuddy/import",
     response_model=PullReport,
@@ -1670,6 +1685,11 @@ async def move_spool(
         "A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived "
         "spool (Bambuddy's archive time, what is left, its usage rows), counted in `created` "
         "and in `archived_created`; Bambuddy archiving a linked spool changes nothing. "
+        "The print worker reads Bambuddy and ScadBuddy pulls what it read, so the import "
+        "waits for it (at most 4.5 minutes); 503 when the worker did not finish it in time "
+        "(it may still be running: check the spools before importing again); 502 when "
+        "ScadBuddy refused what the worker read (importing again gets the same answer); 409 "
+        "when the Bambuddy URL changed during the import. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
         "still needing a type and archived, the BB spool ids it could not pull, the count "
         "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "
@@ -1680,20 +1700,59 @@ async def move_spool(
     ),
 )
 async def import_bambuddy(
-    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep
+    state: StateDep, filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep
 ) -> PullReport:
+    """The print worker reads Bambuddy (``FilamentBbPull``, #6772) and the CRUD routes pull
+    what it read; this route calls no Bambuddy. Bambuddy's refusal of the spool listing is
+    answered as it comes, as when the API read it. The caller is kept under the run's id
+    for the routes to name (`remember_actor`, Decision 181), never sent to the worker."""
     settings = await asyncio.to_thread(store.load)
+    if not settings.bambuddy_url:
+        raise not_configured("no Bambuddy URL is configured; set one in Settings")
     sync = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
     # A person's import pulls the spools whatever `spools` says; the rest follow the setting.
     pulls = dataclasses.replace(Pulls.of(sync), spools=True)
-    try:
-        return await read_and_pull(filament, settings, actor=actor(caller), pulls=pulls)
-    except InstanceChangedError:
+    configured = instance_for(settings.bambuddy_url)
+    if await asyncio.to_thread(links_elsewhere, filament, configured):
+        # #6845 R-6845-5: the links belong to another Bambuddy; a pull would write its
+        # values onto them.
         raise ApiError(
             status.HTTP_409_CONFLICT,
             "the Bambuddy links belong to another Bambuddy; reset them first",
             code="instance_changed",
-        ) from None
+        )
+    start = PullStart(
+        instance=configured,
+        pull_id=new_pull_id(),
+        pulls=pulls,
+        strict=True,
+    )
+    await asyncio.to_thread(remember_actor, filament, start.pull_id, actor(caller))
+    nudger = state.filament_sync
+    try:
+        outcome = await execute_pull(nudger.client_getter(), nudger.task_queue, start)
+    except Exception as error:
+        # The run did not answer (timed out, Temporal out of reach): its read may still be
+        # sending bodies, so the person stays kept for them; a later `remember_actor` drops the
+        # row once it is `ACTOR_KEPT` old.
+        logger.warning("the Bambuddy import did not finish", extra={"error": type(error).__name__})
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED) from error
+    if outcome.outcome == "failed" and outcome.error is None:
+        # The read raised or timed out (Temporal's timeout does not stop it): kept as above.
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
+    # The read answered, so no body of this run is still to come (Decision 183).
+    try:
+        await asyncio.to_thread(forget_actor, filament, start.pull_id)
+    except Exception as error:
+        # A row left is deleted by a later import once it is `ACTOR_KEPT` old.
+        logger.warning(
+            "could not drop an import's kept actor", extra={"error": type(error).__name__}
+        )
+    if outcome.error is not None:
+        raise outcome.error.error()
+    if outcome.report is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
+    return outcome.report
 
 
 @router.get(

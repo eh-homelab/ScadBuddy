@@ -1,6 +1,9 @@
 """Bambuddy's spools pulled into ScadBuddy's own (#6261, spec §8.1, §8.2). The BB to SB
 side only: nothing here writes to Bambuddy (SB to BB is the sync of #6265,
-`bb_sync_plan.py`, `bb_sync_run.py`).
+`bb_sync_plan.py`, `bb_sync_run.py`). Since #6772 the CRUD service reads no Bambuddy for
+the pull: the print worker reads it (`bb_pull_run.py`) and sends the rows, and
+`bb_pull_apply.py` runs `pull` on them. `try_assignments` stays here: the API's inventory
+view reads the assignments too.
 
 `pull` takes each BB spool in its own transaction, under an advisory lock on its id, in
 this order:
@@ -105,9 +108,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
@@ -115,13 +118,11 @@ from uuid import UUID
 from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import BAD_BODY_PROBLEM
-from scadbuddy.bambuddy.linking import ARCHIVE_OVERLAP, ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import (
-    Archive,
     BbLocation,
     BbSupplier,
     SpoolAssignment,
@@ -131,13 +132,15 @@ from scadbuddy.bambuddy.models import (
     as_utc,
 )
 from scadbuddy.bambuddy.models import Spool as BbSpool
-from scadbuddy.core import settings as core_settings
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import bambuddy_usage, ledger, sensors
+from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
+
+# Re-exported: the wire of #6772 holds them, and the pull's callers import them from here.
+from scadbuddy.filament.bb_pull_models import PullReport as PullReport
+from scadbuddy.filament.bb_pull_models import Pulls as Pulls
 from scadbuddy.filament.bb_sync_models import BbLinked, json_form, seen_row
-from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.catalog import KIND_OF_TABLE, lookup_key, resolve_or_add
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
@@ -191,14 +194,6 @@ _PLAIN = (
 _NOT_COLUMNS = frozenset(
     {"remaining_g", "tag_uid", "tray_uuid", "material_number", "core_weight_catalog_id"}
 )
-#: The snapshot fields of a data type other than ``spools`` (#6265 Decision 14): each is
-#: taken, and recorded as seen, only while its type pulls.
-_TYPE_FIELDS: dict[str, str] = {
-    "remaining_g": "weights",
-    "weight_locked": "weights",
-    "tag_uid": "tags",
-    "tray_uuid": "tags",
-}
 #: The `snapshot` fields by their `seen_row` name (#6265 Task 9); the tags have none.
 _SEEN_NAMES: dict[str, str] = {
     "material": "material",
@@ -242,111 +237,8 @@ _WARNED_SKIPS_MAX = 1000
 #: The BB spools already warned about as duplicates, so each is told once a process.
 _WARNED_DUPLICATES: set[int] = set()
 
-Outcome = Literal["pulled", "skipped", "failed"]
-
-
-@dataclass(frozen=True)
-class Pulls:
-    """Which data types a pull takes from Bambuddy (#6265, `FilamentSync`). ``spools``: a
-    linked spool's own fields, new SB spools (made or linked) and the spool catalog; with
-    it False an unlinked BB spool is left alone. ``weights``: ``bb`` readings and scale
-    weighings on a spool SB already tracks (a new spool keeps its first reading, #6268).
-    ``weight_locked`` and BB's last drying are ``weights`` data too (Decision 14).
-    ``tags``: a linked spool's binding to a tag BB names (a new spool takes its tags
-    whatever this says, Decision 6). ``presets``: BB's ``slicer_filament`` as the spool's
-    ``migrated`` presets, and its K-profiles as the spool's own K values. ``suppliers``
-    and ``locations``: BB's supplier and location rows, whatever ``spools`` says
-    (Decision 16); with ``locations`` a linked spool follows BB's location. A child type
-    acts only on a linked spool (Decision 16).
-
-    BB's values are recorded as seen only for the types that pull, so a type switched on
-    later takes what BB changed while it was off, even when BB's row has not moved since.
-    The defaults are `FilamentSync`'s: ``suppliers`` and ``locations`` are off."""
-
-    def of_field(self, field: str) -> bool:
-        """True when the snapshot field ``field`` is of a data type this pull takes."""
-        return bool(getattr(self, _TYPE_FIELDS.get(field, "spools")))
-
-    spools: bool = True
-    weights: bool = True
-    tags: bool = True
-    presets: bool = True
-    suppliers: bool = False
-    locations: bool = False
-
-    @classmethod
-    def of(cls, sync: FilamentSync) -> Pulls:
-        return cls(
-            spools=core_settings.pulls(sync.spools),
-            weights=core_settings.pulls(sync.weights),
-            tags=core_settings.pulls(sync.tags),
-            presets=core_settings.pulls(sync.presets),
-            suppliers=core_settings.pulls(sync.suppliers),
-            locations=core_settings.pulls(sync.locations),
-        )
-
-
-#: The data types `FilamentSync`'s defaults pull: the default of `pull` and
-#: `read_and_pull`.
+#: The data types `FilamentSync`'s defaults pull: the default of `pull`.
 EVERY = Pulls()
-
-
-class PullReport(BaseModel):
-    """What one pull did: how many SB spools it made, linked and changed, how many of
-    those it made or linked still need a type, and how many it left alone because they
-    are archived, with their ids; the BB spools it could not pull (each logged and rolled
-    back); and the BB rows it could not read (each logged), with their ids when the row
-    had one; whether BB's spool catalog failed (all or nothing: then no entry was mapped),
-    and how many of its entries were skipped (no name or weight, or a name another type
-    has), so a spool naming one gets no insert type; and the BB spools it left alone
-    because they are Bambuddy's copy of a tag a linked SB spool holds
-    (``rfid_duplicates``, with their ids); and how many catalog names it skipped because
-    they have no letter or digit (``names_skipped``). ``archived_created`` counts the
-    spools it made archived because Bambuddy archived them (#6707); they are in
-    ``created`` too. ``archived_deferred`` counts the archived BB spools it did not make
-    because BB's usage rows could not be read (R-6707-16), with their ids: the next pull
-    that reads them makes those spools. ``claimed`` counts the BB spools, suppliers and
-    locations left to an open create intent (Decision 10). ``suppliers`` and
-    ``locations`` count the SB rows the pull made, linked or changed; ``moved`` the
-    linked spools it moved to BB's location; and ``conflicts`` the supplier and location
-    fields both sides changed, which it left as SB holds them (R-T4-33)."""
-
-    created: int = 0
-    archived_created: int = 0
-    linked: int = 0
-    updated: int = 0
-    needs_type: int = 0
-    archived: int = 0
-    invalid: int = 0
-    #: BB's spool catalog could not be read or mapped; the insert types were left alone.
-    catalog_failed: bool = False
-    catalog_skipped: int = 0
-    #: Catalog names (material, subtype, brand, category, effect) with no letter or digit,
-    #: so no key: each field was left as if BB sent none, and its spool pulled (R-6706-18).
-    names_skipped: int = 0
-    created_ids: list[UUID] = Field(default_factory=list)
-    linked_ids: list[UUID] = Field(default_factory=list)
-    updated_ids: list[UUID] = Field(default_factory=list)
-    needs_type_ids: list[UUID] = Field(default_factory=list)
-    archived_ids: list[UUID] = Field(default_factory=list)
-    failed_bb_ids: list[int] = Field(default_factory=list)
-    invalid_bb_ids: list[int] = Field(default_factory=list)
-    #: BB's usage rows the pull booked as print ends, and those of a BB spool no SB
-    #: spool is linked to (`bambuddy_usage.py`).
-    usage_booked: int = 0
-    usage_unlinked: int = 0
-    #: BB spools made for a tag a linked SB spool holds: no SB spool is made.
-    rfid_duplicates: int = 0
-    rfid_duplicate_bb_ids: list[int] = Field(default_factory=list)
-    #: Archived BB spools not made yet because the usage rows could not be read.
-    archived_deferred: int = 0
-    archived_deferred_bb_ids: list[int] = Field(default_factory=list)
-    #: #6265 Task 9.
-    claimed: int = 0
-    suppliers: int = 0
-    locations: int = 0
-    moved: int = 0
-    conflicts: int = 0
 
 
 def _text(value: str | None) -> str | None:
@@ -405,6 +297,15 @@ def record_instance(conn: Conn, instance: str | None) -> None:
             f" WHERE instance IS NULL AND ({ANY_LINK})",
             (instance,),
         )
+
+
+def links_elsewhere(store: Filament, configured: str) -> bool:
+    """Whether the links' recorded instance is another than ``configured`` (Decision 12):
+    the pull then takes nothing, or it would write another Bambuddy's values onto linked
+    spools (#6845 R-6845-5)."""
+    with store.spools.transaction() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    return state is not None and state["instance"] not in (None, configured)
 
 
 def pull(
@@ -2064,197 +1965,11 @@ def parse_rows(rows: Sequence[Any]) -> tuple[list[BbSpool], list[int | None]]:
     return good, bad
 
 
-class InstanceChangedError(Exception):
-    """The links belong to another Bambuddy than the configured one (#6845 R-6845-5):
-    the pull reads nothing until `POST /filament/sync/reset-links`."""
-
-
-def links_elsewhere(store: Filament, configured: str) -> bool:
-    """Whether the links' recorded instance is another than ``configured`` (Decision 12)."""
-    with store.spools.transaction() as conn:
-        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
-    return state is not None and state["instance"] not in (None, configured)
-
-
-async def read_and_pull(
-    store: Filament, settings: StoredSettings, *, actor: str = ACTOR, pulls: Pulls = EVERY
-) -> PullReport:
-    """Read BB's spools, the archived ones too (#6707), and pull them (``pulls`` the data
-    types taken); a malformed row is skipped and counted as ``invalid``. Then book BB's
-    usage rows (`bambuddy_usage.py`) on linked spools, while ``pulls.spools`` or
-    ``pulls.weights`` (#6265 F1). BB not configured is `client_for`'s 409; BB's own errors
-    on the spools are its client's.
-
-    The usage rows are read right after the spools, so a deduction BB writes between the
-    two reads shows in the usage rows, never only in a spool's value. The archives are
-    read after the pull, and only when a usage row that would book is not booked yet, so
-    the rows of a spool this pull made are matched with their archives too. The usage
-    read, the query for unbooked rows, the archive read and the booking each fail alone:
-    logged, and the spool pull's report stands. When the usage read fails, no archived
-    BB spool is made in this pull (``archived_deferred``, R-6707-16).
-
-    BB's suppliers are read only under ``pulls.suppliers``, and its locations only under
-    ``pulls.locations``, whatever ``pulls.spools`` says (#6265 Decision 16); each read
-    fails alone, logged, and leaves its rows alone.
-
-    While the links belong to another Bambuddy than the configured one, it reads and
-    writes nothing and raises `InstanceChangedError` (#6845 R-6845-5)."""
-    if settings.bambuddy_url:
-        configured = instance_for(settings.bambuddy_url)
-        if await asyncio.to_thread(links_elsewhere, store, configured):
-            raise InstanceChangedError
-    usage: list[SpoolUsage] = []
-    usage_failed = False
-    archives: list[Archive] = []
-    suppliers: list[BbSupplier] | None = None
-    locations: list[BbLocation] | None = None
-    async with client_for(settings) as client:
-        rows = await client.spool_rows(include_archived=True)
-        try:
-            if pulls.spools or pulls.weights:
-                usage = await client.spool_usage()
-        except Exception as error:
-            usage_failed = True
-            _failed("could not read Bambuddy's usage rows", error)
-        try:
-            if pulls.suppliers:
-                suppliers = await client.suppliers()
-        except Exception as error:
-            _failed("could not read Bambuddy's suppliers", error)
-        try:
-            if pulls.locations:
-                locations = await client.locations()
-        except Exception as error:
-            _failed("could not read Bambuddy's locations", error)
-    spools, bad = parse_rows(rows)
-    catalog = await read_catalog(settings) if pulls.spools else []
-    report = await asyncio.to_thread(
-        lambda: pull(
-            store,
-            spools,
-            now=datetime.now(UTC),
-            actor=actor,
-            catalog=catalog or (),
-            pulls=pulls,
-            usage=usage,
-            defer_archived=usage_failed,
-            suppliers=suppliers,
-            locations=locations,
-            instance=instance_for(settings.bambuddy_url) if settings.bambuddy_url else None,
-        )
-    )
-    report.catalog_failed = report.catalog_failed or catalog is None
-    report.invalid = len(bad)
-    report.invalid_bb_ids = [i for i in bad if i is not None]
-    pending: set[int] = set()
-    try:
-        pending = await asyncio.to_thread(_unbooked, store, usage) if usage else set()
-    except Exception as error:
-        _failed("could not find Bambuddy's unbooked usage rows", error)
-    if pending:
-        try:
-            since = min(row.created_at for row in usage if row.id in pending).date()
-            async with client_for(settings) as client:
-                archives = await _read_archives(client, since - ARCHIVE_LEAD)
-        except Exception as error:
-            _failed("could not read Bambuddy's archives", error)
-    if usage:
-        try:
-            booked = await asyncio.to_thread(_book_usage, store, usage, archives, actor)
-        except Exception as error:
-            _failed("could not book Bambuddy's usage rows", error)
-        else:
-            report.usage_booked, report.usage_unlinked = booked.booked, booked.unlinked
-    logger.info(
-        "pulled Bambuddy's spools",
-        extra={"usage_booked": report.usage_booked, "usage_unlinked": report.usage_unlinked},
-    )
-    return report
-
-
-#: How long before its usage row an archive may have been made. The archive window is on
-#: its ``created_at`` (the dispatch), and the row comes when the print ends; a day covers
-#: a print that long, and the window is on dates.
-ARCHIVE_LEAD = timedelta(days=1)
-
-
-async def _read_archives(client: BambuddyClient, since: date) -> list[Archive]:
-    """The archives made from ``since`` on, paged as `linking` pages them (an overlap, at
-    most `MAX_ARCHIVE_PAGES` pages): the newest 50 would miss the archives of the older
-    usage rows a first pull books (#6598). A read that hits the cap logs it and keeps
-    what it has."""
-    found: dict[int, Archive] = {}
-    for page in range(MAX_ARCHIVE_PAGES):
-        rows = await client.archives(
-            date_from=since, limit=ARCHIVE_PAGE, offset=page * (ARCHIVE_PAGE - ARCHIVE_OVERLAP)
-        )
-        found.update((row.id, row) for row in rows)
-        if len(rows) < ARCHIVE_PAGE:
-            break
-    else:
-        logger.warning(
-            "stopped reading Bambuddy's archives for usage rows; the archives of the oldest"
-            " pending rows were not read (pages probably come newest first)",
-            extra={"since": since.isoformat(), "pages": MAX_ARCHIVE_PAGES},
-        )
-    return list(found.values())
-
-
-def _failed(message: str, error: Exception) -> None:
-    logger.warning(message, extra={"error": type(error).__name__}, exc_info=True)
-
-
-def _unbooked(store: Filament, usage: Sequence[SpoolUsage]) -> set[int]:
-    with store.spools.transaction() as conn:
-        return bambuddy_usage.unbooked(conn, usage)
-
-
-def _book_usage(
-    store: Filament, usage: Sequence[SpoolUsage], archives: Sequence[Archive], actor: str
-) -> bambuddy_usage.UsageReport:
-    with store.spools.transaction() as conn:
-        return bambuddy_usage.book_usage(conn, usage, archives, actor=actor)
-
-
 #: How long :func:`read_assignments` waits for Bambuddy. It runs inside an item print's
 #: check, whose whole budget is 6 s (`workflows/operation_activities.py`
 #: `CHECK_BUDGET_SECONDS`), so it may take at most part of it; the client's own 30 s
 #: would take all of it.
 ASSIGNMENTS_TIMEOUT = 2.5
-
-
-#: How long :func:`read_catalog` waits for Bambuddy: the catalog is the pull's second
-#: read, and a slow one must not hold the spools back (the client's own 30 s would).
-CATALOG_TIMEOUT = 5.0
-
-
-async def read_catalog(settings: StoredSettings) -> list[SpoolCatalogEntry] | None:
-    """Bambuddy's spool catalog (``GET /inventory/catalog``), or ``None``, logged, when
-    Bambuddy refuses, answers in another shape or no JSON (it has no such route before
-    1.2.6b1), or does not answer within :data:`CATALOG_TIMEOUT`: the pull then leaves the
-    insert types alone. Bounded and a wait on Bambuddy as `read_assignments` is."""
-    async with waiting_on_bambuddy():
-        try:
-            async with asyncio.timeout(CATALOG_TIMEOUT), client_for(settings) as client:
-                return await client.spool_catalog()
-        except TimeoutError:
-            logger.warning("no spool catalog from Bambuddy: no answer within %s s", CATALOG_TIMEOUT)
-        except ApiError as error:
-            if error.type == BAD_BODY_PROBLEM:
-                # No JSON, or not a list (R-T7-10): the client's own detail, no Bambuddy text.
-                logger.warning(
-                    "no spool catalog from Bambuddy: an answer of another shape (%s)", error.detail
-                )
-            else:
-                logger.warning("no spool catalog from Bambuddy: %s", error.detail)
-        except ValueError as error:
-            # A pydantic ValidationError: rows of another shape. Only the type is logged: its
-            # text quotes Bambuddy's values (#6580).
-            logger.warning(
-                "no spool catalog from Bambuddy: an answer of another shape (%s)",
-                type(error).__name__,
-            )
-    return None
 
 
 async def read_assignments(settings: StoredSettings) -> list[SpoolAssignment]:
@@ -2296,94 +2011,3 @@ async def try_assignments(settings: StoredSettings) -> list[SpoolAssignment] | N
                 type(error).__name__,
             )
     return None
-
-
-async def read_ha_sensors(store: Filament, settings: StoredSettings, now: datetime) -> None:
-    """Read Bambuddy's Home Assistant states into the location sensors (#6268): one GET,
-    and none when no Home Assistant sensor is set up. The GET reads every entity, because
-    Bambuddy 1.3.1's route takes no list of ids (#6679, plan Decision 26). A state is a
-    reading at ``now`` (see `sensors.apply_ha_states_on`). It never fails the pull: a
-    failure is logged with its type only, and every Home Assistant sensor on a live place
-    is marked unreachable (it got no number)."""
-    try:
-        if not any(
-            s.source == "home_assistant" for s in await asyncio.to_thread(store.sensors.list, None)
-        ):
-            return
-        async with client_for(settings) as client:
-            entities = await client.ha_entities(None)
-        states = {e.entity_id: e.state for e in entities}
-        await asyncio.to_thread(_apply_ha, store, states, now)
-    except Exception as error:
-        _failed("could not read Bambuddy's Home Assistant sensors", error)
-        try:
-            await asyncio.to_thread(_apply_ha, store, {}, now)
-        except Exception as again:
-            _failed("could not mark the Home Assistant sensors unreachable", again)
-
-
-def _apply_ha(store: Filament, states: dict[str, str | None], now: datetime) -> None:
-    with store.spools.transaction() as conn:
-        sensors.apply_ha_states_on(conn, states, now)
-
-
-async def scheduled_pull(
-    store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
-) -> Outcome:
-    """The Schedule's pull (`SpoolRefresh`): ``skipped`` when no data type of
-    ``filament_sync`` pulls (#6265 F1), no BB URL, or the links belong to another
-    Bambuddy (#6845 R-6845-5), ``failed`` when BB or the store fails (logged, never raised),
-    else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13). Whenever a
-    BB URL is set, it first reads the Home Assistant sensors (`read_ha_sensors`), before
-    the spools gate and whatever ``sync`` says: sensors are not spool data. After a pull
-    it reconciles the untagged trays with Bambuddy's assignments (`reconcile_trays`)."""
-    settings = await asyncio.to_thread(load)
-    if settings.bambuddy_url:
-        # Sensors are not spool data: read whatever ``filament_sync`` says.
-        await read_ha_sensors(store, settings, datetime.now(UTC))
-    filament_sync = await asyncio.to_thread(sync)
-    if not any(core_settings.pulls(d) for d in filament_sync.model_dump().values()):
-        logger.info("Bambuddy's spools are not pulled: no Filament sync pulls")
-        return "skipped"
-    if not settings.bambuddy_url:
-        logger.info("no Bambuddy configured; its spools are not pulled")
-        return "skipped"
-    try:
-        report = await read_and_pull(store, settings, pulls=Pulls.of(filament_sync))
-    except InstanceChangedError:
-        logger.info("Bambuddy's spools are not pulled: the links belong to another Bambuddy")
-        return "skipped"
-    except Exception as error:
-        logger.warning(
-            "could not pull Bambuddy's spools",
-            extra={"error": type(error).__name__},
-            exc_info=True,
-        )
-        return "failed"
-    if report.failed_bb_ids or report.invalid:
-        logger.warning(
-            "some Bambuddy spools were not pulled",
-            extra={"bb_spool_ids": report.failed_bb_ids, "invalid": report.invalid},
-        )
-    await reconcile_trays(store, settings)
-    return "pulled"
-
-
-async def reconcile_trays(store: Filament, settings: StoredSettings) -> None:
-    """Set right each untagged tray whose placed spool disagrees with what the printer
-    reports, by Bambuddy's assignments (`FilamentInventory.reconcile_trays`, #6713). The
-    pull runs it: it is the one place that reads Bambuddy's assignments and has the
-    printers' stored reports (the capture backstop holds no Bambuddy settings). A failed
-    assignment read (`try_assignments`) reconciles nothing this pass. It never fails the
-    pull: a failure is logged with its type only."""
-    try:
-        assignments = await try_assignments(settings)
-        if assignments is None:
-            logger.info("no tray reconcile: Bambuddy's assignments could not be read")
-            return
-        moved = await asyncio.to_thread(store.inventory.reconcile_trays, assignments)
-    except Exception as error:
-        _failed("could not reconcile the trays with Bambuddy's assignments", error)
-        return
-    if moved:
-        logger.info("reconciled trays with Bambuddy's assignments", extra={"moved": len(moved)})
