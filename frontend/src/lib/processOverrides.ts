@@ -27,6 +27,17 @@ export function sentOverrides(value: Record<string, unknown> | null | undefined)
   return kept.length > 0 ? Object.fromEntries(kept) : null
 }
 
+/**
+ * #6796 — the prime tower's place, one value per plate. It belongs to one file's layout
+ * (the tower check's "Move the prime tower" writes it), so Remember never keeps it.
+ */
+const LAYOUT_KEYS: readonly string[] = ['wipe_tower_x', 'wipe_tower_y']
+
+/** What Remember keeps of `value`: every setting but the tower place (`LAYOUT_KEYS`). */
+export function rememberedOverrides(value: Record<string, unknown> | null | undefined): ProcessOverrides | null {
+  return sentOverrides(Object.fromEntries(Object.entries(value ?? {}).filter(([key]) => !LAYOUT_KEYS.includes(key))))
+}
+
 /** Whether two sets of settings set the same, compared by what each writes. */
 export function sameOverrides(
   a: Record<string, unknown> | null | undefined,
