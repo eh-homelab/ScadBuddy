@@ -119,8 +119,8 @@ export function choiceReasons(
  * #6885 review — the material families of the plate, for a slot that declares none: the
  * families the other slots declare, as `filaments.py` `suggest` takes them. With none
  * declared, the family most of the chosen spools share; none on a tie. This follows the
- * plan on screen, so it follows the user's edits: the server's `_anchor_family` reads the
- * slots with a loaded spool and can differ once the user changes a slot.
+ * plan on screen, so it follows the user's edits: the server's `_anchor_family` prefers the
+ * slots with a loaded spool, so it can differ once the user changes a slot.
  */
 export function plateFamilies(options: Pick<FilamentOptions, 'slots' | 'spools'>, plan: SlotChoice[]): string[] {
   const declared = [

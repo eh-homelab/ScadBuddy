@@ -367,7 +367,7 @@ export function FilamentPicker({
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
   // The printer, file and slots a reset was pressed for: another one is a new start (#6885
-  // review). The slots' colours tell two outputs apart, which have no library file
+  // review). Each slot's id, material and colour tell two outputs apart, which have no library file
   // (#2720). Not the options object: a new slice's grams make a new one.
   const [resetFor, setResetFor] = useState<string | null>(null)
   const target = [
