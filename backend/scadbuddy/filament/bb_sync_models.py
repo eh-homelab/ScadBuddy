@@ -307,7 +307,16 @@ class SyncPassResult(BaseModel, extra="forbid"):
     of the pass's rounds (R-T4-33). ``unmapped_k``: the largest ``SyncPlan.unmapped_k`` of
     its rounds, for the same reason (decision 58). ``started_at``: when the pass began, by
     the worker's clock; `record_pass` stores it as ``last_pass_started_at`` (#6836). A
-    result from a build before it has none, and the record falls back to its own time."""
+    result from a build before it has none, and the record falls back to the database's
+    ``now()``.
+
+    This model forbids extra keys, so ``started_at`` crosses builds in one direction only.
+    An API from before #6836 refuses a worker's result that carries it (422), so the pass
+    is lost until the API rolls; `RemoteFilamentSync.record_pass` sends no key at all when
+    it is ``None``, so a newer API takes an older or start-less worker's result. Roll the
+    API before the print worker: the manifests are separate apps and nothing in the
+    README's "Deploying" orders them, so during a skew a pass can be lost, and the next
+    signal or the timer runs another."""
 
     written: int
     failed: int

@@ -1466,9 +1466,11 @@ class RemoteFilamentSync:
         return ResultsReport.model_validate(response.json())
 
     async def record_pass(self, result: SyncPassResult) -> None:
-        await self._client.request(
-            "POST", f"{BASE}/filament/sync/pass", json=result.model_dump(mode="json")
-        )
+        body = result.model_dump(mode="json")
+        if result.started_at is None:
+            # The API's model forbids extra keys: one from before #6836 refuses the key.
+            del body["started_at"]
+        await self._client.request("POST", f"{BASE}/filament/sync/pass", json=body)
 
 
 class RemotePrintUses:
