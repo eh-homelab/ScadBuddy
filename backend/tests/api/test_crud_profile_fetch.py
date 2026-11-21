@@ -743,55 +743,79 @@ def _k_row(fetch: Fetch, printer_id: str, nozzle: str, k: str, extruder: int = 0
     )
 
 
+def _seed_k(fetch: Fetch, rows: list[tuple[TypeKValue, str]]) -> None:
+    """The type's K rows, each with the ``source`` given (a person's save, then each row
+    re-tagged, as the fill, a calibration or an earlier fetch would have left it)."""
+    state = _state(fetch.client)
+    state.components.get(FILAMENT).types.set_k_values(
+        fetch.type_id, [row for row, _ in rows], actor="ann"
+    )
+    with state.settings_store.pool.connection() as conn:
+        for row, source in rows:
+            conn.execute(
+                "UPDATE filament_spool_type_k_values SET source = %s WHERE type_id = %s"
+                " AND printer_id = %s AND extruder = %s AND nozzle_diameter = %s",
+                (source, fetch.type_id, row.printer_id, row.extruder, row.nozzle_diameter),
+            )
+
+
+def _k_table_answer(request: httpx.Request) -> httpx.Response:
+    """The H2C's K table: 0.4 matches the fetched preset, 0.8 does not answer, the rest
+    hold no match."""
+    nozzle = request.url.params["nozzle_diameter"]
+    if nozzle == "0.8":
+        return httpx.Response(502, json={"detail": "printer offline"})
+    if nozzle == "0.4":
+        return httpx.Response(200, json={"profiles": [_profile("P1a2b3c4", "0.025")]})
+    return httpx.Response(200, json={"profiles": []})
+
+
 @respx.mock
 def test_a_stale_k_value_of_a_fetched_key_is_removed_and_named(fetch: Fetch) -> None:
-    """R-F4: a fetch replaces the K rows of every key it fetched. An old K row of a fetched
-    (printer, extruder, nozzle) key the new preset does not match is removed, and the
-    run's notes name it; a key whose K table did not answer, and a key not fetched, keep
-    theirs."""
+    """R-F4, narrowed by Decision 127 (#6857): a fetch replaces its own (``profile_fetch``)
+    K rows of every key it fetched. Its old row of a fetched (printer, extruder, nozzle) key
+    the new preset does not match is removed, and the run's notes name it; a key whose K
+    table did not answer, and a key not fetched, keep theirs. A row a person, the fill or a
+    printer calibration set is never removed."""
     state = _state(fetch.client)
     types = state.components.get(FILAMENT).types
     x1c = state.components.get(PRINTERS).store.create_linked(
         serial="31B598000002", name="X1C", model="X1C", bambuddy_printer_id=3
     )
-    types.set_k_values(
-        fetch.type_id,
+    _seed_k(
+        fetch,
         [
-            _k_row(fetch, fetch.printer_id, "0.2", "0.03"),  # GF preset now: removed
-            _k_row(fetch, fetch.printer_id, "0.4", "0.05", extruder=1),  # no match: removed
-            _k_row(fetch, fetch.printer_id, "0.4", "0.04"),  # matched: replaced
-            _k_row(fetch, fetch.printer_id, "0.8", "0.06"),  # its K table failed: kept
-            _k_row(fetch, x1c.id, "0.4", "0.07"),  # not fetched: kept
+            (_k_row(fetch, fetch.printer_id, "0.2", "0.03"), "profile_fetch"),  # GF now: removed
+            (_k_row(fetch, fetch.printer_id, "0.4", "0.05", extruder=1), "profile_fetch"),  # gone
+            (_k_row(fetch, fetch.printer_id, "0.4", "0.04"), "profile_fetch"),  # matched: replaced
+            (_k_row(fetch, fetch.printer_id, "0.8", "0.06"), "profile_fetch"),  # K table failed
+            (_k_row(fetch, x1c.id, "0.4", "0.07"), "profile_fetch"),  # not fetched: kept
+            (_k_row(fetch, fetch.printer_id, "0.2", "0.08", extruder=1), "person"),  # kept
+            (_k_row(fetch, fetch.printer_id, "0.6", "0.09"), "printer_calibration"),  # kept
+            (_k_row(fetch, fetch.printer_id, "0.6", "0.01", extruder=1), "profile"),  # kept
         ],
-        actor="ann",
     )
     bodies = [export("0.2", filament_id="GFL99"), export("0.4"), export("0.6"), export("0.8")]
     for nozzle, body in zip(NOZZLES, bodies, strict=True):
         assert fetch.put(body, nozzle=nozzle).status_code == 204
     bb_import(4)
     local_presets([name_of(b) for b in bodies])
-
-    def answer(request: httpx.Request) -> httpx.Response:
-        nozzle = request.url.params["nozzle_diameter"]
-        if nozzle == "0.8":
-            return httpx.Response(502, json={"detail": "printer offline"})
-        if nozzle == "0.4":
-            return httpx.Response(200, json={"profiles": [_profile("P1a2b3c4", "0.025")]})
-        return httpx.Response(200, json={"profiles": []})
-
-    respx.get(url__regex=KPROFILES.pattern).mock(side_effect=answer)
+    respx.get(url__regex=KPROFILES.pattern).mock(side_effect=_k_table_answer)
 
     r = fetch.import_()
 
     assert r.status_code == 200, r.text
     kept = {
-        (str(k.printer_id), k.extruder, k.nozzle_diameter): k.k_value
+        (str(k.printer_id), k.extruder, k.nozzle_diameter): (k.k_value, k.source)
         for k in types.k_values(fetch.type_id)
     }
     assert kept == {
-        (fetch.printer_id, 0, "0.4"): Decimal("0.0250"),
-        (fetch.printer_id, 0, "0.8"): Decimal("0.0600"),
-        (x1c.id, 0, "0.4"): Decimal("0.0700"),
+        (fetch.printer_id, 0, "0.4"): (Decimal("0.0250"), "profile_fetch"),
+        (fetch.printer_id, 0, "0.8"): (Decimal("0.0600"), "profile_fetch"),
+        (x1c.id, 0, "0.4"): (Decimal("0.0700"), "profile_fetch"),
+        (fetch.printer_id, 1, "0.2"): (Decimal("0.0800"), "person"),
+        (fetch.printer_id, 0, "0.6"): (Decimal("0.0900"), "printer_calibration"),
+        (fetch.printer_id, 1, "0.6"): (Decimal("0.0100"), "profile"),
     }
     removed = [n for n in r.json()["notes"] if n.startswith("removed")]
     assert sorted(removed) == [
@@ -801,6 +825,38 @@ def test_a_stale_k_value_of_a_fetched_key_is_removed_and_named(fetch: Fetch) -> 
         " the fetched preset does not match it",
     ]
     assert fetch.run().notes == r.json()["notes"]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("source", "why"),
+    [
+        ("person", "a person set it"),
+        ("profile", "it came from the linked Bambuddy spools"),
+        ("printer_calibration", "it is the printer's calibration"),
+    ],
+)
+def test_a_fetch_keeps_a_k_value_it_did_not_set(fetch: Fetch, source: str, why: str) -> None:
+    """#6857 (Decision 127): a fetched K value never replaces a row of its key that a person,
+    the fill or a printer calibration set: the row keeps its value and its source, the
+    run's notes say so, and the run counts only the K values it wrote."""
+    types = _state(fetch.client).components.get(FILAMENT).types
+    _seed_k(fetch, [(_k_row(fetch, fetch.printer_id, "0.4", "0.04"), source)])
+    put_all(fetch)
+    bb_import(4)
+    local_presets([name_of(export(n)) for n in NOZZLES])
+    respx.get(url__regex=KPROFILES.pattern).mock(side_effect=_k_table_answer)
+
+    r = fetch.import_()
+
+    assert r.status_code == 200, r.text
+    assert r.json()["k_values"] == 0
+    [k] = types.k_values(fetch.type_id)
+    assert (k.k_value, k.source, k.name) == (Decimal("0.0400"), source, "old")
+    assert (
+        f"kept the K value 0.0400 of H2C (H2C), extruder 0, 0.4 mm, not the fetched 0.025: {why}"
+    ) in r.json()["notes"]
+    assert fetch.run().k_values == 0
 
 
 @respx.mock

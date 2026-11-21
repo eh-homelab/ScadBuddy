@@ -3,6 +3,7 @@ import { useId } from 'react'
 import type { EffectiveKValue, TypeKValue, TypeKValueInput } from '../../api/filament'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { cmpDecimals } from '@/lib/decimal'
 import { keyOf, type KPrinter } from './kValueRows'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
@@ -40,9 +41,22 @@ interface Props {
   saved?: ReadonlyMap<string, TypeKValue>
 }
 
+/**
+ * Whether two K values are one decimal, as the server's `k_identity` compares them
+ * (`Decimal(...).normalize()`): `0.020` is `0.02`, but `0.02000000000000000001`, which a
+ * float rounds to `0.02`, is not (#6857). Text that is not a plain decimal is no match.
+ */
+const sameK = (a: TypeKValueInput['k_value'], b: TypeKValue['k_value']) => {
+  try {
+    return cmpDecimals(String(a).trim(), String(b)) === 0
+  } catch {
+    return false
+  }
+}
+
 /** Whether a draft row still holds what its saved row does (`0.020` is `0.02`). */
 const unchanged = (row: TypeKValueInput, was: TypeKValue) =>
-  Number(row.k_value) === Number(was.k_value) &&
+  sameK(row.k_value, was.k_value) &&
   (row.nozzle_type ?? null) === (was.nozzle_type ?? null) &&
   (row.name ?? null) === (was.name ?? null) &&
   (row.cali_idx ?? null) === (was.cali_idx ?? null) &&

@@ -66,6 +66,20 @@ describe('KValueTable', () => {
     expect(within(row).getByText('Printer calibration')).toBeInTheDocument()
   })
 
+  it('compares K as the server does: by its decimal digits, not as a float (#6857)', () => {
+    const saved = new Map([['p1|0|0.4', saving({ ...ROW, k_value: '0.0200' }, 'printer_calibration')]])
+    const shown = (k: string) => {
+      const { unmount } = render(<KValueTable rows={[{ ...ROW, k_value: k }]} printers={PRINTERS} saved={saved} onChange={() => {}} />)
+      const said = screen.queryByText('Printer calibration') !== null
+      unmount()
+      return said
+    }
+    expect(shown('0.02')).toBe(true)
+    expect(shown('00.020')).toBe(true)
+    // A float rounds this to 0.02; the server's Decimal does not, so a save makes it a person's.
+    expect(shown('0.02000000000000000001')).toBe(false)
+  })
+
   it('adds a row for the first printer', async () => {
     const user = userEvent.setup()
     const spy = vi.fn()
