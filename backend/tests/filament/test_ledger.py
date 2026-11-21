@@ -343,9 +343,36 @@ def _assert_full_path_agrees(conn: ledger.Conn, spool: UUID) -> None:
         weight_locked=booked["weight_locked"],
         label_weight_g=label["label_weight_g"],
     )
-    ledger.refresh_derived(conn, spool)
+    refreshed = ledger.refresh_derived(conn, spool)
     assert booked == _derived(conn, spool)
     assert booked["grams_left"] == walked
+    assert refreshed == ledger.Derived(grams_left=walked, archived=False)
+
+
+@pg
+def test_refresh_derived_answers_the_new_grams_on_either_path(pg_pool: PgPool) -> None:
+    """#6874 review: `record`'s empty check takes the new grams from `refresh_derived`, so
+    the hot capture and usage paths read the spool row once."""
+    spool = _spool(pg_pool, label_weight_g=1000)
+    with pg_pool.connection() as conn, conn.transaction():
+        weighed = record(conn, spool, "weighed", source="scale", absolute_g=700)
+        assert weighed is not None
+        # On top: the fast path.
+        assert ledger.refresh_derived(conn, spool, weighed) == ledger.Derived(700.0, False)
+        used = record(
+            conn,
+            spool,
+            "print_ended",
+            source="print_actual",
+            delta_g=-50,
+            ref_kind=ledger.PRINT_RUN,
+            ref_id="r/J/0",
+        )
+        assert used is not None
+        # A delta: the full walk.
+        assert ledger.refresh_derived(conn, spool, used) == ledger.Derived(650.0, False)
+        conn.execute("UPDATE filament_spools SET archived_at = now() WHERE id = %s", (spool,))
+        assert ledger.refresh_derived(conn, spool) == ledger.Derived(650.0, True)
 
 
 @pg
