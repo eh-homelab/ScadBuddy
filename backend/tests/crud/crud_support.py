@@ -787,6 +787,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "transfer-urls",
         "access-codes",
         "filament",
+        "filament-sync",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:
