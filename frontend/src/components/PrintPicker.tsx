@@ -80,8 +80,11 @@ import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { ColourMatchSwitch } from './print/ColourMatchSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
-import { FlowChoice } from './print/FlowChoice'
+import { FooterStatus } from './print/FooterStatus'
 import { NozzlePlanLine, NozzlePlanStep } from './print/NozzlePlan'
+import { PrintSection } from './print/PrintSection'
+import { usePrintSections, type SectionId } from './print/printSections'
+import { PrintSummary, summaryCell, type SummaryId, type SummaryItem } from './print/PrintSummary'
 import { NozzleStep } from './print/NozzleStep'
 import { PartSettingsDisclosure } from './print/PartSettingsDisclosure'
 import { PreviewPane } from './print/PreviewPane'
@@ -149,14 +152,18 @@ import { Link } from 'react-router'
  *   #313), prints. A 422 is the resolver refusing a
  *   combination (an unpicked slot, no process, no preset for a spool at this size); its
  *   `detail` is shown above Print and the dialog stays open.
- * - Simple mode shows only what the user has to choose (#768): the printer, when there is
- *   more than one, the spools, which plate of a multi-plate file, and Print, with the
- *   Checks. The nozzles, quality, plate type, print options, project and copies are
- *   Advanced steps, and Simple sends what they open on: the size and tier this model
- *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
- *   remembered copies and the page's project, else the last one printed to; that project is
- *   named in a "Filed under" line (#1660). Advanced also adds the full process list,
- *   per-side flow and a per-slot filament preset override.
+ * - Both modes open on one summary row (#6885): the printer, the nozzle, the bed plate and
+ *   the quality, so the user sees what will print. In Simple, a cell opens its step under
+ *   the row (#6884: the bed plate too); in Advanced, it opens the section that holds the
+ *   step. Simple also shows the spools, which plate of a multi-plate file, and Print, with
+ *   the Checks. The print options, project and copies are Advanced steps, and Simple sends
+ *   what they open on: the remembered copies and the page's project, else the last one
+ *   printed to; that project is named in a "Filed under" line (#1660). Advanced groups its
+ *   steps into collapsible sections, which each viewer's browser remembers open or closed,
+ *   and adds the side and rack choices, supports, the prime tower, the print sequence, a
+ *   per-slot filament preset override and any slicer setting.
+ * - The footer stays in sight: the slice's estimate, the first check that holds Print,
+ *   and Print.
  *
  * Around that it keeps what the send bar's print already had: the options disclosure
  * (#88), the project (#79), copies with the remembered quantity (#124/#145), which plate
@@ -926,6 +933,13 @@ export function PrintPicker({
   useEffect(() => {
     if (!open || picker.advanced) setChangingProject(false)
   }, [open, picker.advanced])
+  /** #6885 — the summary cell whose step is open under the row, in Simple. */
+  const [expanded, setExpanded] = useState<SummaryId | null>(null)
+  useEffect(() => {
+    if (!open || picker.advanced) setExpanded(null)
+  }, [open, picker.advanced])
+  /** #6885 — Advanced's sections, open or closed as this viewer left them. */
+  const sections = usePrintSections()
   const focusProject = useRef(false)
   useEffect(() => {
     if (!changingProject || !focusProject.current) return
@@ -1696,6 +1710,165 @@ export function PrintPicker({
     onClose()
   }
 
+  /**
+   * #6885 — the summary row's steps. Each is the one control for its choice: Simple opens
+   * it under the row, Advanced shows it in its section, and never both.
+   */
+  const nozzleStep = choices && !sliced && (
+    <NozzleStep
+      sizes={choices.nozzle_sizes ?? []}
+      installed={choices.installed ?? []}
+      value={nozzles}
+      onChange={picker.changeNozzles}
+    />
+  )
+  const qualityStep = choices && !sliced && (
+    <QualityStep
+      size={size}
+      tiers={choices.tiers?.[size] ?? []}
+      processes={choices.processes?.[size] ?? []}
+      tier={tier}
+      processName={processName}
+      onChange={picker.changeQuality}
+    />
+  )
+  const plateStep = choices && !sliced && bedType !== null && (
+    <PlateStep
+      bedTypes={
+        (choices.bed_types ?? []).includes(bedType) ? (choices.bed_types ?? []) : [bedType, ...(choices.bed_types ?? [])]
+      }
+      labels={choices.bed_type_labels ?? {}}
+      value={bedType}
+      lastBedType={choices.last_bed_type ?? null}
+      printerName={printer?.name ?? null}
+      onChange={picker.setBedType}
+    />
+  )
+  /** Advanced: a summary cell opens its section and brings it into view. */
+  function goToSection(id: SectionId) {
+    sections.set(id, true)
+    requestAnimationFrame(() =>
+      document.getElementById(`print-section-${id}`)?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }),
+    )
+  }
+  const choosePrinter = printers.length + lanChoosable.length > 1
+  const printerSelect = choosePrinter && (
+    <Select
+      value={
+        picker.registryAsked !== null
+          ? `registry:${picker.registryAsked}`
+          : // The printer asked for, while its read is out; then the one read.
+            picker.printerAsked !== null
+            ? String(picker.printerAsked)
+            : printerId === null
+              ? ''
+              : String(printerId)
+      }
+      onValueChange={(next) =>
+        next.startsWith('registry:') ? askRegistry(next.slice('registry:'.length)) : picker.askPrinter(Number(next))
+      }
+    >
+      <SelectTrigger
+        id="print-printer"
+        aria-label="Printer"
+        className={cn(summaryCell, 'pr-7 [&>svg]:absolute [&>svg]:top-1/2 [&>svg]:right-2 [&>svg]:-translate-y-1/2')}
+      >
+        <span className="text-xs text-muted-foreground">Printer</span>
+        <span className="w-full min-w-0 truncate text-sm font-medium">
+          <SelectValue placeholder="Choose a printer" />
+        </span>
+      </SelectTrigger>
+      <SelectContent>
+        {printers.map((entry) => (
+          <SelectItem key={entry.id} value={String(entry.id)}>
+            {entry.name}
+            {entry.model ? ` (${entry.model})` : ''}
+          </SelectItem>
+        ))}
+        {lanOnly.map((row) =>
+          lanChoosable.includes(row) ? (
+            <SelectItem key={row.id} value={`registry:${row.id}`}>
+              {row.name}
+              {row.model ? ` (${row.model})` : ''}: over the LAN
+            </SelectItem>
+          ) : (
+            <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
+              {row.name}
+              {row.model ? ` (${row.model})` : ''}: not printable over the LAN yet
+            </SelectItem>
+          ),
+        )}
+      </SelectContent>
+    </Select>
+  )
+  const flowWord = (flow: string | undefined) => (flow === 'high_flow' ? 'High Flow' : 'Standard')
+  const flows = [...new Set(nozzles.map((nozzle) => nozzle.flow))]
+  const nozzleValue =
+    flows.length > 1
+      ? `${size} mm, ${nozzles.map((nozzle, side) => `${side === 0 ? 'left' : 'right'} ${flowWord(nozzle.flow)}`).join(', ')}`
+      : `${size} mm ${flowWord(flows[0])}`
+  const qualityValue =
+    processName ??
+    choices?.tiers?.[size]?.find((entry) => entry.tier === tier)?.process_name ??
+    (tier === 'fine' ? 'Fine' : tier === 'draft' ? 'Draft' : 'Standard')
+  const lastBedType = choices?.last_bed_type ?? null
+  const bedLabel = bedType === null ? null : (choices?.bed_type_labels?.[bedType] ?? bedType)
+  const summaryItems: SummaryItem[] = !choices
+    ? []
+    : [
+        {
+          id: 'printer',
+          label: 'Printer',
+          value: printerName ?? 'None chosen',
+          control: printerSelect || undefined,
+        },
+        ...(sliced
+          ? []
+          : ([
+              {
+                id: 'nozzle',
+                label: 'Nozzle',
+                value: nozzleValue,
+                ...(picker.advanced ? { onSelect: () => goToSection('nozzles') } : { panel: nozzleStep }),
+              },
+              ...(bedType === null
+                ? []
+                : [
+                    {
+                      id: 'plate' as const,
+                      label: 'Bed plate',
+                      value: bedLabel,
+                      ...(picker.advanced
+                        ? { onSelect: () => goToSection('quality') }
+                        : {
+                            panel: plateStep,
+                            // The step's own reminder, said under the row while the step is shut.
+                            note:
+                              lastBedType !== null && lastBedType !== bedType
+                                ? `The ${printer?.name ?? 'printer'}'s last print used ${lastBedType}. Swap to ${bedType} before this starts.`
+                                : undefined,
+                          }),
+                    },
+                  ]),
+              {
+                id: 'quality',
+                label: 'Quality',
+                value: qualityValue,
+                ...(picker.advanced ? { onSelect: () => goToSection('quality') } : { panel: qualityStep }),
+              },
+            ] satisfies SummaryItem[])),
+      ]
+  /** The footer's estimate: the plate the preview shows, as the preview pane says it. */
+  const footerEstimate = sliced ? slicedEstimate(sliced, previewPlate, filaments, single ?? 'all') : previewSlice.result
+  /** The first check that holds Print, said beside it. */
+  const footerBlocking = noPlate
+    ? 'No plate is chosen to print.'
+    : filamentError
+      ? 'ScadBuddy could not read the filament inventory.'
+      : runRefuses
+        ? (check.verdict?.errors?.[0] ?? null)
+        : null
+
   const description =
     result || unanswered !== null
       ? undefined
@@ -1916,53 +2089,7 @@ export function PrintPicker({
                     disabled={projectCreating}
                     native={native}
                   />
-                  {printers.length + lanChoosable.length > 1 && (
-                    <div className="grid gap-1.5">
-                      <Label htmlFor="print-printer">Printer</Label>
-                      <Select
-                        value={
-                          picker.registryAsked !== null
-                            ? `registry:${picker.registryAsked}`
-                            : // The printer asked for, while its read is out; then the one read.
-                              picker.printerAsked !== null
-                              ? String(picker.printerAsked)
-                              : printerId === null
-                                ? ''
-                                : String(printerId)
-                        }
-                        onValueChange={(next) =>
-                          next.startsWith('registry:')
-                            ? askRegistry(next.slice('registry:'.length))
-                            : picker.askPrinter(Number(next))
-                        }
-                      >
-                        <SelectTrigger id="print-printer" className="w-full">
-                          <SelectValue placeholder="Choose a printer" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {printers.map((entry) => (
-                            <SelectItem key={entry.id} value={String(entry.id)}>
-                              {entry.name}
-                              {entry.model ? ` (${entry.model})` : ''}
-                            </SelectItem>
-                          ))}
-                          {lanOnly.map((row) =>
-                            lanChoosable.includes(row) ? (
-                              <SelectItem key={row.id} value={`registry:${row.id}`}>
-                                {row.name}
-                                {row.model ? ` (${row.model})` : ''}: over the LAN
-                              </SelectItem>
-                            ) : (
-                              <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
-                                {row.name}
-                                {row.model ? ` (${row.model})` : ''}: not printable over the LAN yet
-                              </SelectItem>
-                            ),
-                          )}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
+                  <PrintSummary items={summaryItems} expanded={expanded} onExpand={setExpanded} />
                   {lanBlocked.length > 0 && (
                     <ul className="grid gap-1 text-xs text-muted-foreground" data-testid="lan-blocked">
                       {lanBlocked.map(({ row, block }) => (
@@ -2000,9 +2127,6 @@ export function PrintPicker({
                     </div>
                   )}
                   {sliced && <SlicedSettings profile={sliced} />}
-                  {!picker.advanced && !sliced && (
-                    <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
-                  )}
                   {trayTarget &&
                     trays.open
                       // A native run's tray is a choice already: asked only with a record to link.
@@ -2164,16 +2288,6 @@ export function PrintPicker({
                   {!sliced && (
                     <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
                   )}
-
-                  {picker.advanced && !sliced && filaments && (filaments.slots ?? []).length > 0 && (
-                    <PresetOverrides
-                      size={size}
-                      slots={filaments.slots ?? []}
-                      presets={choices.filament_presets?.[size] ?? []}
-                      overrides={overrides}
-                      onChange={picker.setOverride}
-                    />
-                  )}
                 </>
               )}
 
@@ -2298,17 +2412,20 @@ export function PrintPicker({
                       onChange={editOptions}
                     />
                   )}
-                  {/* #768 — Simple mode sends these steps' defaults without showing them. */}
+                  {/* #768 — Simple mode sends these steps' defaults without showing them.
+                      #6885 — Advanced groups them into sections, each one remembered open
+                      or closed for this viewer. */}
                   {picker.advanced && (
                     <>
                       {!sliced && (
                         <>
-                          <NozzleStep
-                            sizes={choices.nozzle_sizes ?? []}
-                            installed={choices.installed ?? []}
-                            value={nozzles}
-                            onChange={picker.changeNozzles}
-                          />
+                          <PrintSection
+                            id="nozzles"
+                            open={sections.isOpen('nozzles')}
+                            onToggle={(next) => sections.set('nozzles', next)}
+                            summary={nozzleValue}
+                          >
+                          {nozzleStep}
                           <NozzlePlanStep
                             plan={check.verdict?.nozzle_plan}
                             sides={selection.sides}
@@ -2325,29 +2442,22 @@ export function PrintPicker({
                               onPosition={(position) => setPicked(position === null ? null : { printerId, size, position })}
                             />
                           )}
-                          <QualityStep
-                            size={size}
-                            tiers={choices.tiers?.[size] ?? []}
-                            processes={choices.processes?.[size] ?? []}
-                            tier={tier}
-                            processName={processName}
-                            onChange={picker.changeQuality}
-                          />
-                          {bedType !== null && (
-                            <PlateStep
-                              bedTypes={
-                                (choices.bed_types ?? []).includes(bedType)
-                                  ? (choices.bed_types ?? [])
-                                  : [bedType, ...(choices.bed_types ?? [])]
-                              }
-                              labels={choices.bed_type_labels ?? {}}
-                              value={bedType}
-                              lastBedType={choices.last_bed_type ?? null}
-                              printerName={printer?.name ?? null}
-                              onChange={picker.setBedType}
-                            />
-                          )}
+                          </PrintSection>
+                          <PrintSection
+                            id="quality"
+                            open={sections.isOpen('quality')}
+                            onToggle={(next) => sections.set('quality', next)}
+                            summary={[qualityValue, bedLabel].filter(Boolean).join(', ')}
+                          >
+                            {qualityStep}
+                            {plateStep}
+                          </PrintSection>
 
+                          <PrintSection
+                            id="tower"
+                            open={sections.isOpen('tower')}
+                            onToggle={(next) => sections.set('tower', next)}
+                          >
                           <PrintSequenceStep
                             value={printSequence}
                             onChange={setPrintSequence}
@@ -2371,10 +2481,54 @@ export function PrintPicker({
                             // plate), so these are that plate's filaments; null while they load.
                             colours={filaments ? (filaments.slots ?? []).length : null}
                           />
+                          </PrintSection>
+                        </>
+                      )}
+
+                      {!handing && (
+                        <PrintSection
+                          id="filing"
+                          open={sections.isOpen('filing')}
+                          onToggle={(next) => sections.set('filing', next)}
+                        >
+                          <PrintOptionsDisclosure
+                            subject={subject}
+                            printerId={printerId}
+                            registryPrinter={registryPrinter}
+                            native={native}
+                            value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
+                            toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
+                            onChange={({ quantity, ...rest }) => {
+                              setCopies(quantity ?? null)
+                              editOptions(rest)
+                            }}
+                          />
+
+                          {projectPicker}
+
+                          <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+                        </PrintSection>
+                      )}
+
+                      {!sliced && (
+                        <PrintSection
+                          id="slicer"
+                          open={sections.isOpen('slicer')}
+                          onToggle={(next) => sections.set('slicer', next)}
+                        >
+                          {filaments && (filaments.slots ?? []).length > 0 && (
+                            <PresetOverrides
+                              size={size}
+                              slots={filaments.slots ?? []}
+                              presets={choices.filament_presets?.[size] ?? []}
+                              overrides={overrides}
+                              onChange={picker.setOverride}
+                            />
+                          )}
 
                           <SlicerSettingsEditor
                             id="slicer-settings"
-                            title="Slicer settings"
+                            title="Any setting, by key"
                             value={processOverrides}
                             baseline={
                               processValues.values === null
@@ -2398,28 +2552,7 @@ export function PrintPicker({
                               ]}
                             />
                           )}
-                        </>
-                      )}
-
-                      {!handing && (
-                        <>
-                          <PrintOptionsDisclosure
-                            subject={subject}
-                            printerId={printerId}
-                            registryPrinter={registryPrinter}
-                            native={native}
-                            value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
-                            toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
-                            onChange={({ quantity, ...rest }) => {
-                              setCopies(quantity ?? null)
-                              editOptions(rest)
-                            }}
-                          />
-
-                          {projectPicker}
-
-                          <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
-                        </>
+                        </PrintSection>
                       )}
                     </>
                   )}
@@ -2495,7 +2628,20 @@ export function PrintPicker({
         </>
       )}
         </div>
-        <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end px-5 py-3">{footer}</DialogFooter>
+        {/* #6885 — outside the scrolling body, so the estimate, the first check that holds
+            Print, and Print stay in sight however long the choices grow. */}
+        <DialogFooter className="m-0 shrink-0 flex-row flex-wrap items-center justify-end gap-y-2 px-5 py-3">
+          {split && choices && (
+            <FooterStatus
+              estimate={footerEstimate}
+              stale={!sliced && previewSlice.stale}
+              slicing={!sliced && previewSlice.slicing}
+              plateLabel={multiPlate ? previewLabel : null}
+              blocking={footerBlocking}
+            />
+          )}
+          {footer}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )

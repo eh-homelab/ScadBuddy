@@ -333,9 +333,9 @@ export function usePrintChoices(
   function toggleAdvanced() {
     if (advanced) {
       defaulted.current = false
-      // Back to Simple: a flow per side, named process, preset override, side chosen by
-      // hand, print sequence or slicer setting would be sent unseen. Simple's one flow is the
-      // first side's (#2166).
+      // Back to Simple: a preset override, side chosen by hand, print sequence or slicer
+      // setting would be sent unseen. Simple starts again from one flow, the first side's
+      // (#2166), and the tier's process, as its summary row then shows (#6885).
       setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow: current[0]?.flow ?? 'standard' })))
       setProcessName(null)
       setTier((current) => current ?? 'standard')

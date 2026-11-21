@@ -1302,11 +1302,11 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     const toggle = screen.getByRole('switch', { name: /advanced/i })
     const nozzles = screen.getByRole('group', { name: /nozzles/i })
     expect(toggle.compareDocumentPosition(nozzles) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(toggle).toHaveAccessibleDescription(/nozzle, process/i)
+    expect(toggle).toHaveAccessibleDescription(/sides, supports, prime tower/i)
   })
 
-  // #2166 — Simple shows one flow for both sides, so leaving Advanced keeps the first
-  // side's, on screen; the process and slot presets it cannot show are reset.
+  // #2166 — leaving Advanced puts the first side's flow on both sides, shown in the
+  // summary row (#6885); the process and slot presets are reset.
   it('leaving Advanced keeps one flow, shown in Simple, and resets the process and slot presets', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
@@ -1318,7 +1318,7 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await pick(user, screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
     await pick(user, screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
-    expect(screen.getByTestId('flow-high_flow')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('print-summary-nozzle')).toHaveTextContent('0.4 mm High Flow')
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
@@ -4460,12 +4460,12 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await loaded()
     await showAdvanced()
     fireEvent.click(await screen.findByTestId('rack-position-2'))
-    expect(await screen.findByText(/Rack position 2 holds/)).toBeInTheDocument()
+    expect(await screen.findByTestId('print-verdict-error')).toHaveTextContent(/Rack position 2 holds/)
     expect(screen.getByLabelText('Rack nozzle position')).toBeInTheDocument()
     expect(screen.getByTestId('run-print')).toBeDisabled()
 
     fireEvent.click(screen.getByTestId('rack-position-auto'))
-    await waitFor(() => expect(screen.queryByText(/Rack position 2 holds/)).toBeNull())
+    await waitFor(() => expect(screen.queryByTestId('print-verdict-error')).toBeNull())
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
 
