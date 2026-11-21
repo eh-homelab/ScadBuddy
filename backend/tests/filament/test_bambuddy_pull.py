@@ -1204,6 +1204,22 @@ def test_a_bb_archive_archives_the_sb_spool(pg_pool: PgPool) -> None:
     assert spool is not None and spool.archived_at is None
 
 
+def test_a_bb_archive_of_a_linked_spool_adds_its_type_to_the_shopping_list(
+    pg_pool: PgPool,
+) -> None:
+    """#6868 R-6868-6/7: the pull archiving a linked spool is a move into empty (its
+    ``archived`` event has no ``bb_archived_at``: that marks only the archived import)."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
+    spool = f.spools.get(made)
+    assert spool is not None and spool.grams_left and spool.grams_left > 0
+    assert ShoppingStore(pg_pool).list() == []
+    pull(f, [bb(archived_at=_bb_time(-1), updated_at=_bb_time(-1))], now=NOW)
+    [item] = ShoppingStore(pg_pool).list()
+    assert item.empty_spool_id == made
+    assert item.note is not None and "was archived" in item.note
+
+
 def test_an_sb_restore_after_the_bb_archive_wins(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids

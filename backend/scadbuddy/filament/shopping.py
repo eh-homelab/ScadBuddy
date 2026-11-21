@@ -173,15 +173,20 @@ def _add_for_empty(
         if names is None:
             return None
         values = {n: names[n] for n in _TEXT}
-        key = str(type_id)
+        locked = conn.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS ok",
+            (_LOCK + str(type_id),),
+        ).fetchone()
     else:
         values = {n: spool[n] for n in _TEXT}
         if not values["material"]:
             return None
-        key = "text:" + "|".join((values[n] or "").casefold() for n in _TEXT)
-    locked = conn.execute(
-        "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS ok", (_LOCK + key,)
-    ).fetchone()
+        # The key folds case with SQL `lower()`, as the pending check below compares.
+        locked = conn.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s || 'text:' || lower(%s)"
+            " || '|' || lower(%s) || '|' || lower(%s) || '|' || lower(%s), 0)) AS ok",
+            [_LOCK, *(values[n] or "" for n in _TEXT)],
+        ).fetchone()
     if locked is None or not locked["ok"]:
         return None
     if type_id is not None:
