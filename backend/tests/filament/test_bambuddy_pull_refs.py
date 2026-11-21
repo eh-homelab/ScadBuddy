@@ -278,6 +278,124 @@ def test_a_bb_move_after_the_seeded_place_moves_the_spool(pg_pool: PgPool) -> No
     assert report.moved == 1
 
 
+def test_an_unmapped_bb_place_is_not_seeded(pg_pool: PgPool) -> None:
+    """R-T9-3 (decision 164): a seen location is seeded only when BB's place maps to an SB
+    location; the pull that cannot map it leaves it out."""
+    f = _filament(pg_pool)
+    made, shelf = _unseen_place(pg_pool, f)
+    report = pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id == shelf
+    assert report.moved == 0
+    assert "location_id" not in _link_seen(pg_pool, made)
+
+
+def test_a_place_that_maps_later_is_seeded_then(pg_pool: PgPool) -> None:
+    """R-T9-3 (decision 164): BB's place changed while the place was unmapped; the pull
+    that maps it seeds BB's value then, and does not move the spool."""
+    f = _filament(pg_pool)
+    made, shelf = _unseen_place(pg_pool, f)
+    pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    places = _locations([{"id": 5, "name": "Garage"}, {"id": 6, "name": "Attic"}])
+    moved = bb(location_id=6, updated_at=_bb_time(2))
+    report = pull(f, [moved], now=NOW, pulls=ROWS, locations=places)
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id == shelf
+    assert report.moved == 0
+    assert _link_seen(pg_pool, made)["location_id"] == 6
+
+
+def _map_place(pg_pool: PgPool, place: UUID, bb_id: int, *, archived: bool = False) -> None:
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = %s,"
+            " archived_at = CASE WHEN %s THEN now() END WHERE id = %s",
+            (bb_id, archived, place),
+        )
+
+
+def test_a_place_mapping_only_to_an_archived_location_is_not_seeded(pg_pool: PgPool) -> None:
+    """R-T9-3 (decision 164): an archived SB location is no mapping, so no seed."""
+    f = _filament(pg_pool)
+    made, _ = _unseen_place(pg_pool, f)
+    _map_place(pg_pool, _place(pg_pool, f, "Old shelf"), 5, archived=True)
+    report = pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    assert report.moved == 0
+    assert "location_id" not in _link_seen(pg_pool, made)
+
+
+def test_a_place_mapping_only_to_a_printers_place_is_not_seeded(pg_pool: PgPool) -> None:
+    """R-T9-3 (decision 164): a printer's place is no mapping, so no seed."""
+    f = _filament(pg_pool)
+    made, _ = _unseen_place(pg_pool, f)
+    tray = _place(pg_pool, f, "Tray", printer=_printer(pg_pool), ams=0, tray=0)
+    _map_place(pg_pool, tray, 5)
+    report = pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    assert report.moved == 0
+    assert "location_id" not in _link_seen(pg_pool, made)
+
+
+def test_an_old_unmapped_seed_is_replaced_once_it_maps(pg_pool: PgPool) -> None:
+    """Decision 171: a link seeded (#6265) with a place that does not map holds no seed. BB's
+    move to a mapped place seeds it fresh and moves nothing; the next move moves the spool."""
+    f = _filament(pg_pool)
+    made, shelf = _unseen_place(pg_pool, f)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_seen = bb_seen || '{\"location_id\": 5}'"
+            " WHERE spool_id = %s",
+            (made,),
+        )
+    places = _locations([{"id": 6, "name": "Attic"}, {"id": 7, "name": "Cellar"}])
+    first = pull(
+        f, [bb(location_id=6, updated_at=_bb_time(1))], now=NOW, pulls=ROWS, locations=places
+    )
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id == shelf
+    assert first.moved == 0
+    assert _link_seen(pg_pool, made)["location_id"] == 6
+    report = pull(f, [bb(location_id=7, updated_at=_bb_time(2))], now=NOW, pulls=ROWS)
+    assert report.moved == 1
+
+
+def test_a_seed_of_a_place_archived_since_still_counts(pg_pool: PgPool) -> None:
+    """Decision 171: a seed of a place SB once mapped stays a real seen value after its SB
+    location is archived, so Bambuddy's move to a mapped place still moves the spool."""
+    f = _filament(pg_pool)
+    made, shelf = _unseen_place(pg_pool, f)
+    places = _locations([{"id": 5, "name": "Garage"}, {"id": 6, "name": "Attic"}])
+    pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS, locations=places)
+    assert _link_seen(pg_pool, made)["location_id"] == 5
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET archived_at = now() WHERE bb_location_id = 5")
+    kept = pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    assert kept.moved == 0
+    assert _link_seen(pg_pool, made)["location_id"] == 5
+    report = pull(f, [bb(location_id=6, updated_at=_bb_time(2))], now=NOW, pulls=ROWS)
+    attic = _row(pg_pool, "filament_locations", "bb_location_id", 6)
+    spool = f.spools.get(made)
+    assert attic is not None and spool is not None and spool.location_id == attic["id"]
+    assert spool.location_id != shelf
+    assert report.moved == 1
+
+
+def test_a_bb_move_after_a_late_mapped_seed_moves_the_spool(pg_pool: PgPool) -> None:
+    """R-T9-3 (decision 164): after the late seed, Bambuddy's next move moves the spool."""
+    f = _filament(pg_pool)
+    made, _ = _unseen_place(pg_pool, f)
+    pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    places = _locations([{"id": 5, "name": "Garage"}, {"id": 6, "name": "Attic"}])
+    seeding = pull(
+        f, [bb(location_id=6, updated_at=_bb_time(2))], now=NOW, pulls=ROWS, locations=places
+    )
+    assert seeding.moved == 0
+    report = pull(f, [bb(location_id=5, updated_at=_bb_time(3))], now=NOW, pulls=ROWS)
+    garage = _row(pg_pool, "filament_locations", "bb_location_id", 5)
+    spool = f.spools.get(made)
+    assert garage is not None and spool is not None and spool.location_id == garage["id"]
+    assert report.moved == 1
+
+
 def test_a_bb_cleared_location_takes_the_spool_out_of_a_shelf(pg_pool: PgPool) -> None:
     """R-T9-4: Bambuddy clears a place SB saw, so the SB spool leaves its shelf."""
     f = _filament(pg_pool)

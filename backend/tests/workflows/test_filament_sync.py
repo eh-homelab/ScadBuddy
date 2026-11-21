@@ -215,27 +215,27 @@ async def test_a_signal_during_a_skipped_pass_runs_one_more(client: Client) -> N
 
 
 async def test_sync_now_during_a_pass_runs_a_pass_that_starts_after_it(client: Client) -> None:
-    """#6836: "Sync now" while a pass runs sets ``pending``; the pass after it starts at or
-    after the request's ``requested_at``, so ``last_pass_started_at >= requested_at`` only
-    for a pass that ran for the request."""
+    """#6836: "Sync now" while a pass runs sets ``pending``; the next pass's activity starts
+    after the signal was sent. (``started_at`` is stamped inside the real activity, so the
+    workflow stub cannot check it.)"""
+    signalled: list[datetime] = []
     started: list[datetime] = []
-    requested: list[datetime] = []
     handle: WorkflowHandle[FilamentBbSync, None] | None = None
 
     async def sync_now(n: int) -> None:
         started.append(datetime.now(UTC))
         if n == 0:
             assert handle is not None
-            requested.append(datetime.now(UTC))
             await handle.signal(FilamentBbSync.changed, True)
+            signalled.append(datetime.now(UTC))
 
-    passes = Passes(lambda n, start: result(start, started_at=started[n]))
+    passes = Passes()
     passes.during = sync_now
     async with serving(client, passes) as queue:
         handle = await start(client, queue, 0, signal=True)
         await until(lambda: len(passes.calls) == 2)
     assert [call.full for call in passes.calls] == [False, True]
-    assert started[0] < requested[0] <= started[1]
+    assert signalled[0] <= started[1]
 
 
 async def test_a_save_that_stops_every_push_ends_a_running_workflow(client: Client) -> None:
