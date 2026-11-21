@@ -628,14 +628,16 @@ describe('filament sensor and AMS weight tools (#6268)', () => {
     expect(tool(name).gated).toBe(false)
   })
 
-  it('says in its descriptions what the sync skips, that an AMS sensor is not made by hand, and that alerts are not sent', () => {
+  it('says in its descriptions what the sync skips, that an AMS sensor is not made by hand, and when alerts are sent', () => {
     expect(tool('filament_sync_ams_weights').description).toMatch(/locked/)
     expect(tool('filament_sync_ams_weights').description).toMatch(/printing/)
     expect(tool('filament_sync_ams_weights').description).toMatch(/RFID/)
     // #6679: the agent can name which printers had no fresh report.
     expect(tool('filament_sync_ams_weights').description).toMatch(/`stale_printers`.*`name`/)
     expect(tool('filament_sensor_save').description).toMatch(/AMS sensor cannot be made by hand/)
-    expect(tool('filament_sensor_save').description).toMatch(/shown, not sent/)
+    // #6646: notify sends through Bambuddy, once at the start and once at the end.
+    expect(tool('filament_sensor_save').description).toMatch(/starts alerting and one when it stops/)
+    expect(tool('filament_sensors_list').description).toMatch(/`last_notification`/)
   })
 
   it('syncs the AMS weights with one POST and no body', async () => {
