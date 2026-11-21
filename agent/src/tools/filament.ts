@@ -1522,7 +1522,9 @@ const tools: Tool[] = [
     label: 'List location sensors',
     description:
       'The humidity and temperature sensors of the places, by name, or of one place with `location_id`. Each has ' +
-      'its last value and time, `reachable` and `alerting` (the value is outside its alert band).',
+      'its last value and time, `reachable`, `alerting` (the value is outside its alert band) and `last_notification` ' +
+      '(the newest notification it queued when it started or stopped alerting with `notify` on: `kind`, `state`, ' +
+      '`channel`, `sent_at`, and `error` when Bambuddy did not deliver it; null for none).',
     input: z.object({ location_id: z.string().uuid().optional().describe("A place's `id` from filament_location_list") }),
     risk: 'read',
     source: SOURCE,
@@ -1569,7 +1571,10 @@ const tools: Tool[] = [
       "home_assistant`, `kind` (`humidity` or `temperature`), `entity_id` (from filament_ha_entities) and `name`. " +
       'Or edit one: only the `fields` given change (`location_id`, `name`, `unit`, `alert_below`, `alert_above`, ' +
       '`notify`), and `null` clears a nullable one. An AMS sensor cannot be made by hand: ScadBuddy makes it from ' +
-      'the printer report. Alerts are shown, not sent. Only what the user says. Writes ScadBuddy only.',
+      'the printer report. With `notify` on, ScadBuddy sends one notification through Bambuddy\'s notification ' +
+      'channels when the sensor starts alerting and one when it stops (after 10 minutes back inside its band), ' +
+      'within about a minute; turning `notify` off stops what is not sent yet. Only what the user says. Writes ' +
+      'ScadBuddy only.',
     input: z.object({
       sensor_id: z.string().uuid().optional().describe("A sensor's `id` from filament_sensors_list; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The sensor fields to set'),
