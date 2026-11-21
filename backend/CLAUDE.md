@@ -878,7 +878,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and products a line names, and the price points; a confirmed invoice is frozen but for its
   note and file), `invoice_money.py` (tax, shipping and cost per kg, largest-remainder at four
   places; `RECONCILE_TOLERANCE` 0.05; tax on a zero subtotal is `InvoiceMathError`, a 422) and
-  `shopping.py` (`ShoppingStore`; `type_id` is optional and the text identity stays). Every
+  `shopping.py` (`ShoppingStore`; `type_id` is optional and the text identity stays; #6868: an empty
+  spool adds its type, `add_for_empty_on`, called by `ledger.record` in the emptying write's
+  transaction on the move from above 0 g to 0 or an `archived` event, once per type while an item
+  is `pending`, with `empty_spool_id` and a note naming the spool; the stored-only setting
+  `filament_shopping_auto_add_empty`, on by default, read there with SQL; a savepoint, never
+  failing the write; plan Decisions 18-30). Every
   store sets `updated_at` itself. Routes: `api/filament_purchasing.py`; a repeated
   `import_run_id` returns the invoice (200), a number that collides is a 409 whose body has
   `existing_invoice_id`, and confirm refuses (409) a foreign currency, a difference over the
