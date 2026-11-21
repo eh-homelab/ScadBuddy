@@ -406,3 +406,65 @@ Load `frontend-design` first.
     status value (31.0 and 31.0, and so on). The raw MQTT report was not read: Bambuddy's
     `GET /api/v1/printers/1/logging` held no messages (logging was off), and turning it on
     is a write. The comment in `printers/status.py` `ams_units` now says this.
+
+## Decisions made while building the notification (#6646)
+
+29. **The channel is Bambuddy's app message.** Bambuddy 1.3.1 has
+    `POST /api/v1/notifications/app-message` ("Send a message through every enabled
+    channel that has 'Messages from connected apps' on. For other applications"), read
+    from its OpenAPI (`GET /openapi.json`, `info.version` `1.3.1`) and its source
+    (`backend/app/api/routes/notifications.py` at maziggy/bambuddy v1.3.1) on 2026-11-21,
+    read only. It reaches the channels the owner already set up in Bambuddy, with the
+    key ScadBuddy already holds: no new secret, no new outbound path and no new process.
+    The other choice, the agent's ntfy, Home Assistant and Web Push channels (#815), is
+    set up in ScadBuddy's Settings for the assistant and is sent by the agent process,
+    so a sensor alert would need a new CRUD route and an agent poll. The key needs the
+    "Send notifications" permission (`can_send_notifications`, `Scope.SEND_NOTIFICATIONS`),
+    and at least one Bambuddy channel needs "Messages from connected apps" on. Bambuddy
+    takes 20 app messages a minute per key and answers how many channels took one.
+30. **The deploy sends nothing for an alert already open.** The migration sets the new
+    column `alert_open` from each sensor's stored value and band. An alert that started
+    before the deploy has no "started" notification; its end sends a "stopped" one.
+31. **Edge-triggered under the row lock.** `SensorStore.record_on` already locks the
+    sensor row `FOR UPDATE` and refuses an `at` not newer than the last stored one. When
+    it stores a reading it compares the new value's side of the band with `alert_open`,
+    writes the new side, and queues one row of `filament_sensor_notifications`
+    (`started` or `stopped`) when the side changed and `notify` is on. So a reading that
+    arrives twice, or several at once, queues one row. Only a stored reading is judged:
+    a band changed by a PATCH is judged at the next stored reading, at most 15 minutes
+    later (`SAME_VALUE_EVERY`).
+32. **`notify` off still tracks the side.** With `notify` off nothing is queued, but
+    `alert_open` moves. So turning `notify` on during an alert sends no "started"; the
+    alert's end sends "stopped".
+33. **The spool refresh's pull sends.** `bambuddy_pull.scheduled_pull` calls
+    `send_notifications` after it reads the Home Assistant sensors, whatever
+    `filament_sync` says, inside the existing activity: the API process (the `library`
+    worker) holds the store and already calls Bambuddy, so no worker gets SQL and
+    `SpoolRefresh`'s commands do not change. The cost is the delay: an AMS sensor's
+    change waits for the next pull (`spool_overlay_refresh_seconds`, 300 s by default).
+    With no Bambuddy URL the rows stay `queued` until one is set.
+34. **At most once.** A pass claims up to 10 rows (`PASS_LIMIT`, under Bambuddy's 20 a
+    minute) by setting `sending` in one committed statement (`FOR UPDATE SKIP LOCKED`),
+    sends each, then sets `sent` or `failed` with `sent_at`. A failed send is not tried
+    again, and a row a crash left `sending` stays so. The cost is a lost notification
+    when Bambuddy is down at that pass; the sensor shows that it failed and why.
+35. **A failure is a fixed code.** `error` is one of `scope`, `rate_limited`,
+    `unavailable`, `rejected`, `no_channel`, `not_configured` or `internal`
+    (`m.NotificationError`), never Bambuddy's text. An answer of 0 channels is `failed`
+    with `no_channel`: nothing reached anyone.
+36. **The message.** The title is "<sensor>: above the limit", "<sensor>: below the
+    limit" or "<sensor>: back within its limits". The text names the kind, the value and
+    unit, the place, the band and the reading's time in UTC. It carries no link: the
+    pull has no `public_url` (an environment setting of the API), and the place's name
+    says where to look.
+37. **The UI and the agent.** The sensor's add and edit forms get "Notify me through
+    Bambuddy when it starts and stops alerting" (before, the UI never set `notify`). A
+    sensor with `notify` on says "Notifies through Bambuddy", and the newest notification
+    shows under the sensor: sent (when, the kind, how many channels), waiting, or not sent
+    with the reason and its fix. `GET /filament/sensors` answers it as
+    `last_notification`. No route is added, so the agent gets no new tool; the
+    descriptions of `filament_sensors_list` and `filament_sensor_save` say what is sent.
+38. **Not measured: the prod key's permission.** Whether prod's Bambuddy key holds "Send
+    notifications", and whether a channel takes app messages, was not read
+    (`GET /notifications/app-message/channels` needs that key). The first alert after the
+    deploy shows it on the sensor: a `scope` or `no_channel` failure names the fix.

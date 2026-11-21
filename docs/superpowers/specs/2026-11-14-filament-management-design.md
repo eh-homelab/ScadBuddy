@@ -414,9 +414,15 @@ BB has a flat list (`/inventory/locations`) plus location sensors
   Bambuddy's `/location-ha-sensors/entities`, so SB holds no HA token. The AMS sensors
   are made from the first report that shows a number, with an AMS-unit location as the
   parent of the unit's tray locations. The humidity is the report's `humidity_raw`, the
-  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI, and is not
-  sent: follow-up issue #6646 adds the notification, and `notify` is kept for it. The
+  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI. The
   plan's Decisions 4 to 7 have the details.
+  As built in #6646: with `notify` on, a sensor sends one notification when it starts
+  alerting and one when it stops, never one per reading. The reading that changes the side
+  of the band queues it under the sensor's row lock (`filament_sensor_notifications`), and
+  the spool refresh's pull sends it at most once through Bambuddy's
+  `POST /notifications/app-message`, so it reaches the channels the owner set up in
+  Bambuddy. The sensor shows its newest notification: sent, waiting, or failed and why.
+  The plan's Decisions 29 to 38 have the details.
 - A move writes a `moved` event (from, to) in the spool's ledger. A scan of a
   location QR, then of a spool tag or label, moves the spool.
 - Time spent outside dry storage counts toward "needs drying" for hygroscopic

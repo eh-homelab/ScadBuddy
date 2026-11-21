@@ -48,9 +48,38 @@ describe('the sensors of a place', () => {
     expect(within(row).getByText('Not reachable')).toBeInTheDocument()
   })
 
-  it('does not promise a notification', async () => {
+  it('shows the last notification sent through Bambuddy', async () => {
     await show(L.SHELF_A)
-    expect(screen.queryByText(/notif|email|push/i)).toBeNull()
+    const row = screen.getByRole('listitem', { name: 'Shelf A humidity' })
+    expect(within(row).getByText('Notifies through Bambuddy')).toBeInTheDocument()
+    expect(within(row).getByText(/Notified through Bambuddy \(alert started\)/)).toHaveTextContent(/, to 2 channels\.$/)
+  })
+
+  it('says why the last notification was not sent', async () => {
+    await show(L.DRY_BOX)
+    const row = screen.getByRole('listitem', { name: 'Dry box humidity' })
+    expect(within(row).getByText(/Notification not sent \(alert ended/)).toHaveTextContent(/Give the key the Send notifications permission in Bambuddy\./)
+  })
+
+  it('says a notification is waiting to go', async () => {
+    const [shelf] = await listSensors(L.SHELF_A)
+    const waiting = { ...shelf!, last_notification: { ...shelf!.last_notification!, kind: 'stopped' as const, state: 'queued' as const, sent_at: null, channels: null } }
+    renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[waiting]} canAdd={false} onChanged={vi.fn()} />)
+    expect(screen.getByText(/Notification waiting \(alert ended/)).toHaveTextContent(/goes out through Bambuddy at the next refresh/)
+  })
+
+  it('shows no notification line for a sensor that never sent one', async () => {
+    await show(L.AMS_A)
+    expect(screen.queryByText(/notif/i)).toBeNull()
+  })
+
+  it('turns notifications on for a sensor', async () => {
+    const { user, changed } = await show(L.DRY_BOX)
+    await user.click(screen.getByRole('button', { name: 'Edit Dry box temperature' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Notify me through Bambuddy when it starts and stops alerting' }))
+    await user.click(screen.getByRole('button', { name: 'Save sensor' }))
+    await waitFor(() => expect(changed).toHaveBeenCalled())
+    expect((await listSensors(L.DRY_BOX)).find((one) => one.name === 'Dry box temperature')).toMatchObject({ notify: true })
   })
 
   it('opens a sensor history chart from the readings', async () => {

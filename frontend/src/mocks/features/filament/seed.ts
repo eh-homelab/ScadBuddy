@@ -553,11 +553,42 @@ function sensors(): S['Sensor'][] {
     reachable: true,
     archived_at: null,
     created_at: AT,
+    last_notification: null,
+    ...values,
+  })
+  // #6646: the shelf's alert went out through Bambuddy; the dry box's end did not (the key lacks the scope).
+  const notified = (values: Partial<S['SensorNotification']>): S['SensorNotification'] => ({
+    kind: 'started',
+    value: 0,
+    read_at: '2026-11-18T09:00:00Z',
+    channel: 'bambuddy',
+    state: 'sent',
+    channels: 2,
+    error: null,
+    queued_at: '2026-11-18T09:00:00Z',
+    sent_at: '2026-11-18T09:05:00Z',
     ...values,
   })
   return [
-    sensor(1, L.SHELF_A, { name: 'Shelf A humidity', entity_id: 'sensor.shelf_a_humidity', alert_above: 55, last_value: 62, last_at: '2026-11-18T09:45:00Z', alerting: true }),
-    sensor(2, L.DRY_BOX, { name: 'Dry box humidity', entity_id: 'sensor.dry_box_humidity', alert_above: 20, last_value: 11, last_at: '2026-11-18T09:45:00Z' }),
+    sensor(1, L.SHELF_A, {
+      name: 'Shelf A humidity',
+      entity_id: 'sensor.shelf_a_humidity',
+      alert_above: 55,
+      notify: true,
+      last_value: 62,
+      last_at: '2026-11-18T09:45:00Z',
+      alerting: true,
+      last_notification: notified({ value: 57 }),
+    }),
+    sensor(2, L.DRY_BOX, {
+      name: 'Dry box humidity',
+      entity_id: 'sensor.dry_box_humidity',
+      alert_above: 20,
+      notify: true,
+      last_value: 11,
+      last_at: '2026-11-18T09:45:00Z',
+      last_notification: notified({ kind: 'stopped', value: 18, state: 'failed', channels: null, error: 'scope' }),
+    }),
     sensor(3, L.DRY_BOX, { name: 'Dry box temperature', kind: 'temperature', entity_id: 'sensor.dry_box_temperature', unit: '°C', last_value: 38.5, last_at: '2026-11-18T09:45:00Z', reachable: false }),
     sensor(4, L.AMS_A, { name: 'AMS-A humidity', source: 'ams', printer_id: H2C.printer_id, ams_id: 0, last_value: 18, last_at: '2026-11-18T09:40:00Z' }),
   ]

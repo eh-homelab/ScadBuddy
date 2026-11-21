@@ -294,7 +294,7 @@ same way, `vite.config.ts`).
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
   call), `settings.spec.ts` and `page-titles.spec.ts`. Sensors and weights (#6268):
-  `LocationSensors` and `SensorChart` on the Locations tab, `NeedsDrying` and `outsideDry.ts`,
+  `LocationSensors` and `SensorChart` on the Locations tab (#6646: the "Notify me through Bambuddy" box in the add and edit forms, and the newest `last_notification` under the sensor: sent, waiting, or not sent with `NOTIFY_FAILURE`'s reason; the seed's shelf sent one, the dry box's failed `scope`), `NeedsDrying` and `outsideDry.ts`,
   and the Spools tab button "Sync weights from AMS". Type proposals (#6701): `TypeProposals` ("Create types") shows on the Needs-type filter, over
   `GET /filament/type-proposals` and its confirm; the mocks group the seed's untyped spools (#6 is one
   group, #7 lacks a label weight).

@@ -2054,6 +2054,7 @@ export const handlers = [
       reachable: true,
       archived_at: null,
       created_at: now(),
+      last_notification: null,
     }
     state.sensors.push(made)
     return HttpResponse.json(made, { status: 201 })
