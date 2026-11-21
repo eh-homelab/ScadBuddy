@@ -132,8 +132,8 @@ Outside `ci.yml`:
 
 ## Observability
 
-- Six Grafana dashboards live in [`deploy/grafana/`](../../deploy/grafana/) as ConfigMaps
-  (`deploy/grafana/kustomization.yaml:32-80`); see
+- Seven Grafana dashboards live in [`deploy/grafana/`](../../deploy/grafana/) as ConfigMaps
+  (`deploy/grafana/kustomization.yaml:33-89`); see
   [`deploy/CLAUDE.md`](../../deploy/CLAUDE.md). `lint-dashboard.sh` checks them in the
   `lint` job.
 - Traces: the API, the Python workers, the agent and the slicer export OTLP when the

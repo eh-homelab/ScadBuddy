@@ -13,7 +13,7 @@ Paths under `backend/scadbuddy/` are shortened to `scadbuddy/`. Line numbers are
 
 ## Task queues
 
-Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/settings.py:625-646`).
+Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/settings.py:621-646`).
 
 | Queue | Served by | Workflows |
 |---|---|---|

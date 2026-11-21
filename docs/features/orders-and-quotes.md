@@ -44,7 +44,7 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
   `customers.py`, `parts.py`, `machine_rates.py`.
 - Core: `backend/scadbuddy/orders/` (`lifecycle.py:627`, `quote.py`, `pricing.py`,
   `costs.py:731`, `operations.py:1140-1214`, `integrations.py` — the only seam to Bambuddy).
-- Agent tools: `agent/src/tools/orders.ts` (65 tools); customer messages through a bound
+- Agent tools: `agent/src/tools/orders.ts` (68 tools); customer messages through a bound
   plugin, `agent/src/orders/messaging.ts`.
 
 ## Data

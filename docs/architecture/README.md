@@ -105,7 +105,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
 
 **Template-pipelines spec** (`…/2026-09-27-template-pipelines-design.md`)
 
-- `:94` two task queues / seven queue settings (`backend/scadbuddy/core/settings.py:621-641`).
+- `:94` two task queues / eight queue settings (`backend/scadbuddy/core/settings.py:621-646`).
 - `:178` an `Arrange` workflow / Arrange is `TemplatePipeline` with `kind == "arrange"`
   (`backend/scadbuddy/workflows/pipelines.py:858-860`).
 - `:147-153`, `:132` insert the row, then start `render-<job_id>` / update-with-start of
@@ -233,7 +233,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
 **Auth and service-credential specs** (`…/2026-11-01-backend-auth-design.md`,
 `…/2026-11-05-service-credentials-without-db-design.md`)
 
-- auth `:354` callers `agent`, `print`, `projects`, all sealed tokens / six callers
+- auth `:354` callers `agent`, `print`, `projects`, all sealed tokens / seven callers
   (`backend/scadbuddy/auth/service_auth.py:25-27`), only `agent` sealed
   (`backend/scadbuddy/auth/service_credentials.py:84`, `:99-106`).
 - auth `:481-485` route classes / also `exchange`, `crud.*`, `flow.host`
@@ -304,7 +304,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
 - `.github/workflows/build-image.yml:215-216` "drop `continue-on-error` once pinned" / the
   agent pin is required (`.github/workflows/deploy.reusable.yml:925`) but the job keeps it
   (`.github/workflows/build-image.yml:221`).
-- `README.md:2781-2784` one dashboard / six (`deploy/grafana/kustomization.yaml:32-80`).
+- `README.md:2781-2784` one dashboard / seven (`deploy/grafana/kustomization.yaml:33-89`).
 - `README.md:2718` the API, render worker and agent export traces / the slicer does too
   (`workers/rust/crates/sb-temporal/src/telemetry.rs`).
 - `.github/workflows/build-image.yml:317-320` agent-durable as a third container in the
