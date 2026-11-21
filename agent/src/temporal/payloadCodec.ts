@@ -1,10 +1,9 @@
 import { ExternalStorage, type Payload, type PayloadCodec, type SerializationContext, type StorageDriver } from '@temporalio/common'
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { Sql } from 'postgres'
 import { CrudReadError, crudRead } from '../api/crudRead.js'
-import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes } from '../secrets.js'
+import { KEK_BYTES, openBytes, type RandomSource, SealError, sealBytes } from '../secrets.js'
 
 // The payload codec of durable subjects (spec 2026-10-01 §6.5, plan 5c Ruling 11). Every
 // payload of a workflow `session-<uuid>` or `flow-<uuid>` is sealed under that subject's
@@ -30,7 +29,7 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 // `scadbuddy-subject: <subject>`; data = the original payload as JSON
 // (`{"d": <data b64>, "m": {<key>: <value b64>}}`, keys sorted, no spaces), sealed
 // (secrets.ts format) under the subject's key in the context `payload:<subject>`. The
-// key is 32 random bytes sealed under the KEK in the context `dek:ai_payload_keys:<subject>`.
+// key is 32 random bytes the API keeps sealed under its KEK and releases (`CrudPayloadKeys`).
 //
 // A session's large payloads never enter history (#2243). agent-durable gives its
 // Temporal client External Storage (payload_store.py): a sealed session payload of
@@ -73,9 +72,6 @@ export function subjectOf(workflowId: string | undefined): string | undefined {
 export const payloadKeyContext = (subject: string): string => `dek:ai_payload_keys:${subject}`
 /** The context a payload is sealed in under its subject's key. */
 export const payloadContext = (subject: string): string => `payload:${subject}`
-
-/** The advisory lock key creation and forgetSubject take for a subject (Ruling 11). */
-export const payloadKeyLock = (subject: string): string => `scadbuddy:ai_payload_keys:${subject}`
 
 /** The subject's payloads cannot be decoded: its key was deleted (forgetSubject). */
 export class SubjectForgotten extends Error {
@@ -132,7 +128,7 @@ export function openPayload(dek: Buffer, subject: string, payload: Payload): Pay
 export type KeyForOptions = {
   /**
    * Make the key only while the session `session-<id>` names has its `ai_sessions` row,
-   * checked in the insert itself (workspace/sealing.ts, #4789): a write racing the
+   * checked by the API in the insert itself (workspace/sealing.ts, #4789): a write racing the
    * session's deletion never leaves a key nothing deletes. SubjectForgotten otherwise.
    */
   onlyForStandingSession?: boolean
@@ -144,75 +140,11 @@ export interface PayloadKeys {
   keyFor(subject: string, create: boolean, options?: KeyForOptions): Promise<Buffer>
 }
 
-export type PgPayloadKeysOptions = {
-  /** The key mounted as SCADBUDDY_SECRET_KEY_PREVIOUS_FILE, during a rotation. */
-  previous?: Kek | undefined
-  /** How long a data key is kept in memory (default 30 s): how long another process can still open a forgotten subject. */
-  cacheMs?: number
-  /** At most this many keys in memory (default 1000). */
-  cacheMax?: number
-}
-
-/** `ai_payload_keys`, sealed under the KEK; a key is cached in memory for 30 s at most. */
-export class PgPayloadKeys implements PayloadKeys {
-  readonly #sql: Sql
-  readonly #kek: Kek
-  readonly #previous: Kek | undefined
-  readonly #cache: KeyCache
-
-  constructor(sql: Sql, kek: Kek, options: PgPayloadKeysOptions = {}) {
-    this.#sql = sql
-    this.#kek = kek
-    this.#previous = options.previous
-    this.#cache = new KeyCache(options.cacheMs ?? 30_000, options.cacheMax ?? 1000)
-  }
-
-  /** Drops a subject's cached key (forgetSubject, before it deletes the row). */
-  forget(subject: string): void {
-    this.#cache.forget(subject)
-  }
-
-  async keyFor(subject: string, create: boolean, options: KeyForOptions = {}): Promise<Buffer> {
-    const standing = options.onlyForStandingSession === true
-    const cached = this.#cache.get(subject)
-    if (cached) return cached
-    let [row] = await this.#sql<{ dek_sealed: Buffer; kek_id: string }[]>`
-      SELECT dek_sealed, kek_id FROM ai_payload_keys WHERE subject = ${subject}`
-    if (!row && create) {
-      const dek = randomBytes(KEK_BYTES)
-      try {
-        const sealed = sealBytes(this.#kek.key, dek, payloadKeyContext(subject))
-        // Never for a forgotten subject: its payloads stay unreadable, new ones included.
-        // Under the subject's lock, which forgetSubject also takes, so the tombstone
-        // check never reads from before a forget that is committing.
-        await this.#sql.begin(async (tx) => {
-          await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
-          await tx`
-            INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)
-            SELECT ${subject}, ${sealed}, ${this.#kek.id}
-            WHERE NOT EXISTS (SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject})
-              AND (NOT ${standing}::boolean OR EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = substr(${subject}, 9)))
-            ON CONFLICT (subject) DO NOTHING`
-        })
-      } finally {
-        dek.fill(0)
-      }
-      // Whoever inserted first, this is the key every encoder of the subject uses.
-      ;[row] = await this.#sql<{ dek_sealed: Buffer; kek_id: string }[]>`
-        SELECT dek_sealed, kek_id FROM ai_payload_keys WHERE subject = ${subject}`
-    }
-    if (!row) throw new SubjectForgotten(`the payloads of ${subject} cannot be decoded: its key was deleted`)
-    const kek = row.kek_id === this.#kek.id ? this.#kek : row.kek_id === this.#previous?.id ? this.#previous : undefined
-    if (!kek) throw new SealError(`the payload key of ${subject} was sealed with key ${row.kek_id}, which is not mounted`)
-    return this.#cache.keep(subject, openBytes(kek.key, row.dek_sealed, payloadKeyContext(subject)))
-  }
-}
-
 /** A subject's cached data keys, dropped one at a time (forgetSubject, a browser call's end). */
 export type ForgetsKeys = { forget(subject: string): void }
 
-/** The data keys this process holds, 30 s each at most (`cacheMs`), shared by both key sources below. */
-class KeyCache implements ForgetsKeys {
+/** The data keys this process holds, 30 s each at most (`cacheMs`). */
+export class KeyCache implements ForgetsKeys {
   readonly #cacheMs: number
   readonly #cacheMax: number
   readonly #cache = new Map<string, { key: Buffer; until: number }>()
@@ -254,17 +186,12 @@ class KeyCache implements ForgetsKeys {
   }
 }
 
-/** The API has no route for the key, or no KEK to open it with: the call is retried, never sent unsealed. */
-export class PayloadKeyUnavailable extends Error {
-  override name = 'PayloadKeyUnavailable'
-}
-
 /**
  * A subject's data key released by the API (#5299 D5, #5342): `POST …/crud/agent/payload-keys/
  * {subject}` (backend api/crud_agent_secrets.py, area `payload-keys`) opens it with the KEK, and
  * with `create` makes it first, under the subject's lock and never for a forgotten subject, in
  * its own transaction, and audits the release. This process holds no KEK for it; it keeps the
- * key 30 s at most, as `PgPayloadKeys` does.
+ * key 30 s at most.
  */
 export class CrudPayloadKeys implements PayloadKeys, ForgetsKeys {
   readonly #base: string
@@ -301,49 +228,6 @@ export class CrudPayloadKeys implements PayloadKeys, ForgetsKeys {
     if (key.length !== KEK_BYTES) throw new SealError(`the payload key of ${subject} the API released is not ${KEK_BYTES} bytes`)
     return this.#cache.keep(subject, key)
   }
-}
-
-/**
- * `crud` once `useCrud()` holds (the API lists area `payload-keys`), `pg` (this process's own KEK)
- * until then, chosen per call (#5299 D9). With no KEK here and no route yet, a key is
- * PayloadKeyUnavailable: the Temporal call that needs it is retried, never sent unsealed.
- */
-export function gatedPayloadKeys(pg: PgPayloadKeys | undefined, crud: CrudPayloadKeys, useCrud: () => boolean): PayloadKeys & ForgetsKeys {
-  return {
-    forget: (subject) => {
-      pg?.forget(subject)
-      crud.forget(subject)
-    },
-    keyFor: (subject, create, options) => {
-      if (useCrud()) return crud.keyFor(subject, create, options)
-      if (pg) return pg.keyFor(subject, create, options)
-      return Promise.reject(new PayloadKeyUnavailable(`no key-encryption key here, and the API does not release payload keys yet (${subject})`))
-    },
-  }
-}
-
-/** How old a browser call's key is before `sweepBridgeKeys` deletes it: far past the longest call. */
-export const BRIDGE_KEY_MAX_AGE_S = 3600
-
-/**
- * Deletes a subject's key, which crypto-shreds every payload sealed under it: a browser
- * call's (`bridge-<uuid>`) once its caller has the answer. No tombstone: nothing takes the
- * id again. `keys` drops this process's cached copy first.
- */
-export async function dropPayloadKey(sql: Sql, keys: ForgetsKeys | undefined, subject: string): Promise<void> {
-  keys?.forget(subject)
-  await sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
-    await tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
-  })
-}
-
-/** Deletes the keys of browser calls older than `maxAgeS` (one cancelled, or whose caller went away), and returns how many. */
-export async function sweepBridgeKeys(sql: Sql, maxAgeS = BRIDGE_KEY_MAX_AGE_S): Promise<number> {
-  const gone = await sql`
-    DELETE FROM ai_payload_keys
-    WHERE subject LIKE 'bridge-%' AND created_at < now() - make_interval(secs => ${maxAgeS})`
-  return gone.count
 }
 
 /** Where a session's large sealed payloads are kept, by subject and digest. */
@@ -518,32 +402,4 @@ function storeDriver(store: PayloadStore): StorageDriver {
 function storedPayload(ref: { subject: string; digest: string }, data: Uint8Array | undefined): Payload {
   if (!data) throw new SubjectForgotten(`the stored payload ${ref.digest.slice(0, 12)} of ${ref.subject} is gone: forgotten?`)
   return { metadata: { encoding: encoder.encode(SUBJECT_ENCODING), [SUBJECT_METADATA]: encoder.encode(ref.subject) }, data }
-}
-
-/**
- * Re-wraps every payload key sealed under `previous` to `current`. No longer run at the agent's
- * start: the API re-wraps the payload keys (#5299 step 4, backend `agent_data/rotation.py`). It
- * goes with `PgPayloadKeys` (#5299 step 12).
- */
-export async function rewrapPayloadKeys(sql: Sql, previous: Kek, current: Kek): Promise<{ rewrapped: number; failed: number }> {
-  const result = { rewrapped: 0, failed: 0 }
-  const rows = await sql<{ subject: string; dek_sealed: Buffer }[]>`
-    SELECT subject, dek_sealed FROM ai_payload_keys WHERE kek_id = ${previous.id}`
-  for (const row of rows) {
-    let dek: Buffer | undefined
-    try {
-      dek = openBytes(previous.key, row.dek_sealed, payloadKeyContext(row.subject))
-      const sealed = sealBytes(current.key, dek, payloadKeyContext(row.subject))
-      const updated = await sql`
-        UPDATE ai_payload_keys SET dek_sealed = ${sealed}, kek_id = ${current.id}
-        WHERE subject = ${row.subject} AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
-    } catch (err) {
-      if (!(err instanceof SealError)) throw err
-      result.failed += 1
-    } finally {
-      dek?.fill(0)
-    }
-  }
-  return result
 }

@@ -3,8 +3,9 @@ import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
-import type { PgPayloadKeys } from '../src/temporal/payloadCodec.js'
+import type { PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
@@ -72,7 +73,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`lastCwd${TEST_DATABASE_URL ? '' : ` (skippe
     // Forgotten, the parent's range is the child's `inherited` rows, and the child has none of its own.
     const other = randomUUID()
     await session(other, { parent, cut: 2 })
-    await forgetSubject({ sql: db.sql, keys }, `session-${parent}`)
+    await forgetSubject(sqlForget(db.sql, { keys }), `session-${parent}`)
     const rows = await db.sql<{ inherited: boolean }[]>`SELECT inherited FROM ai_session_entries WHERE session_id = ${other}`
     expect(rows.length).toBeGreaterThan(0)
     expect(rows.every((r) => r.inherited)).toBe(true)

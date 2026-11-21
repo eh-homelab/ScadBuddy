@@ -22,7 +22,7 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
     database: { ping: up, ready: up },
     backend: up,
     kek: withKek,
-    credentials: new MemoryCredentials(),
+    credentials: new MemoryCredentials(kek),
     testConnection: () => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }),
     // The ingress: a trusted proxy in front of https://scadbuddy.example.
     remoteAddress: () => '10.0.0.7',
@@ -92,7 +92,7 @@ describe('GET /healthz', () => {
   })
 
   it('names the missing key-encryption key', async () => {
-    const { body } = await health(createApp(deps({ kek: noKek })))
+    const { body } = await health(createApp(deps({ kek: noKek, credentials: new MemoryCredentials() })))
     expect(body.ai).toBe('disabled (no key-encryption key: SCADBUDDY_SECRET_KEY_FILE is not set)')
     expect(body.secret_key).toBe('not configured')
   })
@@ -103,15 +103,15 @@ describe('GET /healthz', () => {
   })
 
   it('is enabled only with database, key and credential', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET })
     const { body } = await health(createApp(deps({ credentials })))
     expect(body).toMatchObject({ ai: 'enabled', database: 'ok', secret_key: 'ok', credential: 'configured' })
   })
 
   it('notices a credential sealed under a different key', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kekFromBase64(randomBytes(32).toString('base64')))
+    const credentials = new MemoryCredentials(kek)
+    await credentials.putUnder(kekFromBase64(randomBytes(32).toString('base64')), { kind: 'anthropic_api_key', secret: SECRET })
     const { body } = await health(createApp(deps({ credentials })))
     expect(body.ai).toBe('unavailable (stored credential was sealed with a different key-encryption key)')
   })
@@ -156,7 +156,7 @@ describe('/api/v1/ai/credentials', () => {
   })
 
   it('reads as unconfigured, and says whether saving is possible', async () => {
-    const res = await createApp(deps({ kek: noKek })).request('/api/v1/ai/credentials', { headers: UI })
+    const res = await createApp(deps({ kek: noKek, credentials: new MemoryCredentials() })).request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       configured: false,
@@ -201,7 +201,7 @@ describe('/api/v1/ai/credentials', () => {
   })
 
   it('keeps the stored secret when PUT omits it, but not for a new destination', async () => {
-    const credentials = new MemoryCredentials()
+    const credentials = new MemoryCredentials(kek)
     const app = createApp(deps({ credentials }))
     await put(app, { kind: 'gateway', base_url: 'https://llm.example', secret: GATEWAY_TOKEN })
     const before = credentials.row?.envelope
@@ -215,11 +215,11 @@ describe('/api/v1/ai/credentials', () => {
     expect(await moved.json()).toEqual({ detail: expect.stringMatching(/needs the secret again/) })
     const kind = await put(app, { kind: 'anthropic_api_key' })
     expect(kind.status).toBe(409)
-    expect((await credentials.reveal(kek))?.secret).toBe(GATEWAY_TOKEN)
+    expect((await credentials.reveal())?.secret).toBe(GATEWAY_TOKEN)
   })
 
   it('refuses to save without a key-encryption key, and says why', async () => {
-    const res = await put(createApp(deps({ kek: noKek })), { kind: 'anthropic_api_key', secret: SECRET })
+    const res = await put(createApp(deps({ kek: noKek, credentials: new MemoryCredentials() })), { kind: 'anthropic_api_key', secret: SECRET })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ detail: expect.stringMatching(/no key-encryption key.*SCADBUDDY_SECRET_KEY_FILE/) })
   })
@@ -240,8 +240,8 @@ describe('/api/v1/ai/credentials', () => {
   })
 
   it('deletes', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET })
     const res = await createApp(deps({ credentials })).request('/api/v1/ai/credentials', { method: 'DELETE', headers: UI })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ configured: false })
@@ -292,7 +292,7 @@ describe('/api/v1/ai/credentials', () => {
       ['a cross-origin page', { ...UI, origin: 'https://evil.example' }],
       ['a malformed Origin', { ...UI, origin: 'null' }],
     ])('refuses %s', async (_name, headers) => {
-      const credentials = new MemoryCredentials()
+      const credentials = new MemoryCredentials(kek)
       const res = await put(createApp(deps({ credentials })), body, headers)
       expect(res.status).toBe(403)
       expect(credentials.row).toBeUndefined()
@@ -336,8 +336,8 @@ describe('/api/v1/ai/credentials', () => {
 
   describe('POST /test', () => {
     it('runs the connection test with the decrypted credential and returns no secret', async () => {
-      const credentials = new MemoryCredentials()
-      await credentials.put({ kind: 'gateway', base_url: 'https://llm.example', secret: GATEWAY_TOKEN }, kek)
+      const credentials = new MemoryCredentials(kek)
+      await credentials.put({ kind: 'gateway', base_url: 'https://llm.example', secret: GATEWAY_TOKEN })
       const testConnection = vi.fn(
         (_c: Credential): Promise<ConnectionTest> =>
           Promise.resolve({ ok: true, detail: 'connected', duration_ms: 5, model: 'claude-x' }),
@@ -354,10 +354,10 @@ describe('/api/v1/ai/credentials', () => {
     })
 
     it('is 404 without a credential and 409 when it was sealed under another key', async () => {
-      const credentials = new MemoryCredentials()
+      const credentials = new MemoryCredentials(kek)
       const app = createApp(deps({ credentials }))
       expect((await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })).status).toBe(404)
-      await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kekFromBase64(randomBytes(32).toString('base64')))
+      await credentials.putUnder(kekFromBase64(randomBytes(32).toString('base64')), { kind: 'anthropic_api_key', secret: SECRET })
       const res = await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
       expect(res.status).toBe(409)
       expect(await res.text()).not.toContain(SECRET)
@@ -387,7 +387,7 @@ describe('/healthz is bounded (review of #354, finding 3)', () => {
   })
 
   it('reports a hung credential read as unavailable instead of hanging', async () => {
-    const credentials = new MemoryCredentials()
+    const credentials = new MemoryCredentials(kek)
     credentials.hang = new Promise(() => {})
     const { body } = await health(createApp(deps({ credentials, healthTimeoutMs: 50 })))
     expect(body.ai).toBe('unavailable (database timed out)')
@@ -400,7 +400,7 @@ describe('health and settings name the key problem, not the key file (finding 9)
     expect(missing.ok).toBe(false)
     if (missing.ok) return
     expect(missing.detail).toMatch(/some\/where.*ENOENT/)
-    const app = createApp(deps({ kek: missing }))
+    const app = createApp(deps({ kek: missing, credentials: new MemoryCredentials(undefined, missing.reason) }))
     const healthText = JSON.stringify((await health(app)).body)
     const getText = await (await app.request('/api/v1/ai/credentials', { headers: UI })).text()
     for (const text of [healthText, getText]) {
@@ -413,8 +413,8 @@ describe('health and settings name the key problem, not the key file (finding 9)
 
 describe('a credential in #354 format (finding 2, clean break)', () => {
   it('is reported as outdated and refused by the connection test', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET })
     // What #354 wrote: version byte 0x01.
     credentials.row!.envelope.secretSealed[0] = 0x01
     const app = createApp(deps({ credentials }))
@@ -434,7 +434,7 @@ describe('origin allowlist and DNS rebinding (finding 1)', () => {
   const REBOUND = { host: 'evil.test:8081', origin: 'http://evil.test:8081', 'x-forwarded-proto': 'https' }
 
   async function status(overrides: Partial<AppDeps>, headers: Record<string, string>): Promise<number> {
-    const credentials = new MemoryCredentials()
+    const credentials = new MemoryCredentials(kek)
     const res = await put(createApp(deps({ credentials, ...overrides })), body, headers)
     if (res.status !== 200) expect(credentials.row).toBeUndefined()
     return res.status
@@ -507,7 +507,7 @@ describe('origin allowlist and DNS rebinding (finding 1)', () => {
 
 describe('gateway base_url egress check (finding 6)', () => {
   async function save(baseUrl: string, resolved: string[] | Error = ['203.0.113.10']) {
-    const credentials = new MemoryCredentials()
+    const credentials = new MemoryCredentials(kek)
     const resolveHost = () => (resolved instanceof Error ? Promise.reject(resolved) : Promise.resolve(resolved))
     const res = await put(createApp(deps({ credentials, resolveHost })), {
       kind: 'gateway',
@@ -548,8 +548,8 @@ describe('gateway base_url egress check (finding 6)', () => {
   })
 
   it('checks again when the connection test runs', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'gateway', base_url: 'https://llm.example', secret: GATEWAY_TOKEN }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'gateway', base_url: 'https://llm.example', secret: GATEWAY_TOKEN })
     const testConnection = vi.fn(() => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }))
     const app = createApp(deps({ credentials, testConnection, resolveHost: () => Promise.resolve(['169.254.169.254']) }))
     const res = await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
@@ -560,8 +560,8 @@ describe('gateway base_url egress check (finding 6)', () => {
 
 describe('POST /test is single-flight with a cooldown (finding 7)', () => {
   it('refuses a second test while one runs, and within the cooldown after it', async () => {
-    const credentials = new MemoryCredentials()
-    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
+    const credentials = new MemoryCredentials(kek)
+    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET })
     let release!: () => void
     const gate = new Promise<void>((resolve) => (release = resolve))
     const testConnection = vi.fn(async (): Promise<ConnectionTest> => {

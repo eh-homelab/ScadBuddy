@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto'
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
-import { type PgPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.js'
+import { SubjectForgotten } from '../src/temporal/payloadCodec.js'
+import { type PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
@@ -207,7 +209,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       it('after the real forgetSubject, append refuses and load finds nothing', async () => {
         const sessionId = randomUUID()
         await store.append({ projectKey, sessionId }, [entry('user')])
-        await forgetSubject({ sql: db.sql, keys }, `session-${sessionId}`)
+        await forgetSubject(sqlForget(db.sql, { keys }), `session-${sessionId}`)
         await expect(store.append({ projectKey, sessionId }, [entry('user')])).rejects.toBeInstanceOf(SubjectForgotten)
         expect(await store.load({ projectKey, sessionId })).toBeNull()
       })
@@ -217,7 +219,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const other = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
         // The other replica's key cache now holds the session's key, for 30 s.
         await other.append({ projectKey, sessionId }, [entry('user')])
-        await forgetSubject({ sql: db.sql, keys }, `session-${sessionId}`)
+        await forgetSubject(sqlForget(db.sql, { keys }), `session-${sessionId}`)
         await expect(other.append({ projectKey, sessionId }, [entry('assistant')])).rejects.toBeInstanceOf(SubjectForgotten)
         const rows = await db.sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId}`
         expect(rows).toHaveLength(0)

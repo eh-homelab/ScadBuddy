@@ -1,5 +1,7 @@
 import postgres from 'postgres'
-import { type Credential, CredentialStore, SettingsStore } from '../src/credentials.js'
+import type { Credential } from '../src/credentials.js'
+import { SqlCredentials } from '../test/support/sql/credentials.js'
+import { sqlSettings } from '../test/support/sql/settings.js'
 import { loadKek } from '../src/secrets.js'
 import { SETTING_MODEL } from '../src/sessions/manager.js'
 
@@ -43,9 +45,9 @@ async function fromDatabase(url: string, keyFile: string | undefined, options: R
     ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
   })
   try {
-    const credential = await new CredentialStore(sql).reveal(kek.kek)
+    const credential = await new SqlCredentials(sql, kek.kek).reveal()
     if (!credential) return { ok: false, reason: 'no Claude credential is saved in Settings (ai_credentials is empty)' }
-    const model = await new SettingsStore(sql).get<string>(SETTING_MODEL).catch(() => undefined)
+    const model = await sqlSettings(sql).get<string>(SETTING_MODEL).catch(() => undefined)
     return {
       ok: true,
       credential,

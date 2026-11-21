@@ -8,11 +8,12 @@ import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { respond } from '../src/routes/pendingInput.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { event } from '../src/sessions/protocol.js'
 import { RESTARTED_PROMPT, restartedPrompt } from '../src/sessions/turnHost.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import { finishedToolCalls, toolCallResult, toolCallStarter } from '../src/tools/activityProjection.js'
 import { PgSessionReads } from '../src/sessions/sessionReads.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -346,7 +347,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
         return n
       }, { timeout: 30_000 })
       .toBe(1)
-    await forgetSubject({ sql: db.sql, client }, `session-${session.id}`)
+    await forgetSubject(sqlForget(db.sql, { client }), `session-${session.id}`)
     for (const id of [toolUseId, unlogged]) {
       const described = await client.workflow.getHandle(toolCallWorkflowId(session.id, id)).describe()
       expect(described.status.name).toBe('TERMINATED')

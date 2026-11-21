@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SessionBlobs } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event, type Owner, type ServerEvent } from '../src/sessions/protocol.js'
 import { copyForkRanges, hasForks } from '../src/sessions/store.js'

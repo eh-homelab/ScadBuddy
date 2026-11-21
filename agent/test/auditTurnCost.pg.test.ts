@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
-import { SettingsStore } from '../src/credentials.js'
+import { type SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { SessionManager } from '../src/sessions/manager.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
@@ -38,7 +39,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`turn cost i
     expect(await db.ready()).toBe(true)
     failures.length = 0
     audit = new AuditLog({ sql: db.sql, settings: () => settings, onError: (err) => failures.push(err) })
-    settings = new SettingsStore(db.sql, audit)
+    settings = sqlSettings(db.sql, audit)
     next = { reply: 'hello there', costUsd: 0.4 }
     const { runner } = scriptedRunner(() => next)
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, settings, audit })

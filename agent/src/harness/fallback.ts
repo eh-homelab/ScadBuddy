@@ -7,10 +7,9 @@ import {
   credentialDisplayLabel,
   credentialLabel,
   describeUnusable,
-  openerOf,
   soonestRecovery,
 } from '../credentials.js'
-import { type KekStatus, redact } from '../secrets.js'
+import { redact } from '../secrets.js'
 import {
   classifyFailure,
   type FailureClass,
@@ -575,13 +574,11 @@ export async function* runWithFallback(
  */
 export class CredentialPool implements CredentialSource {
   private readonly repo: CredentialRepo
-  private readonly kek: KekStatus
   private readonly audit: AuditSink | undefined
   private readonly log: (line: string) => void
 
-  constructor(options: { repo: CredentialRepo; kek: KekStatus; audit?: AuditSink | undefined; log?: (line: string) => void }) {
+  constructor(options: { repo: CredentialRepo; audit?: AuditSink | undefined; log?: (line: string) => void }) {
     this.repo = options.repo
-    this.kek = options.kek
     this.audit = options.audit
     this.log = options.log ?? ((line) => console.warn(line))
   }
@@ -592,14 +589,13 @@ export class CredentialPool implements CredentialSource {
    * runs on, which a cooldown does not end); a disabled one is never listed.
    */
   async candidates(options: { includeCooling?: boolean; sessionId?: string; turnId?: string } = {}): Promise<PooledCredential[]> {
-    // The key that opens them: this process's KEK, or the API's once the credentials go through
-    // its CRUD routes (#5299 D5), where this process may hold none.
-    const kek = await openerOf(this.repo, this.kek)
+    // The key that opens them: the API's (#5299 D5).
+    const kek = await this.repo.opener()
     if (!kek.ok) throw new NoUsableCredentialError(`no key-encryption key: ${kek.reason}`, undefined)
     // One read of every row, its state, epoch and sealed secret together (one transaction on the
     // API, which audits the reveal): the epoch recorded against is always that of the secret the
     // turn runs on.
-    const rows = await this.repo.revealAll(this.kek.ok ? this.kek.kek : undefined, 'turn', { sessionId: options.sessionId, turnId: options.turnId })
+    const rows = await this.repo.revealAll('turn', { sessionId: options.sessionId, turnId: options.turnId })
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {

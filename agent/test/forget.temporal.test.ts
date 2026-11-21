@@ -8,7 +8,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Database } from './support/database.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { PgPayloadKeys, rewrapPayloadKeys, SubjectForgotten, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
+import { sqlForget } from './support/sql/forget.js'
+import { SubjectForgotten, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
+import { PgPayloadKeys, rewrapPayloadKeys } from './support/sql/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
@@ -99,7 +101,7 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
     expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(1)
     const removed: string[] = []
     const payloads = { forget: async (s: string) => void removed.push(s) }
-    const forgotten = await forgetSubject({ sql: db.sql, client, keys, payloads }, subject)
+    const forgotten = await forgetSubject(sqlForget(db.sql, { client, keys, payloads }), subject)
     expect(forgotten).toEqual({ key: true, workflow: 'deleted', rows: 1 })
     expect(removed).toEqual([subject]) // its stored payloads' directory (#2243)
     expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
@@ -118,8 +120,8 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
     ).rejects.toBeInstanceOf(SubjectForgotten)
     expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
     // Again: nothing left, and nothing fails (the server deletes a history in the background).
-    expect(await forgetSubject({ sql: db.sql, client, keys }, subject)).toEqual({ key: false, workflow: expect.stringMatching(/^(deleted|not_found)$/), rows: 0 })
-    await expect(forgetSubject({ sql: db.sql }, 'render-x')).rejects.toThrow(/not a session/)
+    expect(await forgetSubject(sqlForget(db.sql, { client, keys }), subject)).toEqual({ key: false, workflow: expect.stringMatching(/^(deleted|not_found)$/), rows: 0 })
+    await expect(forgetSubject(sqlForget(db.sql), 'render-x')).rejects.toThrow(/not a session/)
   }, 120_000)
 
   it("re-wraps payload keys from the previous key, and removes a pending entry's rows with the session", async () => {
@@ -138,7 +140,7 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
     await db.sql`
       INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder)
       VALUES (${`${request}x`}, ${session.id}, 'answer', 'answered', ${db.sql.json(browser)})`
-    expect((await forgetSubject({ sql: db.sql }, subject)).workflow).toBe('not_reached')
+    expect((await forgetSubject(sqlForget(db.sql), subject)).workflow).toBe('not_reached')
     expect(await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${session.id}`).toHaveLength(0)
     expect(await db.sql`SELECT 1 FROM ai_input_responses WHERE session_id = ${session.id}`).toHaveLength(0)
   }, 60_000)

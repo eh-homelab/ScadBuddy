@@ -10,7 +10,7 @@ import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
-import { SessionFiles } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -62,8 +62,8 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     oauth = new PluginOAuth(db.sql)
     plugins = new PluginStore(db.sql, { oauth })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, workspace: files })
-    const saved = new MemoryCredentials()
-    await saved.create({ kind: 'anthropic_api_key', secret: SECRET }, kek)
+    const saved = new MemoryCredentials(kek)
+    await saved.create({ kind: 'anthropic_api_key', secret: SECRET })
     app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
@@ -76,7 +76,7 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
       sessions: m,
       workspace: files,
       // As main.ts wires it (plugins/secrets.ts `toolSecrets`, #5483): the saved credentials, then every plugin secret.
-      workspaceSecrets: toolSecrets({ kek, credentials: saved, plugins, oauth }).fresh,
+      workspaceSecrets: toolSecrets({ credentials: saved, plugins, oauth }).fresh,
     })
   })
   afterEach(async () => {

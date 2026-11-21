@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { CrudAreas, TASK_AREAS } from '../src/api/crudAreas.js'
 import { CrudReadError, wellFormed } from '../src/api/crudRead.js'
@@ -10,8 +9,7 @@ import { CrudOperations, OperationStore } from '../src/operations/store.js'
 // A session's background tasks and the agent's command record through the API's CRUD routes
 // (#5299 step 8), against a fake API that answers as the backend's api/crud_agent_tasks.py does
 // (the backend's tests/crud/test_crud_agent_tasks.py covers the routes and their SQL). The stores
-// keep their interfaces: each method goes to its route once the area is listed, and to its own
-// SQL until then.
+// keep their interfaces: each method goes to its route.
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
@@ -76,16 +74,6 @@ class FakeApi {
   }
 }
 
-/** A Sql that fails the test if a store runs any SQL on it. */
-const noSql = new Proxy(() => {}, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
-
 describe('the background-tasks and operations areas', () => {
   it('are among the areas the agent waits for', async () => {
     expect(TASK_AREAS).toEqual(['background-tasks', 'operations'])
@@ -98,16 +86,11 @@ describe('the background-tasks and operations areas', () => {
 })
 
 describe("a session's background tasks through the CRUD routes", () => {
-  const store = (api: FakeApi, listed: { on: boolean }) =>
-    new BackgroundTaskStore(noSql, { crud: new CrudBackgroundTasks(BASE, { fetch: api.fetch }), use: () => listed.on })
+  const store = (api: FakeApi) => new BackgroundTaskStore(new CrudBackgroundTasks(BASE, { fetch: api.fetch }))
 
-  it('runs its own SQL until the area is listed, then only the routes', async () => {
+  it('reads a task through the routes', async () => {
     const api = new FakeApi().answer('GET /background-tasks/0000abcd', { task: WIRE_TASK })
-    const listed = { on: false }
-    const tasks = store(api, listed)
-    await expect(tasks.get('0000abcd')).rejects.toThrow('ran SQL')
-    expect(api.seen).toEqual([])
-    listed.on = true
+    const tasks = store(api)
     const task = await tasks.get('0000abcd')
     expect(task).toEqual({
       id: '0000abcd',
@@ -134,7 +117,7 @@ describe("a session's background tasks through the CRUD routes", () => {
       .answer(`GET /background-tasks?session_id=${SESSION}&all=true`, { tasks: [] })
       .answer('GET /background-tasks/recurring-crons', { tasks: [WIRE_TASK] })
       .answer('GET /background-tasks/ffffffff', { task: null })
-    const tasks = store(api, { on: true })
+    const tasks = store(api)
     const made = await tasks.create({
       sessionId: SESSION,
       kind: 'cron',
@@ -172,7 +155,7 @@ describe("a session's background tasks through the CRUD routes", () => {
       .answer('POST /background-tasks/0000abcd/finish', { finished: false })
       .answer('POST /background-tasks/0000abcd/spec', { ok: true })
       .answer('POST /background-tasks/0000abcd/progress', { ok: true })
-    const tasks = store(api, { on: true })
+    const tasks = store(api)
     await tasks.scheduled('0000abcd', new Date('2026-11-15T09:00:00Z'))
     await tasks.fired('0000abcd', new Date('2026-11-15T09:00:01Z'))
     expect(await tasks.finish('0000abcd', 'cancelled', 'cancelled by You')).toBe(false)
@@ -197,7 +180,7 @@ describe("a session's background tasks through the CRUD routes", () => {
       .answer('GET /background-tasks/0000abcd/events/count', { count: 7 })
       .answer('GET /background-tasks/0000abcd/events/count?pending=true', { count: 3 })
       .answer('POST /background-tasks/0000abcd/events/delivered', { ok: true })
-    const tasks = store(api, { on: true })
+    const tasks = store(api)
     expect(await tasks.appendEvent('0000abcd', 'x'.repeat(NOTICE_MAX_CHARS + 10))).toBe(false)
     // A JavaScript string cut between the halves of a pair.
     await tasks.appendNotice('0000abcd', 'done \ud83d')
@@ -222,7 +205,7 @@ describe("a session's background tasks through the CRUD routes", () => {
       .answer('POST /background-tasks/0000abcd/calls', { ok: true })
       .answer('POST /background-tasks/0000abcd/children', { ok: true })
       .answer('GET /background-tasks/0000abcd/children/open', { children: [child] })
-    const tasks = store(api, { on: true })
+    const tasks = store(api)
     // A null result is a journalled call too.
     expect(await tasks.journalled('0000abcd', KEY, 0)).toEqual({ result: null, ok: true })
     expect(await tasks.journalled('0000abcd', KEY, 1)).toBeUndefined()
@@ -242,7 +225,7 @@ describe("a session's background tasks through the CRUD routes", () => {
     async (id) => {
       // As the SQL found no row: TaskStop's "No task found" and the panel's 404 stand.
       const api = new FakeApi()
-      const tasks = store(api, { on: true })
+      const tasks = store(api)
       expect(await tasks.get(id)).toBeUndefined()
       expect(await tasks.finish(id, 'cancelled', 'cancelled by You')).toBe(false)
       expect(await tasks.pendingEvents(id)).toEqual([])
@@ -268,7 +251,7 @@ describe("a session's background tasks through the CRUD routes", () => {
         paths.push(new URL(new Request(input).url).pathname.slice(PREFIX.length))
         return new Response(JSON.stringify({ detail: 'task_id' }), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
       }
-      const tasks = new BackgroundTaskStore(noSql, { crud: new CrudBackgroundTasks(BASE, { fetch: refusing }), use: () => true })
+      const tasks = new BackgroundTaskStore(new CrudBackgroundTasks(BASE, { fetch: refusing }))
       await expect(tasks.appendEvent(id, 'x')).rejects.toThrow()
       await expect(tasks.appendNotice(id, 'x')).rejects.toThrow()
       await expect(tasks.journal(id, KEY, 0, { result: 'x', ok: true })).rejects.toThrow()
@@ -283,7 +266,7 @@ describe("a session's background tasks through the CRUD routes", () => {
     async (input) => {
       const api = new FakeApi()
       const runner: TaskRunner = { start: async () => undefined, cancel: async () => {}, terminate: async () => {} }
-      const tasks = new BackgroundTasks({ store: store(api, { on: true }), runner })
+      const tasks = new BackgroundTasks({ store: store(api), runner })
       const ctx = { tasks, sessionId: SESSION } as unknown as BackgroundContext
       const id = 'task_id' in input ? input.task_id : 'shell_id' in input ? input.shell_id : ''
       expect(await taskStop(ctx, input)).toMatchObject({ isError: true, text: `No task found with ID: ${id}` })
@@ -294,23 +277,19 @@ describe("a session's background tasks through the CRUD routes", () => {
   it('refuses an answer that is not the route\'s', async () => {
     const api = new FakeApi()
     api.notCrud = true
-    await expect(store(api, { on: true }).get('0000abcd')).rejects.toBeInstanceOf(CrudReadError)
+    await expect(store(api).get('0000abcd')).rejects.toBeInstanceOf(CrudReadError)
   })
 })
 
 describe("the agent's command record through the CRUD routes", () => {
-  const store = (api: FakeApi, listed: { on: boolean }) =>
-    new OperationStore(noSql, { crud: new CrudOperations(BASE, { fetch: api.fetch }), use: () => listed.on })
+  const store = (api: FakeApi) => new OperationStore(new CrudOperations(BASE, { fetch: api.fetch }))
 
-  it('runs its own SQL until the area is listed, then reads an operation and its execution', async () => {
+  it('reads an operation and its execution', async () => {
     const api = new FakeApi()
       .answer('GET /operations/o1', { operation: WIRE_OPERATION })
       .answer(`GET /operations/by-key/${KEY}`, { operation: WIRE_OPERATION })
       .answer('GET /operations/none', { operation: null })
-    const listed = { on: false }
-    const operations = store(api, listed)
-    await expect(operations.get('o1')).rejects.toThrow('ran SQL')
-    listed.on = true
+    const operations = store(api)
     const view = {
       id: 'o1',
       kind: 'plugin_package_install',
@@ -333,7 +312,7 @@ describe("the agent's command record through the CRUD routes", () => {
     const api = new FakeApi()
       .answer('POST /operations', { operation: WIRE_OPERATION })
       .answer('POST /operations/o1/finish', { operation: finished })
-    const operations = store(api, { on: true })
+    const operations = store(api)
     const op = await operations.insert(
       {
         id: 'o1',

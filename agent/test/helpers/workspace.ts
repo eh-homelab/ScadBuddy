@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import type { SessionFiles, WorkspaceFileInfo } from '../../src/workspace/store.js'
+import type { WorkspaceFileInfo } from '../../src/workspace/store.js'
+import type { SessionFiles } from '../support/sql/sessionFiles.js'
 
 /**
  * A workspace in memory with what an upload reads (`stat`, `chunks`), for tests

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import { KEK_BYTES, type Kek, openBytes, SealError, sealBytes } from '../secrets.js'
-import type { PayloadKeys } from '../temporal/payloadCodec.js'
-import type { WorkspaceRef } from './store.js'
+import { KEK_BYTES, type Kek, openBytes, SealError, sealBytes } from '../../../src/secrets.js'
+import type { PayloadKeys } from '../../../src/temporal/payloadCodec.js'
+import type { WorkspaceRef } from '../../../src/workspace/store.js'
 
 // How a workspace file in the blob store is sealed (#4789). Each write makes a random
 // file key; the bytes are sealed under it (secrets.ts format) in segments of
