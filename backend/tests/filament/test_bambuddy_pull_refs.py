@@ -358,6 +358,27 @@ def test_an_old_unmapped_seed_is_replaced_once_it_maps(pg_pool: PgPool) -> None:
     assert report.moved == 1
 
 
+def test_dropping_an_unmapped_seed_moves_bb_seen_at(pg_pool: PgPool) -> None:
+    """Decision 171 with review M2: ``bb_seen_at`` moves whenever ``bb_seen`` changes, and
+    dropping a never-mapped seed changes it, so a running push pass sees the newer stamp."""
+    f = _filament(pg_pool)
+    made, _ = _unseen_place(pg_pool, f)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_seen = bb_seen || '{\"location_id\": 5}',"
+            " bb_seen_at = %s WHERE spool_id = %s",
+            (NOW - timedelta(days=1), made),
+        )
+    pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT bb_seen, bb_seen_at FROM filament_bb_links WHERE spool_id = %s", (made,)
+        ).fetchone()
+    assert row is not None
+    assert "location_id" not in row["bb_seen"]
+    assert row["bb_seen_at"] == NOW
+
+
 def test_a_seed_of_a_place_archived_since_still_counts(pg_pool: PgPool) -> None:
     """Decision 171: a seed of a place SB once mapped stays a real seen value after its SB
     location is archived, so Bambuddy's move to a mapped place still moves the spool."""

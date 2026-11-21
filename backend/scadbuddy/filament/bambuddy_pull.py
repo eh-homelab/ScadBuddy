@@ -1518,6 +1518,7 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
         for n, v in seen.items()
         if n in taken or (n in sb and plan.bb_form(n, seen, k_rows) == sb[n])
     }
+    stale = False
     seeds = {
         n: seen[n]
         for n, on in (("location_id", run.pulls.locations), ("archived_at", run.pulls.spools))
@@ -1527,23 +1528,20 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
         if seen["location_id"] is not None and _mapped_place(conn, seen["location_id"]) is None:
             del seeds["location_id"]
         held = _link_seen(conn, spool_id).get("location_id")
-        if held is not None and not _place_ever_mapped(conn, held):
-            # Decision 171: a seed of a place SB has never mapped is no seed. The link's
-            # seen value goes, so the first pull where BB's place maps seeds it fresh.
-            conn.execute(
-                "UPDATE filament_bb_links SET bb_seen = bb_seen - 'location_id'"
-                " WHERE spool_id = %s",
-                (spool_id,),
-            )
+        # Decision 171: a seed of a place SB has never mapped is no seed. The merge below
+        # drops the link's seen value, so `bb_seen_at` moves with it (M2) and the first pull
+        # where BB's place maps seeds it fresh.
+        stale = held is not None and not _place_ever_mapped(conn, held)
     # The seeds go first, so a seen value the link holds already wins over them.
     conn.execute(
         "UPDATE filament_bb_links SET bb_seen = n.seen, bb_seen_at = CASE WHEN"
         " n.seen IS DISTINCT FROM l.bb_seen OR l.bb_seen_at IS NULL THEN %s"
         " ELSE l.bb_seen_at END"
-        " FROM filament_bb_links l, LATERAL (SELECT %s || coalesce(l.bb_seen, '{}'::jsonb)"
+        " FROM filament_bb_links l, LATERAL (SELECT %s ||"
+        " (coalesce(l.bb_seen, '{}'::jsonb) - CASE WHEN %s THEN 'location_id' ELSE '' END)"
         " || %s AS seen) n"
         " WHERE filament_bb_links.spool_id = %s AND l.spool_id = filament_bb_links.spool_id",
-        (run.now, Jsonb(seeds), Jsonb(agree), spool_id),
+        (run.now, Jsonb(seeds), stale, Jsonb(agree), spool_id),
     )
 
 
