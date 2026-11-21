@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { ConfigError, DEFAULT_BACKEND_URL, ENV_VARS, loadConfig } from '../src/config.js'
 
+/** A proof, which every start needs (#5299 step 12). */
+const PROOF = { SCADBUDDY_SERVICE_BOOTSTRAP_FILE: '/run/bootstrap/agent' }
+const load = (env: Parameters<typeof loadConfig>[0] = {}) => loadConfig({ ...PROOF, ...env })
+
 describe('loadConfig', () => {
   it('defaults everything when the environment is empty', () => {
-    expect(loadConfig({})).toEqual({
-      databaseUrl: undefined,
+    expect(load({})).toEqual({
+      ignored: [],
       backendUrl: DEFAULT_BACKEND_URL,
-      secretKeyFile: undefined,
-      previousSecretKeyFile: undefined,
+      serviceBootstrapFile: '/run/bootstrap/agent',
       publicUrl: undefined,
       allowedOrigins: undefined,
       trustedProxies: undefined,
@@ -20,9 +23,9 @@ describe('loadConfig', () => {
     })
   })
 
-  it('reads the variables it owns', () => {
+  it('reads the variables it owns, and names the database and KEK ones it ignores (#5299 step 12)', () => {
     expect(
-      loadConfig({
+      load({
         SCADBUDDY_DATABASE_URL: 'postgresql://u:p@db:5432/scadbuddy',
         SCADBUDDY_BACKEND_URL: 'http://localhost:9000/',
         SCADBUDDY_SECRET_KEY_FILE: '/run/secrets/kek',
@@ -39,10 +42,9 @@ describe('loadConfig', () => {
         SCADBUDDY_AUTH_MODE: 'observe',
       }),
     ).toEqual({
-      databaseUrl: 'postgresql://u:p@db:5432/scadbuddy',
+      ignored: ['SCADBUDDY_DATABASE_URL', 'SCADBUDDY_SECRET_KEY_FILE', 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE'],
       backendUrl: 'http://localhost:9000',
-      secretKeyFile: '/run/secrets/kek',
-      previousSecretKeyFile: '/run/secrets/kek-old',
+      serviceBootstrapFile: '/run/bootstrap/agent',
       publicUrl: 'https://scadbuddy.example',
       allowedOrigins: 'https://scadbuddy.internal.example, https://scadbuddy.lan',
       trustedProxies: '10.42.0.0/16, fd00::/8',
@@ -56,7 +58,7 @@ describe('loadConfig', () => {
     })
   })
 
-  it('reads one service-credential proof, and refuses both (#5494)', () => {
+  it('reads one service-credential proof, and refuses both or none (#5494, #5299 step 12)', () => {
     expect(loadConfig({ SCADBUDDY_SERVICE_TOKEN_FILE: '/var/run/scadbuddy/token' }).serviceTokenFile).toBe(
       '/var/run/scadbuddy/token',
     )
@@ -66,21 +68,22 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig({ SCADBUDDY_SERVICE_TOKEN_FILE: '/a', SCADBUDDY_SERVICE_BOOTSTRAP_FILE: '/b' }),
     ).toThrow(ConfigError)
+    expect(() => loadConfig({})).toThrow(/SCADBUDDY_SERVICE_TOKEN_FILE .* or SCADBUDDY_SERVICE_BOOTSTRAP_FILE/)
   })
 
   it('takes SCADBUDDY_AUTH_MODE=enforce, and refuses an unknown mode', () => {
-    expect(loadConfig({ SCADBUDDY_AUTH_MODE: 'enforce' }).authMode).toBe('enforce')
-    expect(() => loadConfig({ SCADBUDDY_AUTH_MODE: 'strict' })).toThrow(ConfigError)
+    expect(load({ SCADBUDDY_AUTH_MODE: 'enforce' }).authMode).toBe('enforce')
+    expect(() => load({ SCADBUDDY_AUTH_MODE: 'strict' })).toThrow(ConfigError)
   })
 
   it('reads the Temporal switch as the backend does, and refuses whitespace inside a Temporal value', () => {
-    expect(loadConfig({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: '1' }).temporalSearchAttributes).toBe(true)
-    expect(loadConfig({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'false' }).temporalSearchAttributes).toBe(false)
-    expect(() => loadConfig({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'yes please' })).toThrow(ConfigError)
-    expect(() => loadConfig({ SCADBUDDY_TEMPORAL_ADDRESS: 'temporal frontend:7233' })).toThrow(
+    expect(load({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: '1' }).temporalSearchAttributes).toBe(true)
+    expect(load({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'false' }).temporalSearchAttributes).toBe(false)
+    expect(() => load({ SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'yes please' })).toThrow(ConfigError)
+    expect(() => load({ SCADBUDDY_TEMPORAL_ADDRESS: 'temporal frontend:7233' })).toThrow(
       /SCADBUDDY_TEMPORAL_ADDRESS/,
     )
-    expect(() => loadConfig({ SCADBUDDY_TEMPORAL_NAMESPACE: 'a b' })).toThrow(/SCADBUDDY_TEMPORAL_NAMESPACE/)
+    expect(() => load({ SCADBUDDY_TEMPORAL_NAMESPACE: 'a b' })).toThrow(/SCADBUDDY_TEMPORAL_NAMESPACE/)
   })
 
   it.each([
@@ -95,43 +98,38 @@ describe('loadConfig', () => {
     [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.0.0.0/8/1' }, /SCADBUDDY_AGENT_TRUSTED_PROXIES/],
     [{ SCADBUDDY_SESSION_DIR: 'sessions' }, /SCADBUDDY_SESSION_DIR must be an absolute path, not "sessions"/],
   ])('refuses a malformed %j', (env, message) => {
-    expect(() => loadConfig(env)).toThrow(ConfigError)
-    expect(() => loadConfig(env)).toThrow(message)
+    expect(() => load(env)).toThrow(ConfigError)
+    expect(() => load(env)).toThrow(message)
   })
 
   // Spec 2026-10-13 §14.3, plan Step 6.1: one image, run as the HTTP half, the worker half or both.
   it.each(['all', 'api', 'worker'] as const)('reads the role %s', (role) => {
-    expect(loadConfig({ SCADBUDDY_AGENT_ROLE: role }).agentRole).toBe(role)
-    expect(loadConfig({ SCADBUDDY_AGENT_ROLE: ` ${role} ` }).agentRole).toBe(role)
+    expect(load({ SCADBUDDY_AGENT_ROLE: role }).agentRole).toBe(role)
+    expect(load({ SCADBUDDY_AGENT_ROLE: ` ${role} ` }).agentRole).toBe(role)
   })
 
   it('refuses any other role, naming it', () => {
-    expect(() => loadConfig({ SCADBUDDY_AGENT_ROLE: 'workers' })).toThrow(ConfigError)
-    expect(() => loadConfig({ SCADBUDDY_AGENT_ROLE: 'workers' })).toThrow(
+    expect(() => load({ SCADBUDDY_AGENT_ROLE: 'workers' })).toThrow(ConfigError)
+    expect(() => load({ SCADBUDDY_AGENT_ROLE: 'workers' })).toThrow(
       'SCADBUDDY_AGENT_ROLE must be all, api or worker, not "workers"',
     )
   })
 
   it('treats blank values as unset', () => {
     expect(
-      loadConfig({ SCADBUDDY_DATABASE_URL: '  ', SCADBUDDY_BACKEND_URL: '', SCADBUDDY_SECRET_KEY_FILE: '' }),
-    ).toEqual(loadConfig({}))
+      load({ SCADBUDDY_DATABASE_URL: '  ', SCADBUDDY_BACKEND_URL: '', SCADBUDDY_SECRET_KEY_FILE: '' }),
+    ).toEqual(load({}))
   })
 
-  it('accepts both postgres URL schemes', () => {
-    expect(loadConfig({ SCADBUDDY_DATABASE_URL: 'postgres://db/x' }).databaseUrl).toBe('postgres://db/x')
-  })
-
-  it('rejects a non-postgres database URL without echoing it', () => {
-    expect(() => loadConfig({ SCADBUDDY_DATABASE_URL: 'mysql://u:secret@db/x' })).toThrow(ConfigError)
-    expect(() => loadConfig({ SCADBUDDY_DATABASE_URL: 'not a url secret' })).toThrow(
-      /^SCADBUDDY_DATABASE_URL is not a valid URL$/,
-    )
+  it('ignores a database URL, whatever it holds, and never keeps its value (#5299 step 12)', () => {
+    const config = load({ SCADBUDDY_DATABASE_URL: 'mysql://u:secret@db/x' })
+    expect(config.ignored).toEqual(['SCADBUDDY_DATABASE_URL'])
+    expect(JSON.stringify(config)).not.toContain('secret@db')
   })
 
   it('rejects a backend URL that is not http(s)', () => {
-    expect(() => loadConfig({ SCADBUDDY_BACKEND_URL: 'ftp://backend' })).toThrow(ConfigError)
-    expect(() => loadConfig({ SCADBUDDY_BACKEND_URL: '::' })).toThrow(ConfigError)
+    expect(() => load({ SCADBUDDY_BACKEND_URL: 'ftp://backend' })).toThrow(ConfigError)
+    expect(() => load({ SCADBUDDY_BACKEND_URL: '::' })).toThrow(ConfigError)
   })
 
   it('reads no variable outside its declared list (spec §9: no AI env vars)', () => {
@@ -141,7 +139,7 @@ describe('loadConfig', () => {
       {
         get(_target, key) {
           if (typeof key === 'string') read.add(key)
-          return undefined
+          return key === 'SCADBUDDY_SERVICE_BOOTSTRAP_FILE' ? '/run/bootstrap/agent' : undefined
         },
       },
     )
