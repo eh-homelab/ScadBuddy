@@ -13,19 +13,21 @@ function hashId(hash: string): string | null {
 
 /**
  * #6869 — a row a link names by anchor (`filamentLinks` `invoiceLine`, `supplierProduct`):
- * scrolled into view once, when `ready` (its rows have rendered). Returns the named id, so the
+ * scrolled into view once per navigation, when `ready` (its rows have rendered). Returns the named id, so the
  * row can mark itself.
  */
 export function useHashTarget(ready: boolean): string | null {
-  const { hash } = useLocation()
+  const { hash, key } = useLocation()
   const id = hashId(hash)
+  // Per navigation: a second click on the same anchor is a new location key, so it scrolls again.
   const scrolled = useRef<string | null>(null)
   useEffect(() => {
-    if (!ready || !id || scrolled.current === id) return
+    const target = id && `${key}#${id}`
+    if (!ready || !target || scrolled.current === target) return
     const row = document.getElementById(id)
     if (!row) return
-    scrolled.current = id
+    scrolled.current = target
     row.scrollIntoView?.({ block: 'center' })
-  }, [ready, id])
+  }, [ready, id, key])
   return id
 }

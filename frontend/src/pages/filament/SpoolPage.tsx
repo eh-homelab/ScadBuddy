@@ -305,7 +305,7 @@ interface Lists {
   places: { id: string; name: string }[]
   /** Every place by its path, printer trays too: the names a move on the timeline shows. */
   placeNames: { id: string; name: string }[]
-  /** Each place's page, the spools in it, by id (the Spools tab filters by a place's own name, #6869). */
+  /** Each place's page, the spools in it, by id (the Spools tab's `place` filter, by id, #6869). */
   placeHrefs: [string, string][]
   printers: (KPrinter & { model: string | null })[]
 }
