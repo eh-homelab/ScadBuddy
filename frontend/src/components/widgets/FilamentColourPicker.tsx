@@ -121,7 +121,8 @@ export function FilamentColourPicker({
   // A remembered tick means nothing while no spool is loaded, so it is not offered then.
   const anyLoaded = state.spools.some((row) => row.loaded)
   const loadedOnly = anyLoaded && filters.loadedOnly
-  // The spool of the colour now stays on the list, whatever the filters, so its mark shows.
+  // The spool of the colour now stays on the list whatever the material and loaded filters,
+  // so its mark shows. The text search can still hide it: a search names what to show.
   const isChosen = (row: FilamentInventorySpool) => {
     const look = { rgba: row.spool.effective?.rgba ?? row.spool.rgba }
     const colour = spoolColour(look)
