@@ -1,8 +1,10 @@
 import { useState, type ReactNode } from 'react'
 import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed, SpoolOption } from '../api/types'
-import { normalizeHex } from '../lib/format'
 import {
   NO_FILTERS,
+  choiceReasons,
+  closeMatch,
+  colourName,
   facets,
   filterSpools,
   fromTrays,
@@ -10,7 +12,9 @@ import {
   slotNeed,
   checkPlan,
   spoolLabel,
+  tileGroups,
   trayChoiceLabel,
+  trayCode,
   warningsFor,
   type SpoolFilters,
 } from '../lib/filaments'
@@ -35,8 +39,9 @@ import { Swatch } from './print/Swatch'
  * shelf is a legitimate choice that produces a "load this into …" instruction, and
  * hiding it would turn a two-step print into a dead end. The server has already sorted
  * the rows — loaded in this printer, then loaded elsewhere, then the shelf, most
- * remaining first within each band — so the order is meaningful and is not re-sorted
- * here.
+ * remaining first within each band. The grid (#6885, `tileGroups`) only groups them:
+ * the close matches for the slot first, then each unit as Bambu Studio maps it, then
+ * other printers and the shelf, each group in the server's order.
  *
  * Two of Bambuddy's answers are "unknown" spelled as a number, and both are handled
  * rather than rendered:
@@ -213,34 +218,116 @@ export function WarningList({ warnings, testId }: { warnings: FilamentWarning[];
 }
 
 /**
- * #6262 — the ScadBuddy spool a tray holds, by its number, with its brand, colour name
- * and grams: "Spool #12: Bambu Lab Blue · 812 g". A spool with no type yet says so.
+ * #6262 — a spool's chip: its `#RRGGBBAA` (the file's `colour` for a row with no `rgba`),
+ * with the grams left as an arc around it where the row lists a spool, not a "prints in".
  */
-function TraySpool({ spool }: { spool: SpoolOption }) {
-  if (spool.sb_number === null || spool.sb_number === undefined) return null
-  const name = [spool.brand, spool.color_name].filter(Boolean).join(' ') || spool.material
+function SpoolChip({
+  spool,
+  grams: arc = false,
+  size = 'sm',
+}: {
+  spool: SpoolOption
+  grams?: boolean
+  size?: 'sm' | 'md'
+}) {
   return (
-    <p className="basis-full pl-6 text-[11px] text-muted-foreground" data-testid={`sb-spool-${spool.spool_id}`}>
-      <span className="text-foreground">Spool #{spool.sb_number}:</span> {name}
-      {spool.remaining_g !== null && spool.remaining_g !== undefined && (
-        <span className="sb-num"> · {grams(spool.remaining_g)}</span>
-      )}
-    </p>
+    <RgbaSwatch
+      rgba={spool.rgba ?? spool.colour ?? '#000000'}
+      size={size}
+      gramsLeft={arc ? spool.remaining_g : null}
+      labelWeight={arc ? spool.label_weight_g : null}
+    />
   )
 }
 
 /**
- * #6262 — a spool's chip: its `#RRGGBBAA` (the file's `colour` for a row with no `rgba`),
- * with the grams left as an arc around it where the row lists a spool, not a "prints in".
+ * What is left on a spool. On a native run the SB spool's grams when the tray holds one
+ * (the ledger), else the AMS's own percent; on the Bambuddy path the grams. An unknown
+ * is a dash, never "0 g": an untagged spool reports `remain: -1`.
  */
-function SpoolChip({ spool, grams: arc = false }: { spool: SpoolOption; grams?: boolean }) {
+function remaining(spool: SpoolOption, trays: boolean): string {
+  if (spool.remaining_g !== null && spool.remaining_g !== undefined) return grams(spool.remaining_g)
+  if (trays && spool.remain_percent !== null && spool.remain_percent !== undefined) return `${spool.remain_percent}%`
+  return '—'
+}
+
+/**
+ * #6885 — one tray or spool in the grid, as Bambu Studio's filament mapping draws a tray:
+ * the colour as a swatch (with the grams arc), the one colour name, the material and what
+ * is left, and the tray's code ("A3", "HT-A"). The whole tile is the radio: the button
+ * covers it, invisible, so a click anywhere picks it, the arrow keys move between tiles
+ * (Radix's radio group), and the tile draws the focus ring. Its name is the full sentence
+ * a screen reader needs, "PLA Blue in AMS-A slot 1, 812 g left".
+ */
+function SpoolTile({
+  spool,
+  trays,
+  checked,
+  printerId,
+  usedBy,
+  showSides,
+  matches,
+}: {
+  spool: SpoolOption
+  trays: boolean
+  checked: boolean
+  printerId: number | null | undefined
+  usedBy: number | null
+  showSides: boolean
+  matches: boolean
+}) {
+  const name = colourName(spool, trays)
+  const code = trayCode(spool)
+  const left = remaining(spool, trays)
+  const where = trays ? null : loadedLabel(spool, printerId)
+  const away = !trays && spool.loaded && printerId != null && spool.loaded.printer_id !== printerId
+  const said = trays ? trayChoiceLabel(spool) : [spoolLabel(spool), where].filter(Boolean).join(', ')
+  const label = [said, left === '—' ? 'amount left unknown' : `${left} left`, usedBy ? `used by slot ${usedBy}` : null]
+    .filter(Boolean)
+    .join(', ')
   return (
-    <RgbaSwatch
-      rgba={spool.rgba ?? spool.colour ?? '#000000'}
-      size="sm"
-      gramsLeft={arc ? spool.remaining_g : null}
-      labelWeight={arc ? spool.label_weight_g : null}
-    />
+    <label
+      className={cn(
+        'relative flex w-42 max-w-full min-w-0 cursor-pointer flex-col gap-1 rounded-md border px-2 py-1.5 text-xs transition-colors',
+        'has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50',
+        checked ? 'border-primary bg-accent' : 'hover:bg-muted',
+        !matches && !checked && 'text-muted-foreground',
+      )}
+      data-matches={matches ? 'true' : undefined}
+    >
+      <RadioGroupItem
+        value={String(spool.spool_id)}
+        aria-label={label}
+        data-testid={`spool-${spool.spool_id}`}
+        className="absolute inset-0 aspect-auto size-full rounded-md border-0 opacity-0 after:hidden"
+      />
+      <span className="flex min-w-0 items-center gap-2">
+        <SpoolChip spool={spool} grams size="md" />
+        <span className="min-w-0 flex-1">
+          <span className={cn('block truncate font-medium', matches || checked ? 'text-foreground' : '')}>{name}</span>
+          <span className="block truncate text-[11px] text-muted-foreground">
+            {[spool.material, trays ? null : spool.brand].filter(Boolean).join(' · ')}
+          </span>
+        </span>
+        <span className="flex shrink-0 flex-col items-end gap-0.5 text-[11px] text-muted-foreground">
+          {code && <span className="sb-num font-semibold">{code}</span>}
+          <span className="sb-num">{left}</span>
+        </span>
+      </span>
+      {(away || usedBy || spool.sb_number != null || spool.needs_type || (showSides && spool.side)) && (
+        <span className="relative z-10 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+          {spool.sb_number != null && (
+            <span className="sb-num" data-testid={`sb-spool-${spool.spool_id}`}>
+              #{spool.sb_number}
+            </span>
+          )}
+          <NeedsTypeBadge spool={spool} />
+          {showSides && spool.side && <SideBadge side={spool.side} testId={`side-${spool.spool_id}`} />}
+          {away && <span className="truncate">on {spool.loaded?.printer_name ?? 'another printer'}</span>}
+          {usedBy && <span>used by slot {usedBy}</span>}
+        </span>
+      )}
+    </label>
   )
 }
 
@@ -258,6 +345,13 @@ interface Props {
   gramsStale?: boolean
   /** #5627 — more of a slot's row, under its spool: its "Settings for this colour". */
   slotExtra?: (slotId: number) => ReactNode
+  /**
+   * #6885 — say "Slot N has no filament chosen." under an empty slot. Off by default:
+   * before the user acts, an empty slot is a question (its grid is open), not an error.
+   * The dialog turns it on once Print is pressed; "Reset to the suggested filaments" is an
+   * act too, and shows it for a slot the reset leaves empty.
+   */
+  showMissing?: boolean
 }
 
 export function FilamentPicker({
@@ -268,8 +362,10 @@ export function FilamentPicker({
   offeredTrays,
   gramsStale = false,
   slotExtra,
+  showMissing = false,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
+  const [wasReset, setWasReset] = useState(false)
   // Slots whose list is open although a spool is chosen. A slot with a spool shows only
   // that spool until "Change" opens it; a slot with nothing chosen is always open.
   const [opened, setOpened] = useState<ReadonlySet<number>>(() => new Set())
@@ -314,7 +410,10 @@ export function FilamentPicker({
 
   // Recomputed from the plan on screen, not read off the server's answer for its own
   // opening selection — that one stops being true the moment a slot is changed.
-  const warnings = checkPlan(options, plan, copies)
+  // #6885 — an empty slot is no fault until the user acts: see `showMissing`.
+  const warnings = checkPlan(options, plan, copies).filter(
+    (warning) => warning.kind !== 'no-choice' || showMissing || wasReset,
+  )
   // #2166 — with the Filament Track Switch any spool reaches either nozzle, so which
   // inlet it rests on is not shown: ScadBuddy's nozzle plan says where each prints.
   const showSides = !(options.track_switch ?? false)
@@ -336,6 +435,7 @@ export function FilamentPicker({
           onClick={() => {
             onChange(suggested.map((choice) => ({ ...choice })))
             setOpened(new Set())
+            setWasReset(true)
           }}
           data-testid="reset-filaments"
         >
@@ -423,6 +523,7 @@ export function FilamentPicker({
               ? matched
               : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
           const heading = `filament-slot-${slot.slot_id}-heading`
+          const reasons = chosenSpool ? choiceReasons(slot, chosenSpool, trays) : []
           return (
             // min-w-0: without it the slot grows to its widest row and runs off a phone's
             // screen (#944).
@@ -470,13 +571,20 @@ export function FilamentPicker({
                   >
                     <span aria-hidden="true">→</span>
                     <SpoolChip spool={chosenSpool} />
-                    prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
+                    prints in {colourName(chosenSpool, trays)}
                     {showSides && chosenSpool.side && (
                       <SideBadge side={chosenSpool.side} testId={`slot-side-${slot.slot_id}`} />
                     )}
                   </span>
                 )}
               </div>
+              {/* #6885 — why the choice is not what the file asks for: a choice, said plainly,
+                  not a fault. */}
+              {reasons.length > 0 && (
+                <p className="text-xs text-muted-foreground" data-testid={`slot-reason-${slot.slot_id}`}>
+                  {reasons.join('; ')}.
+                </p>
+              )}
               {listOpen && rows.length === 0 ? (
                 <p className="rounded-lg border px-2.5 py-3 text-xs text-muted-foreground">
                   No spool matches those filters.
@@ -486,64 +594,44 @@ export function FilamentPicker({
                   aria-labelledby={heading}
                   value={chosen === null ? '' : String(chosen)}
                   onValueChange={(next) => choose(slot.slot_id, Number(next))}
-                  className="max-h-56 gap-0 overflow-y-auto rounded-lg border"
+                  className={cn('flex flex-wrap items-start gap-x-4 gap-y-2.5', !trays && listOpen && 'max-h-96 overflow-y-auto pr-1')}
                 >
-                  {rows.map((spool) => {
-                    // A tray's label already says where it is.
-                    const where = trays ? null : loadedLabel(spool, options.printer_id)
-                    // Shown, not hidden: printing two slots from one spool is a real thing
-                    // to want, and Bambuddy accepts it. It just should not be a surprise.
-                    const elsewhere = plan.find(
-                      (choice) => choice.spool_id === spool.spool_id && choice.slot_id !== slot.slot_id,
-                    )
-                    return (
-                      <label
-                        key={spool.spool_id}
-                        className={cn(
-                          'flex cursor-pointer flex-wrap items-center gap-x-2.5 gap-y-1 border-b px-2.5 py-2 transition-colors last:border-b-0',
-                          chosen === spool.spool_id ? 'bg-accent' : 'hover:bg-muted',
+                  {/* Closed, the chosen tile stays in the group it has when open, its heading
+                      hidden: the same keys keep the same tile, so the focus and the radio
+                      stay put when a pick closes the grid. */}
+                  {tileGroups(rows, slot, options.printer_id).map(
+                    (group) => (
+                      <div key={group.key} className="flex max-w-full min-w-0 flex-col gap-1" data-testid={`slot-${slot.slot_id}-group-${group.key}`}>
+                        {listOpen && (
+                          <p className="text-[11px] font-medium text-muted-foreground">{group.label}</p>
                         )}
-                      >
-                        <RadioGroupItem value={String(spool.spool_id)} data-testid={`spool-${spool.spool_id}`} />
-                        <SpoolChip spool={spool} grams />
-                        {/* The name takes at least 12rem; when the row is narrower than that
-                            plus the details, the details wrap onto a second line (#944). */}
-                        <span className="min-w-0 flex-[1_1_12rem] truncate text-xs">
-                          {trays ? trayChoiceLabel(spool) : spoolLabel(spool)}
-                        </span>
-                        {/* The spool's number and its badge stay together after the name, in the row's
-                            own wrap, not in the right-hand group's. */}
-                        {((!trays && spool.sb_number != null) || (spool.needs_type && spool.sb_spool_id)) && (
-                          <span className="flex shrink-0 items-center gap-1.5">
-                            {!trays && spool.sb_number != null && (
-                              <span className="sb-num text-[11px] text-muted-foreground">#{spool.sb_number}</span>
-                            )}
-                            <NeedsTypeBadge spool={spool} />
-                          </span>
-                        )}
-                        <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2.5">
-                          {elsewhere && (
-                            <span className="shrink-0 text-[11px] text-muted-foreground">
-                              used by slot {elsewhere.slot_id}
-                            </span>
-                          )}
-                          {where && <Badge variant="secondary">{where}</Badge>}
-                          {showSides && spool.side && <SideBadge side={spool.side} testId={`side-${spool.spool_id}`} />}
-                          <span className="sb-num shrink-0 text-[11px] text-muted-foreground">
-                            {trays
-                              ? // The AMS's own estimate; the grams are the SB spool's, below.
-                                spool.remain_percent === null || spool.remain_percent === undefined
-                                ? '—'
-                                : `${spool.remain_percent}%`
-                              : spool.remaining_g === null || spool.remaining_g === undefined
-                                ? '—'
-                                : grams(spool.remaining_g)}
-                          </span>
-                        </span>
-                        {trays && <TraySpool spool={spool} />}
-                      </label>
-                    )
-                  })}
+                        {/* Tiles of 10.5rem side by side, and the units side by side, as Bambu
+                            Studio maps them; on a phone, one tile a row (#944). */}
+                        <div className="flex flex-wrap gap-1.5">
+                          {group.spools.map((spool) => {
+                            // Shown, not hidden: printing two slots from one spool is a real
+                            // thing to want, and Bambuddy accepts it. It just should not be a
+                            // surprise.
+                            const elsewhere = plan.find(
+                              (choice) => choice.spool_id === spool.spool_id && choice.slot_id !== slot.slot_id,
+                            )
+                            return (
+                              <SpoolTile
+                                key={spool.spool_id}
+                                spool={spool}
+                                trays={trays}
+                                checked={chosen === spool.spool_id}
+                                printerId={options.printer_id}
+                                usedBy={elsewhere?.slot_id ?? null}
+                                showSides={showSides}
+                                matches={group.key === 'best' || closeMatch(slot, spool)}
+                              />
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ),
+                  )}
                 </RadioGroup>
               )}
               {chosenSpool && (

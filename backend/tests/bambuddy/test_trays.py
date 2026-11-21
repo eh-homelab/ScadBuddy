@@ -267,3 +267,69 @@ def test_loading_trays_reads_the_legacy_and_the_bitfield_states(state: int, load
     Above it, SPOOL set and STEADY clear is loading (5)."""
     tray = _filled(1, "FF0000FF", state=state)
     assert loading_trays(_native_status(tray)) == ({(0, 1)} if loading else set())
+
+
+# --- #6885: the measured H2C trays ---------------------------------------------------
+
+
+def _h2c_trays() -> list[SpoolOption]:
+    """The trays of prod's H2C that #6885 names (read in the print dialog for
+    ``library:1000001627`` on 2026-11-21): PLA in the AMS units, grey PETG in HT-A."""
+    return [
+        _loaded(-1, 0, 2, colour="#C12E1F", rgba="#C12E1FFF"),  # AMS-A slot 3, Bambu Red
+        _loaded(-2, 2, 0, colour="#00B1B7", rgba="#00B1B7FF"),  # AMS-C slot 1, Turquoise
+        _loaded(-3, 1, 3, colour="#000080", rgba="#000080FF"),  # AMS-B slot 4, Navy Blue
+        _loaded(-4, 128, 0, material="PETG", colour="#A7AEB2", rgba="#A7AEB2FF"),  # HT-A
+    ]
+
+
+def test_a_close_colour_in_another_material_is_suggested_rather_than_nothing() -> None:
+    """#6885: the file's one filament is grey PLA ``#A7AEB2``. No PLA tray is close, and
+    HT-A holds a PETG of exactly that grey. The slot opened empty; HT-A is suggested now."""
+    slot = SlotNeed(slot_id=1, material="PLA", colour="#A7AEB2")
+    assert suggest([slot], _h2c_trays(), printer_id=1) == [SlotChoice(slot_id=1, spool_id=-4)]
+
+
+def test_a_close_colour_in_the_files_material_still_wins() -> None:
+    trays = [*_h2c_trays(), _loaded(-5, 3, 0, colour="#A0A8AC", rgba="#A0A8ACFF")]
+    slot = SlotNeed(slot_id=1, material="PLA", colour="#A7AEB2")
+    assert suggest([slot], trays, printer_id=1) == [SlotChoice(slot_id=1, spool_id=-5)]
+
+
+def test_a_slot_with_no_close_colour_takes_the_nearest_loaded_tray_of_its_material() -> None:
+    """No tray is close to a green: the nearest loaded PLA, not an empty slot."""
+    slot = SlotNeed(slot_id=1, material="PLA", colour="#3F8E43")
+    assert suggest([slot], _h2c_trays(), printer_id=1) == [SlotChoice(slot_id=1, spool_id=-2)]
+
+
+def test_a_later_slot_takes_a_free_tray_before_it_shares_one() -> None:
+    slots = [
+        SlotNeed(slot_id=1, material="PLA", colour="#A7AEB2"),
+        SlotNeed(slot_id=2, material="PLA", colour="#A7AEB2"),
+    ]
+    chosen = suggest(slots, _h2c_trays(), printer_id=1)
+    assert chosen[0] == SlotChoice(slot_id=1, spool_id=-4)
+    assert chosen[1].spool_id != -4
+
+
+def test_nothing_loaded_in_this_printer_leaves_the_slot_for_the_user() -> None:
+    """The fallback takes loaded trays only: a shelf spool of another material and colour
+    needs a reload as well as a second look."""
+    shelf = [SpoolOption(spool_id=7, material="PETG", colour="#00FF00")]
+    slot = SlotNeed(slot_id=1, material="PLA", colour="#A7AEB2")
+    assert suggest([slot], shelf, printer_id=1) == []
+
+
+@pytest.mark.parametrize(
+    ("colour", "words"),
+    [
+        # #6885: Bambu Lab Turquoise read "grey", DEEPLEE Navy Blue read "purple".
+        ("#00B1B7", {"teal", "turquoise"}),
+        ("#000080", {"navy"}),
+        ("#C12E1F", {"red"}),
+        ("#A7AEB2", {"grey", "light grey"}),
+        ("#0000FF", {"blue"}),
+    ],
+)
+def test_a_colour_word_is_the_nearest_of_enough_words(colour: str, words: set[str]) -> None:
+    assert colour_word(colour) in words

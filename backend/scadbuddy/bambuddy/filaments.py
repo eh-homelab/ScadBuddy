@@ -186,7 +186,8 @@ class SpoolOption(BaseModel):
     #: run's tray choices only.
     label: str | None = None
     #: The tray's colour as a word ("blue", `trays.colour_word`), for "PLA blue in AMS-A
-    #: slot 1"; on a native run's tray choices only, as ``UnknownTray.colour_word``.
+    #: slot 1"; on a tray's choice only (a native run's, or `trays.tray_option`'s), as
+    #: ``UnknownTray.colour_word``.
     colour_word: str | None = None
     #: What the AMS says is left, in percent: an RFID spool's ``remain``; ``None`` for an
     #: untagged one, which reports -1.
@@ -660,7 +661,12 @@ def suggest(
     it is the closest colour for a single slot. Opening a PLA print with an unloaded
     TPU in one slot looks deliberate, for the reason :func:`_match_score` gives for PETG
     in a PLA slot. Such a slot with no free spool of that family shares a loaded one
-    already chosen whose colour fits, and is otherwise left for the user.
+    already chosen whose colour fits.
+
+    A slot still empty then takes the best spool loaded in this printer (#6885,
+    :func:`_fallback`), whatever its material or colour: an empty slot holds Print until
+    someone picks, and the dialog says why the choice differs from the file. A slot is
+    left empty only when no free spool is loaded in this printer and none taken is close.
     """
     scored = [
         (score, index, option)
@@ -695,7 +701,49 @@ def suggest(
             chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=best[1]))
         elif shared is not None:
             chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=shared[1]))
+        elif (fallback := _fallback(slot, spools, families, taken, printer_id)) is not None:
+            taken.add(fallback)
+            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=fallback))
     return chosen
+
+
+def _fallback(
+    slot: SlotNeed,
+    spools: list[SpoolOption],
+    families: set[str],
+    taken: set[int],
+    printer_id: int | None,
+) -> int | None:
+    """#6885: a spool loaded in this printer for a slot nothing matches, so a slot is never
+    left empty while a loaded tray can print it. The measured case: the file's one slot
+    is grey PLA ``#A7AEB2``, the H2C's HT-A holds grey PETG ``#A7AEB2``, and the slot
+    opened empty. The dialog says why the choice differs from the file (its material, or
+    its colour outside ``colour_matches``); every slot stays editable.
+
+    Lower is better, in this order: a spool no earlier slot took, the slot's opacity, a
+    colour within :data:`COLOUR_MATCH_DISTANCE`, the slot's material family (the plate's
+    for an undeclared slot), then the colour distance. So a close colour in another
+    material beats a far colour in the same one. A slot shares a tray an earlier slot
+    took only when every free tray is gone and that tray's colour is close: one spool for
+    two colours that differ would print the plate in one colour."""
+    wanted = {family(slot.material)} if slot.material else families
+    ranked: list[tuple[tuple[bool, bool, bool, bool, float], int]] = []
+    for option in spools:
+        if not _loaded_here(option, printer_id):
+            continue
+        distance = colour_distance(slot.colour, option.colour)
+        far = distance is None or distance > COLOUR_MATCH_DISTANCE
+        if option.spool_id in taken and far:
+            continue
+        key = (
+            option.spool_id in taken,
+            not same_opacity(slot.colour, option.rgba),
+            far and normalise_colour(slot.colour) is not None,
+            family(option.material) not in wanted,
+            1_000.0 if distance is None else distance,
+        )
+        ranked.append((key, option.spool_id))
+    return min(ranked)[1] if ranked else None
 
 
 def _anchor_family(
@@ -740,9 +788,10 @@ def _loaded_here(option: SpoolOption, printer_id: int | None) -> bool:
 def _match_score(slot: SlotNeed, option: SpoolOption, *, printer_id: int | None) -> float | None:
     """Lower is better; ``None`` means this spool is not offered for this slot.
 
-    A slot that declares a material only ever pre-selects that material — opening with
-    a PETG in a PLA slot would be a worse failure than opening with nothing, because it
-    looks deliberate.
+    A slot that declares a material matches only that material here. Another material
+    comes only from :func:`_fallback`, after every match failed, and the dialog then says
+    so ("PETG instead of the file's PLA", #6885): an empty slot was the worse failure,
+    because it held Print with a loaded tray of the right colour.
     """
     if slot.material and option.material.upper() != slot.material.upper():
         return None
