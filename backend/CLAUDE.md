@@ -501,6 +501,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   message's body row and its `scadbuddy_mcp` NOTIFY in one transaction (the header checked against
   the relay's shapes and the NOTIFY payload cap), a row taken or withdrawn once, and the sweep.
   Tests `tests/crud/test_crud_agent_mcp.py`.
+- The agent's change stream (#5299 D4, step 11): `agent_changes/hub.py` (`ChangeHub`, component
+  `agent_changes/component.py` `CHANGES`) registers the agent's five NOTIFY channels on the
+  process's one `PgListener` (before it runs) and taps `PgNotifyEventBus` (`taps`) for
+  `scadbuddy_events`, so it opens no connection; `api/crud_agent_changes.py` (area `changes`,
+  `GET …/agent/changes`) serves each agent process one server-sent event stream of them, in the
+  listener's order. A reconnect's `Last-Event-ID` (a logged event's id, or `0`) is replayed from
+  the `events` log (`position`, `replay`, at most `REPLAY_MAX`; else `resync`) before `ready`. A
+  stream's queue is bounded (`QUEUE_MAX`): a reader that falls behind loses it and gets a replay
+  and `reconnected`, as every stream does when the listener reconnects, and the listener never
+  waits on a reader. `STREAMS_PER_CREDENTIAL` (per credential and peer address, `stream_key`)
+  and `STREAMS_MAX` cap them (429). uvicorn waits for open responses before the lifespan's
+  shutdown, so the component chains a SIGTERM/SIGINT handler
+  in front of uvicorn's that ends every stream first. Tests `tests/crud/test_crud_agent_changes.py`.
   `api/crud_agent_publish.py` (areas `publish` and `session-reads`, #6501): the NOTIFYs the
   agent sent outside a store's write, a `session.*` bus event on `scadbuddy_events` (each field
   checked, so the payload stays small) and a warm eviction on `scadbuddy_warm_evict`; and two
@@ -849,7 +862,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   missing from a complete listing gets one `probe`, `GET` only (a supplier, location or
   insert type has no `GET` by id, so its listing is read again); only a definite 404 drops
   the link, and the next round makes the row again under its direction, while a spool that
-  names such a row waits (#6688, plan Decisions 187-192, 200 and 201). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
+  names such a row waits (#6688, plan Decisions 187-192 and 200-205). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
   Bambuddy instance, on the `bambuddy` queue (AUTO_UPGRADE; a change to its commands goes
   behind `workflow.patched`, and `tests/test_filament_sync_replay.py` replays
   `tests/fixtures/filament_sync_histories/`). The API nudges after a write on
@@ -866,7 +879,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   spools and recorded instance in one transaction (`bb_sync_results.reset_links`; it takes
   `confirm_instance`, 409 otherwise, and deletes no SB row), then nudges a full pass; a
   plan or results call for another instance than the configured one does nothing
-  (`LocalFilamentSync`). Agent `filament_sync_reset_links` (outward). A new
+  (`LocalFilamentSync`), and the pull takes no spool data (`bambuddy_pull.links_elsewhere`:
+  `pull_start` asks for none, the import is 409 `instance_changed`, and `LocalBbPull`
+  refuses a spool, usage or trays body with 409 `instance_changed`, #6845). The dry run
+  reads the configured Bambuddy's spools (a failed read is `bambuddy_unreadable: true`);
+  when it is the links' own Bambuddy at a new URL (`bb_sync_results.same_bambuddy`: every
+  linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
+  least half the links timed on both sides), a reset with `expect_kept: true` reads them
+  again and, while that holds, deletes nothing, records the configured instance and answers
+  `kept: true`; else 409 `proof_changed`, nothing written. `expect_kept: false` deletes
+  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward). A new
   workflow type: roll `scadbuddy-print` with `Recreate` (README, "A release that needs
   `Recreate`").
   History and metrics (#6269, spec §5.7; plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,

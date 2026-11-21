@@ -660,6 +660,12 @@ class _Planner:
     #: spool that names one waits.
     probing: set[tuple[str, UUID]] = field(default_factory=set)
     unsure: set[tuple[str, UUID]] = field(default_factory=set)
+    #: R-6688-9: rows missing from their listing whose probe the round's cap left out.
+    #: They count ``deferred``, and a spool that names one waits as for a probe.
+    capped: set[tuple[str, UUID]] = field(default_factory=set)
+    #: The round's write cap (`plan`'s ``limit``, bounded by `PlanRequest`), which
+    #: `missing` checks a probe against.
+    limit: int = field(kw_only=True)
 
     @property
     def full(self) -> bool:
@@ -676,8 +682,9 @@ class _Planner:
         hashes: dict[str, str],
         *,
         intent: bool = False,
+        retry_last: bool = True,
     ) -> None:
-        if (kind, sb_id) in self.errors:
+        if retry_last and (kind, sb_id) in self.errors:
             phase = _RETRY
         write = BbWrite(
             key=f"{kind}:{sb_id}:{op}",
@@ -727,7 +734,7 @@ class _Planner:
         would wait every pass. A linked row missing from its listing is in flight while
         its probe is planned or failed in this pass (R-6688-5)."""
         key = (ref.kind, ref.sb_id)
-        if key in self.probing or key in self.unsure:
+        if key in self.probing or key in self.unsure or key in self.capped:
             return True
         return key not in self.errors and (key in self.creating or key in self.intents)
 
@@ -966,15 +973,27 @@ class _Planner:
         so a later round makes the row again. A link `results` wrote after the snapshot
         was read (a create or a probe earlier in this pass) is not probed; nor is an item
         whose last write Bambuddy refused in this pass (R-T4-1), which a spool naming it
-        then waits for (``unsure``, R-6688-5)."""
+        then waits for (``unsure``, R-6688-5). A probe is a phase-0 write even for an
+        item with an error row from an earlier pass, so the cap takes phase 0 first, in
+        this order (`take`): a probe that does not fit is not planned, and its row counts
+        ``deferred``, as the cap's cut would count it (``capped``, R-6688-9)."""
         key = (kind, item.sb_id)
         if item.seen is not None and item.seen_at is not None and item.seen_at > self.snap.read_at:
             return
         if self.refused(kind, item.sb_id, create=False):
             self.unsure.add(key)
             return
+        if len(self.phases[0]) >= self.limit:
+            self.capped.add(key)
+            self.deferred.add(key)
+            return
         self.probing.add(key)
-        self.add(0, kind, item.sb_id, "probe", item.bb_id, {}, {})
+        self.add(0, kind, item.sb_id, "probe", item.bb_id, {}, {}, retry_last=False)
+
+    def unconfirmed(self) -> set[tuple[str, UUID]]:
+        """The linked rows a spool must not name by their Bambuddy id in this round: their
+        probe is planned, failed in this pass, or was cut by the cap (R-6688-5, R-6688-9)."""
+        return self.probing | self.unsure | self.capped
 
     def name_taken(self, kind: Kind, sb_id: UUID) -> None:
         """R-T4-8: a linked row renamed in SB to the name of an unlinked Bambuddy row would
@@ -1045,6 +1064,7 @@ class _Planner:
             if waiting:
                 read = all(
                     (r.kind, r.sb_id) in self.probing
+                    or (r.kind, r.sb_id) in self.capped
                     or (
                         self.read(r.kind)
                         and (r.kind, r.sb_id) not in self.archived
@@ -1619,14 +1639,15 @@ def plan(
                 "SELECT kind, sb_id, at FROM filament_bb_push_errors"
             ).fetchall()
         }
-        planner = _Planner(conn, snap, sync, BbRefs.read(conn), intents, sent, errors)
+        planner = _Planner(conn, snap, sync, BbRefs.read(conn), intents, sent, errors, limit=limit)
         planner.rows("supplier", _suppliers(conn), snap.suppliers, sync.suppliers, _SUPPLIER_FIELDS)
         planner.rows("location", _locations(conn), snap.locations, sync.locations, _LOCATION_FIELDS)
         planner.rows("insert_type", _insert_types(conn), snap.catalog, sync.spools, _CATALOG_FIELDS)
         planner.rows("filament", _filaments(conn), snap.filaments, sync.spools, _FILAMENT_FIELDS)
         # R-6688-5: a spool names a row Bambuddy may have deleted as a `Pending`, so it
         # waits for the row's probe (and its create again) instead of sending its old id.
-        planner.refs = planner.refs.without(planner.probing | planner.unsure)
+        unconfirmed = planner.unconfirmed()
+        planner.refs = planner.refs.without(unconfirmed)
         planner.spools()
         writes = planner.take(limit)
     return SyncPlan(
@@ -1638,4 +1659,7 @@ def plan(
         conflicts=planner.conflicts,
         directions=sync,
         interval_s=interval_s,
+        unconfirmed=cast(
+            "list[tuple[Kind, UUID]]", sorted(unconfirmed, key=lambda k: (k[0], str(k[1])))
+        ),
     )

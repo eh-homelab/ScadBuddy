@@ -19,7 +19,7 @@ from scadbuddy.filament import bb_sync_plan
 from scadbuddy.filament.bambuddy_pull import Pulls, pull
 from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op, ResultsReport
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
-from scadbuddy.filament.bb_sync_results import adopt_instance, apply_results
+from scadbuddy.filament.bb_sync_results import adopt_instance, apply_results, same_bambuddy
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.models import (
     InsertTypeCreate,
@@ -45,6 +45,7 @@ from tests.filament.test_bb_sync_plan import (
     _matching,
     _only,
     _plan,
+    _refuse,
     _row,
     _snap,
     _spool,
@@ -82,9 +83,16 @@ def _apply(
     results: list[BbWriteResult],
     instance: str = INSTANCE,
     pass_id: str | None = None,
+    unconfirmed: list[tuple[Kind, UUID]] | None = None,
 ) -> ResultsReport:
     return apply_results(
-        f, writes, results, instance=instance, now=datetime.now(UTC), pass_id=pass_id
+        f,
+        writes,
+        results,
+        instance=instance,
+        now=datetime.now(UTC),
+        pass_id=pass_id,
+        unconfirmed=unconfirmed or [],
     )
 
 
@@ -360,6 +368,58 @@ def test_a_spool_names_its_deleted_location_only_once_it_is_made_again(
     update = _only(third.writes, "update")
     assert (update.kind, update.sb_id, _body(update)) == ("spool", spool, {"location_id": 41})
     assert third.deferred == 0
+
+
+def test_a_spool_probe_beside_its_locations_probe_keeps_its_seen_location(
+    pg_pool: PgPool,
+) -> None:
+    """R-6688-10: ``results`` compares a spool's answer with SB's values as the plan made
+    them: a location probed in the same round may be gone, so its id is no SB value, and
+    the answer's ``location_id`` is not taken into ``bb_seen`` as SB's."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (shelf, spool))
+    _link(pg_pool, spool, 50, seen={"location_id": 7}, seen_at=datetime.now(UTC))
+    location = _write("location", shelf, "probe", 40)
+    probe = _write("spool", spool, "probe", 50)
+    results = [_refused(location, 503), _ok(probe, _answer(50, location_id=40))]
+    _apply(f, [location, probe], results)
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_seen"]["location_id"] == 7
+
+
+def test_a_spool_probe_while_its_locations_probe_failed_keeps_its_seen_location(
+    pg_pool: PgPool,
+) -> None:
+    """R-6688-11: the location's probe failed earlier in this pass (``unsure``), so this
+    round sends no write for it, and only the plan knows it is unconfirmed. ``results``
+    takes the plan's ``unconfirmed`` rows, so a spool's probe in this round still does not
+    take the answer's ``location_id`` into ``bb_seen`` as SB's."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (shelf, spool))
+    _link(
+        pg_pool, spool, 50, seen={"location_id": 7}, seen_at=datetime.now(UTC) - timedelta(hours=1)
+    )
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    _refuse(pg_pool, "location", shelf)
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    planned = _plan(f, _snap([], locations=[], read_at=read_at), sync)
+    probe = _only(planned.writes, "probe")
+    assert (probe.kind, probe.sb_id) == ("spool", spool)
+    assert planned.unconfirmed == [("location", shelf)]
+    _apply(
+        f,
+        planned.writes,
+        [_ok(probe, _answer(50, location_id=40))],
+        unconfirmed=planned.unconfirmed,
+    )
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_seen"]["location_id"] == 7
 
 
 def test_a_spool_naming_an_archived_deleted_location_goes_without_it(pg_pool: PgPool) -> None:
@@ -1029,3 +1089,47 @@ def test_boot_keeps_an_instance_already_recorded(pg_pool: PgPool) -> None:
         conn.execute("UPDATE filament_bb_sync_state SET instance = 'ffffffffffff'")
     adopt_instance(f, INSTANCE)
     assert _instance(pg_pool) == "ffffffffffff"
+
+
+#: When the links' Bambuddy last changed a linked spool, to the microsecond (#6845).
+SEEN = datetime(2026, 11, 20, 10, 0, 0, 123456, tzinfo=UTC)
+
+
+def _held(bb_id: int, at: datetime | None = SEEN) -> BbSpool:
+    return BbSpool.model_validate(
+        {"id": bb_id, "material": "PLA", "label_weight": 1000, "weight_used": 0.0}
+        | ({} if at is None else {"updated_at": at.isoformat()})
+    )
+
+
+@pytest.mark.parametrize(
+    ("links", "rows", "bad", "same"),
+    [
+        # Every linked spool is there, one as last seen, one changed since.
+        ({11: SEEN, 12: SEEN}, [_held(11), _held(12, SEEN + timedelta(hours=1))], [], True),
+        # A link with no time (a pre-#6265 link) only needs its row there, while at
+        # least half the links have a time on both sides (Decision 199).
+        ({11: SEEN, 12: None}, [_held(11), _held(12, None)], [], True),
+        # Most links have no time: one exact match is too little to prove it.
+        ({11: SEEN, 12: None, 13: None}, [_held(11), _held(12), _held(13)], [], False),
+        # Most of Bambuddy's rows have no time: the same.
+        ({11: SEEN, 12: SEEN, 13: SEEN}, [_held(11), _held(12, None), _held(13, None)], [], False),
+        # A linked spool this Bambuddy does not hold.
+        ({11: SEEN, 12: SEEN}, [_held(11)], [], False),
+        # A row older than ScadBuddy saw it: an older copy, or another Bambuddy.
+        ({11: SEEN, 12: SEEN}, [_held(11), _held(12, SEEN - timedelta(hours=1))], [], False),
+        # Every row changed since: nothing ties this Bambuddy to the links.
+        ({11: SEEN}, [_held(11, SEEN + timedelta(seconds=1))], [], False),
+        # A row that did not parse may be a linked one: the listing proves nothing.
+        ({11: SEEN}, [_held(11)], [None], False),
+        # No spool link: nothing to prove it by.
+        ({}, [_held(11)], [], False),
+    ],
+)
+def test_the_proof_of_the_same_bambuddy(
+    links: dict[int, datetime | None], rows: list[BbSpool], bad: list[int | None], same: bool
+) -> None:
+    """#6845 R-6845-2: the configured Bambuddy is the links' Bambuddy only when it holds
+    every linked spool, none older than its link's `bb_updated_at`, one exactly that,
+    and at least half the links have a time on both sides (Decision 199)."""
+    assert same_bambuddy(links, rows, bad) is same

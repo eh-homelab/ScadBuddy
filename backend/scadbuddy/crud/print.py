@@ -179,11 +179,13 @@ from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
     BbWrite,
     BbWriteResult,
+    Kind,
     PlanRequest,
     ResultsReport,
     ResultsRequest,
     SyncPassResult,
     SyncPlan,
+    without_empty_unconfirmed,
 )
 from scadbuddy.filament.models import (
     ClaimedNotification,
@@ -1488,10 +1490,18 @@ class RemoteFilamentSync:
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
         pass_id: str | None,
+        unconfirmed: Sequence[tuple[Kind, UUID]] = (),
     ) -> ResultsReport:
-        body = ResultsRequest(
-            instance=instance, writes=list(writes), results=list(results), pass_id=pass_id
-        ).model_dump(mode="json")
+        # An empty `unconfirmed` is left out of the body, for an API from before R-6688-11.
+        body = without_empty_unconfirmed(
+            ResultsRequest(
+                instance=instance,
+                writes=list(writes),
+                results=list(results),
+                pass_id=pass_id,
+                unconfirmed=list(unconfirmed),
+            )
+        )
         response = await self._client.request("POST", f"{BASE}/filament/sync/results", json=body)
         return ResultsReport.model_validate(response.json())
 

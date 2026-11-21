@@ -151,11 +151,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       return t.db.sql(...args)
     }, t.db.sql) as unknown as typeof t.db.sql
     const watched = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(t.db.sql, new SqlFlowRunReads(t.db.sql)), pollMs: 20 })
-    const waiting = env().run(watched[FLOW_SESSION_TURN]!, { session_id: sid, turn_id: 't1' })
+    // Handled from the start: the wait may refuse while the DELETE below is still awaited,
+    // and a rejection with no handler yet fails the run as unhandled.
+    const refused = failure(env().run(watched[FLOW_SESSION_TURN]!, { session_id: sid, turn_id: 't1' }))
     // Its first read found the turn; the second is the loop, polling past it.
     await expect.poll(() => reads).toBeGreaterThanOrEqual(2)
     await t.db.sql`DELETE FROM ai_sessions WHERE id = ${sid}`
-    const err = await failure(waiting)
+    const err = await refused
     expect([err.type, err.nonRetryable, err.message]).toEqual([SESSION_REFUSED, true, `session ${sid} is gone; its turn t1 will not finish`])
   })
 

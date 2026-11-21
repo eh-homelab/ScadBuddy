@@ -130,7 +130,10 @@ usage to win over color picks the position by hand.
      `material`, compared case-insensitively like the `CF`/`GF` test. Glow cannot be read from `type`: `Bambu PLA Glow @base`
      inherits `fdm_filament_pla`, so its `type` is plain `PLA`. A group whose
      spool is unknown (no inventory spool assigned) is judged by `type` alone,
-     and the dialog says Glow could not be checked.
+     and the dialog says Glow could not be checked. Since #6872 it names each such slot
+     (`RackPickView.unchecked`): no spool chosen, an empty tray chosen, or a spool (an SB
+     number, or the spool in a tray chosen for itself) that is not in the inventory. A
+     tray chosen for itself (a negative id) names the SB spool in that tray.
 
    A group is abrasive when **any** of its filaments is: several filaments can
    share one hotend, and taking only the first (as the group's color does) could
@@ -710,7 +713,8 @@ Unknown 1 does not gate the build: it ships with an empty table (above).
 - A rack color whose alpha byte is `00` (the rack reports `00000000` for a hotend with
   no filament loaded) is no color: it never matches, not even a black group.
 - `RackOption` also carries `nozzle_diameter` and `flow`; `RackPickView` carries
-  `glow_unchecked`, and its `group_id` is `null` in the preview.
+  `glow_unchecked` and, since #6872, `unchecked` (each slot behind it, named), and its
+  `group_id` is `null` in the preview.
 - An empty `serial_number` is skipped by `seen()`; a pick of such a hotend is sent but
   writes no `rack_nozzle_picks` row.
 - A stale rack pick (Bambuddy rejects it at dispatch) shows in the print's progress

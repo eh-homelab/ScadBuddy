@@ -4,8 +4,8 @@ import type { WarmSessions } from './warm.js'
 import { evictOnNotify, WARM_EVICT_CHANNEL } from './warmEvict.js'
 
 // How the warm cache follows the runtime settings and the evictions (main.ts):
-// at start, on NOTIFY, and, since a NOTIFY sent while a replica's listener is
-// down is lost (events/pgListener.ts), when the listener is back and every
+// at start, on NOTIFY, and, since a NOTIFY sent while a replica's change stream is
+// down is lost (events/changeStream.ts), when the stream is back and every
 // RESYNC_MS. A running turn is never touched by any of them.
 
 /** How often the settings are re-read and each idle process is checked against a fresh assembly. */

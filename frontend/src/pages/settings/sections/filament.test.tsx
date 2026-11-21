@@ -4,7 +4,7 @@ import { api } from '../../../api/client'
 import { getSyncStatus } from '../../../api/filament'
 import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
-import { linkOtherBambuddy } from '../../../mocks/features/filament/sync'
+import { linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -371,13 +371,61 @@ describe('Filament (#6262)', () => {
         ])
         await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
         await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-        expect(sent).toEqual({ confirm_instance: '0ld0ld0ld0ld' })
+        expect(sent).toEqual({ confirm_instance: '0ld0ld0ld0ld', expect_kept: false })
         expect(await within(filament).findByText('22 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
         expect(within(filament).queryByRole('button', { name: 'Reset Bambuddy links' })).toBeNull()
         expect(within(filament).queryByRole('list', { name: 'Items not synced' })).toBeNull()
       } finally {
         server.events.removeAllListeners()
       }
+    })
+
+    it('warns that an untagged spool can end up twice when the Bambuddy is another one', async () => {
+      linkOtherBambuddy()
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      expect(dialog).toHaveTextContent('a spool with no tag can end up twice')
+    })
+
+    it('keeps the links when the Bambuddy set up now is the same one at a new address (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { same: true })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Keep the Bambuddy links?' })
+      expect(dialog).toHaveTextContent('Nothing is deleted')
+      expect(dialog).not.toHaveTextContent('end up twice')
+      expect(within(dialog).queryByRole('list', { name: 'What the reset deletes' })).toBeNull()
+      await user.click(within(dialog).getByRole('button', { name: 'Keep links' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+      expect(await within(filament).findByText('Links kept. A full pass now syncs with the Bambuddy at its new address.')).toBeInTheDocument()
+      expect(within(filament).queryByRole('button', { name: 'Reset Bambuddy links' })).toBeNull()
+    })
+
+    it('reads the dry run again when the Bambuddy changed before "Keep links" (#6845 R-6845-6)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { same: true })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Keep the Bambuddy links?' })
+      loseSameBambuddy()
+      await user.click(within(dialog).getByRole('button', { name: 'Keep links' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'The Bambuddy set up now is no longer proven to be the same one. Nothing was deleted.',
+      )
+      expect(await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })).toBeInTheDocument()
+      expect(within(dialog).getByRole('list', { name: 'What the reset deletes' })).toBeInTheDocument()
+      expect((await getSyncStatus()).instance_changed).toBe(true)
+    })
+
+    it('offers the delete when the Bambuddy set up now cannot be read (#6845 R-6845-6)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { unreadable: true })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      expect(dialog).toHaveTextContent('The Bambuddy set up now could not be read')
+      await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+      expect((await getSyncStatus()).instance_changed).toBe(false)
     })
 
     it('keeps everything when the person cancels', async () => {

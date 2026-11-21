@@ -466,8 +466,9 @@ on shutdown.
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
     are not pools, and neither is closed while idle: the follows' connection opens at
-    the first claim and closes only after a failed statement or at shutdown. The agent sidecar holds at most 9 (`agent/src/db.ts`
-    `AGENT_DB_CONNECTIONS`), briefly more while a failed lock connection is replaced.
+    the first claim and closes only after a failed statement or at shutdown. The agent sidecar holds at most 8 (`agent/src/db.ts`
+    `AGENT_DB_CONNECTIONS`), briefly more while a failed lock connection is replaced, and no
+    `LISTEN` connection: its NOTIFY channels reach it over the API's change stream (#5299 D4).
     `scadbuddy_db_pool_connections{pool}`, `scadbuddy_db_pool_max_connections{pool}`
     and `scadbuddy_db_pool_requests_waiting{pool}` (callers queued for a connection: a
     pool too small for its load) show each pool, and every pool names itself as its
@@ -959,7 +960,10 @@ the zones: [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md
    it may not.
 5. `SCADBUDDY_AUTH_MODE=enforce` on the API and the agent sidecar. The API refuses to
    start without a usable login, so a broken login fails the new pod's readiness and the
-   rollout keeps the old pods.
+   rollout keeps the old pods. The maintainers' own prod never takes this step, on purpose
+   (the owner's decision of 2026-11-17: its front door already gates people). It runs
+   `off`, or `observe` while a measurement runs (`observe` for #5297 on 2026-11-21, read
+   with `kubectl -n bambuddy get deploy scadbuddy`), so its manifest is not an unfinished rollout.
 
 The way back is `SCADBUDDY_AUTH_MODE=observe` and a rollout; with the issuer down, a
 person signs in with the break-glass link
