@@ -639,7 +639,7 @@ export function TypePage() {
       <section aria-label="Pressure advance" className="mt-6 flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">K values</h2>
         <p className="text-[12px] text-muted-foreground">Pressure advance, by printer, extruder and nozzle.</p>
-        <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} sources={new Map((saved?.k_values ?? []).map((row) => [keyOf(row), row.source]))} />
+        <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} saved={new Map((saved?.k_values ?? []).map((row) => [keyOf(row), row]))} />
       </section>
 
       {!creating && (

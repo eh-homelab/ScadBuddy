@@ -33,11 +33,20 @@ interface Props {
    */
   typeKeys?: ReadonlySet<string>
   /**
-   * Who set each saved row, by key (`keyOf`): a printer calibration may be replaced by a
-   * newer one, a person's row never is (R-6714-19).
+   * The saved rows, by key (`keyOf`), which say who set each one: a printer calibration
+   * may be replaced by a newer one, a person's row never is (R-6714-19). A row edited and
+   * not yet saved says nothing, since its save makes it the person's (R-6714-22).
    */
-  sources?: ReadonlyMap<string, TypeKValue['source']>
+  saved?: ReadonlyMap<string, TypeKValue>
 }
+
+/** Whether a draft row still holds what its saved row does (`0.020` is `0.02`). */
+const unchanged = (row: TypeKValueInput, was: TypeKValue) =>
+  Number(row.k_value) === Number(was.k_value) &&
+  (row.nozzle_type ?? null) === (was.nozzle_type ?? null) &&
+  (row.name ?? null) === (was.name ?? null) &&
+  (row.cali_idx ?? null) === (was.cali_idx ?? null) &&
+  (row.setting_id ?? null) === (was.setting_id ?? null)
 
 
 /**
@@ -46,7 +55,7 @@ interface Props {
  * index and slicer setting id the printer reported stay on the row; a person edits the
  * rest.
  */
-export function KValueTable({ rows, onChange, printers, inherited, typeKeys, sources }: Props) {
+export function KValueTable({ rows, onChange, printers, inherited, typeKeys, saved }: Props) {
   const listId = useId()
   const set = (at: number, patch: Partial<TypeKValueInput>) => onChange(rows.map((row, i) => (i === at ? { ...row, ...patch } : row)))
   const known = new Set(printers.map((printer) => printer.id))
@@ -107,7 +116,8 @@ export function KValueTable({ rows, onChange, printers, inherited, typeKeys, sou
                 <td className="px-2 py-1">
                   <Input aria-label="K value name" className="h-7 min-w-36" value={row.name ?? ''} onChange={(e) => set(at, { name: e.target.value === '' ? null : e.target.value })} />
                   {(() => {
-                    const source = sources?.get(keyOf(row))
+                    const was = saved?.get(keyOf(row))
+                    const source = was && unchanged(row, was) ? was.source : undefined
                     return source && source !== 'person' ? <p className="mt-0.5 text-[12px] text-muted-foreground">{SOURCE_TEXT[source]}</p> : null
                   })()}
                 </td>

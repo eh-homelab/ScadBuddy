@@ -618,6 +618,16 @@ class TypeKValueCreate(_In):
     setting_id: Text | None = None
 
 
+class ShownKValue(TypeKValueCreate):
+    """A K value row a fill's refresh showed, sent back as ``shown_k_values`` to compare.
+    It takes the refresh's ``type_id`` and ``source`` too, so a client may echo the rows as
+    it got them, and drops both (#6859, R-6714-22): only the server sets a row's source,
+    and the comparison and the write never read them."""
+
+    type_id: Annotated[UUID | None, Field(exclude=True)] = None
+    source: Annotated[str | None, Field(exclude=True)] = None
+
+
 class TypeKValuePatch(_Patch):
     not_null = frozenset({"k_value"})
     nozzle_type: Text | None = None

@@ -42,7 +42,13 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import KProfile, LocalPresetDetail, Spool
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
-from scadbuddy.filament.types import LinkedPrinter, SpoolTypeStore, TypeTempError, k_value_key
+from scadbuddy.filament.types import (
+    LinkedPrinter,
+    SpoolTypeStore,
+    TypeTempError,
+    k_identity,
+    k_value_key,
+)
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.density import DensityTable, density_text
 from scadbuddy.slicing.profiles import ProfileError
@@ -306,10 +312,10 @@ class FillRequest(BaseModel):
     apply: dict[Field, Value] | None = None
     #: With ``apply``: also write the K values a refresh showed, while the type has none.
     k_values: bool = False
-    #: With ``k_values``: the K values the refresh showed (its ``k_values``, without
-    #: ``type_id``; ``[]`` for none), required then (R-6714-i). 409 when Bambuddy now
-    #: gives others (R-6714-g).
-    shown_k_values: list[m.TypeKValueCreate] | None = None
+    #: With ``k_values``: the K values the refresh showed (its ``k_values``, as sent or
+    #: without ``type_id`` and ``source``, which are ignored, R-6714-22; ``[]`` for none),
+    #: required then (R-6714-i). 409 when Bambuddy now gives others (R-6714-g).
+    shown_k_values: list[m.ShownKValue] | None = None
 
     @model_validator(mode="after")
     def _shown_with_k_values(self) -> Self:
@@ -437,16 +443,6 @@ class _KImport:
     @property
     def rows(self) -> list[m.TypeKValueCreate]:
         return [*self.spools, *self.printers]
-
-
-def _same_k(row: m.TypeKValue, new: m.TypeKValueCreate) -> bool:
-    """Whether a calibration gives what its key's imported row already holds."""
-    keep = ("nozzle_type", "name", "cali_idx", "setting_id")
-    return (
-        row.k_value.normalize() == new.k_value.normalize()
-        and all(getattr(row, f) == getattr(new, f) for f in keep)
-        and k_value_key(row.model_dump()) == k_value_key(new.model_dump())
-    )
 
 
 def _k_number(text: str) -> Decimal | None:
@@ -820,7 +816,9 @@ class TypeFiller:
                         continue
                     taken.add(key)
                     was = imported.get(key)
-                    if was is not None and _same_k(was, one):
+                    if was is not None and k_identity(was.model_dump()) == k_identity(
+                        one.model_dump()
+                    ):
                         continue
                     rows.append(one)
         return rows, reasons

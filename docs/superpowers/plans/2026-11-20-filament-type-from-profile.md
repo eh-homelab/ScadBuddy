@@ -244,7 +244,8 @@ findings):
   row of its keys is unchanged (#6857 decides it). A person's save (`PUT …/k-values`) tags each
   row it adds or changes `person` and keeps the source of a row sent as it was, so saving other
   rows does not turn a calibration into a person's. A write never takes `source` from a body:
-  `TypeKValueCreate` has none, so `shown_k_values` and a PUT send rows without it. The type
+  `TypeKValueCreate` has none, so a PUT sends rows without it (a `shown_k_values` row may carry
+  it, and it is dropped: R-6714-22). The type
   page shows it beside a row's name ("Printer calibration", "From linked Bambuddy spools",
   "From 3DFP"; nothing for a person's).
 - R-6714-20 (finding 4): the type comes first in a spool's drying defaults, so a fill that
@@ -258,6 +259,21 @@ findings):
   the fill validates the rows one by one, a row of another shape skipped and counted in
   `k_reason`. The spool page's drying line says a slicer profile gives the AMS HT's values and
   to lower them in an AMS 2 Pro (65 °C at most), since `DRYING_AT` stays the AMS HT's pair.
+
+Decisions of the PR #6859 fix round (2026-11-21):
+
+- R-6714-22: a `shown_k_values` row is `ShownKValue`: `TypeKValueCreate`'s fields, plus an
+  optional `type_id` and `source` that are accepted and dropped (excluded from its dump), so a
+  client that echoes the refresh's `k_values` as it got them is not refused with 422. The
+  shown rows are only compared with what Bambuddy gives now (`_k_key`, which reads neither);
+  the rows written are the server's own import, tagged by the server (`profile` or
+  `printer_calibration`), so a client's `source` never reaches a stored row. A `PUT
+  …/k-values` stays strict (`TypeKValueCreate`, `extra="forbid"`): a `source` there is a 422,
+  never silently dropped, because a PUT is a person's write and the ruling keeps the body
+  free of anything the server owns. One comparison of a K row's values, `types.py`
+  `k_identity`, serves the fill's preview (`_printer_k`), `add_k_values` and `set_k_values`.
+  The type page shows no source on a draft row whose values differ from its saved row (its
+  save makes it the person's), and shows it again when the edit is undone.
 
 ## Tasks
 

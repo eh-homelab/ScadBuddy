@@ -103,9 +103,11 @@ def k_value_key(row: Mapping[str, Any]) -> tuple[str, int, Decimal | str]:
     return str(row["printer_id"]), int(row["extruder"]), number
 
 
-def _k_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+def k_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
     """A K value row's key and values, without its source: equal when a save left the row
-    as it was (``0.40`` is ``0.4``, ``0.020`` is ``0.02``)."""
+    as it was, or a calibration gives what its key's row holds (``0.40`` is ``0.4``,
+    ``0.020`` is ``0.02``). The one comparison for both the fill's preview
+    (`TypeFiller._printer_k`) and the writes (`add_k_values`, `set_k_values`)."""
     k = row["k_value"]
     return (
         *k_value_key(row),
@@ -347,7 +349,7 @@ class SpoolTypeStore:
                     if has is not None:
                         return None
                 was = {
-                    _k_identity(r): r["source"]
+                    k_identity(r): r["source"]
                     for r in conn.execute(
                         f"SELECT {_K_COLUMNS} FROM filament_spool_type_k_values WHERE type_id = %s",
                         (type_id,),
@@ -358,7 +360,7 @@ class SpoolTypeStore:
                         "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
                     )
                     for row in rows:
-                        tag = source or was.get(_k_identity(row.model_dump()), "person")
+                        tag = source or was.get(k_identity(row.model_dump()), "person")
                         _insert_k(conn, type_id, row, tag)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
@@ -426,7 +428,7 @@ class SpoolTypeStore:
                         old = held.get(key)
                         if old is not None and (
                             old["source"] != "printer_calibration"
-                            or _k_identity(old) == _k_identity(row.model_dump())
+                            or k_identity(old) == k_identity(row.model_dump())
                         ):
                             continue
                         if old is not None:
