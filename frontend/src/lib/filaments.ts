@@ -93,17 +93,48 @@ export function closeMatch(slot: SlotNeed, spool: SpoolOption): boolean {
  * #6885 — why the spool chosen for a slot is not what the file asks for, in words: "PETG
  * instead of the file's PLA", "Red, not the file's colour". Empty when it is. The server's
  * suggestion falls back to another material or colour only when nothing closer is
- * loaded (`filaments.py` `_fallback`), and the slot then says so.
+ * loaded (`filaments.py` `_fallback`), and the slot then says so. A slot that declares no
+ * material is judged by the plate's families (`plateFamilies`), as `_fallback` ranks it.
  */
-export function choiceReasons(slot: SlotNeed, spool: SpoolOption, trays: boolean): string[] {
+export function choiceReasons(
+  slot: SlotNeed,
+  spool: SpoolOption,
+  trays: boolean,
+  plate: readonly string[] = [],
+): string[] {
   const reasons: string[] = []
-  if (slot.material && materialFamily(slot.material) !== materialFamily(spool.material)) {
+  const family = materialFamily(spool.material)
+  if (slot.material && materialFamily(slot.material) !== family) {
     reasons.push(`${spool.material || 'Another material'} instead of the file's ${slot.material}`)
+  } else if (!slot.material && plate.length > 0 && !plate.includes(family)) {
+    reasons.push(`${spool.material || 'Another material'} instead of the plate's ${plate.join(' or ')}`)
   }
   if (slot.colour && spool.colour && !(slot.colour_matches ?? []).includes(spool.spool_id)) {
     reasons.push(`${colourName(spool, trays)}, not the file's colour`)
   }
   return reasons
+}
+
+/**
+ * #6885 review — the material families of the plate, for a slot that declares none: the
+ * families the other slots declare, as `filaments.py` `suggest` takes them. With none
+ * declared, the family most of the chosen spools share (the suggestion's anchor family,
+ * `_anchor_family`, picks most slots in one family); none on a tie.
+ */
+export function plateFamilies(options: Pick<FilamentOptions, 'slots' | 'spools'>, plan: SlotChoice[]): string[] {
+  const declared = [
+    ...new Set((options.slots ?? []).filter((slot) => slot.material).map((slot) => materialFamily(slot.material))),
+  ]
+  if (declared.length > 0) return declared
+  const byId = new Map((options.spools ?? []).map((spool) => [spool.spool_id, spool]))
+  const counts = new Map<string, number>()
+  for (const choice of plan) {
+    const spool = byId.get(choice.spool_id)
+    if (spool) counts.set(materialFamily(spool.material), (counts.get(materialFamily(spool.material)) ?? 0) + 1)
+  }
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1])
+  if (ranked.length === 0 || (ranked.length > 1 && ranked[0]![1] === ranked[1]![1])) return []
+  return [ranked[0]![0]]
 }
 
 /** One heading of the tray grid and the spools under it. */
@@ -124,7 +155,7 @@ export interface TileGroup {
 export function tileGroups(spools: SpoolOption[], slot: SlotNeed, printerId: number | null | undefined): TileGroup[] {
   const best = slot.colour ? spools.filter((spool) => closeMatch(slot, spool)) : []
   const inBest = new Set(best.map((spool) => spool.spool_id))
-  const units = new Map<string, { order: [number, number, number]; group: TileGroup }>()
+  const units = new Map<string, { order: [string, number, number]; group: TileGroup }>()
   const elsewhere: SpoolOption[] = []
   const shelf: SpoolOption[] = []
   for (const spool of spools) {
@@ -148,12 +179,13 @@ export function tileGroups(spools: SpoolOption[], slot: SlotNeed, printerId: num
     const unit = amsUnitLabel(loaded.ams_id)
     const label = printerId === null || printerId === undefined ? `${loaded.printer_name ?? 'A printer'} · ${unit}` : unit
     units.set(key, {
-      order: [Number(loaded.ams_id === 255), loaded.ams_id, Number(loaded.printer_id ?? 0)],
+      // The printer first, so one printer's units stay together when no printer is chosen.
+      order: [String(loaded.printer_id ?? ''), Number(loaded.ams_id === 255), loaded.ams_id],
       group: { key, label, spools: [spool] },
     })
   }
   const byUnit = [...units.values()]
-    .sort((a, b) => a.order[0] - b.order[0] || a.order[1] - b.order[1] || a.order[2] - b.order[2])
+    .sort((a, b) => a.order[0].localeCompare(b.order[0]) || a.order[1] - b.order[1] || a.order[2] - b.order[2])
     .map((entry) => entry.group)
   return [
     ...(best.length > 0 ? [{ key: 'best', label: 'Closest to the file', spools: best }] : []),
