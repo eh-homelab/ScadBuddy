@@ -214,7 +214,7 @@ describe('PrintPicker · 3D preview (#1723)', () => {
   })
 })
 
-/** #768 — nozzles, quality, plate type, options, project and copies are Advanced steps. */
+/** #768 — nozzles, quality, options, project and copies are Advanced steps. */
 async function showAdvanced() {
   fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
   await screen.findByRole('group', { name: /nozzles/i })
@@ -277,13 +277,13 @@ afterEach(async () => {
 })
 
 describe('PrintPicker', () => {
-  it('opens in Simple mode on the spools, the checks and Print alone, with no pipeline list (#768)', async () => {
+  it('opens in Simple mode on the spools, the plate, the checks and Print alone, with no pipeline list (#768, #6884)', async () => {
     renderPicker()
     await loaded()
     expect(screen.getByRole('switch', { name: 'Advanced' })).toHaveAttribute('aria-checked', 'false')
     expect(screen.queryByRole('group', { name: /nozzles/i })).toBeNull()
     expect(screen.queryByRole('group', { name: /quality/i })).toBeNull()
-    expect(screen.queryByLabelText('Plate')).toBeNull()
+    expect(screen.getByLabelText('Plate')).toBeInTheDocument()
     expect(screen.queryByLabelText('Copies')).toBeNull()
     expect(screen.queryByTestId('project-select')).toBeNull()
     expect(screen.queryByText('Options')).toBeNull()
@@ -1797,8 +1797,8 @@ describe('PrintPicker · Plate type', () => {
   })
 })
 
-describe('PrintPicker · Simple-mode plate type (#768)', () => {
-  it('sends the plate type the choices read chose, with the step not shown', async () => {
+describe('PrintPicker · Simple-mode plate type (#768, #6884)', () => {
+  it('opens on the plate type the choices read chose, and sends the one picked', async () => {
     server.use(
       http.get('/api/v1/print/outputs/:id/choices', () =>
         HttpResponse.json({ ...choicesView, bed_type: 'Engineering Plate' }),
@@ -1808,10 +1808,19 @@ describe('PrintPicker · Simple-mode plate type (#768)', () => {
     const { user } = renderPicker()
     await loaded()
 
-    expect(screen.queryByLabelText('Plate')).toBeNull()
+    expect(screen.getByLabelText('Plate')).toHaveTextContent('Engineering Plate')
+    await pick(user, screen.getByLabelText('Plate'), 'Textured PEI Plate')
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
-    expect(bodies[0]).toMatchObject({ choices: { bed_type: 'Engineering Plate' } })
+    expect(bodies[0]).toMatchObject({ choices: { bed_type: 'Textured PEI Plate' } })
+  })
+
+  it('shows the plate step once in Advanced', async () => {
+    renderPicker()
+    await loaded()
+    expect(screen.getAllByLabelText('Plate')).toHaveLength(1)
+    await showAdvanced()
+    expect(screen.getAllByLabelText('Plate')).toHaveLength(1)
   })
 })
 

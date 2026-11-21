@@ -19,14 +19,14 @@ test.describe('print dialog', () => {
     return dialog
   }
 
-  test('opens in Simple mode on the spools and Print alone, and prints (#768)', async ({ page }) => {
+  test('opens in Simple mode on the spools, the plate and Print alone, and prints (#768, #6884)', async ({ page }) => {
     const dialog = await openDialog(page)
-    // No pipelines any more, and no nozzle, quality, plate, options, project or copies
-    // until Advanced is on.
+    // No pipelines any more, and no nozzle, quality, options, project or copies until
+    // Advanced is on. The plate shows in both modes (#6884).
     await expect(dialog.getByText(/pipeline/i)).toHaveCount(0)
     await expect(dialog.getByRole('group', { name: 'Nozzles' })).toHaveCount(0)
     await expect(dialog.getByLabel('Copies')).toHaveCount(0)
-    await expect(dialog.getByLabel('Plate')).toHaveCount(0)
+    await expect(dialog.getByLabel('Plate')).toHaveCount(1)
     await expect(dialog.getByTestId('print-checks')).toBeVisible()
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
