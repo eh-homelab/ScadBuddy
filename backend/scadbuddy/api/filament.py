@@ -1798,7 +1798,9 @@ def _configured(url: str | None) -> str | None:
         "(`spools`), the supplier, location, insert type and spool type links "
         "(`suppliers`, `locations`, `insert_types`, `filaments`: each row's Bambuddy id, "
         "hashes and seen copy), the open create `intents`, the `errors` rows and the "
-        "Bambuddy spools the pull `ignored`. Reads ScadBuddy only."
+        "Bambuddy spools the pull `ignored`. Reads ScadBuddy only. The counts are "
+        "approximate: they are read without a lock, so a pass that runs meanwhile can "
+        "change them. The answer of the `POST` gives the counts it deleted."
     ),
 )
 async def preview_filament_sync_reset(

@@ -723,6 +723,10 @@ class LocalFilamentSync:
         pass_id: str | None,
     ) -> ResultsReport:
         read = await asyncio.to_thread(self._settings.read, {"bambuddy_url"})
+        # This reads bambuddy_url before apply_results takes the state row's lock. After a
+        # reset the row's instance is NULL, so this check is what stops an old pass's
+        # results. It holds because a reset is refused until the URL has changed
+        # (Decisions 165, 168).
         if _foreign(read["bambuddy_url"], instance):
             logger.warning(
                 "Bambuddy sync results for another instance are ignored",
