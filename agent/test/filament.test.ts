@@ -286,6 +286,13 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     expect(tool('filament_spool_add_event').description).toContain('drying_defaults')
   })
 
+  it("names a spool's drying defaults and its own drying values (#6856)", () => {
+    const get = tool('filament_spool_get').description
+    for (const word of ['drying_defaults', 'temp_from', 'hours_from']) expect(get).toContain(word)
+    expect(tool('filament_spool_upsert').description).toContain('drying_temp_c')
+    expect(tool('filament_type_fill_from_profile').description).toContain('earlier printer calibration')
+  })
+
   it('bounds tdfp_id in the upsert fields to a positive integer below 2^31, or null', () => {
     const upsert = (tdfp_id: unknown) => tool('filament_type_upsert').parse({ fields: { tdfp_id } })
     for (const bad of [0, -1, 1.5, 2147483648, '12']) expect(() => upsert(bad)).toThrow()

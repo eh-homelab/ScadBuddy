@@ -29,7 +29,8 @@ describe('the spool page and drying', () => {
     const temp = await screen.findByLabelText('Drying temperature (°C)')
     await waitFor(() => expect(temp).toHaveValue('70'))
     expect(screen.getByLabelText('Hours')).toHaveValue('8')
-    expect(screen.getByText('Filled from its type and material. Change them if this drying differs.')).toBeInTheDocument()
+    // A profile fill takes the AMS HT's values, which can be above an AMS 2 Pro's 65 °C (#6856).
+    expect(screen.getByText("Filled from its type and material. A slicer profile gives the AMS HT's values; lower them when you dry in an AMS 2 Pro (65 °C at most).")).toBeInTheDocument()
 
     await user.clear(temp)
     await user.type(temp, '60')
@@ -39,6 +40,19 @@ describe('the spool page and drying', () => {
     expect((await getSpool(spoolId(2))).last_dried_hours).toMatch(/^8/)
     // Recorded, the form shows the defaults again.
     await waitFor(() => expect(screen.getByLabelText('Drying temperature (°C)')).toHaveValue('70'))
+  })
+
+  it("overrides its type's drying temperature, which the drying form then starts from (#6856)", async () => {
+    const { user } = open(2)
+    await screen.findByRole('heading', { level: 1, name: /Spool #2\b/ })
+    const own = await screen.findByLabelText('Default drying temperature (°C)')
+    expect(own).toHaveAttribute('placeholder', '70')
+    await user.type(own, '55')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(async () => expect((await getSpool(spoolId(2))).overridden).toContain('drying_temp_c'))
+    expect((await getSpool(spoolId(2))).drying_defaults).toMatchObject({ temp_c: 55, temp_from: 'spool' })
+    await waitFor(() => expect(screen.getByLabelText('Drying temperature (°C)')).toHaveValue('55'))
+    expect(screen.getByText(/^Filled from this spool and its material\./)).toBeInTheDocument()
   })
 
   it('shows neither the badge nor a warning for a spool that is fine', async () => {
