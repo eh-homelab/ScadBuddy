@@ -801,6 +801,27 @@ async def test_a_printer_calibration_never_overwrites_a_k_value_a_person_set(
 
 
 @respx.mock
+async def test_a_refresh_leaves_out_a_calibration_equal_to_its_stored_row(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """#6857 (the PR #6859 review): `_printer_k` leaves out a calibration that equals the
+    stored ``printer_calibration`` row of its key (`k_identity`: ``0.02`` is ``0.0200``), so
+    a refresh offers only the one that changed."""
+    _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    table = respx.get(f"{API}/printers/1/kprofiles/")
+    table.mock(return_value=_k_table(_cal(0, "GFA05", "0.020"), _cal(1, "GFA05", "0.030")))
+    await filler.fill(LINKED, [type_id], actor=ACTOR)
+    assert [r.source for r in types.k_values(type_id)] == ["printer_calibration"] * 2
+
+    table.mock(return_value=_k_table(_cal(0, "GFA05", "0.02"), _cal(1, "GFA05", "0.031")))
+    (preview,) = await filler.fill(LINKED, [type_id], actor=ACTOR, refresh=True)
+
+    assert [(r.extruder, r.k_value) for r in preview.k_values] == [(1, Decimal("0.031"))]
+
+
+@respx.mock
 async def test_a_newer_calibration_replaces_an_imported_one_never_a_person_row(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
 ) -> None:
@@ -840,20 +861,60 @@ async def test_a_newer_calibration_replaces_an_imported_one_never_a_person_row(
     ]
 
 
-def test_a_profile_fetch_merge_tags_its_rows(types: SpoolTypeStore, pg_pool: PgPool) -> None:
-    """#6856 (R-6714-19): the 3DFP fetch's rows say ``profile_fetch``; it still replaces
-    the rows of its keys, whoever set them (#6857 decides that)."""
+def test_a_profile_fetch_merge_replaces_only_its_own_rows(
+    types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """#6857 (profile-fetch plan Decision 127): the 3DFP fetch's rows say ``profile_fetch``;
+    a newer fetch replaces them, but a ``person``, ``profile`` or ``printer_calibration``
+    row of the same key keeps its value and its source (``0.40`` being ``0.4``)."""
     printer = _h2c(pg_pool)
     type_id = _type(types, pg_pool)
-    own = TypeKValueCreate(
-        printer_id=printer, extruder=0, nozzle_diameter="0.4", k_value=Decimal("0.05")
+
+    def row(extruder: int, nozzle: str, k: str) -> TypeKValueCreate:
+        return TypeKValueCreate(
+            printer_id=printer, extruder=extruder, nozzle_diameter=nozzle, k_value=Decimal(k)
+        )
+
+    types.set_k_values(
+        type_id,
+        _rows(type_id, [row(0, "0.40", "0.05"), row(1, "0.4", "0.06"), row(0, "0.6", "0.07")]),
+        actor="ann",
     )
-    types.set_k_values(type_id, _rows(type_id, [own]), actor="ann")
-    fetched = _rows(type_id, [own.model_copy(update={"k_value": Decimal("0.02")})])
     with pg_pool.connection() as conn:
-        SpoolTypeStore.merge_k_values(conn, type_id, fetched)
-    assert [(r.k_value, r.source) for r in types.k_values(type_id)] == [
-        (Decimal("0.02"), "profile_fetch")
+        conn.execute(
+            "UPDATE filament_spool_type_k_values SET source = CASE extruder"
+            " WHEN 1 THEN 'profile' ELSE 'printer_calibration' END"
+            " WHERE type_id = %s AND nozzle_diameter <> '0.40'",
+            (type_id,),
+        )
+    with pg_pool.connection() as conn, conn.transaction():
+        written, _ = SpoolTypeStore.merge_k_values(
+            conn, type_id, _rows(type_id, [row(0, "0.2", "0.01")])
+        )
+    assert [(r.nozzle_diameter, r.source) for r in written] == [("0.2", "profile_fetch")]
+
+    fetched = [
+        row(0, "0.4", "0.02"),
+        row(1, "0.4", "0.02"),
+        row(0, "0.6", "0.02"),
+        row(0, "0.2", "0.03"),
+    ]
+    with pg_pool.connection() as conn, conn.transaction():
+        written, kept = SpoolTypeStore.merge_k_values(conn, type_id, _rows(type_id, fetched))
+
+    assert [(r.nozzle_diameter, r.k_value) for r in written] == [("0.2", Decimal("0.03"))]
+    assert sorted((r.nozzle_diameter, r.extruder, old["source"]) for r, old in kept) == [
+        ("0.4", 0, "person"),
+        ("0.4", 1, "profile"),
+        ("0.6", 0, "printer_calibration"),
+    ]
+    assert [
+        (r.extruder, r.nozzle_diameter, r.k_value, r.source) for r in types.k_values(type_id)
+    ] == [
+        (0, "0.2", Decimal("0.0300"), "profile_fetch"),
+        (0, "0.40", Decimal("0.0500"), "person"),
+        (0, "0.6", Decimal("0.0700"), "printer_calibration"),
+        (1, "0.4", Decimal("0.0600"), "profile"),
     ]
 
 

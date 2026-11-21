@@ -241,7 +241,9 @@ findings):
   replaces the `printer_calibration` row of its printer, extruder and nozzle when it differs (K,
   nozzle type, name, slot or setting); it never replaces a `person`, `profile` or
   `profile_fetch` row (`add_k_values`, under the type's row lock). The fetch's overwrite of any
-  row of its keys is unchanged (#6857 decides it). A person's save (`PUT …/k-values`) tags each
+  row of its keys is unchanged (#6857 decides it; decided by the profile-fetch plan's Decision 127,
+  `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`: the fetch replaces only its own
+  `profile_fetch` rows). A person's save (`PUT …/k-values`) tags each
   row it adds or changes `person` and keeps the source of a row sent as it was, so saving other
   rows does not turn a calibration into a person's. A write never takes `source` from a body:
   `TypeKValueCreate` has none, so a PUT sends rows without it (a `shown_k_values` row may carry

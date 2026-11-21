@@ -783,7 +783,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   overrides a type's `drying_temp_c` and `drying_hours` as any other value: a spool's
   `drying_defaults` and a `dried` event that leaves them out take the spool's, else the
   type's, else the subtype's, else the material's, #6720, R-6714-18; each type K row has a
-  `source`, `person`, `profile`, `printer_calibration` or `profile_fetch`, R-6714-19),
+  `source`, `person`, `profile`, `printer_calibration` or `profile_fetch`, R-6714-19; the
+  3DFP fetch writes and removes only `profile_fetch` rows, `merge_k_values`, #6857),
   `profile_fill.py` (#6714, #6720, plan
   `docs/superpowers/plans/2026-11-20-filament-type-from-profile.md`: a type's empty print and
   drying values from its slicer profile, but not a drying value its subtype or material sets
