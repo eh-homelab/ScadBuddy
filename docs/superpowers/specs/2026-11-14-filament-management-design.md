@@ -428,9 +428,21 @@ BB has a flat list (`/inventory/locations`) plus location sensors
   Bambuddy's `/location-ha-sensors/entities`, so SB holds no HA token. The AMS sensors
   are made from the first report that shows a number, with an AMS-unit location as the
   parent of the unit's tray locations. The humidity is the report's `humidity_raw`, the
-  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI, and is not
-  sent: follow-up issue #6646 adds the notification, and `notify` is kept for it. The
+  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI. The
   plan's Decisions 4 to 7 have the details.
+  As built in #6646: with `notify` on, a sensor sends one notification when it starts
+  alerting and one when it stops, never one per reading. A reading outside the band opens
+  the alert at once; it closes only once the readings have stayed inside for 10 minutes,
+  so a value that flaps across a limit sends one start. The reading that opens or closes
+  it queues the notification, with its message, under the sensor's row lock
+  (`filament_sensor_notifications`). The print worker sends it at most once through
+  Bambuddy's `POST /notifications/app-message`, a pass a minute, claiming and ending the
+  rows through CRUD routes, so it reaches the channels the owner set up in Bambuddy and
+  the CRUD service makes no Bambuddy call for it. Only a sensor's newest queued
+  notification is sent, and none after `notify` is turned off. The sensor shows its
+  newest notification: sent, waiting, or failed and why. Notification rows older than 30
+  days are pruned, except each sensor's newest. The plan's Decisions 29 to 50 have the
+  details.
 - A move writes a `moved` event (from, to) in the spool's ledger. A scan of a
   location QR, then of a spool tag or label, moves the spool.
 - Time spent outside dry storage counts toward "needs drying" for hygroscopic
@@ -836,6 +848,9 @@ below are the plan's):
 - Lifecycle (Decision 13). A spool is created in Bambuddy only when it is unarchived and
   `pushes(spools)`. Archive and restore are pushed. A 404 on a linked spool, or on the
   probe of one a complete listing lacks, deletes the link; a partial listing never does.
+  A linked supplier, location, insert type or filament entry a complete listing lacks is
+  probed too; its 404 deletes the link, and the next round creates the row again under
+  its direction (#6688, plan Decisions 187-192, 200 and 201).
 - Fields (Decisions 14, 15). The fields each data type carries are in Decision 14. Not
   pushed: SKU settings (#6270 owns them) and `last_scale_weight`. Supplier links and
   prices go to Bambuddy only, and are never pulled.

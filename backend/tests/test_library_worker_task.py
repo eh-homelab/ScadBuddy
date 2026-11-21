@@ -189,6 +189,11 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "ensure_spool_schedule", no_spool_schedule)
+
+    async def no_notify_schedule(client: object, queue: str) -> None:
+        pass
+
+    monkeypatch.setattr(main, "ensure_sensor_notify_schedule", no_notify_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
 
     async def no_triggers() -> None:
@@ -493,6 +498,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             push_all=slow_push,
             # #4975: the expired signed-in sessions, one delete.
             sessions=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
+            # #6646 Decision 49: the sensors' old notification rows, one delete.
+            sensors=SimpleNamespace(prune_notifications=lambda: time.sleep(0.1)),
             # Phase 6: the spent delegation codes and long-dead access tokens.
             delete_spent_delegations=lambda: time.sleep(0.1),
             tokens=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),

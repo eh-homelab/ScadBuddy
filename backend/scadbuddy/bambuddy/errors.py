@@ -63,6 +63,11 @@ class Scope(StrEnum):
     #: a person confirmed it is in (#2164; Bambuddy ``auth.py`` maps
     #: ``INVENTORY_UPDATE`` to it).
     MANAGE_INVENTORY = "Manage Inventory"
+    #: ``can_send_notifications``: a message through Bambuddy's notification channels
+    #: that take "Messages from connected apps" (``POST /notifications/app-message``,
+    #: #6646; ``require_notification_send`` in ``backend/app/core/auth.py`` and the label
+    #: ``sendNotifications`` in ``frontend/src/i18n/locales/en.ts``, maziggy/bambuddy v1.3.1).
+    SEND_NOTIFICATIONS = "Send notifications"
     #: Bambuddy's ``settings:update``, which a virtual printer's writes need (#4747). No
     #: API key can hold it: it is admin-only and absent from ``_APIKEY_SCOPE_BY_PERMISSION``
     #: (``backend/app/core/auth.py`` line 90, maziggy/bambuddy v1.3.1),

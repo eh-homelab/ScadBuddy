@@ -64,17 +64,22 @@ def _public(cls: type) -> set[str]:
 def test_the_area_is_served_and_awaited() -> None:
     assert "rack" in CRUD_AREAS["print"]
     assert "rack" in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's; Task 31's ``spools``
-    # came after it, and #6262's ``filament``.
-    assert CRUD_AREAS["print"][-7:] == [
-        "rack",
-        "spools",
-        "transfer-urls",
-        "access-codes",
-        "filament",
-        "filament-sync",
-        "filament-pull",
+    # Appended, so an older API's list is a prefix of a newer one's: each came after the one before.
+    # Check the order, not the list's tail, which every new area extends.
+    areas = CRUD_AREAS["print"]
+    positions = [
+        areas.index(area)
+        for area in [
+            "rack",
+            "spools",
+            "transfer-urls",
+            "access-codes",
+            "filament",
+            "filament-sync",
+            "filament-pull",
+        ]
     ]
+    assert positions == sorted(positions)
 
 
 def test_every_rack_method_is_remote_refused_or_named() -> None:
