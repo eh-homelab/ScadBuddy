@@ -20,6 +20,7 @@ optional is omitted rather than sent as an explicit ``null``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
@@ -28,15 +29,20 @@ from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
 from typing import IO, Any, Literal, Self
+from urllib.parse import quote
 
 import httpx
 from fastapi import status
 from opentelemetry.trace import Span, SpanKind
 from pydantic import BaseModel, ValidationError
+from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from scadbuddy.bambuddy.errors import (
+    BAD_BODY_PROBLEM,
     REJECTED_PROBLEM,
     Scope,
+    TagAlreadyLinkedError,
     UpstreamAnswer,
     map_response,
     map_transport,
@@ -45,12 +51,15 @@ from scadbuddy.bambuddy.errors import (
     upstream_detail,
 )
 from scadbuddy.bambuddy.models import (
+    AppMessageResult,
     Archive,
     ArchiveDetail,
     ArchivePhotoUpload,
     ArchiveRunList,
     ArchiveStats,
     AvailableFilament,
+    BbLocation,
+    BbSupplier,
     CatalogFilament,
     ExternalLink,
     FilamentRequirements,
@@ -58,15 +67,19 @@ from scadbuddy.bambuddy.models import (
     Folder,
     FolderCreate,
     FolderUpdate,
+    HaEntity,
     InventoryRemain,
+    KProfile,
     LibraryFile,
     LibraryListRow,
     LibraryPlates,
     LocalPreset,
     LocalPresetCatalogue,
     LocalPresetDetail,
+    MaintenanceHistoryEntry,
     MoveResult,
     PresetCatalogue,
+    PresetImport,
     PresetRef,
     PresetValues,
     Printer,
@@ -81,9 +94,14 @@ from scadbuddy.bambuddy.models import (
     SliceJob,
     SliceJobAccepted,
     SliceRequest,
+    SlotConfigure,
     Spool,
     SpoolAssignment,
+    SpoolBuddyDevice,
+    SpoolCatalogEntry,
     SpoolFilamentPreset,
+    SpoolUsage,
+    TagScan,
     TimelapseInfo,
     TimelapseThumbnails,
     TrashedLibraryFile,
@@ -162,10 +180,16 @@ Operation = Literal[
     "archives.timelapse.thumbnails",
     "auth.me",
     "auth.status",
+    "auth.ws_token",
     "external_links.create",
     "external_links.list",
     "external_links.update",
+    "catalog.create",
+    "catalog.update",
+    "filament_catalog.create",
+    "filament_catalog.update",
     "filaments.catalog",
+    "filaments.read",
     "library.annotate",
     "library.bulk_delete",
     "library.delete",
@@ -189,12 +213,16 @@ Operation = Literal[
     "library.trash.list",
     "library.trash.restore",
     "library.upload",
+    "locations.create",
+    "locations.list",
+    "locations.update",
     "media.download",
     "media.photo",
     "media.plate_thumbnail",
     "media.source",
     "media.thumbnail",
     "media.timelapse",
+    "maintenance.history",
     "maintenance.printer",
     "makerworld.import",
     "makerworld.resolve",
@@ -207,8 +235,10 @@ Operation = Literal[
     "printers.files",
     "printers.files.download",
     "printers.inventory_remain",
+    "printers.kprofiles",
     "printers.list",
     "printers.read",
+    "printers.slot_configure",
     "printers.status",
     "projects.add_archives",
     "projects.add_queue",
@@ -219,17 +249,41 @@ Operation = Literal[
     "queue.list",
     "queue.read",
     "settings.read",
+    "settings.update",
     "slice.job.status",
     "slice.start",
     "slicer.local_preset",
     "slicer.local_preset.create",
     "slicer.local_presets",
+    "slicer.local_presets.import",
     "slicer.preset_values",
     "slicer.presets",
     "spools.assign",
     "spools.assignments",
+    "spools.by_tag",
+    "spools.clear_tag",
+    "spools.link_tag",
+    "spools.read",
+    "spools.catalog",
     "spools.filament_presets",
     "spools.list",
+    "spools.usage",
+    "spools.create",
+    "spools.update",
+    "spools.archive",
+    "spools.restore",
+    "spools.k_profiles",
+    "spools.presets_put",
+    "spools.suppliers_put",
+    "suppliers.create",
+    "suppliers.list",
+    "suppliers.update",
+    "ha.entities",
+    "notifications.app_message",
+    "spoolbuddy.cancel_write",
+    "spoolbuddy.devices",
+    "spoolbuddy.scan",
+    "spoolbuddy.write_tag",
     "version",
     "virtual_printers.create",
     "virtual_printers.delete",
@@ -238,6 +292,37 @@ Operation = Literal[
     "virtual_printers.read",
     "virtual_printers.update",
 ]
+
+
+#: The close code Bambuddy's WebSocket gives a join with no valid token
+#: (``_WS_CLOSE_UNAUTHORIZED`` in ``routes/websocket.py``, v1.3.1).
+_WS_UNAUTHORISED = 4401
+#: Seconds websockets waits for the opening handshake.
+WS_OPEN_TIMEOUT = 10.0
+#: websockets logs its request line, ``?token=`` included, at DEBUG; this logger drops it.
+_WS_LOGGER = logging.getLogger("scadbuddy.bambuddy.ws")
+_WS_LOGGER.setLevel(logging.WARNING)
+_SCAN_FRAMES = frozenset({"spoolbuddy_tag_matched", "spoolbuddy_unknown_tag"})
+
+
+def _tag_scan(raw: str | bytes, device_id: str | None) -> TagScan | None:
+    """The scan a WebSocket frame carries, or ``None`` for any other frame, one of
+    another device or one that is not JSON."""
+    try:
+        frame = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(frame, dict) or frame.get("type") not in _SCAN_FRAMES:
+        return None
+    if device_id is not None and frame.get("device_id") != device_id:
+        return None
+    spool = frame.get("spool")
+    matched = frame["type"] == "spoolbuddy_tag_matched" and isinstance(spool, dict)
+    bb_spool_id = spool.get("id") if isinstance(spool, dict) and matched else None
+    try:
+        return TagScan.model_validate({**frame, "bb_spool_id": bb_spool_id})
+    except ValidationError:
+        return None
 
 
 def _call_span(
@@ -357,12 +442,23 @@ class BambuddyClient:
 
     @staticmethod
     def _rows(response: httpx.Response, *, what: str) -> list[Any]:
-        """Bambuddy answers these routes with a bare JSON array."""
-        body = response.json()
+        """Bambuddy answers these routes with a bare JSON array. A body that is not JSON,
+        or not an array, is a 502 `BAD_BODY_PROBLEM` (R-T7-8, R-T7-10). As for the other
+        answers of the wrong shape, no ``bambuddy_status`` is set: Bambuddy's status was a
+        success."""
+        try:
+            body = response.json()
+        except ValueError:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered something that is not JSON when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
+            ) from None
         if not isinstance(body, list):
             raise ApiError(
                 status.HTTP_502_BAD_GATEWAY,
                 f"Bambuddy answered {type(body).__name__}, not a list, when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
             )
         return body
 
@@ -400,6 +496,24 @@ class BambuddyClient:
             what=f"read printer {printer_id}'s maintenance tasks",
         )
         return PrinterMaintenanceOverview.model_validate(response.json())
+
+    async def maintenance_history(self, item_id: int) -> list[MaintenanceHistoryEntry]:
+        """``GET /api/v1/maintenance/items/{item_id}/history``: every time one task of a
+        printer was marked done, newest first, with the print-hour counter then (#5774,
+        spec 2026-11-17-machine-rate-actuals §2.1, §3.7). Gated on ``MAINTENANCE_READ``,
+        as :meth:`printer_maintenance` is. An item Bambuddy does not have answers an empty
+        list, not a 404 (measured on prod's Bambuddy 1.3.1, 2026-11-18)."""
+        what = f"read maintenance item {item_id}'s log"
+        response = await self._send(
+            "GET",
+            f"/maintenance/items/{item_id}/history",
+            scope=Scope.READ_STATUS,
+            operation="maintenance.history",
+            what=what,
+        )
+        return [
+            MaintenanceHistoryEntry.model_validate(row) for row in self._rows(response, what=what)
+        ]
 
     async def printer_access_code(self, printer_id: int) -> str | None:
         """The printer's LAN access code as Bambuddy holds it, or ``None`` when it is
@@ -545,6 +659,97 @@ class BambuddyClient:
             return None
         enabled = body.get("auth_enabled") if isinstance(body, dict) else None
         return enabled if isinstance(enabled, bool) else None
+
+    async def ws_token(self) -> str | None:
+        """A token for Bambuddy's WebSocket, or ``None`` when its auth is off (the socket
+        then takes no token: ``routes/websocket.py`` lines 101-135, v1.3.1).
+        ``POST /api/v1/auth/ws-token`` (``WEBSOCKET_CONNECT``, which ``can_read_status``
+        covers: Read Status; ``routes/auth.py`` line 670, v1.3.1) answers ``{"token": ...}``,
+        valid for 60 minutes. An unreadable auth status counts as on, and a refusal then
+        says so."""
+        enabled = await self.auth_enabled()
+        if enabled is False:
+            return None
+        what = "mint a WebSocket token"
+        try:
+            response = await self._send(
+                "POST",
+                "/auth/ws-token",
+                scope=Scope.READ_STATUS,
+                operation="auth.ws_token",
+                what=what,
+            )
+        except ApiError as error:
+            if enabled is not None:
+                raise
+            unread = ApiError(
+                error.status,
+                f"{error.detail}. Bambuddy's auth status could not be read, so a token was"
+                " tried in case its auth is on",
+                title=error.title,
+                type_=error.type,
+                headers=error.headers,
+                **error.extensions,
+            )
+            unread.upstream = error.upstream
+            raise unread from error
+        body = response.json()
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no token when asked to {what}",
+            )
+        return token
+
+    def _ws_url(self, token: str | None) -> str:
+        scheme, _, rest = self.config.base_url.partition("://")
+        url = f"{'wss' if scheme == 'https' else 'ws'}://{rest}{API_PREFIX}/ws"
+        return url if token is None else f"{url}?token={quote(token, safe='')}"
+
+    async def next_tag_scan(
+        self, *, timeout: float, device_id: str | None = None
+    ) -> TagScan | None:
+        """Wait up to ``timeout`` seconds, token mint and connect included, for a SpoolBuddy
+        reader to read a tag, on ``WS /api/v1/ws`` (``?token=`` from :meth:`ws_token` with
+        Bambuddy's auth on). The socket is sent nothing; every frame is read and all but
+        ``spoolbuddy_tag_matched`` and ``spoolbuddy_unknown_tag`` (of ``device_id``, when
+        given) are ignored. ``None`` only when that deadline passes. A refused join is the
+        scope 409 of ``map_response`` (Read Status); a connect that times out, or a close
+        before any tag, is the 502 or 504 of ``map_transport``."""
+        what = "listen for a SpoolBuddy tag scan"
+        deadline = asyncio.timeout(timeout)
+        with _call_span("spoolbuddy.scan", "GET", Scope.READ_STATUS):
+            try:
+                async with deadline:
+                    token = await self.ws_token()
+                    async with ws_connect(
+                        self._ws_url(token),
+                        logger=_WS_LOGGER,
+                        open_timeout=WS_OPEN_TIMEOUT,
+                        # Like httpx, the socket follows the proxy environment
+                        # (HTTP_PROXY, NO_PROXY); websockets 15+ takes it from here.
+                        proxy=True,
+                    ) as socket:
+                        async for raw in socket:
+                            scan = _tag_scan(raw, device_id)
+                            if scan is not None:
+                                return scan
+                    raise map_transport(httpx.ReadError("the socket closed"), what=what)
+            except TimeoutError as error:
+                if deadline.expired():
+                    return None
+                raise map_transport(httpx.ConnectTimeout("connect timed out"), what=what) from error
+            except InvalidStatus as error:
+                refused = httpx.Response(error.response.status_code)
+                raise map_response(refused, scope=Scope.READ_STATUS, what=what) from error
+            except ConnectionClosed as error:
+                if error.rcvd is not None and error.rcvd.code == _WS_UNAUTHORISED:
+                    unauthorised = httpx.Response(status.HTTP_401_UNAUTHORIZED)
+                    raise map_response(unauthorised, scope=Scope.READ_STATUS, what=what) from error
+                raise map_transport(httpx.ReadError(type(error).__name__), what=what) from error
+            except (OSError, WebSocketException) as error:
+                raise map_transport(httpx.ConnectError(type(error).__name__), what=what) from error
 
     async def printer_status(self, printer_id: int) -> PrinterStatus:
         """Live MQTT state: nozzles, AMS trays and the inlet each AMS is switched to."""
@@ -755,6 +960,58 @@ class BambuddyClient:
         )
         return LocalPreset.model_validate(response.json())
 
+    async def import_local_presets(self, zip_bytes: bytes) -> PresetImport:
+        """``POST /api/v1/local-presets/import``: one zip of presets, sent as the multipart
+        part ``file`` named ``profiles.zip``. Bambuddy gates it like the create call
+        (:meth:`create_local_preset`), so a refusal names the same scope (#6625)."""
+        response = await self._send(
+            "POST",
+            "/local-presets/import",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.local_presets.import",
+            what="import local presets",
+            files={"file": ("profiles.zip", zip_bytes, "application/zip")},
+        )
+        return PresetImport.model_validate(response.json())
+
+    async def k_profiles(self, printer_id: int, nozzle_diameter: str) -> list[KProfile]:
+        """``GET /api/v1/printers/{id}/kprofiles/?nozzle_diameter=``: the K table the
+        printer holds for one nozzle. The trailing slash is Bambuddy's route (#6625). A
+        row of another shape fails the whole read (`ValidationError`); `k_profile_rows`
+        gives them unvalidated."""
+        rows = await self.k_profile_rows(printer_id, nozzle_diameter)
+        return [KProfile.model_validate(row) for row in rows]
+
+    async def k_profile_rows(self, printer_id: int, nozzle_diameter: str) -> list[Any]:
+        """`k_profiles`' rows as Bambuddy sent them, not yet validated, for a caller that
+        skips a bad row (#6856). A body that is not JSON, or not an object whose
+        ``profiles`` is a list, is a 502 `BAD_BODY_PROBLEM`, as `_rows` answers."""
+        what = f"read printer {printer_id}'s K profiles"
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/kprofiles/",
+            scope=Scope.READ_STATUS,
+            operation="printers.kprofiles",
+            what=what,
+            params={"nozzle_diameter": nozzle_diameter},
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered something that is not JSON when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
+            ) from None
+        rows = body.get("profiles", []) if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no list of profiles when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
+            )
+        return rows
+
     # --- inventory -----------------------------------------------------------
 
     async def spools(self, *, include_archived: bool = False) -> list[Spool]:
@@ -781,6 +1038,77 @@ class BambuddyClient:
         )
         return self._rows(response, what=what)
 
+    async def ha_entities(self, search: str | None) -> list[HaEntity]:
+        """``GET /api/v1/location-ha-sensors/entities`` (#6268): Home Assistant's entities
+        and their states as Bambuddy reads them, matched by ``search`` (none: all). Each
+        row is validated on its own: one that is not an entity is logged and left out.
+        Scope: Bambuddy has no key scope for storage locations or their sensors, and no
+        read-only inventory scope; every other read of its inventory here uses
+        ``READ_STATUS``, the one read scope, so this does too (not measured live)."""
+        what = "list the Home Assistant entities"
+        response = await self._send(
+            "GET",
+            "/location-ha-sensors/entities",
+            scope=Scope.READ_STATUS,
+            operation="ha.entities",
+            what=what,
+            params={"search": search} if search else None,
+        )
+        entities: list[HaEntity] = []
+        for row in self._rows(response, what=what):
+            try:
+                entities.append(HaEntity.model_validate(row))
+            except ValidationError:
+                logger.warning("a Bambuddy Home Assistant entity is not an entity; skipped")
+        return entities
+
+    async def send_app_message(
+        self, *, title: str, message: str, timeout: float | None = None
+    ) -> int:
+        """``POST /api/v1/notifications/app-message`` (#6646): ``title`` and ``message``
+        through every enabled Bambuddy channel that takes "Messages from connected apps".
+        Answers how many channels took it (0: none does). Scope "Send notifications";
+        Bambuddy allows 20 a minute per key and answers 429 past that
+        (``routes/notifications.py`` ``APP_MESSAGE_LIMIT``, maziggy/bambuddy v1.3.1).
+        ``timeout`` bounds each phase of the call (connect, write, read), in seconds."""
+        response = await self._send(
+            "POST",
+            "/notifications/app-message",
+            scope=Scope.SEND_NOTIFICATIONS,
+            operation="notifications.app_message",
+            what="send a notification",
+            json={"title": title, "message": message},
+            timeout=timeout,
+        )
+        return AppMessageResult.model_validate(response.json()).channels
+
+    async def spool_usage(self, *, limit: int = 200) -> list[SpoolUsage]:
+        """``GET /api/v1/inventory/usage`` (#6263): BB's usage rows, one per spool per
+        print. The prod key's scopes answered it with 200 on 2026-11-15 (the probe in
+        ``docs/superpowers/plans/2026-11-15-filament-capture.md``). Each row is validated
+        on its own: one that is not a usage row is logged and left out."""
+        what = "list the spool usage history"
+        response = await self._send(
+            "GET",
+            "/inventory/usage",
+            scope=Scope.READ_STATUS,
+            operation="spools.usage",
+            what=what,
+            params={"limit": limit},
+        )
+        rows: list[SpoolUsage] = []
+        for row in self._rows(response, what=what):
+            try:
+                rows.append(SpoolUsage.model_validate(row))
+            except ValidationError:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                logger.warning(
+                    "a Bambuddy usage row is not a usage row; skipped",
+                    extra={"bb_usage_id": row_id if isinstance(row_id, int) else None},
+                    exc_info=True,
+                )
+        return rows
+
     async def filament_catalog(self) -> list[CatalogFilament]:
         """``GET /api/v1/filament-catalog/`` — Bambuddy's filament catalogue, each entry
         with its ``density`` (#6136). Bambuddy gates it with ``FILAMENTS_READ``
@@ -797,6 +1125,19 @@ class BambuddyClient:
             what=what,
         )
         return [CatalogFilament.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def filament(self, filament_id: int) -> CatalogFilament:
+        """``GET /api/v1/filament-catalog/{id}``: one catalogue entry, 404 when there is
+        none (``FILAMENTS_READ``, as the list: ``routes/filaments.py`` line 44 at
+        maziggy/bambuddy v1.3.1). The filament sync's probe (#6688)."""
+        response = await self._send(
+            "GET",
+            f"/filament-catalog/{filament_id}",
+            scope=Scope.READ_STATUS,
+            operation="filaments.read",
+            what=f"read filament {filament_id} in Bambuddy's catalog",
+        )
+        return CatalogFilament.model_validate(response.json())
 
     async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
         """``GET /api/v1/inventory/spools/{id}/filament-presets`` — per-nozzle presets.
@@ -830,6 +1171,20 @@ class BambuddyClient:
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
         return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def spool_catalog(self) -> list[SpoolCatalogEntry]:
+        """``GET /api/v1/inventory/catalog`` — Bambuddy's empty-spool catalog, which a
+        spool's ``core_weight_catalog_id`` names (``CatalogEntry`` in the 1.2.6b1 OpenAPI,
+        spec 2026-11-14 §3). The pull maps each entry to an insert type."""
+        what = "list the spool catalog"
+        response = await self._send(
+            "GET",
+            "/inventory/catalog",
+            scope=Scope.READ_STATUS,
+            operation="spools.catalog",
+            what=what,
+        )
+        return [SpoolCatalogEntry.model_validate(row) for row in self._rows(response, what=what)]
 
     async def assign_spool(
         self, *, spool_id: int, printer_id: int, ams_id: int, tray_id: int
@@ -1767,6 +2122,436 @@ class BambuddyClient:
                 " older than the setting",
             )
         return value
+
+    # --- tags, auto-add, slots and SpoolBuddy (#6264) -------------------------
+
+    async def link_tag(
+        self,
+        spool_id: int,
+        *,
+        tag_uid: str | None,
+        tray_uuid: str | None,
+        tag_type: str | None = None,
+        data_origin: str = "nfc_link",
+    ) -> Spool:
+        """``PATCH /api/v1/inventory/spools/{id}/link-tag`` (``INVENTORY_UPDATE``: Manage
+        Inventory; ``routes/inventory.py`` line 2771, maziggy/bambuddy v1.3.1). A 409
+        ``tag_already_linked`` (``services/tag_conflict.py`` lines 24-40) raises
+        `TagAlreadyLinkedError` naming the holder; any other 409 maps as any refusal."""
+        what = f"link a tag to spool {spool_id}"
+        response = await self._send(
+            "PATCH",
+            f"/inventory/spools/{spool_id}/link-tag",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.link_tag",
+            what=what,
+            json={
+                "tag_uid": tag_uid,
+                "tray_uuid": tray_uuid,
+                "tag_type": tag_type,
+                "data_origin": data_origin,
+            },
+            passthrough=frozenset({status.HTTP_409_CONFLICT}),
+        )
+        if response.status_code == status.HTTP_409_CONFLICT:
+            raise self._tag_conflict(response, what=what)
+        return Spool.model_validate(response.json())
+
+    @staticmethod
+    def _tag_conflict(response: httpx.Response, *, what: str) -> ApiError:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "tag_already_linked":
+            holder = detail.get("spool_id")
+            field = detail.get("field")
+            if isinstance(holder, int) and field in ("tag_uid", "tray_uuid"):
+                message = detail.get("message")
+                return TagAlreadyLinkedError(
+                    message if isinstance(message, str) else "the tag is already linked",
+                    holder_id=holder,
+                    field=field,
+                )
+        return map_response(response, scope=Scope.MANAGE_INVENTORY, what=what)
+
+    async def clear_spool_tag(self, spool_id: int) -> Spool:
+        """``PATCH /api/v1/inventory/spools/{id}`` with both identifiers null
+        (``SpoolUpdate``; ``routes/inventory.py`` line 1693, v1.3.1): Manage Inventory."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/spools/{spool_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.clear_tag",
+            what=f"clear the tag of spool {spool_id}",
+            json={"tag_uid": None, "tray_uuid": None},
+        )
+        return Spool.model_validate(response.json())
+
+    async def spool_by_tag(self, *, tray_uuid: str | None, tag_uid: str | None) -> Spool | None:
+        """``GET /api/v1/inventory/spools/by-tag``: the spool holding the tag, or ``None``
+        on Bambuddy's 404 (``routes/inventory.py`` line 1560, v1.3.1). Bambuddy accepts
+        ``inventory:read`` or ``inventory:update`` there, so a Read Status or a Manage
+        Inventory key opens it; the scope names Manage Inventory, which the push needs for
+        its writes anyway."""
+        response = await self._send(
+            "GET",
+            "/inventory/spools/by-tag",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.by_tag",
+            what="find the spool of a tag",
+            params={
+                key: value
+                for key, value in (("tray_uuid", tray_uuid), ("tag_uid", tag_uid))
+                if value is not None
+            },
+            passthrough=frozenset({status.HTTP_404_NOT_FOUND}),
+        )
+        if response.status_code == status.HTTP_404_NOT_FOUND:
+            return None
+        return Spool.model_validate(response.json())
+
+    async def spool_row(self, spool_id: int) -> Spool:
+        """``GET /api/v1/inventory/spools/{id}``: one spool, for a write that reads state
+        first (``INVENTORY_READ``: Read Status, ``can_read_status``;
+        ``routes/inventory.py`` line 1602, maziggy/bambuddy v1.3.1)."""
+        response = await self._send(
+            "GET",
+            f"/inventory/spools/{spool_id}",
+            scope=Scope.READ_STATUS,
+            operation="spools.read",
+            what=f"read spool {spool_id}",
+        )
+        return Spool.model_validate(response.json())
+
+    # --- the filament sync's writes (#6265) -----------------------------------
+    # Routes, bodies and permissions: ``tests/bambuddy/recordings/openapi/sync-routes.json``
+    # (Bambuddy 1.3.1, the source at tag v1.3.1). The ``INVENTORY_UPDATE`` routes take
+    # Manage Inventory (``can_manage_inventory``); the lists take Read Status.
+
+    async def create_spool(self, body: dict[str, Any]) -> Spool:
+        """``POST /api/v1/inventory/spools`` with a ``SpoolCreate`` (``routes/inventory.py``
+        line 1625)."""
+        response = await self._send(
+            "POST",
+            "/inventory/spools",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.create",
+            what="create a spool",
+            json=body,
+        )
+        return Spool.model_validate(response.json())
+
+    async def update_spool(self, spool_id: int, body: dict[str, Any]) -> Spool:
+        """``PATCH /api/v1/inventory/spools/{id}`` with a ``SpoolUpdate``: only the fields
+        sent change (``model_dump(exclude_unset=True)``, ``routes/inventory.py`` lines
+        1693-1716). A sent ``weight_used`` locks the weight unless ``weight_locked`` is
+        sent too."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/spools/{spool_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.update",
+            what=f"update spool {spool_id}",
+            json=body,
+        )
+        return Spool.model_validate(response.json())
+
+    async def archive_spool(self, spool_id: int) -> Spool:
+        """``POST /api/v1/inventory/spools/{id}/archive``, no body (``routes/inventory.py``
+        line 1774). It also frees the trays the spool was assigned to."""
+        response = await self._send(
+            "POST",
+            f"/inventory/spools/{spool_id}/archive",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.archive",
+            what=f"archive spool {spool_id}",
+        )
+        return Spool.model_validate(response.json())
+
+    async def restore_spool(self, spool_id: int) -> Spool:
+        """``POST /api/v1/inventory/spools/{id}/restore``, no body (``routes/inventory.py``
+        line 1796)."""
+        response = await self._send(
+            "POST",
+            f"/inventory/spools/{spool_id}/restore",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.restore",
+            what=f"restore spool {spool_id}",
+        )
+        return Spool.model_validate(response.json())
+
+    async def put_spool_k_profiles(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
+        """``PUT /api/v1/inventory/spools/{id}/k-profiles`` with ``SpoolKProfileBase`` rows:
+        the spool's whole list is replaced (``routes/inventory.py`` line 2020). Answers the
+        list Bambuddy stored, as sent (``SpoolKProfileResponse`` rows, not validated)."""
+        what = f"replace the K-profiles of spool {spool_id}"
+        response = await self._send(
+            "PUT",
+            f"/inventory/spools/{spool_id}/k-profiles",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.k_profiles",
+            what=what,
+            json=rows,
+        )
+        return self._rows(response, what=what)
+
+    async def put_spool_presets(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
+        """``PUT /api/v1/inventory/spools/{id}/filament-presets`` with
+        ``SpoolFilamentPresetBase`` rows: the whole list is replaced
+        (``routes/inventory.py`` line 2126). Answers the list Bambuddy stored, as sent
+        (``SpoolFilamentPresetResponse`` rows, not validated)."""
+        what = f"replace the per-nozzle presets of spool {spool_id}"
+        response = await self._send(
+            "PUT",
+            f"/inventory/spools/{spool_id}/filament-presets",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.presets_put",
+            what=what,
+            json=rows,
+        )
+        return self._rows(response, what=what)
+
+    async def put_spool_suppliers(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
+        """``PUT /api/v1/inventory/spools/{id}/suppliers`` with ``SpoolSupplierLinkInput``
+        rows: the whole list is replaced; a duplicate supplier or two purchase sources is
+        a 400 and an unknown supplier a 404 (``routes/inventory.py`` lines 2060-2081). Answers
+        the list Bambuddy stored, as sent (``SpoolSupplierResponse`` rows, not validated)."""
+        what = f"replace the suppliers of spool {spool_id}"
+        response = await self._send(
+            "PUT",
+            f"/inventory/spools/{spool_id}/suppliers",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.suppliers_put",
+            what=what,
+            json=rows,
+        )
+        return self._rows(response, what=what)
+
+    async def suppliers(self) -> list[BbSupplier]:
+        """``GET /api/v1/inventory/suppliers`` (``INVENTORY_READ``: Read Status;
+        ``routes/inventory.py`` line 896)."""
+        what = "list the suppliers"
+        response = await self._send(
+            "GET",
+            "/inventory/suppliers",
+            scope=Scope.READ_STATUS,
+            operation="suppliers.list",
+            what=what,
+        )
+        return [BbSupplier.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def create_supplier(self, body: dict[str, Any]) -> BbSupplier:
+        """``POST /api/v1/inventory/suppliers`` with a ``SupplierCreate``: 201, or 409 for
+        a name another supplier has (``routes/inventory.py`` line 916)."""
+        response = await self._send(
+            "POST",
+            "/inventory/suppliers",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="suppliers.create",
+            what="create a supplier",
+            json=body,
+        )
+        return BbSupplier.model_validate(response.json())
+
+    async def update_supplier(self, supplier_id: int, body: dict[str, Any]) -> BbSupplier:
+        """``PATCH /api/v1/inventory/suppliers/{id}`` with a ``SupplierUpdate``: only the
+        fields sent change (``routes/inventory.py`` line 939)."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/suppliers/{supplier_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="suppliers.update",
+            what=f"update supplier {supplier_id}",
+            json=body,
+        )
+        return BbSupplier.model_validate(response.json())
+
+    async def locations(self) -> list[BbLocation]:
+        """``GET /api/v1/inventory/locations`` (``INVENTORY_READ``: Read Status;
+        ``routes/inventory.py`` line 700)."""
+        what = "list the storage locations"
+        response = await self._send(
+            "GET",
+            "/inventory/locations",
+            scope=Scope.READ_STATUS,
+            operation="locations.list",
+            what=what,
+        )
+        return [BbLocation.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def create_location(self, body: dict[str, Any]) -> BbLocation:
+        """``POST /api/v1/inventory/locations`` with a ``LocationCreate``: 201, or 409 for
+        a name another location has (``routes/inventory.py`` line 716)."""
+        response = await self._send(
+            "POST",
+            "/inventory/locations",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="locations.create",
+            what="create a storage location",
+            json=body,
+        )
+        return BbLocation.model_validate(response.json())
+
+    async def update_location(self, location_id: int, body: dict[str, Any]) -> BbLocation:
+        """``PATCH /api/v1/inventory/locations/{id}`` with a ``LocationUpdate``; a rename
+        carries over to the spools in it (``routes/inventory.py`` line 740)."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/locations/{location_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="locations.update",
+            what=f"update storage location {location_id}",
+            json=body,
+        )
+        return BbLocation.model_validate(response.json())
+
+    async def create_catalog_entry(self, name: str, weight: float) -> SpoolCatalogEntry:
+        """``POST /api/v1/inventory/catalog`` (``routes/inventory.py`` line 530).
+        ``CatalogEntryCreate.weight`` is whole grams, so ``weight`` is rounded."""
+        response = await self._send(
+            "POST",
+            "/inventory/catalog",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="catalog.create",
+            what="create a spool catalog entry",
+            json={"name": name, "weight": round(weight)},
+        )
+        return SpoolCatalogEntry.model_validate(response.json())
+
+    async def update_catalog_entry(
+        self, entry_id: int, name: str, weight: float
+    ) -> SpoolCatalogEntry:
+        """``PUT /api/v1/inventory/catalog/{id}``: name and whole grams, both required
+        (``routes/inventory.py`` line 545)."""
+        response = await self._send(
+            "PUT",
+            f"/inventory/catalog/{entry_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="catalog.update",
+            what=f"update spool catalog entry {entry_id}",
+            json={"name": name, "weight": round(weight)},
+        )
+        return SpoolCatalogEntry.model_validate(response.json())
+
+    async def create_filament(self, body: dict[str, Any]) -> CatalogFilament:
+        """``POST /api/v1/filament-catalog/`` with a ``FilamentCreate``
+        (``FILAMENTS_CREATE``, ``routes/filaments.py`` line 34). No API key can hold it, so
+        a 403 is the admin-only scope 409 (`Scope.ADMIN_FILAMENTS`)."""
+        response = await self._send(
+            "POST",
+            "/filament-catalog/",
+            scope=Scope.ADMIN_FILAMENTS,
+            operation="filament_catalog.create",
+            what="add a filament to Bambuddy's catalog",
+            json=body,
+        )
+        return CatalogFilament.model_validate(response.json())
+
+    async def update_filament(self, filament_id: int, body: dict[str, Any]) -> CatalogFilament:
+        """``PATCH /api/v1/filament-catalog/{id}`` with a ``FilamentUpdate``: only the
+        fields sent change (``FILAMENTS_UPDATE``, ``routes/filaments.py`` line 63; no API
+        key can hold it, as for `create_filament`)."""
+        response = await self._send(
+            "PATCH",
+            f"/filament-catalog/{filament_id}",
+            scope=Scope.ADMIN_FILAMENTS,
+            operation="filament_catalog.update",
+            what=f"update filament {filament_id} in Bambuddy's catalog",
+            json=body,
+        )
+        return CatalogFilament.model_validate(response.json())
+
+    async def auto_add_unknown_rfid(self) -> bool:
+        """Bambuddy's ``auto_add_unknown_rfid`` setting (``AppSettings`` in
+        ``rfid-routes.json``; ``GET /api/v1/settings/``: Read Status)."""
+        response = await self._send(
+            "GET",
+            "/settings/",
+            scope=Scope.READ_STATUS,
+            operation="settings.read",
+            what="read Bambuddy's settings",
+        )
+        body = response.json()
+        value = body.get("auto_add_unknown_rfid") if isinstance(body, dict) else None
+        if not isinstance(value, bool):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                "Bambuddy's settings carry no auto_add_unknown_rfid, so this Bambuddy may be"
+                " older than the setting",
+            )
+        return value
+
+    async def set_auto_add_unknown_rfid(self, value: bool) -> None:
+        """``PATCH /api/v1/settings/`` (``SETTINGS_UPDATE``, which no API key holds: a
+        403 is a scope 409 and the write works only while Bambuddy's auth is off;
+        ``routes/settings.py`` line 552, v1.3.1)."""
+        await self._send(
+            "PATCH",
+            "/settings/",
+            scope=Scope.ADMIN_SETTINGS,
+            operation="settings.update",
+            what="change Bambuddy's auto_add_unknown_rfid setting",
+            json={"auto_add_unknown_rfid": value},
+        )
+
+    async def configure_slot(
+        self, printer_id: int, ams_id: int, tray_id: int, params: SlotConfigure
+    ) -> None:
+        """``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` with the values in
+        the query (``PRINTERS_CONTROL``: Control Printer; ``routes/printers.py`` line
+        2963, v1.3.1)."""
+        await self._send(
+            "POST",
+            f"/printers/{printer_id}/slots/{ams_id}/{tray_id}/configure",
+            scope=Scope.CONTROL_PRINTER,
+            operation="printers.slot_configure",
+            what=f"configure slot {ams_id}/{tray_id} of printer {printer_id}",
+            params=params.query(),
+        )
+
+    async def spoolbuddy_devices(self) -> list[SpoolBuddyDevice]:
+        """``GET /api/v1/spoolbuddy/devices`` (``INVENTORY_READ``: Read Status;
+        ``routes/spoolbuddy.py`` line 280, v1.3.1)."""
+        what = "list the SpoolBuddy devices"
+        response = await self._send(
+            "GET",
+            "/spoolbuddy/devices",
+            scope=Scope.READ_STATUS,
+            operation="spoolbuddy.devices",
+            what=what,
+        )
+        return [SpoolBuddyDevice.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def queue_tag_write(self, device_id: str, spool_id: int) -> list[str]:
+        """``POST /api/v1/spoolbuddy/nfc/write-tag`` (``INVENTORY_UPDATE``: Manage
+        Inventory; ``routes/spoolbuddy.py`` line 830, v1.3.1): queues one write, once per call.
+        Returns the answer's ``warnings``."""
+        response = await self._send(
+            "POST",
+            "/spoolbuddy/nfc/write-tag",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spoolbuddy.write_tag",
+            what=f"queue a tag write for spool {spool_id}",
+            json={"device_id": device_id, "spool_id": spool_id},
+        )
+        body = response.json()
+        warnings = body.get("warnings") if isinstance(body, dict) else None
+        if not isinstance(warnings, list):
+            return []
+        return [w for w in warnings if isinstance(w, str)]
+
+    async def cancel_tag_write(self, device_id: str) -> None:
+        """``POST /api/v1/spoolbuddy/devices/{device_id}/cancel-write`` (Manage Inventory;
+        ``routes/spoolbuddy.py`` line 1181, v1.3.1)."""
+        await self._send(
+            "POST",
+            f"/spoolbuddy/devices/{quote(device_id, safe='')}/cancel-write",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spoolbuddy.cancel_write",
+            what="cancel the pending tag write",
+        )
 
     # --- projects ------------------------------------------------------------
 

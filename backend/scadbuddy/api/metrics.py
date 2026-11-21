@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 
 import psycopg
 from fastapi import APIRouter, Response
 
 from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.core.metrics import CONTENT_TYPE_LATEST
+from scadbuddy.filament import metrics_export
+from scadbuddy.filament.component import FILAMENT
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import store_health, store_usage
 
@@ -58,6 +62,36 @@ async def refresh_store_metrics(state: AppState) -> None:
             state.metrics.worker_cache_bytes.set(cached)
 
 
+#: Seconds a filament snapshot answers the scraper for (#6269 plan Decision 3).
+FILAMENT_METRICS_MAX_AGE = 60.0
+
+
+async def refresh_filament_metrics(
+    state: AppState, *, now: Callable[[], float] = time.monotonic
+) -> None:
+    """The filament series from a snapshot at most every `FILAMENT_METRICS_MAX_AGE`
+    seconds, swapped in whole (`FilamentCollector`, #6785). A try counts as a read,
+    failed or not, so a database that does not answer is asked once a minute, not on
+    every scrape. A failure is logged and sets
+    ``scadbuddy_filament_metrics_up`` 0; the series keep the whole last good snapshot."""
+    metrics = state.metrics
+    at = now()
+    last = metrics.filament_snapshot_at
+    if last is not None and at - last < FILAMENT_METRICS_MAX_AGE:
+        return
+    # Set before the read, so a scrape that arrives during it does not read again.
+    metrics.filament_snapshot_at = at
+    try:
+        store = state.components.get(FILAMENT).metrics
+        snapshot = await asyncio.to_thread(store.snapshot)
+        metrics_export.export(metrics, snapshot)
+    except Exception:
+        logger.exception("could not read the filament metrics")
+        metrics.filament_metrics_up.set(0)
+        return
+    metrics.filament_metrics_up.set(1)
+
+
 # Beside /healthz rather than under /api/v1: it is for the scraper, not the SPA, and
 # its body is Prometheus text rather than anything the generated client could type.
 @router.get("/metrics", include_in_schema=False)
@@ -71,4 +105,5 @@ async def metrics(state: StateDep) -> Response:
     except Exception:
         # Like the upload store's gauges: keep the last values, never fail the scrape.
         logger.exception("could not read the blob store's usage")
+    await refresh_filament_metrics(state)
     return Response(state.metrics.exposition(), media_type=CONTENT_TYPE_LATEST)

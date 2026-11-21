@@ -49,6 +49,9 @@ from scadbuddy.printers.models import PrinterRow
 #: A printer whose last report is older than this is offline (Review Focus 5).
 STALE_AFTER = timedelta(seconds=90)
 
+#: The states that show the printer running a plate (OpenBambuAPI ``mqtt.md``).
+RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+
 
 def is_fresh(seen_at: datetime, now: datetime) -> bool:
     """Whether a LAN report seen at ``seen_at`` still answers for its printer: the one
@@ -123,7 +126,7 @@ def _presence_bit(ams_id: int, tray_id: int) -> int | None:
     HT's against OrcaSlicer ``DevFilaSystem.cpp`` and a live H2D capture). Not yet
     measured on our H2C: the LAN fixture is synthetic (plan 2026-10-16 Task 7).
 
-    The HT bits 16-23 are also AMS units 4 and 5's bits, so :func:`_ams` vetoes by no
+    The HT bits 16-23 are also AMS units 4 and 5's bits, so :func:`ams_units` vetoes by no
     bit two reported trays share: nothing says whose it is (#4377)."""
     unit = _A2L_BITS if ams_id == _A2L_PHYSICAL else ams_id
     if 128 <= unit <= 135:
@@ -133,7 +136,7 @@ def _presence_bit(ams_id: int, tray_id: int) -> int | None:
     return None
 
 
-def _ams(report: dict[str, Any]) -> list[AmsUnit]:
+def ams_units(report: dict[str, Any]) -> list[AmsUnit]:
     block = report.get("ams")
     units = block.get("ams") if isinstance(block, dict) else None
     bits = _presence_bits(block) if isinstance(block, dict) else None
@@ -141,7 +144,17 @@ def _ams(report: dict[str, Any]) -> list[AmsUnit]:
     for entry in _list(units):
         if not isinstance(entry, dict):
             continue
-        unit = _valid(AmsUnit, {**entry, "tray": _trays(entry.get("tray"))})
+        # The LAN report's `humidity` is Bambu's 1-5 level; the percent is `humidity_raw`
+        # (recorded H2C report: "humidity": "3" beside "humidity_raw": "29"). `AmsUnit`
+        # holds the percent, so a report without it has none. Bambuddy's status gives the
+        # percent too (measured 2026-11-18, read-only GETs on the live Bambuddy 1.3.1, H2C
+        # printer 1: `/api/v1/printers/1/status` `ams[].humidity` was 31, 17, 14, 15 and 19,
+        # and `/api/v1/ams-history/1/{ams_id}`'s latest points had `humidity` equal to
+        # `humidity_raw` for every unit; plan 2026-11-18-filament-weights-sensors Decision 28).
+        unit = _valid(
+            AmsUnit,
+            {**entry, "humidity": entry.get("humidity_raw"), "tray": _trays(entry.get("tray"))},
+        )
         if unit is not None:
             found.append(unit)
     if bits is None:
@@ -204,7 +217,19 @@ def _device(report: dict[str, Any], name: str) -> dict[str, Any]:
     return block if isinstance(block, dict) else {}
 
 
+def mounted_nozzles(report: dict[str, Any]) -> dict[int, NozzleInfo]:
+    """The nozzles mounted on the extruders, by extruder id (``device.nozzle.info`` ids 0
+    and 1; a printer that reports one nozzle at the top level is extruder 0). A missing id
+    is missing here: `PrinterStatus.nozzles` is sorted by id and so shifts."""
+    return _scan_nozzles(report)[0]
+
+
 def _nozzles(report: dict[str, Any]) -> tuple[list[NozzleInfo], list[NozzleRackSlot]]:
+    mounted, rack = _scan_nozzles(report)
+    return [mounted[key] for key in sorted(mounted)], rack
+
+
+def _scan_nozzles(report: dict[str, Any]) -> tuple[dict[int, NozzleInfo], list[NozzleRackSlot]]:
     mounted: dict[int, NozzleInfo] = {}
     rack: list[NozzleRackSlot] = []
     for entry in _list(_device(report, "nozzle").get("info")):
@@ -241,7 +266,7 @@ def _nozzles(report: dict[str, Any]) -> tuple[list[NozzleInfo], list[NozzleRackS
     # ``src_id`` 19). A printer with no rack lists none.
     if not any(slot.id >= RACK_FIRST_ID for slot in rack):
         rack = []
-    return [mounted[key] for key in sorted(mounted)], rack
+    return mounted, rack
 
 
 def _fila_switch(report: dict[str, Any]) -> FilaSwitch | None:
@@ -284,7 +309,7 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
     and the run name the printer by ``row.id``."""
     data = report.print
     nozzles, rack = _nozzles(data)
-    ams = _ams(data)
+    ams = ams_units(data)
     switch = _fila_switch(data)
     extruders, inlets = _routing(data, switch is not None)
     status = PrinterStatus.model_validate(

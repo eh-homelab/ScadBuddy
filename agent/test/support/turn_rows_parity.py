@@ -1,6 +1,7 @@
-"""Answers a durable turn's row writes as the API's routes answer them (backend
-scadbuddy/api/crud_agent_turns.py over agent_data/turns.py, #6449), for
-test/turnRowsParity.pg.test.ts. Argv: database URL, search_path; stdin: one request a line, a
+"""Answers a durable turn's row writes and a session's edit as the API's routes answer them
+(backend scadbuddy/api/crud_agent_turns.py over agent_data/turns.py, and
+api/crud_agent_edits.py over agent_data/edits.py, #6449), for test/turnRowsParity.pg.test.ts
+and test/editRowsParity.pg.test.ts. Argv: database URL, search_path; stdin: one request a line, a
 JSON object {method, url, body}; stdout: each one's answer, a JSON line {status, body}."""
 
 import asyncio
@@ -15,10 +16,12 @@ from urllib.parse import parse_qs, urlparse
 import psycopg
 from psycopg.rows import dict_row
 
+from scadbuddy.api import crud_agent_edits as edits
 from scadbuddy.api import crud_agent_turns as routes
 from scadbuddy.core.problems import ApiError
 
 SESSION = re.compile(r"/sessions/([0-9a-f-]{36})/turn(/[a-z-]+)?$")
+EDIT = re.compile(r"/sessions/([0-9a-f-]{36})/edit$")
 
 POSTS = {
     "/send-claim": (routes.send_claim, routes.SendClaim),
@@ -40,6 +43,9 @@ async def answer(state: Any, method: str, url: str, body: Any) -> Any:
         return await routes.stale(
             state, query.get("after", ""), int(query["grace_ms"]), int(query["limit"])
         )
+    edit = EDIT.search(parsed.path)
+    if edit is not None:
+        return await edits.edit(edit.group(1), edits.Edit.model_validate(body), state)
     match = SESSION.search(parsed.path)
     if match is None:
         raise SystemExit(f"no route for {url}")
@@ -60,7 +66,7 @@ def main() -> None:
         conn.execute(f"SET search_path TO {search_path}")
 
         @contextmanager
-        def connection() -> Any:
+        def connection(timeout: float | None = None) -> Any:
             yield conn
 
         pool = SimpleNamespace(connection=connection)

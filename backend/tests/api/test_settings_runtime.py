@@ -98,6 +98,19 @@ def test_an_invalid_value_is_a_422_naming_the_field(client: TestClient) -> None:
     assert cleared.json()["errors"][0]["loc"] == ["body", "render_timeout"]
 
 
+@pytest.mark.parametrize("nozzles", [[], ["0.4", "0.4"]])
+def test_profile_fetch_nozzles_needs_one_nozzle_and_no_duplicates(
+    client: TestClient, nozzles: list[str]
+) -> None:
+    response = client.put("/api/v1/settings", json={"profile_fetch_nozzles": nozzles})
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["loc"][:2] == ["body", "profile_fetch_nozzles"]
+
+    ok = client.put("/api/v1/settings", json={"profile_fetch_nozzles": ["0.4", "0.6"]})
+    assert ok.status_code == 200
+    assert ok.json()["profile_fetch_nozzles"] == ["0.4", "0.6"]
+
+
 def test_reset_puts_a_field_back_on_the_deployment_value(settings: Settings) -> None:
     deployed = settings.model_copy(update={"public_url": "https://env.example"})
     with TestClient(create_app(deployed)) as client:

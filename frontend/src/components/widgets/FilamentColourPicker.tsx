@@ -1,27 +1,58 @@
 import { useEffect, useId, useState } from 'react'
-import { api, ApiError } from '../../api/client'
-import type { InventorySpool } from '../../api/types'
+import { ApiError } from '../../api/client'
+import { getInventory } from '../../api/filament'
+import type { FilamentInventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
 import { spoolColour, spoolName, spoolValue } from '../../lib/filamentColour'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 
 type State =
   | { kind: 'loading' }
   | { kind: 'failed'; message: string }
-  | { kind: 'open'; spools: InventorySpool[] }
+  | { kind: 'open'; spools: FilamentInventorySpool[] }
+
+/** The list's filters, remembered in this browser. A material no spool has reads as all. */
+type Filters = { material: string | null; loadedOnly: boolean }
+const FILTERS_KEY = 'scadbuddy.colourPicker.filters'
+const NO_FILTERS: Filters = { material: null, loadedOnly: false }
+
+function readFilters(): Filters {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(FILTERS_KEY) ?? 'null')
+    if (raw && typeof raw === 'object') {
+      const { material, loadedOnly } = raw as Record<string, unknown>
+      return { material: typeof material === 'string' ? material : null, loadedOnly: loadedOnly === true }
+    }
+  } catch {
+    // Blocked or broken storage: start with no filters.
+  }
+  return NO_FILTERS
+}
+
+function writeFilters(filters: Filters) {
+  try {
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(filters))
+  } catch {
+    // Blocked storage: the choice lasts until the list closes.
+  }
+}
+
+const materialOf = (row: FilamentInventorySpool) => row.spool.names?.material ?? null
 
 /** Loaded spools first, then the fullest. */
-function order(a: InventorySpool, b: InventorySpool): number {
+function order(a: FilamentInventorySpool, b: FilamentInventorySpool): number {
   if (!!a.loaded !== !!b.loaded) return a.loaded ? -1 : 1
-  return b.remaining_g - a.remaining_g
+  return (b.spool.grams_left ?? 0) - (a.spool.grams_left ?? 0)
 }
 
 /**
- * #1026 — take a colour parameter's hex from a filament in Bambuddy's inventory, so the
- * preview shows what will actually print. The inventory is read when the list is shown
+ * #1026 — take a colour parameter's hex from one of ScadBuddy's spools (#6262 Task 9: its
+ * effective `#RRGGBBAA`), so the preview shows what will actually print. The inventory is read when the list is shown
  * (the colour popover opens), never on page load. A clear spool with no recorded tint
  * has no colour to take and is listed disabled; a translucent one gives its tint. `onPick`
  * gets the hex and the parameter value (`spoolValue`: with the alpha of a translucent spool).
@@ -41,19 +72,25 @@ export function FilamentColourPicker({
   onPick: (hex: string, value: string) => void
 }) {
   const [state, setState] = useState<State>({ kind: 'loading' })
+  const [filters, setFilters] = useState<Filters>(readFilters)
+  const setFilter = (next: Partial<Filters>) => {
+    const merged = { ...filters, ...next }
+    setFilters(merged)
+    writeFilters(merged)
+  }
   // Each mount is one read; closing the popover unmounts the list, so a late answer
   // never lands anywhere.
   useEffect(() => {
     let live = true
-    api.getSpoolInventory().then(
+    getInventory().then(
       (view) => {
-        if (live) setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((s) => !s.archived).sort(order) })
+        if (live) setState({ kind: 'open', spools: [...(view.spools ?? [])].filter((row) => !row.spool.archived_at).sort(order) })
       },
       (cause: unknown) => {
         if (!live) return
         setState({
           kind: 'failed',
-          message: cause instanceof ApiError ? cause.detail : "Bambuddy's filaments could not be read.",
+          message: cause instanceof ApiError ? cause.detail : "The spools could not be read.",
         })
       },
     )
@@ -64,7 +101,7 @@ export function FilamentColourPicker({
 
   if (state.kind === 'loading') {
     return (
-      <div role="status" aria-label="Reading Bambuddy's filaments" className="flex flex-col gap-1.5 p-1">
+      <div role="status" aria-label="Reading the spools" className="flex flex-col gap-1.5 p-1">
         <Skeleton className="h-7 w-full" />
         <Skeleton className="h-7 w-full" />
       </div>
@@ -77,41 +114,86 @@ export function FilamentColourPicker({
       </p>
     )
   }
-  if (state.spools.length === 0) return <p className="px-1 text-xs text-muted-foreground">Bambuddy has no spools.</p>
+  if (state.spools.length === 0) return <p className="px-1 text-xs text-muted-foreground">ScadBuddy has no spools.</p>
+
+  const materials = [...new Set(state.spools.map(materialOf).filter((m): m is string => m !== null))].sort((a, b) => a.localeCompare(b))
+  const material = filters.material !== null && materials.includes(filters.material) ? filters.material : null
+  // A remembered tick means nothing while no spool is loaded, so it is not offered then.
+  const anyLoaded = state.spools.some((row) => row.loaded)
+  const loadedOnly = anyLoaded && filters.loadedOnly
+  // The spool of the colour now stays on the list whatever the material and loaded filters,
+  // so its mark shows. The text search can still hide it: a search names what to show.
+  const isChosen = (row: FilamentInventorySpool) => {
+    const look = { rgba: row.spool.effective?.rgba ?? row.spool.rgba }
+    const colour = spoolColour(look)
+    return colour !== null && (alpha ? spoolValue(look) : colour.hex) === value
+  }
+  const shown = state.spools.filter(
+    (row) => isChosen(row) || ((!loadedOnly || row.loaded) && (material === null || materialOf(row) === material)),
+  )
 
   return (
     <Command className="rounded-lg! border p-0">
-      {state.spools.length > 6 && <CommandInput placeholder="Search filaments" />}
+      <CommandInput placeholder="Search filaments" />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-2 py-1.5">
+        {materials.length > 1 && (
+          <div role="group" aria-label="Material" className="flex flex-wrap gap-1">
+            {[null, ...materials].map((choice) => (
+              <Button
+                key={choice ?? ''}
+                type="button"
+                size="xs"
+                variant={choice === material ? 'secondary' : 'ghost'}
+                aria-pressed={choice === material}
+                onClick={() => setFilter({ material: choice })}
+              >
+                {choice ?? 'All'}
+              </Button>
+            ))}
+          </div>
+        )}
+        {anyLoaded && (
+          <Label className="ml-auto cursor-pointer text-xs font-normal text-muted-foreground">
+            <Checkbox checked={loadedOnly} onCheckedChange={(checked) => setFilter({ loadedOnly: checked === true })} />
+            Loaded in a printer
+          </Label>
+        )}
+      </div>
       <CommandList label={`Filaments for ${label}`} className="max-h-60">
         <CommandEmpty>No filament matches.</CommandEmpty>
         <CommandGroup>
-          {state.spools.map((spool) => {
-            const colour = spoolColour(spool)
-            const name = spoolName(spool)
-            const chosen = colour !== null && (alpha ? spoolValue(spool) : colour.hex) === value
+          {shown.map((row) => {
+            const { spool } = row
+            // The effective colour: the spool's own, else its filament type's.
+            const look = { rgba: spool.effective?.rgba ?? spool.rgba }
+            const colour = spoolColour(look)
+            const name = spoolName(row)
+            const chosen = isChosen(row)
             // The printer too: on a farm, two spools can both be in AMS-A slot 1.
-            const where = spool.loaded ? trayPlace(spool.loaded, { printer: true }) : null
+            const where = row.loaded ? trayPlace(row.loaded, { printer: true }) : null
+            const grams = spool.grams_left === null ? null : `${Math.round(spool.grams_left)} g`
             const detail =
               colour === null
-                ? 'clear, no tint recorded'
-                : [colour.translucent ? 'translucent' : null, where, `${Math.round(spool.remaining_g)} g`]
-                    .filter(Boolean)
-                    .join(' · ')
+                ? `#${spool.number} · clear, no tint recorded`
+                : [`#${spool.number}`, colour.translucent ? 'translucent' : null, where, grams].filter(Boolean).join(' · ')
             return (
               <CommandItem
                 key={spool.id}
-                value={`${spool.id} ${name} ${detail}`}
+                value={`${spool.number} ${name} ${detail}`}
                 disabled={colour === null}
                 data-checked={chosen}
                 onSelect={() => {
-                  const picked = spoolValue(spool)
+                  const picked = spoolValue(look)
                   if (colour && picked) onPick(colour.hex, picked)
                 }}
                 className="text-xs"
               >
                 {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
-                <span className="min-w-0 flex-1 truncate">{name}</span>
-                <span className="sb-num shrink-0 text-muted-foreground">{detail}</span>
+                {/* Two lines, so a long place and weight never squeeze the name out. */}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate">{name}</span>
+                  <span className="sb-num truncate text-muted-foreground">{detail}</span>
+                </span>
                 {chosen && <span className="sr-only">(the colour now)</span>}
               </CommandItem>
             )

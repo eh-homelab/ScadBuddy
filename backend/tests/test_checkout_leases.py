@@ -15,8 +15,14 @@ from typing import Any
 import pytest
 
 from scadbuddy.library import libraries
-from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
+from scadbuddy.library.libraries import (
+    CheckoutGate,
+    CheckoutLeases,
+    HoldLostError,
+    InstallPermits,
+)
 from tests.conftest import PgPool, open_pg_pool
+from tests.support.waits import reaches
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -97,37 +103,46 @@ async def test_a_crashed_holders_lease_expires(pg_pool: PgPool, tmp_path: Path) 
         assert api.leased(checkout) == []
 
 
-async def test_a_live_lease_is_renewed_past_its_ttl(
+async def test_a_live_lease_is_renewed(
     pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Checked as a renewal lands, not at a wall-clock time (#3855): a loaded runner can
-    stall a renewal past the TTL, so the row lapses until the next one. That stall is
-    made here, on the first renewal, so the check cannot pass on timing alone. It relies
-    on a renewal reviving a lapsed row: ``renew`` has no ``expires_at > now()`` guard. A
-    guard added there is a change to this test's premise, not a regression it catches
-    (#3931 review)."""
-    ttl = 1.5
-    leases = CheckoutLeases(pg_pool, tmp_path, ttl=ttl)
+    """Each renewal moves a live lease's expiry on, and the API still sees the lease.
+    The test renews on cue and checks after each renewal lands, so no runner stall can
+    lapse the lease between them (#3855). A renewal that comes after the lease lapsed
+    does not bring it back (`test_a_lapsed_lease_is_not_renewed`, #6560)."""
+    cue: asyncio.Queue[None] = asyncio.Queue()
+
+    async def on_cue(delay: float) -> None:
+        await cue.get()
+
+    leases = CheckoutLeases(pg_pool, tmp_path)
     renew = leases.renew
-    renewed_at: list[float] = []
+    renewed: list[bool] = []
 
-    def stalled_then_renewed(token: Any) -> None:
-        if not renewed_at:
-            time.sleep(ttl * 1.4)
-        renew(token)
-        renewed_at.append(time.monotonic())
+    def counted(token: Any) -> bool:
+        found = renew(token)
+        renewed.append(found)
+        return found
 
-    monkeypatch.setattr(leases, "renew", stalled_then_renewed)
-    worker, api = CheckoutGate(leases), _gate(pg_pool, tmp_path)
+    monkeypatch.setattr(leases, "renew", counted)
+    worker, api = CheckoutGate(leases, sleep=on_cue), _gate(pg_pool, tmp_path)
     checkout = _checkout(tmp_path)
-    started = time.monotonic()
+
+    def expiry() -> Any:
+        with pg_pool.connection() as conn:
+            row = conn.execute("SELECT expires_at FROM library_leases").fetchone()
+        assert row is not None
+        return row["expires_at"]
 
     async with worker.rendering(JOB, [checkout]):
-        # A renewal that landed two TTLs in: the lease taken at the start has been carried
-        # past its own expiry, and this one has just set a fresh TTL to be read within.
-        async with asyncio.timeout(30):
-            while not renewed_at or renewed_at[-1] < started + 2 * ttl:
-                await asyncio.sleep(0.01)
+        before = await asyncio.to_thread(expiry)
+        for n in (1, 2):
+            cue.put_nowait(None)
+            await reaches(lambda: len(renewed), n)
+            after = await asyncio.to_thread(expiry)
+            assert after > before
+            before = after
+        assert renewed == [True, True]
         assert await asyncio.to_thread(api.leased, checkout) == [JOB]
 
 
@@ -267,28 +282,83 @@ async def test_a_crashed_pinners_hold_expires(pg_pool: PgPool, tmp_path: Path) -
 
 
 async def test_a_live_pin_is_renewed_past_its_ttl(
-    pg_pool: PgPool, pg_conninfo: str, tmp_path: Path
+    pg_pool: PgPool,
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Each side on its own pool, as the worker and the API are. On one, the waiting
-    removal holds the pool's only open connection, so the pin's first renewal waits
-    for a new one: a connect slower than the TTL's slack (0.4 s) let the hold lapse
-    and the removal in (#1851)."""
+    removal holds the pool's only open connection, so the pin's renewal waits for a
+    new one, and the hold lapses and lets the removal in (#1851).
+
+    The test renews on cue and checks after each renewal lands, not at a wall-clock
+    time (#6527): with a 0.6 s TTL and a fixed 1.5 s sleep, a renewal that a loaded
+    runner made late let the hold lapse. Each renewal must land while the removal
+    waits on its only connection, and must move the hold's expiry past the one it
+    had. The TTL is the default, so no runner stall lapses the hold between cues."""
+    monkeypatch.setattr(libraries, "REMOVAL_WAIT_LOG_EVERY", 1)
     # One connection: the API side's single held one is what this models (#1857).
     api_pool = open_pg_pool(pg_conninfo, size=1)
     task: asyncio.Task[None] | None = None
     try:
-        worker, api = _gate(pg_pool, tmp_path, ttl=0.6), _gate(api_pool, tmp_path)
+        cue: asyncio.Queue[None] = asyncio.Queue()
+        asked: list[float] = []
+
+        async def on_cue(delay: float) -> None:
+            asked.append(delay)
+            await cue.get()
+
+        leases = CheckoutLeases(pg_pool, tmp_path)
+        renew_pin = leases.renew_pin
+        renewed: list[bool] = []
+
+        def counted(token: Any) -> bool:
+            found = renew_pin(token)
+            renewed.append(found)
+            return found
+
+        monkeypatch.setattr(leases, "renew_pin", counted)
+        worker, api = CheckoutGate(leases, sleep=on_cue), _gate(api_pool, tmp_path)
         removed = asyncio.Event()
 
         async def remove() -> None:
             async with api.removing():
                 removed.set()
 
-        async with worker.pinning():
-            task = asyncio.create_task(remove())
-            await asyncio.sleep(1.5)
-            assert not removed.is_set()
-        await asyncio.wait_for(task, 10)
+        def looks() -> int:
+            """The removal's looks that found a live pin and kept it waiting."""
+            return sum(
+                record.getMessage() == "a library removal still waits for pins in flight"
+                for record in caplog.records
+            )
+
+        def expiry() -> Any:
+            with pg_pool.connection() as conn:
+                row = conn.execute("SELECT expires_at FROM library_pin_holds").fetchone()
+            assert row is not None
+            return row["expires_at"]
+
+        with caplog.at_level(logging.WARNING, logger=libraries.__name__):
+            async with worker.pinning():
+                held_until = await asyncio.to_thread(expiry)
+                task = asyncio.create_task(remove())
+                for count in (1, 2):
+                    seen = looks()
+                    # The removal waits, and holds its pool's only connection.
+                    await reaches(looks, seen + 1)
+                    cue.put_nowait(None)
+                    await reaches(lambda: len(renewed), count)
+                    assert renewed[-1]
+                    renewed_until = await asyncio.to_thread(expiry)
+                    assert renewed_until > held_until
+                    held_until = renewed_until
+                seen = looks()
+                await reaches(looks, seen + 1)
+                assert not removed.is_set()
+            await asyncio.wait_for(task, 10)
+        assert removed.is_set()
+        assert set(asked) == {leases.ttl / 3}
     finally:
         # A failed assertion leaves the removal waiting on this pool's connection:
         # ended first, so the failure is the assertion's, not the pool's (#1857).
@@ -340,19 +410,165 @@ async def test_installs_are_capped_across_processes(pg_pool: PgPool) -> None:
     assert entered.is_set()
 
 
-async def test_a_live_install_is_renewed_past_its_ttl(pg_pool: PgPool) -> None:
-    worker, api = InstallPermits(1, pg_pool, ttl=0.6), InstallPermits(1, pg_pool)
+async def test_a_live_install_is_renewed_past_its_ttl(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test renews on cue and checks after each renewal lands, not at a wall-clock
+    time (#6546, as #6527 did for a pin): with a 0.6 s TTL and a fixed 1.5 s sleep, a
+    renewal that a loaded runner made late let the slot lapse. Each renewal must land
+    while the other process's install polls for the slot, and must move the slot's
+    expiry past the one it had. The TTL is the default, so no runner stall lapses the
+    slot between cues."""
+    cue: asyncio.Queue[None] = asyncio.Queue()
+    asked: list[float] = []
+
+    async def on_cue(delay: float) -> None:
+        asked.append(delay)
+        await cue.get()
+
+    worker = InstallPermits(1, pg_pool, sleep=on_cue)
+    api = InstallPermits(1, pg_pool, poll=0.01)
+    assert worker.slots is not None
+    renew, claim = worker.slots.renew, api.claim
+    renewed: list[object] = []
+    refused: list[None] = []
+
+    def counted(slot: int, token: Any) -> object:
+        found = renew(slot, token)
+        renewed.append(found)
+        return found
+
+    def watched() -> tuple[int, Any] | None:
+        claimed = claim()
+        if claimed is None:
+            refused.append(None)
+        return claimed
+
+    monkeypatch.setattr(worker.slots, "renew", counted)
+    monkeypatch.setattr(api, "claim", watched)
     entered = asyncio.Event()
 
     async def install() -> None:
         async with api.permit():
             entered.set()
 
-    async with worker.permit():
-        task = asyncio.create_task(install())
-        await asyncio.sleep(1.5)
-        assert not entered.is_set()
-    await asyncio.wait_for(task, 10)
+    def expiry() -> Any:
+        with pg_pool.connection() as conn:
+            row = conn.execute("SELECT expires_at FROM library_install_slots").fetchone()
+        assert row is not None
+        return row["expires_at"]
+
+    task: asyncio.Task[None] | None = None
+    try:
+        async with worker.permit():
+            held_until = await asyncio.to_thread(expiry)
+            task = asyncio.create_task(install())
+            for count in (1, 2):
+                # The other install found the slot held and still polls for it.
+                await reaches(lambda: len(refused), len(refused) + 1)
+                cue.put_nowait(None)
+                await reaches(lambda: len(renewed), count)
+                assert renewed[-1]
+                renewed_until = await asyncio.to_thread(expiry)
+                assert renewed_until > held_until
+                held_until = renewed_until
+            await reaches(lambda: len(refused), len(refused) + 1)
+            assert not entered.is_set()
+        await asyncio.wait_for(task, 10)
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert entered.is_set()
+    assert set(asked) == {worker.ttl / 3}
+
+
+@pytest.mark.parametrize(
+    "lose",
+    [
+        "DELETE FROM library_pin_holds",
+        "UPDATE library_pin_holds SET expires_at = now() - interval '1 second'",
+    ],
+    ids=["deleted", "lapsed"],
+)
+async def test_a_pin_whose_hold_was_lost_ends_with_an_error(
+    pg_pool: PgPool, tmp_path: Path, lose: str
+) -> None:
+    """The hold is lost when the renewal comes (#6560): its row is gone (a take swept
+    it), or it lapsed and no take has swept it yet, which a removal reads as no hold.
+    `renew_pin` reports it lost, the pin ends with `HoldLostError`, and no hold is
+    taken again. The test renews on cue, so no clock runs."""
+    cue: asyncio.Queue[None] = asyncio.Queue()
+    asked: list[float] = []
+
+    async def on_cue(delay: float) -> None:
+        asked.append(delay)
+        await cue.get()
+
+    worker = CheckoutGate(CheckoutLeases(pg_pool, tmp_path), sleep=on_cue)
+
+    def holds() -> int:
+        with pg_pool.connection() as conn:
+            row = conn.execute("SELECT count(*) AS n FROM library_pin_holds").fetchone()
+        assert row is not None
+        return int(row["n"])
+
+    with pytest.raises(HoldLostError) as raised:
+        async with worker.pinning():
+            await reaches(lambda: len(asked), 1)
+            assert await asyncio.to_thread(holds) == 1
+            with pg_pool.connection() as conn:
+                conn.execute(lose)
+            cue.put_nowait(None)
+            # The deadline only ends a test whose block is never ended.
+            async with asyncio.timeout(10):
+                await asyncio.Event().wait()
+    # Ended by the lost hold's cancel, not by the test's deadline.
+    assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+    assert await asyncio.to_thread(holds) == 0
+    assert asked == [60.0 / 3]
+
+
+def test_a_lapsed_lease_is_not_renewed(pg_pool: PgPool, tmp_path: Path) -> None:
+    """A lease that lapsed is lost even while no take has swept its row (#6560): a
+    removal reads it as no lease, so the renewal must not bring it back."""
+    leases = CheckoutLeases(pg_pool, tmp_path)
+    token = leases.take("render", [_checkout(tmp_path)])
+    assert leases.renew(token)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE library_leases SET expires_at = now() - interval '1 second' WHERE token = %s",
+            (token,),
+        )
+    assert not leases.renew(token)
+
+
+async def test_an_install_whose_slot_was_taken_ends_with_an_error(pg_pool: PgPool) -> None:
+    """Another token holds the slot when the renewal comes, as after a lapse and another
+    process's claim (#6560): the renewal finds the slot not its own, the install ends
+    with `HoldLostError`, and the release leaves the other token's slot alone."""
+    cue: asyncio.Queue[None] = asyncio.Queue()
+
+    async def on_cue(delay: float) -> None:
+        await cue.get()
+
+    worker = InstallPermits(1, pg_pool, sleep=on_cue)
+    other = "0" * 8 + "-0000-4000-8000-" + "0" * 12
+
+    def holders() -> list[str]:
+        with pg_pool.connection() as conn:
+            rows = conn.execute("SELECT token::text AS token FROM library_install_slots").fetchall()
+        return [row["token"] for row in rows]
+
+    with pytest.raises(HoldLostError) as raised:
+        async with worker.permit():
+            with pg_pool.connection() as conn:
+                conn.execute("UPDATE library_install_slots SET token = %s", (other,))
+            cue.put_nowait(None)
+            async with asyncio.timeout(10):
+                await asyncio.Event().wait()
+    assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+    assert await asyncio.to_thread(holders) == [other]
 
 
 async def test_a_crashed_installers_permit_expires(pg_pool: PgPool) -> None:

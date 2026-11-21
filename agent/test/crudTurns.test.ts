@@ -150,13 +150,39 @@ describe('a turn\'s row writes over the CRUD routes', () => {
     }
     // No answer: the claim may have committed. The row runs this turn, so it is given back.
     const lost = await run(new CrudReadError('the claim: fetch failed'), TURN)
-    expect(lost.giveBack.mock.calls).toEqual([[SESSION, 'idle']])
+    expect(lost.giveBack.mock.calls).toEqual([[SESSION, 'idle', TURN.toUpperCase()]])
     // The row runs another turn: nothing is given back.
     expect((await run(new CrudReadError('the claim: fetch failed'), randomUUID())).giveBack).not.toHaveBeenCalled()
     // The route answered (its transaction rolled back): the row is not read.
     const refused = await run(new CrudReadError('the claim: 503', 503, true), TURN)
     expect(refused.state).not.toHaveBeenCalled()
     expect(refused.giveBack).not.toHaveBeenCalled()
+  })
+
+  it('gives back fenced on its turn, and unfenced to an API pod older than the fence', async () => {
+    const path = `POST /sessions/${SESSION}/turn/give-back`
+    const fenced = new FakeApi().answer(path, { logged: null })
+    expect(await rows(fenced).giveBack(SESSION, 'failed', TURN.toUpperCase())).toBeUndefined()
+    expect(fenced.seen.map((s) => s.body)).toEqual([{ prior: 'failed', turn_id: TURN }])
+    // An older API's body forbids `turn_id` (422): the claim is given back as that pod gives it.
+    let calls = 0
+    const old: typeof fetch = async (input, init) => {
+      const body = JSON.parse(await new Request(input, init).text()) as Record<string, unknown>
+      calls++
+      if ('turn_id' in body) return new Response(JSON.stringify({ detail: 'the request did not match the expected shape', errors: [{ loc: ['body', 'turn_id'], msg: 'Extra inputs are not permitted' }] }), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
+      return new Response(JSON.stringify({ logged: { events: [JSON.stringify(status('idle'))], seqs: [4] } }), { headers: { 'x-scadbuddy-crud': '1' } })
+    }
+    expect(await new CrudTurnRows(BASE, { fetch: old }).giveBack(SESSION, 'idle', TURN)).toEqual({ events: [status('idle')], seqs: [4] })
+    expect(calls).toBe(2)
+    // A 422 that names another field is no older pod: the fence is kept and the refusal thrown.
+    let other = 0
+    const refused: typeof fetch = async () => {
+      other++
+      const problem = { detail: 'the request did not match the expected shape', errors: [{ loc: ['body', 'prior'], msg: 'bad' }] }
+      return new Response(JSON.stringify(problem), { status: 422, headers: { 'x-scadbuddy-crud': '1' } })
+    }
+    await expect(new CrudTurnRows(BASE, { fetch: refused }).giveBack(SESSION, 'idle', TURN)).rejects.toThrow(/422/)
+    expect(other).toBe(1)
   })
 
   it('a refusal of the route throws, never reads as a fence that held', async () => {
@@ -167,8 +193,8 @@ describe('a turn\'s row writes over the CRUD routes', () => {
     await expect(new CrudTurnRows(BASE, { fetch: old }).finish(SESSION, TURN, [status('idle')])).rejects.toThrow()
   })
 
-  it('waits for area session-turns', async () => {
-    expect(TURN_AREAS).toEqual(['session-turns'])
+  it('waits for areas session-turns and session-edits', async () => {
+    expect(TURN_AREAS).toEqual(['session-turns', 'session-edits'])
     const api = new FakeApi().answer('GET /areas', { areas: ['sessions'] })
     const areas = new CrudAreas(BASE, { fetch: api.fetch, wanted: TURN_AREAS, log: () => {} })
     expect(await areas.refresh()).toBe(false)

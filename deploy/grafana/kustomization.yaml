@@ -9,10 +9,13 @@ kind: Kustomization
 # (.github/scripts/lint-dashboard.sh checks all three). One ConfigMap per dashboard keeps
 # each well under the 256 KiB last-applied annotation a client-side apply writes.
 #
-# eh-homelab/clusters' clusters/prod/scadbuddy overlay pulls this directory in
-# as a remote resource pinned to a full commit SHA, and deploy.reusable.yml
-# moves that `ref` in the same deploy PR as the image digest, so the dashboard
-# shown is the one written for the build that is serving.
+# eh-homelab/clusters vendors this directory: clusters/prod/scadbuddy/grafana/
+# holds a byte-for-byte copy of this file and every *.json beside it, plus a
+# `.revision` file naming the commit they came from (eh-homelab/clusters#3734).
+# deploy.reusable.yml replaces that copy with the files at the deployed commit
+# in the same deploy PR as the image digest, so the dashboard shown is the one
+# written for the build that is serving. Only this file and `[a-z0-9-]+.json`
+# files may live here; the deploy rejects any other file or a subdirectory.
 #
 # The namespace is set on the generator, not with a top-level `namespace:`
 # field, as in clusters/prod/bambuddy. The overlay has to namespace its own
@@ -76,3 +79,11 @@ configMapGenerator:
         grafana_dashboard: "1"
     files:
       - scadbuddy-agent.json
+  - name: scadbuddy-filament-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+    files:
+      - scadbuddy-filament.json

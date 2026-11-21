@@ -358,6 +358,9 @@ class FirmLine:
     #: The slice's plates (`Plate` as JSON), which job cost reads; empty when the slice's
     #: seconds or grams are not known, so they read as unknown, never as zero.
     plates: tuple[dict[str, Any], ...] = ()
+    #: The machine rate's parts the slice price was priced at (#5774), as its row keeps
+    #: them; None for the book's rate, or a row written before it kept them.
+    machine_rate_breakdown: MachineRateBreakdown | None = None
 
 
 class OrderEdit(BaseModel):
@@ -1053,6 +1056,7 @@ class Lifecycle:
                 revision_id=item.current_revision_id,
                 printer=line.printer,
                 plates=line.plates,
+                machine_rate_breakdown=line.machine_rate_breakdown,
             )
             change = self._recorded(conn, order, item, quote, by)
             order = change.order

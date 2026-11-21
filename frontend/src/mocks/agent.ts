@@ -87,6 +87,8 @@ export interface MockAgentSessions {
   cancelOffer(sessionId: string): { cancelled: boolean } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
+  /** #6267 — a session the server started (an invoice import): running, with no scripted turn, so the panel can open it. */
+  adopt(sessionId: string, title: string): void
   /**
    * #815 — `POST /api/v1/ai/pending-input/{id}`: answers the approval or question a
    * session's script is parked on, or the error to answer with.
@@ -95,6 +97,23 @@ export interface MockAgentSessions {
 }
 
 let openAgent: MockAgentSessions | null = null
+
+/**
+ * #6267 — the sessions a server started (an invoice import) before the panel connected: the panel
+ * opens on one in the same tick as the start's answer, so its agent may not exist yet. Each is
+ * adopted when it does.
+ */
+const adoptedLater: { id: string; title: string }[] = []
+
+/** #6267 — a session the server started: the open mock agent adopts it now, a later one when it connects. */
+export function adoptMockSession(id: string, title: string): void {
+  adoptedLater.push({ id, title })
+  openAgent?.adopt(id, title)
+}
+
+export function forgetAdoptedSessions(): void {
+  adoptedLater.length = 0
+}
 
 /** The mock agent the panel is connected to now, if any. */
 export function mockAgentSessions(): MockAgentSessions | null {
@@ -786,6 +805,13 @@ export function createMockAgentTransport({
     has(sessionId) {
       return sessions.has(sessionId)
     },
+    adopt(sessionId, title) {
+      if (sessions.has(sessionId)) return
+      const s: MockSession = { sessionId, title, origin: 'chat', owner: BROWSER_USER, status: 'running', log: [], timers: [], turns: 0, costUsd: 0, budgetUsd, mode: 'durable' }
+      sessions.set(sessionId, s)
+      s.log.push({ v: PROTOCOL_VERSION, type: 'session.started', sessionId, origin: 'chat', owner: BROWSER_USER, title, budgetUsd, mode: 'durable' })
+      deliver(snapshot())
+    },
     offerChat(title, to, forMs = 3_600_000) {
       const s = [...sessions.values()].find((one) => one.title === title)
       if (!s) throw new Error(`no chat titled ${title}`)
@@ -837,6 +863,7 @@ export function createMockAgentTransport({
       // In-process, so open at once (the real socket reports it when its handshake is done).
       h.onOpen?.()
       seedExternal()
+      for (const adopted of adoptedLater) controls.adopt(adopted.id, adopted.title)
       deliver(snapshot())
     },
     send(message) {

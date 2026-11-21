@@ -158,8 +158,8 @@ estimate and says "rough".
 price is firm, so the page shows "$X for one" and nothing else: no "about", no
 "confirmed after we check it", no grams and no print time. While the slice runs or
 waits it shows "Working out the price…". With no slice price (the slice failed, the
-shop has no slice profile, or a spool of the profile is no longer offered) it shows no
-number and no volume estimate: "We price this design by hand". A price still pending
+shop has no slice profile, the printer's status cannot be read, or a filament type of
+the profile has no preset for the nozzle, #6574) it shows no number and no volume estimate: "We price this design by hand". A price still pending
 at the page's time limit is shown the same way.
 
 ### 5.5 Keeping choices (frontend, `storefront/customizeState.ts`)
@@ -215,14 +215,18 @@ Design:
   (`PreviewSlicer`, the native slicer or Bambuddy's, as a quote routes it), each plate read
   with `read_plate`, and priced with `price_plates` at the book's policy and the machine
   rate of the profile's printer. No new subject kind, and no second formula.
-- **Profile.** The shop slice profile (#6255) names only the printer and a spool per
-  material. Support and process settings come from the template, as in the back office;
-  the nozzles, tier and process from the model's remembered dialog choices (else
-  Standard 0.4 mm), and the plate from the one remembered on the printer. Before it
-  slices, the run checks that the printer still offers each profile spool, else no price.
+- **Profile.** The shop slice profile (#6255) names only the printer and a filament
+  type per material (#6574). Support and process settings come from the template, as in
+  the back office. Each slot is sliced with its type's preset for the H2C and the nozzle,
+  in the slot's own colour, as a back-office quote of a spool of that type is. The
+  choices are the ones the print dialog opens on (`bambuddy/choices.py`
+  `opening_choices`): the model's remembered nozzles, tier and process, else the
+  defaults from the printer's live status, and the plate the dialog opens on. A status
+  that cannot be read (`STATUS_UNREAD`) or a type with no preset for the nozzle
+  (`NO_TYPE_PRESET`) gives no price. The run does not check spools.
 - **One price per variant.** `storefront_slice_prices` holds one row per `price_key`: a
-  sha256 of the render's 3MF content, the price-book filament per slot, the profile, the
-  choices, and the book's policy and the printer's live machine rate (read once and carried to the slice, so the key and the price use one rate). A change to any of
+  sha256 of the render's 3MF content, the price-book filament per slot with its colour
+  and the preset it is sliced with, the profile, the choices, and the book's policy and the printer's live machine rate (read once and carried to the slice, so the key and the price use one rate). A change to any of
   them is a new key. The row holds no job id and no bytes, so it outlives the render
   prune.
 - **Capacity.** The slice is the operation `storefront_slice_price` on the `library`

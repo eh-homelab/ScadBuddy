@@ -824,8 +824,7 @@ describe('the no-database sql stub (#2963 review)', () => {
 
 describe('saved http bodies on this pod (#2496)', () => {
   const GONE = '1b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f61'
-  const sql = ((_s: TemplateStringsArray, ...values: unknown[]) =>
-    Promise.resolve(((values[0] as string[]) ?? []).filter((id) => id === SESSION).map((id) => ({ id })))) as never
+  const sql = { live: (ids: readonly string[]) => Promise.resolve(new Set(ids.filter((id) => id === SESSION))) }
 
   it("sweeps a session's bodies once its row is gone, and a flow run's once old; keeps the rest", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'turn-dirs-'))

@@ -43,7 +43,7 @@ LOCK_TIMEOUT_MS = 10_000
 
 
 @contextmanager
-def _write(conn: Connection[Any]) -> Iterator[None]:
+def write_transaction(conn: Connection[Any]) -> Iterator[None]:
     """A write's transaction, its lock waits bounded by ``LOCK_TIMEOUT_MS``."""
     with conn.transaction():
         conn.execute(f"SET LOCAL lock_timeout = {int(LOCK_TIMEOUT_MS)}".encode())
@@ -133,7 +133,7 @@ def send_claim(
 ) -> dict[str, Any] | None:
     """``durable.ts`` ``#send``'s claim: the row runs ``turn_id`` while ``author`` owns it and it
     is free, not done, archived or spent. The status before, and the runtime."""
-    with _write(conn):
+    with write_transaction(conn):
         return _send_claim(conn, session_id, author, tiers, turn_id, bare)
 
 
@@ -201,14 +201,19 @@ def state(conn: Connection[Any], session_id: str, grace_ms: int) -> dict[str, An
     return row
 
 
-def give_back(conn: Connection[Any], session_id: str, prior: str) -> Logged | None:
-    """``durable.ts`` ``#giveBack``: a refused send's claim given back to ``prior``, with its
-    ``session.status``, in one transaction; None when the row no longer runs."""
-    with _write(conn):
+def give_back(
+    conn: Connection[Any], session_id: str, prior: str, turn_id: str | None
+) -> Logged | None:
+    """``durable.ts`` ``#giveBack``: a refused send's claim of ``turn_id`` given back to
+    ``prior``, with its ``session.status``, in one transaction; None when the row no longer runs
+    that turn (a turn claimed since is never ended by it). With no ``turn_id`` (an agent pod older
+    than the fence, during a roll) the row is given back while it runs any turn, as before."""
+    with write_transaction(conn):
         cur = conn.execute(
             "UPDATE ai_sessions SET status = %s, durable_turn_id = NULL, updated_at = now()"
-            " WHERE id = %s AND status = 'running'",
-            (prior, session_id),
+            " WHERE id = %s AND status = 'running'"
+            " AND (%s::uuid IS NULL OR durable_turn_id = %s::uuid)",
+            (prior, session_id, turn_id, turn_id),
         )
         if cur.rowcount == 0:
             return None
@@ -218,7 +223,7 @@ def give_back(conn: Connection[Any], session_id: str, prior: str) -> Logged | No
 
 def interrupt(conn: Connection[Any], session_id: str) -> bool:
     """``durable.ts`` ``interrupt``'s flag, while a turn holds the row."""
-    with _write(conn):
+    with write_transaction(conn):
         cur = conn.execute(
             "UPDATE ai_sessions SET interrupt_requested = true"
             " WHERE id = %s AND durable_turn_id IS NOT NULL",
@@ -232,7 +237,7 @@ def placement(
 ) -> int | None:
     """``turnHost.ts`` ``#claim``, the only writer of ``turn_attempt``: the placement takes the
     turn while the row runs it, and the transcript's mark is set once per ``mark_key``."""
-    with _write(conn):
+    with write_transaction(conn):
         row = conn.execute(
             "UPDATE ai_sessions SET turn_attempt = %(attempt)s,"
             " turn_mark = CASE WHEN turn_mark_turn = %(key)s THEN turn_mark ELSE ("
@@ -263,13 +268,14 @@ def spend(
     """``turnHost.ts`` ``Spend.flush`` and ``#write``: what a placement spent, added whether or
     not it still holds the row, once per ``key`` (a resend of a write whose answer was lost adds
     nothing); False for a session that is gone."""
-    # One statement: the row locked, the session's old keys let go, the key taken, and the spend
-    # added only when the key was new.
-    with _write(conn):
+    # One statement: the row locked, the session's old keys let go (never the key sent: a resend
+    # of an old key still finds it, and adds nothing), the key taken, and the spend added only
+    # when the key was new.
+    with write_transaction(conn):
         row = conn.execute(
             "WITH s AS (SELECT id FROM ai_sessions WHERE id = %(id)s FOR UPDATE),"
             " old AS (DELETE FROM ai_turn_spend_keys WHERE session_id = %(id)s"
-            " AND created_at < now() - make_interval(secs => %(ttl)s)),"
+            " AND created_at < now() - make_interval(secs => %(ttl)s) AND key <> %(key)s),"
             " k AS (INSERT INTO ai_turn_spend_keys (session_id, key) SELECT id, %(key)s FROM s"
             " ON CONFLICT DO NOTHING RETURNING session_id),"
             " u AS (UPDATE ai_sessions SET cost_usd = cost_usd + %(cost)s,"
@@ -364,7 +370,7 @@ def finish(
     worded with the lineage's spend and budget, the status its last event names, then the
     queue's head claimed, in one transaction. None for an end already written, a turn the row no
     longer runs, or a session that is gone."""
-    with _write(conn):
+    with write_transaction(conn):
         row = conn.execute(
             (
                 f"SELECT ai_sessions.turns, {POOL_BUDGET} AS budget, {POOL_COST} AS spent"
@@ -392,14 +398,14 @@ def begin(
     conn: Connection[Any], session_id: str, nxt: dict[str, Any]
 ) -> tuple[Outcome, Logged | None]:
     """``session.begin_turn``: the queue's head claimed while no turn ran (#6386)."""
-    with _write(conn):
+    with write_transaction(conn):
         return claim_queued(conn, session_id, nxt)
 
 
 def queue_changed(conn: Connection[Any], session_id: str, text: str) -> Logged | None:
     """``session.queue_changed``: the queue after a change, as a ``session.queue`` event, under
     the row's lock; None for a session that is gone."""
-    with _write(conn):
+    with write_transaction(conn):
         row = conn.execute(
             "SELECT 1 FROM ai_sessions WHERE id = %s FOR UPDATE", (session_id,)
         ).fetchone()
@@ -437,7 +443,7 @@ def end_lost(
 ) -> Logged | None:
     """``durableSweep.ts`` ``endLostTurn``: the row set ``idle`` with ``tail`` while it still
     holds a turn and its ``event_seq`` is the one the sweep read; None otherwise."""
-    with _write(conn):
+    with write_transaction(conn):
         row = conn.execute(
             "UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()"
             " WHERE id = %s AND status = ANY(%s) AND event_seq = %s RETURNING id",

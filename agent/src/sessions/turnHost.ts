@@ -451,7 +451,7 @@ export class TurnHost {
       const why = cutBy()
       return why !== undefined && why !== 'shutdown'
     }
-    const spend = new Spend(this.#turns, id)
+    const spend = new Spend(this.#turns, id, `${attempt}:${turnId}:end`)
     /** The session's working directory as placed for this turn (set just before it runs). */
     let placed: Placement | undefined
     /**
@@ -1097,10 +1097,11 @@ export class TurnHost {
  * `unpriced_cost_usd` (Claude Code has priced none of it yet), whether or not the row is still
  * this placement's. The end (`TurnHost#write`) replaces it with the turn's own reckoning.
  *
- * Each write has a key of its own (`#token` and a sequence number). A write whose answer never
- * came is sent again under its key before any new one, so one that committed while its answer was
- * lost is added once (`SpendDelta.key`). The token is this object's, never the attempt id, which
- * the next turn's first placement in a run shares.
+ * Each write as it runs has a key of its own (`#token` and a sequence number). A write whose answer
+ * never came is sent again under its key before any new one, so one that committed while its
+ * answer was lost is added once (`SpendDelta.key`). The token is this object's, never the attempt
+ * id alone, which the next turn's first placement in a run shares. The end's write is keyed
+ * `<attempt>:<turn>:end` (`endKey`), not by the token.
  */
 class Spend {
   readonly turns: Pick<TurnRows, 'spend'>
@@ -1114,14 +1115,18 @@ class Spend {
   /** Set by `settled`: the end's write takes over, so a flush from a fence tick still in flight writes nothing. */
   #closed = false
 
-  constructor(turns: Pick<TurnRows, 'spend'>, id: string) {
+  /**
+   * The end's write's key (`TurnHost#write`): `<attempt>:<turn>:end`. The attempt
+   * (`${runId}:${cycle}`, temporal/session/workflow.ts) is shared by the next turn's first placement
+   * in a run, since `cycle` starts at 0 for every turn, so the key adds the turn id. `session_turn`
+   * is never retried (`maximumAttempts: 1`), so (attempt, turn) is this placement's alone.
+   */
+  readonly endKey: string
+
+  constructor(turns: Pick<TurnRows, 'spend'>, id: string, endKey: string) {
     this.turns = turns
     this.id = id
-  }
-
-  /** The end's write's key (`TurnHost#write`). */
-  get endKey(): string {
-    return `${this.#token}:end`
+    this.endKey = endKey
   }
 
   flush(runningUsd: number): void {

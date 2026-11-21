@@ -1,12 +1,12 @@
-import { screen, within } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import type { FilamentOptions, SlotChoice } from '../api/types'
+import type { FilamentOptions, FilamentWarning, SlotChoice } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
-import { TAGGED_TRAY, UNLINKED_RECORD, UNTAGGED_TRAY, hotFilaments, setHotPath } from '../mocks/features/hotPath'
+import { SHELF_NUMBER, TAGGED_TRAY, UNTAGGED_TRAY, hotFilaments } from '../mocks/features/hotPath'
 import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
-import { FilamentPicker } from './FilamentPicker'
+import { FilamentPicker, WarningList } from './FilamentPicker'
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog'
 
 /** Controlled the way `PrintPicker` holds it, so a click really moves the selection. */
@@ -416,51 +416,113 @@ describe('FilamentPicker · grams from the last slice (#2365)', () => {
 
 // #3818 (plan 2026-10-18 D1) — a native run's choices are the printer's loaded trays.
 describe('FilamentPicker on the native path (source: trays)', () => {
-  it('lists each tray by its slot and AMS percent, with the Bambuddy record over it', async () => {
+  it('lists each tray by its slot and AMS percent, with the SB spool it holds', async () => {
     const { user } = open(hotFilaments())
     expect(within(slot(1)).getByText('PLA blue in AMS-A slot 1')).toBeInTheDocument()
     expect(within(slot(1)).getByText('81%')).toBeInTheDocument()
-    const records = within(slot(1)).getByTestId(`records-${TAGGED_TRAY}`)
-    expect(records).toHaveTextContent('Bambuddy: Bambu Lab Blue · 812 g')
-    // The untagged tray has no record yet, and no percent: an unknown is a dash.
+    const held = within(slot(1)).getByTestId(`sb-spool-${TAGGED_TRAY}`)
+    expect(held).toHaveTextContent('Spool #1: Bambu Lab Blue · 812 g')
+    // The untagged tray holds no SB spool yet, and has no percent: an unknown is a dash.
     await expand(user, 2)
     const untagged = within(slot(2)).getByTestId(`spool-${UNTAGGED_TRAY}`).closest('label')!
     expect(untagged).toHaveTextContent('PLA pink in AMS-A slot 2')
     expect(untagged).toHaveTextContent('—')
-    expect(within(slot(2)).queryByTestId(`records-${UNTAGGED_TRAY}`)).not.toBeInTheDocument()
+    expect(within(slot(2)).queryByTestId(`sb-spool-${UNTAGGED_TRAY}`)).not.toBeInTheDocument()
   })
 
-  it("names a record by its provider's own label (#4516)", () => {
-    open({ ...hotFilaments(), provider_labels: { bambuddy: 'Bambuddy (garage)' } })
-    expect(within(slot(1)).getByTestId(`records-${TAGGED_TRAY}`)).toHaveTextContent('Bambuddy (garage): Bambu Lab Blue')
+  it('draws a translucent spool as RGBA with its grams arc (#6262)', () => {
+    const options = hotFilaments()
+    const spools = (options.spools ?? []).map((spool) =>
+      spool.spool_id === TAGGED_TRAY ? { ...spool, rgba: '#0047BB80', label_weight_g: 1000, remaining_g: 250 } : spool,
+    )
+    open({ ...options, spools })
+    const row = within(slot(1)).getByTestId(`spool-${TAGGED_TRAY}`).closest('label')!
+    const chip = within(row).getByTestId('rgba-swatch')
+    expect(chip).toHaveAttribute('data-colour', '#0047BB80')
+    expect(chip.querySelector('[data-layer="grams"]')).toHaveAttribute('data-fraction', '0.25')
   })
 
-  it('offers only the loaded trays: a shelf record is for linking, never a print choice', async () => {
+  it('links a spool with no type to its page in the Filament section (#6262)', () => {
+    const options = hotFilaments()
+    const spools = (options.spools ?? []).map((spool) =>
+      spool.spool_id === TAGGED_TRAY ? { ...spool, needs_type: true } : spool,
+    )
+    open({ ...options, spools })
+    const row = within(slot(1)).getByTestId(`spool-${TAGGED_TRAY}`).closest('label')!
+    const badge = within(row).getByRole('link', { name: 'Needs type' })
+    expect(badge.getAttribute('href')).toMatch(/\/filament\/spools\/[^/]+$/)
+    expect(badge).toHaveAttribute('target', '_blank')
+    expect(badge).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it('shows the badge on a tray line too, and a click on it leaves the choice alone (#6262)', async () => {
+    const options = hotFilaments()
+    const spools = (options.spools ?? []).map((spool) =>
+      spool.spool_id === TAGGED_TRAY
+        ? { ...spool, needs_type: true }
+        : { ...spool, needs_type: true, sb_spool_id: 'untagged-sb', sb_number: 9 },
+    )
+    const { user } = open({ ...options, spools })
+    const held = within(slot(1)).getByTestId(`sb-spool-${TAGGED_TRAY}`).closest('label')!
+    expect(within(held).getAllByRole('link', { name: 'Needs type' })).toHaveLength(1)
+    await expand(user, 1)
+    const other = within(slot(1)).getByTestId(`spool-${UNTAGGED_TRAY}`).closest('label')!
+    const badge = within(other).getByRole('link', { name: 'Needs type' })
+    badge.addEventListener('click', (event) => event.preventDefault())
+    await user.click(badge)
+    expect(within(slot(1)).getByTestId(`spool-${TAGGED_TRAY}`)).toBeChecked()
+    expect(within(slot(1)).getByTestId(`spool-${UNTAGGED_TRAY}`)).not.toBeChecked()
+  })
+
+  it('names an inventory spool by its SB number in RGBA (#6262)', () => {
+    const suggested = fixtures.filamentOptions.suggested?.find((choice) => choice.slot_id === 1)?.spool_id
+    const options: FilamentOptions = {
+      ...fixtures.filamentOptions,
+      spools: (fixtures.filamentOptions.spools ?? []).map((spool) =>
+        spool.spool_id === suggested ? { ...spool, rgba: '#FF149380', sb_number: 7, sb_spool_id: 'abc', needs_type: true } : spool,
+      ),
+    }
+    open(options)
+    const row = within(slot(1)).getByTestId(`spool-${suggested}`).closest('label')!
+    expect(within(row).getByTestId('rgba-swatch')).toHaveAttribute('data-colour', '#FF149380')
+    expect(within(row).getByText('#7')).toBeInTheDocument()
+    expect(within(row).getByRole('link', { name: 'Needs type' }).getAttribute('href')).toMatch(/\/filament\/spools\/abc$/)
+  })
+
+  it('says when the SB spool has no type yet (#6261)', () => {
+    const options = hotFilaments()
+    const spools = (options.spools ?? []).map((spool) =>
+      spool.spool_id === TAGGED_TRAY ? { ...spool, brand: null, needs_type: true } : spool,
+    )
+    open({ ...options, spools })
+    expect(within(slot(1)).getByTestId(`sb-spool-${TAGGED_TRAY}`)).toHaveTextContent('Spool #1: Blue · 812 g')
+  })
+
+  it('offers only the loaded trays: a shelf spool is for linking, never a print choice', async () => {
     // The backend keeps it in `shelf` (#4506); one in `spools` too would still not be offered.
     const options = hotFilaments()
     const { user } = open({ ...options, spools: [...(options.spools ?? []), ...(options.shelf ?? [])] })
     await expand(user, 1)
     expect(within(slot(1)).getByTestId(`spool-${TAGGED_TRAY}`)).toBeInTheDocument()
     expect(within(slot(1)).getByTestId(`spool-${UNTAGGED_TRAY}`)).toBeInTheDocument()
-    expect(within(slot(1)).queryByTestId(`spool-${UNLINKED_RECORD}`)).not.toBeInTheDocument()
+    expect(within(slot(1)).queryByTestId(`spool-${SHELF_NUMBER}`)).not.toBeInTheDocument()
     // A few trays, not an inventory: no filters.
     expect(screen.queryByTestId('filter-material')).not.toBeInTheDocument()
   })
 
-  it('says, quietly, when the overlay is stale, and shows the trays alone', () => {
-    setHotPath(true, { stale: true })
-    open(hotFilaments())
-    expect(screen.getByTestId('overlay-notes')).toHaveTextContent(
-      "Bambuddy's spool records are from 13:40 UTC; showing the trays only.",
-    )
-    expect(within(slot(1)).getByText('PLA blue in AMS-A slot 1')).toBeInTheDocument()
-    expect(within(slot(1)).queryByTestId(`records-${TAGGED_TRAY}`)).not.toBeInTheDocument()
-  })
-
-  it('shows no note and keeps the inventory picker for a Bambuddy answer', async () => {
-    const { user } = open({ ...fixtures.filamentOptions, overlay_notes: ['ignored'] })
-    expect(screen.queryByTestId('overlay-notes')).not.toBeInTheDocument()
+  it('keeps the inventory picker for a Bambuddy answer', async () => {
+    const { user } = open(fixtures.filamentOptions)
     await expand(user, 1)
     expect(screen.getByTestId('filter-material')).toBeInTheDocument()
+  })
+})
+
+// #6748: the run's error and the queued panel both list warnings with `WarningList`. A kind
+// this build does not know (a newer API) still shows, in the quiet tone.
+describe('WarningList', () => {
+  it('gives a warning of an unknown kind the quiet tone', () => {
+    const warning = { kind: 'from-a-newer-api', message: 'A newer warning.' } as unknown as FilamentWarning
+    render(<WarningList warnings={[warning]} testId="warnings" />)
+    expect(within(screen.getByTestId('warnings')).getByText('A newer warning.')).toHaveClass('text-subtle')
   })
 })

@@ -16,6 +16,7 @@ import io
 import json
 import time
 import zipfile
+from collections import Counter
 from datetime import timedelta
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -33,6 +34,8 @@ from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
 from scadbuddy.bambuddy.filaments import MAX_PLATES
 from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.dialog_reads.component import DIALOG_READS
+from scadbuddy.dialog_reads.reads import DIALOG_TTL, DialogReads
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
@@ -56,13 +59,47 @@ from tests.api.test_send import (
 )
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.sb_rows import drop_app_sb_presets
 from tests.test_bambu3mf import add_plate
 
 # A run and the dialog both read or record the output's upload copies (#316), which
 # live in Postgres.
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
+
+
+class StoppedClock:
+    """A clock only the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def dialog_clock(client: TestClient) -> StoppedClock:
+    """The dialog's kept reads (#4196) on a clock only the test moves, so whether the
+    check finds what ``choices`` read never depends on how fast the runner is."""
+    clock = StoppedClock()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.components.override(DIALOG_READS, DialogReads(clock=clock))
+    return clock
+
+
+def bambuddy_reads() -> Counter[str]:
+    """How often each Bambuddy path was asked."""
+    return Counter(call.request.url.path for call in respx.calls)
+
+
+#: What the check reads again after ``choices`` however soon it follows: the printer's
+#: state, its trays and the spools in them (#4196).
+LIVE_READS = (
+    "/api/v1/printers/1/status",
+    "/api/v1/printers/1/inventory-remain",
+    "/api/v1/inventory/assignments",
+)
 
 
 def spool_preset_routes() -> None:
@@ -405,6 +442,7 @@ def test_the_check_reads_every_spools_presets_together(client: TestClient, model
     output_id = prepared(client, model)
     upload_route()
     run_routes()
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
     asked = asyncio.Event()
 
     async def presets(request: httpx.Request) -> httpx.Response:
@@ -433,6 +471,7 @@ def test_the_spools_read_together_are_capped(
     output_id = prepared(client, model)
     upload_route()
     run_routes()
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
     open_reads = 0
     most = 0
 
@@ -518,6 +557,7 @@ def test_the_spools_read_together_fail_as_the_serial_reads_did(
     output_id = prepared(client, model)
     upload_route()
     run_routes()
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
     failing = {5: first, 9: second}
 
     def presets(request: httpx.Request) -> httpx.Response:
@@ -786,6 +826,39 @@ def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
         {"source": "cloud", "id": "GFSG00_24"},
         {"source": "cloud", "id": "GFSA05_21"},
     ]
+
+
+@respx.mock
+@pytest.mark.sb_offset(100)
+@pytest.mark.usefixtures("slots_from_bambuddy")
+def test_a_plan_of_sb_numbers_no_bambuddy_id_shares_prints_those_spools(
+    client: TestClient, model: str
+) -> None:
+    """#6262 Task 7 review I5: SB spools #109 and #105 (Bambuddy's 9 and 5) print with
+    their own colours and presets, read by number, never as Bambuddy ids; and a "bb"
+    plan of Bambuddy's ids is mapped to them."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+    plan = {
+        "ids": "sb",
+        "slots": [{"slot_id": 1, "spool_id": 109}, {"slot_id": 2, "spool_id": 105}],
+    }
+
+    response = run_print(client, output_id, json=run_request(filament_plan=plan))
+
+    assert response.status_code == 200, response.text
+    slice_body: dict[str, Any] = json.loads(sliced.calls.last.request.content)
+    assert slice_body["filament_colours"] == ["#688197", "#0047BB"]
+    assert slice_body["filament_presets"] == [
+        {"source": "cloud", "id": "GFSG00_24"},
+        {"source": "cloud", "id": "GFSA05_21"},
+    ]
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
 
 
 @respx.mock
@@ -1193,19 +1266,21 @@ def test_the_all_plates_filament_read_reads_the_spools_once(
     client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two plates, one spool inventory: the spools are the same for every plate, so an
-    all-plates read asks for them once (#480)."""
+    all-plates read asks for them once (#480): Bambuddy's assignments, which place the SB
+    spools (#6262 Task 7)."""
     slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
     hardware_routes()
-    before = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    placed = "/inventory/assignments"
+    before = sum(1 for call in respx.calls if call.request.url.path.endswith(placed))
     response = client.get(
         f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
     )
     assert response.status_code == 200, response.text
     assert [slot["slot_id"] for slot in response.json()["slots"]] == [1, 2]
-    reads = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    reads = sum(1 for call in respx.calls if call.request.url.path.endswith(placed))
     assert reads - before == 1
 
 
@@ -1910,9 +1985,9 @@ def test_a_check_of_a_plan_with_no_slots_makes_no_read_of_its_own_for_spool_warn
     reads: list[object] = []
     real = filaments.read_inventory
 
-    async def counted(bambuddy: object) -> object:
+    async def counted(bambuddy: object, sb: object) -> object:
         reads.append(bambuddy)
-        return await real(bambuddy)  # type: ignore[arg-type]
+        return await real(bambuddy, sb)  # type: ignore[arg-type]
 
     monkeypatch.setattr(print_run, "read_inventory", counted)
 
@@ -2056,6 +2131,7 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
         "process_part_settings": None,
         "slot_part_settings": None,
         "process_inexact": [],
+        "prime_tower": None,
     }
     assert not uploaded.called
     assert not sliced.called
@@ -2402,3 +2478,32 @@ def test_a_plan_the_run_accepts_has_no_check_error(client: TestClient, model: st
 
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == []
+
+
+@respx.mock
+def test_the_check_reads_again_only_what_can_change_since_choices(
+    client: TestClient, model: str
+) -> None:
+    """#4196 lever 4: the check that follows ``choices`` uses the printer list and the
+    printer that ``choices`` read, and reads the printer's state, trays and spools again.
+    Once the kept reads are older than ``DIALOG_TTL``, the check reads them again."""
+    clock = dialog_clock(client)
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+
+    choices = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1")
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert choices.status_code == 200, choices.text
+    assert check.status_code == 200, check.text
+    asked = bambuddy_reads()
+    assert (asked["/api/v1/printers/"], asked["/api/v1/printers/1"]) == (1, 1)
+    assert [asked[path] for path in LIVE_READS] == [2, 2, 2]
+
+    clock.now = DIALOG_TTL
+    again = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert again.status_code == 200, again.text
+    asked = bambuddy_reads()
+    assert (asked["/api/v1/printers/"], asked["/api/v1/printers/1"]) == (2, 2)

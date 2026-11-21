@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
-import { crudRead, wellFormed } from '../api/crudRead.js'
+import { CrudReadError, crudRead, wellFormed } from '../api/crudRead.js'
 import { isUuid } from '../harness/uuid.js'
 import { appendEventsIn } from './eventLog.js'
 import { event, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -77,7 +77,7 @@ export interface TurnRows {
   /** The row's turn, or undefined for a session that is gone. */
   state(id: string, graceMs?: number): Promise<TurnState | undefined>
   /** A refused send's claim given back to `prior`, with its `session.status`; undefined when the row no longer runs. */
-  giveBack(id: string, prior: SessionStatus): Promise<Logged | undefined>
+  giveBack(id: string, prior: SessionStatus, turnId: string): Promise<Logged | undefined>
   /** A Stop's flag, while a turn holds the row. */
   interrupt(id: string): Promise<boolean>
   /** The placement takes the turn while the row runs it, and the transcript's mark (once per `markKey`); undefined otherwise. */
@@ -202,10 +202,11 @@ export class PgTurnRows implements TurnRows {
     return row
   }
 
-  giveBack(id: string, prior: SessionStatus): Promise<Logged | undefined> {
+  giveBack(id: string, prior: SessionStatus, turnId: string): Promise<Logged | undefined> {
     return this.#sql.begin(async (tx) => {
       const released = await tx`
-        UPDATE ai_sessions SET status = ${prior}, durable_turn_id = NULL, updated_at = now() WHERE id = ${id} AND status = 'running'`
+        UPDATE ai_sessions SET status = ${prior}, durable_turn_id = NULL, updated_at = now()
+        WHERE id = ${id} AND status = 'running' AND durable_turn_id = ${turnId}`
       if (released.count === 0) return undefined
       return logged(tx, id, [event({ type: 'session.status', sessionId: id, status: prior })])
     })
@@ -331,8 +332,15 @@ const nextBody = (next: NextClaim) => ({
   started: next.started.map((e) => JSON.stringify(e)),
 })
 
-/** A route's longest wait: a turn's end waits on the row's lock behind the turn's own writes. */
-const TIMEOUT_MS = 30_000
+/**
+ * A row write's request through the API (the turn routes, and an edit's, edits.ts): longer than
+ * the route's own waits, a pooled connection (`POOL_WAIT_S`, 10 s) and then the row's lock
+ * (`turns.LOCK_TIMEOUT_MS`, 10 s, backend api/crud_agent_turns.py), so the route gives up before
+ * the agent does and a write never commits after the agent reported it failed. Change them
+ * together.
+ */
+export const ROW_WRITE_TIMEOUT_MS = 30_000
+const TIMEOUT_MS = ROW_WRITE_TIMEOUT_MS
 
 /** `PgTurnRows` over the API's CRUD routes (area `session-turns`). */
 export class CrudTurnRows implements TurnRows {
@@ -382,8 +390,21 @@ export class CrudTurnRows implements TurnRows {
     return turn ?? undefined
   }
 
-  async giveBack(id: string, prior: SessionStatus): Promise<Logged | undefined> {
-    const answer = await this.#call<{ logged: WireLogged | null }>(`a claim of session ${id} given back`, this.#path(id, '/give-back'), { prior })
+  async giveBack(id: string, prior: SessionStatus, turnId: string): Promise<Logged | undefined> {
+    const path = this.#path(id, '/give-back')
+    const step = `a claim of session ${id} given back`
+    let answer: { logged: WireLogged | null }
+    try {
+      answer = await this.#call<{ logged: WireLogged | null }>(step, path, { prior, turn_id: turnIdOf(turnId) })
+    } catch (error) {
+      // An API pod older than the fence (during a roll) refuses `turn_id` (422 naming that field,
+      // its body forbids extra fields): give back unfenced, as that pod's route does, rather than
+      // leave the row running until the sweep. Any other refusal keeps the fence and throws.
+      if (!(error instanceof CrudReadError && error.fromRoute && error.status === 422 && error.fields.includes('body.turn_id'))) {
+        throw error
+      }
+      answer = await this.#call<{ logged: WireLogged | null }>(step, path, { prior })
+    }
     return parsed(answer.logged)
   }
 

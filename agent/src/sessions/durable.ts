@@ -22,7 +22,7 @@ import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { SweepRoutes } from '../gate/crudPending.js'
 import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
-import type { UserImage } from './images.js'
+import type { UserAttachment } from './images.js'
 import { SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
 import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, type SessionStatus } from './protocol.js'
 import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './turnRows.js'
@@ -64,9 +64,8 @@ import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './t
 // ai_session_entries, which the turn resumes. A row still `durable` is a DurableSession that
 // closed before plan Step 7.2 moved the open ones (six in production on 2026-11-01, all
 // archived, none with a transcript): no worker runs its workflow, so a send is refused `closed`
-// and a fork of it starts an AgentSession (manager.ts `fork`). `dist/recover-durable-sessions.js`
-// rebuilds such a row's conversation from its closed run's archived history and sets it
-// `unified` (recoverDurable.ts, #4772). No prompt, image or tool content is logged or traced here.
+// and a fork of it starts an AgentSession (manager.ts `fork`). Its recovery CLI is gone (#6501):
+// prod's one such row is archived (measured 2026-11-16). No prompt, image or tool content is logged or traced here.
 
 export const SEND_MESSAGE_UPDATE = 'send_message'
 /** `ai_sessions.runtime`: AgentSession (`unified`), or a closed DurableSession (`durable`, see the header). */
@@ -129,7 +128,7 @@ export type DurableTurn = {
   /** What the model gets: the words and the page context. */
   text: string
   author: Owner
-  images: readonly UserImage[]
+  images: readonly UserAttachment[]
   /** What the engine appends to Claude Code's own system prompt (Ruling 15). */
   systemAppend: string
   /** The sender's tiers, for a turn sent through the sessions_* tools (`turn_tiers`, #2320). */
@@ -367,7 +366,7 @@ export class DurableTurns {
         return this.#turn(id, turn.turnId, seq)
       }
       // The refusal is what the caller hears, whatever the give-back meets.
-      await this.#giveBack(id, claimed.prior_status).catch(() => {
+      await this.#giveBack(id, claimed.prior_status, turn.turnId).catch(() => {
         console.warn(`durable send: session ${id}'s claim could not be given back`)
       })
       throw err
@@ -609,7 +608,7 @@ export class DurableTurns {
       if (!(err instanceof CrudReadError && err.fromRoute)) {
         const row = await this.#turns.state(id).catch(() => undefined)
         if (row?.durable_turn_id === claim.turnId.toLowerCase()) {
-          await this.#giveBack(id, 'idle').catch(() => {
+          await this.#giveBack(id, 'idle', claim.turnId).catch(() => {
             console.warn(`durable send: session ${id}'s claim could not be given back`)
           })
         }
@@ -619,9 +618,9 @@ export class DurableTurns {
   }
 
   /** Gives back a claim whose message the workflow refused (Ruling 7), to the status it had. */
-  async #giveBack(id: string, prior: SessionStatus): Promise<void> {
-    // The status event in the give-back's transaction.
-    const logged = await this.#turns.giveBack(id, prior)
+  async #giveBack(id: string, prior: SessionStatus, turnId: string): Promise<void> {
+    // The status event in the give-back's transaction, only while the row runs this turn.
+    const logged = await this.#turns.giveBack(id, prior, turnId)
     if (logged) this.#events.committed(id, logged.events, logged.seqs)
   }
 

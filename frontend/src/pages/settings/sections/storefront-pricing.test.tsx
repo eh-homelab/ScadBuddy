@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../../api/client'
 import { mockSettings, resetMockState, setMockSettings } from '../../../mocks/handlers'
+import { T } from '../../../mocks/features/filament/seed'
 import { seedOrders, state as orders } from '../../../mocks/features/orders/state'
 import { choose } from '../../../test/select'
 import { renderSettingsSection } from '../testing'
@@ -13,95 +14,90 @@ const H2C = '00000000-0000-4000-8000-000000000001'
 /** `mocks/features/printers.ts`: the printer known by serial only. */
 const GARAGE = '00000000-0000-4000-8000-0000000000aa'
 
-describe('Settings → Storefront pricing (#6153)', () => {
+describe('Settings → Storefront pricing (#6153, #6574)', () => {
   beforeEach(() => resetMockState())
 
-  it('saves one spool per material', async () => {
+  it('saves one filament type per material', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderSettingsSection(<StorefrontPricing />, { route })
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
     await choose(user, within(profile).getByRole('combobox', { name: 'Printer for storefront prices' }), '3DP-31B-598')
-    await choose(user, await within(profile).findByRole('combobox', { name: 'Spool for PLA' }), /Hot Pink/)
-    await choose(user, within(profile).getByRole('combobox', { name: 'Spool for PETG' }), /Clear/)
+    await choose(user, await within(profile).findByRole('combobox', { name: 'Filament type for PLA' }), /Hot Pink/)
+    await choose(user, within(profile).getByRole('combobox', { name: 'Filament type for PETG' }), /Translucent Orange/)
     await user.click(within(profile).getByRole('button', { name: 'Save slice profile' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, spools: { pla: 2, petg: 15 } } })
+    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, materials: { pla: T.PINK, petg: T.ORANGE } } })
     expect(await within(profile).findByText('Saved.')).toBeInTheDocument()
     put.mockRestore()
+  })
+
+  it("offers a material's own types", async () => {
+    const { user } = renderSettingsSection(<StorefrontPricing />, { route })
+    const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
+    await user.click(await within(profile).findByRole('combobox', { name: 'Filament type for PETG' }))
+    expect((await screen.findAllByRole('option')).map((option) => option.textContent)).toEqual([
+      'BL-PETG-HF-TRANSLUCENT-ORANGE PETG Translucent Orange',
+      'INS-PETG-CLEAR PETG Clear',
+      'PM-PETG-CLEAR PETG Clear',
+    ])
   })
 
   it('lists support materials apart', async () => {
     const pva = { ...orders.filaments[0]!, id: 'f1a00000-0000-4000-8000-0000000000aa', material: 'PVA' }
     seedOrders({ filaments: [...orders.filaments, pva] })
-    const { user } = renderSettingsSection(<StorefrontPricing />, { route })
+    renderSettingsSection(<StorefrontPricing />, { route })
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
-    await choose(user, within(profile).getByRole('combobox', { name: 'Printer for storefront prices' }), '3DP-31B-598')
     const support = await within(profile).findByRole('group', { name: 'Support (internal)' })
-    expect(within(support).getByRole('combobox', { name: 'Spool for PVA' })).toBeInTheDocument()
+    expect(within(support).getByRole('combobox', { name: 'Filament type for PVA' })).toBeInTheDocument()
     const customer = within(profile).getByRole('group', { name: 'Customer materials' })
-    expect(within(customer).queryByRole('combobox', { name: 'Spool for PVA' })).not.toBeInTheDocument()
-    expect(within(customer).getByRole('combobox', { name: 'Spool for PLA' })).toBeInTheDocument()
+    expect(within(customer).queryByRole('combobox', { name: 'Filament type for PVA' })).not.toBeInTheDocument()
+    expect(within(customer).getByRole('combobox', { name: 'Filament type for PLA' })).toBeInTheDocument()
   })
 
-  it('asks for a printer before a spool', async () => {
-    renderSettingsSection(<StorefrontPricing />, { route })
-    const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
-    expect(await within(profile).findByText(/Choose the printer first/)).toBeInTheDocument()
-    expect(within(profile).queryByRole('combobox', { name: 'Spool for PLA' })).not.toBeInTheDocument()
-  })
-
-  it('drops the spools of the old printer when the printer changes', async () => {
+  it('keeps the types when the printer changes', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderSettingsSection(<StorefrontPricing />, { route })
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
     await choose(user, within(profile).getByRole('combobox', { name: 'Printer for storefront prices' }), '3DP-31B-598')
-    await choose(user, await within(profile).findByRole('combobox', { name: 'Spool for PLA' }), /Hot Pink/)
+    await choose(user, await within(profile).findByRole('combobox', { name: 'Filament type for PLA' }), /Jade White/)
     await choose(user, within(profile).getByRole('combobox', { name: 'Printer for storefront prices' }), 'Garage')
-    expect(await within(profile).findByRole('combobox', { name: 'Spool for PLA' })).toHaveTextContent('No spool')
     await user.click(within(profile).getByRole('button', { name: 'Save slice profile' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: GARAGE, spools: {} } })
+    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: GARAGE, materials: { pla: T.JADE } } })
     put.mockRestore()
   })
 
-  it('never sends a spool for a material the editor does not list', async () => {
-    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, spools: { pla: 2, nylon: 2 } } })
+  it('never sends a type for a material the editor does not list, or a type it does not offer', async () => {
+    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, materials: { pla: T.JADE, nylon: T.JADE, petg: 'gone-type' } } })
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderSettingsSection(<StorefrontPricing />, { route })
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
-    await within(profile).findByRole('combobox', { name: 'Spool for PLA' })
+    await within(profile).findByRole('combobox', { name: 'Filament type for PLA' })
     await user.click(within(profile).getByRole('button', { name: 'Save slice profile' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, spools: { pla: 2 } } })
+    expect(put.mock.calls[0]?.[0]).toEqual({ storefront_slice_profile: { printer: H2C, materials: { pla: T.JADE } } })
     put.mockRestore()
   })
 
-  it('says so when the stored printer is gone', async () => {
-    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: 'gone', spools: {} } })
-    renderSettingsSection(<StorefrontPricing />, { route })
-    const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
-    expect(await within(profile).findByRole('alert')).toHaveTextContent('no printer gone')
-  })
-
-  it('keeps Save off until the stored printer\'s spools are read', async () => {
-    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, spools: { pla: 2 } } })
+  it('keeps Save off until the types are read', async () => {
+    setMockSettings({ ...mockSettings(), storefront_slice_profile: { printer: H2C, materials: { pla: T.JADE } } })
     const real = api.storefrontSliceOptions.bind(api)
     let release: () => void = () => {}
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
-    const options = vi.spyOn(api, 'storefrontSliceOptions').mockImplementation(async (printer) => {
-      if (printer !== undefined) await held
-      return real(printer)
+    const options = vi.spyOn(api, 'storefrontSliceOptions').mockImplementation(async () => {
+      await held
+      return real()
     })
     renderSettingsSection(<StorefrontPricing />, { route })
     const profile = await screen.findByRole('region', { name: 'Shop slice profile' })
     const save = within(profile).getByRole('button', { name: 'Save slice profile' })
-    await waitFor(() => expect(options).toHaveBeenCalledWith(H2C))
+    await waitFor(() => expect(options).toHaveBeenCalled())
     expect(save).toBeDisabled()
     release()
-    await within(profile).findByRole('combobox', { name: 'Spool for PLA' })
-    expect(save).toBeEnabled()
+    await within(profile).findByRole('combobox', { name: 'Filament type for PLA' })
+    await waitFor(() => expect(save).toBeEnabled())
     options.mockRestore()
   })
 })

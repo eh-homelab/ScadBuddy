@@ -1,30 +1,23 @@
-"""The shop slice profile's choices and its check (#6153 PR C): the price-book materials,
-and the spools the print dialog offers on the profile's printer.
+"""The shop slice profile's choices and its check (#6153 PR C, #6574): the price-book
+materials, and the filament types (`filament/types.py`, #6262) whose presets a slot of a
+material is sliced with.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 import time."""
 
 import asyncio
-from collections.abc import Collection
-from datetime import UTC, datetime
-from typing import Annotated, Any
+from uuid import UUID
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, status
 from pydantic import BaseModel
 
-from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.filaments import normalise_colour
-from scadbuddy.bambuddy.print_run import dialog_route
-from scadbuddy.bambuddy.trays import loaded_trays
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.filament.component import Filament, FilamentDep
+from scadbuddy.filament.models import Material
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.orders.storefront.wire import is_support
-from scadbuddy.printers.component import Printers, PrintersDep
-from scadbuddy.spools.component import Spools, SpoolsDep
-from scadbuddy.spools.overlay import status_overlay
+from scadbuddy.printers.component import Printers
 
 router = APIRouter(prefix="/storefront/slice-profile", tags=["storefront"])
 
@@ -40,93 +33,78 @@ class ProfileMaterial(BaseModel):
     support: bool
 
 
-class ProfileSpool(BaseModel):
-    """A spool the print dialog offers on the profile's printer, under the id its
-    ``filament_plan`` names: a Bambuddy spool, or a loaded tray's negative id on a native
-    route."""
+class ProfileType(BaseModel):
+    """A filament type not archived (`filament_spool_types`). A slot of its material is
+    sliced with its preset for the H2C and the nozzle the dialog opens on (#6574); a
+    type with no such preset gives no slice price (`NO_TYPE_PRESET`)."""
 
-    spool_id: int
+    id: UUID
+    code: str
+    #: The type's catalog material, as its name reads.
     material: str
-    colour: str | None = None
     label: str
 
 
 class ProfileOptions(BaseModel):
     materials: list[ProfileMaterial]
-    #: Empty with no printer named.
-    spools: list[ProfileSpool]
+    #: The filament types a material can name (#6574), by code.
+    types: list[ProfileType]
 
 
 def _label(*parts: str | None) -> str:
     return " ".join(part for part in parts if part)
 
 
-async def offered_spools(
-    settings: StoredSettings, printers: Printers, spools: Spools, printer: str
-) -> list[ProfileSpool] | None:
-    """The spools the print dialog offers on registry printer ``printer``, as its route
-    reads them: the loaded trays on a native route, else Bambuddy's inventory. ``None``
-    when the registry has no such printer."""
-    row = await asyncio.to_thread(printers.store.get, printer)
-    if row is None:
-        return None
-    route = await dialog_route(
-        settings, printers.store, printers.reports, printer=row.id, printer_id=None
-    )
-    if route is not None and route.row is not None and route.status is not None:
-        overlay = await status_overlay(spools, route.row, route.status, now=datetime.now(UTC))
-        trays = loaded_trays(route.status, route.printer_id or 0, route.row.name, overlay)
-        return [
-            ProfileSpool(
-                spool_id=tray.spool_id,
-                material=tray.material,
-                colour=tray.colour,
-                label=_label(tray.label, tray.material, tray.color_name),
-            )
-            for tray in trays
-        ]
-    async with client_for(settings) as client:
-        rows = await client.spools()
+def _types(filament: Filament) -> list[ProfileType]:
+    """The types not archived, each with its material's name. Blocking."""
+    materials = {
+        row.id: row.name
+        for row in filament.catalog.list("materials", include_archived=True)
+        if isinstance(row, Material)
+    }
     return [
-        ProfileSpool(
-            spool_id=spool.id,
-            material=spool.material,
-            colour=normalise_colour(spool.rgba),
-            label=_label(spool.brand, spool.material, spool.subtype, spool.color_name)
-            + f" (#{spool.id})",
+        ProfileType(
+            id=row.id,
+            code=row.code,
+            material=materials.get(row.material_id, ""),
+            label=_label(row.code, materials.get(row.material_id), row.colour_name),
         )
-        for spool in rows
+        for row in filament.types.list()
     ]
 
 
 def profile_errors(
-    profile: StorefrontSliceProfile, offered: Collection[int] | None
-) -> list[dict[str, Any]]:
+    profile: StorefrontSliceProfile, known: bool, types: set[UUID]
+) -> list[dict[str, object]]:
     """What is wrong with ``profile``, as a 422's ``errors``: a printer the registry does
-    not hold (``offered`` is ``None``), or a spool the dialog does not offer on it."""
-    if offered is None:
-        return [{"loc": ["body", FIELD, "printer"], "msg": f"no printer {profile.printer}"}]
-    return [
-        {
-            "loc": ["body", FIELD, "spools", material],
-            "msg": f"the printer offers no spool {spool} for {material}",
-        }
-        for material, spool in profile.spools.items()
-        if spool not in offered
-    ]
+    not hold, and a material whose filament type is not one of ``types`` (the types not
+    archived). A type with no preset for the nozzle gives that variant no price."""
+    errors: list[dict[str, object]] = []
+    if not known:
+        errors.append({"loc": ["body", FIELD, "printer"], "msg": f"no printer {profile.printer}"})
+    for material, type_id in profile.materials.items():
+        if type_id not in types:
+            errors.append(
+                {
+                    "loc": ["body", FIELD, "materials", material],
+                    "msg": f"no filament type {type_id} for {material}",
+                }
+            )
+    return errors
 
 
 async def check_profile(
-    profile: StorefrontSliceProfile, settings: StoredSettings, printers: Printers, spools: Spools
+    profile: StorefrontSliceProfile, printers: Printers, filament: Filament
 ) -> None:
-    """422 unless the profile's printer is in the registry and the print dialog offers
-    each of its spools there (#6153)."""
-    offered = await offered_spools(settings, printers, spools, profile.printer)
-    errors = profile_errors(profile, None if offered is None else {s.spool_id for s in offered})
+    """422 unless the profile's printer is in the registry and each of its filament types
+    is one not archived (#6153, #6574)."""
+    row = await asyncio.to_thread(printers.store.get, profile.printer)
+    types = await asyncio.to_thread(filament.types.list)
+    errors = profile_errors(profile, row is not None, {t.id for t in types})
     if errors:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "; ".join(error["msg"] for error in errors),
+            "; ".join(str(error["msg"]) for error in errors),
             errors=errors,
         )
 
@@ -136,30 +114,18 @@ async def check_profile(
     response_model=ProfileOptions,
     summary="What the shop slice profile can name",
 )
-async def get_options(
-    orders: OrdersDep,
-    store: SettingsStoreDep,
-    printers: PrintersDep,
-    spools: SpoolsDep,
-    printer: Annotated[str | None, Query(max_length=64)] = None,
-) -> ProfileOptions:
+async def get_options(orders: OrdersDep, filament: FilamentDep) -> ProfileOptions:
     """Each material of the price book's filaments not archived, with whether it is a
-    support material, and the spools the print dialog offers on registry printer
-    ``printer`` (none without one; 422 for a printer the registry does not hold)."""
+    support material, and the filament types not archived, whose presets a slot of a
+    material is sliced with (#6574)."""
     filaments = await asyncio.to_thread(orders.store.filaments)
     materials: dict[str, str] = {}
-    for filament in filaments:
-        materials.setdefault(filament.material.casefold(), filament.material)
-    offered: list[ProfileSpool] = []
-    if printer is not None:
-        found = await offered_spools(store.load(), printers, spools, printer)
-        if found is None:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {printer}")
-        offered = found
+    for book in filaments:
+        materials.setdefault(book.material.casefold(), book.material)
     return ProfileOptions(
         materials=[
             ProfileMaterial(material=material, support=is_support(material))
             for material in sorted(materials.values(), key=str.casefold)
         ],
-        spools=offered,
+        types=await asyncio.to_thread(_types, filament),
     )

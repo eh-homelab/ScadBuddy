@@ -1,0 +1,5535 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Bambuddy",
+    "description": "Archive and manage Bambu Lab 3MF files",
+    "version": "1.3.1"
+  },
+  "x-recorded-note": "Pruned to the RFID routes of #6264 plus every schema they reference. Measured read-only on 2026-11-17: GET https://bambuddy.internal.nullreference.io/openapi.json (200, 1,245,373 bytes, info.version 1.3.1), no key sent. 'routes', 'conflict_409', 'ws_events' and 'data_origin_values' are read from the Bambuddy source at tag v1.3.1 (https://github.com/maziggy/bambuddy/tree/v1.3.1/backend/app); each carries its file and line.",
+  "paths": {
+    "/api/v1/inventory/spools/{spool_id}/link-tag": {
+      "patch": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Link Tag To Spool",
+        "description": "Link an RFID tag_uid/tray_uuid to an existing spool.\n\nA tag another active spool already carries is refused with the shared\n``tag_already_linked`` 409, which names that spool so a caller can offer\nto move the tag instead of only reporting that it is taken (#3110).",
+        "operationId": "link_tag_to_spool_api_v1_inventory_spools__spool_id__link_tag_patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkTagRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/by-tag": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Get Spool By Tag",
+        "description": "Find a single spool by its NFC ``tray_uuid`` and/or ``tag_uid``.\n\nLets NFC inventory integrations dedupe a scan without listing the whole\ninventory. ``tray_uuid`` is the primary identifier (it matches the value the\nAMS reports over MQTT), so it is tried first; ``tag_uid`` is the fallback.\nAt least one identifier must be supplied. Returns 404 when nothing matches.\n\nAccepts ``inventory:read`` OR ``inventory:update`` so a Manage-Inventory API\nkey (which has ``inventory:update`` via ``can_manage_inventory``) can read a\nspool back without widening the global ``INVENTORY_READ`` scope mapping (#1663).",
+        "operationId": "get_spool_by_tag_api_v1_inventory_spools_by_tag_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "tray_uuid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tray Uuid"
+            }
+          },
+          {
+            "name": "tag_uid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tag Uid"
+            }
+          },
+          {
+            "name": "include_archived",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Archived"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inventory/spools/{spool_id}": {
+      "patch": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Update Spool",
+        "description": "Update a spool.",
+        "operationId": "update_spool_api_v1_inventory_spools__spool_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "spool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Spool Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpoolUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoolResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Settings",
+        "description": "Get all application settings.",
+        "operationId": "get_settings_api_v1_settings__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppSettings"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Patch Settings",
+        "description": "Partially update application settings (same as PUT, for REST compatibility).",
+        "operationId": "patch_settings_api_v1_settings__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppSettingsUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppSettings"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/printers/{printer_id}/slots/{ams_id}/{tray_id}/configure": {
+      "post": {
+        "tags": [
+          "printers"
+        ],
+        "summary": "Configure Ams Slot",
+        "description": "Configure an AMS slot with a specific filament setting and K profile.\n\nThis sends two commands to the printer:\n1. ams_filament_setting - sets filament type, color, temperature\n2. extrusion_cali_sel - sets the K profile (pressure advance value)\n\nArgs:\n    printer_id: Database ID of the printer\n    ams_id: AMS unit ID (0-3 for regular AMS, 128-135 for HT AMS)\n    tray_id: Tray ID within the AMS (0-3)\n    tray_info_idx: Filament ID short format (e.g., \"GFL05\") or user preset ID\n    tray_type: Filament type (e.g., \"PLA\", \"PETG\")\n    tray_sub_brands: Sub-brand/profile name (e.g., \"PLA Basic\", \"PETG HF\")\n    tray_color: Color in RRGGBBAA hex format (e.g., \"FFFF00FF\")\n    nozzle_temp_min: Minimum nozzle temperature\n    nozzle_temp_max: Maximum nozzle temperature\n    cali_idx: K profile calibration index (-1 for default 0.020)\n    nozzle_diameter: Nozzle diameter string (e.g., \"0.4\")\n    setting_id: Full setting ID with version (e.g., \"GFSL05_07\") - optional\n    kprofile_filament_id: K profile's filament_id for proper K profile linking\n    k_value: Direct K value to set (0.0 to skip direct K value setting)\n    orca_profile_id: Orca Cloud profile the slot is being set to. With no\n        tray_info_idx, the profile's own filament id is looked up here\n        (#3216); the response says when none was found.",
+        "operationId": "configure_ams_slot_api_v1_printers__printer_id__slots__ams_id___tray_id__configure_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "printer_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Printer Id"
+            }
+          },
+          {
+            "name": "ams_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Ams Id"
+            }
+          },
+          {
+            "name": "tray_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Tray Id"
+            }
+          },
+          {
+            "name": "tray_info_idx",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tray Info Idx"
+            }
+          },
+          {
+            "name": "tray_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tray Type"
+            }
+          },
+          {
+            "name": "tray_sub_brands",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tray Sub Brands"
+            }
+          },
+          {
+            "name": "tray_color",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tray Color"
+            }
+          },
+          {
+            "name": "nozzle_temp_min",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Nozzle Temp Min"
+            }
+          },
+          {
+            "name": "nozzle_temp_max",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Nozzle Temp Max"
+            }
+          },
+          {
+            "name": "cali_idx",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": -1,
+              "title": "Cali Idx"
+            }
+          },
+          {
+            "name": "nozzle_diameter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "0.4",
+              "title": "Nozzle Diameter"
+            }
+          },
+          {
+            "name": "setting_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Setting Id"
+            }
+          },
+          {
+            "name": "kprofile_filament_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Kprofile Filament Id"
+            }
+          },
+          {
+            "name": "kprofile_setting_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Kprofile Setting Id"
+            }
+          },
+          {
+            "name": "k_value",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "default": 0.0,
+              "title": "K Value"
+            }
+          },
+          {
+            "name": "orca_profile_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Orca Profile Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spoolbuddy/devices": {
+      "get": {
+        "tags": [
+          "spoolbuddy"
+        ],
+        "summary": "List Devices",
+        "description": "List all registered SpoolBuddy devices.",
+        "operationId": "list_devices_api_v1_spoolbuddy_devices_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeviceResponse"
+                  },
+                  "title": "Response List Devices Api V1 Spoolbuddy Devices Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spoolbuddy/nfc/tag-scanned": {
+      "post": {
+        "tags": [
+          "spoolbuddy"
+        ],
+        "summary": "Nfc Tag Scanned",
+        "description": "RPi reports NFC tag detected \u2014 lookup spool and broadcast.\n\nRoutes the lookup to the inventory backend Bambuddy is configured for:\nSpoolman exclusively when ``spoolman_enabled`` is true, local DB\nexclusively otherwise. The previous implementation always tried local\nfirst and only consulted Spoolman as a fallback on local-DB miss, which\nmeant a stale local copy of a tag would silently win over the\nauthoritative Spoolman row, and deleting the local copy was the only way\nto surface the Spoolman match. Operators expect the SpoolBuddy lookup to\nfollow the inventory mode they selected in Bambuddy settings.",
+        "operationId": "nfc_tag_scanned_api_v1_spoolbuddy_nfc_tag_scanned_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagScannedRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spoolbuddy/nfc/tag-removed": {
+      "post": {
+        "tags": [
+          "spoolbuddy"
+        ],
+        "summary": "Nfc Tag Removed",
+        "description": "RPi reports NFC tag removed \u2014 broadcast event.",
+        "operationId": "nfc_tag_removed_api_v1_spoolbuddy_nfc_tag_removed_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagRemovedRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spoolbuddy/nfc/write-tag": {
+      "post": {
+        "tags": [
+          "spoolbuddy"
+        ],
+        "summary": "Nfc Write Tag",
+        "description": "Queue an NFC tag write command for a SpoolBuddy device.\n\nThe spool comes from the inventory in use: Spoolman when it is enabled,\notherwise Bambuddy's own. Built-in spools are kept after switching to\nSpoolman, so one with the same id must not stand in for the Spoolman spool.",
+        "operationId": "nfc_write_tag_api_v1_spoolbuddy_nfc_write_tag_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WriteTagRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spoolbuddy/nfc/write-result": {
+      "post": {
+        "tags": [
+          "spoolbuddy"
+        ],
+        "summary": "Nfc Write Result",
+        "description": "Handle NFC tag write result from SpoolBuddy daemon.",
+        "operationId": "nfc_write_result_api_v1_spoolbuddy_nfc_write_result_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WriteTagResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/spoolbuddy/devices/{device_id}/cancel-write": {
+      "post": {
+        "tags": [
+          "spoolbuddy"
+        ],
+        "summary": "Cancel Write",
+        "description": "Cancel a pending write-tag command.",
+        "operationId": "cancel_write_api_v1_spoolbuddy_devices__device_id__cancel_write_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/ws-token": {
+      "post": {
+        "tags": [
+          "authentication"
+        ],
+        "summary": "Mint Websocket Token",
+        "description": "Mint a short-lived token for ``/api/v1/ws`` connections (GHSA-r2qv follow-up).\n\nThe WebSocket endpoint cannot read ``Authorization`` headers from\nbrowsers (the WebSocket handshake does not let JS attach custom\nheaders), so we use the same opaque-token-in-query-param pattern\nas ``/camera/stream`` \u2014 the token is minted here behind the standard\npermission gate, then appended as ``?token=<value>`` on the\n``ws://...`` URL. The WebSocket endpoint validates it *before*\ncalling ``websocket.accept()``.\n\nReturns ``{\"token\": <opaque string>}``. The token is valid for 60\nminutes; the SPA refreshes it on reconnect if expired. API keys can\nmint tokens too \u2014 their scope flags decide whether ``WEBSOCKET_CONNECT``\npasses via the standard allowlist (``can_read_status`` covers it).",
+        "operationId": "mint_websocket_token_api_v1_auth_ws_token_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AppSettings": {
+        "properties": {
+          "auto_archive": {
+            "type": "boolean",
+            "title": "Auto Archive",
+            "description": "Automatically archive prints when completed",
+            "default": true
+          },
+          "save_thumbnails": {
+            "type": "boolean",
+            "title": "Save Thumbnails",
+            "description": "Extract and save preview images from 3MF files",
+            "default": true
+          },
+          "capture_finish_photo": {
+            "type": "boolean",
+            "title": "Capture Finish Photo",
+            "description": "Capture photo from printer camera when print completes. Bambuddy records a brief timelapse during the print so the photo can be sourced from the moment before the bed drops; the timelapse file is kept if you enabled timelapse for this print, otherwise it is deleted automatically after the photo is captured.",
+            "default": true
+          },
+          "finish_photo_restore_plate": {
+            "type": "boolean",
+            "title": "Finish Photo Restore Plate",
+            "description": "Raise the build plate back into camera framing before taking the finish photo. Bambu's end G-code drops the plate ~100mm as the last thing it does, leaving the finished print far below the camera's natural framing. Bambuddy moves it back to just above the last printed layer, takes the photo, then lowers it again. Skipped when the print height is unknown or another job is queued for the printer.",
+            "default": true
+          },
+          "default_filament_cost": {
+            "type": "number",
+            "title": "Default Filament Cost",
+            "description": "Default filament cost per kg",
+            "default": 25.0
+          },
+          "currency": {
+            "type": "string",
+            "title": "Currency",
+            "description": "Currency for cost tracking",
+            "default": "USD"
+          },
+          "energy_cost_per_kwh": {
+            "type": "number",
+            "title": "Energy Cost Per Kwh",
+            "description": "Electricity cost per kWh for energy tracking",
+            "default": 0.15
+          },
+          "energy_tracking_mode": {
+            "type": "string",
+            "title": "Energy Tracking Mode",
+            "description": "Energy display mode on stats: 'print' shows sum of per-print energy, 'total' shows lifetime plug consumption",
+            "default": "total"
+          },
+          "energy_price_source": {
+            "type": "string",
+            "title": "Energy Price Source",
+            "description": "Where the electricity price comes from: 'fixed' uses energy_cost_per_kwh, 'homeassistant' reads energy_price_ha_entity hourly and at print start and end (#1251)",
+            "default": "fixed"
+          },
+          "energy_price_ha_entity": {
+            "type": "string",
+            "title": "Energy Price Ha Entity",
+            "description": "Home Assistant sensor holding the electricity price per kWh",
+            "default": ""
+          },
+          "spoolman_enabled": {
+            "type": "boolean",
+            "title": "Spoolman Enabled",
+            "description": "Enable Spoolman integration for filament tracking",
+            "default": false
+          },
+          "spoolman_url": {
+            "type": "string",
+            "title": "Spoolman Url",
+            "description": "Spoolman server URL (e.g., http://localhost:7912)",
+            "default": ""
+          },
+          "spoolman_sync_mode": {
+            "type": "string",
+            "title": "Spoolman Sync Mode",
+            "description": "Sync mode: 'auto' syncs immediately, 'manual' requires button press",
+            "default": "auto"
+          },
+          "spoolman_disable_weight_sync": {
+            "type": "boolean",
+            "title": "Spoolman Disable Weight Sync",
+            "description": "Disable remaining_weight sync. When enabled, only location is updated for existing spools.",
+            "default": false
+          },
+          "spoolman_report_partial_usage": {
+            "type": "boolean",
+            "title": "Spoolman Report Partial Usage",
+            "description": "Report Partial Usage for Failed Prints. When a print fails or is cancelled, report the estimated filament used up to that point based on layer progress.",
+            "default": true
+          },
+          "auto_add_unknown_rfid": {
+            "type": "boolean",
+            "title": "Auto Add Unknown Rfid",
+            "description": "Automatically add spools with unknown RFID tags to inventory. Disable if you pre-create inventory entries manually to avoid duplicates.",
+            "default": true
+          },
+          "disable_filament_warnings": {
+            "type": "boolean",
+            "title": "Disable Filament Warnings",
+            "description": "Disable insufficient filament warnings when printing or queueing prints",
+            "default": false
+          },
+          "prefer_lowest_filament": {
+            "type": "boolean",
+            "title": "Prefer Lowest Filament",
+            "description": "When multiple AMS spools match, prefer the one with lowest remaining filament",
+            "default": false
+          },
+          "check_updates": {
+            "type": "boolean",
+            "title": "Check Updates",
+            "description": "Automatically check for updates on startup",
+            "default": true
+          },
+          "check_printer_firmware": {
+            "type": "boolean",
+            "title": "Check Printer Firmware",
+            "description": "Check for printer firmware updates from Bambu Lab",
+            "default": true
+          },
+          "include_beta_updates": {
+            "type": "boolean",
+            "title": "Include Beta Updates",
+            "description": "Include beta/prerelease versions in update checks",
+            "default": false
+          },
+          "announcements_enabled": {
+            "type": "boolean",
+            "title": "Announcements Enabled",
+            "description": "Fetch announcements from the Bambuddy maintainers (a signed file on GitHub)",
+            "default": true
+          },
+          "announcements_all_users": {
+            "type": "boolean",
+            "title": "Announcements All Users",
+            "description": "Show announcements to every signed-in user, not only administrators",
+            "default": false
+          },
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "description": "UI language (en, de, fr, ja, it, pt-BR)",
+            "default": "en"
+          },
+          "notification_language": {
+            "type": "string",
+            "title": "Notification Language",
+            "description": "Language for push notifications (en, de)",
+            "default": "en"
+          },
+          "bed_cooled_threshold": {
+            "type": "number",
+            "title": "Bed Cooled Threshold",
+            "description": "Bed temperature threshold for cooled notification (\u00b0C)",
+            "default": 35.0
+          },
+          "pause_warning_minutes": {
+            "type": "integer",
+            "title": "Pause Warning Minutes",
+            "description": "Minutes before a pause to send the pause-coming-up notification",
+            "default": 5
+          },
+          "ams_humidity_good": {
+            "type": "integer",
+            "title": "Ams Humidity Good",
+            "description": "Humidity threshold for good (green): <= this value",
+            "default": 40
+          },
+          "ams_humidity_fair": {
+            "type": "integer",
+            "title": "Ams Humidity Fair",
+            "description": "Humidity threshold for fair (orange): <= this value, > is red",
+            "default": 60
+          },
+          "ams_temp_good": {
+            "type": "number",
+            "title": "Ams Temp Good",
+            "description": "Temperature threshold for good (blue): <= this value",
+            "default": 28.0
+          },
+          "ams_temp_fair": {
+            "type": "number",
+            "title": "Ams Temp Fair",
+            "description": "Temperature threshold for fair (orange): <= this value, > is red",
+            "default": 35.0
+          },
+          "ams_temp_alarm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams Temp Alarm",
+            "description": "Temperature threshold (\u00b0C) for sending an alarm. Unset falls back to ams_temp_fair."
+          },
+          "ams_history_retention_days": {
+            "type": "integer",
+            "title": "Ams History Retention Days",
+            "description": "Number of days to keep AMS sensor history data",
+            "default": 30
+          },
+          "printer_sensor_history_retention_days": {
+            "type": "integer",
+            "title": "Printer Sensor History Retention Days",
+            "description": "Number of days to keep printer heater history data (nozzle / bed / chamber)",
+            "default": 30
+          },
+          "queue_drying_enabled": {
+            "type": "boolean",
+            "title": "Queue Drying Enabled",
+            "description": "Automatically dry AMS filament between queued prints",
+            "default": false
+          },
+          "queue_drying_block": {
+            "type": "boolean",
+            "title": "Queue Drying Block",
+            "description": "Block queue until drying completes (when disabled, prints take priority over drying)",
+            "default": false
+          },
+          "ambient_drying_enabled": {
+            "type": "boolean",
+            "title": "Ambient Drying Enabled",
+            "description": "Automatically dry AMS filament on idle printers when humidity exceeds threshold, regardless of queue",
+            "default": false
+          },
+          "ambient_drying_sustained_minutes": {
+            "type": "integer",
+            "maximum": 240.0,
+            "minimum": 0.0,
+            "title": "Ambient Drying Sustained Minutes",
+            "description": "Minutes the humidity must stay above the threshold before an ambient auto-dry starts (0 = start immediately). Rides out the reading spike from opening the AMS lid instead of buying a dry cycle for it.",
+            "default": 0
+          },
+          "print_drying_enabled": {
+            "type": "boolean",
+            "title": "Print Drying Enabled",
+            "description": "Allow auto-drying to also fire on a printer that is currently printing, when its model+firmware supports concurrent drying (H2D 01.03.00.00+, H2C/H2S/P2S/H2D Pro 01.02.00.00+, X2D/A2L 01.01.00.00+, X1C 01.11.02.00+). Drying temperature is automatically capped 5 degC below the idle preset (floor 40 degC) to protect spools during print.",
+            "default": false
+          },
+          "drying_presets": {
+            "type": "string",
+            "title": "Drying Presets",
+            "description": "JSON blob of drying presets per filament type (empty = use built-in defaults)",
+            "default": ""
+          },
+          "ams_humidity_thresholds": {
+            "type": "string",
+            "title": "Ams Humidity Thresholds",
+            "description": "JSON blob of per-filament-type humidity trigger thresholds for auto-drying and alarms. Shape: {\"default\": int, \"PLA\": int, \"ASA\": int, ...}. Empty = fall back to ams_humidity_fair for all types.",
+            "default": ""
+          },
+          "gcode_snippets": {
+            "type": "string",
+            "title": "Gcode Snippets",
+            "description": "JSON: per-model G-code injection snippets {model: {start_gcode, end_gcode}}",
+            "default": ""
+          },
+          "local_backup_enabled": {
+            "type": "boolean",
+            "title": "Local Backup Enabled",
+            "description": "Enable scheduled local backups",
+            "default": false
+          },
+          "local_backup_schedule": {
+            "type": "string",
+            "title": "Local Backup Schedule",
+            "description": "Backup frequency: hourly, daily, weekly",
+            "default": "daily"
+          },
+          "local_backup_time": {
+            "type": "string",
+            "title": "Local Backup Time",
+            "description": "Time of day for daily/weekly backups (HH:MM, 24h)",
+            "default": "03:00"
+          },
+          "local_backup_retention": {
+            "type": "integer",
+            "title": "Local Backup Retention",
+            "description": "Number of backup files to keep (1-100)",
+            "default": 5
+          },
+          "local_backup_path": {
+            "type": "string",
+            "title": "Local Backup Path",
+            "description": "Backup output directory (empty = DATA_DIR/backups)",
+            "default": ""
+          },
+          "per_printer_mapping_expanded": {
+            "type": "boolean",
+            "title": "Per Printer Mapping Expanded",
+            "description": "Expand custom filament mapping by default in print modal",
+            "default": false
+          },
+          "date_format": {
+            "type": "string",
+            "title": "Date Format",
+            "description": "Date format: system, us, eu, iso",
+            "default": "system"
+          },
+          "time_format": {
+            "type": "string",
+            "title": "Time Format",
+            "description": "Time format: system, 12h, 24h",
+            "default": "system"
+          },
+          "default_printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Printer Id",
+            "description": "Default printer ID for uploads, reprints, etc."
+          },
+          "pipeline_max_copies": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Pipeline Max Copies",
+            "description": "Upper bound on the copies an operator can request when running a Slicer Pipeline. Larger fleets / production rigs can raise this; the hard ceiling at 1000 is a sanity guard against fat-fingered input.",
+            "default": 50
+          },
+          "virtual_printer_archive_name_source": {
+            "type": "string",
+            "title": "Virtual Printer Archive Name Source",
+            "description": "Source for the archive's display name on virtual-printer uploads: 'metadata' uses the 3MF's embedded print_name (default, matches Bambu's behavior), 'filename' uses the filename Bambu Studio sent over FTP (lets users rename via the slicer's 'send to printer' dialog).",
+            "default": "metadata"
+          },
+          "dark_style": {
+            "type": "string",
+            "title": "Dark Style",
+            "description": "Dark mode style: classic, glow, vibrant",
+            "default": "vibrant"
+          },
+          "dark_background": {
+            "type": "string",
+            "title": "Dark Background",
+            "description": "Dark mode background: neutral, warm, cool, oled, slate, forest",
+            "default": "cool"
+          },
+          "dark_accent": {
+            "type": "string",
+            "title": "Dark Accent",
+            "description": "Dark mode accent: green, teal, blue, orange, purple, red",
+            "default": "green"
+          },
+          "light_style": {
+            "type": "string",
+            "title": "Light Style",
+            "description": "Light mode style: classic, glow, vibrant",
+            "default": "classic"
+          },
+          "light_background": {
+            "type": "string",
+            "title": "Light Background",
+            "description": "Light mode background: neutral, warm, cool",
+            "default": "neutral"
+          },
+          "light_accent": {
+            "type": "string",
+            "title": "Light Accent",
+            "description": "Light mode accent: green, teal, blue, orange, purple, red",
+            "default": "green"
+          },
+          "ftp_retry_enabled": {
+            "type": "boolean",
+            "title": "Ftp Retry Enabled",
+            "description": "Enable automatic retry for FTP operations",
+            "default": true
+          },
+          "ftp_retry_count": {
+            "type": "integer",
+            "title": "Ftp Retry Count",
+            "description": "Number of retry attempts for FTP operations (1-10)",
+            "default": 3
+          },
+          "ftp_retry_delay": {
+            "type": "integer",
+            "title": "Ftp Retry Delay",
+            "description": "Seconds to wait between FTP retry attempts (1-30)",
+            "default": 2
+          },
+          "ftp_timeout": {
+            "type": "integer",
+            "title": "Ftp Timeout",
+            "description": "FTP connection timeout in seconds (10-300)",
+            "default": 30
+          },
+          "mqtt_enabled": {
+            "type": "boolean",
+            "title": "Mqtt Enabled",
+            "description": "Enable MQTT event publishing to external broker",
+            "default": false
+          },
+          "mqtt_broker": {
+            "type": "string",
+            "title": "Mqtt Broker",
+            "description": "MQTT broker hostname or IP address",
+            "default": ""
+          },
+          "mqtt_port": {
+            "type": "integer",
+            "title": "Mqtt Port",
+            "description": "MQTT broker port (default 1883, TLS typically 8883)",
+            "default": 1883
+          },
+          "mqtt_username": {
+            "type": "string",
+            "title": "Mqtt Username",
+            "description": "MQTT username for authentication (optional)",
+            "default": ""
+          },
+          "mqtt_password": {
+            "type": "string",
+            "title": "Mqtt Password",
+            "description": "MQTT password for authentication (optional)",
+            "default": ""
+          },
+          "mqtt_topic_prefix": {
+            "type": "string",
+            "title": "Mqtt Topic Prefix",
+            "description": "Topic prefix for all published messages",
+            "default": "bambuddy"
+          },
+          "mqtt_use_tls": {
+            "type": "boolean",
+            "title": "Mqtt Use Tls",
+            "description": "Use TLS/SSL encryption for MQTT connection",
+            "default": false
+          },
+          "external_url": {
+            "type": "string",
+            "title": "External Url",
+            "description": "External URL where Bambuddy is accessible (for notification images)",
+            "default": ""
+          },
+          "docker_compose_dir": {
+            "type": "string",
+            "title": "Docker Compose Dir",
+            "description": "Host directory containing docker-compose.yml, used in the update instructions",
+            "default": ""
+          },
+          "ha_enabled": {
+            "type": "boolean",
+            "title": "Ha Enabled",
+            "description": "Enable Home Assistant integration for smart plug control",
+            "default": false
+          },
+          "ha_url": {
+            "type": "string",
+            "title": "Ha Url",
+            "description": "Home Assistant URL (e.g., http://192.168.1.100:8123)",
+            "default": ""
+          },
+          "ha_token": {
+            "type": "string",
+            "title": "Ha Token",
+            "description": "Home Assistant Long-Lived Access Token",
+            "default": ""
+          },
+          "ha_url_from_env": {
+            "type": "boolean",
+            "title": "Ha Url From Env",
+            "description": "Whether HA URL is set via HA_URL environment variable",
+            "default": false
+          },
+          "ha_token_from_env": {
+            "type": "boolean",
+            "title": "Ha Token From Env",
+            "description": "Whether HA token is set via HA_TOKEN environment variable",
+            "default": false
+          },
+          "ha_env_managed": {
+            "type": "boolean",
+            "title": "Ha Env Managed",
+            "description": "Whether HA integration is fully managed by environment variables",
+            "default": false
+          },
+          "library_disk_warning_gb": {
+            "type": "number",
+            "title": "Library Disk Warning Gb",
+            "description": "Show warning when free disk space falls below this threshold (GB)",
+            "default": 5.0
+          },
+          "camera_light_mode": {
+            "type": "string",
+            "title": "Camera Light Mode",
+            "description": "Turn the chamber light on while the camera is in use: 'off', 'all' or 'selected' printers",
+            "default": "off"
+          },
+          "camera_light_delay": {
+            "type": "number",
+            "title": "Camera Light Delay",
+            "description": "Seconds an automatic snapshot waits after the chamber light was turned on",
+            "default": 2.0
+          },
+          "camera_view_mode": {
+            "type": "string",
+            "title": "Camera View Mode",
+            "description": "Camera view mode: 'window' opens in new browser window, 'embedded' shows overlay on main screen",
+            "default": "window"
+          },
+          "preferred_slicer": {
+            "type": "string",
+            "title": "Preferred Slicer",
+            "description": "Slicer used for the server-side API / sidecar: 'bambu_studio' or 'orcaslicer'",
+            "default": "bambu_studio"
+          },
+          "open_in_slicer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open In Slicer",
+            "description": "Desktop slicer for the 'Open in Slicer' button: 'bambu_studio' or 'orcaslicer'. None inherits from preferred_slicer."
+          },
+          "slice_engine": {
+            "type": "string",
+            "title": "Slice Engine",
+            "description": "Default execution site for slicing: 'sidecar' (server-side API) or 'browser'",
+            "default": "sidecar"
+          },
+          "use_slicer_api": {
+            "type": "boolean",
+            "title": "Use Slicer Api",
+            "description": "Use the slicer-API sidecar for slicing instead of the desktop slicer URI scheme",
+            "default": false
+          },
+          "orcaslicer_api_url": {
+            "type": "string",
+            "title": "Orcaslicer Api Url",
+            "description": "OrcaSlicer sidecar URL (e.g. http://localhost:3003). Empty falls back to the SLICER_API_URL env var.",
+            "default": ""
+          },
+          "bambu_studio_api_url": {
+            "type": "string",
+            "title": "Bambu Studio Api Url",
+            "description": "BambuStudio sidecar URL (e.g. http://localhost:3001). Empty falls back to the BAMBU_STUDIO_API_URL env var.",
+            "default": ""
+          },
+          "slicer_stall_timeout_minutes": {
+            "type": "integer",
+            "maximum": 240.0,
+            "minimum": 1.0,
+            "title": "Slicer Stall Timeout Minutes",
+            "description": "Give up on a slice after this many minutes with no progress from the sidecar. On sidecars that do not report progress, applies to total slicing time instead.",
+            "default": 15
+          },
+          "prometheus_enabled": {
+            "type": "boolean",
+            "title": "Prometheus Enabled",
+            "description": "Enable Prometheus metrics endpoint at /metrics",
+            "default": false
+          },
+          "prometheus_token": {
+            "type": "string",
+            "title": "Prometheus Token",
+            "description": "Bearer token for Prometheus metrics authentication (optional)",
+            "default": ""
+          },
+          "low_stock_threshold": {
+            "type": "number",
+            "maximum": 99.9,
+            "minimum": 0.1,
+            "title": "Low Stock Threshold",
+            "description": "Low stock threshold percentage (%) for inventory filtering and display",
+            "default": 20.0
+          },
+          "session_max_hours": {
+            "type": "integer",
+            "maximum": 720.0,
+            "minimum": 1.0,
+            "title": "Session Max Hours",
+            "description": "Maximum session lifetime in hours for user logins (default 24, max 720). Applies to new logins only; already-issued tokens keep their original expiry. Longer sessions reduce automatic logout protection.",
+            "default": 24
+          },
+          "user_notifications_enabled": {
+            "type": "boolean",
+            "title": "User Notifications Enabled",
+            "description": "Enable user email notifications for print job events (requires Advanced Authentication)",
+            "default": true
+          },
+          "default_bed_levelling": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on",
+              "auto"
+            ],
+            "title": "Default Bed Levelling",
+            "description": "Default bed levelling option for new prints",
+            "default": "auto"
+          },
+          "default_flow_cali": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on",
+              "auto"
+            ],
+            "title": "Default Flow Cali",
+            "description": "Default flow calibration option for new prints",
+            "default": "auto"
+          },
+          "default_vibration_cali": {
+            "type": "boolean",
+            "title": "Default Vibration Cali",
+            "description": "Default vibration calibration option for new prints",
+            "default": true
+          },
+          "default_layer_inspect": {
+            "type": "boolean",
+            "title": "Default Layer Inspect",
+            "description": "Default first layer inspection option for new prints",
+            "default": false
+          },
+          "default_timelapse": {
+            "type": "boolean",
+            "title": "Default Timelapse",
+            "description": "Default timelapse option for new prints",
+            "default": false
+          },
+          "default_nozzle_offset_cali": {
+            "type": "string",
+            "enum": [
+              "off",
+              "on",
+              "auto"
+            ],
+            "title": "Default Nozzle Offset Cali",
+            "description": "Default nozzle offset calibration option for new prints (dual-nozzle printers only)",
+            "default": "auto"
+          },
+          "default_confirm_outcome": {
+            "type": "boolean",
+            "title": "Default Confirm Outcome",
+            "description": "Default for asking for a post-print outcome verdict on new prints (#1898)",
+            "default": false
+          },
+          "confirm_outcome_external_prints": {
+            "type": "boolean",
+            "title": "Confirm Outcome External Prints",
+            "description": "Also ask for the outcome of prints Bambuddy archived but did not dispatch \u2014 started at the printer, in Bambu Studio or in the Handy app (#1898)",
+            "default": false
+          },
+          "confirm_default_good_on_plate_clear": {
+            "type": "boolean",
+            "title": "Confirm Default Good On Plate Clear",
+            "description": "When the build plate is released (manual acknowledgment or next dispatch) with the outcome prompt still unanswered, record the print as a good part (#1898)",
+            "default": false
+          },
+          "stagger_group_size": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Stagger Group Size",
+            "description": "Number of printers to start simultaneously in staggered mode",
+            "default": 2
+          },
+          "stagger_interval_minutes": {
+            "type": "integer",
+            "maximum": 60.0,
+            "minimum": 1.0,
+            "title": "Stagger Interval Minutes",
+            "description": "Minutes between staggered printer groups",
+            "default": 5
+          },
+          "billing_enabled": {
+            "type": "boolean",
+            "title": "Billing Enabled",
+            "description": "Enable cost-center billing enforcement for print and queue operations",
+            "default": false
+          },
+          "printer_kill_switch_enabled": {
+            "type": "boolean",
+            "title": "Printer Kill Switch Enabled",
+            "description": "Immediately stop printer jobs that start without Bambuddy authorization",
+            "default": false
+          },
+          "finance_budget_reset_day": {
+            "type": "integer",
+            "maximum": 31.0,
+            "minimum": 1.0,
+            "title": "Finance Budget Reset Day",
+            "description": "Day of month when monthly finance budget window resets (1-31, clamped for short months)",
+            "default": 1
+          },
+          "finance_budget_reset_timezone": {
+            "type": "string",
+            "title": "Finance Budget Reset Timezone",
+            "description": "IANA timezone for finance monthly budget reset calculation (e.g., Europe/Berlin)",
+            "default": "UTC"
+          },
+          "require_plate_clear": {
+            "type": "boolean",
+            "title": "Require Plate Clear",
+            "description": "Require per-printer plate-clear confirmation before starting queued prints on finished printers",
+            "default": false
+          },
+          "queue_shortest_first": {
+            "type": "boolean",
+            "title": "Queue Shortest First",
+            "description": "Shortest Job First \u2014 scheduler prioritizes shorter print jobs over longer ones",
+            "default": false
+          },
+          "queue_max_concurrent_uploads": {
+            "type": "integer",
+            "maximum": 16.0,
+            "minimum": 1.0,
+            "title": "Queue Max Concurrent Uploads",
+            "description": "How many printers the queue may upload to at the same time. Printers are independent machines, so raising this starts a multi-printer batch proportionally sooner; each concurrent upload costs one connection and one thread on the Bambuddy host.",
+            "default": 4
+          },
+          "preheat_enabled": {
+            "type": "boolean",
+            "title": "Preheat Enabled",
+            "description": "Master toggle / default for new queue items. Per-item preheat_override can flip the decision per print.",
+            "default": false
+          },
+          "preheat_filament_targets": {
+            "type": "string",
+            "title": "Preheat Filament Targets",
+            "description": "JSON map of normalized filament type \u2192 chamber target \u00b0C. Empty = bundled defaults (PLA/PETG/TPU/PVA: 0, PETG-CF: 40, ABS/ASA: 45, PA/PC/PC-FR: 50, PA-CF: 55, default: 0). Scheduler picks max across loaded AMS slots; 0 disables chamber phase for that print.",
+            "default": ""
+          },
+          "preheat_max_wait_seconds": {
+            "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 60.0,
+            "title": "Preheat Max Wait Seconds",
+            "description": "Maximum time to wait for the chamber to reach the target before falling through to the soak phase (radiant heating on X1C/P2S can take 15-30 min).",
+            "default": 900
+          },
+          "preheat_soak_seconds": {
+            "type": "integer",
+            "maximum": 1800.0,
+            "minimum": 0.0,
+            "title": "Preheat Soak Seconds",
+            "description": "Additional hold time at temperature after the chamber reaches the target (or after max_wait_seconds elapses). 0 = no soak.",
+            "default": 300
+          },
+          "queue_keep_bed_warm": {
+            "type": "boolean",
+            "title": "Queue Keep Bed Warm",
+            "description": "While a printer is in FINISH state awaiting plate-clear and the next queued item requires chamber heating, hold the bed hot so the chamber stays warm during the bed-clearing window. The bed is the chamber's heating element here: the hold target is queue_keep_warm_bed_temp, or the item's own bed_temperature when the slicer metadata reports a higher one. Only fires for filaments with a non-zero chamber target (ASA, ABS, PA, PC etc.); PLA/PETG prints are skipped automatically.",
+            "default": false
+          },
+          "queue_keep_warm_bed_temp": {
+            "type": "integer",
+            "maximum": 110.0,
+            "minimum": 40.0,
+            "title": "Queue Keep Warm Bed Temp",
+            "description": "Bed temperature (\u00b0C) used when the bed's job is to heat the chamber. 90 sustains chamber warmth on enclosed printers and satisfies bed-threshold-linked aftermarket chamber heaters (which typically activate at bed \u2265 80). Applies in two places: the keep-warm hold between chamber-heated prints, and preheat when a chamber-heated item's slicer metadata carries no bed temperature at all. A parsed bed temperature higher than this always wins, so the bed is never driven cooler than the print needs.",
+            "default": 90
+          },
+          "queue_keep_warm_max_minutes": {
+            "type": "integer",
+            "maximum": 480.0,
+            "minimum": 5.0,
+            "title": "Queue Keep Warm Max Minutes",
+            "description": "How long keep-warm may hold the bed on a printer waiting for its plate to be cleared. When this elapses the bed is switched off, and the hold does not re-arm until the printer next becomes a keep-warm candidate \u2014 so a plate nobody clears cannot leave the bed hot indefinitely. Set it to how long you realistically take to reach the printer; the only cost of it being too short is that the next print re-soaks from cold.",
+            "default": 120
+          },
+          "nozzle_temp_presets": {
+            "type": "string",
+            "title": "Nozzle Temp Presets",
+            "description": "JSON array of 3 nozzle-temperature preset values in C (0-320). Empty = use defaults [120, 220, 260]",
+            "default": ""
+          },
+          "bed_temp_presets": {
+            "type": "string",
+            "title": "Bed Temp Presets",
+            "description": "JSON array of 3 bed-temperature preset values in C (0-140). Empty = use defaults [55, 75, 90]",
+            "default": ""
+          },
+          "chamber_temp_presets": {
+            "type": "string",
+            "title": "Chamber Temp Presets",
+            "description": "JSON array of 3 chamber-temperature preset values in C (0-65). Empty = use defaults [35, 45, 60]",
+            "default": ""
+          },
+          "fan_speed_presets": {
+            "type": "string",
+            "title": "Fan Speed Presets",
+            "description": "JSON array of 3 fan-speed preset values in % (0-100). Empty = use defaults [50, 75, 100]",
+            "default": ""
+          },
+          "local_login_enabled": {
+            "type": "boolean",
+            "title": "Local Login Enabled",
+            "description": "Allow username + password login on /auth/login. Disable when only SSO should be usable. BAMBUDDY_LOCAL_LOGIN=true on the server overrides this to keep a recovery path open.",
+            "default": true
+          },
+          "ldap_enabled": {
+            "type": "boolean",
+            "title": "Ldap Enabled",
+            "description": "Enable LDAP authentication",
+            "default": false
+          },
+          "ldap_server_url": {
+            "type": "string",
+            "title": "Ldap Server Url",
+            "description": "LDAP server URL (e.g., ldap://ldap.example.com:389)",
+            "default": ""
+          },
+          "ldap_bind_dn": {
+            "type": "string",
+            "title": "Ldap Bind Dn",
+            "description": "Bind DN for LDAP searches (e.g., cn=admin,dc=example,dc=com)",
+            "default": ""
+          },
+          "ldap_bind_password": {
+            "type": "string",
+            "title": "Ldap Bind Password",
+            "description": "Bind password for LDAP searches",
+            "default": ""
+          },
+          "ldap_search_base": {
+            "type": "string",
+            "title": "Ldap Search Base",
+            "description": "Search base DN (e.g., ou=users,dc=example,dc=com)",
+            "default": ""
+          },
+          "ldap_user_filter": {
+            "type": "string",
+            "title": "Ldap User Filter",
+            "description": "LDAP user search filter. {username} is replaced with the login username",
+            "default": "(sAMAccountName={username})"
+          },
+          "ldap_security": {
+            "type": "string",
+            "title": "Ldap Security",
+            "description": "LDAP security: 'starttls' or 'ldaps'",
+            "default": "starttls"
+          },
+          "ldap_group_mapping": {
+            "type": "string",
+            "title": "Ldap Group Mapping",
+            "description": "JSON: LDAP group to BamBuddy group mapping {ldap_group_dn: bambuddy_group_name}",
+            "default": ""
+          },
+          "ldap_auto_provision": {
+            "type": "boolean",
+            "title": "Ldap Auto Provision",
+            "description": "Auto-create BamBuddy user on first successful LDAP login",
+            "default": false
+          },
+          "ldap_default_group": {
+            "type": "string",
+            "title": "Ldap Default Group",
+            "description": "Fallback BamBuddy group name assigned when an LDAP user authenticates but has no mapped groups. Empty = no fallback.",
+            "default": ""
+          },
+          "obico_enabled": {
+            "type": "boolean",
+            "title": "Obico Enabled",
+            "description": "Enable Obico AI print failure detection",
+            "default": false
+          },
+          "obico_ml_url": {
+            "type": "string",
+            "title": "Obico Ml Url",
+            "description": "Self-hosted Obico ML API base URL (e.g., http://192.168.1.10:3333)",
+            "default": ""
+          },
+          "bambuddy_internal_url": {
+            "type": "string",
+            "title": "Bambuddy Internal Url",
+            "description": "Bambuddy Internal URL for Obico; empty uses External URL",
+            "default": ""
+          },
+          "obico_ml_token": {
+            "type": "string",
+            "title": "Obico Ml Token",
+            "description": "Bearer token for the Obico ML API, matching the server's ML_API_TOKEN environment variable. Empty when the server runs without one.",
+            "default": ""
+          },
+          "obico_sensitivity": {
+            "type": "string",
+            "title": "Obico Sensitivity",
+            "description": "Detection sensitivity: 'low', 'medium', or 'high' (adjusts LOW/HIGH thresholds)",
+            "default": "medium"
+          },
+          "obico_action": {
+            "type": "string",
+            "title": "Obico Action",
+            "description": "Action on detected failure: 'notify', 'pause', or 'pause_and_off'",
+            "default": "notify"
+          },
+          "obico_poll_interval": {
+            "type": "integer",
+            "maximum": 120.0,
+            "minimum": 5.0,
+            "title": "Obico Poll Interval",
+            "description": "Seconds between detection checks while a print is running",
+            "default": 10
+          },
+          "obico_enabled_printers": {
+            "type": "string",
+            "title": "Obico Enabled Printers",
+            "description": "JSON array of printer IDs to monitor (empty = all connected printers)",
+            "default": ""
+          },
+          "octoeverywhere_enabled": {
+            "type": "boolean",
+            "title": "Octoeverywhere Enabled",
+            "description": "Enable OctoEverywhere AI print failure detection",
+            "default": false
+          },
+          "octoeverywhere_api_key": {
+            "type": "string",
+            "title": "Octoeverywhere Api Key",
+            "description": "OctoEverywhere Gadget API key",
+            "default": ""
+          },
+          "octoeverywhere_api_key_configured": {
+            "type": "boolean",
+            "title": "Octoeverywhere Api Key Configured",
+            "description": "Whether an OctoEverywhere Gadget API key is saved",
+            "default": false
+          },
+          "octoeverywhere_poll_interval": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 5.0,
+            "title": "Octoeverywhere Poll Interval",
+            "description": "Seconds between inspections, subject to the server's minimum interval",
+            "default": 20
+          },
+          "octoeverywhere_confidence": {
+            "type": "string",
+            "title": "Octoeverywhere Confidence",
+            "description": "Confidence OctoEverywhere needs before suggesting a warning or pause: lowest, low, medium, high, or highest (API levels 1-5). Lower reports sooner with more false positives.",
+            "default": "medium"
+          },
+          "octoeverywhere_action": {
+            "type": "string",
+            "title": "Octoeverywhere Action",
+            "description": "Action on failure: notify, pause, or pause_and_off",
+            "default": "notify"
+          },
+          "octoeverywhere_enabled_printers": {
+            "type": "string",
+            "title": "Octoeverywhere Enabled Printers",
+            "description": "JSON array of printer IDs to monitor (empty = all connected printers)",
+            "default": ""
+          },
+          "forecast_global_lead_time_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Forecast Global Lead Time Days",
+            "description": "Global lead time floor (days) used in reorder point calculation for all SKUs",
+            "default": 0
+          },
+          "location_sensor_poll_interval": {
+            "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 60.0,
+            "title": "Location Sensor Poll Interval",
+            "description": "Seconds between Home Assistant polls/UI refreshes for storage-location sensors",
+            "default": 120
+          },
+          "location_sensor_alert_defaults": {
+            "type": "string",
+            "title": "Location Sensor Alert Defaults",
+            "description": "JSON map of sensor category (temperature/humidity/battery) \u2192 {\"alertAbove\": str, \"alertBelow\": str, \"notifyOnAlert\": bool}, seeding new storage-location sensor bindings. Empty = built-in defaults.",
+            "default": ""
+          },
+          "default_sidebar_order": {
+            "type": "string",
+            "title": "Default Sidebar Order",
+            "description": "JSON object with 'order' key containing array of sidebar item IDs (empty = no default)",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "AppSettings",
+        "description": "Application settings schema."
+      },
+      "AppSettingsUpdate": {
+        "properties": {
+          "auto_archive": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Archive"
+          },
+          "save_thumbnails": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Thumbnails"
+          },
+          "capture_finish_photo": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture Finish Photo"
+          },
+          "finish_photo_restore_plate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finish Photo Restore Plate"
+          },
+          "default_filament_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Filament Cost"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "energy_cost_per_kwh": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Energy Cost Per Kwh"
+          },
+          "energy_tracking_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Energy Tracking Mode"
+          },
+          "energy_price_source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "fixed",
+                  "homeassistant"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Energy Price Source"
+          },
+          "energy_price_ha_entity": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Energy Price Ha Entity"
+          },
+          "spoolman_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spoolman Enabled"
+          },
+          "spoolman_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spoolman Url"
+          },
+          "spoolman_sync_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spoolman Sync Mode"
+          },
+          "spoolman_disable_weight_sync": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spoolman Disable Weight Sync"
+          },
+          "spoolman_report_partial_usage": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spoolman Report Partial Usage"
+          },
+          "auto_add_unknown_rfid": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Add Unknown Rfid"
+          },
+          "disable_filament_warnings": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disable Filament Warnings"
+          },
+          "prefer_lowest_filament": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefer Lowest Filament"
+          },
+          "check_updates": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Updates"
+          },
+          "check_printer_firmware": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Check Printer Firmware"
+          },
+          "include_beta_updates": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Include Beta Updates"
+          },
+          "announcements_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Announcements Enabled"
+          },
+          "announcements_all_users": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Announcements All Users"
+          },
+          "local_login_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Login Enabled"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "notification_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notification Language"
+          },
+          "bed_cooled_threshold": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Cooled Threshold"
+          },
+          "pause_warning_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 120.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pause Warning Minutes"
+          },
+          "ams_humidity_good": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams Humidity Good"
+          },
+          "ams_humidity_fair": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams Humidity Fair"
+          },
+          "ams_temp_good": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams Temp Good"
+          },
+          "ams_temp_fair": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams Temp Fair"
+          },
+          "ams_temp_alarm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams Temp Alarm"
+          },
+          "ams_history_retention_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams History Retention Days"
+          },
+          "printer_sensor_history_retention_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Sensor History Retention Days"
+          },
+          "queue_drying_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Drying Enabled"
+          },
+          "queue_drying_block": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Drying Block"
+          },
+          "ambient_drying_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ambient Drying Enabled"
+          },
+          "ambient_drying_sustained_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 240.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ambient Drying Sustained Minutes"
+          },
+          "print_drying_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Drying Enabled"
+          },
+          "drying_presets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drying Presets"
+          },
+          "ams_humidity_thresholds": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ams Humidity Thresholds"
+          },
+          "per_printer_mapping_expanded": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Per Printer Mapping Expanded"
+          },
+          "date_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Format"
+          },
+          "time_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Format"
+          },
+          "default_printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Printer Id"
+          },
+          "pipeline_max_copies": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Max Copies"
+          },
+          "virtual_printer_archive_name_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Virtual Printer Archive Name Source"
+          },
+          "dark_style": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dark Style"
+          },
+          "dark_background": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dark Background"
+          },
+          "dark_accent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dark Accent"
+          },
+          "light_style": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Light Style"
+          },
+          "light_background": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Light Background"
+          },
+          "light_accent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Light Accent"
+          },
+          "ftp_retry_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ftp Retry Enabled"
+          },
+          "ftp_retry_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ftp Retry Count"
+          },
+          "ftp_retry_delay": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ftp Retry Delay"
+          },
+          "ftp_timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ftp Timeout"
+          },
+          "mqtt_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mqtt Enabled"
+          },
+          "mqtt_broker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mqtt Broker"
+          },
+          "mqtt_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mqtt Port"
+          },
+          "mqtt_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mqtt Username"
+          },
+          "mqtt_password": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mqtt Password"
+          },
+          "mqtt_topic_prefix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mqtt Topic Prefix"
+          },
+          "mqtt_use_tls": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mqtt Use Tls"
+          },
+          "external_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Url"
+          },
+          "docker_compose_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Compose Dir"
+          },
+          "ha_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ha Enabled"
+          },
+          "ha_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ha Url"
+          },
+          "ha_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ha Token"
+          },
+          "library_disk_warning_gb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Library Disk Warning Gb"
+          },
+          "camera_view_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Camera View Mode"
+          },
+          "camera_light_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "all",
+                  "selected"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Camera Light Mode"
+          },
+          "camera_light_delay": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 5.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Camera Light Delay"
+          },
+          "preferred_slicer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preferred Slicer"
+          },
+          "open_in_slicer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open In Slicer"
+          },
+          "slice_engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Engine"
+          },
+          "use_slicer_api": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Slicer Api"
+          },
+          "orcaslicer_api_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Orcaslicer Api Url"
+          },
+          "bambu_studio_api_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bambu Studio Api Url"
+          },
+          "slicer_stall_timeout_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 240.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Stall Timeout Minutes"
+          },
+          "prometheus_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prometheus Enabled"
+          },
+          "prometheus_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prometheus Token"
+          },
+          "low_stock_threshold": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 99.9,
+                "minimum": 0.1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low Stock Threshold"
+          },
+          "session_max_hours": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 720.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Max Hours"
+          },
+          "user_notifications_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Notifications Enabled"
+          },
+          "default_bed_levelling": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Bed Levelling"
+          },
+          "default_flow_cali": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Flow Cali"
+          },
+          "default_vibration_cali": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Vibration Cali"
+          },
+          "default_layer_inspect": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Layer Inspect"
+          },
+          "default_timelapse": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Timelapse"
+          },
+          "default_nozzle_offset_cali": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Nozzle Offset Cali"
+          },
+          "default_confirm_outcome": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Confirm Outcome"
+          },
+          "confirm_outcome_external_prints": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirm Outcome External Prints"
+          },
+          "confirm_default_good_on_plate_clear": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirm Default Good On Plate Clear"
+          },
+          "stagger_group_size": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 50.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stagger Group Size"
+          },
+          "stagger_interval_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 60.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stagger Interval Minutes"
+          },
+          "billing_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Billing Enabled"
+          },
+          "printer_kill_switch_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Kill Switch Enabled"
+          },
+          "finance_budget_reset_day": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 31.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finance Budget Reset Day"
+          },
+          "finance_budget_reset_timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finance Budget Reset Timezone"
+          },
+          "require_plate_clear": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Require Plate Clear"
+          },
+          "queue_shortest_first": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Shortest First"
+          },
+          "queue_max_concurrent_uploads": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 16.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Max Concurrent Uploads"
+          },
+          "preheat_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preheat Enabled"
+          },
+          "preheat_filament_targets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preheat Filament Targets"
+          },
+          "preheat_max_wait_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3600.0,
+                "minimum": 60.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preheat Max Wait Seconds"
+          },
+          "preheat_soak_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1800.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preheat Soak Seconds"
+          },
+          "queue_keep_bed_warm": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Keep Bed Warm"
+          },
+          "queue_keep_warm_bed_temp": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 110.0,
+                "minimum": 40.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Keep Warm Bed Temp"
+          },
+          "queue_keep_warm_max_minutes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 480.0,
+                "minimum": 5.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Keep Warm Max Minutes"
+          },
+          "nozzle_temp_presets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Presets"
+          },
+          "bed_temp_presets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Temp Presets"
+          },
+          "chamber_temp_presets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chamber Temp Presets"
+          },
+          "fan_speed_presets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fan Speed Presets"
+          },
+          "gcode_snippets": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gcode Snippets"
+          },
+          "local_backup_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Backup Enabled"
+          },
+          "local_backup_schedule": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Backup Schedule"
+          },
+          "local_backup_time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Backup Time"
+          },
+          "local_backup_retention": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Backup Retention"
+          },
+          "local_backup_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Backup Path"
+          },
+          "ldap_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Enabled"
+          },
+          "ldap_server_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Server Url"
+          },
+          "ldap_bind_dn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Bind Dn"
+          },
+          "ldap_bind_password": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Bind Password"
+          },
+          "ldap_search_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Search Base"
+          },
+          "ldap_user_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap User Filter"
+          },
+          "ldap_security": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Security"
+          },
+          "ldap_group_mapping": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Group Mapping"
+          },
+          "ldap_auto_provision": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Auto Provision"
+          },
+          "ldap_default_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ldap Default Group"
+          },
+          "obico_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obico Enabled"
+          },
+          "obico_ml_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obico Ml Url"
+          },
+          "bambuddy_internal_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bambuddy Internal Url"
+          },
+          "obico_ml_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obico Ml Token"
+          },
+          "obico_sensitivity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obico Sensitivity"
+          },
+          "obico_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obico Action"
+          },
+          "obico_poll_interval": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 120.0,
+                "minimum": 5.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obico Poll Interval"
+          },
+          "obico_enabled_printers": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obico Enabled Printers"
+          },
+          "octoeverywhere_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Octoeverywhere Enabled"
+          },
+          "octoeverywhere_api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Octoeverywhere Api Key"
+          },
+          "octoeverywhere_poll_interval": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 30.0,
+                "minimum": 5.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Octoeverywhere Poll Interval"
+          },
+          "octoeverywhere_confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Octoeverywhere Confidence"
+          },
+          "octoeverywhere_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Octoeverywhere Action"
+          },
+          "octoeverywhere_enabled_printers": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Octoeverywhere Enabled Printers"
+          },
+          "default_sidebar_order": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Sidebar Order"
+          },
+          "forecast_global_lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Forecast Global Lead Time Days"
+          },
+          "location_sensor_poll_interval": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3600.0,
+                "minimum": 60.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Sensor Poll Interval"
+          },
+          "location_sensor_alert_defaults": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Sensor Alert Defaults"
+          }
+        },
+        "type": "object",
+        "title": "AppSettingsUpdate",
+        "description": "Schema for updating settings (all fields optional)."
+      },
+      "DeviceResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "device_id": {
+            "type": "string",
+            "title": "Device Id"
+          },
+          "hostname": {
+            "type": "string",
+            "title": "Hostname"
+          },
+          "ip_address": {
+            "type": "string",
+            "title": "Ip Address"
+          },
+          "firmware_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Firmware Version"
+          },
+          "has_nfc": {
+            "type": "boolean",
+            "title": "Has Nfc"
+          },
+          "has_scale": {
+            "type": "boolean",
+            "title": "Has Scale"
+          },
+          "tare_offset": {
+            "type": "integer",
+            "title": "Tare Offset"
+          },
+          "calibration_factor": {
+            "type": "number",
+            "title": "Calibration Factor"
+          },
+          "nfc_reader_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nfc Reader Type"
+          },
+          "nfc_connection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nfc Connection"
+          },
+          "backend_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend Url"
+          },
+          "display_brightness": {
+            "type": "integer",
+            "title": "Display Brightness",
+            "default": 100
+          },
+          "display_blank_timeout": {
+            "type": "integer",
+            "title": "Display Blank Timeout",
+            "default": 0
+          },
+          "has_backlight": {
+            "type": "boolean",
+            "title": "Has Backlight",
+            "default": false
+          },
+          "last_calibrated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Calibrated At"
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen"
+          },
+          "pending_command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Command"
+          },
+          "nfc_ok": {
+            "type": "boolean",
+            "title": "Nfc Ok"
+          },
+          "scale_ok": {
+            "type": "boolean",
+            "title": "Scale Ok"
+          },
+          "uptime_s": {
+            "type": "integer",
+            "title": "Uptime S"
+          },
+          "update_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Update Status"
+          },
+          "update_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Update Message"
+          },
+          "system_stats": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Stats"
+          },
+          "online": {
+            "type": "boolean",
+            "title": "Online",
+            "default": false
+          },
+          "ssh_public_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ssh Public Key"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "device_id",
+          "hostname",
+          "ip_address",
+          "has_nfc",
+          "has_scale",
+          "tare_offset",
+          "calibration_factor",
+          "nfc_ok",
+          "scale_ok",
+          "uptime_s",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DeviceResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "LinkTagRequest": {
+        "properties": {
+          "tag_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Uid"
+          },
+          "tray_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tray Uuid"
+          },
+          "tag_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Type"
+          },
+          "data_origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Origin",
+            "default": "nfc_link"
+          }
+        },
+        "type": "object",
+        "title": "LinkTagRequest"
+      },
+      "SpoolKProfileResponse": {
+        "properties": {
+          "printer_id": {
+            "type": "integer",
+            "title": "Printer Id"
+          },
+          "extruder": {
+            "type": "integer",
+            "title": "Extruder",
+            "default": 0
+          },
+          "nozzle_diameter": {
+            "type": "string",
+            "title": "Nozzle Diameter",
+            "default": "0.4"
+          },
+          "nozzle_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Type"
+          },
+          "k_value": {
+            "type": "number",
+            "title": "K Value"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "cali_idx": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cali Idx"
+          },
+          "setting_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setting Id"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "spool_id": {
+            "type": "integer",
+            "title": "Spool Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "printer_id",
+          "k_value",
+          "id",
+          "spool_id",
+          "created_at"
+        ],
+        "title": "SpoolKProfileResponse"
+      },
+      "SpoolResponse": {
+        "properties": {
+          "material": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Material"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "color_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Name"
+          },
+          "rgba": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rgba"
+          },
+          "extra_colors": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Colors"
+          },
+          "effect_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effect Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "label_weight": {
+            "type": "integer",
+            "title": "Label Weight",
+            "default": 1000
+          },
+          "core_weight": {
+            "type": "integer",
+            "title": "Core Weight",
+            "default": 250
+          },
+          "core_weight_catalog_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Weight Catalog Id"
+          },
+          "weight_used": {
+            "type": "number",
+            "title": "Weight Used",
+            "default": 0
+          },
+          "weight_used_baseline": {
+            "type": "number",
+            "title": "Weight Used Baseline",
+            "default": 0
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "nozzle_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Min"
+          },
+          "nozzle_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Max"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "tag_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Uid"
+          },
+          "tray_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tray Uuid"
+          },
+          "data_origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Origin"
+          },
+          "tag_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Type"
+          },
+          "cost_per_kg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Kg"
+          },
+          "weight_locked": {
+            "type": "boolean",
+            "title": "Weight Locked",
+            "default": false
+          },
+          "last_scale_weight": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Scale Weight"
+          },
+          "last_weighed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Weighed At"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "low_stock_threshold_pct": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 99.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low Stock Threshold Pct"
+          },
+          "material_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material Number"
+          },
+          "storage_location": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Location"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "added_full": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Added Full"
+          },
+          "last_used": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used"
+          },
+          "last_dried_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried At"
+          },
+          "last_dried_temp": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried Temp"
+          },
+          "last_dried_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried Hours"
+          },
+          "encode_time": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Encode Time"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "k_profiles": {
+            "items": {
+              "$ref": "#/components/schemas/SpoolKProfileResponse"
+            },
+            "type": "array",
+            "title": "K Profiles",
+            "default": []
+          },
+          "suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/SpoolSupplierResponse"
+            },
+            "type": "array",
+            "title": "Suppliers",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "material",
+          "id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SpoolResponse"
+      },
+      "SpoolSupplierResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "supplier_id": {
+            "type": "integer",
+            "title": "Supplier Id"
+          },
+          "supplier_name": {
+            "type": "string",
+            "title": "Supplier Name"
+          },
+          "supplier_article_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Article Number"
+          },
+          "quoted_price_per_kg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quoted Price Per Kg"
+          },
+          "is_purchase_source": {
+            "type": "boolean",
+            "title": "Is Purchase Source",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "supplier_id",
+          "supplier_name"
+        ],
+        "title": "SpoolSupplierResponse"
+      },
+      "SpoolUpdate": {
+        "properties": {
+          "material": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "color_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Name"
+          },
+          "rgba": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9A-Fa-f]{8}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rgba"
+          },
+          "extra_colors": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extra Colors"
+          },
+          "effect_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effect Type"
+          },
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "label_weight": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label Weight"
+          },
+          "core_weight": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Weight"
+          },
+          "core_weight_catalog_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Weight Catalog Id"
+          },
+          "weight_used": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight Used"
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "nozzle_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Min"
+          },
+          "nozzle_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Max"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "tag_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Uid"
+          },
+          "tray_uuid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tray Uuid"
+          },
+          "data_origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Origin"
+          },
+          "tag_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Type"
+          },
+          "cost_per_kg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Kg"
+          },
+          "weight_locked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight Locked"
+          },
+          "last_dried_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Dried At"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "low_stock_threshold_pct": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 99.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low Stock Threshold Pct"
+          },
+          "material_number": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material Number"
+          },
+          "storage_location": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Location"
+          },
+          "location_id": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location Id"
+          }
+        },
+        "type": "object",
+        "title": "SpoolUpdate"
+      },
+      "TagRemovedRequest": {
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "maxLength": 50,
+            "title": "Device Id"
+          },
+          "tag_uid": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Tag Uid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "device_id",
+          "tag_uid"
+        ],
+        "title": "TagRemovedRequest"
+      },
+      "TagScannedRequest": {
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "maxLength": 50,
+            "title": "Device Id"
+          },
+          "tag_uid": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Tag Uid"
+          },
+          "tray_uuid": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32,
+                "pattern": "^[0-9A-Fa-f]*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tray Uuid"
+          },
+          "sak": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sak"
+          },
+          "tag_type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag Type"
+          },
+          "raw_blocks": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Blocks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "device_id",
+          "tag_uid"
+        ],
+        "title": "TagScannedRequest"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WriteTagRequest": {
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "maxLength": 50,
+            "title": "Device Id"
+          },
+          "spool_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Spool Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "device_id",
+          "spool_id"
+        ],
+        "title": "WriteTagRequest"
+      },
+      "WriteTagResultRequest": {
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "maxLength": 50,
+            "title": "Device Id"
+          },
+          "spool_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Spool Id"
+          },
+          "tag_uid": {
+            "type": "string",
+            "maxLength": 30,
+            "minLength": 8,
+            "pattern": "^[0-9A-Fa-f]+$",
+            "title": "Tag Uid"
+          },
+          "success": {
+            "type": "boolean",
+            "title": "Success"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "device_id",
+          "spool_id",
+          "tag_uid",
+          "success"
+        ],
+        "title": "WriteTagResultRequest"
+      }
+    }
+  },
+  "routes": [
+    {
+      "method": "PATCH",
+      "path": "/api/v1/inventory/spools/{spool_id}/link-tag",
+      "operationId": "link_tag_to_spool_api_v1_inventory_spools__spool_id__link_tag_patch",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "LinkTagRequest",
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2771",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/inventory/spools/by-tag",
+      "operationId": "get_spool_by_tag_api_v1_inventory_spools_by_tag_get",
+      "parameters": [
+        {
+          "name": "tray_uuid",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "tag_uid",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "include_archived",
+          "in": "query",
+          "required": false
+        }
+      ],
+      "request_schema": null,
+      "bambuddy_permission": "INVENTORY_READ or INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1560",
+      "apikey_scope_flag": "can_read_status or can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/inventory/spools/{spool_id}",
+      "operationId": "get_spool_api_v1_inventory_spools__spool_id__get",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": null,
+      "bambuddy_permission": "INVENTORY_READ",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1602",
+      "apikey_scope_flag": "can_read_status",
+      "scadbuddy_scope": "Read Status"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/inventory/spools/{spool_id}",
+      "operationId": "update_spool_api_v1_inventory_spools__spool_id__patch",
+      "parameters": [
+        {
+          "name": "spool_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": "SpoolUpdate",
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L1693",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/settings/",
+      "operationId": "get_settings_api_v1_settings__get",
+      "parameters": [],
+      "request_schema": null,
+      "bambuddy_permission": "SETTINGS_READ",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/settings.py#L344",
+      "apikey_scope_flag": "can_read_status",
+      "scadbuddy_scope": "Read Status"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/settings/",
+      "operationId": "patch_settings_api_v1_settings__patch",
+      "parameters": [],
+      "request_schema": "AppSettingsUpdate",
+      "bambuddy_permission": "SETTINGS_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/settings.py#L552",
+      "apikey_scope_flag": "none (denied for every key)",
+      "scadbuddy_scope": "Settings (admin only)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/printers/{printer_id}/slots/{ams_id}/{tray_id}/configure",
+      "operationId": "configure_ams_slot_api_v1_printers__printer_id__slots__ams_id___tray_id__configure_post",
+      "parameters": [
+        {
+          "name": "printer_id",
+          "in": "path",
+          "required": true
+        },
+        {
+          "name": "ams_id",
+          "in": "path",
+          "required": true
+        },
+        {
+          "name": "tray_id",
+          "in": "path",
+          "required": true
+        },
+        {
+          "name": "tray_info_idx",
+          "in": "query",
+          "required": true
+        },
+        {
+          "name": "tray_type",
+          "in": "query",
+          "required": true
+        },
+        {
+          "name": "tray_sub_brands",
+          "in": "query",
+          "required": true
+        },
+        {
+          "name": "tray_color",
+          "in": "query",
+          "required": true
+        },
+        {
+          "name": "nozzle_temp_min",
+          "in": "query",
+          "required": true
+        },
+        {
+          "name": "nozzle_temp_max",
+          "in": "query",
+          "required": true
+        },
+        {
+          "name": "cali_idx",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "nozzle_diameter",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "setting_id",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "kprofile_filament_id",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "kprofile_setting_id",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "k_value",
+          "in": "query",
+          "required": false
+        },
+        {
+          "name": "orca_profile_id",
+          "in": "query",
+          "required": false
+        }
+      ],
+      "request_schema": null,
+      "bambuddy_permission": "PRINTERS_CONTROL (RequirePrinterPermissionIfAuthEnabled)",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/printers.py#L2963",
+      "apikey_scope_flag": "can_control_printer",
+      "scadbuddy_scope": "Control Printer"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/spoolbuddy/devices",
+      "operationId": "list_devices_api_v1_spoolbuddy_devices_get",
+      "parameters": [],
+      "request_schema": null,
+      "bambuddy_permission": "INVENTORY_READ",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L280",
+      "apikey_scope_flag": "can_read_status",
+      "scadbuddy_scope": "Read Status"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/spoolbuddy/nfc/tag-scanned",
+      "operationId": "nfc_tag_scanned_api_v1_spoolbuddy_nfc_tag_scanned_post",
+      "parameters": [],
+      "request_schema": "TagScannedRequest",
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L582",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/spoolbuddy/nfc/tag-removed",
+      "operationId": "nfc_tag_removed_api_v1_spoolbuddy_nfc_tag_removed_post",
+      "parameters": [],
+      "request_schema": "TagRemovedRequest",
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L813",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/spoolbuddy/nfc/write-tag",
+      "operationId": "nfc_write_tag_api_v1_spoolbuddy_nfc_write_tag_post",
+      "parameters": [],
+      "request_schema": "WriteTagRequest",
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L830",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/spoolbuddy/nfc/write-result",
+      "operationId": "nfc_write_result_api_v1_spoolbuddy_nfc_write_result_post",
+      "parameters": [],
+      "request_schema": "WriteTagResultRequest",
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L963",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/spoolbuddy/devices/{device_id}/cancel-write",
+      "operationId": "cancel_write_api_v1_spoolbuddy_devices__device_id__cancel_write_post",
+      "parameters": [
+        {
+          "name": "device_id",
+          "in": "path",
+          "required": true
+        }
+      ],
+      "request_schema": null,
+      "bambuddy_permission": "INVENTORY_UPDATE",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1181",
+      "apikey_scope_flag": "can_manage_inventory",
+      "scadbuddy_scope": "Manage Inventory"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/ws-token",
+      "operationId": "mint_websocket_token_api_v1_auth_ws_token_post",
+      "parameters": [],
+      "request_schema": null,
+      "bambuddy_permission": "WEBSOCKET_CONNECT",
+      "permission_source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/auth.py#L672",
+      "apikey_scope_flag": "can_read_status",
+      "scadbuddy_scope": "Read Status"
+    }
+  ],
+  "conflict_409": {
+    "code": "tag_already_linked",
+    "message": "<'Tag UID' | 'Tray UUID'> is already linked to spool <holder_id>",
+    "spool_id": 0,
+    "field": "tag_uid | tray_uuid"
+  },
+  "conflict_409_meta": {
+    "status": 409,
+    "source": [
+      "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/tag_conflict.py#L24-L40 (detail built)",
+      "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2815 (tag_uid) and #L2839 (tray_uuid) (raised by link-tag)"
+    ],
+    "note": "Not measurable without a write. 'spool_id' is the holder's Bambuddy id. A holder that is archived gives the tag up silently; an archived target answers 400."
+  },
+  "ws_events": {
+    "spoolbuddy_tag_matched": {
+      "fields": [
+        "type",
+        "device_id",
+        "tag_uid",
+        "tray_uuid",
+        "spool"
+      ],
+      "spool_fields": [
+        "id",
+        "material",
+        "subtype",
+        "color_name",
+        "color_name_is_synthesized",
+        "rgba",
+        "extra_colors",
+        "effect_type",
+        "brand",
+        "label_weight",
+        "core_weight",
+        "weight_used"
+      ],
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L667-L690 (Spoolman mode) and #L748-L772 (local mode)"
+    },
+    "spoolbuddy_unknown_tag": {
+      "fields": [
+        "type",
+        "device_id",
+        "tag_uid",
+        "tray_uuid",
+        "sak",
+        "tag_type",
+        "tag_data"
+      ],
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L788-L797"
+    },
+    "spoolbuddy_tag_written": {
+      "fields": [
+        "type",
+        "device_id",
+        "spool_id",
+        "tag_uid"
+      ],
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1089-L1096 (Spoolman mode) and #L1154-L1161 (local mode)"
+    },
+    "spoolbuddy_tag_write_failed": {
+      "fields": [
+        "type",
+        "device_id",
+        "spool_id",
+        "message"
+      ],
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1164-L1172"
+    },
+    "spoolbuddy_tag_link_failed": {
+      "fields": [
+        "type",
+        "device_id",
+        "spool_id",
+        "tag_uid",
+        "message",
+        "reason"
+      ],
+      "note": "The local-mode 'spool_not_found' form (reason 'spool_not_found') has no 'tag_uid'.",
+      "reasons": [
+        "spoolman_not_configured",
+        "spoolman_link_failed",
+        "spool_not_found"
+      ],
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L991-L1000, #L1098-L1109 and #L1126-L1136"
+    }
+  },
+  "data_origin_values": {
+    "rfid_auto": {
+      "written_by": "Bambuddy auto-adds a spool for an unknown tag",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/spool_tag_matcher.py#L265"
+    },
+    "rfid_linked": {
+      "written_by": "Bambuddy adopts a tag onto a matching untagged spool",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/services/spool_tag_matcher.py#L417"
+    },
+    "nfc_link": {
+      "written_by": "link-tag (the LinkTagRequest default)",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/inventory.py#L2747 (default), #L2856-L2857 (applied)"
+    },
+    "opentag3d": {
+      "written_by": "a successful write-tag result, local mode",
+      "source": "https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/api/routes/spoolbuddy.py#L1149"
+    }
+  },
+  "measured_2026-11-17": {
+    "method": "GET only, no key, no body, https://bambuddy.internal.nullreference.io",
+    "auth_status": {
+      "url": "/api/v1/auth/status",
+      "status": 200,
+      "body": {
+        "auth_enabled": false,
+        "requires_setup": false
+      }
+    },
+    "settings": {
+      "url": "/api/v1/settings/",
+      "status": 200
+    },
+    "spoolbuddy_devices": {
+      "url": "/api/v1/spoolbuddy/devices",
+      "status": 200,
+      "body": []
+    },
+    "by_tag_tray_uuid": {
+      "status": 200,
+      "note": "a SpoolResponse (SpoolResponse keys as recorded); tray_uuid and tag_uid not recorded here",
+      "observed_tag_type": "bambulab",
+      "observed_data_origin": "rfid_linked"
+    },
+    "by_tag_tag_uid_unknown": {
+      "url": "/api/v1/inventory/spools/by-tag?tag_uid=00000000",
+      "status": 404,
+      "body": {
+        "detail": "Spool not found"
+      }
+    },
+    "by_tag_no_arguments": {
+      "url": "/api/v1/inventory/spools/by-tag",
+      "status": 400,
+      "body": {
+        "detail": "Provide tray_uuid and/or tag_uid"
+      }
+    },
+    "inventory_spools_origin_counts": {
+      "url": "/api/v1/inventory/spools",
+      "total": 106,
+      "data_origin": {
+        "null": 66,
+        "rfid_linked": 33,
+        "rfid_auto": 7
+      },
+      "tag_type": {
+        "null": 66,
+        "bambulab": 40
+      }
+    },
+    "websocket": {
+      "url": "wss://bambuddy.internal.nullreference.io/api/v1/ws",
+      "handshake": 101,
+      "listened_seconds": 15,
+      "sent": "nothing",
+      "frames": 7,
+      "first_frame_types": [
+        "printer_status",
+        "printer_status",
+        "printer_status",
+        "printer_status",
+        "printer_status",
+        "printer_status",
+        "printer_status"
+      ],
+      "frame_keys": [
+        "data",
+        "printer_id",
+        "type"
+      ]
+    },
+    "ws_token_get": {
+      "url": "/api/v1/auth/ws-token",
+      "status": 404,
+      "note": "the route is POST only; not called"
+    }
+  }
+}

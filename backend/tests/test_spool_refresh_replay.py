@@ -8,12 +8,18 @@ run left open across a deploy replays on the new code. A change to the commands
 whose activity raised and a trays step that raised (``SCADBUDDY_RECORD_HISTORIES=1`` runs
 the recording below), both before the kept local presets' step (#4645); ``held`` with
 that step, behind its patch; ``bb_pull`` with Bambuddy's spools pulled after it, behind
-``filament-bb-pull`` (#6261). Never re-record them: a later change adds a history
-recorded on the changed code beside them.
+``filament-bb-pull`` (#6261); ``providers_gone`` on the code behind
+``spool-providers-gone`` (#6262 Task 12), which runs only the kept presets and the pull;
+``capture`` with the capture backstop after them, behind ``filament-capture-backstop``
+(#6263 Task 8); ``rfid`` with the tag push after the backstop, behind ``filament-rfid``
+(#6264 Task 4). Record only the new one (``-k rfid``).
+Never re-record them: a later change adds a history recorded on the changed code beside
+them.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Iterator
@@ -25,7 +31,10 @@ from temporalio.client import Client, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
 from scadbuddy.workflows.spool_refresh import (
+    CAPTURE_ACTIVITY,
     FILAMENT_PULL_ACTIVITY,
+    FILAMENT_RFID_ACTIVITY,
+    FILAMENT_RFID_PATCH,
     HELD_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
@@ -37,12 +46,64 @@ from tests.support.temporal import temporal_server
 HISTORIES = Path(__file__).parent / "fixtures" / "spool_refresh_histories"
 
 
-@pytest.mark.parametrize("name", ["refreshed", "failed", "held", "bb_pull"])
+@pytest.mark.parametrize(
+    "name", ["refreshed", "failed", "held", "bb_pull", "providers_gone", "capture", "rfid"]
+)
 async def test_spool_refresh_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(
         f"spool-refresh-{name}", (HISTORIES / f"{name}.json").read_text()
     )
     await Replayer(workflows=[SpoolRefresh]).replay_workflow(history)
+
+
+def test_the_capture_history_ends_with_the_backstop() -> None:
+    history = WorkflowHistory.from_json(
+        "spool-refresh-capture", (HISTORIES / "capture.json").read_text()
+    )
+    scheduled = [
+        event.activity_task_scheduled_event_attributes.activity_type.name
+        for event in history.events
+        if event.HasField("activity_task_scheduled_event_attributes")
+    ]
+    assert scheduled == [HELD_ACTIVITY, FILAMENT_PULL_ACTIVITY, CAPTURE_ACTIVITY]
+
+
+def test_the_rfid_history_ends_with_the_tag_push_and_carries_all_three_markers() -> None:
+    history = WorkflowHistory.from_json("spool-refresh-rfid", (HISTORIES / "rfid.json").read_text())
+    scheduled = [
+        event.activity_task_scheduled_event_attributes.activity_type.name
+        for event in history.events
+        if event.HasField("activity_task_scheduled_event_attributes")
+    ]
+    assert scheduled == [
+        HELD_ACTIVITY,
+        FILAMENT_PULL_ACTIVITY,
+        CAPTURE_ACTIVITY,
+        FILAMENT_RFID_ACTIVITY,
+    ]
+    markers = {
+        json.loads(event.marker_recorded_event_attributes.details["patch-data"].payloads[0].data)[
+            "id"
+        ]
+        for event in history.events
+        if event.HasField("marker_recorded_event_attributes")
+        and event.marker_recorded_event_attributes.marker_name == "core_patch"
+    }
+    assert markers == {"spool-providers-gone", "filament-capture-backstop", FILAMENT_RFID_PATCH}
+
+
+def test_the_patched_history_runs_only_the_presets_and_the_pull() -> None:
+    """Behind ``spool-providers-gone`` no provider is listed or refreshed and no tray is
+    recorded: the retired overlay's activities are only for runs opened before it."""
+    history = WorkflowHistory.from_json(
+        "spool-refresh-providers_gone", (HISTORIES / "providers_gone.json").read_text()
+    )
+    scheduled = [
+        event.activity_task_scheduled_event_attributes.activity_type.name
+        for event in history.events
+        if event.HasField("activity_task_scheduled_event_attributes")
+    ]
+    assert scheduled == [HELD_ACTIVITY, FILAMENT_PULL_ACTIVITY]
 
 
 @pytest.fixture
@@ -53,7 +114,10 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-@pytest.mark.parametrize("name", ["bb_pull"])
+# Only the newest history is recorded: the older ones were recorded by the code of their time
+# and are never re-recorded (this code's workflow always takes every patched branch, so a new
+# recording of them would carry the later steps and their markers).
+@pytest.mark.parametrize("name", ["rfid"])
 async def test_record(recording_temporal: str, name: str) -> None:
     @activity.defn(name=LIST_ACTIVITY)
     async def names() -> list[str]:
@@ -78,18 +142,29 @@ async def test_record(recording_temporal: str, name: str) -> None:
     async def bb_pull() -> str:
         return "pulled"
 
+    @activity.defn(name=CAPTURE_ACTIVITY)
+    async def capture() -> str:
+        return "captured"
+
+    @activity.defn(name=FILAMENT_RFID_ACTIVITY)
+    async def rfid() -> str:
+        return "done"
+
     client = await Client.connect(recording_temporal)
     queue = f"spools-{uuid.uuid4().hex[:8]}"
     async with Worker(
         client,
         task_queue=queue,
         workflows=[SpoolRefresh],
-        activities=[names, refresh, seen, held, bb_pull],
+        activities=[names, refresh, seen, held, bb_pull, capture, rfid],
     ):
         handle = await client.start_workflow(
             SpoolRefresh.run, id=f"spool-providers-{queue}", task_queue=queue
         )
-        expected = {"a": "failed" if name == "failed" else "refreshed", "b": "refreshed"}
+        if name in {"providers_gone", "capture", "rfid"}:
+            expected: dict[str, str] = {}
+        else:
+            expected = {"a": "failed" if name == "failed" else "refreshed", "b": "refreshed"}
         assert await handle.result() == expected
         history = await handle.fetch_history()
     HISTORIES.mkdir(exist_ok=True)

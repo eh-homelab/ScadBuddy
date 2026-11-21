@@ -7,7 +7,6 @@ import {
   filterSpools,
   fromTrays,
   loadedLabel,
-  providerLabel,
   slotNeed,
   checkPlan,
   spoolLabel,
@@ -25,6 +24,8 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { NeedsTypeBadge } from './filament/NeedsTypeBadge'
+import { RgbaSwatch } from './filament/RgbaSwatch'
 import { Swatch } from './print/Swatch'
 
 /**
@@ -108,6 +109,10 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'mixed-flows': 'text-warn',
   // #4272 — a Track Switch inlet feeding both extruders, by a side chosen by hand.
   'inlet-shared': 'text-warn',
+  // #6732 — the slicer refused a plate with "Object conflicts were detected".
+  'object-conflict': 'text-warn',
+  // #6781 — by object on a plate that is one object of several colours: it has no effect.
+  'by-object-one-object': 'text-warn',
 }
 
 /**
@@ -186,12 +191,20 @@ function needLabel(slot: SlotNeed, copies: number, stale: boolean): string {
   return stale ? `${label}, from the last slice` : label
 }
 
+/**
+ * #6743 — a warning's tone. A kind this build does not know yet (a newer API) still
+ * shows, in the quiet tone, rather than with no class.
+ */
+function warningTone(kind: string): string {
+  return (WARNING_TONE as Partial<Record<string, string>>)[kind] ?? 'text-subtle'
+}
+
 export function WarningList({ warnings, testId }: { warnings: FilamentWarning[]; testId: string }) {
   if (warnings.length === 0) return null
   return (
     <ul className="mt-1.5 space-y-0.5 text-xs" data-testid={testId}>
       {warnings.map((warning, index) => (
-        <li key={`${warning.kind}-${warning.slot_id ?? 'plate'}-${index}`} className={WARNING_TONE[warning.kind]}>
+        <li key={`${warning.kind}-${warning.slot_id ?? 'plate'}-${index}`} className={warningTone(warning.kind)}>
           {warning.message}
         </li>
       ))}
@@ -200,24 +213,34 @@ export function WarningList({ warnings, testId }: { warnings: FilamentWarning[];
 }
 
 /**
- * #3818 — what each spool provider's record says of the spool in a tray, labelled by
- * provider: "Bambuddy: Bambu Lab Blue · 812 g". The overlay's own order (priority) is kept.
+ * #6262 — the ScadBuddy spool a tray holds, by its number, with its brand, colour name
+ * and grams: "Spool #12: Bambu Lab Blue · 812 g". A spool with no type yet says so.
  */
-function TrayRecords({ spool, labels }: { spool: SpoolOption; labels?: Readonly<Record<string, string>> }) {
-  const records = Object.entries(spool.records ?? {})
-  if (records.length === 0) return null
+function TraySpool({ spool }: { spool: SpoolOption }) {
+  if (spool.sb_number === null || spool.sb_number === undefined) return null
+  const name = [spool.brand, spool.color_name].filter(Boolean).join(' ') || spool.material
   return (
-    <ul className="basis-full space-y-0.5 pl-6 text-[11px] text-muted-foreground" data-testid={`records-${spool.spool_id}`}>
-      {records.map(([provider, record]) => (
-        <li key={provider}>
-          <span className="text-foreground">{providerLabel(provider, labels)}:</span>{' '}
-          {[record.brand, record.name].filter(Boolean).join(' ') || record.material || 'a spool'}
-          {record.remaining_g !== null && record.remaining_g !== undefined && (
-            <span className="sb-num"> · {grams(record.remaining_g)}</span>
-          )}
-        </li>
-      ))}
-    </ul>
+    <p className="basis-full pl-6 text-[11px] text-muted-foreground" data-testid={`sb-spool-${spool.spool_id}`}>
+      <span className="text-foreground">Spool #{spool.sb_number}:</span> {name}
+      {spool.remaining_g !== null && spool.remaining_g !== undefined && (
+        <span className="sb-num"> · {grams(spool.remaining_g)}</span>
+      )}
+    </p>
+  )
+}
+
+/**
+ * #6262 — a spool's chip: its `#RRGGBBAA` (the file's `colour` for a row with no `rgba`),
+ * with the grams left as an arc around it where the row lists a spool, not a "prints in".
+ */
+function SpoolChip({ spool, grams: arc = false }: { spool: SpoolOption; grams?: boolean }) {
+  return (
+    <RgbaSwatch
+      rgba={spool.rgba ?? spool.colour ?? '#000000'}
+      size="sm"
+      gramsLeft={arc ? spool.remaining_g : null}
+      labelWeight={arc ? spool.label_weight_g : null}
+    />
   )
 }
 
@@ -260,7 +283,7 @@ export function FilamentPicker({
 
   /**
    * #3818 — a native run's choices are the printer's loaded trays (plan 2026-10-18 D1):
-   * every one a choice of its own, with the providers' records over it. A shelf record
+   * every one a choice of its own, naming the SB spool it holds (#6262). A shelf spool
    * (loaded nowhere) is only for linking, in the tray question, never a print choice.
    */
   const trays = fromTrays(options)
@@ -271,7 +294,6 @@ export function FilamentPicker({
         offeredTrays?.has(spool.spool_id) ||
         plan.some((choice) => choice.spool_id === spool.spool_id),
   )
-  const notes = trays ? (options.overlay_notes ?? []) : []
   const slots = options.slots ?? []
   const suggested = options.suggested ?? []
   const choices = facets(spools)
@@ -383,14 +405,6 @@ export function FilamentPicker({
         </div>
       )}
 
-      {notes.length > 0 && (
-        <ul className="space-y-0.5 text-xs text-muted-foreground" data-testid="overlay-notes">
-          {notes.map((note) => (
-            <li key={note}>{note}</li>
-          ))}
-        </ul>
-      )}
-
       <div className="space-y-3">
         {slots.map((slot) => {
           const need = slotNeed(slot, copies)
@@ -455,7 +469,7 @@ export function FilamentPicker({
                     data-testid={`slot-prints-in-${slot.slot_id}`}
                   >
                     <span aria-hidden="true">→</span>
-                    <Swatch colour={chosenSpool.colour} size="sm" />
+                    <SpoolChip spool={chosenSpool} />
                     prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
                     {showSides && chosenSpool.side && (
                       <SideBadge side={chosenSpool.side} testId={`slot-side-${slot.slot_id}`} />
@@ -491,12 +505,22 @@ export function FilamentPicker({
                         )}
                       >
                         <RadioGroupItem value={String(spool.spool_id)} data-testid={`spool-${spool.spool_id}`} />
-                        <Swatch colour={spool.colour} size="sm" />
+                        <SpoolChip spool={spool} grams />
                         {/* The name takes at least 12rem; when the row is narrower than that
                             plus the details, the details wrap onto a second line (#944). */}
                         <span className="min-w-0 flex-[1_1_12rem] truncate text-xs">
                           {trays ? trayChoiceLabel(spool) : spoolLabel(spool)}
                         </span>
+                        {/* The spool's number and its badge stay together after the name, in the row's
+                            own wrap, not in the right-hand group's. */}
+                        {((!trays && spool.sb_number != null) || (spool.needs_type && spool.sb_spool_id)) && (
+                          <span className="flex shrink-0 items-center gap-1.5">
+                            {!trays && spool.sb_number != null && (
+                              <span className="sb-num text-[11px] text-muted-foreground">#{spool.sb_number}</span>
+                            )}
+                            <NeedsTypeBadge spool={spool} />
+                          </span>
+                        )}
                         <span className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2.5">
                           {elsewhere && (
                             <span className="shrink-0 text-[11px] text-muted-foreground">
@@ -507,7 +531,7 @@ export function FilamentPicker({
                           {showSides && spool.side && <SideBadge side={spool.side} testId={`side-${spool.spool_id}`} />}
                           <span className="sb-num shrink-0 text-[11px] text-muted-foreground">
                             {trays
-                              ? // The AMS's own estimate; the grams are each record's, below.
+                              ? // The AMS's own estimate; the grams are the SB spool's, below.
                                 spool.remain_percent === null || spool.remain_percent === undefined
                                 ? '—'
                                 : `${spool.remain_percent}%`
@@ -516,7 +540,7 @@ export function FilamentPicker({
                                 : grams(spool.remaining_g)}
                           </span>
                         </span>
-                        {trays && <TrayRecords spool={spool} labels={options.provider_labels} />}
+                        {trays && <TraySpool spool={spool} />}
                       </label>
                     )
                   })}

@@ -30,14 +30,18 @@ type SpoolOption struct {
 	loaded LoadedAtable
 	// The material property
 	material *string
-	// The physical_spool_id property
-	physical_spool_id SpoolOption_SpoolOption_physical_spool_idable
-	// The records property
-	records SpoolOption_recordsable
+	// The needs_type property
+	needs_type SpoolOption_SpoolOption_needs_typeable
 	// The remain_percent property
 	remain_percent SpoolOption_SpoolOption_remain_percentable
 	// The remaining_g property
 	remaining_g SpoolOption_SpoolOption_remaining_gable
+	// The rgba property
+	rgba SpoolOption_SpoolOption_rgbaable
+	// The sb_number property
+	sb_number SpoolOption_SpoolOption_sb_numberable
+	// The sb_spool_id property
+	sb_spool_id SpoolOption_SpoolOption_sb_spool_idable
 	// The side property
 	side SpoolOption_SpoolOption_sideable
 	// The slicer_filament property
@@ -656,75 +660,75 @@ func (m *SpoolOption_SpoolOption_label_weight_g) SetSpoolOptionLabelWeightGMembe
 	m.spoolOption_label_weight_gMember1 = value
 }
 
-// SpoolOption_SpoolOption_physical_spool_id composed type wrapper for classes i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID, SpoolOption_physical_spool_idMember1able
-type SpoolOption_SpoolOption_physical_spool_id struct {
-	// Composed type representation for type i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
-	guid *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
-	// Composed type representation for type SpoolOption_physical_spool_idMember1able
-	spoolOption_physical_spool_idMember1 SpoolOption_physical_spool_idMember1able
+// SpoolOption_SpoolOption_needs_type composed type wrapper for classes bool, SpoolOption_needs_typeMember1able
+type SpoolOption_SpoolOption_needs_type struct {
+	// Composed type representation for type bool
+	boolean *bool
+	// Composed type representation for type SpoolOption_needs_typeMember1able
+	spoolOption_needs_typeMember1 SpoolOption_needs_typeMember1able
 }
 
-// NewSpoolOption_SpoolOption_physical_spool_id instantiates a new SpoolOption_SpoolOption_physical_spool_id and sets the default values.
-func NewSpoolOption_SpoolOption_physical_spool_id() *SpoolOption_SpoolOption_physical_spool_id {
-	m := &SpoolOption_SpoolOption_physical_spool_id{}
+// NewSpoolOption_SpoolOption_needs_type instantiates a new SpoolOption_SpoolOption_needs_type and sets the default values.
+func NewSpoolOption_SpoolOption_needs_type() *SpoolOption_SpoolOption_needs_type {
+	m := &SpoolOption_SpoolOption_needs_type{}
 	return m
 }
 
-// CreateSpoolOption_SpoolOption_physical_spool_idFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// CreateSpoolOption_SpoolOption_needs_typeFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
 // returns a Parsable when successful
-func CreateSpoolOption_SpoolOption_physical_spool_idFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
-	result := NewSpoolOption_SpoolOption_physical_spool_id()
+func CreateSpoolOption_SpoolOption_needs_typeFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSpoolOption_SpoolOption_needs_type()
 	if parseNode != nil {
-		if val, err := parseNode.GetUUIDValue(); val != nil {
+		if val, err := parseNode.GetBoolValue(); val != nil {
 			if err != nil {
 				return nil, err
 			}
-			result.SetGuid(val)
-		} else if val, err := parseNode.GetObjectValue(CreateSpoolOption_physical_spool_idMember1FromDiscriminatorValue); val != nil {
+			result.SetBoolean(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSpoolOption_needs_typeMember1FromDiscriminatorValue); val != nil {
 			if err != nil {
 				return nil, err
 			}
-			if cast, ok := val.(SpoolOption_physical_spool_idMember1able); ok {
-				result.SetSpoolOptionPhysicalSpoolIdMember1(cast)
+			if cast, ok := val.(SpoolOption_needs_typeMember1able); ok {
+				result.SetSpoolOptionNeedsTypeMember1(cast)
 			}
 		}
 	}
 	return result, nil
 }
 
-// GetFieldDeserializers the deserialization information for the current model
-// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
-func (m *SpoolOption_SpoolOption_physical_spool_id) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
-	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+// GetBoolean gets the boolean property value. Composed type representation for type bool
+// returns a *bool when successful
+func (m *SpoolOption_SpoolOption_needs_type) GetBoolean() *bool {
+	return m.boolean
 }
 
-// GetGuid gets the Guid property value. Composed type representation for type i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
-// returns a *UUID when successful
-func (m *SpoolOption_SpoolOption_physical_spool_id) GetGuid() *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID {
-	return m.guid
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SpoolOption_SpoolOption_needs_type) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
 }
 
 // GetIsComposedType determines if the current object is a wrapper around a composed type
 // returns a bool when successful
-func (m *SpoolOption_SpoolOption_physical_spool_id) GetIsComposedType() bool {
+func (m *SpoolOption_SpoolOption_needs_type) GetIsComposedType() bool {
 	return true
 }
 
-// GetSpoolOptionPhysicalSpoolIdMember1 gets the SpoolOption_physical_spool_idMember1 property value. Composed type representation for type SpoolOption_physical_spool_idMember1able
-// returns a SpoolOption_physical_spool_idMember1able when successful
-func (m *SpoolOption_SpoolOption_physical_spool_id) GetSpoolOptionPhysicalSpoolIdMember1() SpoolOption_physical_spool_idMember1able {
-	return m.spoolOption_physical_spool_idMember1
+// GetSpoolOptionNeedsTypeMember1 gets the SpoolOption_needs_typeMember1 property value. Composed type representation for type SpoolOption_needs_typeMember1able
+// returns a SpoolOption_needs_typeMember1able when successful
+func (m *SpoolOption_SpoolOption_needs_type) GetSpoolOptionNeedsTypeMember1() SpoolOption_needs_typeMember1able {
+	return m.spoolOption_needs_typeMember1
 }
 
 // Serialize serializes information the current object
-func (m *SpoolOption_SpoolOption_physical_spool_id) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
-	if m.GetGuid() != nil {
-		err := writer.WriteUUIDValue("", m.GetGuid())
+func (m *SpoolOption_SpoolOption_needs_type) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetBoolean() != nil {
+		err := writer.WriteBoolValue("", m.GetBoolean())
 		if err != nil {
 			return err
 		}
-	} else if m.GetSpoolOptionPhysicalSpoolIdMember1() != nil {
-		err := writer.WriteObjectValue("", m.GetSpoolOptionPhysicalSpoolIdMember1())
+	} else if m.GetSpoolOptionNeedsTypeMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSpoolOptionNeedsTypeMember1())
 		if err != nil {
 			return err
 		}
@@ -732,14 +736,14 @@ func (m *SpoolOption_SpoolOption_physical_spool_id) Serialize(writer i878a80d233
 	return nil
 }
 
-// SetGuid sets the Guid property value. Composed type representation for type i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
-func (m *SpoolOption_SpoolOption_physical_spool_id) SetGuid(value *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID) {
-	m.guid = value
+// SetBoolean sets the boolean property value. Composed type representation for type bool
+func (m *SpoolOption_SpoolOption_needs_type) SetBoolean(value *bool) {
+	m.boolean = value
 }
 
-// SetSpoolOptionPhysicalSpoolIdMember1 sets the SpoolOption_physical_spool_idMember1 property value. Composed type representation for type SpoolOption_physical_spool_idMember1able
-func (m *SpoolOption_SpoolOption_physical_spool_id) SetSpoolOptionPhysicalSpoolIdMember1(value SpoolOption_physical_spool_idMember1able) {
-	m.spoolOption_physical_spool_idMember1 = value
+// SetSpoolOptionNeedsTypeMember1 sets the SpoolOption_needs_typeMember1 property value. Composed type representation for type SpoolOption_needs_typeMember1able
+func (m *SpoolOption_SpoolOption_needs_type) SetSpoolOptionNeedsTypeMember1(value SpoolOption_needs_typeMember1able) {
+	m.spoolOption_needs_typeMember1 = value
 }
 
 // SpoolOption_SpoolOption_remain_percent composed type wrapper for classes int32, SpoolOption_remain_percentMember1able
@@ -912,6 +916,264 @@ func (m *SpoolOption_SpoolOption_remaining_g) SetDouble(value *float64) {
 // SetSpoolOptionRemainingGMember1 sets the SpoolOption_remaining_gMember1 property value. Composed type representation for type SpoolOption_remaining_gMember1able
 func (m *SpoolOption_SpoolOption_remaining_g) SetSpoolOptionRemainingGMember1(value SpoolOption_remaining_gMember1able) {
 	m.spoolOption_remaining_gMember1 = value
+}
+
+// SpoolOption_SpoolOption_rgba composed type wrapper for classes SpoolOption_rgbaMember1able, string
+type SpoolOption_SpoolOption_rgba struct {
+	// Composed type representation for type SpoolOption_rgbaMember1able
+	spoolOption_rgbaMember1 SpoolOption_rgbaMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewSpoolOption_SpoolOption_rgba instantiates a new SpoolOption_SpoolOption_rgba and sets the default values.
+func NewSpoolOption_SpoolOption_rgba() *SpoolOption_SpoolOption_rgba {
+	m := &SpoolOption_SpoolOption_rgba{}
+	return m
+}
+
+// CreateSpoolOption_SpoolOption_rgbaFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateSpoolOption_SpoolOption_rgbaFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSpoolOption_SpoolOption_rgba()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSpoolOption_rgbaMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(SpoolOption_rgbaMember1able); ok {
+				result.SetSpoolOptionRgbaMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SpoolOption_SpoolOption_rgba) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *SpoolOption_SpoolOption_rgba) GetIsComposedType() bool {
+	return true
+}
+
+// GetSpoolOptionRgbaMember1 gets the SpoolOption_rgbaMember1 property value. Composed type representation for type SpoolOption_rgbaMember1able
+// returns a SpoolOption_rgbaMember1able when successful
+func (m *SpoolOption_SpoolOption_rgba) GetSpoolOptionRgbaMember1() SpoolOption_rgbaMember1able {
+	return m.spoolOption_rgbaMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *SpoolOption_SpoolOption_rgba) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *SpoolOption_SpoolOption_rgba) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetSpoolOptionRgbaMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSpoolOptionRgbaMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetSpoolOptionRgbaMember1 sets the SpoolOption_rgbaMember1 property value. Composed type representation for type SpoolOption_rgbaMember1able
+func (m *SpoolOption_SpoolOption_rgba) SetSpoolOptionRgbaMember1(value SpoolOption_rgbaMember1able) {
+	m.spoolOption_rgbaMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *SpoolOption_SpoolOption_rgba) SetString(value *string) {
+	m.string = value
+}
+
+// SpoolOption_SpoolOption_sb_number composed type wrapper for classes int32, SpoolOption_sb_numberMember1able
+type SpoolOption_SpoolOption_sb_number struct {
+	// Composed type representation for type int32
+	integer *int32
+	// Composed type representation for type SpoolOption_sb_numberMember1able
+	spoolOption_sb_numberMember1 SpoolOption_sb_numberMember1able
+}
+
+// NewSpoolOption_SpoolOption_sb_number instantiates a new SpoolOption_SpoolOption_sb_number and sets the default values.
+func NewSpoolOption_SpoolOption_sb_number() *SpoolOption_SpoolOption_sb_number {
+	m := &SpoolOption_SpoolOption_sb_number{}
+	return m
+}
+
+// CreateSpoolOption_SpoolOption_sb_numberFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateSpoolOption_SpoolOption_sb_numberFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSpoolOption_SpoolOption_sb_number()
+	if parseNode != nil {
+		if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSpoolOption_sb_numberMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(SpoolOption_sb_numberMember1able); ok {
+				result.SetSpoolOptionSbNumberMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SpoolOption_SpoolOption_sb_number) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *SpoolOption_SpoolOption_sb_number) GetInteger() *int32 {
+	return m.integer
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *SpoolOption_SpoolOption_sb_number) GetIsComposedType() bool {
+	return true
+}
+
+// GetSpoolOptionSbNumberMember1 gets the SpoolOption_sb_numberMember1 property value. Composed type representation for type SpoolOption_sb_numberMember1able
+// returns a SpoolOption_sb_numberMember1able when successful
+func (m *SpoolOption_SpoolOption_sb_number) GetSpoolOptionSbNumberMember1() SpoolOption_sb_numberMember1able {
+	return m.spoolOption_sb_numberMember1
+}
+
+// Serialize serializes information the current object
+func (m *SpoolOption_SpoolOption_sb_number) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetSpoolOptionSbNumberMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSpoolOptionSbNumberMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *SpoolOption_SpoolOption_sb_number) SetInteger(value *int32) {
+	m.integer = value
+}
+
+// SetSpoolOptionSbNumberMember1 sets the SpoolOption_sb_numberMember1 property value. Composed type representation for type SpoolOption_sb_numberMember1able
+func (m *SpoolOption_SpoolOption_sb_number) SetSpoolOptionSbNumberMember1(value SpoolOption_sb_numberMember1able) {
+	m.spoolOption_sb_numberMember1 = value
+}
+
+// SpoolOption_SpoolOption_sb_spool_id composed type wrapper for classes i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID, SpoolOption_sb_spool_idMember1able
+type SpoolOption_SpoolOption_sb_spool_id struct {
+	// Composed type representation for type i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
+	guid *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
+	// Composed type representation for type SpoolOption_sb_spool_idMember1able
+	spoolOption_sb_spool_idMember1 SpoolOption_sb_spool_idMember1able
+}
+
+// NewSpoolOption_SpoolOption_sb_spool_id instantiates a new SpoolOption_SpoolOption_sb_spool_id and sets the default values.
+func NewSpoolOption_SpoolOption_sb_spool_id() *SpoolOption_SpoolOption_sb_spool_id {
+	m := &SpoolOption_SpoolOption_sb_spool_id{}
+	return m
+}
+
+// CreateSpoolOption_SpoolOption_sb_spool_idFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateSpoolOption_SpoolOption_sb_spool_idFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewSpoolOption_SpoolOption_sb_spool_id()
+	if parseNode != nil {
+		if val, err := parseNode.GetUUIDValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetGuid(val)
+		} else if val, err := parseNode.GetObjectValue(CreateSpoolOption_sb_spool_idMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(SpoolOption_sb_spool_idMember1able); ok {
+				result.SetSpoolOptionSbSpoolIdMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *SpoolOption_SpoolOption_sb_spool_id) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetGuid gets the Guid property value. Composed type representation for type i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
+// returns a *UUID when successful
+func (m *SpoolOption_SpoolOption_sb_spool_id) GetGuid() *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID {
+	return m.guid
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *SpoolOption_SpoolOption_sb_spool_id) GetIsComposedType() bool {
+	return true
+}
+
+// GetSpoolOptionSbSpoolIdMember1 gets the SpoolOption_sb_spool_idMember1 property value. Composed type representation for type SpoolOption_sb_spool_idMember1able
+// returns a SpoolOption_sb_spool_idMember1able when successful
+func (m *SpoolOption_SpoolOption_sb_spool_id) GetSpoolOptionSbSpoolIdMember1() SpoolOption_sb_spool_idMember1able {
+	return m.spoolOption_sb_spool_idMember1
+}
+
+// Serialize serializes information the current object
+func (m *SpoolOption_SpoolOption_sb_spool_id) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetGuid() != nil {
+		err := writer.WriteUUIDValue("", m.GetGuid())
+		if err != nil {
+			return err
+		}
+	} else if m.GetSpoolOptionSbSpoolIdMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetSpoolOptionSbSpoolIdMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetGuid sets the Guid property value. Composed type representation for type i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
+func (m *SpoolOption_SpoolOption_sb_spool_id) SetGuid(value *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID) {
+	m.guid = value
+}
+
+// SetSpoolOptionSbSpoolIdMember1 sets the SpoolOption_sb_spool_idMember1 property value. Composed type representation for type SpoolOption_sb_spool_idMember1able
+func (m *SpoolOption_SpoolOption_sb_spool_id) SetSpoolOptionSbSpoolIdMember1(value SpoolOption_sb_spool_idMember1able) {
+	m.spoolOption_sb_spool_idMember1 = value
 }
 
 // SpoolOption_SpoolOption_side composed type wrapper for classes SpoolOption_sideMember1able, string
@@ -1486,12 +1748,12 @@ type SpoolOption_SpoolOption_labelable interface {
 	SetString(value *string)
 }
 
-type SpoolOption_SpoolOption_physical_spool_idable interface {
+type SpoolOption_SpoolOption_needs_typeable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
-	GetGuid() *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
-	GetSpoolOptionPhysicalSpoolIdMember1() SpoolOption_physical_spool_idMember1able
-	SetGuid(value *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID)
-	SetSpoolOptionPhysicalSpoolIdMember1(value SpoolOption_physical_spool_idMember1able)
+	GetBoolean() *bool
+	GetSpoolOptionNeedsTypeMember1() SpoolOption_needs_typeMember1able
+	SetBoolean(value *bool)
+	SetSpoolOptionNeedsTypeMember1(value SpoolOption_needs_typeMember1able)
 }
 
 type SpoolOption_SpoolOption_remain_percentable interface {
@@ -1508,6 +1770,30 @@ type SpoolOption_SpoolOption_remaining_gable interface {
 	GetSpoolOptionRemainingGMember1() SpoolOption_remaining_gMember1able
 	SetDouble(value *float64)
 	SetSpoolOptionRemainingGMember1(value SpoolOption_remaining_gMember1able)
+}
+
+type SpoolOption_SpoolOption_rgbaable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetSpoolOptionRgbaMember1() SpoolOption_rgbaMember1able
+	GetString() *string
+	SetSpoolOptionRgbaMember1(value SpoolOption_rgbaMember1able)
+	SetString(value *string)
+}
+
+type SpoolOption_SpoolOption_sb_numberable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetInteger() *int32
+	GetSpoolOptionSbNumberMember1() SpoolOption_sb_numberMember1able
+	SetInteger(value *int32)
+	SetSpoolOptionSbNumberMember1(value SpoolOption_sb_numberMember1able)
+}
+
+type SpoolOption_SpoolOption_sb_spool_idable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetGuid() *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID
+	GetSpoolOptionSbSpoolIdMember1() SpoolOption_sb_spool_idMember1able
+	SetGuid(value *i561e97a8befe7661a44c8f54600992b4207a3a0cf6770e5559949bc276de2e22.UUID)
+	SetSpoolOptionSbSpoolIdMember1(value SpoolOption_sb_spool_idMember1able)
 }
 
 type SpoolOption_SpoolOption_sideable interface {
@@ -1701,23 +1987,13 @@ func (m *SpoolOption) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		return nil
 	}
-	res["physical_spool_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
-		val, err := n.GetObjectValue(CreateSpoolOption_SpoolOption_physical_spool_idFromDiscriminatorValue)
+	res["needs_type"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSpoolOption_SpoolOption_needs_typeFromDiscriminatorValue)
 		if err != nil {
 			return err
 		}
 		if val != nil {
-			m.SetPhysicalSpoolId(val.(SpoolOption_SpoolOption_physical_spool_idable))
-		}
-		return nil
-	}
-	res["records"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
-		val, err := n.GetObjectValue(CreateSpoolOption_recordsFromDiscriminatorValue)
-		if err != nil {
-			return err
-		}
-		if val != nil {
-			m.SetRecords(val.(SpoolOption_recordsable))
+			m.SetNeedsType(val.(SpoolOption_SpoolOption_needs_typeable))
 		}
 		return nil
 	}
@@ -1738,6 +2014,36 @@ func (m *SpoolOption) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		if val != nil {
 			m.SetRemainingG(val.(SpoolOption_SpoolOption_remaining_gable))
+		}
+		return nil
+	}
+	res["rgba"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSpoolOption_SpoolOption_rgbaFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetRgba(val.(SpoolOption_SpoolOption_rgbaable))
+		}
+		return nil
+	}
+	res["sb_number"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSpoolOption_SpoolOption_sb_numberFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSbNumber(val.(SpoolOption_SpoolOption_sb_numberable))
+		}
+		return nil
+	}
+	res["sb_spool_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSpoolOption_SpoolOption_sb_spool_idFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSbSpoolId(val.(SpoolOption_SpoolOption_sb_spool_idable))
 		}
 		return nil
 	}
@@ -1838,16 +2144,10 @@ func (m *SpoolOption) GetMaterial() *string {
 	return m.material
 }
 
-// GetPhysicalSpoolId gets the physical_spool_id property value. The physical_spool_id property
-// returns a SpoolOption_SpoolOption_physical_spool_idable when successful
-func (m *SpoolOption) GetPhysicalSpoolId() SpoolOption_SpoolOption_physical_spool_idable {
-	return m.physical_spool_id
-}
-
-// GetRecords gets the records property value. The records property
-// returns a SpoolOption_recordsable when successful
-func (m *SpoolOption) GetRecords() SpoolOption_recordsable {
-	return m.records
+// GetNeedsType gets the needs_type property value. The needs_type property
+// returns a SpoolOption_SpoolOption_needs_typeable when successful
+func (m *SpoolOption) GetNeedsType() SpoolOption_SpoolOption_needs_typeable {
+	return m.needs_type
 }
 
 // GetRemainingG gets the remaining_g property value. The remaining_g property
@@ -1860,6 +2160,24 @@ func (m *SpoolOption) GetRemainingG() SpoolOption_SpoolOption_remaining_gable {
 // returns a SpoolOption_SpoolOption_remain_percentable when successful
 func (m *SpoolOption) GetRemainPercent() SpoolOption_SpoolOption_remain_percentable {
 	return m.remain_percent
+}
+
+// GetRgba gets the rgba property value. The rgba property
+// returns a SpoolOption_SpoolOption_rgbaable when successful
+func (m *SpoolOption) GetRgba() SpoolOption_SpoolOption_rgbaable {
+	return m.rgba
+}
+
+// GetSbNumber gets the sb_number property value. The sb_number property
+// returns a SpoolOption_SpoolOption_sb_numberable when successful
+func (m *SpoolOption) GetSbNumber() SpoolOption_SpoolOption_sb_numberable {
+	return m.sb_number
+}
+
+// GetSbSpoolId gets the sb_spool_id property value. The sb_spool_id property
+// returns a SpoolOption_SpoolOption_sb_spool_idable when successful
+func (m *SpoolOption) GetSbSpoolId() SpoolOption_SpoolOption_sb_spool_idable {
+	return m.sb_spool_id
 }
 
 // GetSide gets the side property value. The side property
@@ -1961,13 +2279,7 @@ func (m *SpoolOption) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 		}
 	}
 	{
-		err := writer.WriteObjectValue("physical_spool_id", m.GetPhysicalSpoolId())
-		if err != nil {
-			return err
-		}
-	}
-	{
-		err := writer.WriteObjectValue("records", m.GetRecords())
+		err := writer.WriteObjectValue("needs_type", m.GetNeedsType())
 		if err != nil {
 			return err
 		}
@@ -1980,6 +2292,24 @@ func (m *SpoolOption) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 	}
 	{
 		err := writer.WriteObjectValue("remain_percent", m.GetRemainPercent())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("rgba", m.GetRgba())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("sb_number", m.GetSbNumber())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("sb_spool_id", m.GetSbSpoolId())
 		if err != nil {
 			return err
 		}
@@ -2085,14 +2415,9 @@ func (m *SpoolOption) SetMaterial(value *string) {
 	m.material = value
 }
 
-// SetPhysicalSpoolId sets the physical_spool_id property value. The physical_spool_id property
-func (m *SpoolOption) SetPhysicalSpoolId(value SpoolOption_SpoolOption_physical_spool_idable) {
-	m.physical_spool_id = value
-}
-
-// SetRecords sets the records property value. The records property
-func (m *SpoolOption) SetRecords(value SpoolOption_recordsable) {
-	m.records = value
+// SetNeedsType sets the needs_type property value. The needs_type property
+func (m *SpoolOption) SetNeedsType(value SpoolOption_SpoolOption_needs_typeable) {
+	m.needs_type = value
 }
 
 // SetRemainingG sets the remaining_g property value. The remaining_g property
@@ -2103,6 +2428,21 @@ func (m *SpoolOption) SetRemainingG(value SpoolOption_SpoolOption_remaining_gabl
 // SetRemainPercent sets the remain_percent property value. The remain_percent property
 func (m *SpoolOption) SetRemainPercent(value SpoolOption_SpoolOption_remain_percentable) {
 	m.remain_percent = value
+}
+
+// SetRgba sets the rgba property value. The rgba property
+func (m *SpoolOption) SetRgba(value SpoolOption_SpoolOption_rgbaable) {
+	m.rgba = value
+}
+
+// SetSbNumber sets the sb_number property value. The sb_number property
+func (m *SpoolOption) SetSbNumber(value SpoolOption_SpoolOption_sb_numberable) {
+	m.sb_number = value
+}
+
+// SetSbSpoolId sets the sb_spool_id property value. The sb_spool_id property
+func (m *SpoolOption) SetSbSpoolId(value SpoolOption_SpoolOption_sb_spool_idable) {
+	m.sb_spool_id = value
 }
 
 // SetSide sets the side property value. The side property
@@ -2152,10 +2492,12 @@ type SpoolOptionable interface {
 	GetLabelWeightG() SpoolOption_SpoolOption_label_weight_gable
 	GetLoaded() LoadedAtable
 	GetMaterial() *string
-	GetPhysicalSpoolId() SpoolOption_SpoolOption_physical_spool_idable
-	GetRecords() SpoolOption_recordsable
+	GetNeedsType() SpoolOption_SpoolOption_needs_typeable
 	GetRemainingG() SpoolOption_SpoolOption_remaining_gable
 	GetRemainPercent() SpoolOption_SpoolOption_remain_percentable
+	GetRgba() SpoolOption_SpoolOption_rgbaable
+	GetSbNumber() SpoolOption_SpoolOption_sb_numberable
+	GetSbSpoolId() SpoolOption_SpoolOption_sb_spool_idable
 	GetSide() SpoolOption_SpoolOption_sideable
 	GetSlicerFilament() SpoolOption_SpoolOption_slicer_filamentable
 	GetSlicerFilamentName() SpoolOption_SpoolOption_slicer_filament_nameable
@@ -2172,10 +2514,12 @@ type SpoolOptionable interface {
 	SetLabelWeightG(value SpoolOption_SpoolOption_label_weight_gable)
 	SetLoaded(value LoadedAtable)
 	SetMaterial(value *string)
-	SetPhysicalSpoolId(value SpoolOption_SpoolOption_physical_spool_idable)
-	SetRecords(value SpoolOption_recordsable)
+	SetNeedsType(value SpoolOption_SpoolOption_needs_typeable)
 	SetRemainingG(value SpoolOption_SpoolOption_remaining_gable)
 	SetRemainPercent(value SpoolOption_SpoolOption_remain_percentable)
+	SetRgba(value SpoolOption_SpoolOption_rgbaable)
+	SetSbNumber(value SpoolOption_SpoolOption_sb_numberable)
+	SetSbSpoolId(value SpoolOption_SpoolOption_sb_spool_idable)
 	SetSide(value SpoolOption_SpoolOption_sideable)
 	SetSlicerFilament(value SpoolOption_SpoolOption_slicer_filamentable)
 	SetSlicerFilamentName(value SpoolOption_SpoolOption_slicer_filament_nameable)

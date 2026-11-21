@@ -1,0 +1,58 @@
+{
+    "id": 2,
+    "name": "Cookiecad PETG Magic Dark Magic (3DFP 7JdoWkaDB) @H2C",
+    "preset_type": "filament",
+    "source": "orcaslicer",
+    "filament_type": "PETG",
+    "filament_vendor": "Cookiecad",
+    "compatible_printers": "[\"Bambu Lab H2C 0.4 nozzle\"]",
+    "inherits": "Generic PETG @BBL H2C 0.4 nozzle",
+    "filament_density": "1.275",
+    "setting": {
+        "inherits": "Generic PETG @BBL H2C 0.4 nozzle",
+        "compatible_printers": [
+            "Bambu Lab H2C 0.4 nozzle"
+        ],
+        "filament_id": "OFYPdQJh",
+        "setting_id": "GFSG99_18",
+        "nozzle_temperature_range_low": [
+            "220"
+        ],
+        "nozzle_temperature_range_high": [
+            "240"
+        ],
+        "filament_density": [
+            "1.275"
+        ],
+        "filament_cost": [
+            "30"
+        ],
+        "cool_plate_temp": [
+            "0"
+        ],
+        "eng_plate_temp": [
+            "70"
+        ],
+        "hot_plate_temp": [
+            "80"
+        ],
+        "textured_plate_temp": [
+            "80"
+        ],
+        "supertack_plate_temp": [
+            "70"
+        ],
+        "filament_dev_ams_drying_temperature": [
+            "65",
+            "65",
+            "55",
+            "55"
+        ],
+        "filament_dev_ams_drying_time": [
+            "12",
+            "12",
+            "12",
+            "12"
+        ]
+    }
+}

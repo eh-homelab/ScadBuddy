@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import expected from './expected-migrations.json' with { type: 'json' }
 
 // The agent no longer migrates (#5299 D6): only the CRUD service may hold SQL access
@@ -55,7 +56,7 @@ export const DEFAULT_AWAIT_INTERVAL_MS = 1_000
  * (from before #354's column, adopted by the API's next start) counts as applied.
  */
 export async function awaitMigrations(
-  sql: Sql,
+  read: LedgerReader,
   expected: readonly ExpectedMigration[] = EXPECTED_MIGRATIONS,
   options: AwaitMigrationsOptions = {},
 ): Promise<void> {
@@ -65,7 +66,7 @@ export async function awaitMigrations(
   const missing: ExpectedMigration[] = []
   let positional: boolean
   for (let attempt = 1; ; attempt++) {
-    const ledger = await readLedger(sql, expected)
+    const ledger = await read(expected)
     positional = ledger === 'positional'
     const recorded = ledger === 'positional' ? new Map<string, string | null>() : ledger
     missing.length = 0
@@ -104,6 +105,30 @@ export async function awaitMigrations(
       (positional ? ' (still keyed by position, before #491)' : '') +
       '; is the API at this build or newer?',
   )
+}
+
+/** Reads the expected files' rows of the ledger (`readLedger`, below): SQL or the API's route. */
+export type LedgerReader = (expected: readonly ExpectedMigration[]) => Promise<Map<string, string | null> | 'positional'>
+
+/** `LedgerReader` over SQL (the agent's own connection). */
+export const sqlLedger =
+  (sql: Sql): LedgerReader =>
+  (expected) =>
+    readLedger(sql, expected)
+
+/** `LedgerReader` through the API's route (area `migrations`, backend api/crud_agent_start.py). */
+export function crudLedger(target: CrudTarget): LedgerReader {
+  const call = crudOf(target)
+  return async (expected) => {
+    const ledger = await call<{ found: boolean; keyed: boolean; rows: { id: string; checksum: string | null }[] }>(
+      "the agent's migrations",
+      '/migrations/ledger',
+      { method: 'POST', body: { ids: expected.map((m) => m.id) } },
+    )
+    if (!ledger.found) return new Map()
+    if (!ledger.keyed) return 'positional'
+    return new Map(ledger.rows.map((row) => [row.id, row.checksum]))
+  }
 }
 
 /**

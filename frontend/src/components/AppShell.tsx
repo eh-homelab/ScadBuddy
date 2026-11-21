@@ -18,6 +18,7 @@ import {
   ReceiptIcon,
   SettingsIcon,
   SparklesIcon,
+  SpoolIcon,
   StoreIcon,
   WorkflowIcon,
 } from 'lucide-react'
@@ -107,6 +108,7 @@ const NAV = [
   { to: '/', label: 'Models', end: true, icon: BoxesIcon },
   { to: '/prints', label: 'Prints', end: false, icon: PrinterIcon },
   { to: '/library', label: 'Library', end: false, icon: LibraryBigIcon },
+  { to: '/filament', label: 'Filament', end: false, icon: SpoolIcon },
   { to: '/orders', label: 'Orders', end: false, icon: ReceiptIcon },
   { to: '/storefront', label: 'Storefront', end: false, icon: StoreIcon },
   { to: '/workflows', label: 'Workflows', end: false, icon: WorkflowIcon },
@@ -503,10 +505,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               </ErrorBoundary>
             )}
             <div className="relative flex min-h-0 flex-1">
+              {/* #6704 - relative: an absolute child (sr-only, a radio, a slider thumb) is clipped here, not by the document. */}
               <main
                 id="main"
                 ref={mainElement}
-                className="min-h-0 min-w-0 flex-1 overflow-hidden focus:outline-none"
+                className="relative min-h-0 min-w-0 flex-1 overflow-hidden focus:outline-none"
               >
                 {/* #361 — the last resort: one page that throws never blanks the app, and
                     leaving it clears the error. What lands here is mostly a lazy chunk that

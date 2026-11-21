@@ -15,6 +15,19 @@ const valid: ServerEvent[] = [
   { v: 1, type: 'session.started', sessionId: 's1', origin: 'chat', owner },
   { v: 1, type: 'session.owner', sessionId: 's1', owner },
   { v: 1, type: 'user.turn', sessionId: 's1', turnId: 'u1', text: 'hi', author: owner },
+  // #6267: an invoice PDF, and a server-built image, name the file with no preview.
+  {
+    v: 1,
+    type: 'user.turn',
+    sessionId: 's1',
+    turnId: 'u2',
+    text: 'import',
+    author: owner,
+    images: [
+      { name: `${'a'.repeat(64)}.pdf`, mediaType: 'application/pdf' },
+      { name: `${'b'.repeat(64)}.png`, mediaType: 'image/png' },
+    ],
+  },
   { v: 1, type: 'assistant.text.delta', sessionId: 's1', messageId: 'm1', delta: 'Hel' },
   { v: 1, type: 'assistant.text.done', sessionId: 's1', messageId: 'm1' },
   { v: 1, type: 'tool.call', sessionId: 's1', id: 't1', name: 'mcp__scadbuddy__render_model', input: { slug: 'x' }, risk: 'write' },

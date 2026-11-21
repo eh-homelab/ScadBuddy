@@ -14,7 +14,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -63,6 +63,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentPlan,
     FilamentWarning,
     Inventory,
+    PrinterReads,
     QueueFilaments,
     SlotNeed,
     SpoolOption,
@@ -74,10 +75,12 @@ from scadbuddy.bambuddy.filaments import (
     family,
     fold_plates,
     gather_plate_options,
+    name_presets,
     normalise_colour,
     plates_named,
     queue_filaments,
     read_inventory,
+    sb_plan,
 )
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile, diameter, model_key, same_family
 from scadbuddy.bambuddy.hardware import (
@@ -96,8 +99,6 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     ProcessValue,
     RackAlgorithm,
-    Spool,
-    SpoolFilamentPreset,
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, PlanInput, plan_for, plan_inputs
 from scadbuddy.bambuddy.options import (
@@ -118,10 +119,12 @@ from scadbuddy.bambuddy.part_settings import (
 )
 from scadbuddy.bambuddy.prime_tower import (
     PrimeTowerChoice,
+    file_tower_overrides,
     not_resliced,
     prime_tower_overrides,
     prime_tower_warnings,
     template_keys_dropped,
+    tower_asked,
     tower_dropped,
 )
 from scadbuddy.bambuddy.print_source import (
@@ -164,6 +167,7 @@ from scadbuddy.bambuddy.supports import (
     wanted_settings,
     without_overridden,
 )
+from scadbuddy.bambuddy.tower_check import TowerCheck, tower_check
 from scadbuddy.bambuddy.trays import (
     colour_word,
     tray_colours,
@@ -173,6 +177,7 @@ from scadbuddy.bambuddy.trays import (
 )
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import EffectivePreset, HeldTrays, Spool
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -214,13 +219,18 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartSettingsUnwritableError,
     part_settings_slots,
+    plate_overrides,
+    stated_tower_off,
 )
+from scadbuddy.render.plate import plate_for
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import ProfileError, ProfileImageError, Profiles
 from scadbuddy.slicing.values import values_for
-from scadbuddy.spools.models import Overlay
 
 if TYPE_CHECKING:
+    # `filament.presets` and `filament.inventory` read Postgres; the types only here.
+    from scadbuddy.filament.inventory import FilamentInventory, SbSpoolReads
+    from scadbuddy.filament.presets import SpoolPresetSource
     from scadbuddy.printers.reports import PrinterReportStore
     from scadbuddy.printers.store import PrinterStore
 
@@ -636,10 +646,11 @@ async def filament_options(
     plate_ids: Sequence[int] | None = None,
     status: asyncio.Future[PrinterStatus | None] | None = None,
     trays_from: PrinterStatus | None = None,
-    overlay: Overlay | None = None,
-    provider_labels: Mapping[str, str] | None = None,
+    held: HeldTrays | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> FilamentOptions:
-    """The filament step's whole payload for one output (#87).
+    """The filament step's whole payload for one output (#87). On Bambuddy's path the
+    spools are ScadBuddy's own, read from ``reads`` (#6262 Task 7, `read_inventory`).
 
     ``all_plates`` answers for every plate of the output at once — one row per slot any
     plate uses, in place of ``plate_id``'s own — which is what an all-plates print
@@ -661,9 +672,9 @@ async def filament_options(
     right, since the read is the request's (#2630).
 
     ``trays_from`` is a native run's printer status from its LAN report (#3818 tier A,
-    plan 2026-10-18 D1, D4): the choices are its loaded trays with ``overlay`` (the spool
-    providers' records, a Postgres read) laid over them, and nothing is read of Bambuddy:
-    ``client`` is ``None`` then (D3).
+    plan 2026-10-18 D1, D4): the choices are its loaded trays with the SB spool ``held``
+    names in each (#6262: the inventory's `TrayView`, or the background slice's
+    `SbSpools`, no shelf), and nothing is read of Bambuddy: ``client`` is ``None`` then (D3).
     """
     if trays_from is not None:
         return await _tray_options(
@@ -672,8 +683,7 @@ async def filament_options(
             printer_id=printer_id,
             asked=asked_plates(plate_id, all_plates, plate_ids),
             status=trays_from,
-            overlay=overlay,
-            labels=provider_labels,
+            held=held,
         )
     client = bambuddy_client(client)
     reading: asyncio.Future[PrinterStatus | None] | None
@@ -688,7 +698,7 @@ async def filament_options(
         reading = None
     try:
         read_file, inventory = await asyncio.gather(
-            source.file_to_read(client), read_inventory(client), return_exceptions=True
+            source.file_to_read(client), read_inventory(client, reads), return_exceptions=True
         )
         file = settled(read_file)
         asked = asked_plates(plate_id, all_plates, plate_ids)
@@ -719,6 +729,9 @@ async def filament_options(
         options.nozzles = []
         return options
     options.nozzles = printer_status.nozzles
+    if options.nozzles and options.nozzles[0].nozzle_diameter:
+        # Each spool's preset for the mounted nozzle, not the 0.4 default (#6262 M-c).
+        name_presets(options, settled(inventory), options.nozzles[0].nozzle_diameter)
     # Each loaded spool's side, as a label in the picker (#469); nothing is checked
     # against it (#768).
     # A filled tray Bambuddy has no spool for is asked about, and offered (#2164).
@@ -732,8 +745,7 @@ async def _tray_options(
     printer_id: int | None,
     asked: Sequence[int] | None,
     status: PrinterStatus,
-    overlay: Overlay | None,
-    labels: Mapping[str, str] | None,
+    held: HeldTrays | None,
 ) -> FilamentOptions:
     """:func:`filament_options` on a native run: the plates' slots from the file itself
     (or the native library's copy), the trays from ``status``."""
@@ -747,9 +759,7 @@ async def _tray_options(
         own_colours=file.own_colours,
         known=await known_slots(source),
         trays_from=status,
-        overlay=overlay,
-        provider_labels=labels,
-        now=datetime.now(UTC),
+        held=held,
     )
     options = read[0] if len(read) == 1 else every_plate(read)
     options.nozzles = status.nozzles
@@ -767,6 +777,7 @@ async def filament_options_for_output(
     plate_id: int = 1,
     all_plates: bool = False,
     plate_ids: Sequence[int] | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> FilamentOptions:
     """:func:`filament_options` for an output ScadBuddy rendered."""
     return await filament_options(
@@ -776,6 +787,7 @@ async def filament_options_for_output(
         plate_id=plate_id,
         all_plates=all_plates,
         plate_ids=plate_ids,
+        reads=reads,
     )
 
 
@@ -977,6 +989,10 @@ class PrintCheck(BaseModel):
     #: prints with ``process_part_settings``. ``None`` when that is ``None``, or when the
     #: template sets nothing.
     slot_part_settings: PartSettingsMap | None = None
+    #: The prime tower on each plate printed, judged before the slice by the tower this
+    #: request chooses (#6758, :func:`check_tower`), with a fix the dialog and the agent
+    #: send as process overrides. ``None`` when there is no tower to judge.
+    prime_tower: TowerCheck | None = None
 
     _parts_set_only = model_serializer(mode="wrap")(
         lambda self, handler: parts_set_only(
@@ -1117,6 +1133,123 @@ def _spools_by_slot(options: FilamentOptions, plan: FilamentPlan) -> dict[int, S
     return {slot.slot_id: by_id[slot.spool_id] for slot in plan.slots if slot.spool_id in by_id}
 
 
+def _chosen_colours(
+    plan: FilamentPlan, inventory: Inventory, status: PrinterStatus | None
+) -> dict[int, str]:
+    """The colour of each id ``plan`` names, for the copy the run prints (#476): a tray
+    chosen for itself prints in the tray's (#2164), an SB spool in its own (#6262 Task 7)."""
+    ids = [slot.spool_id for slot in plan.slots]
+    wanted = set(ids)
+    colours = {
+        row.spool.number: colour
+        for row in inventory
+        if row.spool.number in wanted
+        and (colour := normalise_colour(row.spool.effective.rgba)) is not None
+    }
+    return colours | tray_colours(ids, status)
+
+
+class InventoryPresets:
+    """`filament/presets.py` `SpoolPresetSource` on Bambuddy's path (#6262 Task 7): the
+    chosen SB spools' presets from ``reads``, and each one's Bambuddy spool from the rows
+    the run read already (`FilamentInventorySpool.bb_spool_id`), so no second read names
+    the links."""
+
+    def __init__(self, reads: SbSpoolReads, rows: Inventory) -> None:
+        self._reads = reads
+        self._links = {
+            row.spool.number: row.bb_spool_id for row in rows if row.bb_spool_id is not None
+        }
+
+    async def presets(self, numbers: Sequence[int]) -> dict[int, list[EffectivePreset]]:
+        return await self._reads.presets(numbers)
+
+    async def bb_spools(self, numbers: Sequence[int]) -> dict[int, int]:
+        return {number: self._links[number] for number in numbers if number in self._links}
+
+
+#: The SB spools a plan names, as numbers, and the read of their presets
+#: (`read_spool_presets`), both started before the plan's options are built.
+EarlyPresets = tuple[Awaitable[list[int]], Awaitable[dict[int, list[EffectivePreset]]]]
+
+
+async def read_spool_presets(
+    client: BambuddyClient | None,
+    numbers: list[int],
+    size: str,
+    presets: SpoolPresetSource | None,
+) -> dict[int, list[EffectivePreset]]:
+    """The presets of SB spools ``numbers`` for the H2C and the nozzle ``size``, as
+    :func:`resolve_plates` reads them: each spool's effective ones from ``presets``, and
+    for one with no row for the H2C and ``size`` that is linked to a Bambuddy spool,
+    Bambuddy's rows for that spool, read only with a ``client``."""
+    # Here, not at the top: see the `TYPE_CHECKING` import.
+    from scadbuddy.filament.presets import preset_for
+
+    spool_presets: dict[int, list[EffectivePreset]] = {}
+    links: dict[int, int] = {}
+    if presets is not None and numbers:
+        spool_presets = {
+            number: list(rows) for number, rows in (await presets.presets(numbers)).items()
+        }
+        lacking = [
+            number
+            for number in numbers
+            if preset_for(spool_presets.get(number, []), PRINTER_MODEL, size) is None
+        ]
+        if client is not None and lacking:
+            links = await presets.bb_spools(lacking)
+    # Each lacking SB spool's linked Bambuddy spool. A tray chosen for itself (#2164) with
+    # no SB spool has no presets of its own.
+    bambuddy = sorted(links.items())
+    # Concurrently (#4196); settled in key order, so a failure is the one the serial reads raised.
+    # A body's plan is not capped, only matched to the inventory, so this call caps one
+    # plan's fan-out at SPOOL_PRESET_READS reads at a time. Not a bound on Bambuddy's
+    # load, which every API replica and the print worker share (#4213).
+    gate = asyncio.Semaphore(SPOOL_PRESET_READS)
+
+    async def bambuddy_presets(spool_id: int) -> list[EffectivePreset]:
+        if client is None:
+            # Links are read only with a client: a client-less (native) run reads nothing
+            # of Bambuddy.
+            raise TypeError(
+                f"spool {spool_id}'s presets are Bambuddy's: reading them needs a client"
+            )
+        async with gate:
+            rows = await client.spool_filament_presets(spool_id)
+        # As SB rows the resolver reads (F1), never the spool's own (``overridden``): a
+        # row for no model or nozzle names no key, so it never matched.
+        return [
+            EffectivePreset(
+                printer_model=row.printer_model,
+                nozzle_diameter=row.nozzle_diameter,
+                slicer_filament=row.slicer_filament,
+                slicer_filament_name=row.slicer_filament_name,
+                overridden=False,
+            )
+            for row in rows
+            if row.printer_model is not None and row.nozzle_diameter is not None
+        ]
+
+    read = await asyncio.gather(
+        *(bambuddy_presets(bb_id) for _, bb_id in bambuddy), return_exceptions=True
+    )
+    for (key, _), result in zip(bambuddy, read, strict=True):
+        spool_presets[key] = [*spool_presets.get(key, []), *settled(result)]
+    return spool_presets
+
+
+def chosen_numbers(spools: Iterable[tuple[int, int | None]], plan: FilamentPlan) -> list[int]:
+    """The SB numbers of the spools ``plan`` names, sorted. ``spools`` are (spool id, SB
+    number) pairs; a pair whose spool id ``plan.slots`` names gives its number, and the
+    last pair for a spool id wins. `resolve_plates` passes its options and
+    `_plan_numbers` the unarchived inventory rows, so the check's early read and the
+    read it replaces name the same spools (#6611)."""
+    wanted = {slot.spool_id for slot in plan.slots}
+    chosen = {spool_id: number for spool_id, number in spools if spool_id in wanted}
+    return sorted({number for number in chosen.values() if number is not None})
+
+
 async def resolve_plates(
     client: BambuddyClient | None,
     plate_ids: list[int],
@@ -1124,48 +1257,42 @@ async def resolve_plates(
     plan: FilamentPlan,
     choices: PrintChoices,
     catalogue: Catalogue,
+    *,
+    presets: SpoolPresetSource | None = None,
+    slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    early: EarlyPresets | None = None,
 ) -> tuple[list[Resolved], list[str]]:
     """Each plate resolved for ``plan``, and every slot refusal among them in the run's
     own words: what :func:`plan_run` refuses with, and what :func:`check_print` reports
     (#1050). A spool the inventory lacks resolves as no spool chosen, so its presets
     are not read: Bambuddy would answer for a spool it does not have with an error.
-    A native run's options are trays only (#3818 D1), so no spool presets are read and
-    ``client`` may be ``None``: a remembered Bambuddy spool there is a slot with no
-    choice."""
-    inventory = {spool.spool_id for options in per_plate for spool in options.spools}
+
+    Each chosen SB spool's presets (a tray's SB spool included, #6262 F1, F10) are its
+    effective ones (`filament.presets.effective_presets`), read from ``presets``. One with
+    no row for the H2C and the chosen nozzle that is linked to a Bambuddy spool takes
+    Bambuddy's rows for that spool, read only with a ``client``: a native run has none
+    and reads nothing of Bambuddy. A Bambuddy-path row is an SB spool too (Task 7), so it
+    reads its presets the same way. ``slot_presets`` are a storefront price's filament
+    types' presets, by slot id (#6574, ``resolver.resolve``). ``early`` is the check's
+    read of the chosen spools' presets, started once the inventory was read (#4196):
+    awaited here in place of a new read when it read the same spools, so it fails where
+    a new read would."""
     # Read once for every plate: the plan's spools are the same on every plate.
-    # A tray chosen for itself (#2164) has no spool, so no presets of its own.
-    spool_ids = [
-        spool_id
-        for spool_id in sorted({slot.spool_id for slot in plan.slots} & inventory)
-        if spool_id > 0
-    ]
-    # Concurrently (#4196); settled in spool order, so a failure is the one the serial reads raised.
-    # A body's plan is not capped, only matched to the inventory, so this call caps one
-    # plan's fan-out at SPOOL_PRESET_READS reads at a time. Not a bound on Bambuddy's
-    # load, which every API replica and the print worker share (#4213).
-    gate = asyncio.Semaphore(SPOOL_PRESET_READS)
-
-    async def presets(spool_id: int) -> list[SpoolFilamentPreset]:
-        if client is None:
-            # Only an inventory spool has presets of its own, and only Bambuddy's
-            # inventory has spools: a client-less (native) run has trays alone.
-            raise TypeError(
-                f"spool {spool_id}'s presets are Bambuddy's: reading them needs a client"
-            )
-        async with gate:
-            return await client.spool_filament_presets(spool_id)
-
-    read = await asyncio.gather(
-        *(presets(spool_id) for spool_id in spool_ids), return_exceptions=True
+    numbers = chosen_numbers(
+        ((spool.spool_id, spool.sb_number) for options in per_plate for spool in options.spools),
+        plan,
     )
-    spool_presets = {
-        spool_id: settled(result) for spool_id, result in zip(spool_ids, read, strict=True)
-    }
+    spool_presets = await (
+        early[1]
+        if early is not None and await early[0] == numbers
+        else read_spool_presets(client, numbers, choices.nozzles[0].size, presets)
+    )
     every: list[Resolved] = []
     errors: list[str] = []
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
-        resolved = resolve(options, plan, choices, catalogue, spool_presets)
+        resolved = resolve(
+            options, plan, choices, catalogue, spool_presets, slot_presets=slot_presets
+        )
         for error in resolved.errors:
             message = (
                 f"Plate {plate_id}: {error.message}"
@@ -1186,13 +1313,24 @@ async def _slot_errors(
     *,
     inventory: Inventory | None = None,
     native: bool = False,
+    held: HeldTrays | None = None,
+    presets: SpoolPresetSource | None = None,
+    reads: SbSpoolReads | None = None,
+    printer_reads: PrinterReads | None = None,
+    early_presets: EarlyPresets | None = None,
 ) -> list[str]:
     """The run's slot refusals for ``request``, judged before anything is uploaded for it
     (#1050): read from a copy Bambuddy already has, which has the same slots as the one
     the run prints, as :func:`filament_options` reads them. An output's slots and a
     library file's are read from the file itself (#2720, #2550); with neither and no copy
     there is nothing to read without an upload, and the run still judges the slots
-    after its own. ``inventory`` is the check's own read, when it made one (#2722)."""
+    after its own. ``inventory`` is the check's own read, when it made one (#2722); else
+    Bambuddy's path reads the SB spools from ``reads`` (#6262 Task 7).
+    ``held`` names a native run's SB spool in each tray and ``presets`` reads their
+    presets (#6262), as the dialog and the run read them. ``printer_reads`` are the
+    check's own reads of the printer and its inventory-remain, started beside
+    `prepare_run` (#4196), and ``early_presets`` its read of the plan's spools' presets
+    (`resolve_plates` ``early``)."""
     if source.is_sliced or prepared.catalogue is None:
         # Nothing resolves a preset for a sliced file (#2671); Bambuddy maps its slots.
         return []
@@ -1211,6 +1349,10 @@ async def _slot_errors(
         native=source.native,
         # A native run's choices are its report's trays (D1), as the run resolves them.
         trays_from=prepared.printer_status if native else None,
+        held=held if native else None,
+        reads=reads,
+        nozzle=request.choices.nozzles[0].size,
+        printer_reads=None if native else printer_reads,
     )
     if not native:
         per_plate = [
@@ -1224,8 +1366,49 @@ async def _slot_errors(
         request.filament_plan,
         request.choices,
         prepared.catalogue,
+        presets=presets,
+        early=None if native else early_presets,
     )
     return errors
+
+
+def _names_a_printer(
+    request: PrintRunRequest, settings: StoredSettings, printers: PrinterStore | None
+) -> bool:
+    """Whether ``request`` names a printer, or one is configured: else
+    :func:`check_print` has nothing to judge."""
+    named = request.printer is not None and printers is not None
+    return (
+        named or (request.printer_id or settings.printer_id or settings.default_printer) is not None
+    )
+
+
+async def check_tower(
+    client: BambuddyClient | None,
+    source: PrintSource,
+    request: PrintRunRequest,
+    printer_model: str | None,
+) -> TowerCheck | None:
+    """The prime tower of ``source`` for ``request`` on a ``printer_model``, judged before
+    the slice (#6758, :func:`~scadbuddy.bambuddy.tower_check.tower_check`): the tower the
+    request chooses (``prime_tower``, ``process_overrides``) over the template's
+    ``print_settings``, on the file as the run lays it out, for the plates it prints. It
+    reads the source's one fetch, which the check reads anyway. ``None`` for a sliced
+    file, one with no bytes to lay out, or no printer model."""
+    if source.is_sliced or printer_model is None:
+        return None
+    payload = await source.fetched_3mf(client)
+    if payload is None:
+        return None
+    return await asyncio.to_thread(
+        tower_check,
+        payload,
+        plate_for(printer_model),
+        choice=request.prime_tower,
+        overrides=request.overrides(),
+        template=source.print_settings,
+        plates=request.asked_plates(),
+    )
 
 
 async def check_print(
@@ -1240,6 +1423,10 @@ async def check_print(
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
     process_values: bool = False,
+    sb_trays: FilamentInventory | None = None,
+    sb_presets: SpoolPresetSource | None = None,
+    sb_reads: SbSpoolReads | None = None,
+    listing: Awaitable[list[Printer]] | None = None,
 ) -> PrintCheck:
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
@@ -1281,12 +1468,14 @@ async def check_print(
 
     ``process_values`` asks for the process's values of the part settings too
     (``PrintCheck.process_part_settings``, #5627): only a dialog showing its "Settings
-    for this colour" asks, since the read can be one more Bambuddy call."""
-    named = request.printer is not None and printers is not None
-    if (
-        not named
-        and (request.printer_id or settings.printer_id or settings.default_printer) is None
-    ):
+    for this colour" asks, since the read can be one more Bambuddy call.
+
+    ``sb_trays`` and ``sb_presets`` read ScadBuddy's own spools (#6262): the SB spool in
+    each tray of a native run, and the chosen spools' presets, as the dialog reads them;
+    ``sb_reads`` the spools Bambuddy's path offers (Task 7), and the SB numbers of the
+    Bambuddy spools an older plan names (`sb_plan`). ``listing`` is Bambuddy's printer
+    list, when the caller started that read already (`check_for_library`)."""
+    if not _names_a_printer(request, settings, printers):
         return PrintCheck()
     route: RunRoute | None = None
     if printers is not None and native_backends(settings):
@@ -1314,8 +1503,14 @@ async def check_print(
             rack=rack,
             profiles=profiles,
             process_values=process_values,
+            sb_trays=sb_trays,
+            sb_presets=sb_presets,
         )
     client = bambuddy_client(client)
+    # A plan from before #6262 Task 7 names Bambuddy spools: read as SB numbers (F14).
+    request = request.model_copy(
+        update={"filament_plan": await sb_plan(request.filament_plan, sb_reads)}
+    )
     # The 3MF's download and the inventory wait on nothing `prepare_run` reads, so they
     # are read beside it (#4196): awaited after it in the order they were read in, so a
     # failure surfaces where it did, and cancelled when it refuses. One inventory
@@ -1329,10 +1524,40 @@ async def check_print(
     # and a fetch no other read waits on stops with its task.
     laying_out = None if source.is_sliced else asyncio.create_task(source.states_nozzles(client))
     reading = (
-        asyncio.create_task(read_inventory(client))
+        asyncio.create_task(read_inventory(client, sb_reads))
         if request.filament_plan.slots and not source.is_sliced
         else None
     )
+    # The printer the request names, judged once for `prepare_run` and the reads below.
+    naming = asyncio.create_task(
+        _named_printer(request.printer, request.printer_id, settings, printers)
+    )
+    # The printer and its inventory-remain, which the slot refusals read, wait only on
+    # which printer it is (#4196): read beside `prepare_run`, as the 3MF and the spools
+    # are, and dropped as they are. An output with no slots to read (`_slot_errors`)
+    # drops them unread, and they may reach Bambuddy then too.
+    hardware = (
+        None
+        if source.is_sliced
+        else (
+            asyncio.create_task(_read_named(naming, client.printer)),
+            asyncio.create_task(_read_named(naming, client.inventory_remain)),
+        )
+    )
+    # The plan's spools' presets wait only on the inventory (#4196): read once it is
+    # read, beside `prepare_run`, and awaited by the slot refusals where they read them,
+    # so they fail where they did. Dropped as the reads above are.
+    early_tasks: list[asyncio.Task[Any]] = list(hardware or ())
+    early_presets: EarlyPresets | None = None
+    if reading is not None and sb_presets is not None:
+        numbering = asyncio.create_task(_plan_numbers(reading, request.filament_plan))
+        spool_presets = asyncio.create_task(
+            _read_spool_presets_after(
+                numbering, client, request.choices.nozzles[0].size, sb_presets
+            )
+        )
+        early_presets = (numbering, spool_presets)
+        early_tasks += [numbering, spool_presets]
     try:
         prepared = await prepare_run(
             client,
@@ -1344,12 +1569,11 @@ async def check_print(
             printers=printers,
             reports=reports,
             catalogue=catalogue,
+            naming=naming,
+            listing=listing,
         )
     except BaseException as error:
-        early = [task for task in (laying_out, reading) if task is not None]
-        for task in early:
-            task.cancel()
-        await asyncio.gather(*early, return_exceptions=True)
+        await _drop(laying_out, reading, naming, *early_tasks)
         if isinstance(error, RunRefusalError):
             return PrintCheck(errors=[error.detail])
         if isinstance(error, MemoryError):
@@ -1366,52 +1590,65 @@ async def check_print(
     try:
         laid_out = await laying_out
     except BaseException as error:
-        if reading is not None:
-            reading.cancel()
-            await asyncio.gather(reading, return_exceptions=True)
+        await _drop(reading, *early_tasks)
         if isinstance(error, MemoryError):
             # The file too large to hold here (#4562 review): refused as a read of it is,
             # saying how to bound it, never a 500.
             _log_out_of_memory(source.subject.key, "laying out the file")
             return PrintCheck(errors=[str(ReadOutOfMemoryError())])
         raise
-    inventory = await reading if reading is not None else None
-    nozzle_plan = (
-        await plan_for(
+    try:
+        inventory = await reading if reading is not None else None
+        nozzle_plan = (
+            await plan_for(
+                client,
+                prepared.printer_status,
+                prepared.printer_id,
+                request.filament_plan,
+                request.choices.nozzles,
+                request.choices.sides,
+                inventory=inventory,
+            )
+            if laid_out
+            else None
+        )
+        rack_view, rack_notes = await rack_preview(
             client,
-            prepared.printer_status,
-            prepared.printer_id,
-            request.filament_plan,
-            request.choices.nozzles,
-            request.choices.sides,
+            request,
+            settings,
+            printer_id=prepared.printer_id,
+            printer=prepared.printer or None,
+            status=prepared.printer_status,
+            rack=rack,
+            laid_out=laid_out,
+            nozzle_plan=nozzle_plan,
             inventory=inventory,
         )
-        if laid_out
-        else None
-    )
-    rack_view, rack_notes = await rack_preview(
-        client,
-        request,
-        settings,
-        printer_id=prepared.printer_id,
-        printer=prepared.printer or None,
-        status=prepared.printer_status,
-        rack=rack,
-        laid_out=laid_out,
-        nozzle_plan=nozzle_plan,
-        inventory=inventory,
-    )
-    # A refused manual pick still previews the rack, so the dialog can offer another,
-    # and is said once: as the error, not again as a rack-manual-partial warning.
-    try:
-        _check_manual_pick(request, prepared.printer_status, laid_out=laid_out)
-    except RunRefusalError as refused:
-        errors = [refused.detail]
-        rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
-    else:
-        errors = []
-    # The run's 422 after its upload (#1050): every slot refusal, joined as it joins them.
-    slot_errors = await _slot_errors(client, source, request, prepared, inventory=inventory)
+        # A refused manual pick still previews the rack, so the dialog can offer another,
+        # and is said once: as the error, not again as a rack-manual-partial warning.
+        try:
+            _check_manual_pick(request, prepared.printer_status, laid_out=laid_out)
+        except RunRefusalError as refused:
+            errors = [refused.detail]
+            rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
+        else:
+            errors = []
+        # The run's 422 after its upload (#1050): every slot refusal, joined as it joins
+        # them.
+        slot_errors = await _slot_errors(
+            client,
+            source,
+            request,
+            prepared,
+            inventory=inventory,
+            presets=sb_presets,
+            reads=sb_reads,
+            printer_reads=hardware,
+            early_presets=early_presets,
+        )
+    finally:
+        # Read by the slot refusals, else not wanted: dropped, never left running.
+        await _drop(naming, *early_tasks)
     if slot_errors:
         errors.append(" ".join(slot_errors))
     # The one mounted-nozzle advisory kept (#723, #797): a warning, never a refusal. Not
@@ -1493,9 +1730,61 @@ async def check_print(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # #6758: the tower the request chooses, judged before the slice.
+        prime_tower=await check_tower(client, source, request, prepared.printer_model),
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
         **(await _part_baselines(source, process, read, client) if process_values else {}),
     )
+
+
+async def _drop(*tasks: asyncio.Task[Any] | None) -> None:
+    """Cancel each of ``tasks`` still running and wait for it, so none is left running and
+    no failure is left unretrieved; a task already done keeps its answer."""
+    started = [task for task in tasks if task is not None]
+    for task in started:
+        task.cancel()
+    await asyncio.gather(*started, return_exceptions=True)
+
+
+async def _plan_numbers(reading: Awaitable[Inventory], plan: FilamentPlan) -> list[int]:
+    """The SB spools of the read inventory that ``plan`` names, as `resolve_plates` finds
+    them in the options built from it: each unarchived row is an option under its
+    number."""
+    return chosen_numbers(
+        (
+            # An SB option's spool id is its number (`filaments.build_options`); if that
+            # changes, change this pair too, or the two reads name different spools.
+            (row.spool.number, row.spool.number)
+            for row in await reading
+            if row.spool.archived_at is None
+        ),
+        plan,
+    )
+
+
+async def _read_spool_presets_after(
+    numbering: Awaitable[list[int]],
+    client: BambuddyClient,
+    size: str,
+    presets: SpoolPresetSource,
+) -> dict[int, list[EffectivePreset]]:
+    """`read_spool_presets` of the spools ``numbering`` answers."""
+    return await read_spool_presets(client, await numbering, size, presets)
+
+
+async def _read_named[T](
+    naming: Awaitable[tuple[PrinterRow | None, int | None]],
+    read: Callable[[int], Awaitable[T]],
+) -> T:
+    """``read`` of the Bambuddy printer ``naming`` names (`_named_printer`)."""
+    _, printer_id = await naming
+    if printer_id is None:
+        # Never read: `prepare_run` refuses such a row first (`_not_on_bambuddy`) and drops
+        # this read. The raise can still run, when a `hardware` task resumes before that
+        # drop, but `_drop` discards its error unread. An internal error, so no second
+        # wording of that refusal exists.
+        raise RuntimeError("a read of a printer that Bambuddy does not reach")
+    return await read(printer_id)
 
 
 async def _override_warnings(
@@ -1531,9 +1820,12 @@ async def _native_check(
     rack: RackUsage | None,
     profiles: Profiles | None,
     process_values: bool = False,
+    sb_trays: FilamentInventory | None = None,
+    sb_presets: SpoolPresetSource | None = None,
 ) -> PrintCheck:
     """:func:`check_print` on a native run: its refusals and advisories, judged on the
-    report's status, the trays and the image's presets, with no Bambuddy client."""
+    report's status, the trays with the SB spool in each and the image's presets, with
+    no Bambuddy client."""
     if profiles is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
     if request.project_id is not None:
@@ -1560,7 +1852,7 @@ async def _native_check(
         return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     laid_out = await source.states_nozzles(None)
     # The trays are the choices (D1): no inventory to read, and none to plan from.
-    inventory: Inventory = ([], [])
+    inventory: Inventory = []
     nozzle_plan = (
         await plan_for(
             None,
@@ -1594,7 +1886,18 @@ async def _native_check(
         rack_notes = [note for note in rack_notes if note.kind != "rack-manual-partial"]
     else:
         errors = []
-    slot_errors = await _slot_errors(None, source, request, prepared, native=True)
+    # Here, not at the top: see the `TYPE_CHECKING` import.
+    from scadbuddy.filament.inventory import route_trays
+
+    slot_errors = await _slot_errors(
+        None,
+        source,
+        request,
+        prepared,
+        native=True,
+        held=await route_trays(sb_trays, route.row, route.status),
+        presets=sb_presets,
+    )
     if slot_errors:
         errors.append(" ".join(slot_errors))
     rack_picked = rack_view is not None and rack_view.position is not None
@@ -1654,6 +1957,8 @@ async def _native_check(
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
+        # #6758: the tower the request chooses, judged before the slice.
+        prime_tower=await check_tower(None, source, request, prepared.printer_model),
         # Last, so the read above (`read` keeps each preset's answer) is not made again.
         **(await _part_baselines(source, process, read, None) if process_values else {}),
     )
@@ -1721,8 +2026,9 @@ async def _sequence_clearance(
 ) -> tuple[int | None, list[FilamentWarning]]:
     """#956: for a by-object print (chosen here, else the template's default), the
     objects on each plate printed, and what the toolhead or the gantry would hit, as
-    warnings, never a refusal. Only then is the file read for its objects; an unreadable
-    one says nothing, and the slicer still has the last word."""
+    warnings, never a refusal. A plate that is one object of several filaments gets a
+    warning too (#6781): by object has no effect there. Only then is the file read for
+    its objects; an unreadable one says nothing, and the slicer still has the last word."""
     sequence = (
         request.overrides().get("print_sequence")
         or request.print_sequence
@@ -1780,7 +2086,6 @@ def plan_warnings(
     The warning says each family prints from a nozzle of its own only when
     ``nozzle_plan`` puts them so; with no plan, or one that shares a side between
     families (a hand-picked side can), it says only that they mix (#2733 review)."""
-    spools, assignments = inventory
     # A tray chosen as itself, by slot: its material from the printer's status (None
     # when the status is not known). The one place a slot is told to be a tray, so the
     # not-loaded check and the families below cannot disagree on it (#2733 review).
@@ -1793,8 +2098,7 @@ def plan_warnings(
     # No file: only the spools are judged here, so there are no grams or slots of a file.
     options = build_options(
         library_file_id=None,
-        spools=list(spools),
-        assignments=list(assignments),
+        rows=inventory,
         requirements=[SlotNeed(slot_id=slot.slot_id) for slot in chosen],
     ).model_copy(update={"printer_id": printer_id, "printer_name": printer_name})
     found = [
@@ -1841,7 +2145,7 @@ def plan_warnings(
     if nozzle_plan is not None:
         found += inlet_warnings(
             nozzle_plan,
-            plan_inputs(plan, spools, assignments, status, printer_id),
+            plan_inputs(plan, inventory, status, printer_id),
             kept=one_plate,
         )
     return found
@@ -1927,7 +2231,8 @@ def _rack_option(candidate: RackCandidate) -> RackOption:
 
 
 def _spool_material(spool: Spool) -> str:
-    return f"{spool.material}-{spool.subtype}" if spool.subtype else spool.material
+    material, subtype = spool.names.material or "", spool.names.subtype
+    return f"{material}-{subtype}" if subtype else material
 
 
 async def rack_preview(
@@ -1951,9 +2256,10 @@ async def rack_preview(
     spool counts toward the material test, since the slice may put any of them on the
     rack side, unless ScadBuddy's nozzle plan (#2166) says which do: then only those
     on the rack side count. Advisory: a failure previews nothing. ``inventory`` is the
-    check's own read, reused so a check reads the spools once (#2936); without it the
-    spools are read here. ``picker`` is who picks what the ranking leaves: "the printer"
-    on a native run (#4601), which no Bambuddy picks for."""
+    check's own read of the SB spools a plan names by number (#2936, #6262 Task 7); a
+    check reads none for a plan with no slots, which names no spool. ``picker`` is who
+    picks what the ranking leaves: "the printer" on a native run (#4601), which no
+    Bambuddy picks for."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
     rack_letter = side_of(RACK_SIDE)
@@ -1963,21 +2269,20 @@ async def rack_preview(
         if nozzle_plan is None or nozzle_plan.side_of_slot(slot.slot_id) in (None, rack_letter)
     ]
     try:
-        spools = inventory[0] if inventory is not None else await bambuddy_client(client).spools()
-        by_id = {spool.id: spool for spool in spools}
-        chosen = [by_id.get(slot.spool_id) for slot in slots]
+        by_number = {row.spool.number: row.spool for row in inventory or []}
+        chosen = [by_number.get(slot.spool_id) for slot in slots]
         known = [spool for spool in chosen if spool is not None]
-        first = known[0].rgba if known else None
+        first = known[0].effective.rgba if known else None
         group = RackGroup(
             group_id=0,
             nozzle_diameter=request.choices.nozzles[0].size,
             volume_type=rack_volume_type(request.choices.nozzles, laid_out=laid_out),
-            # Zero alpha (a Clear spool's 00000000) is no color, never black.
+            # Zero alpha (a Clear spool's #00000000) is no color, never black.
             color=rack_color(first) if first else None,
             materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
             abrasive=any(
-                abrasive_type(f"{spool.material} {spool.subtype or ''}")
-                or glow(spool.material, spool.subtype)
+                abrasive_type(f"{spool.names.material or ''} {spool.names.subtype or ''}")
+                or glow(spool.names.material or "", spool.names.subtype)
                 for spool in known
             ),
             glow_unchecked=len(known) < len(chosen),
@@ -2060,12 +2365,16 @@ async def check_for_output(
     native: NativeCopies | None = None,
     process_values: bool = False,
     part_settings: PartSettingsMap | None = None,
+    sb_trays: FilamentInventory | None = None,
+    sb_presets: SpoolPresetSource | None = None,
+    sb_reads: SbSpoolReads | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered, with its template's
     ``print_settings`` as the run reads them, so a template that prints by object is
     checked by object (#2976). ``native`` is the native library a native run's folder is
     checked in (D6). ``part_settings`` are the template's per slot (#5626), which the
-    slots' defaults hold (``PrintCheck.slot_part_settings``)."""
+    slots' defaults hold (``PrintCheck.slot_part_settings``). ``sb_trays``,
+    ``sb_presets`` and ``sb_reads`` are :func:`check_print`'s."""
     return await check_print(
         client,
         OutputSource(
@@ -2085,6 +2394,9 @@ async def check_for_output(
         catalogue=catalogue,
         profiles=profiles,
         process_values=process_values,
+        sb_trays=sb_trays,
+        sb_presets=sb_presets,
+        sb_reads=sb_reads,
     )
 
 
@@ -2103,30 +2415,53 @@ async def check_for_library(
     catalogue: ReadCatalogue | None = None,
     profiles: Profiles | None = None,
     process_values: bool = False,
+    sb_trays: FilamentInventory | None = None,
+    sb_presets: SpoolPresetSource | None = None,
+    sb_reads: SbSpoolReads | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
     slots read from the file itself (#2550): from their cache, else from the download
     the check's layout reads anyway (#4495); ``files`` reads a native one (#3827).
-    ``profiles`` are a native run's presets (D5), as :func:`check_for_output`'s."""
-    return await check_print(
-        client,
-        await LibrarySource.load(
+    ``profiles`` are a native run's presets (D5), and ``sb_trays``, ``sb_presets`` and
+    ``sb_reads`` ScadBuddy's own spools, as :func:`check_for_output`'s.
+
+    Bambuddy's printer list waits only on the request (#4196): with a ``client`` (a
+    check off the native path), it is read beside the file and its plates, and
+    `prepare_run` awaits it in place of its own read. A load that fails drops it, and it
+    may have reached Bambuddy then too."""
+    listing = (
+        asyncio.create_task(client.printers())
+        if client is not None and _names_a_printer(request, settings, printers)
+        else None
+    )
+    try:
+        source = await LibrarySource.load(
             client,
             file_id,
             uploads=uploads,
             settings=settings,
             shared=filaments,
             files=files,
-        ),
-        settings,
-        request,
-        rack=rack,
-        printers=printers,
-        reports=reports,
-        catalogue=catalogue,
-        profiles=profiles,
-        process_values=process_values,
-    )
+        )
+        return await check_print(
+            client,
+            source,
+            settings,
+            request,
+            rack=rack,
+            printers=printers,
+            reports=reports,
+            catalogue=catalogue,
+            profiles=profiles,
+            process_values=process_values,
+            sb_trays=sb_trays,
+            sb_presets=sb_presets,
+            sb_reads=sb_reads,
+            listing=listing,
+        )
+    finally:
+        # Read by `prepare_run`, else not wanted: dropped, never left running.
+        await _drop(listing)
 
 
 @dataclass(frozen=True)
@@ -2547,6 +2882,8 @@ async def prepare_run(
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,
     route: RunRoute | None = None,
+    naming: Awaitable[tuple[PrinterRow | None, int | None]] | None = None,
+    listing: Awaitable[list[Printer]] | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -2577,6 +2914,13 @@ async def prepare_run(
     ``route`` is the caller's `run_route`; a native one (D2) takes the row, its model and
     its report's status as they are, and lists or reads no Bambuddy printer: ``client``
     is ``None`` then (D3), and ``catalogue`` the image's presets (D5).
+
+    Off that path, the printer's status is read beside the catalogue (#4196), and awaited
+    after it, so a refusal of the choices is still the first; it drops the status read,
+    which may have reached Bambuddy already. ``naming`` is the caller's own
+    `_named_printer` for ``request``, when it reads that already (`check_print`), and
+    ``listing`` Bambuddy's printer list, when the caller started that read already
+    (`check_for_library`).
     """
     if native is not None:
         if request.project_id is not None:
@@ -2642,8 +2986,10 @@ async def prepare_run(
         report_status = route.status
         _check_resolvable(printer, any_model=source.is_sliced)
     else:
-        named, bambuddy_id = await _named_printer(
-            request.printer, request.printer_id, settings, printers
+        named, bambuddy_id = await (
+            naming
+            if naming is not None
+            else _named_printer(request.printer, request.printer_id, settings, printers)
         )
         if bambuddy_id is None:
             # A row Bambuddy does not reach: its status would carry printer id 0, which
@@ -2661,7 +3007,7 @@ async def prepare_run(
             # Resolved before the path is decided (#4442 M2), so a row this run links or
             # merges takes its own path from its first run.
             printer = await _require_resolvable_printer(
-                bambuddy_client(client), printer_id, any_model=source.is_sliced
+                bambuddy_client(client), printer_id, any_model=source.is_sliced, listing=listing
             )
         row = await _ensure_row(printers, named, printer)
         if request.path == "bambuddy":
@@ -2701,11 +3047,26 @@ async def prepare_run(
         if catalogue is None
         else catalogue
     )
-    presets = await read()
-    refused = choice_errors(request.choices, presets)
-    if refused:
-        raise RunRefusalError(" ".join(error.message for error in refused))
-    printer_status = report_status or await read_status(bambuddy_client(client), printer_id)
+    # The status waits on nothing the catalogue answers: read beside it (#4196), and
+    # dropped when the choices are refused.
+    reading_status = (
+        asyncio.create_task(read_status(client, printer_id))
+        if report_status is None and client is not None
+        else None
+    )
+    try:
+        presets = await read()
+        refused = choice_errors(request.choices, presets)
+        if refused:
+            raise RunRefusalError(" ".join(error.message for error in refused))
+    except BaseException:
+        await _drop(reading_status)
+        raise
+    printer_status = report_status or (
+        await reading_status
+        if reading_status is not None
+        else await read_status(bambuddy_client(client), printer_id)
+    )
     await record_seen(rack, None if row is None else row.id, printer_status)
     if refuse_manual_pick and request.rack_position is not None:
         # Only a manual pick needs the file judged, which reads its 3MF (#1752).
@@ -3179,10 +3540,16 @@ async def plan_run(
     reuse_slices: bool = True,
     native: NativeSliceStarter | None = None,
     title: str | None = None,
-    overlay: Overlay | None = None,
-    provider_labels: Mapping[str, str] | None = None,
+    held: HeldTrays | None = None,
+    presets: SpoolPresetSource | None = None,
+    reads: SbSpoolReads | None = None,
+    slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
+
+    With ``slot_presets`` (a storefront price's slice, #6574) a slot with no spool is
+    sliced with its filament type's preset in the file's own colour
+    (``resolver.resolve``).
 
     With ``slicer_backend`` ``native`` the plates are sliced by the native slicer
     (``native``, the image's profiles; a 503 without them), and a reprint reuses a
@@ -3210,11 +3577,24 @@ async def plan_run(
     nothing of Bambuddy, and ``client`` is ``None`` (D3): the presets are the image's
     (D5), the choices the report's trays (D1), and the copy goes into the native library
     (D6), in the request's folder or the ``title``'s template folder, never a project.
-    ``overlay`` is the spool providers' records over those trays (D1, a Postgres read),
-    as the dialog lays them, so a low-filament warning judges a provider's grams (#4551).
+    ``held`` is the SB spool in each of those trays (#6262: the inventory's `TrayView`,
+    or the background slice's `SbSpools`, no shelf), as the dialog shows them, so a
+    low-filament warning judges the spool's grams (#4551) and a start books against it;
+    ``presets`` reads the chosen SB spools' presets (:func:`resolve_plates`). Without
+    them a native run plans on the trays alone.
+
+    On Bambuddy's path the choices are ScadBuddy's own spools, read from ``reads`` (#6262
+    Task 7), which also read their presets; a plan that still names Bambuddy spools (an
+    in-flight run's input from before it) is read as SB numbers first (`sb_plan`).
     """
+    if not prepared.lan_start:
+        request = request.model_copy(
+            update={"filament_plan": await sb_plan(request.filament_plan, reads)}
+        )
     if source.is_sliced:
-        return await _plan_sliced(bambuddy_client(client), source, settings, request, prepared)
+        return await _plan_sliced(
+            bambuddy_client(client), source, settings, request, prepared, reads=reads
+        )
     native_slicing = settings.slicer_backend == "native"
     if native_slicing and native is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
@@ -3245,7 +3625,11 @@ async def plan_run(
     # ScadBuddy plans each filament's nozzle (#2166) and states it in the 3MF.
     # One read of the inventory for the plan and every plate's options (#480); a native
     # run's choices are the trays, so its plan reads none (D1).
-    inventory: Inventory = ([], []) if native_run else await read_inventory(bambuddy_client(client))
+    inventory: Inventory = (
+        [] if native_run else await read_inventory(bambuddy_client(client), reads)
+    )
+    if not native_run and presets is None and reads is not None:
+        presets = InventoryPresets(reads, inventory)
     nozzle_plan = await plan_for(
         client,
         printer_status,
@@ -3273,6 +3657,14 @@ async def plan_run(
     # #2998: nor any process override; a key the preset lacks is said, and sent.
     tower_warnings += await _override_warnings(request, process, read)
     tower_dropped = template_keys_dropped(request.prime_tower)
+    # An Arrange with the tower off states it in the file (#3770), but the slicer's process
+    # preset replaces the file's own `enable_prime_tower`: the "0" goes as an override
+    # unless the print says on or off, and a print that says on gets room for the tower.
+    asked = tower_asked(request.prime_tower, request.overrides())
+    # Not a second download: `fetched_3mf` is the source's one fetch (`_fetch`), kept per
+    # source and shared with `file_to_print` and its upload below.
+    fetched = await source.fetched_3mf(client)
+    stated_off = fetched is not None and await asyncio.to_thread(stated_tower_off, fetched)
     # The plan's sides (one chosen by hand, or each Track Switch inlet's, #4272) are
     # kept only in a file of one plate (#3955 review): the map it pins is read by a slice
     # of the whole file, which for more plates prints them all.
@@ -3309,13 +3701,25 @@ async def plan_run(
             else slicer_nozzle_stats(printer_status, choices.nozzles)
         ),
         nozzle_volume_type=slicer_volume_types(choices.nozzles),
-        tray_colours=tray_colours(
-            [slot.spool_id for slot in request.filament_plan.slots], printer_status
-        ),
+        chosen_colours=_chosen_colours(request.filament_plan, inventory, printer_status),
         filament_map=filament_map,
         # #5571: the same copy for the quote, the background slice and the print; with
         # the template's own under the request's (#5626).
         part_settings=overrides_of(await run_part_settings(source, request, client)),
+        tower_on=stated_off and asked is True,
+        # #6820: the slicer applies a plate's own settings over the process file, so
+        # the request's choices a plate can state are written over the plates' too, the
+        # explicit override over the `print_sequence` shorthand, as in the plan below.
+        plate_settings=plate_overrides(
+            {
+                **(
+                    {}
+                    if request.print_sequence is None
+                    else {"print_sequence": request.print_sequence}
+                ),
+                **request.overrides(),
+            }
+        ),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
@@ -3360,18 +3764,24 @@ async def plan_run(
         # model's, not the run's recoloured copy's, as the dialog showed them. Intended.
         known=await known_slots(source),
         native=source.native,
-        # A native run's choices are the report's trays (D1), with the overlay the
-        # dialog laid over them (#4551): it adds only weights and names, not presets
-        # (`trays.loaded_trays`), so the weights the low-filament warnings judge.
+        # A native run's choices are the report's trays (D1), with the SB spool the
+        # dialog showed in each (#4551, #6262): its weights for the low-filament warnings,
+        # its number for its presets (`resolve_plates`) and its id for the start's uses.
         trays_from=printer_status if native_run else None,
-        overlay=overlay if native_run else None,
-        provider_labels=provider_labels if native_run else None,
-        now=datetime.now(UTC) if native_run and overlay is not None else None,
+        held=held if native_run else None,
+        nozzle=choices.nozzles[0].size,
     )
     if not native_run:
         per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
     every, errors = await resolve_plates(
-        client, plate_ids, per_plate, request.filament_plan, choices, catalogue
+        client,
+        plate_ids,
+        per_plate,
+        request.filament_plan,
+        choices,
+        catalogue,
+        presets=presets,
+        slot_presets=slot_presets,
     )
     for plate_id, options, resolved in zip(plate_ids, per_plate, every, strict=True):
         if resolved.errors:
@@ -3410,6 +3820,7 @@ async def plan_run(
                     if (k not in SUPPORT_KEYS or isinstance(v, list)) and k not in tower_dropped
                 },
                 **supports,
+                **file_tower_overrides(stated_off, request.prime_tower, request.overrides()),
                 **prime_tower_overrides(request.prime_tower),
                 **(
                     {}
@@ -3428,10 +3839,10 @@ async def plan_run(
         # Bambuddy's slicer drops the prime tower when slots share one preset name
         # (#3962): each repeat gets a preset of its own, before any key is taken, so
         # the preview, the slice and a reprint's lookup all name the same refs.
-        slot_presets = SlotPresets(client, catalogue)
+        own_presets = SlotPresets(client, catalogue)
         slotted: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
         for plate_id, options, resolved, unslotted in ready:
-            slotted_plan, shared_names[plate_id] = await slot_presets.planned(unslotted)
+            slotted_plan, shared_names[plate_id] = await own_presets.planned(unslotted)
             slotted.append((plate_id, options, resolved, slotted_plan))
         ready = slotted
 
@@ -3564,17 +3975,21 @@ async def _plan_sliced(
     settings: StoredSettings,
     request: PrintRunRequest,
     prepared: PreparedPlates,
+    *,
+    reads: SbSpoolReads | None = None,
 ) -> PlannedRun:
     """:func:`plan_run` for a sliced file (#2671): nothing is uploaded, resolved or
     sliced. Each plate queues the file itself, with the spools chosen for its slots as
-    any print's are, and with the options remembered for it, held for a manual start
-    among them. A file sliced for another model or a nozzle the printer lacks is held
-    for a manual start whatever was remembered (#2954): Bambuddy would otherwise start
-    it as soon as the printer is idle, before anyone read the warning."""
+    any print's are (ScadBuddy's own, read from ``reads``, #6262 Task 7), and with the
+    options remembered for it, held for a manual start among them. A file sliced for
+    another model or a nozzle the printer lacks is held for a manual start whatever was
+    remembered (#2954): Bambuddy would otherwise start it as soon as the printer is idle,
+    before anyone read the warning."""
     printer_id = prepared.printer_id
     project_id = await planned_project(client, request, settings, prepared)
     profile = source.sliced_profile
     nozzle_size = sliced_nozzle_size(profile, prepared, request)
+    inventory = await read_inventory(client, reads)
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -3582,6 +3997,7 @@ async def _plan_sliced(
         plan=request.filament_plan,
         project_id=project_id,
         folder_id=request.folder_id,
+        chosen_colours=_chosen_colours(request.filament_plan, inventory, prepared.printer_status),
     )
     per_plate = await gather_plate_options(
         client,
@@ -3589,6 +4005,7 @@ async def _plan_sliced(
         printer_id=printer_id,
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
+        inventory=inventory,
         known=await known_slots(source),
     )
     per_plate = [with_trays(options, prepared.printer_status, printer_id) for options in per_plate]
@@ -3683,14 +4100,20 @@ def _require_model(printer: Printer) -> None:
 
 
 async def _require_resolvable_printer(
-    client: BambuddyClient, printer_id: int, *, any_model: bool = False
+    client: BambuddyClient,
+    printer_id: int,
+    *,
+    any_model: bool = False,
+    listing: Awaitable[list[Printer]] | None = None,
 ) -> Printer:
     """A 422 before anything is uploaded or sliced when the resolver cannot serve this
     printer: one Bambuddy does not list, one it has deactivated (#479; the dialog never
     offers those), or any model but the H2C, whose presets are the only ones the
     resolver knows (``PRINTER_MODEL``). ``any_model``: nothing is resolved (a sliced
-    file, #2671), so any model will do."""
-    printer = next((row for row in await client.printers() if row.id == printer_id), None)
+    file, #2671), so any model will do. ``listing`` is Bambuddy's printer list when the
+    caller started that read already."""
+    rows = await (client.printers() if listing is None else listing)
+    printer = next((row for row in rows if row.id == printer_id), None)
     if printer is None:
         raise RunRefusalError(
             f"Bambuddy has no printer {printer_id}. Pick another printer.",
@@ -3905,6 +4328,7 @@ async def filament_options_for_library(
     plate_ids: Sequence[int] | None = None,
     filaments: FilamentReader | None = None,
     files: LibraryReads | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> FilamentOptions:
     """:func:`filament_options` for a file already in the library (#313); with
     ``filaments``, its slots read from the file itself (#2550); ``files`` reads a native
@@ -3918,4 +4342,5 @@ async def filament_options_for_library(
         plate_id=plate_id,
         all_plates=all_plates,
         plate_ids=plate_ids,
+        reads=reads,
     )

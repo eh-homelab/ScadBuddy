@@ -34,7 +34,8 @@ from tests.api.test_send import API, _uploaded_3mf, configure
 from tests.bambuddy.test_part_settings import author_two_colours
 from tests.support.operations import press
 
-pytestmark = pytest.mark.requires_postgres
+# The run's plan names SB spools (#6262 Task 7), so the recorded ones are seeded.
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 FILE_ID = 89
 

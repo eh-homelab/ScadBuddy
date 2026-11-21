@@ -238,6 +238,25 @@ def test_the_open_calls_are_those_with_no_result(
     assert c.get(f"{BASE}/sessions/{other}/open-calls", headers=headers).json() == {"calls": []}
 
 
+def test_a_call_logged_twice_keeps_its_first_place(
+    client: tuple[TestClient, dict[str, str]], tables: PgPool
+) -> None:
+    # The agent's Map keeps a key where it was first set; the dict copy must too.
+    c, headers = client
+    sid = _session(tables)
+    _log(
+        tables,
+        sid,
+        [
+            {"type": "tool.call", "id": "a", "name": "first"},
+            {"type": "tool.call", "id": "b", "name": "write"},
+            {"type": "tool.call", "id": "a", "name": "again"},
+        ],
+    )
+    got = c.get(f"{BASE}/sessions/{sid}/open-calls", headers=headers)
+    assert got.json()["calls"] == [{"id": "a", "name": "again"}, {"id": "b", "name": "write"}]
+
+
 def test_the_reasoning_is_the_deltas_since_the_turn_before_the_call(
     client: tuple[TestClient, dict[str, str]], tables: PgPool
 ) -> None:

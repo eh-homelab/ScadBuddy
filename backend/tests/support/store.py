@@ -90,7 +90,10 @@ async def overwrite_object(store: ContentStore, backend_id: str, data: bytes) ->
         await client.put_object(Bucket=backend.settings.bucket, Key=backend_id, Body=data)
     else:
         assert isinstance(backend, LocalContentBackend)
-        (backend.root / backend_id).write_bytes(data)
+        # An object the store never wrote (a forged ref, #6233) has no folder yet.
+        path = backend.root / backend_id
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
 
 
 @pytest.fixture

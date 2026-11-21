@@ -107,7 +107,8 @@ export class CrudSessionReads implements SessionReads {
 
   async openCalls(sessionId: string, turnId?: string): Promise<OpenCall[]> {
     // A turn id past the API's bound (`TURN_ID_MAX`) is no logged turn: every open call, as the SQL read.
-    const query = turnId === undefined || turnId.length > TURN_ID_MAX ? '' : `?${new URLSearchParams({ turn_id: turnId }).toString()}`
+    // An empty or over-long turn id is no turn the API takes, as the SQL found none: every open call.
+    const query = turnId === undefined || turnId === '' || turnId.length > TURN_ID_MAX ? '' : `?${new URLSearchParams({ turn_id: turnId }).toString()}`
     const { calls } = await this.#call<{ calls: OpenCall[] }>(`session ${sessionId}'s open calls`, this.#path(sessionId, `open-calls${query}`))
     return calls
   }

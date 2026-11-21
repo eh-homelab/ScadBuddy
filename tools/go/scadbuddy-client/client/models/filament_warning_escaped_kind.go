@@ -37,10 +37,12 @@ const (
 	SLICEREUSED_FILAMENTWARNING_KIND
 	MIXEDMATERIALS_FILAMENTWARNING_KIND
 	INLETSHARED_FILAMENTWARNING_KIND
+	OBJECTCONFLICT_FILAMENTWARNING_KIND
+	BYOBJECTONEOBJECT_FILAMENTWARNING_KIND
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "mixed-flows", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "process-override-unchecked", "host-setting-dropped", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials", "inlet-shared"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "mixed-flows", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "process-override-unchecked", "host-setting-dropped", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials", "inlet-shared", "object-conflict", "by-object-one-object"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
@@ -108,6 +110,10 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = MIXEDMATERIALS_FILAMENTWARNING_KIND
 	case "inlet-shared":
 		result = INLETSHARED_FILAMENTWARNING_KIND
+	case "object-conflict":
+		result = OBJECTCONFLICT_FILAMENTWARNING_KIND
+	case "by-object-one-object":
+		result = BYOBJECTONEOBJECT_FILAMENTWARNING_KIND
 	default:
 		return nil, nil
 	}

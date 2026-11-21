@@ -1488,14 +1488,15 @@ describe('CustomizePage', () => {
             usable: { min_x: 0, min_y: 0, max_x: 256, max_y: 256 },
           },
           overshoots: [],
-          problem: 'the model is 64.1 x 37.2 mm, which leaves no room for the 60 mm prime tower',
+          problem:
+            'the model is 64.1 x 37.2 mm, which leaves no room for the 24 x 24 mm prime tower',
         })
       }),
     )
     render()
     await firstRender()
     await waitFor(() =>
-      expect(screen.getByTestId('plate-fit')).toHaveTextContent(/no room for the 60 mm prime tower/),
+      expect(screen.getByTestId('plate-fit')).toHaveTextContent(/no room for the 24 x 24 mm prime tower/),
     )
     expect(screen.getByTestId('print')).toHaveTextContent('Does not fit')
     // Two colours, so the check is asked with the tower the send would add.

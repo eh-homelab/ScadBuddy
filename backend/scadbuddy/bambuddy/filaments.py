@@ -1,9 +1,9 @@
-"""Choosing a spool per plate slot, from Bambuddy's own inventory (#87).
+"""Choosing a spool per plate slot (#87), from ScadBuddy's own spools (#6262 Task 7).
 
-This is a **picker**, not a matcher. It shows Bambuddy's spools with how much is left
-on each, marks the ones already loaded and puts them first, and hands the choice
-straight back to Bambuddy. ScadBuddy keeps no filament state of its own and decides no
-placement: which AMS tray a chosen spool is drawn from is Bambuddy's answer, computed
+This is a **picker**, not a matcher. It shows the SB spools with how much is left on
+each, marks the ones already loaded and puts them first, and hands the choice's type and
+colour to Bambuddy. ScadBuddy decides no placement on Bambuddy's path: which AMS tray a
+chosen spool is drawn from is Bambuddy's answer, computed
 by its scheduler's ``_compute_ams_mapping_for_printer`` whenever a queue item carries
 no ``ams_mapping`` — which is exactly what ScadBuddy sends.
 
@@ -41,8 +41,7 @@ import asyncio
 import logging
 import math
 import re
-from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -53,17 +52,19 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.models import (
     FilamentRequirements,
+    InventoryRemain,
     NozzleInfo,
     Printer,
     PrinterStatus,
     SlotChoice,
     SlotMaterial,
-    Spool,
     SpoolAssignment,
 )
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
+from scadbuddy.crud.client import CrudUnavailableError
+from scadbuddy.filament.colour import same_opacity
+from scadbuddy.filament.models import FilamentInventorySpool, HeldTrays
 from scadbuddy.print_library.reads import LibraryReads, reads_for, served_reads
-from scadbuddy.spools.models import Overlay, SpoolSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,12 @@ WarningKind = Literal[
     "mixed-materials",
     # #4272 — a Track Switch inlet feeds both extruders, by a side chosen by hand.
     "inlet-shared",
+    # #6732 — the slicer refused a plate with "Object conflicts were detected": the
+    # prime tower stands on an object, or objects overlap. Names the plate.
+    "object-conflict",
+    # #6781 — a by-object print of a plate that is one object of several colours: by
+    # object has no effect, and the slicer changes filament on every layer. Names the plate.
+    "by-object-one-object",
 ]
 
 
@@ -153,14 +160,14 @@ class SpoolOption(BaseModel):
     subtype: str | None = None
     brand: str | None = None
     color_name: str | None = None
-    #: Normalised to ``#RRGGBB``. The inventory spells it ``RRGGBBAA`` without a ``#``,
-    #: ``available-filaments`` spells the same colour with one, and a plate's
+    #: Normalised to ``#RRGGBB``. An SB spool's ``rgba`` spells it ``#RRGGBBAA``,
+    #: ``available-filaments`` spells the same colour with the ``#`` too, and a plate's
     #: requirement spells it ``#RRGGBB`` — so everything is normalised on the way in.
     colour: str | None = None
     slicer_filament: str | None = None
     slicer_filament_name: str | None = None
-    #: ``label_weight - weight_used``, or Bambuddy's own reconciled figure for a loaded
-    #: spool, which wins where both exist.
+    #: The SB spool's grams left (its ledger), or Bambuddy's own reconciled figure for a
+    #: spool loaded in the chosen printer, which wins where both exist.
     remaining_g: float | None = None
     storage_location: str | None = None
     loaded: LoadedAt | None = None
@@ -184,10 +191,20 @@ class SpoolOption(BaseModel):
     #: What the AMS says is left, in percent: an RFID spool's ``remain``; ``None`` for an
     #: untagged one, which reports -1.
     remain_percent: int | None = None
-    #: The physical spool in the tray, and each spool provider's record of it, from the
-    #: overlay (`spools.store.SpoolStore.overlay`, plan 2026-10-18 D1); a native run only.
-    physical_spool_id: UUID | None = None
-    records: dict[str, SpoolSnapshot] = Field(default_factory=dict)
+    #: ScadBuddy's own spool (#6262, `filament/inventory.py`): on a native run's tray
+    #: choice the SB spool the tray holds, on a shelf row or a Bambuddy-path row (Task 7,
+    #: whose ``spool_id`` is this number) the spool itself; ``None`` when none is known.
+    #: ``sb_number`` is its ``#N``, what its presets are read by (F1).
+    sb_spool_id: UUID | None = None
+    sb_number: int | None = None
+    #: The colour with its alpha, ``#RRGGBBAA``: the held SB spool's own, else the tray's
+    #: reported ``tray_color``. ``colour`` stays ``#RRGGBB``, which the render splits by;
+    #: this is what tells a translucent spool from an opaque one (`same_opacity`), and
+    #: where the print dialog's 3D preview reads each slot's alpha (#6349).
+    rgba: str | None = None
+    #: The SB spool has no type yet (#6261): its values are its own until it gets one.
+    #: ``None`` where no SB spool is known; optional, as ``tray_only`` is.
+    needs_type: bool | None = None
 
 
 class UnknownTray(BaseModel):
@@ -199,6 +216,8 @@ class UnknownTray(BaseModel):
     label: str
     material: str
     colour: str | None = None
+    #: ``colour`` with the reported alpha, ``#RRGGBBAA`` (#6349): the choice's own ``rgba``.
+    rgba: str | None = None
     #: "black", for "black PLA".
     colour_word: str | None = None
     #: What the tray is now, so a "no" is remembered only until it changes.
@@ -229,6 +248,9 @@ class FilamentWarning(BaseModel):
 
     kind: WarningKind
     slot_id: int | None = None
+    #: The plate the warning is about, for a warning of one plate (#6732). Left out of
+    #: the answer when ``None``, so every other warning reads as before.
+    plate_id: int | None = Field(default=None, exclude_if=lambda value: value is None)
     message: str
 
 
@@ -241,10 +263,25 @@ class FilamentPlan(BaseModel):
     can print a part in the wrong colour when the right one is not loaded; with it on,
     Bambuddy holds the queue item until a tray of the right colour is loaded. A caller
     may still send ``False``.
+
+    ``ids`` says what a positive ``spool_id`` names (#6262 F14): ``"sb"`` an SB spool's
+    number, what every picker offers since Task 7 and every client sends; ``"bb"`` (the
+    default, so a plan from before it reads as it was meant: an in-flight run's input, an
+    older client) a Bambuddy spool id, mapped to its linked SB spool's number where it is
+    read (:func:`sb_plan`). A negative id is a tray chosen for itself either way.
     """
 
     slots: list[SlotChoice] = Field(default_factory=list)
     force_colour_match: bool = True
+    ids: Literal["bb", "sb"] = Field(
+        default="bb",
+        description=(
+            "What a positive `spool_id` names: `sb` an SB spool's number (what "
+            "`GET /print/filaments` and the choices offer), `bb` a Bambuddy spool id "
+            "(the default, for a plan from before this field). Send `sb` with the "
+            "numbers you read; an omitted `ids` is read as Bambuddy ids."
+        ),
+    )
 
     def spool_for(self, slot_id: int) -> int | None:
         return next((slot.spool_id for slot in self.slots if slot.slot_id == slot_id), None)
@@ -281,23 +318,15 @@ class FilamentOptions(BaseModel):
     #: native run (#4504) every tray is in ``spools`` already, and the candidates are
     #: rows of ``shelf``.
     trays: list[UnknownTray] = Field(default_factory=list)
-    #: A native run's spools no tray holds (#4504, `trays.shelf_options`): what its
-    #: ``trays`` questions' ``candidates`` name, each with its providers' ``records``.
-    #: Never a print choice, so never in ``spools``; empty on the Bambuddy path. Their
-    #: ``spool_id`` is positional, numbered from 1 in this one answer only: a client
-    #: links a row by its ``physical_spool_id``, else one of its ``records``
-    #: (``PUT /printers/{id}/trays/{ams}/{tray}/spool``), and never stores the id.
+    #: A native run's SB spools no tray holds (#4504, #6262, `trays.shelf_options`): what
+    #: its ``trays`` questions' ``candidates`` name. Never a print choice, so never in
+    #: ``spools``; empty on the Bambuddy path. Each row's ``spool_id`` is the SB spool's
+    #: number (``sb_number``); a client links a row by its ``sb_spool_id``
+    #: (``PUT /printers/{id}/trays/{ams}/{tray}/spool``).
     shelf: list[SpoolOption] = Field(default_factory=list)
     #: Where ``spools`` came from: Bambuddy's inventory, or (a native run, #3818) the
-    #: printer's loaded trays with the spool providers' records over them.
+    #: printer's loaded trays with the SB spool each holds (#6262).
     source: Literal["inventory", "trays"] = "inventory"
-    #: One sentence per spool provider whose records are stale or missing, on a native
-    #: run: those records are left out and the trays shown alone.
-    overlay_notes: list[str] = Field(default_factory=list)
-    #: A native run's spool providers by key, as a person reads them
-    #: (`SpoolProvider.label`): what names a ``records`` entry (#4516). Empty on the
-    #: Bambuddy path.
-    provider_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class QueueFilaments(BaseModel):
@@ -413,10 +442,17 @@ def ciede2000(first: Lab, second: Lab) -> float:
     return math.sqrt(lightness**2 + chroma**2 + hue**2 + r_t * chroma * hue)
 
 
-def colours_match(slot_colour: str | None, spool_colour: str | None) -> bool:
+def colours_match(
+    slot_colour: str | None, spool_colour: str | None, *, spool_rgba: str | None = None
+) -> bool:
     """Whether a spool's colour is close enough to a slot's for a remembered choice of
     it to be kept: within ``COLOUR_MATCH_DISTANCE``, the cut-off the auto-match uses,
-    or with no colour on either side to tell them apart (#933)."""
+    or with no colour on either side to tell them apart (#933). Never when one is
+    translucent and the other opaque (`same_opacity` on the slot's colour and the
+    spool's ``spool_rgba``, plan #6262 Decision 12): a slot's colour is opaque unless it
+    carries an alpha byte."""
+    if not same_opacity(slot_colour, spool_rgba):
+        return False
     distance = colour_distance(slot_colour, spool_colour)
     return distance is None or distance <= COLOUR_MATCH_DISTANCE
 
@@ -440,68 +476,70 @@ def seed_plan(options: FilamentOptions, remembered: Sequence[SlotChoice]) -> Fil
         )
         if kept is not None:
             chosen[slot.slot_id] = kept
-    return FilamentPlan(slots=[chosen[slot_id] for slot_id in sorted(chosen)])
+    return FilamentPlan(slots=[chosen[slot_id] for slot_id in sorted(chosen)], ids="sb")
 
 
 def build_options(
     *,
     library_file_id: int | None,
-    spools: list[Spool],
-    assignments: list[SpoolAssignment],
+    rows: Sequence[FilamentInventorySpool],
     requirements: list[SlotNeed],
     printer: Printer | None = None,
     slot_materials: list[SlotMaterial] | None = None,
+    nozzle: str = "0.4",
 ) -> FilamentOptions:
-    """Join everything already fetched into what the dialog renders.
+    """Join everything already fetched into what the dialog renders: each unarchived SB
+    spool of ``rows`` (`FilamentInventory.rows`, #6262 Task 7) under its number, filled as
+    a native tray's spool is (`trays._from_spool`: its effective values, ``rgba`` and
+    ``needs_type``), at the tray it is in, with the preset it names for the H2C and the
+    ``nozzle`` size (`presets.preset_for`, review R2), as the resolver reads it.
 
     Kept free of the client so the join — the part with the traps in it — is testable
     against recorded bodies without any HTTP at all.
     """
-    by_slot = {(material.ams_id, material.tray_id): material for material in (slot_materials or [])}
-    # Last assignment wins: Bambuddy keeps history rows, and a spool moved between
-    # trays would otherwise render in the tray it left.
-    assignment_by_spool = {assignment.spool_id: assignment for assignment in assignments}
+    # Here, not at the top: `trays` builds its choices from this module's models, and
+    # `filament.presets` reads the resolver's `PRINTER_MODEL`.
+    from scadbuddy.bambuddy.resolver import PRINTER_MODEL
+    from scadbuddy.bambuddy.trays import _from_spool
+    from scadbuddy.filament.presets import preset_for
 
+    by_slot = {(material.ams_id, material.tray_id): material for material in (slot_materials or [])}
     options: list[SpoolOption] = []
-    for spool in spools:
+    for row in rows:
+        spool, loaded = row.spool, row.loaded
         if spool.archived_at is not None:
             continue
-        assignment = assignment_by_spool.get(spool.id)
-        # ``inventory-remain`` was read for ``printer`` while ``/inventory/assignments``
-        # covers every printer, so a spool sitting in printer B's AMS 0 slot 1 must take
-        # none of printer A's AMS 0 slot 1 state — it is a different spool.
-        here = assignment is not None and (printer is None or assignment.printer_id == printer.id)
-        slot_material = (
-            by_slot.get((assignment.ams_id, assignment.tray_id)) if here and assignment else None
-        )
-        remaining = spool.remaining_g
+        # ``inventory-remain`` was read for ``printer`` while a spool's tray may be any
+        # printer's, so a spool sitting in printer B's AMS 0 slot 1 must take none of
+        # printer A's AMS 0 slot 1 state — it is a different spool.
+        here = loaded is not None and (printer is None or loaded.bambuddy_printer_id == printer.id)
+        slot_material = by_slot.get((loaded.ams_id, loaded.tray_id)) if here and loaded else None
+        preset = preset_for(row.presets, PRINTER_MODEL, nozzle)
+        option = SpoolOption(
+            spool_id=spool.number,
+            material=spool.names.material or "",
+            subtype=spool.names.subtype,
+            colour=normalise_colour(spool.effective.rgba),
+            slicer_filament=preset.slicer_filament if preset else None,
+            slicer_filament_name=preset.slicer_filament_name if preset else None,
+            storage_location=spool.names.location,
+            loaded=(
+                LoadedAt(
+                    # 0 for a printer Bambuddy does not have, reached over the LAN alone,
+                    # as its report's status reads (`printers.status.status_from_report`).
+                    printer_id=loaded.bambuddy_printer_id or 0,
+                    printer_name=loaded.printer_name,
+                    ams_id=loaded.ams_id,
+                    tray_id=loaded.tray_id,
+                )
+                if loaded is not None
+                else None
+            ),
+        ).model_copy(update=_from_spool(spool))
+        # Bambuddy's reconciliation of the tray beats the ledger for a spool loaded here.
         if slot_material is not None and slot_material.remaining_g is not None:
-            remaining = slot_material.remaining_g
-        options.append(
-            SpoolOption(
-                spool_id=spool.id,
-                material=spool.material,
-                subtype=spool.subtype,
-                brand=spool.brand,
-                color_name=spool.color_name,
-                colour=normalise_colour(spool.rgba),
-                slicer_filament=spool.slicer_filament,
-                slicer_filament_name=spool.slicer_filament_name,
-                remaining_g=remaining,
-                storage_location=spool.storage_location,
-                label_weight_g=spool.label_weight or None,
-                loaded=(
-                    LoadedAt(
-                        printer_id=assignment.printer_id,
-                        printer_name=assignment.printer_name,
-                        ams_id=assignment.ams_id,
-                        tray_id=assignment.tray_id,
-                    )
-                    if assignment
-                    else None
-                ),
-            )
-        )
+            option.remaining_g = slot_material.remaining_g
+        options.append(option)
 
     options.sort(key=_display_order(printer.id if printer else None))
     return _options(
@@ -513,6 +551,26 @@ def build_options(
     )
 
 
+def name_presets(
+    options: FilamentOptions, rows: Sequence[FilamentInventorySpool], nozzle: str
+) -> FilamentOptions:
+    """``options`` with each SB spool's preset named for the ``nozzle`` size, as
+    `build_options` names it: for the filament step, once the printer's mounted nozzle
+    is read (#6262 Task 7 re-review M-c)."""
+    # Here, not at the top: `filament.presets` reads the resolver's `PRINTER_MODEL`.
+    from scadbuddy.bambuddy.resolver import PRINTER_MODEL
+    from scadbuddy.filament.presets import preset_for
+
+    presets = {row.spool.number: row.presets for row in rows}
+    for option in options.spools:
+        if option.sb_number is None or option.sb_number not in presets:
+            continue
+        preset = preset_for(presets[option.sb_number], PRINTER_MODEL, nozzle)
+        option.slicer_filament = preset.slicer_filament if preset else None
+        option.slicer_filament_name = preset.slicer_filament_name if preset else None
+    return options
+
+
 def _options(
     *,
     library_file_id: int | None,
@@ -521,32 +579,27 @@ def _options(
     printer_id: int | None,
     printer_name: str | None,
     source: Literal["inventory", "trays"] = "inventory",
-    notes: list[str] | None = None,
     trays: list[UnknownTray] | None = None,
     shelf: list[SpoolOption] | None = None,
-    labels: Mapping[str, str] | None = None,
 ) -> FilamentOptions:
     """The dialog's answer over ``options``, already in display order: each slot's
     colour matches, the opening selection and its warnings. ``trays`` and ``shelf`` are
-    a native run's questions and the rows they name (`trays.tray_questions`), and
-    ``labels`` its providers' names."""
+    a native run's questions and the rows they name (`trays.tray_questions`)."""
     suggested = suggest(requirements, options, printer_id=printer_id)
     built = FilamentOptions(
         library_file_id=library_file_id,
         printer_id=printer_id,
         printer_name=printer_name,
         source=source,
-        overlay_notes=notes or [],
         trays=trays or [],
         shelf=shelf or [],
-        provider_labels=dict(labels or {}),
         slots=[
             slot.model_copy(
                 update={
                     "colour_matches": [
                         option.spool_id
                         for option in options
-                        if colours_match(slot.colour, option.colour)
+                        if colours_match(slot.colour, option.colour, spool_rgba=option.rgba)
                     ]
                 }
             )
@@ -692,6 +745,10 @@ def _match_score(slot: SlotNeed, option: SpoolOption, *, printer_id: int | None)
     looks deliberate.
     """
     if slot.material and option.material.upper() != slot.material.upper():
+        return None
+    if not same_opacity(slot.colour, option.rgba):
+        # A translucent spool for an opaque slot, or the reverse, is never a colour
+        # match (spec §5.1, plan #6262 Decision 12), however close the RGB.
         return None
     distance = colour_distance(slot.colour, option.colour)
     if distance is None and normalise_colour(slot.colour) is not None:
@@ -903,8 +960,10 @@ async def gather_options(
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
+    reads: SbRows | None = None,
 ) -> FilamentOptions:
-    """Read Bambuddy once for everything the filament step needs.
+    """Read Bambuddy once for everything the filament step needs, and ``reads`` for the
+    SB spools it offers (#6262 Task 7).
 
     ``own_colours`` replace the colors the file reports, slot by slot: the file was
     recolored for a run's spools (#457), and the step shows the model's.
@@ -916,21 +975,75 @@ async def gather_options(
         plate_ids=[plate_id],
         fallback_colours=fallback_colours,
         own_colours=own_colours,
+        reads=reads,
     )
     return options
 
 
-#: The spools and where each is loaded, read together (#2166 reuses one read).
-Inventory = tuple[list[Spool], list[SpoolAssignment]]
+#: The SB spools and where each is loaded, read once (#2166 reuses one read; #6262 Task 7).
+Inventory = list[FilamentInventorySpool]
 
 
-async def read_inventory(client: BambuddyClient) -> Inventory:
-    """The spools and their assignments, read together (#2354); a failure surfaces in
-    the order every reader once read them in, the spools' first."""
-    spools, assignments = await asyncio.gather(
-        client.spools(), client.spool_assignments(), return_exceptions=True
+class SbRows(Protocol):
+    """What the Bambuddy path reads of SB spools (`filament/inventory.py` `SbSpoolReads`,
+    the API's Postgres or the print worker's CRUD routes)."""
+
+    async def rows(
+        self, bb_assignments: Sequence[SpoolAssignment]
+    ) -> list[FilamentInventorySpool]: ...
+
+    async def bb_to_sb(self, ids: Sequence[int]) -> dict[int, int]: ...
+
+
+async def read_inventory(client: BambuddyClient, reads: SbRows | None) -> Inventory:
+    """The Bambuddy path's picker rows (#6262 Task 7): ScadBuddy's own spools, each in the
+    tray a printer's report holds it in, else the one Bambuddy assigns its linked spool to
+    (``/inventory/assignments``, read here). Without ``reads`` there are no SB spools to
+    offer, so there are no rows. A store that cannot be read (the API's database, or the
+    CRUD service from the print worker) is a 503, as a failed Bambuddy read is (#6262
+    Task 7 review M6)."""
+    assignments = await client.spool_assignments()
+    if reads is None:
+        return []
+    return await _sb_read(reads.rows(assignments))
+
+
+async def _sb_read[T](read: Awaitable[T]) -> T:
+    """``read`` of ScadBuddy's spools; a store that cannot be read is a 503."""
+    unread = ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "ScadBuddy's spools could not be read; try again shortly.",
     )
-    return settled(spools), settled(assignments)
+    try:
+        return await read
+    except DATABASE_ERRORS as error:
+        raise unread from error
+    except CrudUnavailableError as error:
+        raise unread from error
+
+
+async def sb_plan(plan: FilamentPlan, reads: SbRows | None) -> FilamentPlan:
+    """``plan`` naming SB spool numbers (#6262 F14): as it is when its ``ids`` are
+    ``"sb"``; else each positive id, a Bambuddy spool's, mapped to its linked SB spool's
+    number (`FilamentInventory.bb_to_sb`), and a slot whose spool has no link dropped,
+    never read as SB spool #N. A tray chosen for itself (a negative id) is kept. A
+    mapping that cannot be read is a 503, as in `read_inventory` (re-review M-e)."""
+    if plan.ids == "sb":
+        return plan
+    named = [slot.spool_id for slot in plan.slots if slot.spool_id > 0]
+    mapped = await _sb_read(reads.bb_to_sb(named)) if reads is not None and named else {}
+    return plan.model_copy(
+        update={
+            "ids": "sb",
+            "slots": [
+                slot
+                if slot.spool_id <= 0
+                else SlotChoice(slot_id=slot.slot_id, spool_id=mapped[slot.spool_id])
+                for slot in plan.slots
+                if slot.spool_id <= 0 or slot.spool_id in mapped
+            ],
+        }
+    )
 
 
 #: The most plates one request may name (#3652); a 3MF lays out far fewer.
@@ -996,6 +1109,10 @@ def plates_named(plates: Sequence[int]) -> str:
     return f"plates {', '.join(map(str, plates[:-1]))} and {plates[-1]}"
 
 
+#: A printer's own read and its inventory-remain read, started by the caller.
+PrinterReads = tuple[Awaitable[Printer], Awaitable[InventoryRemain]]
+
+
 async def gather_plate_options(
     client: BambuddyClient | None,
     *,
@@ -1008,27 +1125,34 @@ async def gather_plate_options(
     known: Callable[[int | None], FilamentRequirements] | None = None,
     native: LibraryReads | None = None,
     trays_from: PrinterStatus | None = None,
-    overlay: Overlay | None = None,
-    provider_labels: Mapping[str, str] | None = None,
-    now: datetime | None = None,
+    held: HeldTrays | None = None,
+    reads: SbRows | None = None,
+    nozzle: str = "0.4",
+    printer_reads: PrinterReads | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
+    Each spool names its preset for the ``nozzle`` size (`build_options`).
 
-    The spools, assignments and printer are the same for every plate, so they are read
-    once (#480); only each plate's slots are read per plate, concurrently. The reads
-    keep the single-plate order, spools, assignments, the plates, then the printer and
-    its inventory-remain, so the same failure surfaces either way: a plate's error beats
-    the printer's, and among plates the first failing one in ``plate_ids`` order wins.
-    ``inventory`` is the spools and assignments when the caller has read them already.
+    The spools and printer are the same for every plate, so they are read once (#480);
+    only each plate's slots are read per plate, concurrently. The reads keep the
+    single-plate order, the spools (`read_inventory`: Bambuddy's assignments, then the SB
+    spools from ``reads``), the plates, then the printer and its inventory-remain, so the
+    same failure surfaces either way: a plate's error beats the printer's, and among
+    plates the first failing one in ``plate_ids`` order wins. ``inventory`` is the
+    spools when the caller has read them already.
     ``known`` answers each plate's slots in place of Bambuddy's ``filament-requirements``
     when they were read from the file itself (#2550). A native file's (#3827) are read
     from ``native``: the empty requirement, so its slots read as unknown.
 
     ``trays_from`` (a native run, #3818 tier A, plan 2026-10-18 D1) replaces the inventory,
     the printer and its inventory-remain with the printer's loaded trays from its LAN
-    report, ``overlay`` (`SpoolStore.overlay`, a Postgres read) laid over them; no client
-    is needed then, and none is read. ``provider_labels`` name the providers in the
-    overlay's notes, and ``now`` is when the overlay was read."""
+    report, with ``held`` (#6262: the inventory's `TrayView`, or the background slice's
+    `SbSpools`, no shelf) naming the SB spool in each and the shelf it has; no client is
+    needed then, and none is read. Without ``held`` the trays are shown alone.
+
+    ``printer_reads`` are ``printer_id``'s printer and inventory-remain when the caller
+    started those reads already (the print check, #4196): they are awaited here in
+    place of new reads, and still fail after the plates."""
     if trays_from is not None:
         return await _tray_plate_options(
             client,
@@ -1040,13 +1164,11 @@ async def gather_plate_options(
             known=known,
             native=native,
             status=trays_from,
-            overlay=overlay,
-            labels=provider_labels or {},
-            now=now,
+            held=held,
         )
     if client is None:
-        raise TypeError("the inventory is Bambuddy's: reading it needs a client")
-    spools, assignments = inventory if inventory is not None else await read_inventory(client)
+        raise TypeError("the Bambuddy path's options need a client")
+    rows = inventory if inventory is not None else await read_inventory(client, reads)
 
     answers = await asyncio.gather(
         *(
@@ -1056,7 +1178,11 @@ async def gather_plate_options(
             for plate in plate_ids
         ),
         *(
-            (client.printer(printer_id), client.inventory_remain(printer_id))
+            (
+                printer_reads
+                if printer_reads is not None
+                else (client.printer(printer_id), client.inventory_remain(printer_id))
+            )
             if printer_id is not None
             else ()
         ),
@@ -1074,11 +1200,11 @@ async def gather_plate_options(
     return [
         build_options(
             library_file_id=library_file_id,
-            spools=spools,
-            assignments=assignments,
+            rows=rows,
             requirements=requirements,
             printer=printer,
             slot_materials=slot_materials,
+            nozzle=nozzle,
         )
         for requirements in per_plate
     ]
@@ -1095,9 +1221,7 @@ async def _tray_plate_options(
     known: Callable[[int | None], FilamentRequirements] | None,
     native: LibraryReads | None,
     status: PrinterStatus,
-    overlay: Overlay | None,
-    labels: Mapping[str, str],
-    now: datetime | None,
+    held: HeldTrays | None,
 ) -> list[FilamentOptions]:
     # Here, not at the top: `trays` builds its choices from this module's models.
     from scadbuddy.bambuddy.trays import loaded_trays, tray_questions
@@ -1115,11 +1239,9 @@ async def _tray_plate_options(
     # The report's own id: the Bambuddy printer's when the row links one, else 0
     # (`printers.status.status_from_report`); every tray is loaded "here".
     here = printer_id if printer_id is not None else status.id
-    options = loaded_trays(status, here, status.name, overlay)
-    notes = overlay_notes(overlay, labels, now=now) if overlay is not None else []
-    # Shelf ids are positional: they agree across the plates only because every plate
-    # shares this one overlay and so this one numbering.
-    questions, shelf = tray_questions(status, overlay)
+    options = loaded_trays(status, here, status.name, held)
+    # Shelf ids are SB spool numbers, the same on every plate of one answer.
+    questions, shelf = tray_questions(status, held)
     return [
         _options(
             library_file_id=library_file_id,
@@ -1128,31 +1250,11 @@ async def _tray_plate_options(
             printer_id=here,
             printer_name=status.name,
             source="trays",
-            notes=notes,
             trays=[question.model_copy(deep=True) for question in questions],
             shelf=[spool.model_copy(deep=True) for spool in shelf],
-            labels=labels,
         )
         for requirements in per_plate
     ]
-
-
-def overlay_notes(
-    overlay: Overlay, labels: Mapping[str, str], *, now: datetime | None = None
-) -> list[str]:
-    """One sentence per provider the overlay left out: when it last answered, or that it
-    never has. A time today is ``14:02 UTC``; an older one carries its date."""
-    notes: list[str] = []
-    for provider, refreshed in overlay.stale.items():
-        label = labels.get(provider, provider)
-        if refreshed is None:
-            notes.append(f"No spool records from {label} yet; showing the trays only.")
-            continue
-        when = refreshed.astimezone(UTC)
-        same_day = now is not None and now.astimezone(UTC).date() == when.date()
-        stamp = when.strftime("%H:%M UTC" if same_day else "%Y-%m-%d %H:%M UTC")
-        notes.append(f"{label}'s spool records are from {stamp}; showing the trays only.")
-    return notes
 
 
 async def _requirements(

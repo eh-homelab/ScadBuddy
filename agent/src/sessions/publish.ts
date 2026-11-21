@@ -46,7 +46,11 @@ export class CrudPublisher implements Publisher {
     // The API checks each field as its pattern says; a session id that is no UUID names no
     // session any listener follows, so it is not sent.
     if (!isUuid(event.session_id)) return
-    await this.#call(`session ${event.session_id}'s bus event`, '/publish/session-event', { method: 'POST', body: event })
+    // The API takes a lowercase UUID only, as `ai_sessions` writes every id.
+    await this.#call(`session ${event.session_id}'s bus event`, '/publish/session-event', {
+      method: 'POST',
+      body: { ...event, session_id: event.session_id.toLowerCase() },
+    })
   }
 
   async warmEvict(target: string): Promise<void> {

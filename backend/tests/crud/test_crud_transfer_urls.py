@@ -1,9 +1,10 @@
 """A LAN print's read URL of a native slice's sliced 3MF, minted by the API (#5298 Task
 32): ``POST …/print/transfer-urls`` answers the internal blob route's URL, signed under the
 API's KEK, only for a key the content index holds live as a slicer's output (kind
-``slice`` with `SLICED_OUTPUT_META`), whether or not its `native_slices` row still stands;
-any other key (a slicer's input among them, and a marked slice under any key but the
-content-addressed one of its bytes, #6179), and any other caller, is 403. The
+``slice`` with `SLICED_OUTPUT_META`) that is a sliced file of a run in use (#6122), whether
+or not its `native_slices` row still stands; any other key (a slicer's input among them, a
+marked slice under any key but the content-addressed one of its bytes, #6179, and one no
+run in use names), and any other caller, is 403. The
 print worker's `RemoteBlobs` asks the route, signs nothing, and reads a refusal as a file
 no longer stored."""
 
@@ -85,7 +86,7 @@ class _Token:
 class _Content:
     """The content index's `stat` (what the route's allow rule reads) and `get` (what the
     internal GET route streams), over ``blobs``: key to kind and bytes. No
-    `native_slices` row exists here: the rule follows the blob, not the row."""
+    `native_slices` row exists here: the run's half of the rule is `_RunFiles`."""
 
     def __init__(
         self,
@@ -121,11 +122,31 @@ def _live(*keys: str, kind: BlobKind = SLICE_KIND, marked: bool = True) -> _Cont
     return _Content({key: (kind, SLICED) for key in keys}, meta=meta)
 
 
+class _RunFiles:
+    """`PrintRunStore.transferable` (#6122): ``files`` are the sliced files of runs in
+    use; ``None``, every key is one, so a test reads the content index's rule alone. Its
+    SQL is `tests/test_print_run_holds.py`'s."""
+
+    def __init__(self, files: set[str] | None) -> None:
+        self.files = files
+        self.asked: list[str] = []
+
+    async def transferable(self, key: str) -> bool:
+        self.asked.append(key)
+        return self.files is None or key in self.files
+
+
 def _app(
-    tmp_path: Path, content: _Content, *, configured: bool = True, now: datetime | None = None
+    tmp_path: Path,
+    content: _Content,
+    *,
+    configured: bool = True,
+    now: datetime | None = None,
+    runs: _RunFiles | None = None,
 ) -> FastAPI:
     """The print routes, the areas and the internal blob routes over ``content``, the
-    API's KEK in a file; ``configured`` False is an API with no content store."""
+    API's KEK in a file; ``configured`` False is an API with no content store. ``runs``
+    says which keys are files of runs in use: by default every one."""
     key_file = tmp_path / "kek"
     key_file.write_text(KEK_TEXT)
     transfers = Transfers(
@@ -146,6 +167,7 @@ def _app(
         settings=SimpleNamespace(auth_mode="off", secret_key_file=key_file),
         store=SimpleNamespace(content=content),
         components=SimpleNamespace(get=lambda key: {SLICING: SimpleNamespace(transfers=mint)}[key]),
+        print_runs=SimpleNamespace(store=runs or _RunFiles(None)),
     )
     app.include_router(crud_print.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
@@ -203,8 +225,14 @@ async def _read(blobs: RemoteBlobs, key: str) -> bytes:
 
 def test_the_area_is_served_and_awaited() -> None:
     assert "transfer-urls" in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's.
-    assert CRUD_AREAS["print"][-2:] == ["transfer-urls", "access-codes"]
+    # Appended, so an older API's list is a prefix of a newer one's: each came after the one before.
+    # Check the order, not the list's tail, which every new area extends.
+    areas = CRUD_AREAS["print"]
+    positions = [
+        areas.index(area)
+        for area in ["transfer-urls", "access-codes", "filament", "filament-sync", "filament-pull"]
+    ]
+    assert positions == sorted(positions)
 
 
 async def test_an_unknown_key_is_refused(tmp_path: Path) -> None:
@@ -383,12 +411,30 @@ async def test_a_live_slice_gets_the_internal_routes_url(tmp_path: Path) -> None
     assert token.expires_at == url.expires_at
 
 
-async def test_a_swept_rows_live_slice_still_gets_a_url(tmp_path: Path) -> None:
+async def test_a_swept_rows_live_slice_still_gets_a_url_while_its_run_holds_it(
+    tmp_path: Path,
+) -> None:
     """A LAN run's later plate, past the slice sweep (6 h after the slice finished): no
-    `native_slices` row names the key any more, but its blob is live in the content index
-    until the content sweep takes it, and that is what the rule reads (review finding 1).
-    The app has no slice store at all, so no row could answer."""
-    assert await _read(_blobs(_app(tmp_path, _live(KEY))), KEY) == SLICED
+    `native_slices` row names the key any more, but the run in use holds its file
+    (#6122), and that is what the rule reads with the blob's own mark. The app has no
+    slice store at all, so no row could answer."""
+    runs = _RunFiles({KEY})
+    assert await _read(_blobs(_app(tmp_path, _live(KEY), runs=runs)), KEY) == SLICED
+    assert runs.asked == [KEY]
+
+
+async def test_a_live_slice_of_no_run_in_use_is_refused(tmp_path: Path) -> None:
+    """#6122: a live, marked sliced output that no run in use holds or slices, such as
+    the print dialog's slice or an order quote's, gets no URL; the worker reads the
+    refusal as a file no longer stored."""
+    runs = _RunFiles(set())
+    app = _app(tmp_path, _live(KEY), runs=runs)
+    response = await _ask(app, KEY)
+    assert response.status_code == 403
+    assert response.json()["reason"] == TRANSFER_REFUSED
+    with pytest.raises(BlobMissingAnswerError):
+        await _read(_blobs(app), KEY)
+    assert runs.asked == [KEY, KEY]
 
 
 async def test_the_url_reads_the_blob_through_the_internal_route(tmp_path: Path) -> None:

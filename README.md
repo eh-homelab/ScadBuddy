@@ -42,15 +42,17 @@ multi-colour rules, connecting Bambuddy and each feature.
   you set copies, a project, and print options.
 - **Library**: print any file already in Bambuddy's library through the same print
   picker, printed as an output is: a copy laid out for the nozzle side, flow and
-  spools chosen, filed in the project's folder; an author's plates and placement are
-  kept. Advanced also lists STLs, which print as one plate, and sliced
+  spools chosen, filed in the project's folder; an author's plates are kept, and each
+  plate's objects move as one group where every nozzle reaches, as Bambu Studio's
+  "Adapt Settings" moves them: centred when the file was made for another bed size
+  (#6820). Advanced also lists STLs, which print as one plate, and sliced
   `.gcode.3mf` files, which print from Bambuddy directly.
 - **Orders**: customers with their contact points and addresses, and orders of line
   items, each pinning one template commit with its inputs, priced by hand or priced from
   the slice (every plate's grams and time at the price book's filaments and rates, kept
   with the sliced file it was read from), fulfilled, shipped and closed, with an audit
   line per order; a rough estimate from a render's volume before anything is sliced; the
-  pages under Orders, the price book in Settings, and the assistant's `order_*` and
+  pages under Orders, the price book on the Filament page's Types tab, and the assistant's `order_*` and
   `price_book_*` tools (phases 1 and 2 of #4248).
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
@@ -880,8 +882,9 @@ The counter
 `scadbuddy_service_token_exchanges_total{caller, proof, result}` counts them. An exchange
 the API answers `404` (an older API pod during a roll) falls back to the view while the
 caller still has a database URL, except on the workers that hold no database (render,
-print and projects): they take the exchange only (`exchange_source`), since the CRUD areas
-they wait for come only from an API that serves the exchange (#5298). The API's own in-process `projects` worker gets its
+print and projects) and the agent: they take the exchange only (`exchange_source`; the
+agent's `ExchangeCredential`, #6501), since the CRUD areas they wait for come only from an
+API that serves the exchange (#5298). The API's own in-process `projects` worker gets its
 credential minted in memory. `GET /api/v1/auth/service-credentials` returns each
 credential's `proof`, `pod_name` and `pod_uid` (the Settings page does not show them, or the
 `render` caller, yet), and the API also revokes every credential of a pod
@@ -911,7 +914,7 @@ store or another caller's credential:
 |---|---|---|
 | render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start where the role still exists (#5298 Task 22) | none: prod sets none and has no such role (eh-homelab/clusters#3555, #3566, #3578; measured 2026-11-14) |
 | print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start where the role still exists (#5298 Task 35) | none: prod sets none and has no such role (as above) |
-| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
+| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API revokes everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_agent LOGIN PASSWORD '…'`; on
@@ -919,9 +922,9 @@ CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` a
 the API itself stays on the database's owner role. At every start the API grants each
 role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`) and its
 credential's view; a role created
-after the API started is granted on the API's next start. The agent's role owns the
-`ai_*` tables it migrates and grants what the API's role reads of them
-(`agent/src/db/grants.ts`).
+after the API started is granted on the API's next start. The agent grants nothing
+since #6501: on separate roles, the API's role must own the `ai_*` tables (the files it
+applies since #5299 D6 already are; transfer the older ones with `ALTER TABLE … OWNER TO`).
 
 On 2026-11-05 the render, print and projects workers connected as their own roles (the
 projects worker has made no connection since 2026-11-07, and the print worker none since
@@ -1004,17 +1007,21 @@ Both call `deploy.reusable.yml`, which:
    (#547, #1060, #1057). The workflow tolerates a missing worker manifest, noting
    its absence and pinning the rest, from before clusters added them. Each
    file must have exactly one such image line and one of each annotation, before
-   and after the rewrite, or the deploy stops. In the same PR it moves the
-   dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
-   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`,
-   optionally followed by exactly `&timeout=<n>s|m|h`, to the same revision,
-   keeping that suffix as it is. The suffix raises kustomize's 27s default git
-   timeout, which a checkout of this repo (with its LFS test fixtures) now
-   outlasts. That line is optional: an overlay that does not mention
-   `eh-homelab/ScadBuddy//deploy/grafana` at all deploys the images alone with a
-   notice; one that mentions it in any other form (a short SHA, a branch, a
-   comment, other casing or spacing, any other query parameter) or twice stops
-   the deploy;
+   and after the rewrite, or the deploy stops. In the same PR it refreshes the
+   dashboards' vendored copy in clusters (eh-homelab/clusters#3734):
+   `clusters/prod/scadbuddy/grafana/` holds a byte-for-byte copy of this repo's
+   `deploy/grafana/` (`kustomization.yaml` and every `*.json`) and a `.revision`
+   file with the 40-hex commit it came from. The deploy fetches `deploy/grafana/`
+   at the same revision through the contents API, checks each file against its
+   git blob sha, replaces the copy's `kustomization.yaml` and `*.json` (so a
+   removed dashboard goes too), and writes `.revision`. A revision with no
+   `deploy/grafana/` keeps the copy, and the PR says so; a name other than
+   `kustomization.yaml` or `[a-z0-9-]+.json`, or a subdirectory, stops the deploy.
+   The copy is optional: an overlay without that directory deploys the images
+   alone with a notice. Clusters used to pull `deploy/grafana` in as a remote
+   kustomize resource (`…//deploy/grafana?ref=<SHA>`), which Argo CD's
+   repo-server failed to fetch in prod, wedging syncs; an overlay that still
+   names it, in any form, stops the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    first waits up to 90 minutes (two 45 minute rounds, #6368) for an older open
@@ -1294,19 +1301,27 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   printer's with a 503 (#5298 Task 33). The rack hotends' usage
   goes through them too (`…/rack`; a LAN start's picks, a queue item's picks, a settled print's rows and a LAN
   start's settles take an `Idempotency-Key`), so the worker holds no rack pool. Through
-  them too go the spools a native run's overlay reads and the native provider re-caches, ScadBuddy's
-  own spools and what a LAN start uses of them, the kept copy of Bambuddy's local presets
-  and a native slice's start (`…/spools`, `…/native-spools`, `…/held-presets`,
-  `…/native-slices`; a provider's records and a run's settle take an `Idempotency-Key`).
+  them too go the SB spool in each of a native run's trays and their presets, what a LAN
+  start uses of them, the kept copy of Bambuddy's local presets and a native slice's start,
+  and the SB spools Bambuddy's path offers and maps a plan by (`…/filament/trays`,
+  `…/filament/presets`, `…/filament/print-uses`, `…/filament/rows`, `…/filament/bb-to-sb`,
+  area `filament`;
+  `…/held-presets`, `…/native-slices`; a start's uses and a run's settle take an
+  `Idempotency-Key`).
   A LAN print reads a native slice's sliced 3MF by a URL the API mints for it
   (`…/transfer-urls`, #5298 Task 32): the internal blob route's, its token signed under
   the API's KEK and good for 10 minutes, on every `store_backend`, so the pod reaches the
   API only. The API mints one only for a key its content index holds live as a slicer's
-  output (kind `slice` with the mark the slice's record step gives it), whether or not the
-  slice's row was swept since (6 h after it finished: a run's later plates start after
-  the earlier ones print). So the print worker can read any live sliced output (a run's,
-  the print dialog's or an order quote's); a print-run hold on its file would narrow that
-  to the run's own. The slicer's inputs share kind `slice` but are refused. ScadBuddy
+  output (kind `slice` with the mark the slice's record step gives it), and only for a
+  sliced file of a run in use: a running run, or a LAN run with prints still to start
+  (#6122). The run's hold names the file (holder kind `print_run` in `blob_refs`, taken by
+  `slice_run` for a LAN run and dropped where the run ends; a housekeeping sweep drops
+  what an end left), or, for a LAN run whose result says it has prints still to start, a completed slice row
+  of the run's subject does (#6586). The hold outlives
+  the slice's row, which the sweep deletes 6 h after it finished: a run's later plates
+  start after the earlier ones print. The print dialog's slice and an order quote's get
+  no URL unless a LAN run of their subject holds them or has prints still to start. The slicer's inputs share kind `slice`
+  but are refused. ScadBuddy
   strips print-host credential keys (`printhost_apikey`, `printhost_password`,
   `printhost_user`, and any key naming an API key, password, secret or token, at any
   depth) whenever it parses a preset, and never stores, forwards or writes them into a
@@ -1323,7 +1338,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   503 `store_unavailable`, which the worker retries. The worker signs nothing. It does
   not `LISTEN`. It waits until the API lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
   `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
-  `lan-imports`, `printers`, `rack`, `spools`, `transfer-urls` and `access-codes`) before
+  `lan-imports`, `printers`, `rack`, `spools`, `transfer-urls`, `access-codes`,
+  `filament`, `filament-sync` and `filament-pull`) before
   it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
@@ -1401,6 +1417,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   "A release that needs `Recreate`" below). A job start during the roll can reach an old
   build that does not register it; that run's workflow task fails until the new build is
   current.
+- **Upgrading to the release with #6772** adds one workflow type, `FilamentBbPull` (the
+  Bambuddy pull's reads, which the API's spool refresh and `POST
+  /filament/bambuddy/import` start, `backend/scadbuddy/workflows/filament_pull.py`), to the
+  `bambuddy` queue, and the CRUD area `filament-pull`, which the worker waits for. Roll
+  `scadbuddy-print` out with `Recreate` (see "A release that needs `Recreate`" below). A
+  pull started during the roll can reach an old build that does not register it; its
+  workflow task fails until the new build is current, at most the run's 4.5 minutes, and
+  the next tick of the spool refresh pulls again.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
@@ -1919,7 +1943,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   the previous file from every container and restart again. A row the old key
   cannot open is left as it is and counted in that log line. Which tables each
   one re-wraps: `docs/ai/operating.md` §3.3.
-- `/healthz` reports `"ai": "enabled"` only when the database answers, its
+- `/healthz` reports `"ai": "enabled"` only when the database answers (and, once the API lists
+  every area the agent wants, the API answers them too: `database` reads `unreachable` when either
+  does not, and the agent logs which, #6501), its
   `ai_*` migrations have applied (`backend/scadbuddy/migrations_agent/`, which
   the API applies at its start; the agent waits for them, #5299), the key is loaded and a Claude credential is
   saved. Otherwise `ai` names the first missing piece; each database step is
@@ -2269,11 +2295,16 @@ checked per run from the settings as they are then (`printers/hot_path.py`
    answers).
 
 `bambuddy_url` may stay set. A native run never builds a Bambuddy client; what still
-calls Bambuddy are the housekeeping sweeps and the spool providers' refresh (the
-`scadbuddy-spool-providers-<queue>` Schedule, `spool_overlay_refresh_seconds` (restart),
-300 s by default), on their own traces, and any run whose printer's path is `bambuddy`. The
-dialog's filament step reads the loaded trays from the LAN report and lays the cached
-spool records over them; an overlay older than 30 minutes shows trays only, with a note.
+calls Bambuddy are the housekeeping sweeps and the spool refresh, which pulls Bambuddy's
+spools into ScadBuddy's own (the print worker reads Bambuddy for it and the API applies the
+rows, #6772; the `scadbuddy-spool-providers-<queue>` Schedule,
+`spool_overlay_refresh_seconds` (restart), 300 s by default; it is also the timer of the
+sync's full pass to Bambuddy, which takes a change after its next pass, not at a restart, and
+0 leaves that pass to filament changes and Sync now; Settings → Printing → Filament, where
+a `filament_sync` with no data type set to `bb_to_sb` or `two_way` turns the pull off, #6265), on their own traces, and
+any run whose printer's path is `bambuddy`. The
+dialog's filament step reads the loaded trays from the LAN report, each with the
+ScadBuddy spool it holds (found by its RFID tag or a person's tray link, #6262).
 The same refresh keeps a copy of Bambuddy's local presets (its OrcaSlicer imports,
 #4645), which the dialog offers and the native slicer slices from; one imported or
 edited in Bambuddy is there after the next refresh. Bambu Cloud user presets are not
@@ -2412,16 +2443,20 @@ holds the manifest (spec §12).
 - **The sandbox fails closed.** It starts each parse through `confine.py --strict` (its own
   user, network, mount and PID namespaces, no `/proc`, no capabilities, no new privileges,
   a seccomp filter) and exits 3 at start, logging why, when any step is refused. A container
-  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the sandbox's pod
-  runs with the seccomp profile `Unconfined`
-  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)), its pod
-  only. On a node with `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's
-  default) an AppArmor-unconfined pod gets no capabilities in its user namespace, and the
-  sandbox exits 3 ("the user namespace's id maps: Permission denied"). So the pod runs under
-  a `Localhost` AppArmor profile, `scadbuddy-intake-sandbox` (`unconfined` plus `userns,`),
-  that the nodes must have loaded ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction);
-  in prod, eh-homelab/clusters `applications/scadbuddy/apparmor-loader.yaml`). The worker's
-  pod keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
+  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)` and `mount`, so the
+  sandbox's pod runs the `Localhost` seccomp profile `deploy/security/seccomp/intake-sandbox.json`
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/)): the
+  runtime's default plus exactly those two calls (#6779). On a node with
+  `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 24.04's default) an
+  AppArmor-unconfined pod gets no capabilities in its user namespace, and the sandbox exits 3
+  ("the user namespace's id maps: Permission denied"). So the pod runs under the `Localhost`
+  AppArmor profile `scadbuddy-intake-sandbox` (`deploy/security/apparmor/`): the runtime's
+  default plus `userns,` and the launcher's own mounts
+  ([AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction)).
+  The nodes must have both profiles (in prod, eh-homelab/clusters
+  `applications/scadbuddy/apparmor-loader.yaml`; `docs/security/trust-boundaries.md`,
+  "Browser and parser pod profiles", says how they were measured). The worker's pod keeps
+  `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
   the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason`
   (`unauthorized`, `busy`, `unreachable`, `timeout`, `transport`, `check-timeout`,
   `crashed`, `status`, `bad-answer`; `/metrics` on port 9090). Alert on it and on the
@@ -2440,6 +2475,189 @@ holds the manifest (spec §12).
   (`MANIFEST_INTAKE`) like the other workers, once that file is in clusters. The sandbox's
   Deployment has no image line of its own: clusters copies the worker's with a kustomize
   replacement, so one pin moves both.
+
+### Profile-fetch worker (#6625)
+
+A new spool type with a 3dfilamentprofiles.com (3DFP) id gets a slicer preset for each
+printer model and nozzle. Two Deployments do it (#6780). `scadbuddy-profile-fetch` is the
+worker: `python -m scadbuddy.profile_fetch` polls the Temporal queue `profile-fetch`
+(`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROFILE_FETCH`) and answers `/healthz` and `/metrics` on port
+9090. It runs no browser. `scadbuddy-profile-fetch-browser` is the browser service:
+`python -m scadbuddy.profile_fetch.browser` runs Chromium on the site and answers the
+worker's RPC and `/healthz` on port 8091. The plan is `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`; the spec is
+`docs/superpowers/specs/2026-11-14-filament-management-design.md` §9. eh-homelab/clusters
+holds the manifests (the clusters PR, plan Task 11, applies the pod settings below).
+
+- **The flow.** The API opens a run (a row in `filament_profile_fetches`) and starts the
+  `ProfileFetch` workflow `profile-fetch:<run_id>`. The worker's export activity asks the
+  browser service to log in to 3DFP and to export one profile per printer model and nozzle
+  from the spool page, and PUTs each file to the CRUD service. Its import activity then asks the API to import the run. The API
+  checks each file, removes its G-code keys, posts the files as one zip to Bambuddy's
+  `POST /local-presets/import`, sets the type's presets for the fetched
+  `(printer model, nozzle)` keys, reads K values from `GET /printers/{id}/kprofiles/`
+  where one matches exactly, and removes an old K value of a fetched key that the new
+  preset does not match (the run's notes name each one; a printer whose K table did not
+  answer keeps its values). It writes and removes only K values an earlier fetch set
+  (`source` `profile_fetch`): a K value a person, the profile fill or a printer
+  calibration set keeps its value and its source, and the run's notes name each one it
+  kept (#6857, plan Decision 127). It then refreshes the kept copy of the local presets (unless the
+  setting `spool_overlay_refresh_seconds` is 0; build Decision 18). The worker
+  never calls Bambuddy and never has a Bambuddy key. The nozzles are the remembered setting
+  `profile_fetch_nozzles` (Settings → Printing → Filament; default 0.2, 0.4, 0.6, 0.8). The
+  printer models are the models of ScadBuddy's printers.
+- **Who starts a fetch.** Invoice confirm starts one for each new type that has a `tdfp_id`.
+  The "Fetch from 3DFP" button on the type page and the agent tool
+  `filament_type_fetch_profiles` start one by hand
+  (`POST /api/v1/filament/types/{id}/profile-fetch`). The agent tool
+  `filament_type_profile_fetch` and `GET` on the same path read the run and the gaps. A
+  start while a run is `running` joins that run, unless no worker
+  serves the queue: then the API ends that run `failed` and opens a new one
+  (`start_fetch` in `filament/profile_fetch.py`; see "When no worker runs" below).
+- **Two pods (#6780).** The browser runs untrusted web content, so it runs in a pod that
+  cannot reach Temporal or the API. Temporal's frontend has no authorizer and no mTLS here
+  (#6724; eh-homelab/clusters `temporal-cluster-v2.yaml` sets no `authorization` and says
+  "this cluster has no mTLS", read 2026-11-20), so a renderer escape in a Temporal worker
+  could start, signal or read any workflow in the namespace. The worker
+  (`backend/scadbuddy/profile_fetch/worker.py`) holds the CRUD credential, reaches Temporal
+  and the API, and runs no browser. The browser service
+  (`backend/scadbuddy/profile_fetch/browser.py`) holds the 3DFP login and runs Chromium.
+  Between them goes an RPC (`backend/scadbuddy/profile_fetch/remote.py`): the worker asks
+  for a sign-in, an "add to My Spools" or one export (3DFP id, printer model, nozzle), and
+  the service answers the exported file's bytes as the HTTP body (never base64), or a
+  failure kind. The worker reads every answer as untrusted: a kind it does not know is
+  `browser`, the failure's text is the worker's own, the body is capped at 512 KiB and an
+  encoded body is refused. Each call carries the RPC token (`Authorization: Bearer`), which
+  authorizes calls to the service and nothing else; the service answers 401 without it,
+  before it reads the body. The 3DFP login lives in the browser pod only, because only the
+  browser types it; the worker refuses to start with it. The CRUD credential lives in the
+  worker pod only; the browser service refuses to start with a proof, a Temporal or API
+  address, or a mounted ServiceAccount token. When an export activity is cancelled, the
+  worker closes its connection, and the service cancels the step and closes the browser.
+- **No database and no key.** Both processes refuse to start when `SCADBUDDY_DATABASE_URL`,
+  `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set (#5295). The browser
+  service also refuses a `DEBUG` that turns on a Playwright channel, because that log would
+  write the 3DFP password to stderr. The worker holds only a `profile-fetch` service credential. That
+  credential reaches one CRUD area, `runs`, and only runs the API opened
+  (`api/crud_profile_fetch.py`). The credential is a projected ServiceAccount token named by
+  `SCADBUDDY_SERVICE_TOKEN_FILE`; the API URL is `SCADBUDDY_API_INTERNAL_URL`.
+- **Environment:** the worker takes `SCADBUDDY_API_INTERNAL_URL`,
+  `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; set exactly one),
+  `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`,
+  `SCADBUDDY_PROFILE_FETCH_BROWSER_URL` (the service's plain `http://` URL, e.g.
+  `http://scadbuddy-profile-fetch-browser:8091`), `SCADBUDDY_PROFILE_FETCH_BROWSER_TOKEN_FILE`
+  (the RPC token's file: 32 to 1024 bytes of visible ASCII) and `SCADBUDDY_LOG_LEVEL`. The
+  browser service takes `SCADBUDDY_TDFP_EMAIL`, `SCADBUDDY_TDFP_PASSWORD`,
+  `SCADBUDDY_PROFILE_FETCH_BROWSER_TOKEN_FILE` (the same token),
+  `SCADBUDDY_PROFILE_FETCH_BROWSER_PORT` (default 8091), `SCADBUDDY_PROFILE_FETCH_WORK_DIR`
+  (a writable volume for the browser's profile, since the root file system is read-only;
+  default `/tmp`) and `SCADBUDDY_LOG_LEVEL` (`profile_fetch/settings.py`). The browser
+  service reads the 3DFP login from its secret at start and removes it from its
+  environment. It types the login into the site's login form in
+  the browser, so the browser page holds it for the login. Chromium starts with an
+  allowlisted environment, so no browser process gets the login in its environment, and
+  no error text, trace or HAR carries it. The browser's profile under
+  `SCADBUDDY_PROFILE_FETCH_WORK_DIR` keeps the site's cookies, not the login: before each
+  launch the browser service turns off Chromium's autofill, form saving, password manager and
+  credentials service in the profile's `Default/Preferences`, and it sets autocomplete
+  off on the login's fields. `test_the_profile_keeps_no_login_after_a_login`
+  (`backend/tests/profile_fetch/test_site.py`) measures this: it logs in to the local
+  replica site in headed Chromium, closes the browser, and finds neither the email nor
+  the password, as UTF-8, UTF-16-LE or URL-encoded bytes, in any file under the profile
+  directory. Without the two changes, the same test found the email in
+  `Default/Web Data`, `Default/Login Data` and `Default/Sessions` (Playwright 1.64.1's
+  Chromium). It does not check the profile while the browser runs. It exports one run at a time (one replica, strategy
+  `Recreate`), so two browsers never share one login.
+- **The secret.** The 1Password item "3D Filament Profiles" in the vault `homelab - prod` has
+  a `password` field. It needs a text field `email` that the owner adds (the account email;
+  the item's username lacks it). This is the owner's statement of 2026-11-18 (plan Decision
+  15); #6625 did not read the item. The clusters PR makes a OnePasswordItem `scadbuddy-3dfp`
+  that makes a Secret with the keys `email` and `password`, which become the two
+  environment variables above, in the browser pod only (#6780). The RPC token is a second
+  Secret, `scadbuddy-profile-fetch-browser-rpc`, from a OnePasswordItem of the same name: a
+  1Password password item titled `scadbuddy-profile-fetch-browser-rpc` in `homelab - prod`,
+  whose `password` field holds 64 hex characters (`openssl rand -hex 32`). The owner creates
+  it by hand (the operator only reads items), and only the worker and the browser pods
+  mount it, as the file `token`. To rotate it, change the field and restart both
+  Deployments. Never print either value. To check that the field is there,
+  read it into a variable and print a length or the word "missing", never the value:
+
+  ```bash
+  KEY=$(op.exe read "op://homelab - prod/3D Filament Profiles/email" 2>&1); case "$KEY" in *ERROR*|*"not found"*|"") echo "missing";; *) echo "${#KEY}";; esac; unset KEY
+  ```
+
+  A missing field gives op's error text, which contains `ERROR`, so the command prints
+  "missing". The command prints only that word or a length. (On WSL `op.exe` can write the
+  value to stderr, so the command captures both streams.) The path follows op's documented
+  `op://<vault>/<item>/<field>` form and the plan's vault and item names. A live check on
+  2026-11-18 timed out on 1Password authorization, so the path is not yet confirmed. Run
+  the check above once the owner adds the field. A missing `op.exe` also prints "missing".
+- **The browser.** It is a headed Chromium under Xvfb with a normal Chrome user agent. Plan
+  Decision 5 records why. The source is `.claude/skills/filament-intake/SKILL.md`: line 82 says
+  a real Chromium passes Vercel's bot check, and line 84 says the firewall answers 403 to the
+  `HeadlessChrome` user agent "since 2026-11-01". The skill gives a date for the 403 only and
+  no method for either claim. #6625 measured neither against the real site; its tests drive a
+  local replica and never reach 3DFP. Chromium's own
+  sandbox stays on. The code never passes `--no-sandbox`: a renderer exploit must not reach
+  the process that holds the password (the browser pod holds no CRUD credential, #6780). If
+  the sandbox cannot start, the browser does not launch and the browser service exits 1.
+- **The image.** `ghcr.io/eh-homelab/scadbuddy-profile-fetch` is the Dockerfile target
+  `profile-fetch` (python:3.12-slim-bookworm, `xvfb`, `tini`, Playwright's Chromium in
+  `/ms-playwright`, amd64 only, uid 10001). It carries no source tree, no git and no
+  database client library: its build fails when any psycopg package imports. Playwright is
+  pinned exactly in the `profile-fetch` dependency group, so the app image does not carry it.
+  `ENTRYPOINT` is `tini --`; `CMD` is `xvfb-run -a python -m scadbuddy.profile_fetch.browser`,
+  the browser service. The worker's Deployment runs the same image with `args: [python, -m,
+  scadbuddy.profile_fetch]` (#6780).
+- **Pod security (applied by the clusters PR, plan Task 11).** Both pods run `runAsNonRoot`
+  as uid 10001, with `allowPrivilegeEscalation: false`, every capability dropped and a
+  read-only root file system. The worker runs no browser, so it runs the runtime's default
+  seccomp profile. A runtime's default seccomp profile refuses the user namespaces that
+  Chromium's sandbox needs ("No usable sandbox!", plan Decision 73). So the browser pod runs the
+  `Localhost` seccomp profile `deploy/security/seccomp/profile-fetch.json`: the runtime's
+  default plus `clone` with three namespace-flag sets, `unshare(CLONE_NEWUSER)` and `chroot`,
+  each measured necessary (#6779). On Ubuntu 24.04 nodes
+  (`kernel.apparmor_restrict_unprivileged_userns=1`) the pod also needs a `Localhost`
+  AppArmor profile that grants `userns,`; it runs its own, `scadbuddy-profile-fetch`
+  (`deploy/security/apparmor/`: the runtime's default plus `userns,`;
+  [AppArmor: unprivileged user namespace restrictions](https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction)).
+  `docs/security/trust-boundaries.md`, "Browser and parser pod profiles", says how they were
+  measured; nothing has measured them on a prod node yet. The browser service sets `RLIMIT_CORE` to 0 itself, so a node that pipes core dumps
+  to a collector never keeps a renderer's memory. Never add `--no-sandbox`.
+- **Network.** The browser pod's NetworkPolicy allows DNS and TCP 443 to `0.0.0.0/0`
+  except `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
+  `169.254.0.0/16` and the other ranges that are not public (plan Decision 14), and admits
+  only the worker's pods, on 8091. It has no rule to Temporal or the API (#6780); the
+  clusters check `check-scadbuddy-intake-sandbox-policy.sh` fails when one appears. It is
+  not an FQDN list, because the site loads assets from hosts nobody measured; the
+  except-list keeps the browser off the LAN. The worker's policy allows DNS, the API's 8082,
+  Temporal's frontend and the browser service's 8091, and nothing on the internet.
+- **When no worker runs.** The export's `schedule_to_start` is 6 h, since one worker exports
+  one run at a time. The API ends a `running` run `failed` ("no profile-fetch worker picked
+  the fetch up") on a read or a start, once the run is 10 min old and no worker polls the
+  queue (it asks Temporal's DescribeTaskQueue, kept 30 s), and cancels its workflow. A run
+  older than the workflow's 24 h execution timeout plus 1 h ends `failed` too, with "the
+  fetch did not end within 25 h; start it again", even while a worker polls (plan
+  Decisions 62, 66, 67, 69; build Decision 119). An export that no worker started within 6 h ends
+  `failed` with "no profile-fetch worker started the fetch within 6 h: none is running,
+  or it is busy with other fetches" (build Decision 115).
+- **What is retried.** A login that the site refuses (it sends the browser back to
+  `/login`), an unknown 3DFP id, a missing export option and a file over 512 KiB are not
+  retried. A network error, a failed navigation, a timeout, a browser crash and Vercel's
+  check are retried. At start the browser service logs them and starts anyway, so a network
+  blip does not stop it (build Decisions 110, 116); a refused login or a browser that does
+  not launch ends it with 1. A browser service that cannot be reached is a retried
+  `browser` failure.
+- **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-profile-fetch.yaml`
+  (`MANIFEST_PROFILE_FETCH`) like the slicer: only once that file is in clusters and names
+  the image, with one image line. The browser service's Deployment has no image line of its
+  own: clusters copies the worker's with a kustomize replacement, as for the intake sandbox,
+  so one pin moves both. A build whose `profile-fetch` job published nothing keeps
+  the pin and warns (plan Decision 74). `ci.yml`'s `profile-fetch-image` job runs the driver
+  tests in the never-published `profile-fetch-test` stage against a local replica of the
+  site, with `--network none`, under the pod's own seccomp file and AppArmor profile.
+- **First fetch.** The first real fetch is the owner's, at the next invoice import or with
+  the button. Afterwards read `GET /api/v1/filament/types/{id}/profile-fetch` (GET only):
+  expect `status: imported` and `gaps: []`.
 
 ### Switching continuous deploy off
 
@@ -2474,9 +2692,8 @@ deploy PR link into the release notes. There is no human step after
   `applications/scadbuddy/scadbuddy-print.yaml` and
   `applications/scadbuddy/scadbuddy-projects.yaml`; one deploy pins them all to the
   same digest.
-- **Which dashboard is live:** the `?ref=` on the `deploy/grafana` line of
-  clusters' `clusters/prod/scadbuddy/kustomization.yaml`, which should equal the
-  `revision` annotation.
+- **Which dashboard is live:** clusters' `clusters/prod/scadbuddy/grafana/.revision`,
+  which should equal the `revision` annotation.
 - **No ✅ within ~20 min of a merge/publish:** look at the clusters deploy PR
   first — a red required check there means the merge never happened and
   nothing reports until it does. Failed *verification* (merged, but the pod
@@ -2487,8 +2704,9 @@ deploy PR link into the release notes. There is no human step after
 
 There should be no reason for one; but the mechanism is only a PR. Editing the
 image line and annotations in the clusters manifests (both, once the render
-worker's exists), and the dashboard line's `?ref=` (the full 40-character
-revision), by hand and merging does exactly what the pipeline does. Do not
+worker's exists), and copying `deploy/grafana/` at that revision over
+`clusters/prod/scadbuddy/grafana/` with the full 40-character revision in its
+`.revision`, by hand and merging does exactly what the pipeline does. Do not
 `kubectl rollout restart` — the pin is what makes the running image knowable.
 
 ### Tracing (#988)
@@ -2560,10 +2778,9 @@ The ScadBuddy dashboard (uid `scadbuddy`) is `deploy/grafana/`: a kustomize
 directory whose `configMapGenerator` makes the ConfigMap `scadbuddy-dashboard`
 in `cattle-dashboards`, labelled `grafana_dashboard: "1"`, which the
 rancher-monitoring Grafana's sidecar loads. clusters' `clusters/prod/scadbuddy`
-overlay will list it as a remote resource pinned to a full commit SHA, once
-clusters#1596 Phase 5 adds the line, and the deploy
-moves that pin with the image (above), so the dashboard shown is the one written
-for the build that is serving. The overlay must namespace its own resources with
+overlay lists a vendored copy of it, `grafana/` (eh-homelab/clusters#3734), and
+the deploy refreshes that copy with the image (above), so the dashboard shown is
+the one written for the build that is serving. The overlay must namespace its own resources with
 an `unsetOnly` NamespaceTransformer, not a plain `namespace:` field, or the
 ConfigMap is moved out of `cattle-dashboards` and never loads (clusters#1596
 Phase 5). Datasources are the variables `DS_PROMETHEUS` and `DS_TEMPO` (default

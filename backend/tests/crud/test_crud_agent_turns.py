@@ -7,6 +7,7 @@ made from its own migration files, as the API applies them at its start (#5299 D
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import uuid
@@ -14,8 +15,9 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
+import psycopg_pool
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.agent_data import turns
@@ -29,7 +31,7 @@ from scadbuddy.auth.service_credentials import (
     ServiceCredentialStore,
 )
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.core.problems import install_problem_handlers
+from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.render.agent_migrations import migrate_agent
 from tests.conftest import PgPool
 from tests.crud.crud_support import _NoSessions, _Noted
@@ -40,7 +42,7 @@ BASE = "/api/v1/internal/crud/agent"
 BROWSER = {"kind": "browser", "id": "browser"}
 
 
-def _app(pool: PgPool) -> FastAPI:
+def _app(pool: PgPool, router: APIRouter = crud_agent_turns.router) -> FastAPI:
     credentials = ServiceCredentialStore(pool)
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(
@@ -56,7 +58,7 @@ def _app(pool: PgPool) -> FastAPI:
         components=SimpleNamespace(get=lambda key: parts[key]),
         settings_store=SimpleNamespace(pool=pool),
     )
-    app.include_router(crud_agent_turns.router, prefix="/api/v1")
+    app.include_router(router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
@@ -199,13 +201,30 @@ def test_a_send_claims_a_free_row_and_gives_it_back(agent: Agent, tables: PgPool
     # A second claim finds the row running.
     again = {**body, "turn_id": str(uuid.uuid4())}
     assert agent.post(f"/sessions/{sid}/turn/send-claim", again)["claimed"] is None
-    logged = agent.post(f"/sessions/{sid}/turn/give-back", {"prior": "failed"})["logged"]
+    # Another turn's claim is never given back by this one.
+    other = {"prior": "failed", "turn_id": str(uuid.uuid4())}
+    assert agent.post(f"/sessions/{sid}/turn/give-back", other)["logged"] is None
+    assert str(_row(tables, sid)["durable_turn_id"]) == turn
+    back = {"prior": "failed", "turn_id": turn.upper()}
+    logged = agent.post(f"/sessions/{sid}/turn/give-back", back)["logged"]
     assert logged["seqs"] == [1]
     assert json.loads(logged["events"][0])["status"] == "failed"
     assert _events(tables, sid) == [json.loads(_status(sid, "failed"))]
     assert _row(tables, sid)["durable_turn_id"] is None
     # Given back once: the row no longer runs.
-    assert agent.post(f"/sessions/{sid}/turn/give-back", {"prior": "idle"})["logged"] is None
+    again_back = {"prior": "idle", "turn_id": turn}
+    assert agent.post(f"/sessions/{sid}/turn/give-back", again_back)["logged"] is None
+
+
+def test_an_agent_older_than_the_fence_gives_back_unfenced(agent: Agent, tables: PgPool) -> None:
+    # During a roll an agent pod from before the fence sends `{prior}` alone: its claim is given
+    # back while the row runs any turn, as the route did before.
+    turn = str(uuid.uuid4())
+    sid = _session(tables, status="running", turn=turn)
+    logged = agent.post(f"/sessions/{sid}/turn/give-back", {"prior": "failed"})["logged"]
+    assert logged["seqs"] == [1]
+    row = _row(tables, sid)
+    assert (row["status"], row["durable_turn_id"]) == ("failed", None)
 
 
 @pytest.mark.parametrize(
@@ -314,6 +333,28 @@ def test_a_spend_sent_again_under_its_key_is_added_once(agent: Agent, tables: Pg
     agent.post(f"/sessions/{sid}/turn/spend", {**body, "key": "run:2:0"})
     keys = _sql(tables, "SELECT key FROM ai_turn_spend_keys WHERE session_id = %s", (sid,))
     assert sorted(k["key"] for k in keys) == ["run:1:1", "run:2:0"]
+    # A key sent again past the hour still finds its own row, never let go by its own write.
+    _sql(
+        tables,
+        "UPDATE ai_turn_spend_keys SET created_at = now() - interval '2 hours'"
+        " WHERE session_id = %s AND key = 'run:1:1'",
+        (sid,),
+    )
+    before = _row(tables, sid)["cost_usd"]
+    assert agent.post(f"/sessions/{sid}/turn/spend", {**body, "key": "run:1:1"})
+    assert _row(tables, sid)["cost_usd"] == before
+
+
+def test_a_call_that_waits_past_the_pools_bound_is_refused() -> None:
+    class Busy:
+        def connection(self, timeout: float) -> Any:
+            assert timeout == crud_agent_turns.POOL_WAIT_S
+            raise psycopg_pool.PoolTimeout("couldn't get a connection")
+
+    state = SimpleNamespace(settings_store=SimpleNamespace(pool=Busy()))
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(crud_agent_turns._in_conn(state, lambda c: None))
+    assert (refused.value.status, refused.value.extensions["reason"]) == (503, "pool_busy")
 
 
 def test_a_write_that_waits_past_the_lock_timeout_is_refused(
@@ -535,7 +576,8 @@ def test_the_bodies_and_ids_are_bounded(agent: Agent, tables: PgPool) -> None:
             "/send-claim",
             {"author": BROWSER, "turn_id": turn, "bare": False, "tiers": ["r"] * 17},
         ),
-        ("/give-back", {"prior": "sideways"}),
+        ("/give-back", {"prior": "sideways", "turn_id": turn}),
+        ("/give-back", {"prior": "idle", "turn_id": "t"}),
         ("/placement", {"turn_id": turn, "attempt": "", "mark_key": turn}),
         ("/placement", {"turn_id": "../x", "attempt": "a", "mark_key": turn}),
         ("/spend", {"key": "k", "cost_usd": float("1e9"), "unpriced_usd": 0, "turns": 0}),

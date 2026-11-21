@@ -32,7 +32,6 @@ from scadbuddy.bambuddy.models import (
     LibraryPlates,
     Printer,
     SlotChoice,
-    Spool,
 )
 from scadbuddy.bambuddy.print_links import PrintSend
 from scadbuddy.bambuddy.print_source import (
@@ -61,7 +60,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
     write_plates_3mf,
 )
-from scadbuddy.render.plate import DEFAULT_PLATE
+from scadbuddy.render.plate import DEFAULT_PLATE, plate_for
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 from tests.bambuddy.conftest import BASE_URL, recording
@@ -390,14 +389,14 @@ async def test_a_last_print_record_that_fails_does_not_fail_the_queued_plate(
 # --- #1752: one pipeline; a library file differs only in how its 3MF is obtained -------
 
 FOLDER, INBOX, ORIGIN = 30, 2, 41
-SPOOL_RGBA = "00C000FF"
+SPOOL_COLOUR = "#00C000"
 HIGH_FLOW = ["High Flow", "High Flow"]
 STATS = ["High Flow#1", "High Flow#0"]
 
 
 class _Bambuddy:
     """What the pipeline reads of Bambuddy, in memory: the file to download, the
-    printer it is laid out for, the spool chosen, the project's folder, and each folder's
+    printer it is laid out for, the project's folder, and each folder's
     files, which uploads add to."""
 
     def __init__(self, payload: bytes, *, listed: list[LibraryFile] | None = None) -> None:
@@ -413,9 +412,6 @@ class _Bambuddy:
 
     async def printers(self) -> list[Printer]:
         return [Printer(id=1, name="H2C", model="H2C")]
-
-    async def spools(self) -> list[Spool]:
-        return [Spool(id=9, material="PLA", rgba=SPOOL_RGBA)]
 
     async def folders_by_project(self, project_id: int) -> list[Folder]:
         return [Folder(id=FOLDER, name="Project", project_id=project_id)]
@@ -473,8 +469,10 @@ def _scadbuddy_3mf(tmp_path: Path) -> bytes:
 
 
 def _authors_3mf(tmp_path: Path, *, covers: bool = False) -> bytes:
-    """A two-plate project its author saved in Bambu Studio: their placement, their
-    plates, a real printer preset, and with ``covers`` each plate's cover images."""
+    """A two-plate project its author saved in Bambu Studio for the H2C: their
+    placement, their plates, a real printer preset, and with ``covers`` each plate's
+    cover images. It is laid out on the H2C's own bed, so a print on the H2C keeps its
+    placement (#6820: a file from another bed size is moved, as Bambu Studio moves it)."""
     tray = ColourPart(1, "Tray", "#FF6AC1", trimesh.creation.box(extents=(30, 30, 4)))
     lid = ColourPart(2, "Lid", "#1F6FEB", trimesh.creation.box(extents=(12, 12, 2)))
     out = tmp_path / "maze.3mf"
@@ -486,6 +484,7 @@ def _authors_3mf(tmp_path: Path, *, covers: bool = False) -> bytes:
         if covers
         else None,
         model_name="maze",
+        plate=plate_for("H2C"),
     )
     with zipfile.ZipFile(out) as archive:
         entries = [(name, archive.read(name)) for name in archive.namelist()]
@@ -545,7 +544,8 @@ async def _print(
         cast(BambuddyClient, bambuddy),
         printer_id=1,
         nozzle_size="0.4",
-        plan=FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=9)]),
+        plan=FilamentPlan(ids="sb", slots=[SlotChoice(slot_id=1, spool_id=9)]),
+        chosen_colours={9: SPOOL_COLOUR},
         project_id=project_id,
         nozzle_stats=STATS,
         nozzle_volume_type=HIGH_FLOW,

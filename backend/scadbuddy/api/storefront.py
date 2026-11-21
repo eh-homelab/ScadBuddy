@@ -179,7 +179,7 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     ``listing_locked_colours_unprintable``: no allowed material offers every locked colour
     and a choice of each offered colour,
     ``listing_reference``, ``listing_pipeline_unsupported``,
-    ``listing_material_unsliceable``: the shop slice profile has no spool for a material
+    ``listing_material_unsliceable``: the shop slice profile has no filament type for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows."""

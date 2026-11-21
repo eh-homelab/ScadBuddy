@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,7 +29,8 @@ from scadbuddy.bambuddy.print_run import PlannedRun
 from scadbuddy.core import heartbeat
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.print_library.store import file_type_of
-from scadbuddy.workflows import printing
+from scadbuddy.slicing.store import NativeSlice
+from scadbuddy.workflows import printing, slicing_activities
 from scadbuddy.workflows.print_models import NativeSliced, SlicedUploadInput, SliceRunInput
 from scadbuddy.workflows.slicing import SLICE_ROUND, failure_status, slice_failure
 from scadbuddy.workflows.slicing_activities import RunActivities, _refused
@@ -351,3 +353,65 @@ async def test_a_native_sliced_upload_left_unanswered_is_taken(tmp_path: Path) -
 
     assert uploaded == left
     assert native.uploads == []
+
+
+@pytest.mark.parametrize("taken", [True, False])
+@pytest.mark.parametrize("run_id", ["run-7", None])
+async def test_slice_run_holds_the_file_for_a_lan_run_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    run_id: str | None,
+    taken: bool,
+) -> None:
+    """#6122: a LAN run's ``slice_run`` holds the sliced file for the run, so the print
+    worker's read URL of it follows the run; a run that names none holds nothing. A hold
+    not taken (the run ended first) is logged at DEBUG with the run and the key (#6586),
+    so a later ``transfer-refused`` can be explained."""
+    caplog.set_level(logging.DEBUG, logger=slicing_activities.__name__)
+    run = _activities(tmp_path)
+    run.slicing = SimpleNamespace(refs=SimpleNamespace(pool="the pool"))  # type: ignore[assignment]
+    at = datetime(2026, 11, 17)
+    key = "slice-" + "a" * 64
+    row = NativeSlice(
+        id=9,
+        workflow_id="slice-1-x",
+        subject="out-1",
+        library_file_id=COPY,
+        plate_id=1,
+        preset_key="k",
+        input_sha256="0" * 64,
+        status="completed",
+        failure=None,
+        sliced_blob_key=key,
+        warnings=[],
+        created_at=at,
+        started_at=at,
+        finished_at=at,
+    )
+
+    async def started(input: SliceRunInput) -> NativeSlice:
+        return row
+
+    held: list[tuple[Any, ...]] = []
+
+    def hold(*args: Any) -> bool:
+        held.append(args)
+        return taken
+
+    monkeypatch.setattr(run, "_started", started)
+    monkeypatch.setattr(slicing_activities, "hold_run_file", hold)
+
+    sliced = await ActivityEnvironment().run(
+        run.slice_run,
+        SliceRunInput(library_file_id=COPY, plan=PLAN, plate_id=1, subject="out-1", run_id=run_id),
+    )
+
+    assert sliced == NativeSliced(slice_id=9, preset_key="k", sliced_blob_key=key)
+    assert held == ([] if run_id is None else [("the pool", run_id, key)])
+    logged = [r.getMessage() for r in caplog.records if r.name == slicing_activities.__name__]
+    if run_id is not None and not taken:
+        [message] = logged
+        assert run_id in message and key in message
+    else:
+        assert logged == []

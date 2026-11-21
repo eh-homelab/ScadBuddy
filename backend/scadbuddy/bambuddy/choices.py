@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Mapping
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,7 +19,7 @@ from scadbuddy.bambuddy.catalogue import (
     RefreshClaim,
     cached_catalogue,
 )
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles, one_flow
 from scadbuddy.bambuddy.filaments import FilamentOptions
@@ -43,13 +44,14 @@ from scadbuddy.bambuddy.print_run import (
     NATIVE_SLICER_UNAVAILABLE,
     LanBlock,
     RunRoute,
+    dialog_route,
     filament_options,
     lan_printers,
     lan_reach,
     read_status,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
-from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
+from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, PrintChoices, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
@@ -60,9 +62,10 @@ from scadbuddy.rack.usage import RackUsage, record_seen
 from scadbuddy.render.plate import bed_types_for
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
-from scadbuddy.spools.models import Overlay
 
 if TYPE_CHECKING:
+    from scadbuddy.filament.inventory import SbSpoolReads
+    from scadbuddy.filament.models import TrayView
     from scadbuddy.printers.component import Printers
 
 logger = logging.getLogger(__name__)
@@ -81,10 +84,13 @@ __all__ = [
     "TierOption",
     "choices_for",
     "choices_for_output",
+    "dialog_bed_type",
     "installed_nozzles",
     "last_bed_type",
     "nozzle_warning",
+    "opening_choices",
     "plate_warning",
+    "printer_opening",
 ]
 
 
@@ -120,6 +126,10 @@ class ChoicesView(BaseModel):
     bed_type_labels: dict[str, str] = Field(default_factory=dict)
     last_bed_type: str | None = None
     bed_type: str = DEFAULT_BED
+    #: #6574: the choices the dialog opens on (:func:`opening_choices`): the model's
+    #: remembered nozzles, tier and process, else the printer's defaults, and
+    #: ``bed_type``. A storefront slice price is sliced with the same choices.
+    opening_choices: PrintChoices | None = None
     filaments: FilamentOptions
     #: Task 9 R5 — the filament presets each nozzle size takes, for Advanced mode's
     #: per-slot override. One row per name, the resolver's preferred tier winning.
@@ -162,6 +172,98 @@ def filament_presets_by_size(catalogue: Catalogue) -> dict[str, list[FilamentPre
     return out
 
 
+def dialog_bed_type(
+    settings: StoredSettings,
+    *,
+    last: str | None,
+    printer: str | None,
+    printer_id: int | None,
+) -> str:
+    """The plate the dialog opens on: the printer's last print's plate (``last``, from
+    Bambuddy's archives), else the plate remembered on the printer, else the default."""
+    return (
+        last or settings.bed_type_of(printer=printer, bambuddy_printer_id=printer_id) or DEFAULT_BED
+    )
+
+
+def opening_choices(
+    remembered: ModelPrintChoices | None, status: PrinterStatus | None, bed_type: str
+) -> PrintChoices:
+    """The choices the print dialog opens on for a subject on a printer (#6574): the
+    subject's remembered nozzles (one flow, #4272), tier and process
+    (``model_print_choices``), else the defaults from the printer's live ``status``
+    (``extruders.default_nozzles``: High Flow when the printer has a High Flow nozzle of
+    the size), and ``bed_type`` (:func:`dialog_bed_type`). A remembered process opens
+    with no tier, as the dialog does. The dialog (:func:`choices_for`) and a storefront
+    slice price (``orders/storefront/slice_price.py``) both use it."""
+    nozzles = one_flow(remembered.nozzles) if remembered and remembered.nozzles else None
+    process_name = remembered.process_name if remembered else None
+    tier: Tier | None = None
+    if process_name is None:
+        tier = (remembered.tier if remembered else None) or "standard"
+    return PrintChoices(
+        nozzles=nozzles or default_nozzles(status),
+        tier=tier,
+        process_name=process_name,
+        bed_type=bed_type,
+    )
+
+
+@dataclass(frozen=True)
+class PrinterOpening:
+    """What the dialog reads of a printer before it opens: its live status (``None``
+    when it cannot be read), its last print's plate (``last``, from Bambuddy) and the
+    printer the plate is remembered on. :meth:`bed_type` reads the remembered plate
+    each time, so a kept opening sees a plate remembered after it was read."""
+
+    status: PrinterStatus | None
+    last: str | None = None
+    printer: str | None = None
+    printer_id: int | None = None
+
+    def bed_type(self, settings: StoredSettings) -> str:
+        """The plate the dialog opens on (:func:`dialog_bed_type`)."""
+        return dialog_bed_type(
+            settings, last=self.last, printer=self.printer, printer_id=self.printer_id
+        )
+
+
+async def printer_opening(
+    settings: StoredSettings, printers: Printers, printer: str
+) -> PrinterOpening | None:
+    """Registry printer ``printer`` read as the dialog reads it (#6574): on a route a run
+    takes over the LAN, the status of its LAN report (``dialog_route``, as
+    ``api/printing.py`` ``opening_route`` does for a named printer, no Bambuddy call);
+    else Bambuddy's status of the printer it links and its last print's plate
+    (``choices_for``). ``None`` when the registry has no such printer. A printer that
+    links no Bambuddy printer and has no LAN route, or that Bambuddy cannot read, has
+    no status."""
+    row = await asyncio.to_thread(printers.store.get, printer)
+    if row is None:
+        return None
+    route = await dialog_route(
+        settings, printers.store, printers.reports, printer=row.id, printer_id=None
+    )
+    if route is not None and route.status is not None:
+        return PrinterOpening(status=route.status, printer=row.id, printer_id=route.printer_id)
+    # A LAN route whose report has no status yet falls through to Bambuddy's status of
+    # the printer it links, as the dialog falls back to Bambuddy's path.
+    printer_id = row.bambuddy_printer_id
+    if printer_id is None:
+        return PrinterOpening(status=None)
+    try:
+        async with client_for(settings) as client:
+            status, last = await asyncio.gather(
+                read_status(client, printer_id), _last_bed_type(client, printer_id)
+            )
+    except ApiError:
+        # No Bambuddy configured, or it refused: no status, so no default is guessed.
+        logger.info("the printer's status cannot be read from Bambuddy")
+        return PrinterOpening(status=None)
+    # As `choices_for` opens the dialog on Bambuddy's path: no registry printer is named.
+    return PrinterOpening(status=status, last=last, printer_id=printer_id)
+
+
 async def choices_for(
     client: BambuddyClient,
     source: Awaitable[PrintSource],
@@ -176,6 +278,7 @@ async def choices_for(
     rack: RackUsage | None = None,
     native: Profiles | None = None,
     refresh_claim: RefreshClaim | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
     together, then everything that needs the chosen printer together, its status read
@@ -187,7 +290,8 @@ async def choices_for(
     a few wasted reads on a rare path, for not waiting on the file every time. The
     rack's state is recorded by the second wave, so a failed catalogue read raises after
     it is written, not before (#2907). With ``native`` (the image's profiles) the
-    catalogue is theirs (``slicing/catalogue.py``), and no preset is read from Bambuddy."""
+    catalogue is theirs (``slicing/catalogue.py``), and no preset is read from Bambuddy.
+    The filament step offers ScadBuddy's own spools, read from ``reads`` (#6262 Task 7)."""
     presets = asyncio.ensure_future(
         # A native run's presets are the image's own: nothing read from Bambuddy, and
         # nothing kept under `cache` (#3818 tier A).
@@ -204,6 +308,7 @@ async def choices_for(
             remembered=remembered,
             printer_id=printer_id,
             rack=rack,
+            reads=reads,
         )
     finally:
         # A failed source or printer list answers without the catalogue; a catalogue
@@ -222,6 +327,7 @@ async def _choices(
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
     rack: RackUsage | None,
+    reads: SbSpoolReads | None,
 ) -> ChoicesView:
     loaded, listed = await asyncio.gather(source, client.printers(), return_exceptions=True)
     ready = settled(loaded)
@@ -243,7 +349,9 @@ async def _choices(
     last: str | None = None
     if printer_id is None:
         read_presets, read = await asyncio.gather(
-            presets, filament_options(client, ready, printer_id=None), return_exceptions=True
+            presets,
+            filament_options(client, ready, printer_id=None, reads=reads),
+            return_exceptions=True,
         )
         catalogue = settled(read_presets)
         filaments = settled(read)
@@ -253,7 +361,7 @@ async def _choices(
             presets,
             _record_seen(rack, settings.registry_printer(printer_id), reading),
             _last_bed_type(client, printer_id),
-            filament_options(client, ready, printer_id=printer_id, status=reading),
+            filament_options(client, ready, printer_id=printer_id, status=reading, reads=reads),
             return_exceptions=True,
         )
         catalogue = settled(read_presets)
@@ -299,11 +407,7 @@ def _view(
         )
         for size in SIZES
     }
-    bed = (
-        last
-        or settings.bed_type_of(printer=registry_printer, bambuddy_printer_id=printer_id)
-        or DEFAULT_BED
-    )
+    bed = dialog_bed_type(settings, last=last, printer=registry_printer, printer_id=printer_id)
     bed_types = list(bed_types_for(model))
     return ChoicesView(
         printer_id=printer_id,
@@ -319,6 +423,7 @@ def _view(
         processes=processes,
         last_bed_type=last,
         bed_type=bed,
+        opening_choices=opening_choices(remembered, status, bed),
         filaments=filaments,
         filament_presets=filament_presets_by_size(catalogue),
         # One flow, as the resolver requires (#4272): a pair remembered from before it
@@ -341,15 +446,15 @@ async def native_choices_for(
     remembered: ModelPrintChoices | None,
     profiles: Profiles | None,
     rows: list[PrinterRow],
-    overlay: Overlay | None,
-    provider_labels: Mapping[str, str],
+    held: TrayView | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     """:func:`choices_for` on a native run (#3818 tier A, plan 2026-10-18 D2-D5), with no
     Bambuddy call: the printers are the registry's ``rows`` that link one, the status is
     ``route``'s from the printer's LAN report (D4), the presets the image's (D5) and the
-    filaments the loaded trays with ``overlay`` over them (D1). No plate is preselected
-    from Bambuddy's archives: the remembered one is, as when those are unreadable."""
+    filaments the loaded trays with the SB spool ``held`` names in each (D1, #6262). No
+    plate is preselected from Bambuddy's archives: the remembered one is, as when those
+    are unreadable."""
     if profiles is None:
         raise ApiError(http.HTTP_503_SERVICE_UNAVAILABLE, NATIVE_SLICER_UNAVAILABLE)
     assert route.row is not None and route.status is not None, "a native route is a report's"
@@ -360,8 +465,7 @@ async def native_choices_for(
         source,
         printer_id=route.printer_id,
         trays_from=status,
-        overlay=overlay,
-        provider_labels=provider_labels,
+        held=held,
     )
     await record_seen(rack, route.row.id, status)
     printers = [
@@ -398,6 +502,7 @@ async def choices_for_output(
     catalogue_key: bytes | None,
     rack: RackUsage | None = None,
     refresh_claim: RefreshClaim | None = None,
+    reads: SbSpoolReads | None = None,
 ) -> ChoicesView:
     return await choices_for(
         client,
@@ -409,6 +514,7 @@ async def choices_for_output(
         catalogue_key=catalogue_key,
         rack=rack,
         refresh_claim=refresh_claim,
+        reads=reads,
     )
 
 

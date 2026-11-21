@@ -5,7 +5,7 @@ its operation kinds (Q9, `crud/operations.py`); and the events it publishes outs
 transaction (Q5), for `RemoteEvents`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.print`` (plan D8):
-the Bambuddy key, which the Bambuddy spool provider also uses (`PRINT_SECRETS`). Every
+the Bambuddy key (`PRINT_SECRETS`). Every
 other sealed field is null (`print_projection`). The CRUD router answers
 ``Cache-Control: no-store``, and each answer is logged with the secrets it released and
 the credential it released them to, never their values: at INFO the first time per
@@ -87,17 +87,31 @@ would not repeat, so each takes an ``Idempotency-Key`` and runs with its ledger 
 one transaction. A LAN start's picks delete the earlier pick's rows and insert the new
 ones: that is one route, one transaction here (plan D6), never several calls.
 
-The spools, ScadBuddy's own spools, the kept presets and a native slice's start (Q28-Q30,
-area ``spools``, #5298 Task 31) are `SpoolStore`'s, `NativeSpoolStore`'s,
-`HeldPresetStore`'s and `NativeSliceStore`'s, for `RemoteSpoolStore`,
-`RemoteNativeSpools`, `RemoteHeldPresets` and `RemoteNativeSlices`: the overlay (a
-``POST`` read, so the trays' RFID keys stay out of the URL), the shelf, the kept presets,
-and the writes ``…/spools/records`` (a provider's whole inventory under the spools'
-advisory lock), ``…/spools/refreshes/{provider}/failed``, ``…/native-spools/uses``,
-``…/native-spools/uses/settle`` (a run's uses under their row locks) and
-``…/native-slices/start`` (under the lock on its workflow id). Each runs whole in one
-transaction here (plan D6). A failure, a start's uses and a slice's start are natural; a
-provider's records and a settle take an ``Idempotency-Key`` and run with their ledger row.
+The kept presets and a native slice's start (Q30, area ``spools``, #5298 Task 31) are
+`HeldPresetStore`'s and `NativeSliceStore`'s, for `RemoteHeldPresets` and
+`RemoteNativeSlices`: the kept presets (reads) and ``…/native-slices/start`` (under the
+lock on its workflow id, whole in one transaction here, plan D6; natural). The spool
+overlay's routes (``…/spools/overlay``, ``…/spools/records``,
+``…/spools/refreshes/{provider}/failed``) went with the overlay in #6262 Task 12, and the
+shelf's and the uses routes in Task 11: a print worker from before Task 6 that calls one
+gets 404, and none from Task 6 on calls them.
+
+A native run's SB spools and what its LAN starts use of them (area ``filament``, #6262 Task
+6) are `filament/inventory.py`'s and `filament/print_uses.py`'s, for `RemoteFilamentTrays`
+and `RemotePrintUses`: ``…/filament/trays`` (the SB spool in each tray a printer reports,
+a ``POST`` read so the trays' RFID keys stay out of the URL), ``…/filament/presets`` (the
+held spools' presets by number, a read), ``…/filament/rows`` and ``…/filament/bb-to-sb``
+(the Bambuddy path's SB spools with their trays, and the SB number of each Bambuddy spool
+id an older plan names; reads, Task 7), and ``…/filament/print-uses`` and
+``…/filament/print-uses/settle`` (a start's estimates, and a run's settle under its
+spools' row locks). Each write runs whole in one transaction with its ledger row, once
+per ``Idempotency-Key``: each answers what it booked, which a resend would not repeat.
+
+The sensors' alert notifications (area ``sensor-notify``, #6646) are
+``…/filament/sensor-notifications/claim`` (the queued rows marked ``sending``, once per
+``Idempotency-Key``, after the rows no claim sends are ended) and ``…/{id}/end`` (natural),
+`filament/sensors.py` `claim_on` and `end_on`: the print worker sends them to Bambuddy,
+so the API makes no Bambuddy call for them.
 
 A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
 ``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
@@ -108,20 +122,24 @@ other key (unknown, gone, of another kind such as a ``workspace`` file, or a sli
 input of kind ``slice``: the laid-out copy and the preset files) is 403
 ``transfer-refused``. The inputs are left out as defence in depth: the preset files are
 written with every print-host credential key stripped (`core/credentials.py`
-`strip_credentials`), and an input is no file the print worker prints. The rule follows
-the blob's own life, not its `native_slices` row's: the slice sweep deletes a row 6 h
-after it finished, but a LAN run of several plates or copies reads each file again when it starts
-the next one, up to days later, until the content sweep collects it. Its cost: the print
-worker can read any live sliced output (a run's, the print dialog's or an order
-quote's). A hold of the run on its file (a print-run holder in `blob_refs`, released
-where each run ends) would bind the key to the run; no such hold exists yet (#6122). The
-URL is the internal blob route's (`slicing/transfer.py` `Transfers.internal_get`, good
-for `READ_TTL`), signed under the API's KEK, on every backend: the token reads that one
-key. A backend that fails the key's read (an S3 error other than a missing object, a
-Bambuddy that does not answer) is 503 ``store_unavailable``, logged by the error's type
-only; the CRUD client retries it as it retries any 5xx but ``not_configured``. A read
-that mints, so natural: it takes no ``Idempotency-Key``. Its answer carries a bearer
-token (``no-store``, as every CRUD answer): never logged.
+`strip_credentials`), and an input is no file the print worker prints. The key must also
+be a sliced file of a run in use (`bambuddy/runs.py` `PrintRunStore.transferable`,
+#6122): a running run, or a LAN run with prints still to start. Its hold names the key
+(`RUN_HOLDER` in `blob_refs`, which `slice_run` takes for a LAN run and the run's end
+drops), or a completed `native_slices` row of its subject does while the run's result
+marks it a LAN run with prints still to start (#6586). The hold follows the run, not the
+row: the slice sweep deletes a row 6 h after it finished, but a LAN run of several
+plates or copies reads each file again when it starts the next one, up to days later.
+So the print dialog's slice and an order quote's get no URL unless a LAN run of their
+subject holds them or has prints still to start (the dialog's slice and a run's share a
+row, Ruling C2). The URL is the internal blob route's (`slicing/transfer.py`
+`Transfers.internal_get`, good for `READ_TTL`), signed under the API's KEK, on every
+backend: the token reads that one key. A backend that fails the key's read (an S3 error
+other than a missing object, a Bambuddy that does not answer) is 503
+``store_unavailable``, logged by the error's type only; the CRUD client retries it as it
+retries any 5xx but ``not_configured``. A read that mints, so natural: it takes no
+``Idempotency-Key``. Its answer carries a bearer token (``no-store``, as every CRUD
+answer): never logged.
 
 The print worker holds no KEK (#5298 Task 33), so the API answers the two questions its
 key once did (area ``access-codes``): ``GET /access-codes`` says whether this API can
@@ -146,10 +164,10 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
-from functools import partial
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -169,6 +187,7 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, RouteLimit
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.bambuddy.copy_leases import (
@@ -179,7 +198,7 @@ from scadbuddy.bambuddy.copy_leases import (
     CopyLeases,
     LeaseLostError,
 )
-from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail
+from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail, SpoolAssignment
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.print_links import LinkedPrint, PrintLink, PrintReprint, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
@@ -200,6 +219,7 @@ from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import (
     MaybeIdempotencyKey,
@@ -212,13 +232,38 @@ from scadbuddy.crud.idempotency import (
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.crud.print import (
     ACCESS_CODE_UNREADABLE,
+    BASE,
     NO_ACCESS_CODE,
     NO_SUCH_PRINTER,
-    PAST_DEADLINE,
     SERIAL_TAKEN,
     SLICE_SUBJECT,
 )
 from scadbuddy.crud.wire import NOT_CONFIGURED
+from scadbuddy.filament import models as m
+from scadbuddy.filament import print_uses, sensors
+from scadbuddy.filament.bb_pull_apply import LocalBbPull
+from scadbuddy.filament.bb_pull_models import (
+    INSTANCE_CHANGED,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    TraysBody,
+    TraysReconciled,
+    UsageBody,
+    UsageBooked,
+)
+from scadbuddy.filament.bb_sync_models import (
+    PlanRequest,
+    ResultsReport,
+    ResultsRequest,
+    SyncPassResult,
+    SyncPlan,
+)
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync
+from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayView
+from scadbuddy.filament.print_uses import SlotUse
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
@@ -250,13 +295,21 @@ from scadbuddy.slicing.transfer import (
     TRANSFER_REFUSED,
     TransferUnavailableError,
 )
-from scadbuddy.spools.component import SpoolsDep
-from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
-from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
-from scadbuddy.spools.spool_providers import native_provider
+from scadbuddy.spools.models import SeenTray
 from scadbuddy.store.content_models import content_index_key
 
 logger = logging.getLogger(__name__)
+
+#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's four routes, whatever the
+#: content type. The gate counts only a type in its table, and FastAPI reads a body with
+#: no Content-Type as JSON, so without this a header left out would skip the cap.
+PULL_ROUTE_LIMIT = RouteLimit(
+    "POST",
+    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays)?$"),
+    MAX_TEXT_BODY_BYTES,
+    "a Bambuddy pull",
+    "fixed, api/limits.py MAX_TEXT_BODY_BYTES",
+)
 
 router = crud_router("print")
 # The `Operation` records of the Bambuddy kinds the worker runs (Q9).
@@ -1647,40 +1700,7 @@ async def rack_settle_lan_ended(
     )
 
 
-# -- spools, native spools, held presets, native slices (Q28-Q30, area ``spools``) -------
-
-
-class SpoolRecords(BaseModel):
-    provider: str = Field(min_length=1, max_length=64)
-    snapshots: list[SpoolSnapshot]
-    at: datetime
-    #: Seconds the write may take from the route's receipt, the waits for a connection
-    #: and the lock included; the caller sends less than it waits (`RemoteSpoolStore`).
-    timeout: float | None = Field(default=None, gt=0)
-
-
-class SpoolFailure(BaseModel):
-    at: datetime
-    #: A type, never a message.
-    failure: str = Field(min_length=1, max_length=200)
-
-
-class OverlayAsk(BaseModel):
-    printer_id: UUID
-    trays: list[SeenTray]
-    now: datetime
-    providers: list[str]
-    located: dict[str, str] = Field(default_factory=dict)
-
-
-class AnySpool(BaseModel):
-    any: bool
-
-
-class SpoolUses(BaseModel):
-    run_id: str
-    subtask_name: str
-    uses: list[SpoolUse]
+# -- held presets and native slices (Q30, area ``spools``); a native run's SB spools ------
 
 
 class SettleUses(BaseModel):
@@ -1688,9 +1708,49 @@ class SettleUses(BaseModel):
     stages: list[str]
 
 
-class SpoolsChanged(BaseModel):
-    #: The spools this settle changed; a resend under its key answers the first's.
-    changed: list[UUID]
+#: The most trays one read names: an H2C's four AMS units of four trays, its HT units
+#: and its external spools fit many times over.
+MAX_TRAYS = 64
+#: The most SB spool numbers one presets read names: one per tray it read.
+MAX_NUMBERS = MAX_TRAYS
+#: The most Bambuddy assignments one rows read sends: a tray each, over every printer
+#: Bambuddy has (#6262 Task 7).
+MAX_ASSIGNMENTS = 1024
+#: The most Bambuddy spool ids one ``bb-to-sb`` read names: one per slot of a plan.
+MAX_BB_IDS = 256
+
+
+class TraysAsk(BaseModel):
+    printer_id: UUID
+    seen: list[SeenTray] = Field(max_length=MAX_TRAYS)
+
+
+class PresetsAsk(BaseModel):
+    numbers: list[int] = Field(max_length=MAX_NUMBERS)
+
+
+class RowsAsk(BaseModel):
+    bb_assignments: list[SpoolAssignment] = Field(default_factory=list, max_length=MAX_ASSIGNMENTS)
+
+
+class BbIdsAsk(BaseModel):
+    ids: list[int] = Field(max_length=MAX_BB_IDS)
+
+
+class PrintUsesBody(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    subtask: str = Field(min_length=1, max_length=200)
+    uses: list[SlotUse] = Field(max_length=MAX_TRAYS)
+
+
+class PrintUsesRecorded(BaseModel):
+    #: The events this call booked; a resend under its key answers the first's.
+    recorded: int
+
+
+class PrintUsesSettled(BaseModel):
+    #: Whether this settle booked any use; a resend under its key answers the first's.
+    settled: bool
 
 
 class HeldPresetRow(BaseModel):
@@ -1707,107 +1767,347 @@ class SliceStartAsk(BaseModel):
     fresh: bool = False
 
 
-SPOOL_RECORDS_ROUTE = "POST /spools/records"
-SETTLE_USES_ROUTE = "POST /native-spools/uses/settle"
-
-
-def _native_spools(spools: SpoolsDep) -> NativeSpoolStore:
-    return native_provider(spools).store
-
-
-NativeSpoolsDep = Annotated[NativeSpoolStore, Depends(_native_spools)]
+PRINT_USES_ROUTE = "POST /filament/print-uses"
+SETTLE_PRINT_USES_ROUTE = "POST /filament/print-uses/settle"
 
 
 @router.post(
-    "/spools/records", name="crud_print_spool_records", status_code=status.HTTP_204_NO_CONTENT
+    "/filament/trays",
+    name="crud_print_filament_trays",
+    summary="The SB spool in each tray a printer reports",
+    description=(
+        "The SB spool each of `seen` (the printer's trays, from its stored report) holds,"
+        " as the API's own inventory reads them (#6262). The trays only: `shelf` is"
+        " always empty, since a plan's choices are the trays. A read, sent as a `POST` so"
+        " the trays' RFID keys stay out of the URL."
+    ),
 )
-async def replace_spool_records(
-    body: SpoolRecords, spools: SpoolsDep, idempotency_key: MaybeIdempotencyKey = None
-) -> None:
-    """A provider's whole inventory, under the store's advisory lock, in one transaction
-    with its ledger row (plans D5, D6): once per ``Idempotency-Key``. The deadline is
-    ``timeout`` seconds from this route's receipt, before it waits for a connection; a
-    write past it rolls back and is 409 ``past-deadline``, as the SQL store's raises."""
+async def filament_trays(body: TraysAsk, filament: FilamentDep) -> TrayView:
+    """Natural: a read."""
+    view = await asyncio.to_thread(filament.inventory.trays, body.printer_id, body.seen)
+    return TrayView(trays=view.trays, shelf=[])
+
+
+@router.post(
+    "/filament/presets",
+    name="crud_print_filament_presets",
+    summary="SB spools' effective presets, by number",
+    description=(
+        "Each SB spool's effective slicer presets (its own over its type's), by its"
+        " number; a number no spool has is left out (#6262 F1). A read."
+    ),
+)
+async def filament_presets(
+    body: PresetsAsk, filament: FilamentDep
+) -> dict[int, list[EffectivePreset]]:
+    """Natural: a read."""
+    return await filament.presets.presets(body.numbers)
+
+
+@router.post(
+    "/filament/rows",
+    name="crud_print_filament_rows",
+    summary="Every SB spool, its tray and its Bambuddy spool",
+    description=(
+        "Every unarchived SB spool by number, the tray it is in and the Bambuddy spool it"
+        " is linked to: the Bambuddy path's print picker (#6262 Task 7). A spool's tray is"
+        " the one a registry printer's latest report holds it in, else the one"
+        " `bb_assignments` (Bambuddy's `GET /inventory/assignments`) puts its linked"
+        " Bambuddy spool in. A read, sent as a `POST` for its body."
+    ),
+)
+async def filament_rows(body: RowsAsk, filament: FilamentDep) -> list[FilamentInventorySpool]:
+    """Natural: a read."""
+    return await asyncio.to_thread(filament.inventory.rows, bb_assignments=body.bb_assignments)
+
+
+@router.post(
+    "/filament/bb-to-sb",
+    name="crud_print_filament_bb_to_sb",
+    summary="The SB spool number of each Bambuddy spool id",
+    description=(
+        "The SB spool number each of `ids` (Bambuddy spool ids, as a plan from before #6262"
+        " Task 7 names them) is linked to through `filament_bb_links`; an unlinked id is"
+        " left out. A read."
+    ),
+)
+async def filament_bb_to_sb(body: BbIdsAsk, filament: FilamentDep) -> dict[int, int]:
+    """Natural: a read."""
+    return await asyncio.to_thread(filament.inventory.bb_to_sb, body.ids)
+
+
+@router.post(
+    "/filament/print-uses",
+    name="crud_print_filament_print_uses",
+    summary="Book what a LAN start uses of SB spools",
+    description=(
+        "A `print_started` estimate per slot at the plate's start (#6262), in one"
+        " transaction with its ledger row: once per `Idempotency-Key`, so a resend answers"
+        " the count the first booked."
+    ),
+)
+async def record_print_uses(
+    body: PrintUsesBody, settings: SettingsStoreDep, idempotency_key: MaybeIdempotencyKey = None
+) -> PrintUsesRecorded:
     key = required_key(idempotency_key)
-    store = spools.store
-    deadline = store.deadline(body.timeout)
 
-    def write(conn: Connection[DictRow]) -> None:
-        store.replace_records_in(conn, body.provider, body.snapshots, body.at, deadline)
+    def write(conn: Connection[DictRow]) -> dict[str, Any]:
+        recorded = print_uses.record_uses_in(conn, body.run_id, body.subtask, body.uses)
+        return {"recorded": recorded}
 
+    answer = await asyncio.to_thread(
+        _once_on,
+        settings.pool,
+        key,
+        PRINT_USES_ROUTE,
+        body.model_dump(mode="json"),
+        write,
+    )
+    return PrintUsesRecorded.model_validate(answer)
+
+
+@router.post(
+    "/filament/print-uses/settle",
+    name="crud_print_filament_print_uses_settle",
+    summary="Settle what a LAN run used of SB spools",
+    description=(
+        "Each of the run's estimates replaced by its `print_ended` (#6262): its sliced"
+        " grams for a start that ended `done`, else 0. Under the spools' row locks, whole,"
+        " in one transaction with its ledger row: once per `Idempotency-Key`."
+    ),
+)
+async def settle_print_uses(
+    body: SettleUses, settings: SettingsStoreDep, idempotency_key: MaybeIdempotencyKey = None
+) -> PrintUsesSettled:
+    key = required_key(idempotency_key)
+
+    def write(conn: Connection[DictRow]) -> dict[str, Any]:
+        return {"settled": print_uses.settle_uses_in(conn, body.run_id, body.stages)}
+
+    answer = await asyncio.to_thread(
+        _once_on,
+        settings.pool,
+        key,
+        SETTLE_PRINT_USES_ROUTE,
+        body.model_dump(mode="json"),
+        write,
+    )
+    return PrintUsesSettled.model_validate(answer)
+
+
+def _sync(filament: FilamentDep, settings: SettingsStoreDep) -> LocalFilamentSync:
+    return LocalFilamentSync(filament, settings)
+
+
+SyncDep = Annotated[LocalFilamentSync, Depends(_sync)]
+
+
+@router.get(
+    "/filament/sync/directions",
+    name="crud_print_filament_sync_directions",
+    summary="Which way each kind of filament data moves",
+    description=(
+        "The stored `filament_sync` (#6265 R-T8-2): a pass reads it before Bambuddy, and"
+        " skips the pass when no data type pushes."
+    ),
+)
+async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
+    return await sync.directions()
+
+
+@router.post(
+    "/filament/sync/plan",
+    name="crud_print_filament_sync_plan",
+    summary="The writes SB wants Bambuddy to take next",
+    description=(
+        "What SB wants Bambuddy to hold, from the `snapshot` the print worker read of it,"
+        " at most `limit` writes (#6265): a pass's rounds together stay within 200. The"
+        " route reads `filament_sync` and the timer's interval itself. A kept create"
+        " records its intent in this call, so a plan sent again plans the same create"
+        " from that intent. A snapshot of another Bambuddy than the configured one plans"
+        " nothing and answers `instance_changed` (#6773)."
+    ),
+)
+async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
+    """Natural: a plan sent again finds the intent it recorded."""
+    return await sync.plan(body.snapshot, body.limit)
+
+
+@router.post(
+    "/filament/sync/results",
+    name="crud_print_filament_sync_results",
+    summary="Record what Bambuddy answered to a plan's writes",
+    description=(
+        "Records the answers to `writes` (#6265): each is checked against SB's links, and"
+        " a result whose write names no SB item, or another Bambuddy row, is ignored. A"
+        ' list `PUT`\'s answer is `{"k_profiles": rows}` or `{"suppliers": rows}`. Answers'
+        " the counts of items linked, updated, failed and unlinked. Results for another"
+        " Bambuddy than the configured one are all ignored (#6773)."
+    ),
+)
+async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsReport:
+    """Natural: a result sent again finds its item linked or recorded and is ignored, and a
+    refusal sent again with the plan's `pass_id` adds no attempt (R-T6-5)."""
+    return await sync.results(body.instance, body.writes, body.results, body.pass_id)
+
+
+@router.post(
+    "/filament/sync/pass",
+    name="crud_print_filament_sync_pass",
+    summary="Record what one sync pass did",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "Writes the sync's state row (#6265): the pass's time and counts, its error, and"
+        " the time of the last clean pass only when `error` is null."
+    ),
+)
+async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
+    """Natural: the row is set, not added to."""
+    await sync.record_pass(body)
+
+
+def _pull(filament: FilamentDep, settings: SettingsStoreDep) -> LocalBbPull:
+    return LocalBbPull(filament, settings.load)
+
+
+PullDep = Annotated[LocalBbPull, Depends(_pull)]
+
+
+async def _for_configured[T](write: Awaitable[T]) -> T:
     try:
-        await asyncio.to_thread(
-            _once_on, store.pool, key, SPOOL_RECORDS_ROUTE, body.model_dump(mode="json"), write
-        )
-    except (TimeoutError, psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+        return await write
+    except PullInstanceChangedError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            "The refresh ran past its deadline; nothing was written.",
-            reason=PAST_DEADLINE,
+            "the body was read from another Bambuddy than the configured one",
+            reason=INSTANCE_CHANGED,
         ) from None
 
 
 @router.post(
-    "/spools/refreshes/{provider}/failed",
-    name="crud_print_spool_refresh_failed",
-    status_code=status.HTTP_204_NO_CONTENT,
+    "/filament/pull",
+    name="crud_print_filament_pull",
+    summary="Pull what the print worker read of Bambuddy into SB",
+    description=(
+        "The Bambuddy pull's SB side (#6772): the spools, usage rows, suppliers, locations"
+        " and spool catalog the print worker read, pulled into SB's tables as the spool"
+        " refresh pulled them (`filament/bambuddy_pull.py`); the API calls no Bambuddy."
+        " Answers the pull's report and the date from which the worker reads Bambuddy's"
+        " archives for the usage rows not booked yet. 409 `instance_changed` for a read of"
+        " another Bambuddy than the configured one."
+    ),
 )
-async def spool_refresh_failed(provider: str, body: SpoolFailure, spools: SpoolsDep) -> None:
-    """Natural: an upsert of the provider's failure."""
-    await spools.store.failed(provider, body.at, body.failure)
-
-
-@router.post("/spools/overlay", name="crud_print_spool_overlay")
-async def spool_overlay(body: OverlayAsk, spools: SpoolsDep) -> Overlay:
-    """A read, sent as a ``POST`` so the trays' RFID keys stay out of the URL (spec §7)."""
-    return await spools.store.overlay(
-        body.printer_id,
-        body.trays,
-        now=body.now,
-        providers=body.providers,
-        located=body.located,
-    )
-
-
-@router.get("/native-spools", name="crud_print_native_spools")
-async def native_spools(
-    store: NativeSpoolsDep, include_archived: bool = False
-) -> list[NativeSpool]:
-    return await asyncio.to_thread(partial(store.list, include_archived=include_archived))
-
-
-@router.get("/native-spools/any", name="crud_print_native_spools_any")
-async def native_spools_any(store: NativeSpoolsDep) -> AnySpool:
-    return AnySpool(any=await asyncio.to_thread(store.any))
+async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
+    """Natural: a pull of the same rows changes nothing the first did not."""
+    return await _for_configured(sync.apply(body))
 
 
 @router.post(
-    "/native-spools/uses",
-    name="crud_print_record_spool_uses",
-    status_code=status.HTTP_204_NO_CONTENT,
+    "/filament/pull/usage",
+    name="crud_print_filament_pull_usage",
+    summary="Book Bambuddy's usage rows the print worker read",
+    description=(
+        "BB's usage rows booked on linked spools, matched to the archives the worker read"
+        " (#6772, `filament/bambuddy_usage.py`). 409 `instance_changed` as the pull's."
+    ),
 )
-async def record_spool_uses(body: SpoolUses, store: NativeSpoolsDep) -> None:
-    """Natural: ``ON CONFLICT DO NOTHING`` on the start's slot."""
-    await asyncio.to_thread(store.record_uses, body.run_id, body.subtask_name, body.uses)
+async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
+    """Natural: a row's ``bb_usage`` event names it, so it is booked once."""
+    return await _for_configured(sync.book_usage(body))
 
 
-@router.post("/native-spools/uses/settle", name="crud_print_settle_spool_uses")
-async def settle_spool_uses(
-    body: SettleUses, store: NativeSpoolsDep, idempotency_key: MaybeIdempotencyKey = None
-) -> SpoolsChanged:
-    """A run's uses settled under their row locks, whole, in one transaction with its
-    ledger row (plans D5, D6): once per ``Idempotency-Key``, so a resend answers the
-    spools the first settle changed."""
+@router.post(
+    "/filament/pull/ha-states",
+    name="crud_print_filament_pull_ha_states",
+    summary="Record Bambuddy's Home Assistant states as sensor readings",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "Each state a reading of the Home Assistant sensor naming its entity (#6268, #6772);"
+        " `states` null (the read failed) marks every such sensor unreachable. 409"
+        " `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
+    """Natural: a reading of the same value within 15 minutes is not stored again."""
+    await _for_configured(sync.ha_states(body))
+
+
+@router.post(
+    "/filament/pull/trays",
+    name="crud_print_filament_pull_trays",
+    summary="Set the untagged trays right by Bambuddy's assignments",
+    description=(
+        "Each untagged tray whose placed spool disagrees with the printer's report takes"
+        " the spool Bambuddy assigns it, when that one agrees (#6713, #6772). Answers how"
+        " many trays moved. 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_trays(body: TraysBody, sync: PullDep) -> TraysReconciled:
+    """Natural: a tray already set right is left alone."""
+    return TraysReconciled(moved=await _for_configured(sync.reconcile_trays(body)))
+
+
+# -- a sensor's alert notifications (area ``sensor-notify``, #6646) ----------------------
+
+CLAIM_NOTIFICATIONS_ROUTE = "POST /filament/sensor-notifications/claim"
+
+
+@router.post(
+    "/filament/sensor-notifications/claim",
+    name="crud_print_sensor_notifications_claim",
+    summary="Claim the sensor notifications to send",
+    description=(
+        "Up to `limit` (at most 20) queued sensor notifications marked `sending`, oldest"
+        " reading first, each with its title and message (#6646). First it ends the rows"
+        " no claim sends: `sending` for over 10 minutes (`interrupted`), a sensor's whose"
+        " `notify` is off or that or its place is archived (`cancelled`), and each but the"
+        " newest of a sensor (`superseded`). Once per `Idempotency-Key`: a claim sent again"
+        " answers the rows it claimed."
+    ),
+)
+async def claim_sensor_notifications(
+    body: m.NotificationClaim,
+    settings: SettingsStoreDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> list[m.ClaimedNotification]:
     key = required_key(idempotency_key)
 
-    def write(conn: Connection[DictRow]) -> dict[str, Any]:
-        changed = NativeSpoolStore.settle_uses_in(conn, body.run_id, body.stages)
-        return {"changed": sorted(str(spool) for spool in changed)}
+    def write(conn: Connection[DictRow]) -> list[dict[str, Any]]:
+        return [row.model_dump(mode="json") for row in sensors.claim_on(conn, body.limit)]
 
     answer = await asyncio.to_thread(
-        _once_on, store.pool, key, SETTLE_USES_ROUTE, body.model_dump(mode="json"), write
+        _once_on,
+        settings.pool,
+        key,
+        CLAIM_NOTIFICATIONS_ROUTE,
+        body.model_dump(mode="json"),
+        write,
     )
-    return SpoolsChanged.model_validate(answer)
+    return [m.ClaimedNotification.model_validate(row) for row in answer]
+
+
+@router.post(
+    "/filament/sensor-notifications/{notification_id}/end",
+    name="crud_print_sensor_notification_end",
+    summary="Record how a sensor notification's send ended",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "A claimed notification ended `sent` (`channels`, how many Bambuddy channels took"
+        " it), `failed` (`error`, a fixed code of the send) or handed back (`requeue`: the"
+        " pass never tried it, so it is `queued` again). A row no longer `sending` is left"
+        " as it is."
+    ),
+)
+async def end_sensor_notification(
+    notification_id: UUID, body: m.NotificationEnd, settings: SettingsStoreDep
+) -> None:
+    """Natural: an end sent again finds the row ended and changes nothing."""
+
+    def write() -> None:
+        with settings.pool.connection() as conn, conn.transaction():
+            sensors.end_on(conn, notification_id, body)
+
+    await asyncio.to_thread(write)
 
 
 @router.get("/held-presets", name="crud_print_held_presets")
@@ -1862,10 +2162,13 @@ class TransferUrlAsk(BaseModel):
 
 
 @router.post("/transfer-urls", name="crud_print_transfer_url")
-async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl:
+async def transfer_url(
+    body: TransferUrlAsk, slicing: SlicingDep, runs: PrintRunsDep
+) -> TransferUrl:
     """A read URL of ``key``, only if the content index holds it live as a slicer's
     output (see the module docstring), under the content-addressed key of its own bytes
-    (`content_index_key`, #6179): a mark or kind on any other key mints nothing. Without a
+    (`content_index_key`, #6179): a mark or kind on any other key mints nothing. And only
+    if it is a sliced file of a run in use (`PrintRunStore.transferable`, #6122). Without a
     content store, an internal URL or a KEK on the API it is 503 ``not_configured``, which
     the worker does not retry."""
     try:
@@ -1891,6 +2194,7 @@ async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl
         or stat.ref.kind != SLICE_KIND
         or body.key != content_index_key(SLICE_KIND, stat.ref.sha256)
         or any(stat.meta.get(k) != v for k, v in SLICED_OUTPUT_META.items())
+        or not await runs.store.transferable(body.key)
     ):
         raise ApiError(status.HTTP_403_FORBIDDEN, "transfer refused", reason=TRANSFER_REFUSED)
     try:

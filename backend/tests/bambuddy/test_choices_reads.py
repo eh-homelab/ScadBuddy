@@ -2,7 +2,8 @@
 which reads wait on which, and which are kept between opens.
 
 A gated route answers only once its partner has been asked, so a read that still waits
-on the one before it deadlocks and the test times out, rather than passing slowly."""
+on the one before it deadlocks and the test hangs, rather than passing slowly. No test
+waits on the wall clock (#6519): a slow runner makes a test slow, never a failure."""
 
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.slicing.conftest import PROFILES
+from tests.support.sb_rows import FakeSbRows
 
 API = f"{BASE_URL}/api/v1"
 
@@ -102,10 +104,9 @@ def _expire(cache: Path) -> None:
 
 async def _refreshes_done() -> None:
     """Wait for this process's background refreshes: the one place these tests reach
-    into the module's running reads (#4717 review). A refresh that hangs fails the test
-    within 5 s rather than stalling it."""
-    async with asyncio.timeout(5):
-        await asyncio.gather(*catalogue._refreshing.values())
+    into the module's running reads (#4717 review). A refresh that hangs stalls the
+    test; no wall-clock guard fails it on a slow runner (#6519)."""
+    await asyncio.gather(*catalogue._refreshing.values())
 
 
 class _HeldPresets:
@@ -140,9 +141,8 @@ def _count_shields(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Awaitable
     monkeypatch.setattr(asyncio, "shield", counting)
 
     async def until(n: int) -> None:
-        async with asyncio.timeout(5):
-            while shields < n:
-                await asyncio.sleep(0)
+        while shields < n:
+            await asyncio.sleep(0)
 
     return until
 
@@ -171,16 +171,15 @@ async def test_the_printer_reads_do_not_wait_on_the_preset_catalogue(
     )
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
 
-    async with asyncio.timeout(5):
-        view = await choices_for(
-            bambuddy,
-            _source(),
-            StoredSettings(),
-            remembered=None,
-            printer_id=1,
-            cache=tmp_path,
-            catalogue_key=None,
-        )
+    view = await choices_for(
+        bambuddy,
+        _source(),
+        StoredSettings(),
+        remembered=None,
+        printer_id=1,
+        cache=tmp_path,
+        catalogue_key=None,
+    )
 
     assert view.printer_id == 1
     assert view.processes["0.4"]
@@ -256,8 +255,7 @@ async def test_an_expired_catalogue_answers_at_once_and_is_read_again_behind_it(
     asked = asyncio.Event()
     respx.get(f"{API}/slicer/presets").mock(side_effect=_after(asked, "slicer-presets-h2c.json"))
 
-    async with asyncio.timeout(5):
-        stale = await cached_catalogue(bambuddy, tmp_path)
+    stale = await cached_catalogue(bambuddy, tmp_path)
     assert stale == first
     assert len(catalogue._refreshing) == 1
     # A second open while the read runs starts no other.
@@ -374,7 +372,7 @@ async def test_a_refresh_claim_that_cannot_reach_postgres_lets_the_replica_refre
         "postgresql://nobody@127.0.0.1:1/none"  # refused at once
     )
 
-    async with asyncio.timeout(10), claim(tmp_path / "v1-x.json") as granted:
+    async with claim(tmp_path / "v1-x.json") as granted:
         assert granted
     # A refresh that fails under it does not carry the connect error as its context
     # (#4938 review), which a later `exc_info` would print with the conninfo.
@@ -564,8 +562,7 @@ async def test_an_open_that_misses_the_kept_file_answers_what_this_process_read(
     caplog.set_level(logging.INFO, logger=catalogue.__name__)
 
     started = time.perf_counter()
-    async with asyncio.timeout(5):
-        read = await cached_catalogue(bambuddy, tmp_path)
+    read = await cached_catalogue(bambuddy, tmp_path)
     print(f"#4528: the open answered in {(time.perf_counter() - started) * 1000:.0f} ms")
 
     assert read == first
@@ -628,13 +625,11 @@ async def test_a_process_that_has_read_nothing_still_waits_on_its_first_read(
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
 
     opening = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
-    async with asyncio.timeout(5):
-        await held.asked.wait()
+    await held.asked.wait()
     assert not opening.done()
     held.release.set()
 
-    async with asyncio.timeout(5):
-        assert (await opening).process
+    assert (await opening).process
     assert held.started == 1
 
 
@@ -696,8 +691,7 @@ async def test_a_refresh_still_running_is_stopped_at_shutdown(
     await cached_catalogue(bambuddy, tmp_path)
     (task,) = catalogue._refreshing.values()
 
-    async with asyncio.timeout(5):
-        await catalogue.stop_refreshes()
+    await catalogue.stop_refreshes()
 
     assert task.cancelled()
     assert not catalogue._refreshing
@@ -778,8 +772,7 @@ async def test_opens_with_nothing_kept_share_one_read(
     opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(3)]
     await waiting(3)
     held.release.set()
-    async with asyncio.timeout(5):
-        first, *rest = await asyncio.gather(*opens)
+    first, *rest = await asyncio.gather(*opens)
 
     assert rest == [first, first]
     assert held.started == 1
@@ -803,8 +796,7 @@ async def test_an_open_given_up_on_does_not_cancel_the_read_the_others_wait_on(
     given_up.cancel()
     held.release.set()
 
-    async with asyncio.timeout(5):
-        assert (await still).process
+    assert (await still).process
     assert given_up.cancelled()
     assert held.started == 1
     # Kept for the next open, though the one that started the read gave up on it.
@@ -823,8 +815,7 @@ async def test_a_shared_read_that_fails_fails_every_open_and_is_not_kept(
     opens = [asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path)) for _ in range(2)]
     await waiting(2)
     held.release.set()
-    async with asyncio.timeout(5):
-        outcomes = await asyncio.gather(*opens, return_exceptions=True)
+    outcomes = await asyncio.gather(*opens, return_exceptions=True)
 
     assert all(isinstance(outcome, ApiError) for outcome in outcomes)
     assert held.started == 1
@@ -856,8 +847,7 @@ async def test_shutdown_stops_a_first_read_too(bambuddy: BambuddyClient, tmp_pat
     respx.get(f"{API}/slicer/presets").mock(side_effect=held)
     respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
     opening = asyncio.ensure_future(cached_catalogue(bambuddy, tmp_path))
-    async with asyncio.timeout(5):
-        await held.asked.wait()
+    await held.asked.wait()
     (reading,) = catalogue._reading.values()
 
     await catalogue.stop_refreshes()
@@ -925,18 +915,21 @@ async def test_a_failing_catalogue_beats_the_filament_steps_failure_with_no_prin
 
 
 @respx.mock
-async def test_the_spools_and_assignments_are_read_together(bambuddy: BambuddyClient) -> None:
-    """#2354: the assignments waited for the spools."""
-    asked = asyncio.Event()
-    respx.get(f"{API}/inventory/spools").mock(side_effect=_after(asked, "inventory-spools.json"))
-    respx.get(f"{API}/inventory/assignments").mock(
-        side_effect=_marks(asked, "inventory-assignments.json")
-    )
+async def test_the_inventory_is_sb_spools_placed_by_bambuddys_assignments(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#6262 Task 7: Bambuddy's spools are not read; its assignments place the SB rows."""
+    spools = respx.get(f"{API}/inventory/spools").mock(return_value=_ok("inventory-spools.json"))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=_ok("inventory-assignments.json"))
+    reads = FakeSbRows([])
 
     async with asyncio.timeout(5):
-        spools, assignments = await read_inventory(bambuddy)
+        rows = await read_inventory(bambuddy, reads)
 
-    assert spools and assignments
+    assert rows == []
+    assert not spools.called
+    [asked] = reads.assignments
+    assert asked
 
 
 @respx.mock
@@ -952,10 +945,9 @@ async def test_the_printer_and_its_remaining_filament_are_read_together(
         side_effect=_marks(asked, "inventory-remain.json")
     )
 
-    async with asyncio.timeout(5):
-        (options,) = await gather_plate_options(
-            bambuddy, library_file_id=62, printer_id=1, plate_ids=[1]
-        )
+    (options,) = await gather_plate_options(
+        bambuddy, library_file_id=62, printer_id=1, plate_ids=[1]
+    )
 
     assert options.slots
 
@@ -973,16 +965,15 @@ async def test_stalled_archives_cost_the_plate_preselection_not_the_dialog(
     never = asyncio.Event()
     respx.get(f"{API}/archives/").mock(side_effect=_after(never, "archives.json"))
 
-    async with asyncio.timeout(5):
-        view = await choices_for(
-            bambuddy,
-            _source(),
-            StoredSettings(),
-            remembered=None,
-            printer_id=1,
-            cache=tmp_path,
-            catalogue_key=None,
-        )
+    view = await choices_for(
+        bambuddy,
+        _source(),
+        StoredSettings(),
+        remembered=None,
+        printer_id=1,
+        cache=tmp_path,
+        catalogue_key=None,
+    )
 
     assert view.last_bed_type is None
     assert view.filaments.slots
@@ -1010,18 +1001,17 @@ async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
     bambuddy: BambuddyClient,
 ) -> None:
     """#4196: the check read the printer, then the 3MF, then the spools, one after
-    another. Here the printer list answers only once the download and the spools have
-    been asked for, and it lists no printer 1, so the check refuses and drops the
-    download and the assignments read it started."""
+    another. Here the printer list answers only once the download and the spools'
+    assignments have been asked for (the SB spools are placed by them since #6262), and
+    it lists no printer 1, so the check refuses and drops the download and the
+    assignments read it started."""
     source = _CheckSource()
     spools_asked = asyncio.Event()
-    respx.get(f"{API}/inventory/spools").mock(
-        side_effect=_marks(spools_asked, "inventory-spools.json")
-    )
     assignments_dropped = False
 
     async def assignments_never(request: httpx.Request) -> httpx.Response:
         nonlocal assignments_dropped
+        spools_asked.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -1039,14 +1029,13 @@ async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
     respx.get(f"{API}/printers/").mock(side_effect=no_printers)
     request = PrintRunRequest.model_validate(
         {
-            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "filament_plan": {"ids": "sb", "slots": [{"slot_id": 1, "spool_id": 9}]},
             "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
             "printer_id": 1,
         }
     )
 
-    async with asyncio.timeout(5):
-        check = await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
+    check = await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
 
     assert check.errors == ["Bambuddy has no printer 1. Pick another printer."]
     assert source.cancelled
@@ -1073,22 +1062,55 @@ async def test_the_checks_early_reads_fail_in_the_order_they_were_read_in(
     respx.get(f"{API}/printers/").mock(return_value=_ok("printers.json"))
     respx.get(f"{API}/printers/1/status").mock(return_value=_ok("printer-status-rack.json"))
     _preset_routes()
-    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
-    respx.get(f"{API}/inventory/assignments").mock(return_value=_ok("inventory-assignments.json"))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(500))
     source = _DownloadFails() if download_fails else _CheckDone()
     request = PrintRunRequest.model_validate(
         {
-            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "filament_plan": {"ids": "sb", "slots": [{"slot_id": 1, "spool_id": 9}]},
             "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
             "printer_id": 1,
         }
     )
 
     expected, said = (
-        (ValueError, "the download failed") if download_fails else (ApiError, "filament spools")
+        (ValueError, "the download failed") if download_fails else (ApiError, "spool assignments")
     )
     with pytest.raises(expected, match=said):
         await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
+
+
+@respx.mock
+async def test_the_printers_status_does_not_wait_on_the_catalogue(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4196: `prepare_run` read the preset catalogue, then the printer's status. Here the
+    catalogue answers only once the status has been asked for, so a check that still read
+    them one after the other hangs. The choices are refused by the catalogue, and the
+    refusal is the check's answer, as before."""
+    respx.get(f"{API}/printers/").mock(return_value=_ok("printers.json"))
+    status_asked = asyncio.Event()
+    respx.get(f"{API}/printers/1/status").mock(
+        side_effect=_marks(status_asked, "printer-status-rack.json")
+    )
+    presets = respx.get(f"{API}/slicer/presets").mock(
+        side_effect=_after(status_asked, "slicer-presets-h2c.json")
+    )
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    respx.get(f"{API}/printers/1").mock(return_value=_ok("printer.json"))
+    respx.get(f"{API}/printers/1/inventory-remain").mock(return_value=_ok("inventory-remain.json"))
+    request = PrintRunRequest.model_validate(
+        {
+            "filament_plan": {"ids": "sb", "slots": []},
+            "choices": {"nozzles": [{"size": "0.4"}, {"size": "0.2"}], "tier": "standard"},
+            "printer_id": 1,
+        }
+    )
+
+    check = await check_print(bambuddy, cast(PrintSource, _CheckDone()), StoredSettings(), request)
+
+    [error] = check.errors
+    assert "different sizes" in error
+    assert presets.call_count == 1
 
 
 def _sidecar_unanswered() -> httpx.Response:

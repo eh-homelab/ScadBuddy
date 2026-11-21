@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Sql } from 'postgres'
 import { describe, expect, it, vi } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
-import { BrowserSessions, personSessions, SESSION_COOKIE } from '../src/auth/browserSession.js'
+import { BrowserSessions, PgSessionLookup, personSessions, SESSION_COOKIE } from '../src/auth/browserSession.js'
 import type { CustomerMessaging, MessagingBinding, MessagingConnection } from '../src/orders/messaging.js'
 import { registerOrderMessageRoutes } from '../src/routes/orderMessages.js'
 import { BACKEND, LOOPBACK, ORIGINS } from './helpers/mcp.js'
@@ -23,7 +23,7 @@ const BINDING: MessagingBinding = {
 
 function signedIn(): BrowserSessions {
   const sql = (() => Promise.resolve([{ principal: 'user:https://idp.test#alice', name: 'Alice', kind: 'login' }])) as unknown as Sql
-  return new BrowserSessions(sql)
+  return new BrowserSessions(new PgSessionLookup(sql))
 }
 
 /** A binding that gives the plugin a dedupe key (§7.2 step 4: a replayed claim may be sent again). */

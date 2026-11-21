@@ -62,8 +62,13 @@ from tests.api.test_versions import SLUG, upload
 from tests.orders.test_lifecycle import BY
 from tests.support.fake_slicer import fake_slicer_worker
 from tests.support.operations import press
+from tests.support.sb_rows import seed_app_sb_spools
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_git]
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_git,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 
 class Projects:
@@ -653,6 +658,7 @@ def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_
     two_colours(fake_openscad)
     Projects()
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         configure(client)
         with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
             slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])
@@ -732,6 +738,7 @@ def test_a_quotes_lan_path_on_a_printer_no_longer_on_the_lan_wants_a_new_quote(
     two_colours(fake_openscad)
     Projects()
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         configure(client)
         with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
             slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])

@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
-import { FILAMENT_PLA } from '../../mocks/features/orders/state'
+import { FILAMENT_PLA, seedOrders, state as orders } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { FilamentsEditor } from './FilamentsEditor'
 
@@ -73,8 +73,9 @@ describe('FilamentsEditor (#4250)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('cost per kilogram')
   })
 
-  // #4253 §8.3 — on click only, and only with Bambuddy linked.
-  it('imports the filaments from Bambuddy spools', async () => {
+  // #4253 §8.3 — on click only; #6262 Task 9 — from ScadBuddy's spools, Bambuddy or not.
+  it("imports the filaments from ScadBuddy's spools", async () => {
+    setMockSettings({ ...mockSettings(), bambuddy_url: null })
     const { user } = renderPage(<FilamentsEditor />)
     await screen.findByRole('table', { name: 'Filaments' })
     await user.click(await screen.findByRole('button', { name: 'Import from spools' }))
@@ -89,10 +90,9 @@ describe('FilamentsEditor (#4250)', () => {
   // #6136 — each density says where it came from; a filament added by hand takes its
   // spools', and "Fill densities" fills the ones born empty, row by row.
   it('shows where each density comes from and fills the empty ones', async () => {
-    const linked = mockSettings()
-    setMockSettings({ ...linked, bambuddy_url: null })
-    const pink = await api.createFilament({ material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Hot Pink', colour: '#F5547C', cost_per_kg: '20', density_g_cm3: null })
-    setMockSettings(linked)
+    // Born empty, as a record made before its spools were.
+    const pink = { ...orders.filaments[0]!, id: 'f1a00000-0000-4000-8000-0000000000b1', material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Hot Pink', colour: '#F5547C', alpha: 255, cost_per_kg: '20', density_g_cm3: null, density_profile: null }
+    seedOrders({ filaments: [...orders.filaments, pink] })
     const none = await api.createFilament({ material: 'PLA', subtype: 'Tri Color', brand: 'Bambu Lab', colour_name: 'Neon City', colour: '#0047BB', cost_per_kg: '25', density_g_cm3: null })
     const { user } = renderPage(<FilamentsEditor />)
     expect(await within(await screen.findByTestId(`filament-${pink.id}`)).findByText('Not set: no estimate')).toBeInTheDocument()
@@ -101,7 +101,7 @@ describe('FilamentsEditor (#4250)', () => {
     await user.click(screen.getByRole('button', { name: 'Fill densities' }))
     const status = await screen.findByRole('status', { name: 'Density fill' })
     expect(status).toHaveTextContent('Bambu Lab PLA Basic Hot Pink: filled, 1.26 g/cm³ from Bambu PLA Basic @base (spool preset GFA00)')
-    expect(status).toHaveTextContent('Neon City: no source (Bambuddy links no preset or density to it); enter its density')
+    expect(status).toHaveTextContent('Neon City: no source (none of its spools has a density or names a preset, nor does its tray); enter its density')
     await within(screen.getByTestId(`filament-${pink.id}`)).findByText('1.26 g/cm³, from Bambu PLA Basic @base (spool preset GFA00)')
     expect(within(screen.getByTestId(`filament-${none.id}`)).getByText('Not set: no estimate')).toBeInTheDocument()
   })
@@ -145,11 +145,22 @@ describe('FilamentsEditor (#4250)', () => {
     expect(within(screen.getByTestId(`filament-${clear.id}`)).queryByRole('button', { name: /^Use the spool colour/ })).toBeNull()
   })
 
-  it('offers no import without Bambuddy', async () => {
-    setMockSettings({ ...mockSettings(), bambuddy_url: null })
-    renderPage(<FilamentsEditor />)
-    await within(await screen.findByRole('table', { name: 'Filaments' })).findByText(/Sunflower Yellow/)
-    expect(screen.queryByRole('button', { name: 'Import from spools' })).toBeNull()
-    await expect(api.importSpools()).rejects.toThrow(/not linked/)
+  // #6316 — a translucent spool of a hue never fills the opaque record of that hue.
+  it('fills a filament only from spools of its alpha', async () => {
+    const glass = await api.createFilament({ material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Hot Pink', colour: '#F5547C', alpha: 128, cost_per_kg: '20', density_g_cm3: null })
+    expect([glass.density_g_cm3, glass.density_profile]).toEqual([null, null])
+    const opaque = await api.createFilament({ material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Hot Pink', colour: '#F5547C', cost_per_kg: '20', density_g_cm3: null })
+    expect(opaque.density_g_cm3).toBe('1.26')
+  })
+
+  // #6262 Task 16 review: the Type column waits for the types, so no row offers "Make a type" for a type not yet read.
+  it('shows the Type column only when the types are given', async () => {
+    const first = renderPage(<FilamentsEditor />)
+    await screen.findByRole('table', { name: 'Filaments' })
+    expect(screen.queryByRole('columnheader', { name: 'Type' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Make a type/ })).toBeNull()
+    first.unmount()
+    renderPage(<FilamentsEditor types={[]} />)
+    expect(await screen.findByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
   })
 })

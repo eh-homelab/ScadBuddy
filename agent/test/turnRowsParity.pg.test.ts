@@ -80,9 +80,9 @@ async function scenario(rows: TurnRows): Promise<unknown[]> {
   // Moved on since the sweep read it: never ended.
   await say(rows.endLost(S1, String(Number(stale!.event_seq) - 1), lost))
   await say(rows.endLost(S1, stale!.event_seq, lost))
-  await say(rows.giveBack(S1, 'failed'))
+  await say(rows.giveBack(S1, 'failed', T3))
   await say(rows.sendClaim(S1, { author: BROWSER, turnId: T3, tiers: null, bare: true }))
-  await say(rows.giveBack(S1, 'failed'))
+  await say(rows.giveBack(S1, 'failed', T3))
   await say(rows.begin(S2, head(S2, H2, { kind: 'bearer', id: 'not-the-owner' })))
   await say(rows.begin(MISSING, head(MISSING, H2)))
   return out

@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.filaments import (
 )
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.bambuddy.resolver import TIERS, PrintChoices, printer_preset_name
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.geometry import GeometryAnalysis
@@ -65,8 +66,8 @@ class AnalysisRequest(BaseModel):
     printer_id: int | None = None
     #: The registry printer the dialog is for, by its id, as ``printer`` on the run and
     #: the dialog's reads. When a run on it would be native (`dialog_route`), its printer,
-    #: trays and spools are read from the registry, its report and the spool overlay,
-    #: with no Bambuddy call (#3818 tier A, #4629).
+    #: trays and spools are read from the registry, its report and the SB spools in its
+    #: trays (`filament/inventory.py`), with no Bambuddy call (#3818 tier A, #4629, #6262).
     printer: str | None = None
     filament_plan: FilamentPlan | None = None
     choices: PrintChoices | None = None
@@ -86,6 +87,10 @@ class AnalysisRequest(BaseModel):
     #: The path the print will take (#5352, `PrintRunRequest.path`): ``bambuddy`` reads
     #: the printer, trays and spools through Bambuddy, as that run does.
     path: Literal["bambuddy", "native"] | None = None
+    #: The print's prime tower (#3628, `PrintRunRequest.prime_tower`). Plate fit keeps
+    #: room for a tower over a file that states it off (#3770) only when this turns it on,
+    #: as the send does. Omitted leaves the tower to the file.
+    prime_tower: PrimeTowerChoice | None = None
     #: What reading a library file's 3MF for the mesh checks may spend (#2087), each
     #: omitted budget the setting's; none past its ceiling.
     read_budget: ReadBudgetOverride | None = None

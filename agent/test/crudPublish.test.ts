@@ -59,7 +59,8 @@ describe('the publishes over the CRUD routes', () => {
     const publisher = new SessionEventPublisher(gated<Publisher>(new PgPublisher(noSql), new CrudPublisher(target(api)), () => true), {
       replica: 'r1',
     })
-    publisher.onAppend(SESSION, [{ type: 'session.status', sessionId: SESSION, status: 'idle' } as ServerEvent], 7)
+    // An uppercase id goes as the lowercase UUID the API takes.
+    publisher.onAppend(SESSION.toUpperCase(), [{ type: 'session.status', sessionId: SESSION, status: 'idle' } as ServerEvent], 7)
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(api.seen).toEqual([
       {
@@ -100,6 +101,8 @@ describe('the session reads over the CRUD routes', () => {
     expect(await reads(api).openCalls(SESSION.toUpperCase(), 't/1')).toEqual([])
     // A turn id past the API's bound is no logged turn: every open call.
     expect(await reads(api).openCalls(SESSION, 't'.repeat(501))).toEqual(calls)
+    // An empty one too, as the SQL found no such turn.
+    expect(await reads(api).openCalls(SESSION, '')).toEqual(calls)
   })
 
   it('reads a child reasoning, and none for a call not logged', async () => {
