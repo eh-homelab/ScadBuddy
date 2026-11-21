@@ -944,7 +944,14 @@ export function PrintPicker({
   // keeps the state as it is, so it does not render the dialog again without end.
   const reportOptions = useCallback(
     (next: PrintOptions) =>
-      setOptionsShown((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next)),
+      setOptionsShown((current) => {
+        if (current === null) return next
+        const keys = new Set([...Object.keys(current), ...Object.keys(next)])
+        const same = [...keys].every(
+          (key) => current[key as keyof PrintOptions] === next[key as keyof PrintOptions],
+        )
+        return same ? current : next
+      }),
     [],
   )
   useEffect(() => {

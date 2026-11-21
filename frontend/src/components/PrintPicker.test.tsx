@@ -214,7 +214,7 @@ describe('PrintPicker · 3D preview (#1723)', () => {
   })
 })
 
-/** #768 — nozzles, quality, plate type, options, project and copies are Advanced steps. */
+/** #768 — the options, project and copies are Advanced steps; #6885 — Advanced groups the nozzle, quality and plate steps into sections. */
 async function showAdvanced() {
   fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
   await screen.findByRole('group', { name: /nozzles/i })

@@ -197,8 +197,9 @@ describe('PrintPicker · Advanced sections (#6885)', () => {
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
     expect(screen.getByTestId('print-summary-plate-note')).toHaveTextContent('Swap to Engineering Plate before this starts.')
 
-    // Open, the step says it, and the row does not say it twice.
-    await user.click(screen.getByRole('button', { name: 'Quality and plate' }))
+    // The plate cell opens the section; the step says it, and the row does not say it twice.
+    await user.click(screen.getByTestId('print-summary-plate-open'))
+    expect(screen.getByRole('button', { name: 'Quality and plate' })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.queryByTestId('print-summary-plate-note')).toBeNull()
     expect(screen.getAllByText(/Swap to Engineering Plate before this starts\./)).toHaveLength(1)
   })
