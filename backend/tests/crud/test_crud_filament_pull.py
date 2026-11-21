@@ -4,6 +4,9 @@ Bambuddy call. `RemoteBbPull` and `LocalBbPull` give one answer. Invented ids on
 
 from __future__ import annotations
 
+import http.client
+import json
+import socket
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -143,20 +146,20 @@ def test_a_body_past_the_gate_is_413_on_its_headers(settings: Settings) -> None:
     """Decision 178, revised by Decision 182: the routes have no cap in a dependency. The
     CRUD listener serves the same app, whose `BodySizeGate` refuses an ``application/json``
     body past the routes' `RouteLimit`, `MAX_TEXT_BODY_BYTES` (8 MiB), on its Content-Length,
-    before any route reads it. Through the real app, with the print worker's real credential."""
+    before any route reads it: the request sends its headers only. Through the real app,
+    with the print worker's real credential."""
     app = create_app(settings.model_copy(update={"crud_port": 0}))
-    over = b"[" + b" " * MAX_TEXT_BODY_BYTES + b"]"
     with TestClient(app):
         store = getattr(app.state, STATE_ATTR).settings_store
         issued = ServiceCredentialStore(store.pool).issue("print", "bootstrap", rate_limited=False)
         assert issued.token is not None
         headers = {"Authorization": f"Bearer {issued.token}", "Content-Type": "application/json"}
         port = crud_listener_port(app)
-        with httpx.Client(base_url=f"http://127.0.0.1:{port}", headers=headers) as crud:
-            for path in PATHS:
-                refused = crud.post(path, content=over)
-                assert refused.status_code == 413, (path, refused.text)
-                assert "a Bambuddy pull is at most 8 MB" in refused.json()["detail"], path
+        assert port is not None
+        for path in PATHS:
+            status, problem = _post_headers_only(port, path, headers, MAX_TEXT_BODY_BYTES + 2)
+            assert status == 413, (path, problem)
+            assert "a Bambuddy pull is at most 8 MB" in problem["detail"], path
         assert filament_on(store.pool).spools.list() == []
 
 
@@ -164,25 +167,36 @@ def test_a_body_past_the_gate_is_413_on_its_headers(settings: Settings) -> None:
 def test_a_body_with_no_content_type_is_413_too(settings: Settings) -> None:
     """#6861: the gate counts only a type in its table and FastAPI reads a body with no
     Content-Type as JSON, so the four routes carry their own `RouteLimit` (Decision 182):
-    9 MiB with the header left out is 413 on each, on its Content-Length."""
+    a length past 8 MiB with the header left out is 413 on each, on its Content-Length."""
     app = create_app(settings.model_copy(update={"crud_port": 0}))
-    over = b"[" + b" " * MAX_TEXT_BODY_BYTES + b"]"
     with TestClient(app):
         store = getattr(app.state, STATE_ATTR).settings_store
         issued = ServiceCredentialStore(store.pool).issue("print", "bootstrap", rate_limited=False)
         assert issued.token is not None
         port = crud_listener_port(app)
-        with httpx.Client(
-            base_url=f"http://127.0.0.1:{port}",
-            headers={"Authorization": f"Bearer {issued.token}"},
-        ) as crud:
-            for path in PATHS:
-                # Raw bytes: httpx sets no Content-Type of its own.
-                refused = crud.post(path, content=over)
-                assert "content-type" not in refused.request.headers
-                assert refused.status_code == 413, (path, refused.text)
-                assert "a Bambuddy pull is at most 8 MB" in refused.json()["detail"], path
+        assert port is not None
+        headers = {"Authorization": f"Bearer {issued.token}"}  # no Content-Type
+        for path in PATHS:
+            status, problem = _post_headers_only(port, path, headers, MAX_TEXT_BODY_BYTES + 2)
+            assert status == 413, (path, problem)
+            assert "a Bambuddy pull is at most 8 MB" in problem["detail"], path
         assert filament_on(store.pool).spools.list() == []
+
+
+def _post_headers_only(
+    port: int, path: str, headers: dict[str, str], length: int
+) -> tuple[int, dict[str, Any]]:
+    """POST ``path`` to the CRUD listener with its headers only: ``Content-Length`` declares
+    ``length`` bytes and none are sent. The gate judges a declared length on the headers
+    alone, so it answers before any body; a client still writing the 8 MiB body when the
+    server answers and closes raced it (httpx.WriteTimeout in CI, #6883)."""
+    head = [f"POST {path} HTTP/1.1", f"Host: 127.0.0.1:{port}", f"Content-Length: {length}"]
+    head += [f"{name}: {value}" for name, value in headers.items()]
+    with socket.create_connection(("127.0.0.1", port), timeout=30) as sock:
+        sock.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
+        response = http.client.HTTPResponse(sock)
+        response.begin()
+        return response.status, json.loads(response.read())
 
 
 @pg

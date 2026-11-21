@@ -843,7 +843,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   missing from a complete listing gets one `probe`, `GET` only (a supplier, location or
   insert type has no `GET` by id, so its listing is read again); only a definite 404 drops
   the link, and the next round makes the row again under its direction, while a spool that
-  names such a row waits (#6688, plan Decisions 187-192, 200 and 201). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
+  names such a row waits (#6688, plan Decisions 187-192 and 200-205). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
   Bambuddy instance, on the `bambuddy` queue (AUTO_UPGRADE; a change to its commands goes
   behind `workflow.patched`, and `tests/test_filament_sync_replay.py` replays
   `tests/fixtures/filament_sync_histories/`). The API nudges after a write on

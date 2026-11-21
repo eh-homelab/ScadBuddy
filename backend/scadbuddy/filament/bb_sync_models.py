@@ -236,7 +236,16 @@ class SyncPlan(BaseModel, extra="forbid"):
     both sides changed since SB last saw them, so neither side's value is pushed
     (R-T4-33). Also whether the snapshot's instance is not the links' one (Decision 12), and the
     directions and timer interval the plan read. ``pass_id``: made by the route for this plan
-    round; the worker sends it back with the round's results (R-T6-5)."""
+    round; the worker sends it back with the round's results (R-T6-5). ``unconfirmed``:
+    the linked rows no spool of this round names by their Bambuddy id (their probe is
+    planned, failed in this pass, or was cut by the cap), which the worker sends back
+    with the results so a spool's compare names none of them either (R-6688-11).
+
+    This model and `ResultsRequest` forbid extra keys, so ``unconfirmed`` crosses builds
+    only when it is empty: both leave the key out then (`without_empty_unconfirmed`), and
+    a build before it takes the body. A plan or results body that names a row is refused
+    by such a build (the pass fails, and the next signal or the timer runs another), so
+    roll the API and the print worker together, the API first."""
 
     writes: list[BbWrite]
     deferred: int
@@ -248,6 +257,7 @@ class SyncPlan(BaseModel, extra="forbid"):
     directions: FilamentSync
     interval_s: float
     pass_id: str | None = None
+    unconfirmed: list[tuple[Kind, UUID]] = Field(default_factory=list)
 
 
 class PlanRequest(BaseModel, extra="forbid"):
@@ -273,12 +283,23 @@ class ResultsRequest(BaseModel, extra="forbid"):
     """The results route's body: the Bambuddy the answers came from, the writes of the
     plan round (`apply_results` checks each against the links, the plan is not kept) and
     what Bambuddy answered to each. ``pass_id``: the plan's, so results sent again
-    count once (R-T6-5)."""
+    count once (R-T6-5). ``unconfirmed``: the plan's (`SyncPlan`), which a worker from
+    before R-6688-11 does not send; `apply_results` then takes the round's probes only."""
 
     instance: str
     writes: list[BbWrite]
     results: list[BbWriteResult]
     pass_id: str | None = None
+    unconfirmed: list[tuple[Kind, UUID]] = Field(default_factory=list)
+
+
+def without_empty_unconfirmed(model: SyncPlan | ResultsRequest) -> dict[str, Any]:
+    """``model`` as JSON with no ``unconfirmed`` key when it is empty, so a build that
+    does not know the key takes the body (R-6688-11)."""
+    dumped = model.model_dump(mode="json")
+    if not dumped["unconfirmed"]:
+        del dumped["unconfirmed"]
+    return dumped
 
 
 #: The pass activity's name (`bb_sync_run.FilamentSyncActivities`), as the workflow
@@ -370,6 +391,7 @@ class FilamentSyncApi(Protocol):
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
         pass_id: str | None,
+        unconfirmed: Sequence[tuple[Kind, UUID]] = (),
     ) -> ResultsReport: ...
 
     async def record_pass(self, result: SyncPassResult) -> None: ...

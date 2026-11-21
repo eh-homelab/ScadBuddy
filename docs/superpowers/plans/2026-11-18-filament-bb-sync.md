@@ -382,7 +382,7 @@ eh-homelab/clusters: scadbuddy-print strategy Recreate, then back to RollingUpda
 - Produces in `bb_sync_models.py` (pydantic, `extra="forbid"`):
   `BbSnapshot {instance: str, full: bool, spools: list[dict], spools_complete: bool, suppliers: list[BbSupplier] | None, locations: list[BbLocation] | None, catalog: list[SpoolCatalogEntry] | None, filaments: list[CatalogFilament] | None, read_at: datetime}` (a `None` list means "not read", never "empty"; `spools_complete` is False when any spool row failed `bambuddy_pull.parse_rows`; consumers parse `spools` with `parse_rows`);
   `seen_row(row: Spool) -> dict[str, Any]`: the one shape of every spool `bb_seen`: BB's row restricted to Decision 14's fields, keyed by BB names (`color_name`, `rgba`, `extra_colors`, `label_weight`, `weight_used`, `note`, `low_stock_threshold_pct`, `location_id`, `core_weight`, `last_dried_at`, `slicer_filament`, …), with `rgba`/`extra_colors` in Decision 14's canonical form. `bambuddy_pull.snapshot` stays for the `synced_from_bb` event only;
-  `BbWrite {key: str, kind: Kind, sb_id: UUID, op: Literal["create","update","archive","restore","k_profiles","presets","suppliers","probe"], bb_id: int | None, body: dict | list, hashes: dict[str, str]}` (`probe` is Decision 13's `GET spool_row(bb_id)`, with an empty body);
+  `BbWrite {key: str, kind: Kind, sb_id: UUID, op: Literal["create","update","archive","restore","k_profiles","presets","suppliers","probe"], bb_id: int | None, body: dict | list, hashes: dict[str, str]}` (`probe` is Decision 13's `GET spool_row(bb_id)`, with an empty body (a spool's; other rows': Decisions 187-192, 201));
   `BbWriteResult {key: str, ok: bool, bb_id: int | None = None, answer: dict | None = None, error: str | None = None, status: int | None = None}`;
   `SyncPlan {writes: list[BbWrite], deferred: int, instance_changed: bool = False, directions: FilamentSync, interval_s: float}`;
   `PlanRequest {snapshot: BbSnapshot, limit: int = Field(ge=1, le=200)}` (the plan route's body; `full` stays on the snapshot);
@@ -2000,7 +2000,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     entry holds no spool back: a spool names its type by code. Why: a spool update naming a
     deleted Bambuddy location gets a 404 or 422 and an error row. Cost: a spool waits up to
     two rounds; with a probe that keeps failing, it waits for later passes.
-192. R-6688-6: a row's probe is a phase-0 write, with its kind's other writes, and counts
+192. (changed by 202) R-6688-6: a row's probe is a phase-0 write, with its kind's other writes, and counts
     toward the cap as a spool's probe does; it writes nothing, so `written` does not count
     it, and its 404 is an answer, not `failed` (decision 116). Tests:
     `test_bb_sync_plan.py` (`test_a_row_missing_from_its_listing_is_probed`,
@@ -2036,6 +2036,56 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     listing read per filament entry Bambuddy deleted. Tests: `test_bb_sync_run.py`
     `test_a_filament_404_is_confirmed_by_the_listing`,
     `test_a_filament_404_whose_listing_fails_is_no_404`.
+202. R-6688-9 (PR #6870 review; changes 192): a row's probe is a phase-0 write even for a
+    row with an error row from an earlier pass (`add`'s `retry_last=False`), so the cap
+    takes it first and `missing` knows when it plans it whether it fits: a probe past the
+    round's `limit` is not planned. Its row counts `deferred` (`capped`), as `take` counts
+    a write the cap cut, so the next pass probes it; a spool that names it waits on it
+    (`deferred`) and never names the id Bambuddy may have deleted. Only a planned probe's
+    row is in `probing`. Why: a probe left in the retry phase could be cut by the cap with
+    no `more` while its spool waited on it, and `probing` named a row whose probe never ran.
+    Cost: a row whose probe keeps failing is probed before the other retries each pass (one
+    `GET`). Tests: `test_bb_sync_plan.py` `test_a_rows_probe_goes_before_the_retries`,
+    `test_a_probe_the_cap_cuts_is_not_planned`.
+203. R-6688-10 (PR #6870 review): `results` compares a spool's answer with SB's values as
+    the plan made them: the rows this round probes are taken out of its `BbRefs`
+    (`_Reads.unconfirmed`, `BbRefs.without`), as the plan took them out of the spool's desired
+    values. So a spool probe or write answered beside a location probe does not take the
+    answer's `location_id` into `bb_seen` as SB's value. Why: the location may be gone, and
+    the plan never sent that id. Cost: none known. Test: `test_bb_sync_results.py`
+    `test_a_spool_probe_beside_its_locations_probe_keeps_its_seen_location`.
+204. R-6688-11 (PR #6883 review): `results` leaves out of a spool's compare every row the
+    plan left out of the spool's desired values (`_Planner.unconfirmed()`: probe planned,
+    probe failed in this pass, or probe cut by the cap), not only the rows this round
+    probes. A row whose probe failed earlier in the pass gets no write in a later round,
+    so only the plan knows it. `SyncPlan` and `ResultsRequest` carry it as `unconfirmed`
+    (a list of `[kind, sb_id]`), and the pass sends the plan's list back with the results
+    (`FilamentSyncApi.results`). `results` still adds the round's own probes, so the
+    results of a worker that sends no list keep Decision 203. Both models forbid extra
+    keys, so an empty list is left out of the body (`without_empty_unconfirmed`, the plan
+    route and `RemoteFilamentSync.results`), as `started_at` is (#6846). A body that names a
+    row is refused by a build from before this (the pass fails, and the next signal or
+    the timer runs another), so roll the API and the print worker together, the API
+    first. Why: send it, not rebuild it in `results`. "Failed in this pass" is an error
+    row newer than the snapshot's `read_at`, and `results` has no snapshot; a cut by the
+    cap depends on the round's `limit`. Cost: one optional field on two CRUD bodies.
+    Also: `_Planner.limit` has no default; `plan` passes it, and `PlanRequest` bounds it.
+    Tests: `test_bb_sync_results.py`
+    `test_a_spool_probe_while_its_locations_probe_failed_keeps_its_seen_location`,
+    `test_bb_sync_run.py` `test_each_round_sends_its_plans_unconfirmed_rows`,
+    `test_crud_filament_sync.py` `test_the_sync_bodies_leave_out_an_empty_unconfirmed`;
+    `test_bb_sync_plan.py` `test_a_probe_the_cap_cuts_is_not_planned` now gives the spool
+    an error row from an earlier pass, so its write is a retry that a cut by the cap
+    would not count (R-T4-15): it counts `deferred` only because it waits on the capped
+    row.
+205. R-6688-12 (PR #6883, CI): `test_crud_filament_pull.py`
+    `test_a_body_past_the_gate_is_413_on_its_headers` and
+    `test_a_body_with_no_content_type_is_413_too` send the headers only, with a
+    `Content-Length` past 8 MiB and no body, over a plain socket. Why: they sent the whole
+    8 MiB body with httpx, and the gate answers 413 on the headers and the server closes;
+    the client could still be writing, and it failed with `httpx.WriteTimeout` (shard 4 on
+    main, run 44936881958, and on this PR). With no body to write there is no race, and
+    the test still proves the answer comes from the headers alone. Cost: none.
 
 ## Self-review
 
