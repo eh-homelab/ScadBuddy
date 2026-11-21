@@ -15,7 +15,9 @@ tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cance
 (`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
 which writes Bambuddy only for the data types set to push; `GET /filament/sync/status`
-reads how its passes went.
+reads how its passes went. `GET /filament/sync/reset-links` counts what a reset of the
+Bambuddy links would delete, and `POST /filament/sync/reset-links` deletes them after the
+Bambuddy URL changed (#6773), then nudges a full pass.
 
 Every 2xx answer to a write here, in `api/filament_purchasing.py` and in
 `api/tray_spools.py` nudges the ScadBuddy-to-Bambuddy sync (`nudge_after_write`, #6265
@@ -51,8 +53,21 @@ from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, Pulls, read_and_pull, try_assignments
-from scadbuddy.filament.bb_sync_models import SyncRun, SyncStatus, skip_reason
-from scadbuddy.filament.bb_sync_results import sync_status
+from scadbuddy.filament.bb_sync_models import (
+    LinksResetDone,
+    LinksResetPreview,
+    LinksResetRequest,
+    SyncRun,
+    SyncStatus,
+    skip_reason,
+)
+from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.bb_sync_results import (
+    ResetRefusedError,
+    reset_links,
+    reset_preview,
+    sync_status,
+)
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
@@ -113,10 +128,17 @@ from scadbuddy.printers.component import PrintersDep
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
-#: (Decision 17, R-T8-3); "Sync now" nudges a full pass itself; the Bambuddy import pulls
+#: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
+#: themselves; the Bambuddy import pulls
 #: and the RFID scan writes nothing, so neither has anything to push (Decision 163).
 NOT_NUDGED = frozenset(
-    {"sync_ams_weights", "run_filament_sync", "import_bambuddy", "scan_rfid_tag"}
+    {
+        "sync_ams_weights",
+        "run_filament_sync",
+        "reset_filament_sync_links",
+        "import_bambuddy",
+        "scan_rfid_tag",
+    }
 )
 
 
@@ -1731,7 +1753,9 @@ async def reconcile_rfid(
         "six data types `spools`, `weights`, `tags`, `presets`, `suppliers` and "
         "`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or "
         "`two_way`, and never for `tags`, which reach Bambuddy through the spool refresh's "
-        "tag drain. `instance` is the Bambuddy the links belong to. `last_pass_at` is the "
+        "tag drain. `instance` is the Bambuddy the links belong to, and `instance_changed` "
+        "whether that is not the configured Bambuddy: the sync is then stopped until "
+        "`POST /filament/sync/reset-links` resets the links. `last_pass_at` is the "
         "last pass, `last_pass_started_at` when it started (by the worker's clock; a result "
         "from an older worker stores the database's `now()` instead), "
         "`last_error` its error label (null when it worked), and `last_ok_at` the "
@@ -1751,9 +1775,78 @@ async def reconcile_rfid(
 async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDep) -> SyncStatus:
     read = await asyncio.to_thread(store.read, {"bambuddy_url", "filament_sync"})
     sync = read["filament_sync"]
+    url = read["bambuddy_url"]
     return await asyncio.to_thread(
-        sync_status, filament, sync, skip_reason(read["bambuddy_url"], sync)
+        sync_status, filament, sync, skip_reason(url, sync), _configured(url)
     )
+
+
+def _configured(url: str | None) -> str | None:
+    """The configured Bambuddy's instance, ``None`` with none configured."""
+    return instance_for(url) if url else None
+
+
+@router.get(
+    "/sync/reset-links",
+    response_model=LinksResetPreview,
+    summary="What a reset of the Bambuddy links would delete",
+    description=(
+        "The dry run of `POST /filament/sync/reset-links` (#6773): `instance` is the "
+        "Bambuddy the links belong to (null when none is recorded), the value "
+        "`confirm_instance` must name; `configured_instance` is the configured Bambuddy's "
+        "(null with none). `counts` is what a reset would delete now: the spool links "
+        "(`spools`), the supplier, location, insert type and spool type links "
+        "(`suppliers`, `locations`, `insert_types`, `filaments`: each row's Bambuddy id, "
+        "hashes and seen copy), the open create `intents`, the `errors` rows and the "
+        "Bambuddy spools the pull `ignored`. Reads ScadBuddy only. The counts are "
+        "approximate: they are read without a lock, so a pass that runs meanwhile can "
+        "change them. The answer of the `POST` gives the counts it deleted."
+    ),
+)
+async def preview_filament_sync_reset(
+    filament: FilamentDep, store: SettingsStoreDep
+) -> LinksResetPreview:
+    read = await asyncio.to_thread(store.read, {"bambuddy_url"})
+    return await asyncio.to_thread(reset_preview, filament, _configured(read["bambuddy_url"]))
+
+
+@router.post(
+    "/sync/reset-links",
+    response_model=LinksResetDone,
+    summary="Reset the Bambuddy links after the Bambuddy URL changed",
+    description=(
+        "Deletes, in one transaction, what the sync keeps of the Bambuddy the links belong "
+        "to (#6773): every spool link, the supplier, location, insert type and spool type "
+        "links (their Bambuddy ids, hashes and seen copies), the open create intents, the "
+        "error rows, the Bambuddy spools the pull ignores, and the recorded instance. No "
+        "ScadBuddy spool, type, supplier or location is deleted, and none of their own "
+        "fields changes. Answers the instance and the counts deleted, then nudges a full "
+        "pass, so the configured Bambuddy is linked afresh: the pull links its spools, "
+        "suppliers and locations that match, and the push adopts or creates the rest. "
+        "`confirm_instance` must be the links' instance (`GET "
+        "/filament/sync/reset-links` `instance`), so a stale page cannot reset another "
+        "Bambuddy's links. 409 with `code` `confirm_mismatch` when it is not, "
+        "`same_instance` when the links belong to the configured Bambuddy (nothing to "
+        "reset), and `nothing_to_reset` when no instance is recorded."
+    ),
+)
+async def reset_filament_sync_links(
+    filament: FilamentDep, store: SettingsStoreDep, state: StateDep, body: LinksResetRequest
+) -> LinksResetDone:
+    read = await asyncio.to_thread(store.read, {"bambuddy_url"})
+    try:
+        done = await asyncio.to_thread(
+            reset_links, filament, body.confirm_instance, _configured(read["bambuddy_url"])
+        )
+    except ResetRefusedError as refused:
+        detail = {
+            "nothing_to_reset": "no Bambuddy instance is recorded, so no link belongs to one",
+            "same_instance": "the links belong to the configured Bambuddy; nothing to reset",
+            "confirm_mismatch": "confirm_instance is not the instance the links belong to",
+        }[refused.code]
+        raise ApiError(status.HTTP_409_CONFLICT, detail, code=refused.code) from None
+    state.filament_sync.nudge_soon(full=True)
+    return done
 
 
 @router.post(

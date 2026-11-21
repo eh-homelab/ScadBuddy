@@ -44,6 +44,9 @@ from scadbuddy.filament.bb_sync_models import (
     BbWrite,
     BbWriteResult,
     Kind,
+    LinksResetCounts,
+    LinksResetDone,
+    LinksResetPreview,
     ResultsReport,
     SkipReason,
     SyncError,
@@ -54,6 +57,7 @@ from scadbuddy.filament.bb_sync_models import (
     seen_row,
     seen_value,
 )
+from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_plan import (
     ROW_KINDS,
     UNSEEN,
@@ -526,10 +530,16 @@ def _labels(conn: Conn, rows: list[Any]) -> dict[tuple[str, UUID], str]:
 
 
 def sync_status(
-    store: Filament, directions: FilamentSync, skipped: SkipReason | None
+    store: Filament,
+    directions: FilamentSync,
+    skipped: SkipReason | None,
+    configured: str | None = None,
 ) -> SyncStatus:
     """The state row and the error rows (Decision 19), newest error first, with the
-    directions and the skip reason the caller read from the settings."""
+    directions and the skip reason the caller read from the settings. ``configured`` is
+    the configured Bambuddy's instance (`instance_for`), ``None`` with none:
+    ``instance_changed`` is whether the links belong to another one, as the plan judges
+    it (Decision 12, #6773)."""
     with store.spools.transaction() as conn:
         state = conn.execute(
             "SELECT instance, last_pass_at, last_pass_started_at, last_ok_at, last_error, counts"
@@ -555,6 +565,9 @@ def sync_status(
         ],
         directions=directions,
         skipped=skipped,
+        instance_changed=configured is not None
+        and state["instance"] is not None
+        and state["instance"] != configured,
     )
 
 
@@ -567,11 +580,105 @@ def adopt_instance(store: Filament, instance: str) -> None:
         record_instance(conn, instance)
 
 
+class ResetRefusedError(Exception):
+    """A reset of the Bambuddy links refused (#6773); ``code`` is the 409's code:
+    ``nothing_to_reset`` (no instance is recorded, so no link belongs to one),
+    ``same_instance`` (the links belong to the configured Bambuddy) or
+    ``confirm_mismatch`` (``confirm_instance`` is not the links' instance)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+#: The rows a link of each kind is kept on, and its Bambuddy id column (#6773).
+_ROW_LINKS: tuple[tuple[str, str, str], ...] = (
+    ("suppliers", "filament_suppliers", "bb_supplier_id"),
+    ("locations", "filament_locations", "bb_location_id"),
+    ("insert_types", "filament_insert_types", "bb_catalog_id"),
+    ("filaments", "filament_spool_types", "bb_filament_id"),
+)
+
+
+def _reset_counts(conn: Conn) -> LinksResetCounts:
+    """What a reset deletes now: one count per link kind, the intents, the error rows
+    and the ignored Bambuddy spools."""
+    counts: dict[str, int] = {}
+    for name, table in (
+        ("spools", "filament_bb_links"),
+        ("intents", "filament_bb_creates"),
+        ("errors", "filament_bb_push_errors"),
+        ("ignored", "filament_bb_ignored"),
+    ):
+        row = conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()
+        counts[name] = row["n"] if row is not None else 0
+    for name, table, column in _ROW_LINKS:
+        row = conn.execute(
+            f"SELECT count(*) AS n FROM {table} WHERE {column} IS NOT NULL"
+        ).fetchone()
+        counts[name] = row["n"] if row is not None else 0
+    return LinksResetCounts(**counts)
+
+
+def reset_preview(store: Filament, configured: str | None) -> LinksResetPreview:
+    """The dry run of `reset_links`: the links' instance, the configured one, and what a
+    reset would delete. Reads only."""
+    with store.spools.transaction() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+        counts = _reset_counts(conn)
+    return LinksResetPreview(
+        instance=state["instance"] if state is not None else None,
+        configured_instance=configured,
+        counts=counts,
+    )
+
+
+def reset_links(store: Filament, confirm_instance: str, configured: str | None) -> LinksResetDone:
+    """Delete every Bambuddy link and what the sync keeps of the old Bambuddy (#6773), in
+    one transaction under the state row's lock, which `apply_results` takes too: the spool
+    links, each supplier's, location's, insert type's and spool type's Bambuddy id with its
+    hashes and seen copy, the open create intents, the error rows, the ignored Bambuddy
+    spools and the state row's ``instance``. No ScadBuddy spool, type, supplier or location
+    is deleted, and none of their own fields changes. Refused (`ResetRefusedError`) when no
+    instance is recorded, when it is ``configured`` or when it is not
+    ``confirm_instance``."""
+    with store.spools.transaction() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state FOR UPDATE").fetchone()
+        instance = state["instance"] if state is not None else None
+        if instance is None:
+            raise ResetRefusedError("nothing_to_reset")
+        if instance == configured:
+            raise ResetRefusedError("same_instance")
+        if confirm_instance != instance:
+            raise ResetRefusedError("confirm_mismatch")
+        counts = _reset_counts(conn)
+        for table in (
+            "filament_bb_links",
+            "filament_bb_creates",
+            "filament_bb_push_errors",
+            "filament_bb_ignored",
+        ):
+            conn.execute(f"DELETE FROM {table}")
+        for _, table, column in _ROW_LINKS:
+            conn.execute(
+                f"UPDATE {table} SET {column} = NULL, bb_pushed = '{{}}', bb_seen = NULL,"
+                f" bb_seen_at = NULL WHERE {column} IS NOT NULL OR bb_seen IS NOT NULL"
+                " OR bb_pushed <> '{}'"
+            )
+        conn.execute("UPDATE filament_bb_sync_state SET instance = NULL")
+    logger.info("the Bambuddy links were reset", extra={"instance": instance})
+    return LinksResetDone(instance=instance, deleted=counts)
+
+
 class LocalFilamentSync:
     """`FilamentSyncApi` over SB's own stores, for the API's in-process print queue. The
     print worker's `RemoteFilamentSync` gives the same answers through the CRUD routes,
     which call this class. It reads ``filament_sync`` and the timer's interval
-    (``spool_overlay_refresh_seconds``) on each plan, so a change applies to the next."""
+    (``spool_overlay_refresh_seconds``) on each plan, so a change applies to the next.
+    A plan or results call for another instance than the configured Bambuddy's plans
+    nothing (``instance_changed``) and records nothing: after a reset of the links
+    (#6773) the state row names no instance, so a pass of the old Bambuddy's workflow
+    still running must not create rows there or link them again."""
 
     def __init__(self, filament: Filament, settings_store: SettingsStore) -> None:
         self._filament = filament
@@ -584,12 +691,23 @@ class LocalFilamentSync:
 
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
         def run() -> SyncPlan:
-            read = self._settings.read({"filament_sync", "spool_overlay_refresh_seconds"})
+            read = self._settings.read(
+                {"filament_sync", "spool_overlay_refresh_seconds", "bambuddy_url"}
+            )
+            interval_s = float(read["spool_overlay_refresh_seconds"])
+            if _foreign(read["bambuddy_url"], snap.instance):
+                return SyncPlan(
+                    writes=[],
+                    deferred=0,
+                    directions=read["filament_sync"],
+                    interval_s=interval_s,
+                    instance_changed=True,
+                )
             return plan(
                 self._filament,
                 snap,
                 read["filament_sync"],
-                interval_s=float(read["spool_overlay_refresh_seconds"]),
+                interval_s=interval_s,
                 limit=limit,
             )
 
@@ -604,6 +722,17 @@ class LocalFilamentSync:
         results: Sequence[BbWriteResult],
         pass_id: str | None,
     ) -> ResultsReport:
+        read = await asyncio.to_thread(self._settings.read, {"bambuddy_url"})
+        # This reads bambuddy_url before apply_results takes the state row's lock. After a
+        # reset the row's instance is NULL, so this check is what stops an old pass's
+        # results. It holds because a reset is refused until the URL has changed
+        # (Decisions 165, 168).
+        if _foreign(read["bambuddy_url"], instance):
+            logger.warning(
+                "Bambuddy sync results for another instance are ignored",
+                extra={"instance": instance},
+            )
+            return ResultsReport()
         return await asyncio.to_thread(
             apply_results,
             self._filament,
@@ -616,3 +745,9 @@ class LocalFilamentSync:
 
     async def record_pass(self, result: SyncPassResult) -> None:
         await asyncio.to_thread(record_pass, self._filament, result)
+
+
+def _foreign(bambuddy_url: str | None, instance: str) -> bool:
+    """Whether ``instance`` is not the configured Bambuddy's. With none configured no
+    pass starts (`skip_reason`), so nothing is foreign."""
+    return bool(bambuddy_url) and instance_for(cast("str", bambuddy_url)) != instance

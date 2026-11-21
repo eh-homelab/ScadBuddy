@@ -842,13 +842,47 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     ['filament_sync_status', 'read', false],
     // It writes Bambuddy, as filament_rfid_reconcile does: outward and approved first.
     ['filament_sync_run', 'outward', true],
+    // #6773: it deletes the links and asks for a pass that writes Bambuddy.
+    ['filament_sync_reset_links', 'outward', true],
   ])('%s is %s tier, gated: %s', (name, risk, gated) => {
     expect(tool(name).risk).toBe(risk)
     expect(tool(name).gated).toBe(gated)
   })
 
-  it('classifies the run as touching no recorded resource', () => {
+  it('classifies the run and the reset as touching no recorded resource', () => {
     expect(TOUCHES_NOTHING.has('filament_sync_run')).toBe(true)
+    expect(TOUCHES_NOTHING.has('filament_sync_reset_links')).toBe(true)
+  })
+
+  it('resets the links of the instance it names, and needs one', async () => {
+    let body: unknown
+    const deleted = { spools: 3, suppliers: 1, locations: 0, insert_types: 0, filaments: 2, intents: 0, errors: 1, ignored: 0 }
+    server.use(
+      http.post(`${SYNC}/reset-links`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ instance: '0ld0ld0ld0ld', deleted })
+      }),
+    )
+    const t = tool('filament_sync_reset_links')
+    expect(() => t.parse({})).toThrow()
+    const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld' }), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld' })
+    expect(firstText(result)).toEqual({ instance: '0ld0ld0ld0ld', deleted })
+  })
+
+  it('fails on a 409 and says why nothing was deleted', async () => {
+    const detail = 'confirm_instance is not the instance the links belong to'
+    server.use(
+      http.post(`${SYNC}/reset-links`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail, code: 'confirm_mismatch' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const t = tool('filament_sync_reset_links')
+    await expect(t.execute(t.parse({ confirm_instance: 'abcabcabcabc' }), ctx('outward'))).rejects.toThrow(detail)
   })
 
   it('both run in durable mode: activities of the agent-tools worker', () => {

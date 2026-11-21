@@ -1729,6 +1729,57 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_an_unmapped_bb_place_is_not_seeded`, `test_a_place_that_maps_later_is_seeded_then`,
     `test_a_bb_move_after_a_late_mapped_seed_moves_the_spool`. Why: a seed of an unmapped
     place made the move to it, once mapped, wait for BB's next change of place.
+165. #6773 (changes 12's cost; owner's rulings 1 and 2): the links are reset by one route,
+    `POST /filament/sync/reset-links` (`api/filament.py`, `bb_sync_results.reset_links`).
+    Its body's `confirm_instance` must be the state row's `instance`, read `FOR UPDATE`
+    (the lock `apply_results` takes), else 409 `confirm_mismatch`, so a stale page cannot
+    reset another Bambuddy's links. 409 `same_instance` when that instance is the configured
+    Bambuddy's, and `nothing_to_reset` when no instance is recorded. "No links" is read as
+    no recorded instance: a recorded instance whose links a 404 all dropped still stops the
+    sync (the plan answers `instance_changed`), so the reset clears it too. The answer is
+    the instance and the counts deleted; after the commit the route nudges a full pass
+    (`nudge_soon(full=True)`), and it is in `NOT_NUDGED`, as "Sync now" is. Tests:
+    `test_a_reset_deletes_the_links_and_no_sb_row`, `test_a_reset_with_a_wrong_instance_is_409`,
+    `test_a_reset_with_nothing_to_reset_is_409`.
+166. #6773 (widens ruling 1): the reset also clears the insert types' `bb_catalog_id` and
+    the spool types' `bb_filament_id` with their `bb_pushed`, `bb_seen` and `bb_seen_at`,
+    and deletes `filament_bb_ignored`. Each holds an id of the old Bambuddy
+    (`bambuddy_pull.ANY_LINK` counts the first two), and a kept `bb_filament_id` would make
+    the plan patch a stranger's catalog entry. No SB row is deleted, and no column but
+    these sync columns changes: `updated_at` stays, so Decision 8's change times do not
+    move. Test: `test_a_reset_deletes_the_links_and_no_sb_row` (`_sb_rows`).
+167. #6773 (ruling 5): the dialog's counts come from a dry run, `GET
+    /filament/sync/reset-links` (`reset_preview`: the links' instance, the configured one,
+    the counts), not from the status. The page reads the status every 3 s after "Sync now"
+    (Decision 162), and the counts are eight table reads; the dialog wants them as they
+    stand when it opens. The status gains only `instance_changed`: the links' instance is
+    recorded and is not the configured Bambuddy's, as the plan judges it. The models are
+    `LinksReset*`: `ResetPreview` is the flows' Reset. Tests:
+    `test_the_dry_run_counts_what_a_reset_deletes`,
+    `test_status_reports_links_of_another_bambuddy`.
+168. #6773 (widens 12): `LocalFilamentSync.plan` and `.results` (the CRUD routes and the
+    in-process pass) do nothing for another instance than the configured Bambuddy's: the plan
+    answers `instance_changed`, the results are ignored. After a reset the state row names no
+    instance, so the old Bambuddy's workflow, with a pass still running, would otherwise
+    create every SB spool there and link them again. With no Bambuddy configured nothing is
+    foreign (no pass starts). Test:
+    `test_a_pass_of_another_bambuddy_plans_and_records_nothing`.
+169. #6773 (rulings 3 and 4): Settings → Filament shows "Reset Bambuddy links" only while
+    the status says `instance_changed`. It reads the dry run, and its confirm dialog lists
+    each count above zero, says no ScadBuddy spool, type, supplier or location is deleted,
+    and sends the dry run's `instance` as `confirm_instance`; a 409 is said in the dialog.
+    After the reset the page reads the status until a later pass lands, as after "Sync now".
+    The agent's `filament_sync_reset_links` is `outward` (gated), takes `confirm_instance`
+    (filament_sync_status `instance`) and touches no recorded resource kind. Tests:
+    `filament.test.tsx` "Reset Bambuddy links (#6773)", agent `filament.test.ts`.
+170. #6773 (the issue's check of Decision 10): Decision 10's adoption needs an open intent,
+    and the reset deletes the intents, so it adopts nothing after a reset. The first passes
+    against the new Bambuddy link only what the pull matches: a BB spool to the SB spool
+    that holds its tag (the pull's step 2), and, under `pulls(suppliers)` and
+    `pulls(locations)`, a supplier or location by its upper case name, as an insert type by
+    its name. Cost: an untagged spool is made again on the side its direction sends it to (a
+    new BB spool under `pushes(spools)`, a new SB spool under `pulls(spools)`); the dialog
+    and the agent tool say so.
 171. PR #6842 review, revised after the round-2 review (repairs 164 for links seeded since
     #6265): a link whose `bb_seen.location_id` names a BB place that SB has never mapped
     (no `filament_locations` row has that `bb_location_id`, in any state, archived and

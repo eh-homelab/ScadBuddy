@@ -28,6 +28,14 @@ slot setup and NTAG writes write BB whatever `filament_sync` says.
   answers `started: true` at once; read `filament_sync_status` afterwards. A 409
   `no_bambuddy` or `nothing_pushes` means there is nothing to run: say so, and do not
   change `filament_sync` for the person.
+- `instance_changed: true` in `filament_sync_status` means the links belong to another
+  Bambuddy than the one set up now (its URL changed), so the sync is stopped.
+  `filament_sync_reset_links` deletes the links, intents and error rows of that old
+  instance, then asks for a full pass; it never deletes an SB spool, type, supplier or
+  location. It writes, so it needs approval. Pass `confirm_instance` as the status's
+  `instance`; a 409 `confirm_mismatch`, `same_instance` or `nothing_to_reset` deleted
+  nothing. Before you ask for it, tell the person that afterwards a spool is linked again
+  only by its RFID tag, so an untagged spool can end up twice (plan Decisions 165-170).
 - Child data types (weights, presets, suppliers per spool, a spool's location) move only
   on spools that are linked to a BB spool already (plan Decision 16).
 - A spool deleted in BB comes back under `sb_to_bb` or `two_way` with `spools` set to

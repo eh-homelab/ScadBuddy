@@ -401,6 +401,9 @@ class SyncStatus(BaseModel, extra="forbid"):
     errors: list[SyncError]
     directions: FilamentSync
     skipped: SkipReason | None
+    #: The links belong to another Bambuddy than the configured one, so the sync is
+    #: stopped until a person resets them (Decision 12, #6773).
+    instance_changed: bool = False
 
 
 class SyncRun(BaseModel, extra="forbid"):
@@ -410,3 +413,48 @@ class SyncRun(BaseModel, extra="forbid"):
 
     started: Literal[True] = True
     requested_at: AwareDatetime
+
+
+class LinksResetCounts(BaseModel, extra="forbid"):
+    """What a reset of the Bambuddy links deletes (#6773), or deleted: the spool links
+    (`filament_bb_links`), the supplier, location, insert type and spool type links (each
+    row's Bambuddy id, its hashes and its seen copy), the open create intents
+    (`filament_bb_creates`), the error rows (`filament_bb_push_errors`) and the Bambuddy
+    spools the pull ignores (`filament_bb_ignored`). No ScadBuddy row is deleted."""
+
+    spools: int = 0
+    suppliers: int = 0
+    locations: int = 0
+    insert_types: int = 0
+    filaments: int = 0
+    intents: int = 0
+    errors: int = 0
+    ignored: int = 0
+
+    def links(self) -> int:
+        """Every link of every kind."""
+        return self.spools + self.suppliers + self.locations + self.insert_types + self.filaments
+
+
+class LinksResetPreview(BaseModel, extra="forbid"):
+    """``GET /filament/sync/reset-links``: the instance the links belong to (what
+    ``confirm_instance`` must name), the configured one, and what a reset would delete."""
+
+    instance: str | None
+    configured_instance: str | None
+    counts: LinksResetCounts
+
+
+class LinksResetRequest(BaseModel, extra="forbid"):
+    """``POST /filament/sync/reset-links``'s body: the instance the person confirms the
+    links belong to, so a stale page cannot reset another Bambuddy's links."""
+
+    confirm_instance: str = Field(min_length=1, max_length=64)
+
+
+class LinksResetDone(BaseModel, extra="forbid"):
+    """``POST /filament/sync/reset-links``'s answer: the instance whose links were
+    deleted, and what was deleted."""
+
+    instance: str
+    deleted: LinksResetCounts

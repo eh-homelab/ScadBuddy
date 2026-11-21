@@ -1891,7 +1891,8 @@ async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
         " at most `limit` writes (#6265): a pass's rounds together stay within 200. The"
         " route reads `filament_sync` and the timer's interval itself. A kept create"
         " records its intent in this call, so a plan sent again plans the same create"
-        " from that intent."
+        " from that intent. A snapshot of another Bambuddy than the configured one plans"
+        " nothing and answers `instance_changed` (#6773)."
     ),
 )
 async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
@@ -1907,7 +1908,8 @@ async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
         "Records the answers to `writes` (#6265): each is checked against SB's links, and"
         " a result whose write names no SB item, or another Bambuddy row, is ignored. A"
         ' list `PUT`\'s answer is `{"k_profiles": rows}` or `{"suppliers": rows}`. Answers'
-        " the counts of items linked, updated, failed and unlinked."
+        " the counts of items linked, updated, failed and unlinked. Results for another"
+        " Bambuddy than the configured one are all ignored (#6773)."
     ),
 )
 async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsReport:

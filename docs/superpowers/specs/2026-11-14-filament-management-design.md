@@ -777,7 +777,21 @@ below are the plan's):
 - Instance (Decision 12). The workflow id carries a hash of the normalised Bambuddy URL.
   `filament_bb_sync_state.instance` records the instance the links belong to. A pass for
   another instance plans nothing and reports `instance_changed`, and the sync stays
-  stopped until the links are reset, which is not built.
+  stopped until the links are reset.
+- Reset of the links (#6773, Decisions 165-170). `POST /filament/sync/reset-links` takes
+  `confirm_instance`, which must be the recorded instance (409 `confirm_mismatch`), and
+  answers 409 `same_instance` when the links belong to the configured Bambuddy and
+  `nothing_to_reset` when no instance is recorded. In one transaction it deletes the spool
+  links, the supplier, location, insert type and spool type links (their Bambuddy ids,
+  hashes and seen copies), the create intents, the error rows, `filament_bb_ignored` and the
+  recorded instance, answers the counts, then nudges a full pass. No SB spool, type,
+  supplier or location is deleted. `GET` on the same path is its dry run. The status reports
+  `instance_changed`; Settings → Filament then offers "Reset Bambuddy links" with a confirm
+  dialog, and the agent has `filament_sync_reset_links` (outward). A plan or results call
+  for another instance than the configured Bambuddy's does nothing. After a reset, a spool
+  is linked again only by its RFID tag (the pull, step 2): Decision 10's adoption needs an
+  intent, which the reset deletes, so an untagged spool is created again on the side its
+  direction sends it to.
 - Lifecycle (Decision 13). A spool is created in Bambuddy only when it is unarchived and
   `pushes(spools)`. Archive and restore are pushed. A 404 on a linked spool, or on the
   probe of one a complete listing lacks, deletes the link; a partial listing never does.
