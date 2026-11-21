@@ -21,6 +21,8 @@ type RackPickView struct {
 	position RackPickView_RackPickView_positionable
 	// The reason property
 	reason RackPickView_RackPickView_reasonable
+	// The unchecked property
+	unchecked []RackUncheckedSlotable
 	// The unsafe_material property
 	unsafe_material *bool
 }
@@ -390,6 +392,22 @@ func (m *RackPickView) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		return nil
 	}
+	res["unchecked"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfObjectValues(CreateRackUncheckedSlotFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]RackUncheckedSlotable, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = v.(RackUncheckedSlotable)
+				}
+			}
+			m.SetUnchecked(res)
+		}
+		return nil
+	}
 	res["unsafe_material"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetBoolValue()
 		if err != nil {
@@ -433,6 +451,12 @@ func (m *RackPickView) GetReason() RackPickView_RackPickView_reasonable {
 	return m.reason
 }
 
+// GetUnchecked gets the unchecked property value. The unchecked property
+// returns a []RackUncheckedSlotable when successful
+func (m *RackPickView) GetUnchecked() []RackUncheckedSlotable {
+	return m.unchecked
+}
+
 // GetUnsafeMaterial gets the unsafe_material property value. The unsafe_material property
 // returns a *bool when successful
 func (m *RackPickView) GetUnsafeMaterial() *bool {
@@ -473,6 +497,18 @@ func (m *RackPickView) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 	}
 	{
 		err := writer.WriteObjectValue("reason", m.GetReason())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetUnchecked() != nil {
+		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetUnchecked()))
+		for i, v := range m.GetUnchecked() {
+			if v != nil {
+				cast[i] = v.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable)
+			}
+		}
+		err := writer.WriteCollectionOfObjectValues("unchecked", cast)
 		if err != nil {
 			return err
 		}
@@ -522,6 +558,11 @@ func (m *RackPickView) SetReason(value RackPickView_RackPickView_reasonable) {
 	m.reason = value
 }
 
+// SetUnchecked sets the unchecked property value. The unchecked property
+func (m *RackPickView) SetUnchecked(value []RackUncheckedSlotable) {
+	m.unchecked = value
+}
+
 // SetUnsafeMaterial sets the unsafe_material property value. The unsafe_material property
 func (m *RackPickView) SetUnsafeMaterial(value *bool) {
 	m.unsafe_material = value
@@ -535,11 +576,13 @@ type RackPickViewable interface {
 	GetOptions() []RackOptionable
 	GetPosition() RackPickView_RackPickView_positionable
 	GetReason() RackPickView_RackPickView_reasonable
+	GetUnchecked() []RackUncheckedSlotable
 	GetUnsafeMaterial() *bool
 	SetGlowUnchecked(value *bool)
 	SetGroupId(value RackPickView_RackPickView_group_idable)
 	SetOptions(value []RackOptionable)
 	SetPosition(value RackPickView_RackPickView_positionable)
 	SetReason(value RackPickView_RackPickView_reasonable)
+	SetUnchecked(value []RackUncheckedSlotable)
 	SetUnsafeMaterial(value *bool)
 }
