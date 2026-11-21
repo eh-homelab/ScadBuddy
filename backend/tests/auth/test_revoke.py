@@ -251,8 +251,14 @@ def test_the_state_of_a_retired_role_is_reported(
     conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
     conn.execute("CREATE TABLE ai_left_behind (id int)")
     conn.execute("RESET ROLE")
-    conn.execute(sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(role)))
-    with psycopg.connect(pg_conninfo, user=role, autocommit=True):
+    # CI's Postgres asks every role for a password (scram-sha-256).
+    password = uuid.uuid4().hex
+    conn.execute(
+        sql.SQL("ALTER ROLE {} LOGIN PASSWORD {}").format(
+            sql.Identifier(role), sql.Literal(password)
+        )
+    )
+    with psycopg.connect(pg_conninfo, user=role, password=password, autocommit=True):
         (state,) = retired_state(conn)
     # settings, activity, operations, the sequence and the credential view.
     assert state == RetiredState(role, granted=5, owned=1, sessions=1)
