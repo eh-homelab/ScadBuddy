@@ -131,6 +131,9 @@ class _Reads:
 
     rows: dict[str, dict[UUID, dict[str, Any]]] = field(default_factory=dict)
     refs: BbRefs | None = None
+    #: R-6688-10: the rows this round probes. Bambuddy may have deleted them, so the plan
+    #: named none of them to a spool (`BbRefs.without`), and a spool's compare names none.
+    probed: frozenset[tuple[str, UUID]] = frozenset()
 
     def desired(self, conn: Conn, kind: str, sb_id: UUID) -> dict[str, Any] | None:
         if kind not in self.rows:
@@ -139,7 +142,7 @@ class _Reads:
 
     def bb_refs(self, conn: Conn) -> BbRefs:
         if self.refs is None:
-            self.refs = BbRefs.read(conn)
+            self.refs = BbRefs.read(conn).without(self.probed)
         return self.refs
 
     def linked(self, kind: str, sb_id: UUID, bb_id: int) -> None:
@@ -180,7 +183,11 @@ def apply_results(
     `bambuddy_pull.record_instance`), and results for another instance are all ignored.
     A result whose link another SB row holds by now is ignored (review I1)."""
     report = ResultsReport()
-    reads = _Reads()
+    reads = _Reads(
+        probed=frozenset(
+            (w.kind, w.sb_id) for w in plan_writes if w.op == "probe" and w.kind != "spool"
+        )
+    )
     writes = {write.key: write for write in plan_writes}
     for result in results:
         write = writes.get(result.key)

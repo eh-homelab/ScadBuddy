@@ -839,7 +839,7 @@ below are the plan's):
   probe of one a complete listing lacks, deletes the link; a partial listing never does.
   A linked supplier, location, insert type or filament entry a complete listing lacks is
   probed too; its 404 deletes the link, and the next round creates the row again under
-  its direction (#6688, plan Decisions 187-192, 200 and 201).
+  its direction (#6688, plan Decisions 187-192 and 200-203).
 - Fields (Decisions 14, 15). The fields each data type carries are in Decision 14. Not
   pushed: SKU settings (#6270 owns them) and `last_scale_weight`. Supplier links and
   prices go to Bambuddy only, and are never pulled.

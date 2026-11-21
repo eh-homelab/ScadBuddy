@@ -362,6 +362,26 @@ def test_a_spool_names_its_deleted_location_only_once_it_is_made_again(
     assert third.deferred == 0
 
 
+def test_a_spool_probe_beside_its_locations_probe_keeps_its_seen_location(
+    pg_pool: PgPool,
+) -> None:
+    """R-6688-10: ``results`` compares a spool's answer with SB's values as the plan made
+    them: a location probed in the same round may be gone, so its id is no SB value, and
+    the answer's ``location_id`` is not taken into ``bb_seen`` as SB's."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (shelf, spool))
+    _link(pg_pool, spool, 50, seen={"location_id": 7}, seen_at=datetime.now(UTC))
+    location = _write("location", shelf, "probe", 40)
+    probe = _write("spool", spool, "probe", 50)
+    results = [_refused(location, 503), _ok(probe, _answer(50, location_id=40))]
+    _apply(f, [location, probe], results)
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_seen"]["location_id"] == 7
+
+
 def test_a_spool_naming_an_archived_deleted_location_goes_without_it(pg_pool: PgPool) -> None:
     """R-6688-7: the probe of an archived location is planned in this round, so a later
     round of this pass can settle the spool that names it: it counts ``deferred``, not
