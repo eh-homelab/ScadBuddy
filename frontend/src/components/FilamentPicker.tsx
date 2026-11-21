@@ -25,6 +25,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { NeedsTypeBadge } from './filament/NeedsTypeBadge'
+import { SpoolNumberLink } from './filament/SpoolNumberLink'
 import { RgbaSwatch } from './filament/RgbaSwatch'
 import { Swatch } from './print/Swatch'
 
@@ -221,7 +222,8 @@ function TraySpool({ spool }: { spool: SpoolOption }) {
   const name = [spool.brand, spool.color_name].filter(Boolean).join(' ') || spool.material
   return (
     <p className="basis-full pl-6 text-[11px] text-muted-foreground" data-testid={`sb-spool-${spool.spool_id}`}>
-      <span className="text-foreground">Spool #{spool.sb_number}:</span> {name}
+      <SpoolNumberLink spool={spool} className="text-foreground">Spool #{spool.sb_number}</SpoolNumberLink>
+      <span className="text-foreground">:</span> {name}
       {spool.remaining_g !== null && spool.remaining_g !== undefined && (
         <span className="sb-num"> · {grams(spool.remaining_g)}</span>
       )}
@@ -516,7 +518,7 @@ export function FilamentPicker({
                         {((!trays && spool.sb_number != null) || (spool.needs_type && spool.sb_spool_id)) && (
                           <span className="flex shrink-0 items-center gap-1.5">
                             {!trays && spool.sb_number != null && (
-                              <span className="sb-num text-[11px] text-muted-foreground">#{spool.sb_number}</span>
+                              <SpoolNumberLink spool={spool} className="sb-num text-[11px] text-muted-foreground">#{spool.sb_number}</SpoolNumberLink>
                             )}
                             <NeedsTypeBadge spool={spool} />
                           </span>

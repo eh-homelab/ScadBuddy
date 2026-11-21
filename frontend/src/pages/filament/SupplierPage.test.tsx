@@ -41,6 +41,21 @@ describe('the supplier page', () => {
     expect(screen.getByLabelText('Customer number')).toHaveValue('BL-208841')
   })
 
+  it("marks the product a link names, and links each product's type and price sheet row (#6869)", async () => {
+    renderPage(
+      <Routes>
+        <Route path="/filament/suppliers/:id" element={<SupplierPage />} />
+      </Routes>,
+      { route: `/filament/suppliers/${SUPPLIER.BAMBU}#product-${PRODUCT.JADE}` },
+    )
+    await heading('Bambu Lab')
+    await waitFor(() => expect(productRow(PRODUCT.JADE)).toHaveAttribute('aria-current', 'location'))
+    expect(productRow(PRODUCT.ORANGE)).not.toHaveAttribute('aria-current')
+    expect(within(productRow(PRODUCT.JADE)).getByRole('link', { name: /BL-PLA-BASIC|Jade|A00/i })).toHaveAttribute('href', `/filament/types/${T.JADE}`)
+    const sheet = screen.getByRole('table', { name: 'Price sheet' })
+    expect(within(sheet).getByRole('link', { name: 'A00-W1' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.BAMBU}#product-${PRODUCT.JADE}`)
+  })
+
   it('renders a product page as a link that opens safely', async () => {
     render()
     await heading('Bambu Lab')

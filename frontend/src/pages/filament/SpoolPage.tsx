@@ -56,6 +56,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { listBack } from '../../components/filament/spoolsQuery'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 
@@ -303,6 +305,8 @@ interface Lists {
   places: { id: string; name: string }[]
   /** Every place by its path, printer trays too: the names a move on the timeline shows. */
   placeNames: { id: string; name: string }[]
+  /** Each place's page, the spools in it, by id (the Spools tab filters by a place's own name, #6869). */
+  placeHrefs: [string, string][]
   printers: (KPrinter & { model: string | null })[]
 }
 
@@ -314,6 +318,10 @@ function flatten(nodes: LocationNode[], path: string[] = []): { id: string; name
 /** Every place, trays too, by its path. */
 const named = (nodes: LocationNode[], path: string[] = []): { id: string; name: string }[] =>
   nodes.flatMap((node) => [{ id: node.id, name: [...path, node.name].join(' / ') }, ...named(node.children ?? [], [...path, node.name])])
+
+/** Every place, trays too, and its page. */
+const placeLinks = (nodes: LocationNode[]): [string, string][] =>
+  nodes.flatMap((node) => [[node.id, filamentLinks.location(node.name)] as [string, string], ...placeLinks(node.children ?? [])])
 
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
 
@@ -331,7 +339,7 @@ export function SpoolPage() {
   const { id = 'new' } = useParams()
   const location = useLocation()
   /** The list's filters this page was opened from: back and a delete return to them. */
-  const listPath = `/filament/spools${listBack(location.state)}`
+  const listPath = `${filamentLinks.spools}${listBack(location.state)}`
   /** Set at once when a new spool's POST lands: the page is then an edit of it. */
   const [madeId, setMadeId] = useState<string | null>(null)
   const creating = id === 'new' && madeId === null
@@ -377,7 +385,7 @@ export function SpoolPage() {
     ])
       .then(([spool, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
         if (!live) return
-        setLists({ materials, subtypes, brands, categories, effects, insertTypes, types, places: flatten(places), placeNames: named(places), printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })) })
+        setLists({ materials, subtypes, brands, categories, effects, insertTypes, types, places: flatten(places), placeNames: named(places), placeHrefs: placeLinks(places), printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })) })
         if (spool) {
           setSaved(spool)
           setDraft(draftOf(spool))
@@ -395,6 +403,23 @@ export function SpoolPage() {
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
   /** The catalogs and places by id and name: the names the timeline shows for an event's ids. */
   const catalogs = useMemo(() => (lists ? [lists.materials, lists.subtypes, lists.brands, lists.categories, lists.effects, lists.insertTypes, lists.placeNames] : []), [lists])
+  /** The page of each id the timeline names: a type, a catalog row's catalog, a place's spools (#6869). */
+  const timelineHrefs = useMemo(() => {
+    const hrefs = new Map<string, string>()
+    if (!lists) return hrefs
+    const kinds = [
+      [lists.materials, 'materials'],
+      [lists.subtypes, 'subtypes'],
+      [lists.brands, 'brands'],
+      [lists.categories, 'categories'],
+      [lists.effects, 'effects'],
+      [lists.insertTypes, 'insert-types'],
+    ] as const
+    for (const [rows, kind] of kinds) for (const row of rows) hrefs.set(row.id, filamentLinks.catalog(kind))
+    for (const [id, href] of lists.placeHrefs) hrefs.set(id, href)
+    for (const type of lists.types) hrefs.set(type.id, filamentLinks.type(type.id))
+    return hrefs
+  }, [lists])
   const dirty = JSON.stringify(draft) !== JSON.stringify(base)
   const presetsDirty = JSON.stringify(draft.presets) !== JSON.stringify(base.presets)
   const typeId = draft.type_id
@@ -498,7 +523,7 @@ export function SpoolPage() {
       if (JSON.stringify(draft.k_values) !== JSON.stringify(kWere)) await setSpoolKValues(spoolId, draft.k_values)
       setNotice('Saved')
       if (id === 'new') {
-        guard.leaveTo(`/filament/spools/${spoolId}`, { replace: true, state: location.state })
+        guard.leaveTo(filamentLinks.spool(spoolId), { replace: true, state: location.state })
         return
       }
       const [fresh] = await Promise.all([getSpool(spoolId), readHistory(spoolId)])
@@ -600,7 +625,17 @@ export function SpoolPage() {
           <p className="text-[13px] text-muted-foreground">
             {creating
               ? 'Choose its type, or its material if it has none yet.'
-              : [typeRow?.code ?? saved?.names.material, leftNow != null ? grams(leftNow) : null, saved?.low_stock ? 'Low stock' : null, saved?.archived_at ? 'Archived' : null].filter(Boolean).join(', ')}
+              : (() => {
+                  const rest = [leftNow != null ? grams(leftNow) : null, saved?.low_stock ? 'Low stock' : null, saved?.archived_at ? 'Archived' : null].filter(Boolean).join(', ')
+                  const what = typeRow && saved?.type_id ? <EntityLink to={filamentLinks.type(saved.type_id)}>{typeRow.code}</EntityLink> : saved?.names.material
+                  return (
+                    <>
+                      {what}
+                      {what && rest ? ', ' : ''}
+                      {rest}
+                    </>
+                  )
+                })()}
           </p>
           {!creating && saved && <NeedsDrying spool={saved} />}
         </div>
@@ -611,7 +646,7 @@ export function SpoolPage() {
         )}
         {!creating && saved && (
           <Button asChild variant="outline" size="sm">
-            <Link to={`/filament/labels?ids=${saved.id}`}>
+            <Link to={filamentLinks.labels([saved.id])}>
               <PrinterIcon /> Print label
             </Link>
           </Button>
@@ -852,7 +887,17 @@ export function SpoolPage() {
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-[12px] text-muted-foreground">Saved through a move, which the history records.</p>
+                <p className="text-[12px] text-muted-foreground">
+                  Saved through a move, which the history records.
+                  {saved?.names?.location && (
+                    <>
+                      {' '}
+                      <EntityLink to={filamentLinks.location(saved.names.location)} className="underline">
+                        Spools in {saved.names.location}
+                      </EntityLink>
+                    </>
+                  )}
+                </p>
                 {!creating && saved && (
                   <p className={saved.needs_drying ? 'text-[13px] font-medium text-warn' : 'text-[13px] text-muted-foreground'}>{outsideDryText(saved.hours_outside_dry)}</p>
                 )}
@@ -919,7 +964,7 @@ export function SpoolPage() {
                       <GramsChart points={history.series} plates={plateTimes(history.events.map((row) => row.event))} label="Grams left" />
                     </div>
                     {saved && <SpoolMetricsPanel history={history} gramsLeft={leftNow} createdAt={saved.created_at} />}
-                    <SpoolTimeline rows={history.events} catalogs={catalogs} types={lists.types} />
+                    <SpoolTimeline rows={history.events} catalogs={catalogs} types={lists.types} hrefs={timelineHrefs} />
                   </>
                 ) : (
                   !historyError && <p className="text-[13px] text-muted-foreground">Loading the history…</p>
@@ -985,7 +1030,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
-        <Link to={`/filament/spools${listBack(location.state)}`} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+        <Link to={`${filamentLinks.spools}${listBack(location.state)}`} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
           <ChevronLeftIcon className="size-3.5" /> Spools
         </Link>
         {children}

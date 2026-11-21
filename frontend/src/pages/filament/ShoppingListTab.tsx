@@ -3,6 +3,8 @@ import { listTypes, type SpoolType } from '../../api/filament'
 import { addShopping, clearShopping, listShopping, patchShopping, removeShopping, type ShoppingItem, type ShoppingItemCreate } from '../../api/filamentPurchasing'
 import { TD, TH } from '../../components/filament/formClasses'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -267,7 +269,7 @@ export function ShoppingListTab() {
                 return (
                   <tr key={item.id} data-item={item.id} className={`border-t ${bought ? 'text-muted-foreground' : ''}`}>
                     <td className="px-1 py-1.5">{type && <RgbaSwatch rgba={type.rgba} size="md" />}</td>
-                    <td className={TD}>{item.material}</td>
+                    <td className={TD}>{item.type_id ? <EntityLink to={filamentLinks.type(item.type_id)}>{item.material}</EntityLink> : item.material}</td>
                     <td className={TD}>{item.subtype}</td>
                     <td className={TD}>{item.brand}</td>
                     <td className={TD}>{item.colour_name}</td>

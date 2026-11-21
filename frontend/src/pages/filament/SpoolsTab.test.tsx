@@ -38,7 +38,7 @@ describe('the Spools tab', () => {
     const rows = spoolRows(await table())
     const row = (number: string) => rows.find((one) => one.dataset.spool === number)!
     expect(await within(row('8')).findByText('Check this tray')).toBeInTheDocument()
-    expect(within(row('8')).getByText('3DP-31B-598 AMS-A slot 4 reports PETG #A7AEB2')).toBeInTheDocument()
+    expect(within(row('8')).getByRole('link', { name: '3DP-31B-598 AMS-A slot 4' }).parentElement).toHaveTextContent('3DP-31B-598 AMS-A slot 4 reports PETG #A7AEB2')
     expect(within(row('4')).queryByText('Check this tray')).toBeNull()
   })
 

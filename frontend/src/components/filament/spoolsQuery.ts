@@ -135,9 +135,6 @@ export const listBack = (state: unknown): string => {
   return typeof back === 'string' && back.startsWith('?') ? back : ''
 }
 
-/** A spool's page (Task 17). */
-export const spoolPath = (spool: Pick<Spool, 'id'>) => `/filament/spools/${encodeURIComponent(spool.id)}`
-
 /** Grams as a whole number with the viewer's grouping; empty when unknown. */
 export const grams = (value: number | null | undefined) => (value == null ? '' : Math.round(value).toLocaleString())
 

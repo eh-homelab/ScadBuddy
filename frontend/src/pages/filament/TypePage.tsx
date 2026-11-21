@@ -35,6 +35,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { listBack } from '../../components/filament/spoolsQuery'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 
@@ -396,7 +398,7 @@ export function TypePage() {
       if (JSON.stringify(draft.k_values) !== JSON.stringify(kWere)) await setTypeKValues(typeId, draft.k_values)
       setNotice('Saved')
       if (id === 'new') {
-        guard.leaveTo(`/filament/types/${typeId}`, { replace: true, state: location.state })
+        guard.leaveTo(filamentLinks.type(typeId), { replace: true, state: location.state })
         return
       }
       const fresh = await getType(typeId)
@@ -662,13 +664,13 @@ export function TypePage() {
                       <RgbaSwatch rgba={spool.effective?.rgba ?? draft.rgba ?? '#FFFFFFFF'} size="md" gramsLeft={spool.grams_left} labelWeight={spool.effective?.label_weight_g} />
                     </td>
                     <td className="px-2 py-1.5">
-                      <Link to={`/filament/spools/${spool.id}`} className="font-medium underline-offset-4 hover:underline">
+                      <EntityLink to={filamentLinks.spool(spool.id)} className="font-medium">
                         #{spool.number}
-                      </Link>
+                      </EntityLink>
                       {spool.archived_at && <span className="ml-2 text-[12px] text-muted-foreground">Archived</span>}
                     </td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{spool.grams_left ?? ''}</td>
-                    <td className="px-2 py-1.5">{spool.names?.location ?? ''}</td>
+                    <td className="px-2 py-1.5">{spool.names?.location ? <EntityLink to={filamentLinks.location(spool.names.location)}>{spool.names.location}</EntityLink> : ''}</td>
                   </tr>
                 ))}
                 {mine.length === 0 && (
@@ -725,7 +727,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
-        <Link to={`/filament/types${listBack(location.state)}`} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+        <Link to={`${filamentLinks.types}${listBack(location.state)}`} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
           <ChevronLeftIcon className="size-3.5" /> Types
         </Link>
         {children}

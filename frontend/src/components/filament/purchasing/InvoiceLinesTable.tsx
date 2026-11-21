@@ -1,12 +1,15 @@
 import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { useEffect, useRef } from 'react'
-import { Link } from 'react-router'
 import type { Spool, SpoolType } from '../../../api/filament'
 import type { InvoiceLine, SupplierProduct } from '../../../api/filamentPurchasing'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { NEW_TAB } from '../../../lib/embed'
+import { anchors, filamentLinks } from '../../../lib/filamentLinks'
+import { useHashTarget } from '../../../lib/useHashTarget'
+import { cn } from '@/lib/utils'
+import { EntityLink } from '../EntityLink'
 import { AppLink } from '../../AppLink'
 import { SpoolLink } from '../SpoolLink'
 import { RgbaSwatch } from '../RgbaSwatch'
@@ -45,6 +48,8 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
   const typeOf = (id: string) => types.find((type) => type.id === id)
   const table = useRef<HTMLTableElement>(null)
   const addButton = useRef<HTMLButtonElement>(null)
+  // A link to one line (`filamentLinks.invoiceLine`) scrolls to it and marks it (#6869).
+  const target = useHashTarget(computed.size > 0)
   // A line added by the button: its description takes focus once the row is there.
   const focusLine = useRef<number | null>(null)
   useEffect(() => {
@@ -102,7 +107,13 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
               const ticked = row.updateSpoolIds.map((id) => spools.find((one) => one.id === id)).filter((one): one is Spool => !!one)
               const quantity = Number(row.quantity) >= 1 ? Number(row.quantity) : 1
               return (
-                <tr key={row.key} data-line={n} className="border-t align-top">
+                <tr
+                  key={row.key}
+                  id={server ? anchors.invoiceLine(server.id) : undefined}
+                  data-line={n}
+                  aria-current={server && target === anchors.invoiceLine(server.id) ? 'location' : undefined}
+                  className="scroll-mt-24 border-t align-top aria-[current=location]:bg-secondary/60"
+                >
                   <td className={`${TD} min-w-52`}>
                     <div className="flex flex-col gap-1">
                       <Input className={field} aria-label={`Description, line ${n}`} aria-invalid={problems.description ? true : undefined} value={row.description} onChange={(e) => change(at, { description: e.target.value })} onBlur={onCommit} />
@@ -164,7 +175,7 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
                             ))}
                         </SelectContent>
                       </Select>
-                      <AppLink href="/filament/types/new" {...NEW_TAB} className="w-fit text-[12px] underline underline-offset-4">
+                      <AppLink href={filamentLinks.newType} {...NEW_TAB} className="w-fit text-[12px] underline underline-offset-4">
                         New type
                       </AppLink>
                       <Select
@@ -206,7 +217,10 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
                             .filter((one) => one.cost_per_kg !== null)
                             .map((one) => (
                               <li key={one.id}>
-                                Spool #{one.number} replaces {money(one.cost_per_kg!)}/kg
+                                <SpoolLink spool={one} className="underline-offset-4 hover:underline">
+                                  Spool #{one.number}
+                                </SpoolLink>{' '}
+                                replaces {money(one.cost_per_kg!)}/kg
                               </li>
                             ))}
                         </ul>
@@ -273,8 +287,10 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
 }
 
 /** A confirmed invoice's lines: what was bought, what it cost, and the spools it made. */
-function Frozen({ lines, types, spools, money }: Shared & { lines: InvoiceLine[] }) {
+function Frozen({ lines, types, spools, money, supplierId }: Shared & { lines: InvoiceLine[]; supplierId?: string }) {
   const spoolNumber = new Map(spools.map((spool) => [spool.id, spool.number]))
+  // A link to one line (`filamentLinks.invoiceLine`) scrolls to it and marks it (#6869).
+  const target = useHashTarget(lines.length > 0)
   return (
     <div className="relative overflow-x-auto rounded-md border">
       <table aria-label="Invoice lines" className="w-full min-w-[40rem] text-left text-[13px]">
@@ -292,19 +308,31 @@ function Frozen({ lines, types, spools, money }: Shared & { lines: InvoiceLine[]
           {lines.map((line, at) => {
             const type = types.find((one) => one.id === line.type_id)
             return (
-              <tr key={line.id} data-line={at + 1} className="border-t align-top">
+              <tr
+                key={line.id}
+                id={anchors.invoiceLine(line.id)}
+                data-line={at + 1}
+                aria-current={target === anchors.invoiceLine(line.id) ? 'location' : undefined}
+                className={cn('scroll-mt-24 border-t align-top aria-[current=location]:bg-secondary/60')}
+              >
                 <td className={TD}>
                   {line.description}
-                  {(line.sku || line.colour_code) && <span className="block text-[12px] text-muted-foreground">{[line.sku, line.colour_code].filter(Boolean).join(' · ')}</span>}
+                  {(line.sku || line.colour_code) && (
+                    <span className="block text-[12px] text-muted-foreground">
+                      {line.sku && supplierId && line.supplier_product_id ? <EntityLink to={filamentLinks.supplierProduct(supplierId, line.supplier_product_id)}>{line.sku}</EntityLink> : line.sku}
+                      {line.sku && line.colour_code ? ' · ' : ''}
+                      {line.colour_code}
+                    </span>
+                  )}
                 </td>
                 <td className={`${TD} text-right tabular-nums`}>{line.quantity}</td>
                 <td className={`${TD} text-right tabular-nums`}>{money(line.unit_price)}</td>
                 <td className={TD}>
                   {type ? (
-                    <Link to={`/filament/types/${type.id}`} className="inline-flex items-center gap-2 underline-offset-4 hover:underline">
+                    <EntityLink to={filamentLinks.type(type.id)} className="inline-flex items-center gap-2">
                       <RgbaSwatch rgba={type.rgba ?? '#FFFFFFFF'} size="sm" />
                       {type.code}
-                    </Link>
+                    </EntityLink>
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}
@@ -320,9 +348,16 @@ function Frozen({ lines, types, spools, money }: Shared & { lines: InvoiceLine[]
                   <ul className="flex flex-wrap gap-x-2 gap-y-1">
                     {line.spool_ids.map((id) => (
                       <li key={id}>
-                        <SpoolLink spool={{ id }} className="underline-offset-4 hover:underline">
-                          Spool #{spoolNumber.get(id) ?? '?'}
-                        </SpoolLink>
+                        {/* A spool missing from every spool, archived too, was deleted (R-6869-5). */}
+                        {spools.length > 0 && !spoolNumber.has(id) ? (
+                          <EntityLink to={filamentLinks.spool(id)} deleted>
+                            Spool
+                          </EntityLink>
+                        ) : (
+                          <SpoolLink spool={{ id }} className="underline-offset-4 hover:underline">
+                            Spool #{spoolNumber.get(id) ?? '?'}
+                          </SpoolLink>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -336,6 +371,6 @@ function Frozen({ lines, types, spools, money }: Shared & { lines: InvoiceLine[]
   )
 }
 
-export function InvoiceLinesTable(props: ({ editable: true } & EditableProps) | ({ editable: false; lines: InvoiceLine[] } & Shared)) {
+export function InvoiceLinesTable(props: ({ editable: true } & EditableProps) | ({ editable: false; lines: InvoiceLine[]; supplierId?: string } & Shared)) {
   return props.editable ? <Editable {...props} /> : <Frozen {...props} />
 }

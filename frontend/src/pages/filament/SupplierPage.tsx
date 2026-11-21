@@ -24,6 +24,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { useAdvanced } from '../../lib/advanced'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 import { message } from '../../components/filament/purchasing/priceFormat'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /** Remembered per browser: whether archived products are listed. */
 export const SHOW_ARCHIVED_PRODUCTS_KEY = 'scadbuddy.filament.supplier.showArchivedProducts'
@@ -264,7 +265,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
-        <Link to="/filament/suppliers" className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+        <Link to={filamentLinks.suppliers} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
           <ChevronLeftIcon className="size-3.5" /> Suppliers
         </Link>
         {children}

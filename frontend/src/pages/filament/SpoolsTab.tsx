@@ -51,6 +51,7 @@ import { downloadBlob } from '../../lib/embed'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 interface Loaded {
   spools: Spool[]
@@ -376,7 +377,7 @@ export function SpoolsTab() {
         )}
         <div className="ml-auto flex flex-wrap gap-2">
           <Button size="sm" asChild>
-            <Link to="/filament/spools/new">
+            <Link to={filamentLinks.newSpool}>
               <PlusIcon /> New spool
             </Link>
           </Button>

@@ -1,6 +1,7 @@
-import { Link } from 'react-router'
 import type { PriceSheetRow } from '../../../api/filamentPurchasing'
 import type { SpoolType } from '../../../api/filament'
+import { filamentLinks } from '../../../lib/filamentLinks'
+import { EntityLink } from '../EntityLink'
 import { TD, TH } from '../formClasses'
 import { RgbaSwatch } from '../RgbaSwatch'
 import { PriceCell } from './PriceCell'
@@ -43,12 +44,14 @@ export function PriceSheet({ rows, types, money }: { rows: PriceSheetRow[]; type
             return (
               <tr key={row.product.id} data-product={row.product.id} className="border-t align-top">
                 <td className={TD}>
-                  <Link to={`/filament/types/${row.product.type_id}`} className="inline-flex items-center gap-2 underline-offset-4 hover:underline">
+                  <EntityLink to={filamentLinks.type(row.product.type_id)} className="inline-flex items-center gap-2">
                     {type && <RgbaSwatch rgba={type.rgba ?? '#FFFFFFFF'} size="sm" />}
                     <span className="font-medium">{row.type_code}</span>
-                  </Link>
+                  </EntityLink>
                 </td>
-                <td className={`${TD} font-mono text-[12px]`}>{row.product.sku}</td>
+                <td className={`${TD} font-mono text-[12px]`}>
+                  <EntityLink to={filamentLinks.supplierProduct(row.product.supplier_id, row.product.id)}>{row.product.sku}</EntityLink>
+                </td>
                 <td className={`${TD} text-right`}>
                   <PriceCell point={row.newest} money={money} />
                 </td>

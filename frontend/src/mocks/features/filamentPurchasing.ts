@@ -62,6 +62,7 @@ function build() {
     on_date: row.on_date,
     source: 'manual',
     invoice_line_id: null,
+    invoice_id: null,
     created_at: `${row.on_date}T09:00:00Z`,
     updated_at: `${row.on_date}T09:00:00Z`,
   }))
@@ -195,6 +196,7 @@ function invoicePrice(invoice: Stored, line: Line, products: Product[]): Price {
     on_date: invoice.invoice_date,
     source: 'invoice',
     invoice_line_id: line.id,
+    invoice_id: invoice.id,
     created_at: now(),
     updated_at: now(),
   }
@@ -714,6 +716,7 @@ export const handlers = [
       on_date: (body.on_date as string | null | undefined) ?? today(),
       source: 'manual',
       invoice_line_id: null,
+      invoice_id: null,
       created_at: now(),
       updated_at: now(),
     }

@@ -1,17 +1,22 @@
 import { ArrowDownIcon, ArrowUpIcon } from 'lucide-react'
 import { Fragment } from 'react'
 import { CheckTray, type TrayCheck } from './CheckTray'
+import { EntityLink } from './EntityLink'
 import { NeedsDrying } from './NeedsDrying'
 import { SpoolLink } from './SpoolLink'
 import type { Spool } from '../../api/filament'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { RgbaSwatch } from './RgbaSwatch'
 import { COLUMN_TITLES, grams, hasUnknownMaterial, needsType, type ColumnId, type SpoolGroup } from './spoolsQuery'
 
 const NUMERIC = new Set<ColumnId>(['grams_left', 'label_weight'])
 const UNSORTABLE = new Set<ColumnId>(['type', 'note'])
+
+/** The catalog each name column's entry is in (#6869). */
+const CATALOG_OF = { material: 'materials', brand: 'brands', subtype: 'subtypes' } as const
 
 const day = (at: string | null | undefined) => (at ? new Date(at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '')
 
@@ -50,11 +55,18 @@ function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, str
       return spool.effective?.colour_name ?? ''
     case 'material':
     case 'brand':
-    case 'subtype':
-    case 'location':
-      return spool.names?.[column] ?? ''
-    case 'type':
-      return spool.type_id ? (typeCodes.get(spool.type_id) ?? '') : ''
+    case 'subtype': {
+      const name = spool.names?.[column]
+      return name ? <EntityLink to={filamentLinks.catalog(CATALOG_OF[column])}>{name}</EntityLink> : ''
+    }
+    case 'location': {
+      const name = spool.names?.location
+      return name ? <EntityLink to={filamentLinks.location(name)}>{name}</EntityLink> : ''
+    }
+    case 'type': {
+      const code = spool.type_id ? typeCodes.get(spool.type_id) : undefined
+      return spool.type_id && code ? <EntityLink to={filamentLinks.type(spool.type_id)}>{code}</EntityLink> : ''
+    }
     case 'grams_left':
       return grams(spool.grams_left)
     case 'label_weight':
