@@ -349,7 +349,7 @@ class _Reads:
         self.client = client
         self._presets: dict[int, LocalPresetDetail | ApiError | ValidationError] = {}
         self._spools: dict[int, Spool] | Unread | None = None
-        self._k_tables: dict[tuple[int, str], list[KProfile] | Unread] = {}
+        self._k_tables: dict[tuple[int, str], _KTable | Unread] = {}
         self.printers: list[LinkedPrinter] | None = None
 
     async def local_preset(self, preset_id: int) -> LocalPresetDetail:
@@ -389,19 +389,34 @@ class _Reads:
                     self._spools = found
         return self._spools
 
-    async def k_table(self, printer_id: int, nozzle: str) -> list[KProfile] | Unread:
+    async def k_table(self, printer_id: int, nozzle: str) -> _KTable | Unread:
         """Bambuddy printer ``printer_id``'s K calibrations for one nozzle, read with GET
-        once per fill (#6720). Only while Bambuddy is linked."""
+        once per fill (#6720). Each row is validated on its own, as `spools` does: a row of
+        another shape is left out and counted (#6856). Only while Bambuddy is linked."""
         assert self.client is not None
         key = (printer_id, nozzle)
         if key not in self._k_tables:
             try:
-                self._k_tables[key] = await self.client.k_profiles(printer_id, nozzle)
+                rows = await self.client.k_profile_rows(printer_id, nozzle)
             except ApiError as error:
                 self._k_tables[key] = Unread(str(error.detail))
-            except ValidationError:
-                self._k_tables[key] = Unread("Bambuddy answered in another shape")
+            else:
+                table = _KTable()
+                for row in rows:
+                    try:
+                        table.rows.append(KProfile.model_validate(row))
+                    except ValidationError:
+                        table.skipped += 1
+                self._k_tables[key] = table
         return self._k_tables[key]
+
+
+@dataclass
+class _KTable:
+    """A printer's K table for one nozzle: the rows that validated, and how many did not."""
+
+    rows: list[KProfile] = field(default_factory=list)
+    skipped: int = 0
 
 
 @dataclass(frozen=True)
@@ -685,7 +700,7 @@ class TypeFiller:
         """The K values a fill would import (`_KImport`), and why any were not read."""
         spools, spool_reason = await self._spool_k(type_id, reads)
         printers, printer_reasons = await self._printer_k(type_id, reads, spools)
-        reasons = [r for r in (spool_reason, *printer_reasons) if r]
+        reasons = list(dict.fromkeys(r for r in (spool_reason, *printer_reasons) if r))
         return _KImport(spools, printers, "; ".join(reasons) or None)
 
     async def _printer_k(
@@ -724,8 +739,13 @@ class TypeFiller:
                         f"{printer.name} did not give its {nozzle} mm K table: {table.reason}"
                     )
                     continue
+                if table.skipped:
+                    reasons.append(
+                        f"{printer.name} sent {table.skipped} K calibrations at {nozzle} mm"
+                        " in another shape, skipped"
+                    )
                 by_extruder: dict[int, list[tuple[KProfile, Decimal]]] = {}
-                for cal in table:
+                for cal in table.rows:
                     value = _k_number(cal.k_value)
                     if cal.filament_id.strip() == filament and value is not None:
                         by_extruder.setdefault(cal.extruder_id, []).append((cal, value))

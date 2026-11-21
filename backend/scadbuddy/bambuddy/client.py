@@ -69,7 +69,6 @@ from scadbuddy.bambuddy.models import (
     HaEntity,
     InventoryRemain,
     KProfile,
-    KProfileTable,
     LibraryFile,
     LibraryListRow,
     LibraryPlates,
@@ -975,7 +974,15 @@ class BambuddyClient:
     async def k_profiles(self, printer_id: int, nozzle_diameter: str) -> list[KProfile]:
         """``GET /api/v1/printers/{id}/kprofiles/?nozzle_diameter=``: the K table the
         printer holds for one nozzle. The trailing slash is Bambuddy's route (#6625). A
-        body that is not JSON is a 502 `BAD_BODY_PROBLEM`, as `_rows` answers (#6856)."""
+        row of another shape fails the whole read (`ValidationError`); `k_profile_rows`
+        gives them unvalidated."""
+        rows = await self.k_profile_rows(printer_id, nozzle_diameter)
+        return [KProfile.model_validate(row) for row in rows]
+
+    async def k_profile_rows(self, printer_id: int, nozzle_diameter: str) -> list[Any]:
+        """`k_profiles`' rows as Bambuddy sent them, not yet validated, for a caller that
+        skips a bad row (#6856). A body that is not JSON, or not an object whose
+        ``profiles`` is a list, is a 502 `BAD_BODY_PROBLEM`, as `_rows` answers."""
         what = f"read printer {printer_id}'s K profiles"
         response = await self._send(
             "GET",
@@ -993,7 +1000,14 @@ class BambuddyClient:
                 f"Bambuddy answered something that is not JSON when asked to {what}",
                 type_=BAD_BODY_PROBLEM,
             ) from None
-        return KProfileTable.model_validate(body).profiles
+        rows = body.get("profiles", []) if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no list of profiles when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
+            )
+        return rows
 
     # --- inventory -----------------------------------------------------------
 

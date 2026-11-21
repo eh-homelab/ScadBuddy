@@ -833,6 +833,26 @@ async def test_a_k_table_read_that_fails_is_a_k_reason_and_the_fields_still_fill
 
 
 @respx.mock
+async def test_a_k_row_of_another_shape_is_skipped_and_counted_the_rest_import(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """#6856: the K table is read row by row, as Bambuddy's spools are; a row that does not
+    validate is left out, and ``k_reason`` says how many were."""
+    _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    bad = _cal(1, "GFA05", "0.030") | {"extruder_id": "left"}
+    respx.get(f"{API}/printers/1/kprofiles/").mock(
+        return_value=_k_table(_cal(0, "GFA05", "0.020"), bad, {"slot_id": "x"})
+    )
+
+    (done,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
+
+    assert [(r.extruder, r.k_value) for r in done.k_values] == [(0, Decimal("0.020"))]
+    assert "2 K calibrations" in (done.k_reason or "")
+
+
+@respx.mock
 async def test_only_printers_of_the_preset_model_are_asked_once_per_nozzle(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
 ) -> None:
