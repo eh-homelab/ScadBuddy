@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { FilamentOptions, FilamentWarning, SlotNeed, SpoolOption } from '../api/types'
 import {
   NO_FILTERS,
+  choiceReasons,
+  colourName,
+  tileGroups,
+  trayCode,
   carriedPlan,
   checkPlan,
   facets,
@@ -432,5 +436,100 @@ describe('trayChoiceLabel', () => {
     expect(
       trayChoiceLabel({ spool_id: -1, material: 'PETG', colour: null, loaded: { printer_id: 0, ams_id: 1, tray_id: 2 } }),
     ).toMatch(/^PETG in AMS-B/)
+  })
+
+  // #6885 — one name per tray: the spool's own colour name wins over the colour word.
+  it("names the tray by the spool's own colour name when it holds one", () => {
+    expect(
+      trayChoiceLabel({
+        spool_id: -3,
+        material: 'PLA',
+        colour: '#00B1B7',
+        colour_word: 'teal',
+        color_name: 'Turquoise',
+        label: 'AMS-C slot 1',
+      }),
+    ).toBe('PLA Turquoise in AMS-C slot 1')
+  })
+})
+
+describe('colourName (#6885)', () => {
+  it('takes the spool’s own name, else the colour word, else the hex code', () => {
+    expect(colourName(spool({ color_name: 'Navy Blue', colour_word: 'navy' }), true)).toBe('Navy Blue')
+    expect(colourName(spool({ color_name: null, colour_word: 'navy' }), true)).toBe('navy')
+    expect(colourName(spool({ color_name: null, colour_word: null, colour: '#000080' }), true)).toBe('#000080')
+  })
+
+  it("never names a Bambuddy-path tray by its place, \"what's in …\"", () => {
+    const tray = spool({ tray_only: true, color_name: "what's in AMS-D slot 4", colour_word: 'black' })
+    expect(colourName(tray, false)).toBe('black')
+  })
+})
+
+describe('trayCode (#6885)', () => {
+  it('codes a tray as Bambu Studio maps it', () => {
+    expect(trayCode({ loaded: loaded({ ams_id: 0, tray_id: 2 }) })).toBe('A3')
+    expect(trayCode({ loaded: loaded({ ams_id: 3, tray_id: 3 }) })).toBe('D4')
+    expect(trayCode({ loaded: loaded({ ams_id: 128, tray_id: 0 }) })).toBe('HT-A')
+    expect(trayCode({ loaded: loaded({ ams_id: 255, tray_id: 1 }), label: 'External R' })).toBe('Ext R')
+    expect(trayCode({ loaded: null })).toBeNull()
+  })
+})
+
+describe('choiceReasons (#6885)', () => {
+  const grey: SlotNeed = { slot_id: 1, material: 'PLA', colour: '#A7AEB2', colour_matches: [-4] }
+
+  it("says a close colour in another material is not the file's material", () => {
+    const petg = spool({ spool_id: -4, material: 'PETG', color_name: 'Grey', colour: '#A7AEB2' })
+    expect(choiceReasons(grey, petg, true)).toEqual(["PETG instead of the file's PLA"])
+  })
+
+  it("says a far colour is not the file's colour", () => {
+    const teal = spool({ spool_id: -2, material: 'PLA Basic', color_name: null, colour_word: 'teal', colour: '#00B1B7' })
+    expect(choiceReasons(grey, teal, true)).toEqual(["teal, not the file's colour"])
+  })
+
+  it('says nothing for a close match in the same family', () => {
+    const match = spool({ spool_id: -4, material: 'PLA Matte', colour: '#A7AEB2' })
+    expect(choiceReasons(grey, match, true)).toEqual([])
+  })
+})
+
+describe('tileGroups (#6885)', () => {
+  const tray = (spool_id: number, ams_id: number, tray_id: number, rest: Partial<SpoolOption> = {}) =>
+    spool({ spool_id, loaded: loaded({ ams_id, tray_id }), ...rest })
+
+  it('puts the close matches first, then the units in Bambu Studio’s order', () => {
+    const spools = [
+      tray(-17, 255, 0, { colour: '#FFFFFF' }),
+      tray(-4, 128, 0, { material: 'PETG', colour: '#A7AEB2' }),
+      tray(-1, 0, 0, { colour: '#C12E1F' }),
+      tray(-5, 1, 0, { colour: '#A0A8AC' }),
+      tray(-2, 0, 1, { colour: '#000080' }),
+      spool({ spool_id: 9, colour: '#A7AEB2' }),
+    ]
+    const slot: SlotNeed = { slot_id: 1, material: 'PLA', colour: '#A7AEB2', colour_matches: [-4, -5, 9] }
+    const groups = tileGroups(spools, slot, 1)
+    expect(groups.map((group) => group.label)).toEqual([
+      'Closest to the file',
+      'AMS-A',
+      'HT-A',
+      'External',
+    ])
+    // The PETG is the colour, not the material: it stays under its unit.
+    expect(groups[0]!.spools.map((entry) => entry.spool_id)).toEqual([-5, 9])
+    expect(groups[1]!.spools.map((entry) => entry.spool_id)).toEqual([-1, -2])
+  })
+
+  it('has no close-match group for a slot with no colour', () => {
+    const groups = tileGroups([tray(-1, 0, 0)], { slot_id: 1, colour_matches: [-1] }, 1)
+    expect(groups.map((group) => group.label)).toEqual(['AMS-A'])
+  })
+
+  it('puts a spool loaded in another printer apart', () => {
+    const away = spool({ spool_id: 30, loaded: loaded({ printer_id: 2 }) })
+    expect(tileGroups([away], { slot_id: 1, colour_matches: [] }, 1).map((group) => group.label)).toEqual([
+      'In another printer',
+    ])
   })
 })

@@ -5321,7 +5321,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     const { user } = renderPicker()
     await loaded()
     await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
-    expect(within(screen.getByTestId('filament-slot-1')).getByText('PLA blue in AMS-A slot 1')).toBeInTheDocument()
+    expect(within(screen.getByTestId('filament-slot-1')).getByRole('radio', { name: /PLA Blue in AMS-A slot 1/ })).toBeInTheDocument()
     expect(screen.getByText('Filed under:')).toHaveTextContent('the template’s folder')
     expect(screen.queryByText(NO_BAMBUDDY)).not.toBeInTheDocument()
     const pair = { printer: HOT_PRINTER.id, printer_id: HOT_PRINTER.bambuddy_printer_id }
