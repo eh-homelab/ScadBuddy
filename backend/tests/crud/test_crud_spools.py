@@ -63,7 +63,14 @@ def test_the_area_is_served_and_awaited() -> None:
     areas = CRUD_AREAS["print"]
     positions = [
         areas.index(area)
-        for area in ["spools", "transfer-urls", "access-codes", "filament", "filament-sync"]
+        for area in [
+            "spools",
+            "transfer-urls",
+            "access-codes",
+            "filament",
+            "filament-sync",
+            "filament-pull",
+        ]
     ]
     assert positions == sorted(positions)
 

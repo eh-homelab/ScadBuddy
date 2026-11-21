@@ -56,6 +56,7 @@ def test_the_print_areas_list_filament_sync() -> None:
     API that serves them (`wait_for_areas`) rather than planning into a 404."""
     assert "filament-sync" in PRINT_CRUD_AREAS
     assert "filament-sync" in CRUD_AREAS["print"]
+    assert CRUD_AREAS["print"].index("filament-pull") > CRUD_AREAS["print"].index("filament-sync")
     assert set(CRUD_AREAS["print"]) == PRINT_CRUD_AREAS
 
 

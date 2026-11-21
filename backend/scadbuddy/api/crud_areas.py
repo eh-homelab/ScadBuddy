@@ -88,9 +88,12 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/filament/bb-to-sb``, the Bambuddy path's SB spools (Task 7). An area of its own, so a
 #: print worker that books there waits for an API that serves them. Its ``filament-sync``
 #: area is ``…/print/filament/sync/directions``, ``…/plan``, ``…/results`` and ``…/pass``:
-#: the sync pass's reads and writes of SB, `FilamentSyncApi` (#6265 Task 6). Its ``sensor-notify``
-#: area is ``…/print/filament/sensor-notifications/claim`` and ``…/{id}/end``: the sensors'
-#: alert notifications the print worker sends through Bambuddy (#6646). The intake
+#: the sync pass's reads and writes of SB, `FilamentSyncApi` (#6265 Task 6). Its
+#: ``filament-pull`` area is ``…/print/filament/pull``, ``…/pull/usage``,
+#: ``…/pull/ha-states`` and ``…/pull/trays``: what the worker read of Bambuddy for the pull,
+#: applied by the API, `BbPullApi` (#6772). Its ``sensor-notify`` area is
+#: ``…/print/filament/sensor-notifications/claim`` and ``…/{id}/end``: the sensors' alert
+#: notifications the print worker sends through Bambuddy (#6646). The intake
 #: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
 #: customer's staged file, checked by the intake worker (#6133). The agent's small stores
 #: (#5299 step 5, `api/crud_agent_stores.py`): its ``activity-kinds`` area is
@@ -180,6 +183,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "access-codes",
         "filament",
         "filament-sync",
+        "filament-pull",
         "sensor-notify",
     ],
     "storefront": [

@@ -12,6 +12,8 @@ import pytest
 
 from scadbuddy import main
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.bb_pull_apply import LocalBbPull
+from scadbuddy.filament.bb_pull_models import PULL_READ_ACTIVITY
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.sensors import PoolSensorNotifications
@@ -327,6 +329,14 @@ async def test_the_api_serves_the_filament_sync_pass_on_its_own_stores(
     api: Any = sync_pass.__self__.api
     assert isinstance(api, LocalFilamentSync)
     assert api._filament is FILAMENT_STORE and api._settings is state.settings_store
+    # The Bambuddy pull's reads apply on this process's own stores (#6772).
+    [pull_read] = [
+        fn
+        for fn in given
+        if getattr(fn, "__temporal_activity_definition").name == PULL_READ_ACTIVITY
+    ]
+    pull_api: Any = pull_read.__self__.api
+    assert isinstance(pull_api, LocalBbPull) and pull_api.filament is FILAMENT_STORE
     [notify] = [
         fn
         for fn in given

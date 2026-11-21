@@ -434,7 +434,7 @@ export const filamentTools: Tool[] = [
       "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
       'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
       "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
-      'where a printer has an exact match. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
+      'where a printer has an exact match, never over a K value a person, the fill or a printer calibration set. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
       '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
       'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
       '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
@@ -1485,7 +1485,10 @@ export const filamentTools: Tool[] = [
       'for a tag a linked spool holds, left alone), `catalog_failed` and `catalog_skipped` (Bambuddy\'s spool ' +
       'catalog), `names_skipped` (catalog names with no letter or digit, left out), and `usage_booked` and ' +
       '`usage_unlinked` (Bambuddy usage rows booked, and those of an unlinked spool). ' +
-      '409 when no Bambuddy is configured. Reads Bambuddy, writes ScadBuddy only.',
+      '409 when no Bambuddy is configured, or when the Bambuddy URL changed during the import (import again). ' +
+      '503 when the print worker did not finish in time: it may still be running, so check the spools before ' +
+      'importing again. 502 when ScadBuddy refused what the worker read (importing again gets the same answer). ' +
+      "ScadBuddy's print worker reads Bambuddy; this writes ScadBuddy only.",
     input: z.object({}),
     risk: 'write',
     source: SOURCE,

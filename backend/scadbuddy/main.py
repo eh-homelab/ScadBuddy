@@ -31,6 +31,10 @@ from scadbuddy.activity.index import (
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
+    crud_agent_events,
+    crud_agent_transcripts,
+    crud_agent_turns,
+    crud_print,
     health,
     internal_blobs,
     internal_library,
@@ -93,6 +97,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
+from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync, adopt_instance
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
@@ -1769,6 +1775,12 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
             settings_loader(state.settings_store.load),
         ).sync_pass,
+        # The Bambuddy pull's reads (#6772) on this process's own stores, as the CRUD
+        # routes apply them for the print worker.
+        FilamentPullActivities(
+            LocalBbPull(state.components.get(FILAMENT), state.settings_store.load),
+            settings_loader(state.settings_store.load),
+        ).pull_read,
         # The sensors' alert notifications (#6646) on this process's own pool, as the
         # CRUD routes claim and end them for the print worker.
         SensorNotifyActivities(
@@ -1938,11 +1950,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # The retired spool-provider activities, for runs opened before
         # spool-providers-gone (#6262 Task 12).
         *spool_activities(),
-        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
+        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule:
+        # read by the print worker, which sends the rows to the CRUD routes (#6772).
         filament_pull_activity(
             state.components.get(FILAMENT),
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
+            partial(execute_pull, client, settings.temporal_task_queue_bambuddy),
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
         capture_backstop_activity(state.components.get(PRINTERS)),
@@ -2465,6 +2479,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             internal_blobs.PUT_ROUTE_LIMIT,
             # A native run's per-print copy from the print worker (#3818 tier A Task 4).
             internal_library.PUT_ROUTE_LIMIT,
+            # The Bambuddy pull's bodies from the print worker (#6772, #6861).
+            crud_print.PULL_ROUTE_LIMIT,
+            # The agent store's transcript, turn and event-log writes, at their declared
+            # bounds, which are above the 8 MiB text default (#6863).
+            crud_agent_transcripts.ROUTE_LIMIT,
+            crud_agent_turns.ROUTE_LIMIT,
+            crud_agent_events.ROUTE_LIMIT,
         ],
     )
     # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).

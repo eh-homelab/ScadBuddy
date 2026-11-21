@@ -69,7 +69,7 @@ class _Credentials:
         }.get(token)
 
 
-_PRINT_AREAS_THROUGH_FILAMENT_SYNC = [
+_PRINT_AREAS_THROUGH_FILAMENT_PULL = [
     "settings",
     "runs",
     "operations",
@@ -88,6 +88,7 @@ _PRINT_AREAS_THROUGH_FILAMENT_SYNC = [
     "access-codes",
     "filament",
     "filament-sync",
+    "filament-pull",
 ]
 
 
@@ -117,7 +118,7 @@ def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> Non
     # extends the list and this test.
     areas = client.get("/api/v1/internal/crud/print/areas", headers=printing).json()["areas"]
     assert areas == CRUD_AREAS["print"]
-    assert areas[: len(_PRINT_AREAS_THROUGH_FILAMENT_SYNC)] == _PRINT_AREAS_THROUGH_FILAMENT_SYNC
+    assert areas[: len(_PRINT_AREAS_THROUGH_FILAMENT_PULL)] == _PRINT_AREAS_THROUGH_FILAMENT_PULL
     assert client.get("/api/v1/internal/crud/render/areas", headers=printing).status_code == 403
 
 

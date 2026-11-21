@@ -189,5 +189,6 @@ def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> Non
         "access-codes",
         "filament",
         "filament-sync",
+        "filament-pull",
     ]
     assert len(areas) >= 18 and "sensor-notify" in areas

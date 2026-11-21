@@ -18,6 +18,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import filament as filament_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.filament import actor
 from scadbuddy.auth.component import AUTH
@@ -35,6 +36,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import TagScan
 from scadbuddy.core.settings import Settings
 from scadbuddy.filament import assignments_cache, rfid_mode
+from scadbuddy.filament.bb_pull_models import PullOutcome
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.main import create_app
@@ -570,6 +572,54 @@ def test_the_bambuddy_import_pulls_once_then_changes_nothing(client: TestClient)
     again = client.post(IMPORT_BB).json()
     assert (again["created"], again["linked"], again["updated"]) == (0, 0, 0)
     assert route.call_count == 2
+
+
+def _kept_actors(pg_conninfo: str) -> list[tuple[str, str]]:
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        return conn.execute("SELECT pull_id, actor FROM filament_pull_actors").fetchall()
+
+
+@respx.mock
+def test_a_finished_import_drops_its_kept_actor(client: TestClient, pg_conninfo: str) -> None:
+    configure(client)
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/inventory/catalog").mock(return_value=httpx.Response(200, json=[]))
+    assert client.post(IMPORT_BB).status_code == 200
+    assert _kept_actors(pg_conninfo) == []
+
+
+@pytest.mark.parametrize(
+    "ended",
+    [
+        pytest.param(TimeoutError("the run timed out"), id="the-run-timed-out"),
+        pytest.param(PullOutcome(outcome="failed"), id="the-read-failed-or-timed-out"),
+    ],
+)
+def test_an_import_that_did_not_finish_keeps_its_actor_and_says_it_may_run_on(
+    client: TestClient,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+    ended: Exception | PullOutcome,
+) -> None:
+    """Decision 183: the route did not see the read end (the run timed out, Temporal out of
+    reach, the read failed or timed out), so the worker may still be sending its bodies.
+    The person stays kept under the run's id, for the bodies still to come to name them;
+    a later `remember_actor` drops the row once it is `ACTOR_KEPT` old. The 503 says the
+    import may still be running."""
+    configure(client)
+
+    async def unfinished(*args: object) -> PullOutcome:
+        if isinstance(ended, Exception):
+            raise ended
+        return ended
+
+    monkeypatch.setattr(filament_api, "execute_pull", unfinished)
+    answer = client.post(IMPORT_BB)
+    assert answer.status_code == 503, answer.text
+    assert "may still be running" in answer.json()["detail"]
+    ((pull_id, kept),) = _kept_actors(pg_conninfo)
+    assert pull_id.startswith("filament-bb-pull-")
+    assert kept == actor(ANONYMOUS)
 
 
 # -- type proposals (#6701, spec §8.1) --------------------------------------------------

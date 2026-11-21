@@ -97,6 +97,7 @@ def test_the_areas_are_served_and_awaited() -> None:
             "access-codes",
             "filament",
             "filament-sync",
+            "filament-pull",
         ]
     ]
     assert positions == sorted(positions)

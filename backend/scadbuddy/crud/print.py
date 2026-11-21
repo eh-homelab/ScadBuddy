@@ -125,6 +125,7 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+from pydantic import BaseModel
 
 from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
 from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail, SpoolAssignment
@@ -163,6 +164,17 @@ from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
 from scadbuddy.crud.wire import NOT_CONFIGURED
+from scadbuddy.filament.bb_pull_models import (
+    INSTANCE_CHANGED,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    TraysBody,
+    TraysReconciled,
+    UsageBody,
+    UsageBooked,
+)
 from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
     BbWrite,
@@ -1482,6 +1494,50 @@ class RemoteFilamentSync:
             # The API's model forbids extra keys: one from before #6836 refuses the key.
             del body["started_at"]
         await self._client.request("POST", f"{BASE}/filament/sync/pass", json=body)
+
+
+class RemoteBbPull:
+    """`filament/bb_pull_models.py` `BbPullApi` over ``…/print/filament/pull`` (area
+    ``filament-pull``, #6772): what the print worker read of Bambuddy for the pull, applied
+    by the API. Each is natural, so each is sent again on the client's retries: a pull of
+    the same rows changes nothing the first did not, a usage row is booked once (its
+    ``bb_usage`` event names it), a Home Assistant reading of the same value within 15
+    minutes is not stored again, and a tray already set right is left alone. The API's
+    409 ``instance_changed`` (the body's Bambuddy is no longer the configured one) is
+    `PullInstanceChangedError`."""
+
+    #: The pull applies one transaction per BB spool, so a large inventory takes longer
+    #: than the client's default; under ``FilamentBbPull``'s activity timeout.
+    APPLY_TIMEOUT = 180.0
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def _post(self, path: str, body: BaseModel, timeout: float | None = None) -> Any:
+        try:
+            response = await self._client.request(
+                "POST",
+                f"{BASE}/filament/pull{path}",
+                json=body.model_dump(mode="json"),
+                timeout=timeout,
+            )
+        except CrudRefusedError as refused:
+            if refused.status == 409 and refused.problem.get("reason") == INSTANCE_CHANGED:
+                raise PullInstanceChangedError(str(refused)) from refused
+            raise
+        return response.json() if response.content else None
+
+    async def apply(self, body: PullBody) -> PullApplied:
+        return PullApplied.model_validate(await self._post("", body, self.APPLY_TIMEOUT))
+
+    async def book_usage(self, body: UsageBody) -> UsageBooked:
+        return UsageBooked.model_validate(await self._post("/usage", body, self.APPLY_TIMEOUT))
+
+    async def ha_states(self, body: HaBody) -> None:
+        await self._post("/ha-states", body)
+
+    async def reconcile_trays(self, body: TraysBody) -> int:
+        return TraysReconciled.model_validate(await self._post("/trays", body)).moved
 
 
 class RemoteSensorNotifications:

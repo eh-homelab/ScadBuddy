@@ -847,8 +847,8 @@ async def _import_once(
                 with list_edit(conn, type_id, "presets", by):
                     SpoolTypeStore.merge_presets(conn, type_id, ending.presets)
                 with list_edit(conn, type_id, "k_values", by):
+                    _merge_k_values(conn, type_id, ending)
                     _drop_stale_k_values(conn, type_id, ending)
-                    SpoolTypeStore.merge_k_values(conn, type_id, ending.k_values)
                 files = now["files"]
                 for preset in ending.presets:
                     entry = files[preset.printer_model][preset.nozzle_diameter]
@@ -1177,16 +1177,44 @@ async def _k_values(
             ending.k_values.extend(_matched(type_id, printer_id, f.nozzle, filament_id, rows))
 
 
+#: Why a fetch kept a K row of a key it fetched, by the row's ``source`` (Decision 127).
+_KEPT_BECAUSE: dict[str, str] = {
+    "person": "a person set it",
+    "profile": "it came from the linked Bambuddy spools",
+    "printer_calibration": "it is the printer's calibration",
+}
+
+
+def _merge_k_values(conn: Conn, type_id: UUID, ending: _Ending) -> None:
+    """Write ``ending.k_values`` over the type's K rows that a fetch set
+    (`SpoolTypeStore.merge_k_values`, #6857, Decision 127), and keep in ``ending.k_values``
+    only the rows written, so the run counts those. A row a person, the fill or a printer
+    calibration set stands, named in ``ending.notes`` when its value differs from the fetched
+    one. On ``conn``, in the end's transaction."""
+    written, kept = SpoolTypeStore.merge_k_values(conn, type_id, ending.k_values)
+    for row, old in kept:
+        if Decimal(old["k_value"]) == row.k_value:
+            continue
+        label = ending.k_scope.get((row.printer_id, row.nozzle_diameter), "a printer")
+        ending.notes.append(
+            f"kept the K value {old['k_value']} of {label}, extruder {old['extruder']},"
+            f" {old['nozzle_diameter']} mm, not the fetched {row.k_value}:"
+            f" {_KEPT_BECAUSE.get(old['source'], old['source'])}"
+        )
+    ending.k_values = written
+
+
 def _drop_stale_k_values(conn: Conn, type_id: UUID, ending: _Ending) -> None:
-    """Remove the type's K rows of ``ending.k_scope``'s keys that the fetch did not match
-    (`_Ending.k_scope`), each named in ``ending.notes``. On ``conn``, in the end's
-    transaction."""
+    """Remove the type's ``profile_fetch`` K rows of ``ending.k_scope``'s keys that the
+    fetch did not match (`_Ending.k_scope`), each named in ``ending.notes``; a row a
+    person, the fill or a printer calibration set stays (#6857, Decision 127). On
+    ``conn``, in the end's transaction, after `_merge_k_values`."""
     keep = {(k.printer_id, k.extruder, k.nozzle_diameter) for k in ending.k_values}
     for (printer_id, nozzle), label in sorted(ending.k_scope.items()):
         rows = conn.execute(
             "SELECT extruder, k_value FROM filament_spool_type_k_values"
             " WHERE type_id = %s AND printer_id = %s AND nozzle_diameter = %s"
-            " ORDER BY extruder",
+            " AND source = 'profile_fetch' ORDER BY extruder",
             (type_id, printer_id, nozzle),
         ).fetchall()
         for row in rows:

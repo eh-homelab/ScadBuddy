@@ -42,6 +42,8 @@ Row = Mapping[str, Any]
 _Types = list[m.SpoolType]
 _Presets = list[m.TypePreset]
 _KValues = list[m.TypeKValue]
+#: The K rows a fetch did not write, each with the row that kept its key (`merge_k_values`).
+_KeptK = list[tuple[m.TypeKValue, dict[str, Any]]]
 _Ids = list[int]
 
 #: The fields whose change rewrites a type's price book row.
@@ -538,31 +540,41 @@ class SpoolTypeStore:
             )
 
     @staticmethod
-    def merge_k_values(conn: Conn, type_id: UUID, rows: _KValues) -> None:
-        """``rows`` replace the type's K values of their own keys (printer, extruder and
-        nozzle), whoever set them (#6857 may change that); its other rows stay. Each says
-        ``profile_fetch`` (R-6714-19). On ``conn``, in the caller's transaction (#6625)."""
+    def merge_k_values(conn: Conn, type_id: UUID, rows: _KValues) -> tuple[_KValues, _KeptK]:
+        """Each of ``rows`` (a 3DFP fetch's K values, #6625) into a key (printer, extruder
+        and nozzle, ``0.40`` being ``0.4``) the type has no row for, or over the
+        ``profile_fetch`` row of its key; a ``person``, ``profile`` or
+        ``printer_calibration`` row stands, value and source (#6857, profile-fetch plan
+        Decision 127). The type's other rows stay. Checked and written under the type's
+        row lock, on ``conn``, in the caller's transaction. Answers the rows written (one per
+        key, the last of a batch's duplicates), each tagged ``profile_fetch`` (R-6714-19),
+        and each row not written with the row that kept its key."""
+        conn.execute("SELECT 1 FROM filament_spool_types WHERE id = %s FOR UPDATE", (type_id,))
+        held = {
+            k_value_key(row): row
+            for row in conn.execute(
+                f"SELECT {_K_COLUMNS} FROM filament_spool_type_k_values WHERE type_id = %s",
+                (type_id,),
+            ).fetchall()
+        }
+        written: dict[tuple[str, int, Decimal | str], m.TypeKValue] = {}
+        kept: _KeptK = []
         for row in rows:
-            conn.execute(
-                "INSERT INTO filament_spool_type_k_values (type_id, printer_id, extruder,"
-                " nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id, source)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'profile_fetch')"
-                " ON CONFLICT (type_id, printer_id, extruder, nozzle_diameter) DO UPDATE SET"
-                " nozzle_type = EXCLUDED.nozzle_type, k_value = EXCLUDED.k_value,"
-                " name = EXCLUDED.name, cali_idx = EXCLUDED.cali_idx,"
-                " setting_id = EXCLUDED.setting_id, source = EXCLUDED.source",
-                (
-                    type_id,
-                    row.printer_id,
-                    row.extruder,
-                    row.nozzle_diameter,
-                    row.nozzle_type,
-                    row.k_value,
-                    row.name,
-                    row.cali_idx,
-                    row.setting_id,
-                ),
-            )
+            key = k_value_key(row.model_dump())
+            old = held.get(key)
+            if old is not None and old["source"] != "profile_fetch":
+                kept.append((row, old))
+                continue
+            if old is not None:
+                conn.execute(
+                    "DELETE FROM filament_spool_type_k_values WHERE type_id = %s"
+                    " AND printer_id = %s AND extruder = %s AND nozzle_diameter = %s",
+                    (type_id, old["printer_id"], old["extruder"], old["nozzle_diameter"]),
+                )
+            _insert_k(conn, type_id, row, "profile_fetch")
+            held[key] = {**row.model_dump(), "source": "profile_fetch"}
+            written[key] = row.model_copy(update={"type_id": type_id, "source": "profile_fetch"})
+        return list(written.values()), kept
 
     def match(
         self,

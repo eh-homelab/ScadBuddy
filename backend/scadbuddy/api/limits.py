@@ -102,7 +102,11 @@ class _BodyTooLargeError(Exception):
 
 
 class BodySizeGate:
-    """Refuse a gated body larger than its content type's limit with a 413 problem.
+    """Refuse a gated body larger than its limit with a 413 problem.
+
+    A route with a `RouteLimit` gets that limit, whatever its content type. Any other
+    body gets its content type's limit from ``limits``; a body with no type, or a type
+    ``limits`` does not list, gets `MAX_TEXT_BODY_BYTES`.
 
     A declared length is judged on the headers alone. An undeclared one is counted
     chunk by chunk, and reading stops at the first chunk that crosses the limit.
