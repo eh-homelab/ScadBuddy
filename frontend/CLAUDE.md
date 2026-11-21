@@ -276,7 +276,13 @@ same way, `vite.config.ts`).
   from unless the spool overrides them in Storage, the spool page saying where they came from
   and that a profile's are the AMS HT's (#6720, R-6714-18); its K table says who set each saved
   row, and nothing on a row edited since, `KValueTable` `saved`, R-6714-19, R-6714-22; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
-  line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
+  line is an error). Search (#6894): the Spools and Types tabs filter their loaded lists by
+  `q=` (`FilamentSearchBox`, "/" focuses it) with `lib/filamentSearch.ts` (every token must
+  match a field; `#87` is spool 87 only; a hex with or without `#`; SKUs from the suppliers'
+  products, trays from `/filament/inventory`), and every Filament tab has the quick find
+  (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
+  colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
+  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
   configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
   `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
