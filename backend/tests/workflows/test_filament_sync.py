@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import pytest
 from temporalio import activity
@@ -211,6 +212,30 @@ async def test_a_signal_during_a_skipped_pass_runs_one_more(client: Client) -> N
         await until(lambda: len(passes.calls) == 2)
         assert (await handle.describe()).close_time is None
     assert [call.run_id for call in passes.calls] == [passes.calls[0].run_id] * 2
+
+
+async def test_sync_now_during_a_pass_runs_a_pass_that_starts_after_it(client: Client) -> None:
+    """#6836: "Sync now" while a pass runs sets ``pending``; the pass after it starts at or
+    after the request's ``requested_at``, so ``last_pass_started_at >= requested_at`` only
+    for a pass that ran for the request."""
+    started: list[datetime] = []
+    requested: list[datetime] = []
+    handle: WorkflowHandle[FilamentBbSync, None] | None = None
+
+    async def sync_now(n: int) -> None:
+        started.append(datetime.now(UTC))
+        if n == 0:
+            assert handle is not None
+            requested.append(datetime.now(UTC))
+            await handle.signal(FilamentBbSync.changed, True)
+
+    passes = Passes(lambda n, start: result(start, started_at=started[n]))
+    passes.during = sync_now
+    async with serving(client, passes) as queue:
+        handle = await start(client, queue, 0, signal=True)
+        await until(lambda: len(passes.calls) == 2)
+    assert [call.full for call in passes.calls] == [False, True]
+    assert started[0] < requested[0] <= started[1]
 
 
 async def test_a_save_that_stops_every_push_ends_a_running_workflow(client: Client) -> None:
