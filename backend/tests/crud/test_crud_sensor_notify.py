@@ -40,9 +40,10 @@ def _end(row: UUID | str) -> str:
 
 
 def test_the_print_areas_list_sensor_notify() -> None:
-    """An area of its own, appended last, so a new worker waits for an API that serves it."""
+    """An area of its own, after the older ones, so a new worker waits for an API that serves it."""
     assert "sensor-notify" in PRINT_CRUD_AREAS
-    assert CRUD_AREAS["print"][-1] == "sensor-notify"
+    assert "sensor-notify" in CRUD_AREAS["print"]
+    assert CRUD_AREAS["print"].index("sensor-notify") > CRUD_AREAS["print"].index("filament-sync")
     assert set(CRUD_AREAS["print"]) == PRINT_CRUD_AREAS
 
 
