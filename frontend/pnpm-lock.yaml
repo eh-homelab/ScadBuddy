@@ -182,8 +182,8 @@ importers:
         specifier: 1.10.0
         version: 1.10.0
       '@opentelemetry/core':
-        specifier: 3.0.0
-        version: 3.0.0(@opentelemetry/api@1.10.0)
+        specifier: 3.1.1
+        version: 3.1.1(@opentelemetry/api@1.10.0)
       '@opentelemetry/instrumentation':
         specifier: 0.301.2
         version: 0.301.2(@opentelemetry/api@1.10.0)(supports-color@10.2.2)
@@ -3825,7 +3825,7 @@ snapshots:
   '@opentelemetry/instrumentation-document-load@0.69.0(@opentelemetry/api@1.10.0)(supports-color@10.2.2)':
     dependencies:
       '@opentelemetry/api': 1.10.0
-      '@opentelemetry/core': 3.0.0(@opentelemetry/api@1.10.0)
+      '@opentelemetry/core': 3.1.1(@opentelemetry/api@1.10.0)
       '@opentelemetry/instrumentation': 0.300.0(@opentelemetry/api@1.10.0)(supports-color@10.2.2)
       '@opentelemetry/semantic-conventions': 1.43.0
       '@opentelemetry/web-common': 0.300.0(@opentelemetry/api@1.10.0)
