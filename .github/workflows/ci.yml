@@ -1610,7 +1610,7 @@ jobs:
           chmod 0755 "$rpc"
           chmod 0444 "$rpc/token"
           # The container goes on every exit path, the early failures included. A failed
-          # step first prints what the sandbox logged while it handled the check (#6811).
+          # step first prints what the sandbox logged, once, from here (#6811, #6821).
           trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "sandbox logs:"; docker logs intake-sandbox 2>&1 || true; fi; docker rm -f intake-sandbox >/dev/null 2>&1 || true' EXIT
           docker run -d --name intake-sandbox --user 10002:10002 --read-only --cap-drop ALL \
             --security-opt no-new-privileges \
@@ -1627,7 +1627,6 @@ jobs:
             if [ "$(docker inspect -f '{{.State.Running}}' intake-sandbox)" != true ]; then break; fi
             sleep 1
           done
-          docker logs intake-sandbox
           # A sandbox that exited (3: it could not confine a check) fails here, by name.
           if [ "$(docker inspect -f '{{.State.Running}}' intake-sandbox)" != true ]; then
             echo "::error::the intake sandbox exited under its pod profiles"
