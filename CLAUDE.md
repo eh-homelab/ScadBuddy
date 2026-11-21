@@ -55,7 +55,8 @@ database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#35
 agent revokes nothing since #6501. Template Python still runs in the render
 worker's pod, which holds no database secret now but holds its `crud.render` credential,
 the S3 keys and the Bambuddy render key. Do the rest in this order: #5299 (the agent),
-#5297 (authenticate `/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of
+#5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
+of 2026-11-17), #5296 (untrusted code out of
 pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
 are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
 

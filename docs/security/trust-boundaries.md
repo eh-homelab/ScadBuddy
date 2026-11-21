@@ -338,8 +338,9 @@ policies admit only the CRUD service.
    role and grant list. Every new route needs a service credential from its first PR.
 2. #5299: move the agent's data behind CRUD routes. Then remove the agent's database
    secret.
-3. #5297: require a service credential on the remaining `/api/v1/internal/*` routes, and
-   move the API and the agent to `enforce`.
+3. #5297: require a service credential on the remaining `/api/v1/internal/*` routes in
+   every mode, then on the agent's 8081 routes (part 2). Prod never runs `enforce` (the
+   owner's decision of 2026-11-17).
 4. #5296: move template `pipeline/` Python and openscad out of every pod with a database
    secret.
 5. eh-homelab/clusters#3182: a Postgres ingress policy for the CRUD service only, egress
