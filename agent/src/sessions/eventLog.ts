@@ -18,9 +18,9 @@ import type { ServerEvent } from './protocol.js'
 // Going live: a write on THIS replica wakes local followers at once. A write
 // on another replica is announced on the event bus (spec §7, #300): `onAppend`
 // publishes it as `session.*` (busEvents.ts `SessionEventPublisher`), and every
-// replica's LISTEN consumer calls `wake()` (busEvents.ts
+// replica's change-stream consumer calls `wake()` (busEvents.ts
 // `followSessionEvents`). Polling every `pollMs` stays as the fallback for a
-// NOTIFY that never arrives (a dropped LISTEN connection, no listener).
+// NOTIFY that never arrives (a dropped change stream, none at all; #5299 D4).
 
 // A fork is copy-on-write for its log (#4212): its `ai_sessions` row names the session it was
 // forked from (`fork_parent_id`) and the seq of the last event of that session's log, as that
@@ -388,7 +388,7 @@ export class EventLog {
 
   /**
    * Wakes this replica's followers of a session: after a local append, and
-   * from the LISTEN consumer for `session.*` from other replicas
+   * from the change-stream consumer for `session.*` from other replicas
    * (busEvents.ts `followSessionEvents`); the poll then only backs it up.
    */
   wake(sessionId: string): void {

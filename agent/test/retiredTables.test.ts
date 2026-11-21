@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 // #5299: the agent reads these backend tables only through the backend's CRUD routes
-// (flows/backendReads.ts, events/eventLogReads.ts), and its gate's run grant check runs on the
+// (flows/backendReads.ts; the event log's replay runs on the API, behind the change stream,
+// events/changeStream.ts), and its gate's run grant check runs on the
 // API (gate/crudStore.ts, step 10). The API takes back the grants of its role
 // `scadbuddy_agent` on them at every start (backend auth/revoke.py `RETIRED_GRANTS`), but the
 // agent still connects as the database owner, so that revoke binds nothing until it loses its

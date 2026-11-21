@@ -830,16 +830,27 @@ below are the plan's):
   supplier or location is deleted. `GET` on the same path is its dry run. The status reports
   `instance_changed`; Settings → Filament then offers "Reset Bambuddy links" with a confirm
   dialog, and the agent has `filament_sync_reset_links` (outward). A plan or results call
-  for another instance than the configured Bambuddy's does nothing. After a reset, a spool
-  is linked again only by its RFID tag (the pull, step 2): Decision 10's adoption needs an
-  intent, which the reset deletes, so an untagged spool is created again on the side its
-  direction sends it to.
+  for another instance than the configured Bambuddy's does nothing. After a reset that
+  deletes, a spool is linked again only by its RFID tag (the pull, step 2): Decision 10's
+  adoption needs an intent, which the reset deletes, so an untagged spool is created again
+  on the side its direction sends it to.
+- Reset to the same Bambuddy (#6845, Decisions 193-199). Bambuddy has no instance id, so a
+  new URL to the same Bambuddy is another instance. The dry run reads the configured
+  Bambuddy's spools; when it holds every linked BB spool id, none older than its link's
+  `bb_updated_at`, at least one exactly that, and at least half the links timed on both
+  sides (`same_bambuddy`), the reset with `expect_kept: true` reads them again and, while
+  that still holds, deletes nothing, records the configured instance and answers
+  `kept: true`, so no spool is made twice. When it no longer holds, or the read fails, it
+  is 409 `proof_changed` and deletes nothing. A dry run that cannot read Bambuddy answers
+  `bambuddy_unreadable: true` and offers the delete; the delete (`expect_kept: false`)
+  reads no Bambuddy. The pull (the Schedule's and the import) does nothing while the links
+  belong to another instance.
 - Lifecycle (Decision 13). A spool is created in Bambuddy only when it is unarchived and
   `pushes(spools)`. Archive and restore are pushed. A 404 on a linked spool, or on the
   probe of one a complete listing lacks, deletes the link; a partial listing never does.
   A linked supplier, location, insert type or filament entry a complete listing lacks is
   probed too; its 404 deletes the link, and the next round creates the row again under
-  its direction (#6688, plan Decisions 187-192, 200 and 201).
+  its direction (#6688, plan Decisions 187-192 and 200-205).
 - Fields (Decisions 14, 15). The fields each data type carries are in Decision 14. Not
   pushed: SKU settings (#6270 owns them) and `last_scale_weight`. Supplier links and
   prices go to Bambuddy only, and are never pulled.

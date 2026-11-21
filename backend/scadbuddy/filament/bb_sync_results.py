@@ -131,6 +131,10 @@ class _Reads:
 
     rows: dict[str, dict[UUID, dict[str, Any]]] = field(default_factory=dict)
     refs: BbRefs | None = None
+    #: R-6688-10, R-6688-11: the plan's unconfirmed rows (probed this round, refused in
+    #: this pass, or cut by the cap). Bambuddy may have deleted them, so the plan named
+    #: none of them to a spool (`BbRefs.without`), and a spool's compare names none.
+    unconfirmed: frozenset[tuple[str, UUID]] = frozenset()
 
     def desired(self, conn: Conn, kind: str, sb_id: UUID) -> dict[str, Any] | None:
         if kind not in self.rows:
@@ -139,7 +143,7 @@ class _Reads:
 
     def bb_refs(self, conn: Conn) -> BbRefs:
         if self.refs is None:
-            self.refs = BbRefs.read(conn)
+            self.refs = BbRefs.read(conn).without(self.unconfirmed)
         return self.refs
 
     def linked(self, kind: str, sb_id: UUID, bb_id: int) -> None:
@@ -160,6 +164,7 @@ def apply_results(
     instance: str,
     now: datetime,
     pass_id: str | None = None,
+    unconfirmed: Sequence[tuple[str, UUID]] = (),
 ) -> ResultsReport:
     """Record what Bambuddy answered to ``plan_writes``, as the module says, each result
     in a transaction of its own. ``now`` is the stored seen copies' ``bb_seen_at``.
@@ -175,12 +180,16 @@ def apply_results(
     intent (R-T4-18). The upsert adds an attempt and sets ``at = now()``, unless the row's
     ``last_pass_id`` is ``pass_id`` (the plan round these results answer): results sent
     again after a lost answer count once (R-T6-5). A ``None`` ``pass_id`` is a round of
-    its own, so it always adds one. The state row's instance
+    its own, so it always adds one. A spool's answer is compared with its desired
+    values less the rows in ``unconfirmed`` (the plan's, R-6688-11) and the rows the
+    round probes, as the plan made them. The state row's instance
     is set by the first result that links anything (Decision 12; the pull sets it too,
     `bambuddy_pull.record_instance`), and results for another instance are all ignored.
     A result whose link another SB row holds by now is ignored (review I1)."""
     report = ResultsReport()
-    reads = _Reads()
+    # The round's own probes too: a worker from before R-6688-11 sends no `unconfirmed`.
+    probed = {(w.kind, w.sb_id) for w in plan_writes if w.op == "probe" and w.kind != "spool"}
+    reads = _Reads(unconfirmed=frozenset(probed | set(unconfirmed)))
     writes = {write.key: write for write in plan_writes}
     for result in results:
         write = writes.get(result.key)
@@ -584,8 +593,10 @@ def adopt_instance(store: Filament, instance: str) -> None:
 class ResetRefusedError(Exception):
     """A reset of the Bambuddy links refused (#6773); ``code`` is the 409's code:
     ``nothing_to_reset`` (no instance is recorded, so no link belongs to one),
-    ``same_instance`` (the links belong to the configured Bambuddy) or
-    ``confirm_mismatch`` (``confirm_instance`` is not the links' instance)."""
+    ``same_instance`` (the links belong to the configured Bambuddy),
+    ``confirm_mismatch`` (``confirm_instance`` is not the links' instance) or
+    ``proof_changed`` (the caller expected the links kept, but the configured Bambuddy
+    could not be read or is no longer proven the links' own, #6845 R-6845-6)."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -621,28 +632,97 @@ def _reset_counts(conn: Conn) -> LinksResetCounts:
     return LinksResetCounts(**counts)
 
 
-def reset_preview(store: Filament, configured: str | None) -> LinksResetPreview:
-    """The dry run of `reset_links`: the links' instance, the configured one, and what a
-    reset would delete. Reads only."""
+def same_bambuddy(
+    links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
+) -> bool:
+    """Whether a Bambuddy whose spools are ``rows`` (``bad``: the rows that did not parse,
+    `bambuddy_pull.parse_rows`) is the one the spool ``links`` were made against (#6845
+    R-6845-2). Bambuddy has no instance id of its own, so it is proven by its spools: it
+    holds every linked BB spool id (a link maps to its ``bb_updated_at``), none older
+    than ScadBuddy last saw it, and at least one exactly as then. A link with no time on
+    either side (a pre-#6265 link, or a row Bambuddy sends with no ``updated_at``) is
+    only checked to be there, so at least half the links must have a time on both sides
+    (Decision 199): a few exact matches among many unchecked links prove too little. A
+    listing with a row that did not parse, or no spool link at all, proves nothing."""
+    if not links or bad:
+        return False
+    held = {row.id: row for row in rows}
+    exact = False
+    timed = 0
+    for bb_id, seen in links.items():
+        row = held.get(bb_id)
+        if row is None:
+            return False
+        if seen is None or row.updated_at is None:
+            continue
+        if row.updated_at < seen:
+            return False
+        timed += 1
+        exact = exact or row.updated_at == seen
+    return exact and timed * 2 >= len(links)
+
+
+def _proven_same(conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]) -> bool:
+    """`same_bambuddy` for the spool links as they stand."""
+    links = {
+        row["bb_spool_id"]: row["bb_updated_at"]
+        for row in conn.execute("SELECT bb_spool_id, bb_updated_at FROM filament_bb_links")
+    }
+    return same_bambuddy(links, *listing)
+
+
+#: What `parse_rows` makes of the configured Bambuddy's spools: the rows, and the ids of
+#: those that did not parse. ``None``: no Bambuddy is configured, so nothing was read.
+Listing = tuple[Sequence[BbSpool], Sequence[int | None]] | None
+
+
+def reset_preview(
+    store: Filament, configured: str | None, listing: Listing, *, unreadable: bool = False
+) -> LinksResetPreview:
+    """The dry run of `reset_links`: the links' instance, the configured one, what a
+    reset would delete, and whether the configured Bambuddy, whose spools are
+    ``listing``, is the links' own (#6845), so a reset with ``expect_kept`` keeps the
+    links. ``unreadable``: the configured Bambuddy could not be read (``listing`` is
+    then ``None``), which the answer says (Decision 198). Reads only."""
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
         counts = _reset_counts(conn)
+        same = listing is not None and _proven_same(conn, listing)
     return LinksResetPreview(
         instance=state["instance"] if state is not None else None,
         configured_instance=configured,
         counts=counts,
+        same_bambuddy=same,
+        bambuddy_unreadable=unreadable,
     )
 
 
-def reset_links(store: Filament, confirm_instance: str, configured: str | None) -> LinksResetDone:
-    """Delete every Bambuddy link and what the sync keeps of the old Bambuddy (#6773), in
-    one transaction under the state row's lock, which `apply_results` takes too: the spool
-    links, each supplier's, location's, insert type's and spool type's Bambuddy id with its
-    hashes and seen copy, the open create intents, the error rows, the ignored Bambuddy
-    spools and the state row's ``instance``. No ScadBuddy spool, type, supplier or location
-    is deleted, and none of their own fields changes. Refused (`ResetRefusedError`) when no
-    instance is recorded, when it is ``configured`` or when it is not
-    ``confirm_instance``."""
+def reset_links(
+    store: Filament,
+    confirm_instance: str,
+    configured: str | None,
+    listing: Listing,
+    *,
+    expect_kept: bool,
+) -> LinksResetDone:
+    """Reset the Bambuddy links after the Bambuddy URL changed, in one transaction under
+    the state row's lock, which `apply_results` takes too. Refused (`ResetRefusedError`)
+    when no instance is recorded, when it is ``configured`` or when it is not
+    ``confirm_instance``.
+
+    With ``expect_kept`` (the preview proved the same Bambuddy, #6845 R-6845-6), the
+    configured Bambuddy, whose spools are ``listing`` (``None``: it could not be read),
+    must still be the links' own (`same_bambuddy`); then nothing is deleted: the state
+    row records ``configured`` as the links' instance, so every link and intent stays
+    (R-6845-3). When it is not, the reset is refused ``proof_changed`` and writes
+    nothing, so a Bambuddy that changed between the preview and the reset never turns
+    "Keep links" into a delete. Without ``expect_kept`` (the person confirmed the delete,
+    Decision 198; ``listing`` is not read) every
+    Bambuddy link and what the sync keeps of the old Bambuddy is deleted (#6773): the
+    spool links, each supplier's, location's, insert type's and spool type's Bambuddy id
+    with its hashes and seen copy, the open create intents, the error rows, the ignored
+    Bambuddy spools and the state row's ``instance``. No ScadBuddy spool, type, supplier
+    or location is deleted, and none of their own fields changes."""
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state FOR UPDATE").fetchone()
         instance = state["instance"] if state is not None else None
@@ -652,6 +732,15 @@ def reset_links(store: Filament, confirm_instance: str, configured: str | None) 
             raise ResetRefusedError("same_instance")
         if confirm_instance != instance:
             raise ResetRefusedError("confirm_mismatch")
+        if expect_kept:
+            if configured is None or listing is None or not _proven_same(conn, listing):
+                raise ResetRefusedError("proof_changed")
+            conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (configured,))
+            logger.info(
+                "the Bambuddy links were kept: the new URL reaches the same Bambuddy",
+                extra={"instance": instance, "configured": configured},
+            )
+            return LinksResetDone(instance=instance, kept=True, deleted=LinksResetCounts())
         counts = _reset_counts(conn)
         for table in (
             "filament_bb_links",
@@ -668,7 +757,7 @@ def reset_links(store: Filament, confirm_instance: str, configured: str | None) 
             )
         conn.execute("UPDATE filament_bb_sync_state SET instance = NULL")
     logger.info("the Bambuddy links were reset", extra={"instance": instance})
-    return LinksResetDone(instance=instance, deleted=counts)
+    return LinksResetDone(instance=instance, kept=False, deleted=counts)
 
 
 class LocalFilamentSync:
@@ -722,6 +811,7 @@ class LocalFilamentSync:
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
         pass_id: str | None,
+        unconfirmed: Sequence[tuple[Kind, UUID]] = (),
     ) -> ResultsReport:
         read = await asyncio.to_thread(self._settings.read, {"bambuddy_url"})
         # This reads bambuddy_url before apply_results takes the state row's lock. After a
@@ -742,6 +832,7 @@ class LocalFilamentSync:
             instance=instance,
             now=datetime.now(UTC),
             pass_id=pass_id,
+            unconfirmed=unconfirmed,
         )
 
     async def record_pass(self, result: SyncPassResult) -> None:

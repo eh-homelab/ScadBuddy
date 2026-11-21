@@ -173,6 +173,7 @@ from uuid import UUID
 
 import psycopg
 from fastapi import Depends, Query, Request, status
+from fastapi.responses import JSONResponse
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
@@ -259,6 +260,7 @@ from scadbuddy.filament.bb_sync_models import (
     ResultsRequest,
     SyncPassResult,
     SyncPlan,
+    without_empty_unconfirmed,
 )
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync
 from scadbuddy.filament.component import FilamentDep
@@ -1925,12 +1927,15 @@ async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
         " route reads `filament_sync` and the timer's interval itself. A kept create"
         " records its intent in this call, so a plan sent again plans the same create"
         " from that intent. A snapshot of another Bambuddy than the configured one plans"
-        " nothing and answers `instance_changed` (#6773)."
+        " nothing and answers `instance_changed` (#6773). `unconfirmed` is left out when"
+        " it is empty (#6688)."
     ),
+    response_model=SyncPlan,
 )
-async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
-    """Natural: a plan sent again finds the intent it recorded."""
-    return await sync.plan(body.snapshot, body.limit)
+async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> JSONResponse:
+    """Natural: a plan sent again finds the intent it recorded. With nothing unconfirmed
+    the key is left out, so a print worker from before it takes the plan (R-6688-11)."""
+    return JSONResponse(without_empty_unconfirmed(await sync.plan(body.snapshot, body.limit)))
 
 
 @router.post(
@@ -1948,7 +1953,9 @@ async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
 async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsReport:
     """Natural: a result sent again finds its item linked or recorded and is ignored, and a
     refusal sent again with the plan's `pass_id` adds no attempt (R-T6-5)."""
-    return await sync.results(body.instance, body.writes, body.results, body.pass_id)
+    return await sync.results(
+        body.instance, body.writes, body.results, body.pass_id, body.unconfirmed
+    )
 
 
 @router.post(
@@ -1979,7 +1986,8 @@ async def _for_configured[T](write: Awaitable[T]) -> T:
     except PullInstanceChangedError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            "the body was read from another Bambuddy than the configured one",
+            "the body was read from another Bambuddy than the configured one, or the"
+            " Bambuddy links belong to another one",
             reason=INSTANCE_CHANGED,
         ) from None
 
@@ -1994,7 +2002,8 @@ async def _for_configured[T](write: Awaitable[T]) -> T:
         " refresh pulled them (`filament/bambuddy_pull.py`); the API calls no Bambuddy."
         " Answers the pull's report and the date from which the worker reads Bambuddy's"
         " archives for the usage rows not booked yet. 409 `instance_changed` for a read of"
-        " another Bambuddy than the configured one."
+        " another Bambuddy than the configured one, or while the links belong to another"
+        " Bambuddy (#6845)."
     ),
 )
 async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
@@ -2024,7 +2033,8 @@ async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
     description=(
         "Each state a reading of the Home Assistant sensor naming its entity (#6268, #6772);"
         " `states` null (the read failed) marks every such sensor unreachable. 409"
-        " `instance_changed` as the pull's."
+        " `instance_changed` for a read of another Bambuddy than the configured one; the"
+        " links' instance does not stop it, as sensors are not spool data (#6845)."
     ),
 )
 async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:

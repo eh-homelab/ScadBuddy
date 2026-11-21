@@ -180,7 +180,7 @@ async def _rounds(
                 failed += 1
             heartbeat()
         calls += len(plan.writes)
-        await api.results(snap.instance, plan.writes, results, plan.pass_id)
+        await api.results(snap.instance, plan.writes, results, plan.pass_id, plan.unconfirmed)
         heartbeat()
     return SyncPassResult(
         written=written,

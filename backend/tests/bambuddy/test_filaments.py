@@ -235,18 +235,26 @@ def test_one_spool_is_not_pre_selected_for_two_slots_with_a_free_one() -> None:
     assert len(picked) == len(set(picked))
 
 
-def test_a_slot_that_declares_a_material_never_pre_selects_another_one() -> None:
-    """Opening with a PETG in a PLA slot is worse than opening with nothing, because it
-    looks deliberate."""
+def test_a_slot_that_declares_a_material_takes_another_only_from_the_loaded_trays() -> None:
+    """A PETG in a PLA slot comes only from the fallback (#6885): loaded in this
+    printer, after no PLA matched. The dialog says why."""
     built = options(requirements=[SlotNeed(slot_id=1, material="PLA", colour="#688197")])
     chosen = [row for row in built.spools if row.spool_id in {c.spool_id for c in built.suggested}]
-    assert all(row.material == "PLA" for row in chosen)
+    assert all(
+        row.material == "PLA" or (row.loaded is not None and row.loaded.printer_id == 1)
+        for row in chosen
+    )
 
 
-def test_a_colour_further_away_than_the_threshold_is_not_pre_selected() -> None:
+def test_a_colour_further_away_than_the_threshold_falls_back_to_a_loaded_spool() -> None:
+    """#6885: no spool is within the threshold, so the slot takes a loaded one rather than
+    opening empty. Without a printer nothing is loaded here, and it opens empty."""
     assert COLOUR_MATCH_DISTANCE < 441
     built = options(requirements=[SlotNeed(slot_id=1, colour="#00FF00")])
-    assert built.suggested == []
+    chosen = next(row for row in built.spools if row.spool_id == built.suggested[0].spool_id)
+    assert chosen.loaded is not None and chosen.loaded.printer_id == 1
+    unscoped = options(requirements=[SlotNeed(slot_id=1, colour="#00FF00")], printer=None)
+    assert unscoped.suggested == []
 
 
 # --- the two warnings that fall out of the data ------------------------------
@@ -1003,7 +1011,8 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
 
 def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> None:
     """#2850: the family came from the single best match, so a PETG loaded beside the
-    PLA and closest to one slot left every other undeclared slot empty."""
+    PLA and closest to one slot left every other undeclared slot empty. The PETG slot
+    then takes the PETG from the fallback (#6885), after the PLA slots are filled."""
     shelf = [
         _spool(1, "1A1A1AFF"),  # PLA black, loaded
         _spool(3, "C02E20FF"),  # PLA red, loaded
@@ -1020,7 +1029,7 @@ def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> N
         ],
         printer=printer(),
     )
-    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {2: 1, 3: 3}
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 5, 2: 1, 3: 3}
 
 
 def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -> None:

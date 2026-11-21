@@ -58,16 +58,25 @@ CLOSE_COLOUR = 20.0
 #: The external spool holder's ``ams_id``, whose trays arrive in ``vt_tray``.
 EXTERNAL = 255
 
-#: Basic colour words, for "black PLA" (#2164's question).
+#: Basic colour words, for "black PLA" (#2164's question). :func:`colour_word` takes the
+#: nearest by CIEDE2000, so a hue with no word near it falls to a wrong one: with eleven
+#: words, Bambu Lab Turquoise ``#00B1B7`` read "grey" and DEEPLEE Navy Blue ``#000080``
+#: read "purple" (#6885, prod's H2C on 2026-11-21). Light grey, beige, teal, light blue
+#: and navy fill those gaps; ``tests/bambuddy/test_trays.py`` pins both cases.
 _WORDS: dict[str, tuple[int, int, int]] = {
     "black": (25, 25, 25),
     "white": (245, 245, 245),
     "grey": (128, 128, 128),
+    "light grey": (190, 190, 190),
+    "beige": (225, 200, 160),
     "red": (200, 30, 30),
     "orange": (240, 130, 30),
     "yellow": (240, 220, 40),
     "green": (40, 160, 60),
-    "blue": (30, 90, 200),
+    "teal": (0, 160, 160),
+    "light blue": (140, 190, 230),
+    "blue": (30, 70, 220),
+    "navy": (20, 30, 110),
     "purple": (130, 50, 170),
     "pink": (240, 120, 180),
     "brown": (110, 70, 40),
@@ -268,6 +277,8 @@ def tray_option(tray: UnknownTray, printer_id: int, printer_name: str | None) ->
         colour=tray.colour,
         rgba=tray.rgba,
         color_name=f"what's in {tray.label}",
+        # The picker's tile names the colour by this, not by the place above (#6885).
+        colour_word=tray.colour_word,
         loaded=LoadedAt(
             printer_id=printer_id,
             printer_name=printer_name,
