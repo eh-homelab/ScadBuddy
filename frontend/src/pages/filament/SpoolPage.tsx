@@ -59,6 +59,13 @@ import { listBack } from '../../components/filament/spoolsQuery'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 
+/** Where the drying form's values come from, or `null` when the spool has none (#6720). */
+function dryingDefaultsText(defaults: NonNullable<SpoolDetail['drying_defaults']>): string | null {
+  const from = [...new Set([defaults.temp_from, defaults.hours_from].filter((one) => one != null))]
+  if (from.length === 0) return null
+  return `Filled from its ${from.join(' and ')}. Change them if this drying differs.`
+}
+
 /** What a field holds while it is edited: text, `''` for none (the spool takes its type's value). */
 interface Draft {
   type_id: string
@@ -327,6 +334,8 @@ export function SpoolPage() {
   const [reading, setReading] = useState('')
   const [dryTemp, setDryTemp] = useState('')
   const [dryHours, setDryHours] = useState('')
+  /** The drying form holds what a person typed, not the spool's drying defaults (#6720). */
+  const [dryTouchedFor, setDryTouchedFor] = useState<string | null>(null)
   /** The type the form holds: its own presets and K values say which keys "Reset to type" can reset. */
   const [typeDetail, setTypeDetail] = useState<SpoolTypeDetail | null>(null)
   const [typeError, setTypeError] = useState<string | null>(null)
@@ -384,6 +393,14 @@ export function SpoolPage() {
     }
   }, [typeId])
   const guard = useLeaveGuard(dirty)
+  const dryTouched = dryTouchedFor !== null && dryTouchedFor === saved?.id
+  const dryDefaults = saved?.drying_defaults
+  useEffect(() => {
+    if (dryTouched) return
+    setDryTemp(dryDefaults?.temp_c == null ? '' : String(dryDefaults.temp_c))
+    setDryHours(dryDefaults?.hours == null ? '' : String(dryDefaults.hours))
+  }, [dryTouched, dryDefaults?.temp_c, dryDefaults?.hours])
+  const dryFrom = !dryTouched && dryDefaults ? dryingDefaultsText(dryDefaults) : null
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setNotice(null)
     setDraft((was) => ({ ...was, [key]: value }))
@@ -834,7 +851,7 @@ export function SpoolPage() {
                     if (dryHours.trim() !== '' && !DECIMAL.test(dryHours.trim())) return setError('Enter the drying hours as a number, such as 8.')
                     const temp = dryTemp.trim() === '' ? null : Number(dryTemp)
                     const hours = dryHours.trim() === '' ? null : dryHours.trim()
-                    void act(async () => { await addSpoolEvent(spoolKey, { kind: 'dried', temp_c: temp, hours }); setDryTemp(''); setDryHours(''); await reload(true) }, 'Drying recorded')
+                    void act(async () => { await addSpoolEvent(spoolKey, { kind: 'dried', temp_c: temp, hours }); setDryTouchedFor(null); await reload(true) }, 'Drying recorded')
                   }}
                 >
                   <p className="text-[13px]">
@@ -848,18 +865,19 @@ export function SpoolPage() {
                       <Label htmlFor="spool-dry-temp" className="text-[12px]">
                         Drying temperature (°C)
                       </Label>
-                      <Input id="spool-dry-temp" inputMode="numeric" className="w-24 tabular-nums" value={dryTemp} onChange={(e) => setDryTemp(e.target.value)} />
+                      <Input id="spool-dry-temp" inputMode="numeric" className="w-24 tabular-nums" value={dryTemp} onChange={(e) => { setDryTouchedFor(saved?.id ?? null); setDryTemp(e.target.value) }} />
                     </div>
                     <div className="flex flex-col gap-1">
                       <Label htmlFor="spool-dry-hours" className="text-[12px]">
                         Hours
                       </Label>
-                      <Input id="spool-dry-hours" inputMode="decimal" className="w-20 tabular-nums" value={dryHours} onChange={(e) => setDryHours(e.target.value)} />
+                      <Input id="spool-dry-hours" inputMode="decimal" className="w-20 tabular-nums" value={dryHours} onChange={(e) => { setDryTouchedFor(saved?.id ?? null); setDryHours(e.target.value) }} />
                     </div>
                     <Button type="submit" size="sm" variant="outline" disabled={busy}>
                       Record drying
                     </Button>
                   </div>
+                  {dryFrom && <p className="text-[12px] text-muted-foreground">{dryFrom}</p>}
                 </form>
               )}
             </div>

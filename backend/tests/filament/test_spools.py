@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import (
     Material,
+    MaterialPatch,
     SpoolCreate,
     SpoolEventAdd,
     SpoolPatch,
@@ -204,6 +205,53 @@ def test_a_weighing_and_a_drying_update_the_derived_values(pg_pool: PgPool) -> N
     restored = store.archive(spool, False, actor="ann")
     assert restored is not None and restored.archived_at is None
     assert _kinds(store, spool)[-1] == "restored"
+
+
+def test_a_drying_takes_the_type_drying_values_for_the_fields_it_does_not_send(
+    pg_pool: PgPool,
+) -> None:
+    """#6720, R-6714-10: a spool's drying defaults are its type's drying values, else its
+    subtype's, else its material's, field by field; a drying that leaves a field out
+    takes its default, and one that sends ``null`` records none."""
+    store = FilamentSpoolStore(pg_pool)
+    catalog = CatalogStore(pg_pool)
+    material = _material(pg_pool)
+    catalog.update(
+        "materials", material, MaterialPatch(drying_temp_c=50, drying_hours=Decimal("6"))
+    )
+    kind = SpoolTypeStore(pg_pool).create(
+        SpoolTypeCreate(
+            code="PLA-DRY",
+            material_id=material,
+            rgba="#FF0000",
+            label_weight_g=1000,
+            drying_temp_c=55,
+        )
+    )
+    spool = store.create(SpoolCreate(type_id=kind.id), actor="ann").id
+    detail = store.detail(spool)
+    assert detail is not None
+    assert detail.drying_defaults.model_dump() == {
+        "temp_c": 55,
+        "hours": Decimal("6"),
+        "temp_from": "type",
+        "hours_from": "material",
+    }
+
+    store.add_event(spool, SpoolEventAdd(kind="dried"), actor="ann")
+    now = store.get(spool)
+    assert now is not None
+    assert (now.last_dried_temp_c, now.last_dried_hours) == (55, Decimal("6"))
+
+    store.add_event(spool, SpoolEventAdd(kind="dried", temp_c=60, hours=None), actor="ann")
+    now = store.get(spool)
+    assert now is not None
+    assert (now.last_dried_temp_c, now.last_dried_hours) == (60, None)
+
+    bare = _spool(store, pg_pool)
+    found = store.detail(bare)
+    assert found is not None
+    assert (found.drying_defaults.temp_c, found.drying_defaults.temp_from) == (50, "material")
 
 
 def test_a_reading_from_the_future_is_refused() -> None:

@@ -432,9 +432,15 @@ _FILL_DESCRIPTION = (
     "Bambu Studio preset of that `filament_id` for the printer and nozzle (else its "
     "`@base`) or of that `setting_id`. It maps `nozzle_temperature_range_low/high`, the "
     "H2C plates' temperatures (SuperTack, Engineering, Textured PEI; above 0), "
-    "`filament_density` and `filament_diameter` onto the type, and fills only its empty "
-    "fields (`diameter_mm` is never empty). `filament_cost` is `cost_hint`, never written. "
-    "A type with no K values takes those of the Bambuddy spools its spools are linked to. "
+    "`filament_density`, `filament_diameter` and the AMS HT's idle drying temperature and "
+    "time (`filament_dev_ams_drying_temperature`/`_time`, the second value) onto the type, "
+    "and fills only its empty fields (`diameter_mm` is never empty). `filament_cost` is "
+    "`cost_hint`, never written. A type with no K values takes those of the Bambuddy spools "
+    "its spools are linked to; then each Bambuddy-linked printer of a preset's model gives "
+    "its K calibrations for the preset's nozzle (`GET /printers/{id}/kprofiles/`), and one "
+    "whose `filament_id` is the preset's `slicer_filament` fills that printer, extruder and "
+    "nozzle when the type has no row there (a row is never overwritten; calibrations of one "
+    "key that differ are skipped, said in `k_reason`). "
     "A profile that cannot be read leaves the type alone and says why in `reason`. "
 )
 
@@ -464,8 +470,9 @@ async def fill_types_from_profile(
         _FILL_DESCRIPTION + "`refresh: true` answers the profile's values that differ from "
         "the type's, set or not (`filled`, with `previous`), and writes nothing. `apply` "
         "writes those fields, as the refresh showed them, over what the type has, and with "
-        "`k_values: true` the K values it showed (sent back as `shown_k_values`), while the "
-        "type has none; 409 when the profile, or Bambuddy's spools, no longer give one of "
+        "`k_values: true` the K values it showed (sent back as `shown_k_values`): the "
+        "spools' while the type has none, the printers' into keys it has no row for; 409 "
+        "when the profile, or Bambuddy's spools or printers, no longer give one of "
         "them, 422 for `k_values: true` without `shown_k_values` (`[]` for none), a field "
         "it does not fill or a "
         "range it would leave backwards. 404 for no such type."
@@ -1131,7 +1138,9 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
     summary="Record a weighing or a drying",
     description=(
         "`weighed` with `grams` (the filament left, without the empty spool) is a new "
-        "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`. "
+        "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`; "
+        "one left out is the spool's `drying_defaults` value (its type's, else its "
+        "subtype's, else its material's), and `null` records none. "
         "404 for no such spool, 422 for a field the kind does not take."
     ),
 )

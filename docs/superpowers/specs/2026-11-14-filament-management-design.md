@@ -233,6 +233,15 @@ Children:
   name. BB parity with `SpoolFilamentPreset`.
 - `spool_type_k_values`: printer, extruder, nozzle diameter, nozzle type, K,
   name, `cali_idx`, `setting_id`. BB parity with `SpoolKProfile`.
+
+  As built in #6714 and #6720 (plan `docs/superpowers/plans/2026-11-20-filament-type-from-profile.md`,
+  R-6714-9 to R-6714-17): a type also has `drying_temp_c` and `drying_hours`, the default of
+  a spool's drying (else the subtype's, else the material's; a spool does not override them,
+  each drying may change them). The slicer profile fill writes a type's empty print and
+  drying values (the AMS HT's idle drying pair) and imports K values: its linked Bambuddy
+  spools' while it has none, then each linked printer's K calibrations whose `filament_id` is
+  a preset's `slicer_filament` (`GET /printers/{id}/kprofiles/`), into keys with no row only,
+  so a K value a person set is never overwritten.
 - `supplier_products`: supplier, SKU or article number, product URL, pack size
   (spools per order line), note.
 - `price_points`: supplier product, price, currency, price per kg, date, source

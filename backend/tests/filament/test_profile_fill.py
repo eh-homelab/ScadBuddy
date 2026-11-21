@@ -89,6 +89,28 @@ def test_the_mapping_takes_first_values_and_the_h2c_plates() -> None:
     assert cost_hint(flat) == "30"
 
 
+def test_drying_takes_the_ams_ht_idle_values() -> None:
+    """R-6714-9: `filament_dev_ams_drying_temperature` and `_time` hold one value per AMS
+    and state, `[AMS 2 Pro idle, AMS HT idle, AMS 2 Pro printing, AMS HT printing]`; the
+    type takes the AMS HT's idle pair, which the lower AMS limit does not cap."""
+    flat = {
+        "filament_dev_ams_drying_temperature": ["65", "80", "65", "75"],
+        "filament_dev_ams_drying_time": ["12", "8.0", "12", "8.0"],
+        "filament_dev_chamber_drying_bed_temperature": ["90.0"],
+        "filament_dev_chamber_drying_time": ["12.0"],
+    }
+    assert profile_values(flat) == {"drying_temp_c": 80, "drying_hours": Decimal("8")}
+    # One value only: that one.
+    one = {"filament_dev_ams_drying_temperature": ["55"], "filament_dev_ams_drying_time": "6.5"}
+    assert profile_values(one) == {"drying_temp_c": 55, "drying_hours": Decimal("6.5")}
+    # 0, as a custom root preset stores it, is none; so is a time past the column.
+    none = {
+        "filament_dev_ams_drying_temperature": ["0", "0"],
+        "filament_dev_ams_drying_time": ["0", "1000"],
+    }
+    assert profile_values(none) == {}
+
+
 @pytest.mark.parametrize("bad", ["", "nil", [], ["nil"], ["x"], ["0"], {"a": 1}, None])
 def test_an_empty_nil_or_unreadable_value_is_skipped(bad: Any) -> None:
     flat = {"nozzle_temperature_range_low": bad, "filament_density": bad, "eng_plate_temp": bad}
@@ -113,6 +135,9 @@ async def test_a_system_id_reads_the_h2c_04_preset_through_inherits(table: Densi
         "bed_temp_max": 60,
         "density_g_cm3": Decimal("1.32"),
         "diameter_mm": Decimal("1.75"),
+        # The base's AMS HT drying values (R-6714-9).
+        "drying_temp_c": 45,
+        "drying_hours": Decimal("12"),
     }
 
 
@@ -155,6 +180,9 @@ async def test_a_local_preset_is_read_from_bambuddy_over_its_parent(table: Densi
         "density_g_cm3": Decimal("1.275"),
         # Not in the preset's own setting: its parent's, through the tree.
         "diameter_mm": Decimal("1.75"),
+        # `["65","65","55","55"]` and `["12",…]`: the AMS HT's idle values (R-6714-9).
+        "drying_temp_c": 65,
+        "drying_hours": Decimal("12"),
     }
     assert cost_hint(read.values) == "30"
 
