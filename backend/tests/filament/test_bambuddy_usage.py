@@ -16,7 +16,7 @@ from scadbuddy.bambuddy.linking import ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.filament import bambuddy_usage, capture, ledger
-from scadbuddy.filament.bambuddy_pull import pull, read_and_pull
+from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.bambuddy_usage import book_usage
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
@@ -33,6 +33,7 @@ from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from tests.conftest import PgPool
+from tests.filament.pull_support import read_and_pull
 
 pytestmark = pytest.mark.requires_postgres
 

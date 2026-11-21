@@ -15,13 +15,14 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import BbLocation, BbSupplier
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament.bambuddy_pull import Pulls, pull, read_and_pull
+from scadbuddy.filament.bambuddy_pull import Pulls, pull
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.models import SpoolKValueCreate
 from scadbuddy.filament.purchasing_models import SupplierCreate
 from scadbuddy.library.settings_store import StoredSettings
 from tests.conftest import PgPool
+from tests.filament.pull_support import read_and_pull
 from tests.filament.test_bambuddy_pull import (
     BB,
     NOW,
