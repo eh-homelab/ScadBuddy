@@ -65,7 +65,18 @@ describe('the sensors of a place', () => {
     const [shelf] = await listSensors(L.SHELF_A)
     const waiting = { ...shelf!, last_notification: { ...shelf!.last_notification!, kind: 'stopped' as const, state: 'queued' as const, sent_at: null, channels: null } }
     renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[waiting]} canAdd={false} onChanged={vi.fn()} />)
-    expect(screen.getByText(/Notification waiting \(alert ended/)).toHaveTextContent(/goes out through Bambuddy at the next refresh/)
+    expect(screen.getByText(/Notification waiting \(alert ended/)).toHaveTextContent(/goes out through Bambuddy within about a minute/)
+  })
+
+  it.each([
+    ['unauthorized', /Notification not sent .*Check the key in Settings\./],
+    ['not_found', /Notification not sent .*Bambuddy must be 1\.3\.1 or later\./],
+    ['interrupted', /Notification may not have been sent .*It is not sent again\./],
+  ] as const)('says what a %s failure means', async (error, text) => {
+    const [shelf] = await listSensors(L.SHELF_A)
+    const failed = { ...shelf!, last_notification: { ...shelf!.last_notification!, state: 'failed' as const, channels: null, error } }
+    renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[failed]} canAdd={false} onChanged={vi.fn()} />)
+    expect(screen.getByText(/Notification (not|may not have been) sent/)).toHaveTextContent(text)
   })
 
   it('shows no notification line for a sensor that never sent one', async () => {

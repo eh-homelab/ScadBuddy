@@ -637,6 +637,9 @@ describe('filament sensor and AMS weight tools (#6268)', () => {
     expect(tool('filament_sensor_save').description).toMatch(/AMS sensor cannot be made by hand/)
     // #6646: notify sends through Bambuddy, once at the start and once at the end.
     expect(tool('filament_sensor_save').description).toMatch(/starts alerting and one when it stops/)
+    // #6855 review: the hold before an alert closes, and notify off stops what is queued.
+    expect(tool('filament_sensor_save').description).toMatch(/after 10 minutes back inside its band/)
+    expect(tool('filament_sensor_save').description).toMatch(/turning `notify` off stops/)
     expect(tool('filament_sensors_list').description).toMatch(/`last_notification`/)
   })
 

@@ -74,13 +74,18 @@ const shortTime = (at: string) => new Date(at).toLocaleString([], { month: 'shor
 
 /** #6646 — what a failed notification's `error` code means, and what fixes it. */
 const NOTIFY_FAILURE: Record<NonNullable<SensorNotification['error']>, string> = {
-  scope: "Bambuddy refused ScadBuddy's API key. Give the key the Send notifications permission in Bambuddy.",
+  unauthorized: "Bambuddy refused ScadBuddy's API key. Check the key in Settings.",
+  scope: "ScadBuddy's API key lacks a permission. Give the key the Send notifications permission in Bambuddy.",
+  not_found: 'Bambuddy has no route for messages from connected apps. Bambuddy must be 1.3.1 or later.',
   no_channel: 'No Bambuddy channel takes messages from connected apps. Turn that on for a channel in Bambuddy.',
   rate_limited: 'Bambuddy refused it for sending too many messages in a minute.',
   unavailable: 'Bambuddy could not be reached.',
   rejected: 'Bambuddy refused the message.',
   not_configured: 'Bambuddy is not connected. Connect it in Settings.',
   internal: 'ScadBuddy could not send it.',
+  cancelled: 'Notify was turned off, or the sensor or its place was archived, before it went out.',
+  superseded: 'A newer change of the sensor went out instead.',
+  interrupted: 'The send stopped before Bambuddy answered, so it may have gone out. It is not sent again.',
 }
 
 /** The sensor's newest notification: sent, waiting to go, or failed and why. */
@@ -91,7 +96,7 @@ function LastNotification({ notification }: { notification: SensorNotification }
       <p className="flex items-start gap-1.5 text-warn">
         <BellOffIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
         <span>
-          Notification not sent ({what}, <time dateTime={notification.read_at}>{shortTime(notification.read_at)}</time>).{' '}
+          {notification.error === 'interrupted' ? 'Notification may not have been sent' : 'Notification not sent'} ({what}, <time dateTime={notification.read_at}>{shortTime(notification.read_at)}</time>).{' '}
           {notification.error ? NOTIFY_FAILURE[notification.error] : null}
         </span>
       </p>
@@ -112,7 +117,7 @@ function LastNotification({ notification }: { notification: SensorNotification }
       <span>
         {notification.state === 'sending' ? 'Notification sent to Bambuddy, no answer yet' : 'Notification waiting'} ({what},{' '}
         <time dateTime={notification.read_at}>{shortTime(notification.read_at)}</time>).
-        {notification.state === 'queued' && ' It goes out through Bambuddy at the next refresh.'}
+        {notification.state === 'queued' && ' It goes out through Bambuddy within about a minute.'}
       </span>
     </p>
   )
