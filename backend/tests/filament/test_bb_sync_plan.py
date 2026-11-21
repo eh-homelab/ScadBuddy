@@ -1667,6 +1667,7 @@ def test_a_spool_is_blocked_while_its_locations_probe_failed(pg_pool: PgPool) ->
     result = _plan(f, snap, _ROWS_PUSH)
     assert result.writes == []
     assert (result.deferred, result.blocked) == (0, 1)
+    assert result.unconfirmed == [("location", shelf)]
 
 
 def test_an_unlinked_row_is_made_again(pg_pool: PgPool) -> None:
@@ -1681,3 +1682,47 @@ def test_an_unlinked_row_is_made_again(pg_pool: PgPool) -> None:
     result = _plan(f, _snap([row | {"location_id": 40}], locations=[]), _ROWS_PUSH)
     assert [(w.kind, w.op, w.sb_id) for w in result.writes] == [("location", "create", shelf)]
     assert result.deferred == 1
+
+
+def test_a_rows_probe_goes_before_the_retries(pg_pool: PgPool) -> None:
+    """R-6688-9: a row's probe is a phase-0 write even when the row has an error row from
+    an earlier pass, so the cap takes it first. A spool waits only on a probe this round
+    sends."""
+    f = _filament(pg_pool)
+    kind = _type(f)
+    waiting, other = _spool(f, kind), _spool(f, kind)
+    shelf = _linked(pg_pool, f, "location")
+    _put(pg_pool, waiting, shelf)
+    _refuse(pg_pool, "location", shelf, at=datetime.now(UTC) - timedelta(hours=1))
+    rows = [
+        _matching(pg_pool, waiting, 50, _ROWS_PUSH) | {"location_id": None},
+        _matching(pg_pool, other, 51, _ROWS_PUSH) | {"color_name": "Other"},
+    ]
+    _link(pg_pool, waiting, 50)
+    _link(pg_pool, other, 51)
+    snap = _snap(rows, locations=[], read_at=datetime.now(UTC))
+    result = _plan(f, snap, _ROWS_PUSH, limit=1)
+    assert [(w.kind, w.op, w.sb_id) for w in result.writes] == [("location", "probe", shelf)]
+
+
+def test_a_probe_the_cap_cuts_is_not_planned(pg_pool: PgPool) -> None:
+    """R-6688-9: a probe past the cap is not planned. Its row counts ``deferred`` (the cap
+    cut its write, so the next pass probes it), and a spool naming it waits on it too,
+    never sending the id Bambuddy may have deleted."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    first = _linked(pg_pool, f, "location", 40)
+    second = f.locations.create(LocationCreate(name="Shelf B", kind_id=_kind(f, "Shelf"))).id
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET bb_location_id = 41 WHERE id = %s", (second,))
+    _put(pg_pool, spool, second)
+    row = _matching(pg_pool, spool, 50, _ROWS_PUSH) | {"location_id": None, "color_name": "X"}
+    _link(pg_pool, spool, 50)
+    # The spool's last write failed in an earlier pass, so it is a retry: a retry the cap
+    # cuts counts nothing (R-T4-15), and the spool counts ``deferred`` only because it
+    # waits on the capped row (R-6688-9).
+    _refuse(pg_pool, "spool", spool, at=datetime.now(UTC) - timedelta(hours=1))
+    result = _plan(f, _snap([row], locations=[]), _ROWS_PUSH, limit=1)
+    assert [(w.kind, w.op, w.bb_id) for w in result.writes] == [("location", "probe", 40)]
+    assert (result.deferred, result.blocked, result.failed) == (2, 0, 0)
+    assert sorted(result.unconfirmed) == sorted([("location", first), ("location", second)])
