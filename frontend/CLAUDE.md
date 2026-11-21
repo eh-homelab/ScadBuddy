@@ -254,7 +254,8 @@ same way, `vite.config.ts`).
   shop's currency and `reconciles`. A confirmed invoice keeps only its note and file. A unit test
   that uploads a file answers the `/file` part itself (jsdom's `FormData` does not reach msw;
   `InvoiceUpload.test.tsx`). The Shopping list tab (`ShoppingListTab`) adds an item from a type or by
-  text, marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
+  text, marks an item an empty spool added "Auto" with its note linked to that spool (#6868; the switch
+  is Settings → Filament's `filament_shopping_auto_add_empty`), marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
   purchased" and "Clear all"; the last quantity is remembered (`QUANTITY_KEY`). The Types tab's row
   and `TypePage` add a type to it as one pending spool (one click at a time: the button is off
   while its request is out). `useMoney.format` shows the bare decimal, with no symbol, while the

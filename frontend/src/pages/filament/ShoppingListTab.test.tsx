@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { listShopping } from '../../api/filamentPurchasing'
-import { T } from '../../mocks/features/filament/seed'
+import { spoolId, T } from '../../mocks/features/filament/seed'
 import { ITEM } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
@@ -37,6 +37,17 @@ describe('the Shopping list tab', () => {
     expect(within(pink).getByText('Hot Pink')).toBeInTheDocument()
     expect(within(pink).getByText('Pending')).toBeInTheDocument()
     expect(within(rowOf(ITEM.CLEAR)).getByText('Purchased')).toBeInTheDocument()
+  })
+
+  it('marks an item an empty spool added, and links its note to that spool (#6868)', async () => {
+    renderPage(<ShoppingListTab />)
+    await table()
+    const pink = rowOf(ITEM.PINK)
+    expect(within(pink).getByText('Auto')).toHaveAccessibleDescription('Added when a spool ran out or was archived')
+    expect(within(pink).getByRole('link', { name: 'Spool #3 ran out on 2026-11-14 18:42 UTC.' })).toHaveAttribute('href', expect.stringContaining(`/filament/spools/${spoolId(3)}`))
+    expect(within(rowOf(ITEM.ORANGE)).queryByText('Auto')).not.toBeInTheDocument()
+    expect(screen.getByText(/A spool that runs out adds its type here/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', expect.stringContaining('/settings/printing#filament'))
   })
 
   it('adds an item from a type with its quantity', async () => {
