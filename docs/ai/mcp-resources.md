@@ -179,53 +179,51 @@ to start if any resource is backed by a tool that is not `read`.
 
 ### The event source
 
-The agent LISTENs on `scadbuddy_events`, the channel the backend NOTIFYs on
+The agent hears `scadbuddy_events`, the channel the backend NOTIFYs on
 (`PG_CHANNEL`, [`backend/scadbuddy/core/events.py`](../../backend/scadbuddy/core/events.py)),
-on one dedicated connection of its own (`PgEventListener`,
-[`agent/src/events/pgListener.ts`](../../agent/src/events/pgListener.ts)). It needs
-`SCADBUDDY_DATABASE_URL` and nothing else; without a database `/mcp` is not served at
-all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
+and its other channels (`scadbuddy_input`, `_pending`, `_mcp`, `_warm_evict`, `_settings`)
+over one server-sent event stream from the backend, `GET /api/v1/internal/crud/agent/changes`
+(#5299 D4, [`agent/src/events/changeStream.ts`](../../agent/src/events/changeStream.ts),
+[`backend/scadbuddy/api/crud_agent_changes.py`](../../backend/scadbuddy/api/crud_agent_changes.py)),
+opened with the agent's service credential. The agent opens no `LISTEN` connection: each API
+process registers those channels on its one `LISTEN` connection
+([`agent_changes/hub.py`](../../backend/scadbuddy/agent_changes/hub.py)) and hands every
+NOTIFY to each stream it serves, in the order Postgres delivered them. Without a service
+credential (no database and no proof) `/mcp` is not served at all (`createApp()`,
+[`agent/src/app.ts`](../../agent/src/app.ts)).
 
-- **Point the URL at the primary.** On a hot standby `LISTEN` and `NOTIFY` are refused
+- **Point the API's URL at the primary.** On a hot standby `LISTEN` and `NOTIFY` are refused
   ([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html)).
   With CloudNativePG use the `-rw` service, which "Points to the primary instance of the
   cluster" ([CloudNativePG: Service management](https://cloudnative-pg.io/docs/devel/service_management)).
 - **Replicas need nothing extra.** Postgres delivers a NOTIFY to every session
   listening on the channel ([NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html)),
-  so every agent and backend replica hears every event. An MCP session's transport and
+  so every API replica hears every NOTIFY and every agent replica's stream gets it,
+  whichever API replica serves it. An MCP session's transport and
   subscriptions live on the replica that opened it, so each replica notifies only its
   own sessions; a GET stream that reached another replica gets them through the session
   relay below.
-- **No transaction-mode pooler in between.** `LISTEN` belongs to a server session; a
-  pooler that hands the connection to someone else between transactions would drop it.
+- **No transaction-mode pooler in front of the API.** `LISTEN` belongs to a server session;
+  a pooler that hands the connection to someone else between transactions would drop it.
   **Unverified** for any particular pooler.
-- **Reconnects.** When the listening connection drops, the listener retries with
-  backoff (500 ms to 30 s) and logs each failure. On reconnect it replays the backend's
-  `events` log after the last `seq` it knows (backend
-  [`pg_events.py`](../../backend/scadbuddy/core/pg_events.py); pruned by
-  `SCADBUDDY_EVENT_LOG_RETENTION_*`), skipping ids it already delivered. It reads the log
-  through the backend's CRUD routes (`…/crud/agent/events/head` and `…/crud/agent/events`,
-  #5299, [`eventLogReads.ts`](../../agent/src/events/eventLogReads.ts)); its listening
-  connection only listens. More than 1000
-  missed events, or a log it cannot read, makes it log
-  `event bus: resyncing followers: …` and send every subscription an update plus one
-  `list_changed`, so clients re-read.
-- **The replay rests on short event transactions.** The listener's place in the log
-  trails the newest `seq` by one 30 s check, because a `seq` is handed out at INSERT
-  but becomes visible only at COMMIT. That is safe only while no transaction that
-  writes to `events` stays open longer than 30 s. One that did could commit an event
-  behind the place, and if the listener were reconnecting at the time, that event would
-  be lost for good; the duplicate filter stops repeats, not skips. The backend keeps
-  well inside this: each event is one short INSERT + `pg_notify` transaction
-  ([`pg_events.py`](../../backend/scadbuddy/core/pg_events.py), "Publishing"). As a
-  guard, a replayed event whose `logged_at` (its transaction's start) is more than 30 s
-  older than the place shows the bound was broken; the listener then logs
-  `event bus: resyncing followers: a replayed event's transaction was open more than …`
-  and resyncs every subscriber (the ASSUMPTION and GUARD comments in `pgListener.ts`).
-- **Schemas.** Over SQL the listener reads `events` through the connection's
-  `search_path`, so the agent and the backend must share a schema; channels are per database, so two
-  deployments sharing a database would hear each other (the same caveat the backend's
-  `pg_events.py` states).
+- **Reconnects.** When the stream drops, the agent opens it again with backoff (500 ms to
+  30 s, jittered) and logs each failure (`change stream: …`). It sends the last logged
+  event's id as `Last-Event-ID`; the API replays its `events` log after it (backend
+  [`pg_events.py`](../../backend/scadbuddy/core/pg_events.py), pruned by
+  `SCADBUDDY_EVENT_LOG_RETENTION_*`) before the stream's `ready` frame, and the agent skips
+  ids it already delivered. More than 1000 missed events, or a place the log no longer
+  holds, makes the API say `resync`: the agent logs
+  `change stream: resyncing followers: …` and sends every subscription an update plus one
+  `list_changed`, so clients re-read. The API says the same (`reconnected`) when the gap
+  was on its side: its own `LISTEN` connection dropped, or the agent fell more than 10,000
+  changes behind. A stream silent for 45 s (the API sends a keepalive every 15 s) is
+  opened again.
+- **Bounds.** A service credential may hold 4 streams at once from one address (an agent
+  process's pod; the processes that read one credential from the view share it) and an API
+  process 64; one more is answered 429 and retried. The API's shutdown ends every stream first, so a stream
+  never holds a rolling deploy's drain.
+- **Channels are per database.** Two deployments sharing a database would hear each other
+  (the same caveat the backend's `pg_events.py` states).
 
 ### Sessions across replicas (#2086)
 

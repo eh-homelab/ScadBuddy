@@ -28,7 +28,7 @@ from scadbuddy.filament.bambuddy_pull import (
     try_assignments,
 )
 from scadbuddy.filament.bb_pull_apply import pull_start
-from scadbuddy.filament.bb_pull_models import PullOutcome, PullStart
+from scadbuddy.filament.bb_pull_models import PullInstanceChangedError, PullOutcome, PullStart
 from scadbuddy.filament.bb_pull_run import read_catalog
 from scadbuddy.filament.bb_sync_models import seen_row
 from scadbuddy.filament.bb_sync_nudge import instance_for
@@ -797,6 +797,27 @@ async def test_the_spool_refresh_activity_skips_and_fails_as_before(pg_pool: PgP
     assert await filament_pull_activity(f, lambda: settings, FilamentSync, down)() == "failed"
     worker = _Execute(PullOutcome(outcome="failed"))
     assert await filament_pull_activity(f, lambda: settings, FilamentSync, worker)() == "failed"
+
+
+async def test_a_pull_of_another_bambuddy_is_skipped(pg_pool: PgPool) -> None:
+    """#6845 R-6845-5: while the links belong to another Bambuddy than the configured one,
+    the Schedule's pull reads no spool, and a body the worker read anyway is refused, so
+    nothing is written to a linked spool."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW, instance="0ld0ld0ld0ld").created_ids
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(
+            json=[bb(note="a stranger's", updated_at=_bb_time(-1)).model_dump(mode="json")]
+        )
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        assert await scheduled_pull(f, lambda: settings, FilamentSync) == "skipped"
+        assert not spools.called
+        with pytest.raises(PullInstanceChangedError):
+            await read_and_pull(f, settings)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.note != "a stranger's"
 
 
 async def test_a_pull_reads_bambuddy_and_imports(pg_pool: PgPool) -> None:

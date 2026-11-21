@@ -24,8 +24,9 @@ import type { Publisher } from './publish.js'
 // (sessions_get, `scadbuddy://sessions/{id}`, the chat socket).
 //
 // CONSUMERS. Postgres delivers a NOTIFY to every listening session
-// (https://www.postgresql.org/docs/current/sql-notify.html), and the backend
-// and the agent each LISTEN on the channel independently (spec §7):
+// (https://www.postgresql.org/docs/current/sql-notify.html): every API replica's
+// one LISTEN connection hears it, and hands it to its own subscribers and to the
+// agent's change streams it serves (events/changeStream.ts, #5299 D4):
 //   - every agent replica's `followSessionEvents` wakes that replica's event-log
 //     followers (eventLog.ts `wake`), so a watcher attached on replica B sees a
 //     turn running on replica A without waiting for the poll;
@@ -38,7 +39,7 @@ import type { Publisher } from './publish.js'
 // NOT IN THE BACKEND'S `events` LOG. That log is the backend's (its advisory
 // lock, its pruning by row count, backend/scadbuddy/core/pg_events.py), and a
 // streaming turn would flood it. So a `session.*` NOTIFY sent while a
-// listener's connection is down is not replayed; the listener reports the
+// replica's change stream is down is not replayed; the stream reports the
 // reconnect (events/bus.ts `onReconnect`) and the consumers above re-read
 // everything session-shaped instead. The event log itself is durable and
 // polled (`pollMs`), so a lost NOTIFY only costs latency.
@@ -179,7 +180,7 @@ export function sessionIdOf(event: BusEvent): string | undefined {
 }
 
 /**
- * The LISTEN consumer that wakes this replica's event-log followers
+ * The change-stream consumer that wakes this replica's event-log followers
  * (eventLog.ts `wake`, the seam #264 left for it) for sessions that another
  * replica wrote. Its own writes woke them already, in `append`. After a
  * resync or a reconnect every follower is woken, since a `session.*` NOTIFY

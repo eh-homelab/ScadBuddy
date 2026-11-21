@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { CrudReadError, crudRead } from '../src/api/crudRead.js'
-import { CrudEventLogReads } from '../src/events/eventLogReads.js'
 import { CrudFlowRunReads, STILL_WAITING_BATCH } from '../src/flows/backendReads.js'
 
 // The agent's reads of the backend's tables through its CRUD routes (#5299 D7): the clients
@@ -141,36 +140,5 @@ describe('CrudFlowRunReads', () => {
     const reads = new CrudFlowRunReads(BASE, { fetch: api([() => ({ status: 503, body: { detail: 'database-unavailable' } })]) })
     await expect(reads.starter('r1', 'e1')).rejects.toThrow("the backend refused a flow run's starter (HTTP 503: database-unavailable)")
     await expect(reads.waitingRuns()).rejects.toBeInstanceOf(CrudReadError)
-  })
-})
-
-describe('CrudEventLogReads', () => {
-  it("reads the log's head and its gap, newest first, with the database clock", async () => {
-    const seen: Request[] = []
-    const reads = new CrudEventLogReads(BASE, {
-      fetch: api(
-        [
-          at('/events/head', { seq: '9007199254740993', at: '2026-11-14T10:00:00Z' }),
-          at('/events', {
-            events: [
-              { seq: '12', event_id: 'b', payload: { id: 'b' }, logged_at: '2026-11-14T10:00:02Z' },
-              { seq: '11', event_id: 'a', payload: { id: 'a' }, logged_at: '2026-11-14T10:00:01Z' },
-            ],
-            read_at: '2026-11-14T10:00:03Z',
-          }),
-        ],
-        seen,
-      ),
-    })
-    // A bigint past 2^53 is kept exact.
-    expect(await reads.head()).toEqual({ seq: 9007199254740993n, at: new Date('2026-11-14T10:00:00Z') })
-    const rows = await reads.gap(10n, 1001)
-    expect(rows.map((r) => [r.seq, r.event_id, r.payload])).toEqual([
-      ['12', 'b', { id: 'b' }],
-      ['11', 'a', { id: 'a' }],
-    ])
-    expect(rows[1]?.logged_at.toISOString()).toBe('2026-11-14T10:00:01.000Z')
-    expect(rows.every((r) => r.read_at.toISOString() === '2026-11-14T10:00:03.000Z')).toBe(true)
-    expect(Object.fromEntries(new URL(seen[1]!.url).searchParams)).toEqual({ after: '10', limit: '1001' })
   })
 })

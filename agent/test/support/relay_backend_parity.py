@@ -11,6 +11,7 @@ from typing import Any, get_type_hints
 from pydantic import BaseModel, ValidationError
 
 from scadbuddy.api import crud_agent_mcp
+from scadbuddy.core.problems import ApiError
 
 PREFIX = "/internal/crud/agent"
 
@@ -38,14 +39,10 @@ def main() -> None:
             continue
         result: dict[str, Any] = {"ok": True}
         if isinstance(body, crud_agent_mcp.Send):
-            if (getattr(body.header, "row", None) is None) != (body.body is None):
-                results.append({"ok": False, "error": "a body only with the header that names its row"})
-                continue
-            payload = crud_agent_mcp._payload(body.header)
-            if len(payload.encode()) > crud_agent_mcp.NOTIFY_PAYLOAD_MAX:
-                result = {"ok": False, "error": "payload past the NOTIFY cap"}
-            else:
-                result["payload"] = payload
+            try:
+                result["payload"] = crud_agent_mcp.checked_payload(body)
+            except ApiError as err:
+                result = {"ok": False, "error": str(err)}
         results.append(result)
     json.dump(results, sys.stdout)
 

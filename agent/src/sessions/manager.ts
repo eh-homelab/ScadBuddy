@@ -117,7 +117,7 @@ import { FlowQueue } from '../flows/queue.js'
 //     scrubForLog must read that declaration.
 //   - #266's WebSocket gateway maps the panel's client messages onto send
 //     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
-//   - `onAppend` publishes `session.*` on the bus, and main.ts's LISTEN
+//   - `onAppend` publishes `session.*` on the bus, and main.ts's change-stream
 //     consumer calls EventLog.wake() (busEvents.ts, #300).
 //
 // Turns (plan Step 6.3: every session is an AgentSession). `send` claims the row and
@@ -935,7 +935,7 @@ export class SessionManager {
    * This replica's warm Claude Code processes (warm.ts, spec 2026-10-13 §5.3):
    * one per classic session, serving its turns until it no longer matches
    * them, goes idle, or is evicted (a handoff, done, an archive, a credential,
-   * plugin or package change on any replica: warmEvict.ts; main.ts LISTENs).
+   * plugin or package change on any replica: warmEvict.ts; main.ts hears it on the change stream).
    */
   readonly warm: WarmSessions
   /** The sessions' rows (rows.ts): over SQL, or the API's CRUD routes once it lists area `sessions` (main.ts). */

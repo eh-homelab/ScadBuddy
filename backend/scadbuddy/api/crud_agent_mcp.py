@@ -284,15 +284,20 @@ def _payload(header: Any) -> str:
     )
 
 
-@router.post("/mcp-relay/send", name="crud_agent_mcp_relay_send")
-async def send(body: Send, state: StateDep) -> Done:
-    header = body.header
-    row: UUID | None = getattr(header, "row", None)
-    if (row is None) != (body.body is None):
+def checked_payload(body: Send) -> str:
+    """The NOTIFY payload of a send the route takes; 422 for one it refuses."""
+    if (getattr(body.header, "row", None) is None) != (body.body is None):
         raise ApiError(422, "a body is sent with the header that names its row, and only then")
-    payload = _payload(header)
+    payload = _payload(body.header)
     if len(payload.encode()) > NOTIFY_PAYLOAD_MAX:
         raise ApiError(422, f"a relay header is at most {NOTIFY_PAYLOAD_MAX} bytes")
+    return payload
+
+
+@router.post("/mcp-relay/send", name="crud_agent_mcp_relay_send")
+async def send(body: Send, state: StateDep) -> Done:
+    payload = checked_payload(body)
+    row: UUID | None = getattr(body.header, "row", None)
 
     def run(conn: psycopg.Connection[Any]) -> None:
         if row is not None:

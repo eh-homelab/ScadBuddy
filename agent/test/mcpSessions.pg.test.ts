@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { AgentApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { MemoryEventSource } from '../src/events/bus.js'
-import { PgEventListener } from '../src/events/pgListener.js'
+import { PgEventListener } from './support/pgListener.js'
 import { CrudRelayRows, PgRelayRows, RELAY_SEND_MAX_BYTES, type RelayRows } from '../src/mcp/relayRows.js'
 import { SharedMcpSessionRelay, type SessionOwner, sessionHash } from '../src/mcp/sessionRelay.js'
 import { ResourceHub } from '../src/resources/hub.js'
