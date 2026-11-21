@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -65,7 +65,7 @@ async def run_pass(
     pass (R-T7-8).
 
     ``written`` counts the writes Bambuddy answered ok (a probe writes nothing),
-    ``failed`` the writes it refused (a probe's 404 is an answer: the spool is gone). The
+    ``failed`` the writes it refused (a probe's 404 is an answer: the row is gone). The
     other counts come from the plans: ``deferred`` and ``more`` from the last round's,
     ``conflicts`` and ``unmapped_k`` the largest of the rounds', since every round plans
     from the one snapshot (R-T4-33). ``interval_s`` is the plans' (the stored setting),
@@ -202,6 +202,12 @@ async def _call(
     message)."""
     try:
         answer = await _send(client, write, catalog)
+    except _NotListedError:
+        return BbWriteResult(key=write.key, ok=False, error="not_found", status=404)
+    except _ListingFailedError as exc:
+        # No status: the listing's own answer is not the row's, so even its 404 keeps
+        # the link (R-6688-3).
+        return BbWriteResult(key=write.key, ok=False, error=exc.label)
     except ApiError as exc:
         code = exc.extensions.get("bambuddy_status")
         return BbWriteResult(
@@ -259,6 +265,8 @@ async def _send(
             case "presets":
                 await client.put_spool_presets(bb_id, cast("list[dict[str, Any]]", body))
                 return None
+    if op == "probe":
+        return await _probe(client, write.kind, bb_id)
     if op != "update":
         raise ValueError(f"{write.key}: no such write")
     fields = cast("dict[str, Any]", body)
@@ -278,6 +286,48 @@ async def _send(
             if name is None or weight is None:
                 raise ValueError(f"{write.key}: catalog entry {bb_id} was not read")
             return _row(await client.update_catalog_entry(bb_id, name, float(weight)))
+
+
+class _NotListedError(Exception):
+    """A probe's listing, read whole, does not hold the row: Bambuddy deleted it."""
+
+
+class _ListingFailedError(Exception):
+    """A probe could not read its listing whole; ``label`` is what the error row says."""
+
+    def __init__(self, label: str) -> None:
+        super().__init__(label)
+        self.label = label
+
+
+#: The listing a probe reads again, for each kind Bambuddy has no ``GET`` of one row for
+#: (Bambuddy v1.3.1: ``/inventory/suppliers/{id}`` and ``/inventory/locations/{id}`` take
+#: ``PATCH`` and ``DELETE`` only, ``/inventory/catalog/{id}`` ``PUT`` and ``DELETE``).
+_LISTINGS: dict[str, Callable[[BambuddyClient], Awaitable[Sequence[BaseModel]]]] = {
+    "supplier": lambda client: client.suppliers(),
+    "location": lambda client: client.locations(),
+    "insert_type": lambda client: client.spool_catalog(),
+}
+
+
+async def _probe(client: BambuddyClient, kind: str, bb_id: int) -> dict[str, Any]:
+    """#6688 (R-6688-2, R-6688-3): whether Bambuddy still holds a linked row, by ``GET``
+    only. A filament entry is read by its id, so its 404 is Bambuddy's own. Any other
+    kind's listing is read again: the row there is the answer, and a listing read whole
+    without it is `_NotListedError`; a listing that fails or does not parse is
+    `_ListingFailedError`, which is never a 404."""
+    if kind == "filament":
+        return _row(await client.filament(bb_id))
+    try:
+        rows = await _LISTINGS[kind](client)
+    except ApiError as exc:
+        raise _ListingFailedError(error_label(exc)) from None
+    except ValidationError:
+        raise _ListingFailedError("invalid") from None
+    for row in rows:
+        if getattr(row, "id", None) == bb_id:
+            return _row(row)
+    raise _NotListedError
 
 
 async def _create(client: BambuddyClient, write: BbWrite) -> BaseModel:

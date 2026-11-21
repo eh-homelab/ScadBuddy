@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -194,6 +194,21 @@ class BbRefs:
                 "SELECT id, bambuddy_printer_id AS bb FROM printers"
                 " WHERE bambuddy_printer_id IS NOT NULL"
             ),
+        )
+
+    def without(self, rows: Iterable[tuple[str, UUID]]) -> BbRefs:
+        """These refs less the ``(kind, sb_id)`` rows given, which a spool then names as
+        a `Pending` (#6688: a linked row Bambuddy may have deleted)."""
+        gone = set(rows)
+
+        def keep(kind: str, ids: Mapping[UUID, int]) -> dict[UUID, int]:
+            return {sb: bb for sb, bb in ids.items() if (kind, sb) not in gone}
+
+        return replace(
+            self,
+            insert_types=keep("insert_type", self.insert_types),
+            locations=keep("location", self.locations),
+            suppliers=keep("supplier", self.suppliers),
         )
 
 
@@ -640,6 +655,11 @@ class _Planner:
     creating: set[tuple[str, UUID]] = field(default_factory=set)
     #: The archived rows of the kinds `rows` plans (R-T4-19).
     archived: set[tuple[str, UUID]] = field(default_factory=set)
+    #: #6688 (R-6688-1, R-6688-5): linked rows missing from their complete listing whose
+    #: probe this round plans, and those whose probe Bambuddy refused in this pass. A
+    #: spool that names one waits.
+    probing: set[tuple[str, UUID]] = field(default_factory=set)
+    unsure: set[tuple[str, UUID]] = field(default_factory=set)
 
     @property
     def full(self) -> bool:
@@ -704,8 +724,11 @@ class _Planner:
     def in_flight(self, ref: Pending) -> bool:
         """True while a row's create is planned in this round, or has an open intent and
         no failed write: a row Bambuddy refused is no reason to wait, or a spool naming it
-        would wait every pass."""
+        would wait every pass. A linked row missing from its listing is in flight while
+        its probe is planned or failed in this pass (R-6688-5)."""
         key = (ref.kind, ref.sb_id)
+        if key in self.probing or key in self.unsure:
+            return True
         return key not in self.errors and (key in self.creating or key in self.intents)
 
     def expire(self, kind: Kind, sb_id: UUID) -> None:
@@ -821,7 +844,8 @@ class _Planner:
         its 409). Under ``two_way`` an adoption with no intent (a person made the row), or
         the retry of one (``marked``), sends none of SB's differing values and records
         their marks (R-T4-32); one with an intent sends only the fields Bambuddy still
-        holds as the create sent them (``sent``), and marks the rest (R-T4-35). With the
+        holds as the create sent them (``sent``), and marks the rest (R-T4-35). A linked
+        item missing from the listing gets a probe (`missing`, #6688). With the
         listing not read (``None``) nothing is written. A full pass
         seeds a linked item's missing seen copy (R-T4-22), and closes the intent of an
         archived item or of a create no row matches (R-T4-20)."""
@@ -837,7 +861,10 @@ class _Planner:
         for item in items:
             if item.bb_id is not None:
                 row = by_id.get(item.bb_id)
-                if row is None or self.refused(kind, item.sb_id, create=False):
+                if row is None:
+                    self.missing(kind, item)
+                    continue
+                if self.refused(kind, item.sb_id, create=False):
                     continue
                 seen, seen_at, marks = item.seen, item.seen_at, item.unseen
                 table = _SEEN_TABLES.get(kind)
@@ -932,6 +959,23 @@ class _Planner:
                 continue
             self.add(0, kind, item.sb_id, "create", None, item.body, hashes, intent=True)
 
+    def missing(self, kind: Kind, item: _Item) -> None:
+        """#6688 (R-6688-1): a linked item missing from its kind's listing, which the pass
+        read whole (a listing is read whole or not at all, `bb_sync_run._maybe`). Bambuddy
+        may have deleted the row: it gets one probe, whose 404 drops the link (`results`),
+        so a later round makes the row again. A link `results` wrote after the snapshot
+        was read (a create or a probe earlier in this pass) is not probed; nor is an item
+        whose last write Bambuddy refused in this pass (R-T4-1), which a spool naming it
+        then waits for (``unsure``, R-6688-5)."""
+        key = (kind, item.sb_id)
+        if item.seen is not None and item.seen_at is not None and item.seen_at > self.snap.read_at:
+            return
+        if self.refused(kind, item.sb_id, create=False):
+            self.unsure.add(key)
+            return
+        self.probing.add(key)
+        self.add(0, kind, item.sb_id, "probe", item.bb_id, {}, {})
+
     def name_taken(self, kind: Kind, sb_id: UUID) -> None:
         """R-T4-8: a linked row renamed in SB to the name of an unlinked Bambuddy row would
         get a 409 on every pass. It gets no write, and one error row (kept as it is when
@@ -988,8 +1032,8 @@ class _Planner:
         when one names a row whose create is in flight (the spool waits; ``deferred``
         when this pass read that row's listing, so a later round can clear it, else
         ``blocked``, R-T4-1; ``blocked`` too when that row is archived, as no round plans
-        it, R-T4-19); else the fields naming a row Bambuddy will not have this pass are
-        left out (Decision 35)."""
+        it, R-T4-19, and when that row's probe failed in this pass, R-6688-5); else the
+        fields naming a row Bambuddy will not have this pass are left out (Decision 35)."""
         desired, unmapped = desired_and_unmapped(self.conn, sb_id, self.refs, self.sync)
         self.unmapped_k += unmapped
         out = {}
@@ -998,7 +1042,10 @@ class _Planner:
             waiting = [r for r in refs if self.in_flight(r)]
             if waiting:
                 read = all(
-                    self.read(r.kind) and (r.kind, r.sb_id) not in self.archived for r in waiting
+                    self.read(r.kind)
+                    and (r.kind, r.sb_id) not in self.archived
+                    and (r.kind, r.sb_id) not in self.unsure
+                    for r in waiting
                 )
                 (self.deferred if read else self.blocked).add(("spool", sb_id))
                 return None
@@ -1541,9 +1588,10 @@ def plan(
 ) -> SyncPlan:
     """The writes SB wants Bambuddy to take next, from what ``snap`` read, at most
     ``limit`` (Decision 11), in this order: suppliers, locations, insert types and
-    filament catalog entries; then spool creates, updates and probes whose references
-    are known (the others count ``deferred`` or ``blocked``); then archive and restore;
-    then each spool's lists (K-profiles, presets, suppliers); last the writes of items
+    filament catalog entries, with the probes of those rows a complete listing lacks
+    (#6688); then spool creates, updates and probes whose references are known (the
+    others count ``deferred`` or ``blocked``); then archive and restore; then each
+    spool's lists (K-profiles, presets, suppliers); last the writes of items
     Bambuddy refused in an earlier pass (R-T4-2). An item refused in this pass, or a
     create refused earlier on an event pass, counts ``failed`` (R-T4-1). Each write's
     ``key`` is ``kind:sb_id:op``. A kept create records its intent here, in this
@@ -1571,6 +1619,9 @@ def plan(
         planner.rows("location", _locations(conn), snap.locations, sync.locations, _LOCATION_FIELDS)
         planner.rows("insert_type", _insert_types(conn), snap.catalog, sync.spools, _CATALOG_FIELDS)
         planner.rows("filament", _filaments(conn), snap.filaments, sync.spools, _FILAMENT_FIELDS)
+        # R-6688-5: a spool names a row Bambuddy may have deleted as a `Pending`, so it
+        # waits for the row's probe (and its create again) instead of sending its old id.
+        planner.refs = planner.refs.without(planner.probing | planner.unsure)
         planner.spools()
         writes = planner.take(limit)
     return SyncPlan(

@@ -907,7 +907,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     409 for a second supplier or location of one name, so a create would fail on every
     pass. Cost: a BB row of the same name that a person made becomes SB's. Task 5 must take
     an `update` on an unlinked item with an open intent as an adoption, for spools too.
-42. (changed by 62) Task 4: a linked supplier, location, catalog or filament entry missing from BB's
+42. (changed by 62, replaced by 172-177 for #6688) Task 4: a linked supplier, location, catalog or filament entry missing from BB's
     listing gets no write; only spools are probed (Decision 13). Why: the brief's probe is
     `spool_row`. Cost: such a row stays linked to a row Bambuddy deleted until a later
     task handles it.
@@ -1794,6 +1794,68 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_place_mapping_only_to_an_archived_location_is_not_seeded`,
     `test_a_place_mapping_only_to_a_printers_place_is_not_seeded`,
     `test_a_seed_of_a_place_archived_since_still_counts`.
+172. R-6688-1 (#6688; replaces 42): a linked supplier, location, insert type or filament
+    catalog entry gets one `probe` write when its Bambuddy id is missing from its kind's
+    listing, the pass read that listing, the kind pushes (`rows` plans nothing for a kind
+    that does not push, so its link stays as it is), Bambuddy did not refuse the item's
+    write in this pass (R-T4-1), and `results` did not store a seen copy after
+    `snap.read_at` (a row created or probed earlier in this pass, which the snapshot
+    cannot hold). A listing that is read is complete: `bb_sync_run._maybe` makes a listing
+    that fails, or that has one row that does not parse, `None`, and Bambuddy v1.3.1's
+    list routes have no filter and no pages (`inventory.py` lines 516, 697 and 893,
+    `filaments.py` line 20, https://github.com/maziggy/bambuddy/tree/v1.3.1/backend/app/api/routes).
+    A listing not read (`None`) gets no probe. Why: the issue's scope, as spools are probed
+    (Decision 13, F16). Cost: one Bambuddy call per such row per pass, toward the cap.
+173. R-6688-2: a probe is `GET` only and never writes. A filament entry is read by its id
+    (`GET /filament-catalog/{id}`, `FILAMENTS_READ` as the list, `filaments.py` line 44 at
+    v1.3.1; client `BambuddyClient.filament`). Bambuddy has no `GET` of one supplier,
+    location or spool catalog entry (measured 2026-11-21: `GET
+    https://bambuddy.internal.nullreference.io/openapi.json`, version 1.3.1, no key:
+    `/inventory/suppliers/{id}` and `/inventory/locations/{id}` take `PATCH` and `DELETE`,
+    `/inventory/catalog/{id}` `PUT` and `DELETE`), so the probe of one of those reads its
+    kind's listing again and looks for the id. Why: an empty `PATCH` would answer by id but
+    is a write, and the catalog's `PUT` needs a name and a weight SB does not know Bambuddy
+    holds. Cost: a probe reads a whole listing.
+174. R-6688-3: only a definite "not found" for that row's id drops the link: the `GET` by
+    id's 404, or a listing that answered 200 and parsed whole without the id (the worker
+    reports that as `status` 404, `error` `not_found`). Any other answer keeps the link and
+    upserts the item's error row, counted `failed`: a 5xx, a timeout, a 401 or 403, a
+    listing that does not parse, and a 404 of the listing route itself (the worker sends
+    such a listing failure with no `status`, so `results` never takes it as the row's).
+    `results` is unchanged: a probe's 404 already drops any kind's link (decision 88).
+    Why: a dropped live link makes the plan create the row again, a duplicate Bambuddy
+    refuses (409) on every pass. Cost: a row whose probe keeps failing stays linked.
+175. R-6688-4: once a probe's 404 dropped a link, the next plan round of the same pass
+    plans the row as any unlinked one: a create when it is unarchived and its kind pushes,
+    or an adoption of an unlinked Bambuddy row of its name (Decision 10, 41). An archived
+    row stays unlinked. No direction rule is new. Why: the issue's "recreate under the
+    direction rules". Cost: none known.
+176. R-6688-5: a spool that names a supplier, location or insert type that is missing from
+    its complete listing, and that `results` has not written in this pass, waits: the plan
+    takes those rows out of `BbRefs` (`BbRefs.without`), so the spool names them as a
+    `Pending`. It counts `deferred` while the row's probe (then its create) is planned in
+    this pass, and `blocked` while the row's probe failed in this pass. A later round
+    sends the spool with the row's new id, or its old id when the probe found it. A filament
+    entry holds no spool back: a spool names its type by code. Why: a spool update naming a
+    deleted Bambuddy location gets a 404 or 422 and an error row. Cost: a spool waits up to
+    two rounds; with a probe that keeps failing, it waits for later passes.
+177. R-6688-6: a row's probe is a phase-0 write, with its kind's other writes, and counts
+    toward the cap as a spool's probe does; it writes nothing, so `written` does not count
+    it, and its 404 is an answer, not `failed` (decision 116). Tests:
+    `test_bb_sync_plan.py` (`test_a_row_missing_from_its_listing_is_probed`,
+    `test_a_row_of_an_unread_listing_is_not_probed`,
+    `test_a_row_whose_kind_does_not_push_is_not_probed`,
+    `test_a_row_written_this_pass_is_not_probed`,
+    `test_a_row_refused_this_pass_is_not_probed_again`,
+    `test_a_spool_waits_for_the_probe_of_its_location`,
+    `test_a_spool_is_blocked_while_its_locations_probe_failed`,
+    `test_an_unlinked_row_is_made_again`), `test_bb_sync_run.py`
+    (`test_a_row_probe_reads_its_listing_again`, `test_a_filament_probe_gets_the_entry`,
+    `test_a_failed_listing_probe_is_no_404`, `test_a_filament_probe_that_fails_is_no_404`,
+    `test_a_spool_is_written_after_its_deleted_location_is_made_again`) and
+    `test_bb_sync_results.py` (`test_a_row_probe_404_drops_the_link`,
+    `test_a_row_probe_that_finds_the_row_keeps_the_link`,
+    `test_a_spool_names_its_deleted_location_only_once_it_is_made_again`).
 
 ## Self-review
 

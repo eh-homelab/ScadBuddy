@@ -40,8 +40,10 @@ Kind = Literal["spool", "supplier", "location", "insert_type", "filament"]
 #: already, linked now by its name, or made.
 BbLinked = Literal["found", "linked", "made"]
 
-#: What one write does. ``probe`` is Decision 13's ``GET spool_row(bb_id)``, with an
-#: empty body.
+#: What one write does. ``probe`` asks, with ``GET`` only and an empty body, whether
+#: Bambuddy still holds a linked row a complete listing lacks: a spool's ``spool_row(bb_id)``
+#: (Decision 13), a filament entry's ``GET`` by id, any other row's listing read again
+#: (#6688, decisions 172-177).
 Op = Literal[
     "create", "update", "archive", "restore", "k_profiles", "presets", "suppliers", "probe"
 ]
@@ -227,7 +229,8 @@ class SyncPlan(BaseModel, extra="forbid"):
     (R-T4-15).
     ``failed``: Bambuddy refused the item's last write; it is tried again in a later pass,
     a create only on a full one. ``blocked``: a read this pass did not get holds it (a
-    partial spool listing, a listing not read). Neither sets ``more`` (R-T4-1).
+    partial spool listing, a listing not read, a row whose probe failed in this pass,
+    R-6688-5). Neither sets ``more`` (R-T4-1).
     ``unmapped_k``: K values left out for a printer with no Bambuddy id (Decision 14).
     ``conflicts``: fields of suppliers, locations, insert types and filament entries that
     both sides changed since SB last saw them, so neither side's value is pushed

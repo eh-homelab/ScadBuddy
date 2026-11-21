@@ -188,6 +188,7 @@ Operation = Literal[
     "filament_catalog.create",
     "filament_catalog.update",
     "filaments.catalog",
+    "filaments.read",
     "library.annotate",
     "library.bulk_delete",
     "library.delete",
@@ -1102,6 +1103,19 @@ class BambuddyClient:
             what=what,
         )
         return [CatalogFilament.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def filament(self, filament_id: int) -> CatalogFilament:
+        """``GET /api/v1/filament-catalog/{id}``: one catalogue entry, 404 when there is
+        none (``FILAMENTS_READ``, as the list: ``routes/filaments.py`` line 44 at
+        maziggy/bambuddy v1.3.1). The filament sync's probe (#6688)."""
+        response = await self._send(
+            "GET",
+            f"/filament-catalog/{filament_id}",
+            scope=Scope.READ_STATUS,
+            operation="filaments.read",
+            what=f"read filament {filament_id} in Bambuddy's catalog",
+        )
+        return CatalogFilament.model_validate(response.json())
 
     async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
         """``GET /api/v1/inventory/spools/{id}/filament-presets`` — per-nozzle presets.

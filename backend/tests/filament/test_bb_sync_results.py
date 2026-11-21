@@ -41,6 +41,7 @@ from tests.filament.test_bb_sync_plan import (
     _intents,
     _kind,
     _link,
+    _linked,
     _matching,
     _only,
     _plan,
@@ -268,6 +269,97 @@ def test_a_probe_that_finds_the_spool_keeps_the_link(pg_pool: PgPool) -> None:
     assert link is not None and link["bb_spool_id"] == 50
     assert link["bb_seen"] is not None and link["bb_seen_at"] is not None
     assert _pushed_events(f, spool) == []
+
+
+#: Each row kind's link column and a Bambuddy answer for its row 40 (#6688).
+_ROW_LINKS: dict[str, tuple[str, str, dict[str, Any]]] = {
+    "supplier": ("filament_suppliers", "bb_supplier_id", {"id": 40, "name": "Shop"}),
+    "location": ("filament_locations", "bb_location_id", {"id": 40, "name": "Shelf A"}),
+    "insert_type": (
+        "filament_insert_types",
+        "bb_catalog_id",
+        {"id": 40, "name": "Cardboard", "weight": 250},
+    ),
+    "filament": (
+        "filament_spool_types",
+        "bb_filament_id",
+        {"id": 40, "name": "GFA00-RED", "type": "PLA"},
+    ),
+}
+
+
+def _row_link(pool: PgPool, kind: str, sb_id: UUID) -> dict[str, Any]:
+    table, column, _ = _ROW_LINKS[kind]
+    with pool.connection() as conn:
+        row = conn.execute(
+            f"SELECT {column} AS bb_id, bb_seen, bb_seen_at FROM {table} WHERE id = %s", (sb_id,)
+        ).fetchone()
+    assert row is not None
+    return dict(row)
+
+
+@pytest.mark.parametrize("kind", list(_ROW_LINKS))
+def test_a_row_probe_404_drops_the_link(pg_pool: PgPool, kind: Kind) -> None:
+    """R-6688-3: the probe's 404 says Bambuddy deleted the row: the link, its hashes, its
+    seen copy and its error row go. A probe that failed otherwise keeps the link and
+    records an error (R-6688-3)."""
+    f = _filament(pg_pool)
+    sb_id = _linked(pg_pool, f, kind)
+    probe = _write(kind, sb_id, "probe", 40)
+    assert _apply(f, [probe], [_refused(probe, 503)]).failed == 1
+    assert _row_link(pg_pool, kind, sb_id)["bb_id"] == 40
+    assert _errors(pg_pool) == [(kind, sb_id, "bambuddy-refused:503", 1)]
+    timeout = BbWriteResult(key=probe.key, ok=False, error="bambuddy-unreachable")
+    assert _apply(f, [probe], [timeout]).failed == 1
+    assert _row_link(pg_pool, kind, sb_id)["bb_id"] == 40
+    assert _apply(f, [probe], [_refused(probe, 404)]).unlinked == 1
+    assert _row_link(pg_pool, kind, sb_id) == {"bb_id": None, "bb_seen": None, "bb_seen_at": None}
+    assert _errors(pg_pool) == []
+
+
+@pytest.mark.parametrize("kind", list(_ROW_LINKS))
+def test_a_row_probe_that_finds_the_row_keeps_the_link(pg_pool: PgPool, kind: Kind) -> None:
+    """R-6688-1: the found row is stored as seen now, after the snapshot, so a later
+    round of the pass neither probes it again nor writes it from the old listing."""
+    f = _filament(pg_pool)
+    sb_id = _linked(pg_pool, f, kind)
+    probe = _write(kind, sb_id, "probe", 40)
+    assert _apply(f, [probe], [_ok(probe, _ROW_LINKS[kind][2])]) == ResultsReport()
+    link = _row_link(pg_pool, kind, sb_id)
+    assert link["bb_id"] == 40 and link["bb_seen_at"] is not None
+
+
+def test_a_spool_names_its_deleted_location_only_once_it_is_made_again(
+    pg_pool: PgPool,
+) -> None:
+    """R-6688-4, R-6688-5, the plan and the results together over one snapshot: round 1
+    probes the location Bambuddy deleted, the 404 drops its link; round 2 makes it again;
+    round 3 sends the spool with the new id. No round sends the deleted id."""
+    f = _filament(pg_pool)
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (shelf, spool))
+    row = _matching(pg_pool, spool, 50, sync) | {"location_id": None}
+    _link(pg_pool, spool, 50)
+    snap = _snap([row], locations=[], read_at=datetime.now(UTC) - timedelta(seconds=1))
+
+    first = _plan(f, snap, sync)
+    probe = _only(first.writes, "probe")
+    assert [w.kind for w in first.writes] == ["location"] and first.deferred == 1
+    assert _apply(f, first.writes, [_refused(probe, 404)]).unlinked == 1
+
+    second = _plan(f, snap, sync)
+    create = _only(second.writes, "create")
+    assert [w.kind for w in second.writes] == ["location"] and second.deferred == 1
+    made = {"id": 41, "name": "Shelf A", "identifier": None}
+    assert _apply(f, second.writes, [_ok(create, made, 41)]).linked == 1
+
+    third = _plan(f, snap, sync)
+    update = _only(third.writes, "update")
+    assert (update.kind, update.sb_id, _body(update)) == ("spool", spool, {"location_id": 41})
+    assert third.deferred == 0
 
 
 def test_a_spool_whose_link_was_dropped_can_be_deleted(pg_pool: PgPool) -> None:
