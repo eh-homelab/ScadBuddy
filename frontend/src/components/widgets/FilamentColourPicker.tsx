@@ -7,12 +7,42 @@ import { spoolColour, spoolName, spoolValue } from '../../lib/filamentColour'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 
 type State =
   | { kind: 'loading' }
   | { kind: 'failed'; message: string }
   | { kind: 'open'; spools: FilamentInventorySpool[] }
+
+/** The list's filters, remembered in this browser. A material no spool has reads as all. */
+type Filters = { material: string | null; loadedOnly: boolean }
+const FILTERS_KEY = 'scadbuddy.colourPicker.filters'
+const NO_FILTERS: Filters = { material: null, loadedOnly: false }
+
+function readFilters(): Filters {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(FILTERS_KEY) ?? 'null')
+    if (raw && typeof raw === 'object') {
+      const { material, loadedOnly } = raw as Record<string, unknown>
+      return { material: typeof material === 'string' ? material : null, loadedOnly: loadedOnly === true }
+    }
+  } catch {
+    // Blocked or broken storage: start with no filters.
+  }
+  return NO_FILTERS
+}
+
+function writeFilters(filters: Filters) {
+  try {
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(filters))
+  } catch {
+    // Blocked storage: the choice lasts until the list closes.
+  }
+}
+
+const materialOf = (row: FilamentInventorySpool) => row.spool.names?.material ?? null
 
 /** Loaded spools first, then the fullest. */
 function order(a: FilamentInventorySpool, b: FilamentInventorySpool): number {
@@ -42,6 +72,12 @@ export function FilamentColourPicker({
   onPick: (hex: string, value: string) => void
 }) {
   const [state, setState] = useState<State>({ kind: 'loading' })
+  const [filters, setFilters] = useState<Filters>(readFilters)
+  const setFilter = (next: Partial<Filters>) => {
+    const merged = { ...filters, ...next }
+    setFilters(merged)
+    writeFilters(merged)
+  }
   // Each mount is one read; closing the popover unmounts the list, so a late answer
   // never lands anywhere.
   useEffect(() => {
@@ -80,13 +116,39 @@ export function FilamentColourPicker({
   }
   if (state.spools.length === 0) return <p className="px-1 text-xs text-muted-foreground">ScadBuddy has no spools.</p>
 
+  const materials = [...new Set(state.spools.map(materialOf).filter((m): m is string => m !== null))].sort((a, b) => a.localeCompare(b))
+  const material = filters.material !== null && materials.includes(filters.material) ? filters.material : null
+  const shown = state.spools.filter((row) => (!filters.loadedOnly || row.loaded) && (material === null || materialOf(row) === material))
+
   return (
     <Command className="rounded-lg! border p-0">
-      {state.spools.length > 6 && <CommandInput placeholder="Search filaments" />}
+      <CommandInput placeholder="Search filaments" />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-2 py-1.5">
+        {materials.length > 1 && (
+          <div role="group" aria-label="Material" className="flex flex-wrap gap-1">
+            {[null, ...materials].map((choice) => (
+              <Button
+                key={choice ?? ''}
+                type="button"
+                size="xs"
+                variant={choice === material ? 'secondary' : 'ghost'}
+                aria-pressed={choice === material}
+                onClick={() => setFilter({ material: choice })}
+              >
+                {choice ?? 'All'}
+              </Button>
+            ))}
+          </div>
+        )}
+        <Label className="ml-auto cursor-pointer text-xs font-normal text-muted-foreground">
+          <Checkbox checked={filters.loadedOnly} onCheckedChange={(checked) => setFilter({ loadedOnly: checked === true })} />
+          Loaded in a printer
+        </Label>
+      </div>
       <CommandList label={`Filaments for ${label}`} className="max-h-60">
         <CommandEmpty>No filament matches.</CommandEmpty>
         <CommandGroup>
-          {state.spools.map((row) => {
+          {shown.map((row) => {
             const { spool } = row
             // The effective colour: the spool's own, else its filament type's.
             const look = { rgba: spool.effective?.rgba ?? spool.rgba }
@@ -113,8 +175,11 @@ export function FilamentColourPicker({
                 className="text-xs"
               >
                 {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
-                <span className="min-w-0 flex-1 truncate">{name}</span>
-                <span className="sb-num shrink-0 text-muted-foreground">{detail}</span>
+                {/* Two lines, so a long place and weight never squeeze the name out. */}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate">{name}</span>
+                  <span className="sb-num truncate text-muted-foreground">{detail}</span>
+                </span>
                 {chosen && <span className="sr-only">(the colour now)</span>}
               </CommandItem>
             )
