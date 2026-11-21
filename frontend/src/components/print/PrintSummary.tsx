@@ -100,7 +100,8 @@ export function PrintSummary({
         </div>
       )}
       {notes.map((item) => (
-        <p key={item.id} role="status" className="mt-1.5 text-xs text-muted-foreground" data-testid={`print-summary-${item.id}-note`}>
+        // A plain line: the step itself announces its reminder when it shows.
+        <p key={item.id} className="mt-1.5 text-xs text-muted-foreground" data-testid={`print-summary-${item.id}-note`}>
           {item.note}
         </p>
       ))}

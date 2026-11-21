@@ -141,6 +141,28 @@ describe('PrintPicker · Advanced sections (#6885)', () => {
     expect(screen.getByRole('button', { name: 'Nozzles' })).toHaveAttribute('aria-expanded', 'true')
   })
 
+  it('names in a closed section what it still sends: a remembered hold, the sequence', async () => {
+    window.localStorage.setItem(SECTIONS_KEY, JSON.stringify({ filing: false, tower: false }))
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({ ...fixtures.printOptions, global_options: { manual_start: true } }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    const filing = screen.getByRole('button', { name: 'Filing and copies' })
+    expect(filing).toHaveAttribute('aria-expanded', 'false')
+    await waitFor(() => expect(filing).toHaveTextContent('Waits for a manual start'))
+
+    const tower = screen.getByRole('button', { name: 'Supports, prime tower and print sequence' })
+    expect(tower).not.toHaveTextContent('Print sequence by object')
+    await user.click(tower)
+    await choose(user, screen.getByLabelText('Print sequence'), 'By object')
+    await user.click(tower)
+    expect(tower).toHaveTextContent('Print sequence by object')
+  })
+
   it('keeps every section open when the storage cannot be read', async () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('blocked')

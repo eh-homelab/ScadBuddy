@@ -180,10 +180,9 @@ export function usePrintChoices(
     const seeds = next.sliced ? {} : (sentPartSettings(seedSource) ?? {})
     setPartSettings(seeds)
     setSeededParts(seeds)
-    // A named process, a different flow per side and a print sequence (#4970) are
-    // Advanced choices; opening in Simple would send them unseen. One flow for both is
-    // Simple's own choice (#2166).
-    // #2998: so are slicer settings.
+    // A print sequence (#4970) and slicer settings (#2998) are Advanced choices; opening
+    // in Simple would send them unseen. A named process and a different flow per side
+    // also open Advanced, as before #6885, though Simple's summary row now names both.
     setAdvanced(
       nextProcess !== null ||
         nextSequence !== null ||
@@ -215,7 +214,7 @@ export function usePrintChoices(
         } else if (defaulted.current) {
           const defaults = defaultsOf(next)
           setNozzles(defaults)
-          // Opened, never closed: Simple would send a flow per side unseen.
+          // Opened, never closed: a flow per side opens Advanced, as the first read does.
           if (!oneFlow(defaults)) setAdvanced(true)
         }
       })

@@ -938,6 +938,18 @@ export function PrintPicker({
   useEffect(() => {
     if (!open || picker.advanced) setExpanded(null)
   }, [open, picker.advanced])
+  /** #6885 — the section a summary cell opened: scrolled to once it is open on screen. */
+  const [scrollTo, setScrollTo] = useState<SectionId | null>(null)
+  useEffect(() => {
+    if (scrollTo === null) return
+    document.getElementById(`print-section-${scrollTo}`)?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+    setScrollTo(null)
+  }, [scrollTo])
+  /** #6885 review — the merged options Advanced's options disclosure reports, while it is mounted. */
+  const [optionsShown, setOptionsShown] = useState<PrintOptions | null>(null)
+  useEffect(() => {
+    if (!open || !picker.advanced) setOptionsShown(null)
+  }, [open, picker.advanced])
   /** #6885 — Advanced's sections, open or closed as this viewer left them. */
   const sections = usePrintSections()
   const focusProject = useRef(false)
@@ -1747,9 +1759,7 @@ export function PrintPicker({
   /** Advanced: a summary cell opens its section and brings it into view. */
   function goToSection(id: SectionId) {
     sections.set(id, true)
-    requestAnimationFrame(() =>
-      document.getElementById(`print-section-${id}`)?.scrollIntoView?.({ block: 'start', behavior: 'smooth' }),
-    )
+    setScrollTo(id)
   }
   const choosePrinter = printers.length + lanChoosable.length > 1
   const printerSelect = choosePrinter && (
@@ -1858,6 +1868,42 @@ export function PrintPicker({
               },
             ] satisfies SummaryItem[])),
       ]
+  /**
+   * #6885 review — what a closed section still sends, said in its header, so a closed
+   * section never hides a remembered hold, sequence, tower or slicer setting.
+   */
+  // The options disclosure's own merge, which follows its saves; the dialog's read until
+  // it reports one.
+  const effectiveOptions =
+    optionsShown ??
+    resolveOptions(
+      remembered?.global_options,
+      printerKey === null ? undefined : remembered?.printers?.[printerKey],
+      scopeKey === undefined ? undefined : remembered?.models?.[scopeKey],
+      sentOptions,
+    )
+  const filingSummary = [
+    effectiveOptions.manual_start === true ? 'Waits for a manual start' : null,
+    effectiveOptions.auto_off_after === true ? 'Powers off afterwards' : null,
+    filedUnderLabel === null ? null : `Filed under ${filedUnderLabel}`,
+    effectiveCopies === 1 ? null : `${effectiveCopies} copies`,
+  ]
+    .filter(Boolean)
+    .join(', ')
+  const towerSummary = [
+    printSequence === null ? null : `Print sequence ${printSequence}`,
+    supports === null ? null : supports.enabled ? `Supports ${supports.type ?? 'on'}` : 'No supports',
+    primeTower === null ? null : primeTower.enabled ? 'Prime tower on' : 'Prime tower off',
+  ]
+    .filter(Boolean)
+    .join(', ')
+  const presetCount = Object.keys(overrides).length
+  const slicerSummary = [
+    presetCount === 0 ? null : `${presetCount} filament ${presetCount === 1 ? 'preset' : 'presets'}`,
+    ...Object.keys(sentProcess ?? {}),
+  ]
+    .filter(Boolean)
+    .join(', ')
   /** The footer's estimate: the plate the preview shows, as the preview pane says it. */
   const footerEstimate = sliced ? slicedEstimate(sliced, previewPlate, filaments, single ?? 'all') : previewSlice.result
   /** The first check that holds Print, said beside it. */
@@ -2412,9 +2458,12 @@ export function PrintPicker({
                       onChange={editOptions}
                     />
                   )}
-                  {/* #768 — Simple mode sends these steps' defaults without showing them.
+                  {/* #768 — Advanced's steps. Simple sends what the side, rack, sequence,
+                      supports, tower, filing and slicer steps open on without showing
+                      them; it shows the nozzle, quality and plate in its summary row.
                       #6885 — Advanced groups them into sections, each one remembered open
-                      or closed for this viewer. */}
+                      or closed for this viewer; a closed one names in its header what it
+                      still sends. */}
                   {picker.advanced && (
                     <>
                       {!sliced && (
@@ -2457,6 +2506,7 @@ export function PrintPicker({
                             id="tower"
                             open={sections.isOpen('tower')}
                             onToggle={(next) => sections.set('tower', next)}
+                            summary={towerSummary}
                           >
                           <PrintSequenceStep
                             value={printSequence}
@@ -2490,6 +2540,7 @@ export function PrintPicker({
                           id="filing"
                           open={sections.isOpen('filing')}
                           onToggle={(next) => sections.set('filing', next)}
+                          summary={filingSummary}
                         >
                           <PrintOptionsDisclosure
                             subject={subject}
@@ -2502,6 +2553,7 @@ export function PrintPicker({
                               setCopies(quantity ?? null)
                               editOptions(rest)
                             }}
+                            onEffective={setOptionsShown}
                           />
 
                           {projectPicker}
@@ -2515,6 +2567,7 @@ export function PrintPicker({
                           id="slicer"
                           open={sections.isOpen('slicer')}
                           onToggle={(next) => sections.set('slicer', next)}
+                          summary={slicerSummary}
                         >
                           {filaments && (filaments.slots ?? []).length > 0 && (
                             <PresetOverrides
