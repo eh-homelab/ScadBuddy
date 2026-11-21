@@ -181,6 +181,29 @@ describe('the change stream client', () => {
     expect(resyncs()).toBe(1)
   })
 
+  it('runs the reconnect re-reads with no resync when the API sends reconnected {resync: false} mid-stream', async () => {
+    const { stream, heard, resyncs, reconnects } = open()
+    let reread = 0
+    stream.onReconnect(() => reread++)
+    const first = await api.open(1)
+    send(first.res, 'ready', { resync: false, reconnect: false }, 'p1')
+    await stream.ready()
+    // The API's own gap (its LISTEN dropped, or this reader fell behind): it replayed what was
+    // logged, then says so. The stream itself never dropped.
+    const replayed = busEvent({ kind: 'job.done', job_id: 'r' })
+    change(first.res, 'scadbuddy_events', JSON.stringify(replayed), replayed.id)
+    send(first.res, 'reconnected', { resync: false }, replayed.id)
+    await until(() => reread === 1, 'the reconnect callback')
+    expect(reconnects()).toBe(1)
+    expect(resyncs()).toBe(0)
+    expect(stream.resyncs).toBe(0)
+    expect(heard.map((e) => e.id)).toEqual([replayed.id])
+    // The same stream: no new open.
+    expect(stream.connects).toBe(1)
+    expect(api.opens).toHaveLength(1)
+    expect(logs.some((m) => m.includes('resyncing'))).toBe(false)
+  })
+
   it("keeps its place on a logged change or the API's place: a NOTIFY-only event or another frame never moves it", async () => {
     const { heard } = open()
     const first = await api.open(1)

@@ -30,6 +30,15 @@ it (`PgNotifyEventBus.position`, `replay`), at most :data:`REPLAY_MAX` events, a
 copies of what it replayed. An id it cannot place (pruned, malformed, never logged), a pruned
 gap or a longer replay is a ``resync``: the agent re-reads everything it follows.
 
+**Commit order.** The replay reads ``seq > position(last_id)``, so it would skip a row that
+committed below the place after the agent was sent the place's event. That cannot happen:
+every writer of ``events`` holds `EVENT_LOG_LOCK` until it commits (`core/pg_events.py`,
+"Publishing"), so rows commit in ``seq`` order, and the place is the last logged event this
+stream sent, never a guess ahead of it. The agent's old listener adopted ``max(seq)`` one
+check late and so needed a guard for a transaction open longer than that check (a replayed
+row's ``logged_at`` too old); this stream needs none while the lock holds. A writer of
+``events`` that does not take the lock breaks this replay.
+
 **Bounds.** At most :data:`STREAMS_PER_CREDENTIAL` streams per service credential and peer
 address (`api/crud_agent_changes.py` `stream_key`) and :data:`STREAMS_MAX` in all are open at
 once; another is refused 429. The process's shutdown ends

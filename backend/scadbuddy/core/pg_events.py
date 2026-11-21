@@ -107,8 +107,10 @@ calls only, all on the event loop:
 
 ``subscribe`` is the :class:`~.events.EventBus` protocol, so it works on the
 in-process bus too; ``position``/``replay``/``bus.resync`` exist only here, where
-there is a database. The agent service LISTENs on ``scadbuddy_events`` itself, on its
-own connection, and reads the same ``events`` table.
+there is a database. The agent service opens no LISTEN connection and reads no
+``events`` row itself: it hears this channel over the API's change stream
+(``agent_changes/hub.py``), which taps this bus and replays this log after its
+``Last-Event-ID``.
 
 Channels are per database and the log is per schema: two deployments sharing one
 database in different schemas would hear each other's events. Give each its own

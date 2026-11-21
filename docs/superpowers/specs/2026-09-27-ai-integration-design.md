@@ -315,7 +315,7 @@ below against it; re-date this section once that happens):
 | Item | Where it matters | Verified by |
 |---|---|---|
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
-| ~~Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas~~ **Answered in #264:** only that every service connects to the primary. `LISTEN` and `NOTIFY` are refused on a hot standby ("`LISTEN`, `NOTIFY`" are among the commands not allowed, <https://www.postgresql.org/docs/current/hot-standby.html>), and CloudNativePG's `-rw` service "Points to the primary instance of the cluster" (<https://cloudnative-pg.io/docs/devel/service_management>), so `SCADBUDDY_DATABASE_URL` must name the `-rw` service, never `-ro` or `-r`. Any number of agent and backend replicas can then listen: a NOTIFY reaches every listening session (<https://www.postgresql.org/docs/current/sql-notify.html>). Measured on `postgres:17` by `agent/test/eventBus.pg.test.ts` | §7 | #264 |
+| ~~Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas~~ **Answered in #264:** only that every service connects to the primary. `LISTEN` and `NOTIFY` are refused on a hot standby ("`LISTEN`, `NOTIFY`" are among the commands not allowed, <https://www.postgresql.org/docs/current/hot-standby.html>), and CloudNativePG's `-rw` service "Points to the primary instance of the cluster" (<https://cloudnative-pg.io/docs/devel/service_management>), so `SCADBUDDY_DATABASE_URL` must name the `-rw` service, never `-ro` or `-r`. Any number of backend replicas can then listen: a NOTIFY reaches every listening session (<https://www.postgresql.org/docs/current/sql-notify.html>). Measured on `postgres:17` by `agent/test/eventBus.pg.test.ts`, deleted in #5299 step 11 when the agent stopped listening: since then only the API LISTENs, and the agent hears its channels over the API's change stream | §7 | #264 |
 | Bambu Studio's hand-off mechanism for "Open in Bambu Studio" | #284 | #284 |
 | Which keys `filament_overrides` accepts on `PrintQueueItemCreate` (can it carry nozzle temperature and fan?) | §11 | #284 |
 | Whether Bambuddy's `/local-presets/` can create a process preset that inherits from a base preset plus a diff | §11 | #284 |
@@ -329,20 +329,20 @@ browser (SPA, maybe inside the Bambuddy iframe)
   │  https / wss (one origin)
   ▼
 ingress ──/api/v1/*, /api/v1/ws, /──▶ backend (Python, uvicorn)  ◀── Bambuddy (httpx, key server-side)
-   │                                     ▲        │
-   │                                     │        │ pg_notify
-   │                                     │        ▼
+   │                                     ▲        │ ▲
+   │                                     │        │ │ pg_notify, LISTEN
+   │                                     │        ▼ │
    │                                     │   Postgres (#241)
-   │                                     │        │
-   │                                     │        │ LISTEN
-   │                                     │        ▼
+   │                                     │
+   │                                     │ change stream from backend (SSE, …/crud/agent/changes)
    ├──/mcp, /api/v1/ai/* ─────────────▶ agent (Node 24, Agent SDK)
    │                                     │ openapi-fetch → backend on localhost
 external MCP clients ───────────────────┘
 
-(There is no direct backend→agent event channel: events go backend → Postgres → agent, §7.
- The backend and the agent each `LISTEN` on their own connection and serve their own
- sockets: the UI's `/api/v1/ws` from the backend, the agent's own under `/api/v1/ai/*`.)
+(Events go backend → Postgres → backend → agent, §7. Only the backend `LISTEN`s, on its
+ one connection; the agent hears its channels over the backend's change stream
+ (`GET …/crud/agent/changes`, #5299 step 11). Each serves its own sockets: the UI's
+ `/api/v1/ws` from the backend, the agent's own under `/api/v1/ai/*`.)
 ```
 
 ### 4.1 Process layout: sidecar (recommended)
@@ -714,9 +714,9 @@ content. Kinds:
 `printer.status`, `inventory.changed`, `library.changed`, `font.installed`,
 `settings.changed`, and from the agent side `session.*` and `analyzer.decision`.
 
-Two independent consumers `LISTEN` on the channel, each on its own connection
-(Postgres delivers a `NOTIFY` to every listening session:
-<https://www.postgresql.org/docs/current/sql-notify.html>):
+The backend `LISTEN`s on the channel on its one connection (Postgres delivers a `NOTIFY`
+to every listening session: <https://www.postgresql.org/docs/current/sql-notify.html>), and
+the agent hears it over the backend's change stream (below). Two consumers act on it:
 
 - **The backend** fans events out to the UI's WebSocket `/api/v1/ws` (#266,
   `backend/scadbuddy/api/realtime.py`), which replaces both polling loops (§3.1).
@@ -730,9 +730,9 @@ commits: `{ id, at, kind, session_id, seq, status?, replica }` with the kinds
 `session.started`, `session.owner`, `session.waiting`, `session.done` and
 `session.message` (streamed text, throttled to one per 100 ms per session). They are
 not rows in the backend's `events` log (its lock and row-count pruning are the
-backend's, and a streaming turn would flood it), so they are not replayed; a
-reconnecting agent listener reports the reconnect instead (`onReconnect`,
-`agent/src/events/bus.ts`), and session followers and subscriptions re-read. Each agent
+backend's, and a streaming turn would flood it), so they are not replayed; the agent's
+change stream reports a reconnect instead (`onReconnect`, `agent/src/events/bus.ts` and
+`changeStream.ts`), and session followers and subscriptions re-read. Each agent
 replica's consumer calls `EventLog.wake()` for other replicas' sessions; the event
 log's poll stays as the fallback. The backend decodes them (`SessionBusEvent`,
 `backend/scadbuddy/core/events.py`) and routes them to no WebSocket topic: the UI
@@ -1015,7 +1015,8 @@ Since #5299 the API applies their migrations at its start
   response to a request containing an `MCP-Session-Id`, it MUST start a new session",
   [Streamable HTTP][mcp-transport]), which re-subscribes. A durable copy would replay
   into a session that no longer exists. What is durable is the backend's `events`
-  table, which covers the agent's own LISTEN gaps, §7);
+  table, which covers the agent's change-stream gaps (the API replays it after
+  `Last-Event-ID`), §7);
 - approvals of outward actions (§8.2, `ai_approvals`);
 - the audit log.
 
