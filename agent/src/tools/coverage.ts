@@ -23,7 +23,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'GET /api/v1/filament/sync/reset-links',
     reason:
-      "The dry run of a reset of the Bambuddy links (#6773), for Settings' confirm dialog. The assistant reads the links' instance in filament_sync_status, and filament_sync_reset_links answers the counts it deleted.",
+      "The dry run of a reset of the Bambuddy links (#6773), for Settings' confirm dialog. The assistant reads the links' instance in filament_sync_status, and filament_sync_reset_links answers whether it kept the links (#6845) and the counts it deleted.",
   },
   {
     operation: 'GET /api/v1/filament/spools/{spool_id}/k-values',

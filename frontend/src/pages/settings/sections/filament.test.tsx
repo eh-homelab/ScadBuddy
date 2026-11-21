@@ -380,6 +380,28 @@ describe('Filament (#6262)', () => {
       }
     })
 
+    it('warns that an untagged spool can end up twice when the Bambuddy is another one', async () => {
+      linkOtherBambuddy()
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      expect(dialog).toHaveTextContent('a spool with no tag can end up twice')
+    })
+
+    it('keeps the links when the Bambuddy set up now is the same one at a new address (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { same: true })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Keep the Bambuddy links?' })
+      expect(dialog).toHaveTextContent('Nothing is deleted')
+      expect(dialog).not.toHaveTextContent('end up twice')
+      expect(within(dialog).queryByRole('list', { name: 'What the reset deletes' })).toBeNull()
+      await user.click(within(dialog).getByRole('button', { name: 'Keep links' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+      expect(await within(filament).findByText('Links kept. A full pass now syncs with the Bambuddy at its new address.')).toBeInTheDocument()
+      expect(within(filament).queryByRole('button', { name: 'Reset Bambuddy links' })).toBeNull()
+    })
+
     it('keeps everything when the person cancels', async () => {
       linkOtherBambuddy()
       const { user, filament } = await withSync()

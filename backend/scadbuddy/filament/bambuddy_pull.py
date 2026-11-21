@@ -2064,6 +2064,18 @@ def parse_rows(rows: Sequence[Any]) -> tuple[list[BbSpool], list[int | None]]:
     return good, bad
 
 
+class InstanceChangedError(Exception):
+    """The links belong to another Bambuddy than the configured one (#6845 R-6845-5):
+    the pull reads nothing until `POST /filament/sync/reset-links`."""
+
+
+def links_elsewhere(store: Filament, configured: str) -> bool:
+    """Whether the links' recorded instance is another than ``configured`` (Decision 12)."""
+    with store.spools.transaction() as conn:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    return state is not None and state["instance"] not in (None, configured)
+
+
 async def read_and_pull(
     store: Filament, settings: StoredSettings, *, actor: str = ACTOR, pulls: Pulls = EVERY
 ) -> PullReport:
@@ -2083,7 +2095,14 @@ async def read_and_pull(
 
     BB's suppliers are read only under ``pulls.suppliers``, and its locations only under
     ``pulls.locations``, whatever ``pulls.spools`` says (#6265 Decision 16); each read
-    fails alone, logged, and leaves its rows alone."""
+    fails alone, logged, and leaves its rows alone.
+
+    While the links belong to another Bambuddy than the configured one, it reads and
+    writes nothing and raises `InstanceChangedError` (#6845 R-6845-5)."""
+    if settings.bambuddy_url:
+        configured = instance_for(settings.bambuddy_url)
+        if await asyncio.to_thread(links_elsewhere, store, configured):
+            raise InstanceChangedError
     usage: list[SpoolUsage] = []
     usage_failed = False
     archives: list[Archive] = []
@@ -2312,8 +2331,8 @@ async def scheduled_pull(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> Outcome:
     """The Schedule's pull (`SpoolRefresh`): ``skipped`` when no data type of
-    ``filament_sync`` pulls (#6265 F1) or no BB URL,
-    ``failed`` when BB or the store fails (logged, never raised),
+    ``filament_sync`` pulls (#6265 F1), no BB URL, or the links belong to another
+    Bambuddy (#6845 R-6845-5), ``failed`` when BB or the store fails (logged, never raised),
     else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13). Whenever a
     BB URL is set, it first reads the Home Assistant sensors (`read_ha_sensors`), before
     the spools gate and whatever ``sync`` says: sensors are not spool data. After a pull
@@ -2331,6 +2350,9 @@ async def scheduled_pull(
         return "skipped"
     try:
         report = await read_and_pull(store, settings, pulls=Pulls.of(filament_sync))
+    except InstanceChangedError:
+        logger.info("Bambuddy's spools are not pulled: the links belong to another Bambuddy")
+        return "skipped"
     except Exception as error:
         logger.warning(
             "could not pull Bambuddy's spools",

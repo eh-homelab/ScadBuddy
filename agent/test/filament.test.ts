@@ -883,7 +883,7 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     server.use(
       http.post(`${SYNC}/reset-links`, async ({ request }) => {
         body = await request.json()
-        return HttpResponse.json({ instance: '0ld0ld0ld0ld', deleted })
+        return HttpResponse.json({ instance: '0ld0ld0ld0ld', kept: false, deleted })
       }),
     )
     const t = tool('filament_sync_reset_links')
@@ -891,7 +891,13 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld' }), ctx('outward'))
     expect(result.isError).toBeFalsy()
     expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld' })
-    expect(firstText(result)).toEqual({ instance: '0ld0ld0ld0ld', deleted })
+    expect(firstText(result)).toEqual({ instance: '0ld0ld0ld0ld', kept: false, deleted })
+  })
+
+  it('says the links are kept when the Bambuddy is the same one at a new address (#6845)', () => {
+    const description = tool('filament_sync_reset_links').description
+    expect(description).toContain('`kept: true`')
+    expect(description).toContain('After a delete (`kept: false`)')
   })
 
   it('fails on a 409 and says why nothing was deleted', async () => {

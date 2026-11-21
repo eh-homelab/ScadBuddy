@@ -1794,6 +1794,46 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_place_mapping_only_to_an_archived_location_is_not_seeded`,
     `test_a_place_mapping_only_to_a_printers_place_is_not_seeded`,
     `test_a_seed_of_a_place_archived_since_still_counts`.
+193. R-6845-1 (#6845, controller's ruling; changes 170's cost): a reset to the same
+    Bambuddy keeps the links. It never adopts an untagged spool by a look-alike identity
+    (type, colour, weight, created time). Why: an identity match can silently merge two
+    different physical spools; keeping links that are proven to point at the same rows
+    cannot.
+194. R-6845-2 (#6845): Bambuddy has no instance id of its own, and the recorded instance is
+    a hash of the URL (Decision 12), so a new URL to the same Bambuddy is another instance.
+    The reset proves "same Bambuddy" from the configured Bambuddy's spools
+    (`bb_sync_results.same_bambuddy`): its full listing (archived spools too, every row
+    valid) holds every linked BB spool id, none of those rows has an `updated_at` older
+    than its link's `bb_updated_at`, and at least one has exactly that `updated_at`. Why: ids
+    alone match any Bambuddy with as many spools; an equal timestamp to the microsecond on
+    the same id is a row ScadBuddy has seen; "never older" refuses an older backup of it.
+    With no spool link there is no proof. Cost: a link Bambuddy lost, a row older than its
+    link, or a row that does not parse makes the reset delete the links, as before, with
+    the warning of 170.
+195. R-6845-3 (#6845; widens 165 and 167): when the proof holds, `POST
+    /filament/sync/reset-links` deletes nothing. It keeps every link, hash, seen copy,
+    intent, error row and ignored BB spool, records the configured instance, answers
+    `kept: true` with zero counts, and nudges a full pass, so Decision 10's intents and
+    every untagged spool's link stay. The dry run reads the same listing and answers
+    `same_bambuddy`; the dialog and the agent tool say the links are kept. Without the proof
+    the reset is 165's, and the dialog keeps 170's warning. The `confirm_instance` check
+    and the 409s are unchanged. Tests: `test_a_reset_to_the_same_bambuddy_keeps_the_links`,
+    `test_the_proof_of_the_same_bambuddy` (each way it fails).
+196. R-6845-4 (#6845): the dry run and the reset read the configured Bambuddy's spools
+    (`GET /inventory/spools?include_archived=true`) before any write. A failed read is
+    Bambuddy's error as it comes, and nothing is deleted; with no Bambuddy configured
+    nothing is read and the reset deletes, as before. Why: a passing fault must not turn a
+    reset that keeps the links into one that duplicates every untagged spool, and the pass
+    after a reset needs Bambuddy anyway. Test:
+    `test_a_reset_that_cannot_read_bambuddy_deletes_nothing`.
+197. R-6845-5 (#6845; widens 168 to the pull): the pull (the Schedule's and the import)
+    does nothing while the links belong to another instance than the configured
+    Bambuddy's: the Schedule's pull is `skipped`, and `POST /filament/bambuddy/import` is
+    409 `instance_changed`. Why: the pull read the new URL with the old links, so it wrote
+    another Bambuddy's values onto linked spools and moved their `bb_updated_at` to that
+    Bambuddy's rows, which would also make 194's proof pass for a stranger. Tests:
+    `test_a_pull_of_another_bambuddy_is_skipped`,
+    `test_the_import_of_another_bambuddy_is_409`.
 
 ## Self-review
 

@@ -22,6 +22,7 @@ from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.bambuddy_pull import (
     _WARNED_DUPLICATES,
+    InstanceChangedError,
     Pulls,
     pull,
     read_and_pull,
@@ -750,6 +751,26 @@ async def test_a_scheduled_pull_with_bambuddy_down_is_a_logged_no_op(
         assert await scheduled_pull(f, lambda: settings, FilamentSync) == "failed"
     assert "could not pull Bambuddy's spools" in caplog.text
     assert f.spools.list() == []
+
+
+async def test_a_pull_of_another_bambuddy_is_skipped(pg_pool: PgPool) -> None:
+    """#6845 R-6845-5: while the links belong to another Bambuddy than the configured one,
+    the Schedule's pull reads no spool and writes nothing to a linked spool."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW, instance="0ld0ld0ld0ld").created_ids
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        spools = router.get(f"{BB}/api/v1/inventory/spools").respond(
+            json=[bb(note="a stranger's", updated_at=_bb_time(-1)).model_dump(mode="json")]
+        )
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        assert await scheduled_pull(f, lambda: settings, FilamentSync) == "skipped"
+        assert not spools.called
+        with pytest.raises(InstanceChangedError):
+            await read_and_pull(f, settings)
+    spool = f.spools.get(made)
+    assert spool is not None
+    assert spool.note != "a stranger's"
 
 
 async def test_a_pull_reads_bambuddy_and_imports(pg_pool: PgPool) -> None:

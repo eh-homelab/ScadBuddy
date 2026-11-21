@@ -1153,17 +1153,21 @@ export const filamentTools: Tool[] = [
     label: 'Reset the Bambuddy links',
     description:
       'After the Bambuddy URL changed, the links (Bambuddy ids) belong to the old Bambuddy and the sync is stopped: ' +
-      'filament_sync_status says `instance_changed: true`. This deletes, in one transaction, every spool link, the ' +
+      'filament_sync_status says `instance_changed: true`, and the pull is stopped too. It first reads the ' +
+      "configured Bambuddy's spools. When that Bambuddy holds every linked spool as ScadBuddy last saw it (the same " +
+      'Bambuddy at a new address), nothing is deleted: every link now belongs to it, and the answer has `kept: ' +
+      'true` and zero counts. Else this deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
-      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then it asks ' +
-      'for a full pass, which links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
-      'is deleted. Afterwards a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
+      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then the full ' +
+      'pass links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
+      'is deleted. After a delete (`kept: false`) a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
       'spools are created on the side the sync sends them to, so tell the user an untagged spool can end up twice. ' +
+      'Either way it asks for a full pass. ' +
       '`confirm_instance` must be the instance the links belong to: filament_sync_status `instance`. Answers the ' +
-      'instance and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
+      'instance, `kept` and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
       '`filaments`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
       "links' instance, `same_instance` when they belong to the configured Bambuddy, `nothing_to_reset` when no " +
-      'instance is recorded; each deletes nothing. Approved first.',
+      "instance is recorded; each deletes nothing, as does a failed read of Bambuddy (Bambuddy's error). Approved first.",
     input: z.object({
       confirm_instance: z
         .string()

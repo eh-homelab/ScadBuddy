@@ -438,11 +438,15 @@ class LinksResetCounts(BaseModel, extra="forbid"):
 
 class LinksResetPreview(BaseModel, extra="forbid"):
     """``GET /filament/sync/reset-links``: the instance the links belong to (what
-    ``confirm_instance`` must name), the configured one, and what a reset would delete."""
+    ``confirm_instance`` must name), the configured one, and what a reset would delete.
+    ``same_bambuddy``: the configured Bambuddy holds the linked spools as ScadBuddy last
+    saw them (`bb_sync_results.same_bambuddy`, #6845), so a reset keeps every link and
+    deletes nothing."""
 
     instance: str | None
     configured_instance: str | None
     counts: LinksResetCounts
+    same_bambuddy: bool
 
 
 class LinksResetRequest(BaseModel, extra="forbid"):
@@ -454,7 +458,9 @@ class LinksResetRequest(BaseModel, extra="forbid"):
 
 class LinksResetDone(BaseModel, extra="forbid"):
     """``POST /filament/sync/reset-links``'s answer: the instance whose links were
-    deleted, and what was deleted."""
+    reset, whether they were ``kept`` (the configured Bambuddy is the same one, #6845:
+    nothing deleted, the links now belong to it), and what was deleted."""
 
     instance: str
+    kept: bool
     deleted: LinksResetCounts

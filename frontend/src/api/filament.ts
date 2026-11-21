@@ -186,12 +186,17 @@ export type LinksResetCounts = Schemas['LinksResetCounts']
 export type LinksResetPreview = Schemas['LinksResetPreview']
 export type LinksResetDone = Schemas['LinksResetDone']
 
-/** #6773 — what a reset of the Bambuddy links would delete, and the instance they belong to. Reads only. */
+/**
+ * #6773 — what a reset of the Bambuddy links would delete, and the instance they belong to.
+ * #6845 — `same_bambuddy`: the Bambuddy set up now is the links' own, so a reset keeps them.
+ * Reads ScadBuddy and the configured Bambuddy's spools.
+ */
 export const getResetPreview = () => request<LinksResetPreview>(`${BASE}/sync/reset-links`)
 
 /**
  * #6773 — deletes the Bambuddy links of `confirmInstance` (the preview's `instance`), then a full pass
- * links the configured Bambuddy afresh. 409 with `code` `confirm_mismatch`, `same_instance` or
+ * links the configured Bambuddy afresh. #6845 — when that Bambuddy is the links' own (`kept`), it
+ * deletes nothing and the links now belong to it. 409 with `code` `confirm_mismatch`, `same_instance` or
  * `nothing_to_reset` when it deletes nothing.
  */
 export const resetSyncLinks = (confirmInstance: string) =>

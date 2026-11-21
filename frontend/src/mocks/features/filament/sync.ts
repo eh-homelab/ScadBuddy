@@ -21,6 +21,8 @@ type S = components['schemas']
  * configured Bambuddy; `linkOtherBambuddy` makes them another's (`instance_changed`), as after a
  * change of the Bambuddy URL. The reset checks `confirm_instance` as the server does, deletes the
  * links, the intents and the error rows, and asks for a pass that lands as "Sync now"'s does.
+ * #6845 — with `{ same: true }` the configured Bambuddy is the links' own at a new address
+ * (`same_bambuddy`): the reset deletes nothing and the links belong to the configured one.
  */
 
 const BASE = '/api/v1/filament/sync'
@@ -45,6 +47,8 @@ let running: number | null = null
 let otherInstance: string | null = null
 /** No links at all, after a reset and before the pass that links the new Bambuddy. */
 let unlinked = false
+/** #6845 — the configured Bambuddy holds the linked spools: a reset keeps the links. */
+let sameBambuddy = false
 
 /** What the seed's links number when they belong to another Bambuddy. */
 const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, intents: 1, ignored: 0 }
@@ -57,12 +61,17 @@ export function reset() {
   running = null
   otherInstance = null
   unlinked = false
+  sameBambuddy = false
 }
 
-/** #6773 — the links now belong to `instance`, not the configured Bambuddy, so the sync is stopped. */
-export function linkOtherBambuddy(instance = '0ld0ld0ld0ld') {
+/**
+ * #6773 — the links now belong to `instance`, not the configured Bambuddy, so the sync is stopped.
+ * #6845 — `same`: the configured Bambuddy is that one at a new address, so a reset keeps the links.
+ */
+export function linkOtherBambuddy(instance = '0ld0ld0ld0ld', { same = false }: { same?: boolean } = {}) {
   otherInstance = instance
   unlinked = false
+  sameBambuddy = same
 }
 
 /** The configured Bambuddy's instance, as `instance_for` would name it (the mock uses the URL). */
@@ -138,7 +147,12 @@ export const handlers = [
     return HttpResponse.json({ started: true, requested_at: requestedAt } satisfies S['SyncRun'], { status: 202 })
   }),
   http.get(`${BASE}/reset-links`, () =>
-    HttpResponse.json({ instance: linksInstance(), configured_instance: configured(), counts: resetCounts() } satisfies S['LinksResetPreview']),
+    HttpResponse.json({
+      instance: linksInstance(),
+      configured_instance: configured(),
+      counts: resetCounts(),
+      same_bambuddy: sameBambuddy && otherInstance !== null,
+    } satisfies S['LinksResetPreview']),
   ),
   http.post(`${BASE}/reset-links`, async ({ request }) => {
     const body = (await request.json()) as S['LinksResetRequest']
@@ -146,11 +160,18 @@ export const handlers = [
     if (instance === null) return conflict('no Bambuddy instance is recorded, so no link belongs to one', 'nothing_to_reset')
     if (instance === configured()) return conflict('the links belong to the configured Bambuddy; nothing to reset', 'same_instance')
     if (body.confirm_instance !== instance) return conflict('confirm_instance is not the instance the links belong to', 'confirm_mismatch')
+    if (sameBambuddy) {
+      otherInstance = null
+      sameBambuddy = false
+      running ??= READS_TO_LAND
+      const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+      return HttpResponse.json({ instance, kept: true, deleted: none } satisfies S['LinksResetDone'])
+    }
     const deleted = resetCounts()
     otherInstance = null
     unlinked = true
     errors = []
     running ??= READS_TO_LAND
-    return HttpResponse.json({ instance, deleted } satisfies S['LinksResetDone'])
+    return HttpResponse.json({ instance, kept: false, deleted } satisfies S['LinksResetDone'])
   }),
 ]
