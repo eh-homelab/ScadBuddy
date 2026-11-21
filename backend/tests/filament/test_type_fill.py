@@ -295,30 +295,56 @@ async def test_a_type_really_deleted_meanwhile_gets_no_k_values(
     assert set(done.skipped.values()) == {"the type was deleted meanwhile"}
 
 
+@respx.mock
 async def test_the_deleted_stop_does_not_depend_on_the_reason_text(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#6800: `_one` stops on `_fill_empty`'s flag, so another reason text still writes
-    no K value."""
-    gone = _type(types, pg_pool, "GONE3")
-    _presets(types, gone, ("H2C", "0.4", "GFA05"))
-    k_calls: list[str] = []
+    """#6800, #6809: `_one` stops on `_fill_empty`'s flag, not on the reason text. The
+    type still exists and loses the race twice, so its skip reason equals the patched
+    `_DELETED`; the K values are still read and written."""
+    type_id = _type(types, pg_pool, "RACED")
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    spool = FilamentSpoolStore(pg_pool).create(SpoolCreate(type_id=type_id), actor="ann").id
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000000002', 'H2C', 1)"
+        )
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, linked_at)"
+            " VALUES (%s, 40, now())",
+            (spool,),
+        )
+    k = {"extruder": 0, "nozzle_diameter": "0.4", "nozzle_type": "HS", "cali_idx": 3}
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 40,
+                    "material": "PLA",
+                    "k_profiles": [{"printer_id": 1, "k_value": 0.03, **k}],
+                }
+            ],
+        )
+    )
+    raced = 0
 
     def meanwhile(type_id: UUID, values: Any, *, actor: str) -> Any:
-        with pg_pool.connection() as conn:
-            conn.execute("DELETE FROM filament_spool_types WHERE id = %s", (type_id,))
+        nonlocal raced
+        raced += 1
         raise TypeTempError("raced")
 
-    monkeypatch.setattr(profile_fill, "_DELETED", "another reason text")
+    monkeypatch.setattr(profile_fill, "_DELETED", "the type changed meanwhile: raced")
     monkeypatch.setattr(types, "fill_empty", meanwhile)
-    for name in ("k_values", "linked_bb_spools", "fill_k_values"):
-        monkeypatch.setattr(types, name, lambda *a, _n=name, **k: k_calls.append(_n))
 
-    (done,) = await filler.fill(LINKED, [gone], actor=ACTOR)
+    (done,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
 
-    assert k_calls == []
-    assert not done.written
-    assert set(done.skipped.values()) == {"another reason text"}
+    assert raced == 2
+    assert set(done.skipped.values()) == {"the type changed meanwhile: raced"}
+    assert [(r.extruder, r.k_value) for r in done.k_values] == [(0, Decimal("0.03"))]
+    assert done.written
+    assert [r.k_value for r in types.k_values(type_id)] == [Decimal("0.03")]
 
 
 async def test_a_type_without_presets_or_a_profile_is_left_alone_with_a_reason(
