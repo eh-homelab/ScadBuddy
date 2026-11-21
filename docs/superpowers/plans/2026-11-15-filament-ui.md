@@ -779,12 +779,17 @@ check passed it no inventory. So Decision 2's negative tray id was never found.
 17. R-6872-3: three reasons, each said in its own words. `no_spool`: a rack-side slot of
     the nozzle plan that the filament plan gives no spool. `empty_tray`: a tray chosen for
     itself that reports no filament. `not_in_inventory`: an SB number the inventory does
-    not have, or a filled tray that holds no SB spool. `rank.rack_groups` takes the plan's
-    ids (`chosen`, optional) and keeps the same reasons on `RackGroup.unchecked`;
-    `RackGroup.glow_unchecked` is now derived from it. Why: issue ruling 3; a slot with no
-    spool is not "not in the inventory".
+    not have, or a filled tray that holds no SB spool. The reasons live in `print_run.py`
+    (`UncheckedReason`, `_unfound_reason`); `rank.py` is unchanged (R-6872-5). Why: issue
+    ruling 3; a slot with no spool is not "not in the inventory".
 18. R-6872-4: the run's ranking on a native run judges Glow on the tray option, whose
     material is the tray's reported `tray_type` and whose subtype is empty, not on the SB
     spool's subtype. That is a separate gap, filed as #6876, not changed here. Why: it is
     the run's choice, not the dialog's lookup, and its fix touches the picker's labels and
     the profile resolution.
+28. R-6872-5: `rank.rack_groups` gets no `chosen` parameter and `RackGroup` no per-slot
+    reasons in #6872; `RackGroup.glow_unchecked` stays a plain field. The per-slot reasons
+    for the run's own ranking come with #6876 and reuse `print_run._unfound_reason`'s tray
+    check. Why: claude-review on #6877 found that no production caller passed `chosen`, so
+    its reasons ran only in tests, and that it called every unfound tray id empty while the
+    preview checks the tray's report. (19-27 are #6869's.)

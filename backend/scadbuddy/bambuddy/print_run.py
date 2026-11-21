@@ -194,10 +194,8 @@ from scadbuddy.printers.lan_models import LanReport, LanStarted, LanStopped
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import is_fresh, status_from_report
 from scadbuddy.rack.rank import (
-    GlowUnchecked,
     RackCandidate,
     RackGroup,
-    UncheckedReason,
     Usage,
     abrasive_type,
     candidates_for,
@@ -541,6 +539,21 @@ class RackSentPick(BaseModel):
     plate_id: int
     group_id: int
     position: int
+
+
+#: Why a rack-side slot's spool could not be checked for Glow (#6872): the plan chose no
+#: spool for it; it chose a tray that holds none; or the spool it names (an SB number, or
+#: the spool in a tray chosen for itself) is not in the inventory.
+UncheckedReason = Literal["no_spool", "empty_tray", "not_in_inventory"]
+
+
+@dataclass(frozen=True)
+class _Unchecked:
+    """One slot the preview could not test Glow on, and the id the plan names for it."""
+
+    slot_id: int
+    reason: UncheckedReason
+    spool_id: int | None = None
 
 
 class RackUncheckedSlot(BaseModel):
@@ -2296,7 +2309,7 @@ def _unfound_reason(spool_id: int, status: PrinterStatus | None) -> UncheckedRea
 
 
 def _unchecked_view(
-    item: GlowUnchecked, status: PrinterStatus | None, nozzle_plan: NozzlePlan | None
+    item: _Unchecked, status: PrinterStatus | None, nozzle_plan: NozzlePlan | None
 ) -> RackUncheckedSlot:
     """``item`` named for the dialog (#6872 ruling 2): the SB number, else the tray and
     what it reports, else the slot's own material and colour from the nozzle plan."""
@@ -2356,7 +2369,7 @@ async def rack_preview(
         found = _chosen_spools(slots, inventory, held, printer_id)
         known = [spool for spool in found.values() if spool is not None]
         unchecked = [
-            GlowUnchecked(
+            _Unchecked(
                 slot_id=slot.slot_id,
                 reason=_unfound_reason(slot.spool_id, status),
                 spool_id=slot.spool_id,
@@ -2367,7 +2380,7 @@ async def rack_preview(
         if nozzle_plan is not None:
             planned = {slot.slot_id for slot in request.filament_plan.slots}
             unchecked += [
-                GlowUnchecked(slot_id=slot.slot_id, reason="no_spool")
+                _Unchecked(slot_id=slot.slot_id, reason="no_spool")
                 for slot in nozzle_plan.slots
                 if slot.side == rack_letter and slot.slot_id not in planned
             ]
@@ -2384,7 +2397,7 @@ async def rack_preview(
                 or glow(spool.names.material or "", spool.names.subtype)
                 for spool in known
             ),
-            unchecked=tuple(unchecked),
+            glow_unchecked=bool(unchecked),
             label="the rack side",
         )
         algorithm = request.rack_algorithm or settings.rack_algorithm(printer_id, printer)
@@ -2409,7 +2422,7 @@ async def rack_preview(
             reason=pick.reason if pick else None,
             unsafe_material=pick.unsafe_material if pick else False,
             glow_unchecked=group.glow_unchecked,
-            unchecked=[_unchecked_view(item, status, nozzle_plan) for item in group.unchecked],
+            unchecked=[_unchecked_view(item, status, nozzle_plan) for item in unchecked],
             options=[_rack_option(c) for c in sorted(options, key=lambda c: c.position)],
         ),
         warnings,

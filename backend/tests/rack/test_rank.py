@@ -11,7 +11,6 @@ from scadbuddy.bambuddy.models import NozzleRackSlot
 from scadbuddy.rack import rank
 from scadbuddy.rack.rank import (
     NOZZLE_MATERIALS,
-    GlowUnchecked,
     Usage,
     abrasive_type,
     candidates_for,
@@ -423,32 +422,6 @@ def test_a_pla_group_on_a_glow_spool_is_abrasive(subtype: str) -> None:
 def test_a_filament_with_no_spool_is_judged_by_type_and_says_glow_was_unchecked() -> None:
     [found] = rack_groups([requirement(1)], {})
     assert not found.abrasive and found.glow_unchecked
-
-
-def test_a_filament_whose_slot_has_no_spool_chosen_says_it_has_none() -> None:
-    """#6872 ruling 3: a slot the plan gives no spool is not "not in the inventory"."""
-    [found] = rack_groups([requirement(1)], {}, chosen={})
-    assert found.glow_unchecked
-    assert found.unchecked == (GlowUnchecked(slot_id=1, reason="no_spool"),)
-
-
-def test_a_chosen_spool_the_options_lack_is_named_by_its_id() -> None:
-    """#6872 ruling 2: the spool the plan names, and its slot, so a person can act."""
-    [found] = rack_groups([requirement(2)], {}, chosen={2: 45})
-    assert found.unchecked == (GlowUnchecked(slot_id=2, reason="not_in_inventory", spool_id=45),)
-
-
-def test_a_tray_chosen_for_itself_that_no_option_offers_is_empty() -> None:
-    """#6872 ruling 3: a tray id the options lack is a tray with no spool in it."""
-    [found] = rack_groups([requirement(2)], {}, chosen={2: -2049})
-    assert found.unchecked == (GlowUnchecked(slot_id=2, reason="empty_tray", spool_id=-2049),)
-
-
-def test_a_tray_chosen_for_itself_is_found_by_its_negative_id() -> None:
-    """#6872: a native plan names trays (HT-A is -2049); the option under that id counts."""
-    tray = SpoolOption(spool_id=-2049, material="PETG", tray_only=True)
-    [found] = rack_groups([requirement(2)], {2: tray}, chosen={2: -2049})
-    assert not found.glow_unchecked and found.unchecked == ()
 
 
 def test_off_rack_and_ungrouped_filaments_are_not_rack_groups() -> None:

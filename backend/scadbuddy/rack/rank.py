@@ -11,7 +11,6 @@ import re
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
 
 from scadbuddy.bambuddy.extruders import RACK_SIDE
 from scadbuddy.bambuddy.filament_ids import filament_material
@@ -67,22 +66,6 @@ class Usage:
     last_used_at: datetime | None = None
 
 
-#: Why a filament's spool could not be checked for Glow (#6872): the plan chose no spool
-#: for its slot; it chose a tray that holds none; or the spool it names is not in the
-#: inventory.
-UncheckedReason = Literal["no_spool", "empty_tray", "not_in_inventory"]
-
-
-@dataclass(frozen=True)
-class GlowUnchecked:
-    """One filament whose spool Glow could not be checked on (spec §3, #6872): its slot,
-    why, and the id the plan names for it (``None`` with no spool chosen)."""
-
-    slot_id: int
-    reason: UncheckedReason
-    spool_id: int | None = None
-
-
 @dataclass(frozen=True)
 class RackGroup:
     """One ``on_rack`` filament group of a sliced plate, or the preview's rack side."""
@@ -93,19 +76,14 @@ class RackGroup:
     color: str | None = None
     materials: tuple[str, ...] = ()
     abrasive: bool = False
-    #: Each filament whose spool Glow could not be checked on (spec §3, #6872).
-    unchecked: tuple[GlowUnchecked, ...] = ()
+    #: A filament had no inventory spool, so Glow could not be checked (spec §3).
+    glow_unchecked: bool = False
     #: How a warning names it; empty means "group <id>".
     label: str = ""
 
     @property
     def name(self) -> str:
         return self.label or f"group {self.group_id}"
-
-    @property
-    def glow_unchecked(self) -> bool:
-        """A filament had no inventory spool, so Glow could not be checked (spec §3)."""
-        return bool(self.unchecked)
 
 
 @dataclass(frozen=True)
@@ -215,15 +193,11 @@ def rack_color(raw: str) -> str | None:
 
 
 def rack_groups(
-    filaments: Sequence[FilamentRequirement],
-    spools_by_slot: Mapping[int, SpoolOption],
-    chosen: Mapping[int, int] | None = None,
+    filaments: Sequence[FilamentRequirement], spools_by_slot: Mapping[int, SpoolOption]
 ) -> list[RackGroup]:
     """One :class:`RackGroup` per ``on_rack`` group of the plate's used filaments. A group
     is abrasive when any of its filaments is; its color is the group's own (its first
-    filament's, spec §8 unknown 2). ``chosen`` is the plan's spool id per slot (#6872):
-    with it, a filament with no spool in ``spools_by_slot`` says whether its slot had
-    none chosen or which id was not found; without it, every such one is not found."""
+    filament's, spec §8 unknown 2)."""
     grouped: dict[int, list[FilamentRequirement]] = {}
     for filament in filaments:
         if (
@@ -250,25 +224,10 @@ def rack_groups(
                 or any(
                     spool is not None and glow(spool.material, spool.subtype) for spool in spools
                 ),
-                unchecked=tuple(
-                    _unchecked(member.slot_id, chosen)
-                    for member, spool in zip(members, spools, strict=True)
-                    if spool is None
-                ),
+                glow_unchecked=any(spool is None for spool in spools),
             )
         )
     return groups
-
-
-def _unchecked(slot_id: int, chosen: Mapping[int, int] | None) -> GlowUnchecked:
-    if chosen is None:
-        return GlowUnchecked(slot_id=slot_id, reason="not_in_inventory")
-    spool_id = chosen.get(slot_id)
-    if spool_id is None:
-        return GlowUnchecked(slot_id=slot_id, reason="no_spool")
-    # A negative id is a tray chosen for itself: offered only while it is filled.
-    reason: UncheckedReason = "empty_tray" if spool_id < 0 else "not_in_inventory"
-    return GlowUnchecked(slot_id=slot_id, reason=reason, spool_id=spool_id)
 
 
 def _available(
