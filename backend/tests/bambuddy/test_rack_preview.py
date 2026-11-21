@@ -150,7 +150,7 @@ async def test_a_filled_tray_with_no_inventory_spool_is_named_by_tray_and_colour
             tray="HT-A",
             material="PETG",
             colour="#A7AEB2",
-            colour_word="grey",
+            colour_word="light grey",
         )
     ]
 
