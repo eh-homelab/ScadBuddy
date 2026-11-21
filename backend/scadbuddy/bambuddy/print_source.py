@@ -6,7 +6,8 @@ library file downloads its bytes, wrapping an STL in a 3MF of ScadBuddy's own.
 
 Everything after that is one pipeline (:class:`PrintPipeline`), the same for both: the
 3MF is laid out for the printer chosen as whoever laid it out allows (replated for the
-plate, #105, when ScadBuddy did; an author's placement and plates kept), states the
+plate, #105, when ScadBuddy did; an author's plates kept, each moved as one group
+where every extruder reaches, as Bambu Studio adapts a project, #6820), states the
 nozzle side (#834) and each side's flow (#484), is recolored for the spools (#476) and
 uploaded into the project's folder (#79) as a copy recorded under the subject (#316);
 each queued plate is recorded by its :class:`PrintSubject` (#1750), its slice against
