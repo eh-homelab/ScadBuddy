@@ -1,10 +1,8 @@
 import os from 'node:os'
 import type { Client } from '@temporalio/client'
-import type { Sql } from 'postgres'
-import type { Kek } from '../secrets.js'
 import { TASK_QUEUE } from '../temporal/names.js'
 import { deleteUpstreamSession, type SessionLedger } from './forwarder.js'
-import { loadEnabledPlugins, type PluginStore } from './registry.js'
+import { loadEnabledPlugins, type PluginStoreLike } from './registry.js'
 import type { Resolver } from '../http/egress.js'
 import { type CrudTarget, crudOf } from '../api/crudStores.js'
 
@@ -37,11 +35,10 @@ type Row = { plugin_id: string; upstream_session_id: string; old: boolean }
 
 /**
  * The rows of `ai_plugin_sessions`: the forwarders' ledger (`seen`, `ended`) and the sweep's
- * reads. `PluginSessions` runs them over SQL, `CrudPluginSessions` through the API's CRUD
- * routes (area `plugin-sessions`, #5299 step 5).
+ * reads, through the API's CRUD routes (`CrudPluginSessions`, area `plugin-sessions`).
  */
 export type PluginSessionRows = SessionLedger & {
-  /** The database's clock now, as Postgres's text (`startMark`). */
+  /** The database's clock now, as Postgres's text, to the microsecond (#3691). */
   mark(): Promise<string>
   /** The rows of replicas not in `live`, older than `graceMs`; `old` past SWEEP_GIVE_UP_MS. */
   dead(live: ReadonlySet<string>, graceMs: number): Promise<Row[]>
@@ -49,45 +46,7 @@ export type PluginSessionRows = SessionLedger & {
   own(self: string, mark: string): Promise<Row[]>
 }
 
-export class PluginSessions implements PluginSessionRows {
-  private readonly sql: Sql
-  private readonly replica: string
-
-  constructor(sql: Sql, replica: string = replicaIdentity()) {
-    this.sql = sql
-    this.replica = replica
-  }
-
-  async seen(plugin: string, id: string): Promise<void> {
-    await this.sql`
-      INSERT INTO ai_plugin_sessions (plugin_id, upstream_session_id, replica)
-      VALUES (${plugin}, ${id}, ${this.replica})
-      ON CONFLICT DO NOTHING`
-  }
-
-  async ended(plugin: string, id: string): Promise<void> {
-    await this.sql`DELETE FROM ai_plugin_sessions WHERE plugin_id = ${plugin} AND upstream_session_id = ${id}`
-  }
-
-  mark(): Promise<string> {
-    return startMark(this.sql)
-  }
-
-  async dead(live: ReadonlySet<string>, graceMs: number): Promise<Row[]> {
-    return this.sql<Row[]>`
-      SELECT plugin_id, upstream_session_id, created_at < now() - ${SWEEP_GIVE_UP_MS / 1000} * interval '1 second' AS old
-      FROM ai_plugin_sessions
-      WHERE replica <> ALL(${[...live]}) AND created_at < now() - ${graceMs / 1000} * interval '1 second'`
-  }
-
-  async own(self: string, mark: string): Promise<Row[]> {
-    return this.sql<Row[]>`
-      SELECT plugin_id, upstream_session_id, false AS old FROM ai_plugin_sessions
-      WHERE replica = ${self} AND created_at < ${mark}::text::timestamptz`
-  }
-}
-
-/** `PluginSessions` through the API's CRUD routes (backend api/crud_agent_access.py). */
+/** The rows through the API's CRUD routes (backend api/crud_agent_access.py). */
 export class CrudPluginSessions implements PluginSessionRows {
   readonly #call: ReturnType<typeof crudOf>
   readonly #replica: string
@@ -120,8 +79,7 @@ export class CrudPluginSessions implements PluginSessionRows {
 }
 
 export type SweepDeps = {
-  plugins: Pick<PluginStore, 'enabled'>
-  kek: Kek | undefined
+  plugins: Pick<PluginStoreLike, 'enabled'>
   resolve?: Resolver
   /** Rows younger than this are kept (default SWEEP_GRACE_MS). */
   graceMs?: number
@@ -142,7 +100,7 @@ export const SWEEP_GIVE_UP_MS = 24 * 3_600_000
 async function endSessions(ledger: PluginSessionRows, rows: Row[], deps: SweepDeps, forgetFailed: boolean): Promise<void> {
   if (rows.length === 0) return
   const log = deps.log ?? (() => {})
-  const loaded = await loadEnabledPlugins(deps.plugins, deps.kek, deps.resolve)
+  const loaded = await loadEnabledPlugins(deps.plugins, deps.resolve)
   const byName = new Map(loaded.plugins.map((checked) => [checked.plugin.name, checked]))
   // A package's server is never looked up in the registry, whatever its name.
   const registered = (id: string) => (id.startsWith(PACKAGE_PREFIX) ? undefined : byName.get(id))
@@ -174,19 +132,9 @@ export async function sweepDeadReplicas(ledger: PluginSessionRows, liveReplicas:
 }
 
 /**
- * The database's clock, read once at start before anything can record a session: the line between this incarnation's rows and the last one's.
- * Kept as Postgres's text, to the microsecond: a JS Date keeps milliseconds, and a row from earlier in the mark's millisecond fell after it
- * (#3691). It goes back as `::text::timestamptz`: a parameter postgres.js sees as a timestamptz it sends through a Date, which cuts it again.
- */
-export async function startMark(sql: Sql): Promise<string> {
-  const [row] = await sql<{ t: string }[]>`SELECT now()::text AS t`
-  return row!.t
-}
-
-/**
  * At start, before the first sweep: ends the sessions this replica's previous incarnation left
  * (the hostname is reused across a restart, so the sweep would count them live): its rows
- * recorded before `mark` (`startMark`), never this incarnation's. Failed DELETEs are forgotten
+ * recorded before `mark` (`PluginSessionRows.mark`), never this incarnation's. Failed DELETEs are forgotten
  * too: nothing would retry them.
  */
 export async function endOwnSessions(ledger: PluginSessionRows, self: string, deps: SweepDeps, mark: string): Promise<number> {

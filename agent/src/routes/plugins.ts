@@ -20,7 +20,7 @@ import {
   toolPrefix,
 } from '../plugins/registry.js'
 import { DEFAULT_PLUGIN_TEST_TIMEOUT_MS, type PluginTest, testPlugin } from '../plugins/testConnection.js'
-import { type KekStatus, SealError } from '../secrets.js'
+import { SealError } from '../secrets.js'
 import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
 import { browserUser } from '../auth/browserSession.js'
 import { ready, type RouteModule } from './module.js'
@@ -60,7 +60,6 @@ export type PluginRouteDeps = {
   /** Undefined when there is no database (spec §9). */
   plugins: PluginRepo | undefined
   ready: () => Promise<boolean>
-  kek: KekStatus
   remoteAddress: RemoteAddress
   origins: OriginPolicy
   resolveHost?: Resolver
@@ -117,7 +116,7 @@ const PatchBody = z.strictObject({
   secret: z.string().min(1).max(4096).nullable().optional(),
 })
 
-export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
+export function pluginView(plugin: PluginSummary): PluginView {
   return {
     name: plugin.name,
     kind: plugin.kind,
@@ -126,8 +125,8 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
     enabled: plugin.enabled,
     tool_prefix: toolPrefix(plugin.name),
     auth: plugin.auth_header === null ? null : { header: plugin.auth_header, last4: plugin.secret_last4 ?? '' },
-    // Through the API's routes, its key opens the secret (#5299 step 5); over SQL, this process's.
-    usable: plugin.opens ?? (plugin.kekId === null || (kek.ok && kek.kek.id === plugin.kekId)),
+    // The API's key opens the secret.
+    usable: plugin.opens,
     problem: reservedNameProblem(plugin.name),
     tool_tiers: plugin.tool_tiers,
     disabled_tools: plugin.disabled_tools,
@@ -160,7 +159,6 @@ async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.
 export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
   const base = '/api/v1/ai/plugins'
   const resolveHost = deps.resolveHost ?? systemResolver
-  const kek = () => (deps.kek.ok ? deps.kek.kek : undefined)
 
   async function store(): Promise<PluginRepo | string> {
     if (!deps.plugins) return NO_DATABASE
@@ -205,7 +203,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
     const [builtIns, remote] = await Promise.all([deps.builtIns.list(), repo.list()])
-    return c.json([...builtIns, ...remote.map((p) => pluginView(p, deps.kek))])
+    return c.json([...builtIns, ...remote.map((p) => pluginView(p))])
   })
 
   app.get(`${base}/:name`, async (c) => {
@@ -215,7 +213,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     if (set) return c.json(await deps.builtIns.view(set))
     const plugin = await repo.get(c.req.param('name'))
     if (!plugin) return c.json({ detail: `no plugin named "${c.req.param('name')}"` }, 404)
-    return c.json(pluginView(plugin, deps.kek))
+    return c.json(pluginView(plugin))
   })
 
   app.post(base, async (c) => {
@@ -227,16 +225,13 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     try {
       // The endpoint is checked before anything is stored (egress + https).
       await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)
-      const saved = await repo.create(
-        {
-          name: body.name,
-          url: body.url,
-          ...(body.auth_header === undefined ? {} : { auth_header: body.auth_header }),
-          ...(body.secret === undefined ? {} : { secret: body.secret }),
-        },
-        kek(),
-      )
-      return c.json(pluginView(saved, deps.kek), 201)
+      const saved = await repo.create({
+        name: body.name,
+        url: body.url,
+        ...(body.auth_header === undefined ? {} : { auth_header: body.auth_header }),
+        ...(body.secret === undefined ? {} : { secret: body.secret }),
+      })
+      return c.json(pluginView(saved), 201)
     } catch (err) {
       return refusal(c, err)
     }
@@ -262,8 +257,8 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     }
     try {
       if (body.url !== undefined) await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)
-      const saved = await repo.update(c.req.param('name'), body, kek())
-      return c.json(pluginView(saved, deps.kek))
+      const saved = await repo.update(c.req.param('name'), body)
+      return c.json(pluginView(saved))
     } catch (err) {
       return refusal(c, err)
     }
@@ -299,17 +294,14 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     const verdict = checkOrigin(requestFacts(c, deps.remoteAddress), deps.origins)
     if (!verdict.ok) return c.json({ detail: 'sign-in must start from the ScadBuddy UI' }, 403)
     try {
-      const started = await deps.pluginOAuth.start(
-        {
-          plugin: { name, url: plugin.url },
-          redirectUri: `${verdict.origin}${CALLBACK_PATH}`,
-          ...(body.client_id === undefined ? {} : { clientId: body.client_id }),
-          ...(body.client_secret === undefined ? {} : { clientSecret: body.client_secret }),
-          ...(body.scope === undefined ? {} : { scope: body.scope }),
-          by: browserUser(c).id,
-        },
-        kek(),
-      )
+      const started = await deps.pluginOAuth.start({
+        plugin: { name, url: plugin.url },
+        redirectUri: `${verdict.origin}${CALLBACK_PATH}`,
+        ...(body.client_id === undefined ? {} : { clientId: body.client_id }),
+        ...(body.client_secret === undefined ? {} : { clientSecret: body.client_secret }),
+        ...(body.scope === undefined ? {} : { scope: body.scope }),
+        by: browserUser(c).id,
+      })
       return c.json({
         authorize_url: `${OAUTH_PATH}/authorize?ticket=${started.ticket}`,
         redirect_uri: started.redirect_uri,
@@ -377,7 +369,7 @@ export async function testAndList(
     if (!(await deps.ready())) return { status: 503, body: { detail: NOT_READY } }
     let plugin: RemotePlugin | undefined
     try {
-      plugin = await deps.plugins.reveal(name, deps.kek.ok ? deps.kek.kek : undefined)
+      plugin = await deps.plugins.reveal(name)
     } catch (err) {
       if (err instanceof SealError) {
         return { status: 409, body: { detail: `the plugin secret cannot be decrypted: ${err.message}; save it again` } }
@@ -426,10 +418,9 @@ export async function testAndList(
 /** What the connection test needs from the app's deps: the default test goes through the forwarder. */
 export function pluginTestDeps(
   deps: AppDeps,
-): Pick<PluginRouteDeps, 'plugins' | 'kek' | 'testPlugin' | 'resolveHost'> & { listings?: ToolListings } {
+): Pick<PluginRouteDeps, 'plugins' | 'testPlugin' | 'resolveHost'> & { listings?: ToolListings } {
   return {
     plugins: deps.plugins,
-    kek: deps.kek,
     testPlugin:
       deps.testPlugin ??
       ((plugin, address) =>

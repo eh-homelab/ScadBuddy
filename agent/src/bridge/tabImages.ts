@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { type CrudTarget, crudCall, segment } from '../api/crudStores.js'
 import { type ImageMediaType, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { BLOB_NAME, type SessionImage } from '../sessions/blobs.js'
@@ -18,7 +17,7 @@ import { BLOB_NAME, type SessionImage } from '../sessions/blobs.js'
 
 /** How long a tab's image is held for the call that asked for it. */
 export const TAB_IMAGE_TTL_MS = 10 * 60_000
-/** Images held at once without a database (one process). */
+/** Images held at once without the shared store (one process). */
 export const MEMORY_TAB_IMAGES_MAX = 16
 
 export type StoredTabImage = { mediaType: ImageMediaType; bytes: Buffer }
@@ -29,7 +28,7 @@ export interface TabImageStore {
   take(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined>
 }
 
-/** Without a database: only this process's tabs are reached (hub.ts), so this process holds their images. */
+/** Without the shared store: only this process's tabs are reached (hub.ts), so this process holds their images. */
 export class MemoryTabImageStore implements TabImageStore {
   readonly #images = new Map<string, { image: SessionImage; at: number }>()
   readonly #now: () => number
@@ -58,41 +57,8 @@ export class MemoryTabImageStore implements TabImageStore {
   }
 }
 
-/** `ai_tab_images` (backend/scadbuddy/migrations_agent/20261101T1813Z_tab_images.sql), shared by every replica. */
-export class PostgresTabImageStore implements TabImageStore {
-  readonly #sql: Sql
-
-  constructor(sql: Sql) {
-    this.#sql = sql
-  }
-
-  async put(image: SessionImage): Promise<void> {
-    const ttl = `${TAB_IMAGE_TTL_MS} milliseconds`
-    await this.#sql`DELETE FROM ai_tab_images WHERE stored_at < now() - ${ttl}::interval`
-    await this.#sql`
-      INSERT INTO ai_tab_images (name, media_type, bytes) VALUES (${image.name}, ${image.mediaType}, ${image.bytes})
-      ON CONFLICT (name) DO UPDATE SET stored_at = now()`
-  }
-
-  async take(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined> {
-    const ttl = `${TAB_IMAGE_TTL_MS} milliseconds`
-    // The expired rows go with the read, and the one read goes as it is returned.
-    const query = this.#sql<{ media_type: ImageMediaType; bytes: Buffer; fresh: boolean }[]>`
-      DELETE FROM ai_tab_images WHERE name = ${name} OR stored_at < now() - ${ttl}::interval
-      RETURNING media_type, bytes, (name = ${name} AND stored_at >= now() - ${ttl}::interval) AS fresh`
-    const onAbort = () => query.cancel()
-    signal?.addEventListener('abort', onAbort, { once: true })
-    try {
-      const row = (await query).find((r) => r.fresh)
-      return row ? { mediaType: row.media_type, bytes: row.bytes } : undefined
-    } finally {
-      signal?.removeEventListener('abort', onAbort)
-    }
-  }
-}
-
 /**
- * `ai_tab_images` through the API's CRUD routes, area `bridge-tabs` (#5299 step 5, D8): the
+ * `ai_tab_images` through the API's CRUD routes, area `bridge-tabs` (#5299 D8): the
  * bytes are the request's and the answer's body, never JSON; the API checks the name against
  * them again.
  */
@@ -115,7 +81,7 @@ export class CrudTabImageStore implements TabImageStore {
   }
 
   async take(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined> {
-    // A name that is no blob's names no image, as the SQL store answers it.
+    // A name that is no blob's names no image.
     if (!BLOB_NAME.test(name)) return undefined
     const response = await crudCall(this.#fetch, this.#base, "a tab's image", `/tab-images/${segment(name, BLOB_NAME, "a tab's image name")}/take`, {
       method: 'POST',
