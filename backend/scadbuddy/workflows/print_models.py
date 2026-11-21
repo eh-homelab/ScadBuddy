@@ -32,7 +32,8 @@ from scadbuddy.printers.nozzle_mapping import SlicedRack
 #: The workflow type every print route starts.
 PRINT_RUN_WORKFLOW = "PrintRun"
 #: A LAN run's later plate copies (#4541), started by its ``PrintRun`` once the first
-#: is printing, and left to run past it (`lan_sequence_id`).
+#: is printing, and left to run past it (`lan_sequence_id`). A run queued on a busy
+#: printer (#6871) starts it with every print still to start, the first included.
 LAN_SEQUENCE_WORKFLOW = "PrintLanSequence"
 
 
@@ -67,9 +68,9 @@ SLICE_GONE = "PrintSliceGone"
 #: plate in the printer's report, so a start it did take is not sent twice.
 LAN_UNSURE = "PrintLanUnsure"
 #: A LAN start that started nothing, for sure (#6871): the printer refused the
-#: ``project_file`` (``ERROR STATE``, a missing file), or ``lan_print`` stopped before it
-#: sent one. Recorded as ``FAILED`` is, but the run's first start refused so queued
-#: nothing, and the run says so (``print_fail``'s ``unqueued``).
+#: ``project_file`` (``ERROR STATE``, a missing file). Recorded as ``FAILED`` is, but the
+#: run's first start refused so queued nothing, and the run says so (``print_fail``'s
+#: ``unqueued``).
 LAN_REFUSED = "PrintLanRefused"
 
 

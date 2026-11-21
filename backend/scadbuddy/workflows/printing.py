@@ -1046,7 +1046,8 @@ class PrintRunWorkflow(_PlateStarts):
     async def _print_lan(
         self, input: PrintRunInput, accepted: Accepted, planned: PlannedRun
     ) -> PrintRun:
-        """A LAN run of several plates or copies (#4541). The printer has no queue, and a
+        """A LAN run of several plates or copies (#4541), or of one print planned with
+        ``queue_when_busy`` (#6871). The printer has no queue, and a
         second ``project_file`` replaces the print it runs, so the run is the queue, as
         Bambuddy's is on its path: every plate is sliced first (a slice that fails then
         starts nothing), then each plate's copies start in turn, plate by plate as
@@ -1059,7 +1060,12 @@ class PrintRunWorkflow(_PlateStarts):
         print, and its result names each start still to come (``lan_waiting``). The rest
         are ``PrintLanSequence``'s, a child left to run past this run, which closes after
         its repeat window as any run does: a repeat of the request is answered as one of
-        any run is, never kept waiting days for the last copy."""
+        any run is, never kept waiting days for the last copy.
+
+        With ``queue_when_busy`` the run first reads the printer (``lan_check``). When it
+        is busy (#6871), the run succeeds with nothing started: its result names every
+        print in ``lan_waiting`` and the wait in ``lan_queued``, and ``PrintLanSequence``
+        waits for the printer and a cleared plate before the first start."""
         plates: list[tuple[PlatePlan, int, int | None, str | None, NativeSliced | None]] = []
         for plate in planned.plates:
             if plate.sliced_file_id is not None and workflow.patched(SLICED_PATCH):
@@ -1301,7 +1307,12 @@ class LanSequenceWorkflow(_PlateStarts):
 
     A run planned with ``plate_clear`` (#4939) then waits, as Bambuddy's queue does with
     ``require_plate_clear`` on, for `PLATE_CLEARED_SIGNAL` before each later copy: its
-    result says so (``lan_awaiting_clear``) until it comes."""
+    result says so (``lan_awaiting_clear``) until it comes.
+
+    A run queued on a busy printer (#6871, ``queued``) has started nothing: the sequence
+    starts every print, the first included. Before the first it waits for the printer's
+    print to end and for a cleared plate, whatever ``plate_clear`` says, then reads the
+    printer again and waits again while it is busy."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1435,10 +1446,18 @@ class LanSequenceWorkflow(_PlateStarts):
                     copy=start.copy_number,
                 )
                 taken = taken.model_copy(update={"plate_id": plate_id})
+                # A queued run's first start (#6871) names the slice and its file, as a
+                # run that started at once does (`finish_run`).
+                first: dict[str, Any] = (
+                    {"slice_job_id": start.slice_job_id, "sliced_library_file_id": start.sliced}
+                    if queued is not None and not result.lan
+                    else {}
+                )
                 # On the run before anything else, so whatever fails next never reads a
                 # copy the printer is printing as one it never started.
                 result = result.model_copy(
                     update={
+                        **first,
                         "lan": [*result.lan, taken],
                         "lan_waiting": result.lan_waiting[1:],
                         "warnings": [

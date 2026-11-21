@@ -19,8 +19,9 @@ run waited out carries how it ended (`LanStarted.ended`), since the printer repo
 next one by then, and each start still to come (`PrintRunResult.lan_waiting`) is a copy
 ``queued``, as one waiting in Bambuddy's queue is, until the run stops (``lan_stopped``).
 While the run waits for a cleared plate (#4939, ``lan_awaiting_clear``) the next one says
-so (`AWAITING_CLEAR`). The progress names the run's controls (`lan_control`, #4942): stop
-the rest, and say the plate is clear.
+so (`AWAITING_CLEAR`). A run queued on a busy printer (#6871, ``lan_queued``) has
+started none, and says so (`QUEUED_BUSY`). The progress names the run's controls
+(`lan_control`, #4942): stop the rest, and say the plate is clear.
 """
 
 from __future__ import annotations
@@ -136,11 +137,14 @@ def lan_ended(
     print (`shows`). ``started_at`` is the print worker's clock and the report's time the
     watch's, maybe another pod's, and the watch may not have merged the start's delta yet,
     so a report from before the start can look newer. Read as an end, it would start the
-    next copy over this one."""
+    next copy over this one.
+
+    A start with no name is a print a queued run waits out whose report named none
+    (#6871, `busy_with`): no report can name it, so any end after the check counts."""
     if report is None or report[1] <= started.started_at:
         return None
     data, seen_at = report
-    if not seen and not shows(report, started):
+    if not seen and started.subtask_name and not shows(report, started):
         return None
     state = data.get("gcode_state")
     if state in _RUNNING:

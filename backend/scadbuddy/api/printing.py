@@ -1441,7 +1441,8 @@ async def _to_sequence(
 )
 async def post_stop_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     """A native run of several plates or copies starts each once the printer has ended
-    the one before (#4541). This stops the ones it has not started (#4942): it cancels
+    the one before (#4541); a run queued on a busy printer (#6871, ``lan_queued``), even
+    of one print, has started none yet. This stops the ones it has not started (#4942): it cancels
     the run's ``PrintLanSequence``, which records the stop on the run (``lan_stopped``),
     and the progress shows them cancelled. The print on the printer carries on; one
     being started as the stop arrives still starts. Answers **202** with the run as it
@@ -1462,11 +1463,12 @@ async def post_stop_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
 async def post_plate_cleared(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     """With ``lan_require_plate_clear`` on (#4939), a native run of several prints waits,
     once the printer has ended each, for someone to say the plate is clear, as Bambuddy's
-    queue does with its ``require_plate_clear``. While it waits its result says so
-    (``lan_awaiting_clear``). This tells it the plate is clear, and it starts the next
-    print. Answers **202** with the run as it was read; 409 when the run is not waiting
-    for a clear, or its sequence is no longer running (the run then records its prints
-    still to start as stopped)."""
+    queue does with its ``require_plate_clear``. A run queued on a busy printer
+    (#6871, ``lan_queued``), even of one print, waits so before its first print whatever
+    the setting says. While it waits its result says so (``lan_awaiting_clear``). This
+    tells it the plate is clear, and it starts the next print. Answers **202** with the
+    run as it was read; 409 when the run is not waiting for a clear, or its sequence is
+    no longer running (the run then records its prints still to start as stopped)."""
     run = await _waiting_run(runs, run_id)
     assert run.result is not None  # `_waiting_run` answers a run with a result
     if not run.result.lan_awaiting_clear:

@@ -177,6 +177,7 @@ from scadbuddy.api.deps import (
     OutputsDep,
     PrintLinksDep,
     PrintRunsDep,
+    RunIdPath,
     SettingsStoreDep,
     StateDep,
     UploadsDep,
@@ -466,7 +467,7 @@ async def lan_waiting(
 
 
 @router.get("/runs/{run_id}/queue-place", name="crud_print_queue_place")
-async def queue_place(run_id: str, runs: PrintRunsDep, printer: str) -> int:
+async def queue_place(run_id: RunIdPath, runs: PrintRunsDep, printer: str) -> int:
     """#6871: a run queued on a busy printer's place, as `PrintRunStore.queue_place`."""
     try:
         UUID(printer)

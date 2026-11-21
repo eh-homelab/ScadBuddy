@@ -59,7 +59,7 @@ The H2C's hotend rack is chosen per filament group, and the sliced file does not
 
 So Task 8 measures first, with the user at the printer, then the LAN path sends `nozzle_mapping` from ScadBuddy's own rack pick (`rack_chooser`, `print_run.py:578-670` at `7613580bf`). No refusal ships. **Decide then:** only if the measurement finds the printer cannot be told the mapping over LAN does the plan choose a fallback (refuse with a reason, let the firmware pick as Bambuddy does when it cannot resolve one, `bambu_mqtt.py` `resolve_rack_nozzle_mapping` docstring, or hand the run to Bambuddy); that choice goes to the user with the measurement.
 
-### D8 to D17. A busy printer queues the print (#6871)
+### D8 to D21. A busy printer queues the print (#6871)
 
 Recorded 2026-11-21 for #6871. The run that started it: workflow `print-1e3d8e87…`, run
 `e58d226b`, 15:04 UTC. Its `lan_upload` succeeded, `lan_print` failed `3DP-31B-598 refused the
@@ -127,6 +127,27 @@ was read with `scadbuddy-run-forensics` (`print_runs.py show`). It is now the re
     and a run whose attempts all fail ends before anything is sent. Why: the prod history
     `lan_refused_busy` and the new `lan_queued_busy` (both workflows) replay in
     `tests/test_print_replay.py`. No new workflow type is added.
+18. R-6871-11: Only the printer's own refusal of a `project_file` is `LAN_REFUSED`. A start
+    that `lan_print` stops before it sends one (the printer cannot be reached, a certificate
+    mismatch, a report that shows the print finished) stays `FAILED`, with
+    `may_have_queued` as before. Why: those early exits cannot always prove that nothing
+    was sent, so they must not say "Nothing was sent to print" (review of #6882).
+19. R-6871-12: A queued run's first start fills `slice_job_id` and
+    `sliced_library_file_id` on the run's result, as `finish_run` fills them for a run that
+    starts at once. `rack_picks` stays empty, as it is on every LAN run: a LAN start keeps
+    its picks by run and `subtask_name` (`rack_nozzle_*`). Why: a reader of the run (the
+    dialog, the agent, an order) finds the sliced file the same way on both paths (review
+    of #6882).
+20. R-6871-13: The print a queued run waits for may have no name, when the report names
+    no `subtask_name` (`busy_with` then gives the job the name `""`). Any end then counts:
+    `lan_ended` takes any report after the check that is not in a busy state. Why: no
+    report can name that print, so the wait would otherwise run to `LAN_WAIT_BOUND`. The
+    plate-clear gate and the re-check (decision 11) still guard the start (review of
+    #6882).
+21. R-6871-14: `GET …/runs/{run_id}/queue-place` takes only a run id as the API makes
+    them (`RunIdPath`, 32 lowercase hex characters) and answers 422 for any other. Why:
+    the id goes into a query, and a NUL byte in it failed with a 500 (review of #6882).
+
 
 ## Acceptance criteria and the layer each lives in
 

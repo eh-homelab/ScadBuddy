@@ -17,7 +17,7 @@ from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, finish_run
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, given_run, newest_failure
 from scadbuddy.core.events import PrintEvent, PrintRunEvent
-from scadbuddy.printers.lan_models import LanQueued, LanStarted, LanStopped
+from scadbuddy.printers.lan_models import LanQueued, LanStarted, LanStopped, busy_with
 from scadbuddy.printers.progress import (
     AWAITING_CLEAR,
     IDLE_SINCE,
@@ -605,3 +605,38 @@ async def test_a_library_files_lan_print_has_no_last_print_row() -> None:
     progress = PrintProgress(route="lan", stage="done", settled=True, bambuddy_url="", run_id="r")
     await lan_last_print(prints)("library:7", progress)
     assert prints.moved == []
+
+
+#: The report of a print a queued run waits out (#6871) that names no ``subtask_name``.
+UNNAMED_REPORT = {"gcode_state": "RUNNING"}
+
+
+@pytest.mark.parametrize(
+    ("data", "stage"),
+    [
+        ({"gcode_state": "FINISH", "subtask_name": ""}, "done"),
+        ({"gcode_state": "FAILED", "subtask_name": ""}, "failed"),
+        # Ended, with no name to tell whose end it is.
+        ({"gcode_state": "FINISH"}, "unknown"),
+        ({"gcode_state": "IDLE"}, "unknown"),
+        ({"gcode_state": "FINISH", "subtask_name": "theirs"}, "unknown"),
+    ],
+)
+def test_a_busy_print_with_no_name_ends_when_the_printer_leaves_busy(
+    data: dict[str, Any], stage: str
+) -> None:
+    """#6871 review: `busy_with` names no job when the report names none, so no report
+    can name it. Any end counts: the printer no longer in a busy state."""
+    queued = busy_with(UNNAMED_REPORT, STARTED_AT, plate_clear=False)
+    assert queued is not None and queued.job is not None
+    ended = lan_ended((data, at(seconds=10)), queued.job, seen=False)
+    assert ended is not None and ended.ended == stage
+
+
+@pytest.mark.parametrize("state", ["RUNNING", "PAUSE", "PREPARE", "SLICING"])
+def test_a_busy_print_with_no_name_has_not_ended_while_busy(state: str) -> None:
+    queued = busy_with(UNNAMED_REPORT, STARTED_AT, plate_clear=False)
+    assert queued is not None and queued.job is not None
+    assert lan_ended(({"gcode_state": state}, at(seconds=10)), queued.job, seen=False) is None
+    # Nor from a report no newer than the check.
+    assert lan_ended(({"gcode_state": "FINISH"}, STARTED_AT), queued.job, seen=False) is None

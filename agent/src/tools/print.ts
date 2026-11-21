@@ -931,7 +931,8 @@ export const printTools: Tool[] = [
     label: 'Stop the rest of a LAN print run',
     description:
       'Stops the prints a run over the LAN (`path: "native"`) has not started yet: a run of several plates or ' +
-      "copies starts each once the printer has ended the one before (`lan_waiting`). The print on the printer " +
+      "copies starts each once the printer has ended the one before (`lan_waiting`), and a run queued on a busy " +
+      'printer (`lan_queued`, even of one print) has started none yet. The print on the printer ' +
       'carries on; one being started as the stop arrives still starts. The run then records why the rest never ' +
       'start (`lan_stopped`). get_print_progress names a run that has prints still to start (`lan_run`). 409 when ' +
       'it has none left to stop.',
@@ -956,7 +957,8 @@ export const printTools: Tool[] = [
     description:
       'Tells a run over the LAN that the printer\'s plate is clear, so it starts its next print. With "Wait for ' +
       'a cleared plate" on in Settings, such a run of several prints waits after each until someone says so ' +
-      '(`lan_awaiting_clear`, and get_print_progress `lan_run.awaiting_clear`). Only call it once the user has ' +
+      '(`lan_awaiting_clear`, and get_print_progress `lan_run.awaiting_clear`). A run queued on a busy printer ' +
+      '(`lan_queued`, even of one print) waits so before its first print, whatever the setting says. Only call it once the user has ' +
       'said the plate is clear: the next print starts on whatever is on the bed. 409 when the run is not waiting.',
     input: z.object({ run_id: runId }),
     risk: 'outward',

@@ -123,7 +123,7 @@ describe('QueuedPanel · a LAN run of several plate copies', () => {
   it("offers the run's controls while its progress says prints are still to start", () => {
     const progress: PrintProgress = {
       ...lanProgress,
-      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: true },
+      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: true, queued: false },
     }
     render(
       <QueuedPanel result={{ ...queuedResult, path: 'native', copies: 2, lan_waiting: [1] }} printerName="H2C" progress={progress} polling />,

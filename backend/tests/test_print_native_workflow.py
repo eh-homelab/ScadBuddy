@@ -1117,6 +1117,15 @@ async def test_a_busy_printer_queues_the_print_and_starts_it_once_free_and_clear
     assert len(fake_lan.project_files()) == 1 and fake_lan.received()["refused"] == []
     # The plate is recorded once, by its start.
     assert [outcome.lan is not None for outcome in fake.outcomes] == [True]
+    # #6871 review: its first start names the slice and the sliced file, as a run that
+    # started at once does.
+    [outcome] = fake.outcomes
+    assert queued.sliced_library_file_id is None
+    assert outcome.sliced_library_file_id is not None
+    assert (result.slice_job_id, result.sliced_library_file_id) == (
+        outcome.slice_job_id,
+        outcome.sliced_library_file_id,
+    )
 
 
 async def test_a_queued_run_waits_again_when_the_printer_is_busy_once_cleared(

@@ -22,7 +22,7 @@ function posted(action: 'stop' | 'plate-cleared', status = 202) {
 }
 
 function controls(control: Partial<LanRunControl> = {}) {
-  render(<LanRunControls control={{ run_id: RUN, waiting: 2, awaiting_clear: false, ...control }} printerName="H2C" />)
+  render(<LanRunControls control={{ run_id: RUN, waiting: 2, awaiting_clear: false, queued: false, ...control }} printerName="H2C" />)
 }
 
 describe('LanRunControls (#4942, #4939)', () => {
