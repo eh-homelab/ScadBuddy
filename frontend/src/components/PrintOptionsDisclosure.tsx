@@ -272,26 +272,32 @@ export function PrintOptionsDisclosure({
   )
   const holding = HOLDING.filter((hold) => optionValue(effective, hold.name) === true)
 
+  // #6885 — a choice, not a fault: a neutral chip that names it, with its two ways out.
   const held = holding.length > 0 && (
-    <ul className="mt-4 space-y-1.5" aria-label="Options that change this print">
+    <ul className="mt-4 flex flex-wrap gap-2" aria-label="Options that change this print">
       {holding.map((hold) => {
         const source = effectiveScope(layers, hold.name)
         const stored = source !== null && source !== 'request' ? source : null
         return (
           <li
             key={hold.name}
-            className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn"
+            className="flex max-w-full flex-wrap items-center gap-x-1 gap-y-0.5 rounded-2xl border bg-muted/50 py-1 pr-1 pl-3 text-[13px] text-foreground"
             data-testid={`holding-${hold.name}`}
           >
-            <span className="min-w-0 flex-[1_1_16rem]">
-              <span className="font-medium">{hold.title}</span> {hold.effect}
-              {stored &&
-                ` Remembered for ${stored === 'global' ? 'every print' : scopeLabel(stored, noun)}.`}
+            <span className="min-w-0" title={hold.effect}>
+              <span className="font-medium">{hold.title}</span>
+              {stored && (
+                <span className="text-muted-foreground">
+                  {` Remembered for ${stored === 'global' ? 'every print' : scopeLabel(stored, noun)}.`}
+                </span>
+              )}
+              <span className="sr-only"> {hold.effect}</span>
             </span>
             <Button
               type="button"
               size="sm"
-              variant="outline"
+              variant="ghost"
+              className="h-7 px-2"
               onClick={() => set(hold.name, optionValue(defaults, hold.name) ?? false)}
               disabled={busy}
             >
@@ -302,6 +308,7 @@ export function PrintOptionsDisclosure({
                 type="button"
                 size="sm"
                 variant="ghost"
+                className="h-7 px-2 text-muted-foreground"
                 onClick={() => void stopRemembering(hold.name, stored)}
                 disabled={busy}
               >

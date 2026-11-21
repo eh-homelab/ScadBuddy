@@ -65,22 +65,32 @@ One dialog, in the place the current one lives. Every step follows one pattern:
 **offer everything you own, mark what is on the printer, warn rather than block, and
 let Advanced override.**
 
-**Simple mode shows only what the user has to choose (#768):** the printer, when there
-is more than one; the spools; which plate, for a multi-plate file; and Print, beside the
-Checks. Nozzles, quality, plate type, print options, project and copies are Advanced
-steps. In Simple mode they still send their defaults: the nozzle size and tier this
-model last printed with, else 0.4 mm and Standard; the plate type from the printer's
-last print, else the remembered or default one (§4.4); the remembered copies; and the
-project the page passed in (the Customize page's own project choice), else the last
-project printed to (`last_project_id`), as the Library page's prints use.
+**Simple mode shows what the user has to choose (#768), and what will print (#6885):**
+one summary row names the printer, the nozzle, the bed plate and the quality, and each
+cell opens its step in place (the printer's list; the nozzle step with size and flow per
+side; the plate step with its swap reminder, #6884; the quality step). Under it come the
+spools; which plate, for a multi-plate file; and Print, beside the Checks. The nozzle
+size and tier open on what this model last printed with, else 0.4 mm and Standard; the
+plate type on the printer's last print, else the remembered or default one (§4.4). Print
+options, project and copies are Advanced steps. In Simple mode they still send their
+defaults: the remembered copies, and the project the page passed in (the Customize
+page's own project choice), else the last project printed to (`last_project_id`), as
+the Library page's prints use.
 
-| Step | Simple mode | Advanced mode adds |
+**Advanced mode (#6885)** shows the same summary row, whose cells open the section that
+holds each step. Its steps are grouped into collapsible sections: Nozzles (with the side
+and rack choices); Quality and plate; Supports, prime tower and print sequence; Filing and
+copies; and Slicer settings (the per-slot preset override and any setting by key). Each
+viewer's browser remembers which sections are open. Both modes keep a footer in sight
+with the slice's estimate (time and grams), the first check that holds Print, and Print.
+
+| Step | Simple mode | The step (#6885: Simple opens it from the summary row; Advanced shows it in a section), and what Advanced adds |
 |---|---|---|
 | 1. Plate slots | One row per color in the model — for "All plates", every color any plate uses — each pre-matched to the nearest spool (the existing `suggest`). | — |
 | 2. Spools | Any active spool from inventory. Loaded spools are marked with printer + AMS slot (and the side they feed) and listed first. An unloaded spool is allowed and warned: "Jade White PLA isn't loaded — load it before this prints." | Override the filament preset per slot, from the presets compatible with the chosen nozzle size. |
-| 3. Nozzles | Not shown: the remembered size, else 0.4 mm. | One nozzle size for the job, both sides — a single radio group, not a per-side choice (§5 test 3 withdrew the per-side size). All four sizes (0.2 / 0.4 / 0.6 / 0.8) are offered; the ones installed in the rack are marked; picking one that isn't installed warns "No 0.6 mm nozzle is installed. Install one before this prints." Standard or High Flow per side. Bambuddy has no High Flow presets (§5 test 1), so choosing High Flow slices as Standard and the step says so: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (bambuddy#3176). |
-| 4. Quality | Not shown: the remembered tier, else Standard. | Fine / Standard / Draft (§4.2), or Bambu's full H2C process list for the chosen size. |
-| 5. Plate | Not shown: preselected from the printer's last print (§4.4). | Every H2C plate type. |
+| 3. Nozzles | In the summary row: the remembered size, else 0.4 mm, and the flow; its cell opens the nozzle step (#6885). | One nozzle size for the job, both sides — a single radio group, not a per-side choice (§5 test 3 withdrew the per-side size). All four sizes (0.2 / 0.4 / 0.6 / 0.8) are offered; the ones installed in the rack are marked; picking one that isn't installed warns "No 0.6 mm nozzle is installed. Install one before this prints." Standard or High Flow per side. Bambuddy has no High Flow presets (§5 test 1), so choosing High Flow slices as Standard and the step says so: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (bambuddy#3176). |
+| 4. Quality | In the summary row: the remembered tier's process, else Standard's; its cell opens the quality step (#6885). | Fine / Standard / Draft (§4.2), or Bambu's full H2C process list for the chosen size. |
+| 5. Plate | In the summary row: preselected from the printer's last print (§4.4), with the swap reminder under the row; its cell opens the plate step (#6884). | Every H2C plate type. |
 | 6. Print options, project, copies | Not shown: Bambuddy's defaults, the page's project (else the last one printed to), the remembered copies. | Bambuddy's queue-item options with Bambuddy's defaults, exactly as `PrintOptionsDisclosure` shows them today (#88); the project; copies. Queue behavior — manual start, waiting for filament — is Bambuddy's. |
 | 7. Print | Slice through Bambuddy, then queue. | — |
 
@@ -470,8 +480,8 @@ The user passed it with notes, from nine photos (in the template's media on [`na
   is remembered per **printer**, not per model (`printer_bed_types`), since the plate is
   a property of what's on the bed, not of the model being printed. Reopening the dialog
   restores those choices, and the dialog opens in Advanced mode if the remembered choice
-  is a named process or a High Flow flow — either one would otherwise be applied unseen
-  from Simple mode.
+  is a named process or a High Flow flow. Before #6885 either one was applied unseen
+  from Simple mode; Simple's summary row now names both.
 
 **Removed from the dialog**
 

@@ -298,11 +298,20 @@ pick or maintain. Pipelines still exist in Bambuddy, but ScadBuddy doesn't use t
 
 Top to bottom, the dialog is:
 
-- **Advanced switch.** Off (Simple) by default. Advanced adds the full process list, a
-  High Flow choice per side, and a filament preset override per slot. Switching back to
-  Simple resets those to Standard flow, the tier's process and each spool's own preset,
-  so nothing chosen in Advanced is sent unseen.
-- **Printer** — shown only when more than one printer is active (today there is one).
+- **Advanced switch.** Off (Simple) by default. Advanced groups its steps into sections
+  you can close (Nozzles; Quality and plate; Supports, prime tower and print sequence;
+  Filing and copies; Slicer settings), and your browser remembers which are open. It adds
+  the side and rack choices, supports, the prime tower, the print sequence, the print
+  options, the project, copies, a filament preset override per slot and any slicer
+  setting. Switching back to Simple sets the flow on both sides to the left side's and
+  the process to the tier's, and drops the preset overrides, the sides, the print
+  sequence and the slicer settings, so nothing chosen in Advanced is sent unseen.
+- **Summary row** — in both modes, one row names the printer, the nozzle, the bed plate
+  and the quality, so you see what will print. In Simple, click a cell to change it in
+  place; in Advanced, a cell opens the section that holds it. The footer keeps the
+  slice's estimate (time and filament), the first check that holds Print, and Print in
+  sight.
+- **Printer** — a list in the summary row when more than one printer is active.
   Otherwise ScadBuddy has already picked one: this model's remembered printer, else the
   printer set in Settings, else the first active printer — skipping a remembered or
   Settings printer that is no longer active. Presets are only resolved for the H2C, so
@@ -327,12 +336,12 @@ Top to bottom, the dialog is:
   "(installed)". A size neither mounted nozzle has, and the rack holds no spare of, is
   refused before upload (on a single-nozzle printer, a size its nozzle isn't); if the
   printer doesn't report what's mounted, picking one the rack lacks warns you to install
-  it first. Advanced adds
+  it first. The same step sets
   Standard or High Flow per side. Bambuddy has no High Flow presets yet, so a High Flow
   choice slices as Standard and the dialog says so: "Bambuddy slices this as Standard
   flow; High Flow presets aren't supported by Bambuddy yet."
-- **Quality** — Fine / Standard / Draft in Simple mode. Advanced replaces that with the
-  full list of Bambu processes for the chosen nozzle size.
+- **Quality** — the tier's process, from the remembered tier, else Standard. The step
+  lists every Bambu process for the chosen nozzle size.
 - **Plate** — every plate type the H2C supports, preselected from the printer's last
   print, else the plate last remembered for this printer, else Textured PEI Plate.
   Choosing anything other than the last print's plate shows a reminder: "The
@@ -363,7 +372,8 @@ suggestion), the nozzle choice, the quality tier and process name are remembered
 model, the same way print options and copies already are. The plate type is remembered
 per **printer**, not per model. Reopening the dialog restores all of it, and opens
 straight into Advanced mode if the remembered choice is a named process or a High Flow
-flow — either would otherwise apply unseen from Simple mode.
+flow. A remembered print option that holds the job, such as "Waits for a manual start",
+shows as a plain note with **Not this time** and **Stop remembering**.
 
 ### Library
 
