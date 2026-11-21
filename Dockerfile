@@ -446,7 +446,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # volume, no credentials: its whole configuration is its environment (README.md,
 # "Slicer worker").
 #
-# The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.99.1);
+# The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.100.0);
 # bump the two together, tag and digest. The Temporal Core SDK's build runs protoc,
 # and imports protobuf's well-known types (google/protobuf/field_mask.proto …), which
 # Debian ships in libprotobuf-dev, not protobuf-compiler: without it temporalio-protos'
