@@ -546,9 +546,9 @@ class SpoolTypeStore:
         ``profile_fetch`` row of its key; a ``person``, ``profile`` or
         ``printer_calibration`` row stands, value and source (#6857, profile-fetch plan
         Decision 127). The type's other rows stay. Checked and written under the type's
-        row lock, on ``conn``, in the caller's transaction. Answers the rows written, each
-        tagged ``profile_fetch`` (R-6714-19), and each row not written with the row that
-        kept its key."""
+        row lock, on ``conn``, in the caller's transaction. Answers the rows written (one per
+        key, the last of a batch's duplicates), each tagged ``profile_fetch`` (R-6714-19),
+        and each row not written with the row that kept its key."""
         conn.execute("SELECT 1 FROM filament_spool_types WHERE id = %s FOR UPDATE", (type_id,))
         held = {
             k_value_key(row): row
@@ -557,7 +557,7 @@ class SpoolTypeStore:
                 (type_id,),
             ).fetchall()
         }
-        written: _KValues = []
+        written: dict[tuple[str, int, Decimal | str], m.TypeKValue] = {}
         kept: _KeptK = []
         for row in rows:
             key = k_value_key(row.model_dump())
@@ -573,8 +573,8 @@ class SpoolTypeStore:
                 )
             _insert_k(conn, type_id, row, "profile_fetch")
             held[key] = {**row.model_dump(), "source": "profile_fetch"}
-            written.append(row.model_copy(update={"type_id": type_id, "source": "profile_fetch"}))
-        return written, kept
+            written[key] = row.model_copy(update={"type_id": type_id, "source": "profile_fetch"})
+        return list(written.values()), kept
 
     def match(
         self,

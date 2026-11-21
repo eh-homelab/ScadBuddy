@@ -1193,6 +1193,8 @@ def _merge_k_values(conn: Conn, type_id: UUID, ending: _Ending) -> None:
     transaction."""
     written, kept = SpoolTypeStore.merge_k_values(conn, type_id, ending.k_values)
     for row, old in kept:
+        if Decimal(old["k_value"]).normalize() == row.k_value.normalize():
+            continue
         label = ending.k_scope.get((row.printer_id, row.nozzle_diameter), "a printer")
         ending.notes.append(
             f"kept the K value {old['k_value']} of {label}, extruder {old['extruder']},"
