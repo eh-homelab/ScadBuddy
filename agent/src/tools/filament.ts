@@ -274,7 +274,8 @@ export const filamentTools: Tool[] = [
       '`lead_time_days` and `safety_margin_days` (days, `null` clears) set the type\'s own reorder timing. ' +
       '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
       "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
-      "fetches its slicer presets by. 409 when an unarchived type has the " +
+      "fetches its slicer presets by. `drying_temp_c` (whole °C) and `drying_hours` (a decimal) are the type's " +
+      "drying values, the default of a drying of its spools (filament_spool_add_event). 409 when an unarchived type has the " +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
@@ -288,6 +289,19 @@ export const filamentTools: Tool[] = [
             .nullable()
             .optional()
             .describe("The type's filament id on 3dfilamentprofiles.com: a positive integer below 2^31, null clears it"),
+          drying_temp_c: z
+            .number()
+            .int()
+            .min(0)
+            .max(1000)
+            .nullable()
+            .optional()
+            .describe('The drying temperature in °C a drying of its spools defaults to; null clears it'),
+          drying_hours: z
+            .string()
+            .nullable()
+            .optional()
+            .describe('The drying time in hours a drying of its spools defaults to, a decimal such as `8`; null clears it'),
         })
         .catchall(z.unknown())
         .default({})
@@ -506,18 +520,24 @@ export const filamentTools: Tool[] = [
       "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
       'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
       'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
-      'empty fields (nozzle and bed temperature ranges from the H2C plates, density; the diameter is never empty), ' +
-      'never the cost (`cost_hint` is only a hint), and a type with no K values takes those of its linked Bambuddy ' +
-      "spools. Each result names the fields `filled`, the `source` preset, and a `reason` when the profile could not " +
-      'be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
+      'empty fields (nozzle and bed temperature ranges from the H2C plates, density, drying temperature and hours ' +
+      "from the AMS HT's idle drying values; the diameter is never empty), never the cost (`cost_hint` is only a " +
+      'hint). A type with no K values takes those of its linked Bambuddy spools; then each Bambuddy-linked printer of a ' +
+      "preset's model gives its K calibrations for the preset's nozzle, and one whose `filament_id` is the preset's " +
+      '`slicer_filament` fills that printer, extruder and nozzle when the type has no K value there (one a person set ' +
+      'is never overwritten; `k_reason` says what was not imported). Each result names the fields `filled`, the ' +
+      '`source` preset, and a `reason` when the profile could not be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
       'and writes nothing. With `type_id`, `apply` writes the fields a refresh showed over the type (only after the ' +
       'user confirms them), and `k_values: true` the K values it showed, sent back as `shown_k_values`. 409 when the ' +
-      'profile no longer gives an applied value, or Bambuddy now gives other K values. Reads Bambuddy, writes ScadBuddy only.',
+      'profile no longer gives an applied value, or Bambuddy now gives other K values. Reads Bambuddy (GET only), writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit for every type"),
       refresh: z.boolean().default(false).describe('Answer the differences and write nothing'),
       apply: z
-        .partialRecord(z.enum(['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm']), z.union([z.number(), z.string()]))
+        .partialRecord(
+          z.enum(['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm', 'drying_temp_c', 'drying_hours']),
+          z.union([z.number(), z.string()]),
+        )
         .optional()
         .describe('The confirmed fields and values a refresh showed, to write over the type'),
       k_values: z.boolean().optional().describe('With `apply`: also write the K values the refresh showed'),
@@ -1270,15 +1290,16 @@ export const filamentTools: Tool[] = [
     label: 'Record a weighing or a drying',
     description:
       'Record on a spool a weighing (`kind: weighed`, `grams` = the filament left, without the empty spool; ' +
-      '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). Only what the user ' +
-      'says. Writes ScadBuddy only.',
+      '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). A drying that leaves ' +
+      "out `temp_c` or `hours` records the spool's `drying_defaults` (filament_spool_get: its type's drying values, " +
+      "else its subtype's, else its material's); `null` records none. Only what the user says. Writes ScadBuddy only.",
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
-      temp_c: z.number().int().min(0).optional(),
-      hours: z.string().optional().describe('A decimal, e.g. `8`'),
+      temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
+      hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
     }),
     risk: 'write',
