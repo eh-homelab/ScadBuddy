@@ -42,8 +42,11 @@ Row = Mapping[str, Any]
 _Types = list[m.SpoolType]
 _Presets = list[m.TypePreset]
 _KValues = list[m.TypeKValue]
+#: A K row's key: printer, extruder and nozzle (`k_value_key`).
+_KKey = tuple[str, int, Decimal | str]
+_Kept = tuple[m.TypeKValue, dict[str, Any]]
 #: The K rows a fetch did not write, each with the row that kept its key (`merge_k_values`).
-_KeptK = list[tuple[m.TypeKValue, dict[str, Any]]]
+_KeptK = list[_Kept]
 _Ids = list[int]
 
 #: The fields whose change rewrites a type's price book row.
@@ -95,7 +98,7 @@ class LinkedPrinter:
     bambuddy_printer_id: int
 
 
-def k_value_key(row: Mapping[str, Any]) -> tuple[str, int, Decimal | str]:
+def k_value_key(row: Mapping[str, Any]) -> _KKey:
     """A K value row's key, its nozzle as a number when it is one (``0.40`` is ``0.4``)."""
     nozzle = str(row["nozzle_diameter"]).strip()
     try:
@@ -558,8 +561,8 @@ class SpoolTypeStore:
                 (type_id,),
             ).fetchall()
         }
-        written: dict[tuple[str, int, Decimal | str], m.TypeKValue] = {}
-        kept: dict[tuple[str, int, Decimal | str], tuple[m.TypeKValue, dict[str, Any]]] = {}
+        written: dict[_KKey, m.TypeKValue] = {}
+        kept: dict[_KKey, _Kept] = {}
         for row in rows:
             key = k_value_key(row.model_dump())
             old = held.get(key)
