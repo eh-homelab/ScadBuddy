@@ -9,7 +9,7 @@ and the [durable printing, agents and flows spec](../superpowers/specs/2026-10-0
 the operator's notes per worker are in [`README.md` "Deploying"](../../README.md#deploying).
 
 Paths under `backend/scadbuddy/` are shortened to `scadbuddy/`. Line numbers are for
-`main` at the commit that adds this page.
+`main` at `67d7ff6` (2026-11-21).
 
 ## Task queues
 

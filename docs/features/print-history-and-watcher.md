@@ -3,16 +3,16 @@
 ## What it does
 
 The Prints page shows what is printing now, the queue and the history, with each print's
-photos, videos and timelapse. A print ScadBuddy did not start can be linked to a model
-by hand (**Import print**), and the print watcher does it with no user step for prints
+photos, videos and timelapse. A print ScadBuddy did not start can be linked to a model or to a
+file of ScadBuddy's own library by hand (**Import print**, `backend/scadbuddy/api/print_imports.py:101`), and the print watcher does it with no user step for prints
 seen on Bambuddy or on LAN-only printers. Print again re-runs a past print. See README
 ["The print watcher"](../../README.md#the-print-watcher-4699).
 
 ## How it works
 
 History reads Bambuddy's archives plus ScadBuddy's own run records. The watcher is a
-housekeeping sweep (`housekeeping_auto_import_prints`) that matches new archives to
-outputs; a LAN job start nudges it at once. LAN-only printers' jobs come from
+housekeeping sweep (`housekeeping_auto_import_prints`) that links new archives to
+models; a LAN job start nudges it at once. LAN-only printers' jobs come from
 `printer_reports` through the `LanAutoImport` workflow.
 
 ## Code
@@ -42,5 +42,4 @@ outputs; a LAN job start nudges it at once. LAN-only printers' jobs come from
 
 ## Limits and known issues
 
-- Matching a print to an item compares colour alpha too
-  ([#6316](https://github.com/eh-homelab/ScadBuddy/issues/6316)).
+- None tracked in code comments.

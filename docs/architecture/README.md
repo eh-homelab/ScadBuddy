@@ -3,7 +3,7 @@
 ScadBuddy is a self-hosted OpenSCAD customizer that renders multi-colour 3MFs, slices
 them and prints them on Bambu printers, through Bambuddy or directly over the LAN. Around
 that core it has a print library, orders and a public storefront, user-written flows and
-an AI assistant. This folder describes the code on `main` as it is today; the design
+an AI assistant. This folder describes the code on `main` at `67d7ff6` (2026-11-21), which the `path:line` citations resolve against; the design
 history is in [`docs/superpowers/specs/`](../superpowers/specs/), and where the code
 disagrees with a spec, the code is what these pages describe (see
 [Drift from specs](#drift-from-specs)).
@@ -135,7 +135,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
   pipeline route; following is the `FollowPrint` workflow
   (`backend/scadbuddy/workflows/follow.py:70`).
 - print-flow `:7-12` ScadBuddy keeps no spool or printer state of its own / its own spools,
-  virtual and LAN printers (`frontend/src/components/settings/NativeSpools.tsx:84`,
+  virtual and LAN printers (`backend/scadbuddy/filament/inventory.py:901`,
   `backend/scadbuddy/printers/store.py`).
 
 **Print library file spec** (`…/2026-09-28-print-library-file-design.md`)
@@ -217,9 +217,8 @@ document's claim and the code. These specs and docs were not changed in this PR.
 
 - orders `:257-258` quote `source` is `slice` or `manual` / also `archive` and
   `storefront` (`backend/scadbuddy/orders/models.py:75`).
-- orders `:675-677` the native path has no spool inventory / unchanged in orders, which
-  fill spools only from Bambuddy (`backend/scadbuddy/orders/spools.py:226-229`), though
-  ScadBuddy's own spools now exist.
+- orders `:673-674` the native path has no spool inventory / an item's spools are filled
+  from ScadBuddy's own spools (`backend/scadbuddy/orders/spools.py:215-221`).
 - storefront `:274` listing `colours` / listings also carry `materials`
   (`backend/scadbuddy/migrations/20261114T2313Z_storefront_materials.sql`).
 - storefront `:306-310` request uploads go through `order_attachment_add` / added directly
@@ -228,15 +227,8 @@ document's claim and the code. These specs and docs were not changed in this PR.
   `backend/scadbuddy/orders/pricing.py:175-183`.
 - customer-models `:712-787` the staged-model import flow / not built; the watcher "waits
   for the import (a later PR)" (`backend/scadbuddy/workflows/staged_file.py:17`).
-- storefront-customize-ux `:153` "about $X for one" with grams and time / only "about
-  {price}" (`frontend/src/storefront/components/Estimate.tsx:9`, `:24`).
 - template-forks `:149-151` Detach as a UI action / also a route
   (`backend/scadbuddy/api/upstream.py:228`).
-
-**Filament management spec** (`…/2026-11-14-filament-management-design.md`)
-
-- `:420-421` AMS units are locations made automatically / `ensure_ams` exists but has no
-  caller outside tests (`backend/scadbuddy/filament/locations.py:163`).
 
 **Auth and service-credential specs** (`…/2026-11-01-backend-auth-design.md`,
 `…/2026-11-05-service-credentials-without-db-design.md`)
@@ -264,12 +256,12 @@ document's claim and the code. These specs and docs were not changed in this PR.
   (`agent/src/access/model.ts:27`).
 - `docs/ai/README.md:60` `agent/src/db/migrations.ts` / no such file; the agent waits in
   `agent/src/db/schema.ts`.
-- `docs/ai/README.md:55-58` tools run in-process / a `ToolCall` workflow per call when
+- `docs/ai/README.md:50-51` tools run in-process / a `ToolCall` workflow per call when
   Temporal is set (`agent/src/tools/projections.ts:136-147`).
 - `docs/ai/operating.md:385-389` Claude Code's env is `CLAUDE_CONFIG_DIR`, `HOME`, `PATH` /
   also `TZ`, the gateway URL and token, and traffic switches
   (`agent/src/harness/options.ts:61`, `agent/src/harness/run.ts:515-521`).
-- `docs/ai/security.md:540`, `:967` the credential reaches Claude Code through `env` /
+- `docs/ai/security.md:558`, `:985` the credential reaches Claude Code through `env` /
   Claude Code gets only a leased gateway token (`agent/src/gateway/server.ts:21-29`).
 - `agent/CLAUDE.md:9` "run no SQL on a backend table" / the agent still reads two backend
   views over SQL as fallbacks: `auth_sessions_agent` until the API lists area

@@ -35,6 +35,8 @@ key goes through the one generic `process_overrides`, never a per-key field (roo
   `backend/scadbuddy/slicing/presets.py:324`, `workers/rust/crates/sb-slicer/src/runner.rs:103-135`;
   Bambuddy's slicer through `backend/scadbuddy/bambuddy/dispatch.py`.
 - Background slice follow: `backend/scadbuddy/preview_follow/follows.py:69`.
+- Prime-tower conflict check before slicing, with a one-click move: `backend/scadbuddy/bambuddy/tower_check.py:233`,
+  `frontend/src/components/print/TowerConflictNotice.tsx:38`.
 - Analyzers: `backend/scadbuddy/analyzers/runner.py:141`.
 
 ## Data
@@ -59,11 +61,8 @@ key goes through the one generic `process_overrides`, never a per-key field (roo
   [#6219](https://github.com/eh-homelab/ScadBuddy/issues/6219); settings per object and
   part: [#6253](https://github.com/eh-homelab/ScadBuddy/issues/6253); labels and help in
   the settings list: [#6281](https://github.com/eh-homelab/ScadBuddy/issues/6281).
-- The dialog's check reads Bambuddy about 17 times
-  ([#4196](https://github.com/eh-homelab/ScadBuddy/issues/4196)).
 - Bambu Cloud user presets are not offered on a native run
   ([#5113](https://github.com/eh-homelab/ScadBuddy/issues/5113)).
 - The native slicer's output goes through the API, not a presigned PUT
-  ([#4231](https://github.com/eh-homelab/ScadBuddy/issues/4231)); a sliced plate's cover
-  ignores the filament colour ([#6170](https://github.com/eh-homelab/ScadBuddy/issues/6170)).
+  ([#4231](https://github.com/eh-homelab/ScadBuddy/issues/4231)).
 - Analyzers beyond the built-ins are [#284](https://github.com/eh-homelab/ScadBuddy/issues/284).

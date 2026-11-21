@@ -49,12 +49,7 @@ printing is the print dialog's job.
 
 ## Limits and known issues
 
-- Render time: thumbnails and per-colour solids run serially
-  ([#3789](https://github.com/eh-homelab/ScadBuddy/issues/3789)); a Rust tool for them is
+- A Rust tool for thumbnails and the split is
   [#3824](https://github.com/eh-homelab/ScadBuddy/issues/3824).
 - A template plate is one object, so print by object does nothing
   ([#6245](https://github.com/eh-homelab/ScadBuddy/issues/6245)).
-- Every render job writes into one key space, so a render credential can overwrite other
-  renders' pieces ([#6233](https://github.com/eh-homelab/ScadBuddy/issues/6233)).
-- Storefront renders appear in the back office's Recent renders
-  ([#6371](https://github.com/eh-homelab/ScadBuddy/issues/6371)).

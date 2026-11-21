@@ -3,7 +3,7 @@
 ## What it does
 
 Customers with contacts and addresses; orders of line items, each pinning one template
-commit and its inputs; quotes priced by hand, from a past print's archive, or from a slice
+commit and its inputs; quotes priced by hand, from a past print's archive, from a slice, or from the storefront's cached slice price (`backend/scadbuddy/orders/models.py:75`)
 (each plate's grams and time at the price book's filaments and rates); a rough estimate
 from a render's volume; payment requests, deposits and the balance; printing an item;
 fulfilment, shipping and closing, with an audit line per order. The real cost and margin
@@ -67,12 +67,9 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
 
 ## Limits and known issues
 
-- An archive quote prices a plate of several units as one
-  ([#6336](https://github.com/eh-homelab/ScadBuddy/issues/6336)).
-- The built-in fulfilment flow ignores a remembered `force_colour_match`
-  ([#6304](https://github.com/eh-homelab/ScadBuddy/issues/6304)).
-- Item spools are filled only from Bambuddy's inventory, not ScadBuddy's own spools
-  (`backend/scadbuddy/orders/spools.py:226-229`).
-- Machine-rate actuals from logged maintenance:
-  [#5774](https://github.com/eh-homelab/ScadBuddy/issues/5774). Deposit tests that cross
-  midnight UTC fail: [#6305](https://github.com/eh-homelab/ScadBuddy/issues/6305).
+- An item's spools are filled from ScadBuddy's own spools; while Bambuddy is linked, its
+  tray assignments only place spools no registry printer reports
+  (`backend/scadbuddy/orders/spools.py:215-221`).
+- Machine-rate actuals come from logged maintenance events and part replacements
+  (`backend/scadbuddy/orders/machine_rate.py:22-28`); a row prices by its actual only once
+  it has enough of them.

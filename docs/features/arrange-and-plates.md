@@ -37,9 +37,9 @@ keep-out) see the repo skill `.claude/skills/h2c-plate-layout`.
 ## Limits and known issues
 
 - The 5 mm gap ignores Bambu's by-object clearance
-  ([#6246](https://github.com/eh-homelab/ScadBuddy/issues/6246)).
-- Auto Arrange does not reserve the prime tower's real footprint
-  ([#3770](https://github.com/eh-homelab/ScadBuddy/issues/3770)); dragging with clearance
+  ([#6246](https://github.com/eh-homelab/ScadBuddy/issues/6246)); dragging with clearance
   halos is [#3772](https://github.com/eh-homelab/ScadBuddy/issues/3772).
+- The packer reserves the prime tower's real footprint and its keep-out
+  (`backend/scadbuddy/render/plate.py:238`, `backend/scadbuddy/render/plate_profiles.py:280`).
 - Saving an arranged output waits on reading what a render worker just stored
   ([#2811](https://github.com/eh-homelab/ScadBuddy/issues/2811)).

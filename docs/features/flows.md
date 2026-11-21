@@ -58,8 +58,5 @@ sequenceDiagram
 
 ## Limits and known issues
 
-- A run whose outward step failed ends succeeded
-  ([#6123](https://github.com/eh-homelab/ScadBuddy/issues/6123)).
-- A keyed tool call whose heartbeat was lost is not retried with one key
-  ([#6345](https://github.com/eh-homelab/ScadBuddy/issues/6345)); grant checks do not
-  follow the inherited chain ([#5685](https://github.com/eh-homelab/ScadBuddy/issues/5685)).
+- Grant checks do not follow the inherited chain
+  ([#5685](https://github.com/eh-homelab/ScadBuddy/issues/5685)).

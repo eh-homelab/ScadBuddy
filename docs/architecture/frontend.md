@@ -3,8 +3,8 @@
 `frontend/` is a React and Vite app with two entries: the back office (the app people
 use inside Bambuddy) and the public storefront. Commands, Playwright and the folder
 layout are in [`frontend/CLAUDE.md`](../../frontend/CLAUDE.md). Paths below are under
-`frontend/` unless they say otherwise; line numbers are for `main` at the commit that adds
-this page.
+`frontend/` unless they say otherwise; line numbers are for `main` at `67d7ff6`
+(2026-11-21).
 
 ## Two entries, one build
 

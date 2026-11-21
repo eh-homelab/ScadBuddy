@@ -11,7 +11,7 @@ approval, and serves `/api/v1/ai/*` and `/mcp`. Commands, tests and folder layou
 [evals](../ai/evals.md). This page maps the code and links to them.
 
 Paths below are under `agent/src/` unless they say otherwise. Line numbers are for `main`
-at the commit that adds this page.
+at `67d7ff6` (2026-11-21).
 
 ## Processes and roles
 

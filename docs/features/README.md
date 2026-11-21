@@ -20,7 +20,7 @@ the [user guide](../user-guide.md).
 | Printers and the native hot path | [printer-hot-path.md](printer-hot-path.md) | `backend/scadbuddy/printers/hot_path.py:32`, `backend/scadbuddy/printers/print_activities.py:302` |
 | Print library, search, copies and batches | [print-library.md](print-library.md) | `frontend/src/pages/LibraryPage.tsx`, `backend/scadbuddy/api/library_print.py:196` |
 | Prints, history and the print watcher | [print-history-and-watcher.md](print-history-and-watcher.md) | `frontend/src/pages/PrintsPage.tsx:38`, `backend/scadbuddy/print_watch/sweep.py` |
-| Spools and filament | [spools-and-filament.md](spools-and-filament.md) | `backend/scadbuddy/api/filament.py:45`, `backend/scadbuddy/spools/overlay.py` |
+| Spools and filament | [spools-and-filament.md](spools-and-filament.md) | `backend/scadbuddy/api/filament.py:173`, `frontend/src/pages/filament/FilamentPage.tsx:45` |
 | Versions and history | [versions-and-history.md](versions-and-history.md) | `frontend/src/pages/VersionsPage.tsx`, `backend/scadbuddy/api/versions.py:54` |
 | Orders, quotes, pricing and job cost | [orders-and-quotes.md](orders-and-quotes.md) | `backend/scadbuddy/api/orders.py:187`, `backend/scadbuddy/orders/lifecycle.py:627` |
 | Storefront and payments | [storefront-and-payments.md](storefront-and-payments.md) | `backend/scadbuddy/storefront/__main__.py`, `backend/scadbuddy/api/payment_webhooks.py:58` |

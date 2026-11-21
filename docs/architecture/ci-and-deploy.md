@@ -6,7 +6,7 @@ A map of the GitHub Actions workflows and of the path an image takes to prod. Th
 ["PR conventions"](../../CLAUDE.md#pr-conventions); the operator's view of a deploy is
 in [`README.md`, "Deploying"](../../README.md#deploying). This page does not repeat them.
 
-All line numbers are for `main` at the commit that adds this page.
+All line numbers are for `main` at `67d7ff6` (2026-11-21).
 
 ## Images
 

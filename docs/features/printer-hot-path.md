@@ -58,9 +58,4 @@ route. `PrinterWatch` keeps one MQTT connection per printer and writes its repor
   (`backend/scadbuddy/printers/ams_mapping.py:34-36`;
   [#4978](https://github.com/eh-homelab/ScadBuddy/issues/4978)); `ams_mapping2` is computed
   but not sent (`backend/scadbuddy/printers/lan.py:174-199`).
-- Transfer URLs are not narrowed to a run's own sliced file
-  ([#6122](https://github.com/eh-homelab/ScadBuddy/issues/6122),
-  [#6179](https://github.com/eh-homelab/ScadBuddy/issues/6179)).
-- Whether the print worker still needs the Bambuddy key:
-  [#6189](https://github.com/eh-homelab/ScadBuddy/issues/6189). The epic is
-  [#3818](https://github.com/eh-homelab/ScadBuddy/issues/3818).
+- The epic is [#3818](https://github.com/eh-homelab/ScadBuddy/issues/3818).

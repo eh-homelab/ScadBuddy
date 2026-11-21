@@ -3,7 +3,7 @@
 ## What it does
 
 A public shop: published listings that a visitor can customize (colours, text, size)
-with a live render and a price estimate, a cart, design requests, "print my model"
+with a live render and a firm price from a slice (or "priced by hand" when the shop cannot slice it), a cart, design requests, "print my model"
 uploads, passwordless accounts, an order page, and payment through Stripe, PayPal or
 Square. In the back office, **Sell on storefront** turns a model into a listing, and the
 Storefront page edits, prepares and publishes listings. See README
@@ -15,7 +15,13 @@ Storefront page edits, prepares and publishes listings. See README
 The storefront edge is its own process with no database, KEK or Temporal access. Every
 call it makes is a `crud.storefront` route on the API's CRUD port. Payment webhooks are
 served by the API, not the edge. Customer uploads are checked by the intake worker in a
-sandbox before they are used.
+sandbox before they are used. A render's price comes from slicing it through the back
+office's quote path, as the `storefront_slice_price` operation on the `library` queue
+(`backend/scadbuddy/orders/storefront/slice_price.py:1-4`, `backend/scadbuddy/orders/quote.py:872`);
+the visitor's page asks `GET /api/store/v1/renders/{job_id}/estimate`
+(`backend/scadbuddy/storefront/routes.py:196`), which answers `slice`, `pending` or `none`
+(`backend/scadbuddy/orders/estimate.py:69-71`). Checkout charges that cached price as a
+`storefront` quote.
 
 ```mermaid
 sequenceDiagram
@@ -74,13 +80,10 @@ sequenceDiagram
 
 ## Limits and known issues
 
-- The estimate comes from volume, not a slice
-  ([#6153](https://github.com/eh-homelab/ScadBuddy/issues/6153)).
 - Customer model imports after the check are a later phase
   (`backend/scadbuddy/workflows/staged_file.py:17`;
   [#6133](https://github.com/eh-homelab/ScadBuddy/issues/6133)).
 - Venmo's pay page is off (`backend/scadbuddy/payments/venmo.py:48`;
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
-- Listings refuse pipeline templates ([#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701));
-  colours-only picking ([#6258](https://github.com/eh-homelab/ScadBuddy/issues/6258)) and
-  swatches ([#6215](https://github.com/eh-homelab/ScadBuddy/issues/6215)) are open.
+- Listings refuse pipeline templates
+  ([#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).
