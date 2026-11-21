@@ -31,6 +31,9 @@ from scadbuddy.activity.index import (
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
+    crud_agent_events,
+    crud_agent_transcripts,
+    crud_agent_turns,
     health,
     internal_blobs,
     internal_library,
@@ -2440,6 +2443,11 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             internal_blobs.PUT_ROUTE_LIMIT,
             # A native run's per-print copy from the print worker (#3818 tier A Task 4).
             internal_library.PUT_ROUTE_LIMIT,
+            # The agent store's transcript, turn and event-log writes, at their declared
+            # bounds, which are above the 8 MiB text default (#6863).
+            crud_agent_transcripts.ROUTE_LIMIT,
+            crud_agent_turns.ROUTE_LIMIT,
+            crud_agent_events.ROUTE_LIMIT,
         ],
     )
     # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).

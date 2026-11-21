@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from typing import Annotated, Any
 
@@ -32,8 +33,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.agent_data import events
 from scadbuddy.api.deps import StateDep
+from scadbuddy.api.limits import RouteLimit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.guard import PREFIX, crud_router
 
 router = crud_router("agent")
 
@@ -44,6 +46,17 @@ EVENTS_MAX = 1000
 #: images are blobs, ``sessions/blobs.ts``). The agent splits a batch to stay under the body's.
 EVENT_CHARS_MAX = 16 * 1024 * 1024
 BODY_BYTES_MAX = 32 * 1024 * 1024
+
+#: For ``main.py``'s `BodySizeGate` (#6863): the gate refuses a JSON body over 8 MiB unless the
+#: route has a limit of its own, so without this ``BODY_BYTES_MAX`` is never reached. The path is
+#: the mounted one; the route's own `_bounded` still answers 411 and 413 for the same bound.
+ROUTE_LIMIT = RouteLimit(
+    "POST",
+    re.compile(rf"^/api/v1{PREFIX}/agent/sessions/[^/]+/(?:events|fork-log)$"),
+    BODY_BYTES_MAX,
+    "an event-log request",
+    "fixed, api/crud_agent_events.py BODY_BYTES_MAX",
+)
 #: One read's rows at most (``eventLog.ts`` ``PAGE``).
 READ_MAX = 500
 TURN_ID_MAX = 500
