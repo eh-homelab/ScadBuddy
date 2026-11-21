@@ -974,16 +974,26 @@ class BambuddyClient:
 
     async def k_profiles(self, printer_id: int, nozzle_diameter: str) -> list[KProfile]:
         """``GET /api/v1/printers/{id}/kprofiles/?nozzle_diameter=``: the K table the
-        printer holds for one nozzle. The trailing slash is Bambuddy's route (#6625)."""
+        printer holds for one nozzle. The trailing slash is Bambuddy's route (#6625). A
+        body that is not JSON is a 502 `BAD_BODY_PROBLEM`, as `_rows` answers (#6856)."""
+        what = f"read printer {printer_id}'s K profiles"
         response = await self._send(
             "GET",
             f"/printers/{printer_id}/kprofiles/",
             scope=Scope.READ_STATUS,
             operation="printers.kprofiles",
-            what=f"read printer {printer_id}'s K profiles",
+            what=what,
             params={"nozzle_diameter": nozzle_diameter},
         )
-        return KProfileTable.model_validate(response.json()).profiles
+        try:
+            body = response.json()
+        except ValueError:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered something that is not JSON when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
+            ) from None
+        return KProfileTable.model_validate(body).profiles
 
     # --- inventory -----------------------------------------------------------
 
