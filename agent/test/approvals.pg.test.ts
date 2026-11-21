@@ -1,9 +1,8 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  approvalHashKey,
   ApprovalService,
   canonicalJson,
   DEFAULT_APPROVAL_EXPIRY_SECONDS,
@@ -13,11 +12,9 @@ import {
   summariseInput,
   sweepErrorText,
 } from '../src/approvals/service.js'
-import { AuditLog } from '../src/audit/log.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
 import { ChatConnection } from '../src/routes/chat.js'
@@ -28,6 +25,8 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 import { respond } from '../src/routes/pendingInput.js'
+import { sqlAuditLog, TEST_HASH_KEY } from './support/sql/audit.js'
+import { SqlApprovals } from './support/sql/approvals.js'
 
 // The approval store and its rules without the SDK (#258): ai_approvals in
 // Postgres, expiry, visibility, the orphan paths, and the HTTP routes. Since plan
@@ -46,13 +45,6 @@ describe('input binding', () => {
     // Not a bare hash: another key gives another value, so the table alone does not reveal an input.
     expect(inputHash(Buffer.alloc(32, 8), 't', { a: 1 })).not.toBe(inputHash(key, 't', { a: 1 }))
     expect(inputHash(key, 't', { a: 1 })).not.toBe(createHash('sha256').update(canonicalJson({ tool: 't', input: { a: 1 } })).digest('hex'))
-  })
-
-  it('derives the key from the KEK, the same across restarts and different from the KEK', () => {
-    const kek = kekFromBase64(randomBytes(32).toString('base64'))
-    expect(approvalHashKey(kek).equals(approvalHashKey(kek))).toBe(true)
-    expect(approvalHashKey(kek)).toHaveLength(32)
-    expect(approvalHashKey(kek).equals(kek.key)).toBe(false)
   })
 
   it('summarises through scrubForLog: secrets and secret-named arguments never reach the summary', () => {
@@ -152,7 +144,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
   it('reads the expiry window from ai_settings, within bounds', async () => {
     expect(await m.approvals.expirySeconds()).toBe(DEFAULT_APPROVAL_EXPIRY_SECONDS)
     const settings = new SettingsStore(db.sql)
-    const service = new ApprovalService({ sql: db.sql, events: m.events, settings })
+    const service = new ApprovalService({ routes: new SqlApprovals(db.sql), events: m.events, settings, hashKey: () => TEST_HASH_KEY })
     await settings.set(SETTING_APPROVAL_EXPIRY_SECONDS, 120)
     expect(await service.expirySeconds()).toBe(120)
     await settings.set(SETTING_APPROVAL_EXPIRY_SECONDS, 1)
@@ -356,7 +348,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   // #1122: like an answer over the socket (questions.pg.test.ts), a decision records where it came from.
   it('a decision made over the chat socket is audited with the socket client address', async () => {
-    const audit = new AuditLog({ sql: db.sql })
+    const audit = sqlAuditLog(db.sql)
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, audit })
     const { session, approval } = await orphan(browser)
@@ -385,7 +377,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
       }
       return m.events.append(sessionId, batch, tx)
     }
-    const service = new ApprovalService({ sql: db.sql, events })
+    const service = new ApprovalService({ routes: new SqlApprovals(db.sql), events, hashKey: () => TEST_HASH_KEY })
     const approval = await service.create({
       sessionId: session.id,
       turnId: null,
