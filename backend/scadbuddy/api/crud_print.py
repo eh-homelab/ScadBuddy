@@ -1979,7 +1979,8 @@ async def _for_configured[T](write: Awaitable[T]) -> T:
     except PullInstanceChangedError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            "the body was read from another Bambuddy than the configured one",
+            "the body was read from another Bambuddy than the configured one, or the"
+            " Bambuddy links belong to another one",
             reason=INSTANCE_CHANGED,
         ) from None
 
@@ -1994,7 +1995,8 @@ async def _for_configured[T](write: Awaitable[T]) -> T:
         " refresh pulled them (`filament/bambuddy_pull.py`); the API calls no Bambuddy."
         " Answers the pull's report and the date from which the worker reads Bambuddy's"
         " archives for the usage rows not booked yet. 409 `instance_changed` for a read of"
-        " another Bambuddy than the configured one."
+        " another Bambuddy than the configured one, or while the links belong to another"
+        " Bambuddy (#6845)."
     ),
 )
 async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
@@ -2024,7 +2026,8 @@ async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
     description=(
         "Each state a reading of the Home Assistant sensor naming its entity (#6268, #6772);"
         " `states` null (the read failed) marks every such sensor unreachable. 409"
-        " `instance_changed` as the pull's."
+        " `instance_changed` for a read of another Bambuddy than the configured one; the"
+        " links' instance does not stop it, as sensors are not spool data (#6845)."
     ),
 )
 async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:

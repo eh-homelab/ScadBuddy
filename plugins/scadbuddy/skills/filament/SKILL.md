@@ -29,13 +29,21 @@ slot setup and NTAG writes write BB whatever `filament_sync` says.
   `no_bambuddy` or `nothing_pushes` means there is nothing to run: say so, and do not
   change `filament_sync` for the person.
 - `instance_changed: true` in `filament_sync_status` means the links belong to another
-  Bambuddy than the one set up now (its URL changed), so the sync is stopped.
-  `filament_sync_reset_links` deletes the links, intents and error rows of that old
-  instance, then asks for a full pass; it never deletes an SB spool, type, supplier or
+  Bambuddy than the one set up now (its URL changed), so the sync and the pull are stopped.
+  Call `filament_sync_reset_links` with `expect_kept: true` first: it reads the configured
+  Bambuddy's spools, and when it holds every linked spool as ScadBuddy last saw it (the
+  same Bambuddy at a new address), the reset deletes nothing and answers `kept: true`: the
+  links now belong to it (plan Decisions 193-199, #6845). When it cannot prove that
+  (Bambuddy could not be read, or it is another one), it answers 409 `proof_changed` and
+  deletes nothing. Only then call it with `expect_kept: false`, which reads no Bambuddy and
+  deletes the links, intents and error rows of that old instance (`kept: false`). Either
+  way it asks for a full pass, and it never deletes an SB spool, type, supplier or
   location. It writes, so it needs approval. Pass `confirm_instance` as the status's
-  `instance`; a 409 `confirm_mismatch`, `same_instance` or `nothing_to_reset` deleted
-  nothing. Before you ask for it, tell the person that afterwards a spool is linked again
-  only by its RFID tag, so an untagged spool can end up twice (plan Decisions 165-170).
+  `instance`; a 409 `confirm_mismatch`, `same_instance`, `nothing_to_reset` or
+  `proof_changed` deleted nothing.
+  Before you ask for the delete, tell the person that when the Bambuddy is another one, a spool is
+  linked again only by its RFID tag, so an untagged spool can end up twice (plan Decisions
+  165-170).
 - Child data types (weights, presets, suppliers per spool, a spool's location) move only
   on spools that are linked to a BB spool already (plan Decision 16).
 - A spool deleted in BB comes back under `sb_to_bb` or `two_way` with `spools` set to

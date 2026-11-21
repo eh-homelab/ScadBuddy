@@ -860,7 +860,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   spools and recorded instance in one transaction (`bb_sync_results.reset_links`; it takes
   `confirm_instance`, 409 otherwise, and deletes no SB row), then nudges a full pass; a
   plan or results call for another instance than the configured one does nothing
-  (`LocalFilamentSync`). Agent `filament_sync_reset_links` (outward). A new
+  (`LocalFilamentSync`), and the pull takes no spool data (`bambuddy_pull.links_elsewhere`:
+  `pull_start` asks for none, the import is 409 `instance_changed`, and `LocalBbPull`
+  refuses a spool, usage or trays body with 409 `instance_changed`, #6845). The dry run
+  reads the configured Bambuddy's spools (a failed read is `bambuddy_unreadable: true`);
+  when it is the links' own Bambuddy at a new URL (`bb_sync_results.same_bambuddy`: every
+  linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
+  least half the links timed on both sides), a reset with `expect_kept: true` reads them
+  again and, while that holds, deletes nothing, records the configured instance and answers
+  `kept: true`; else 409 `proof_changed`, nothing written. `expect_kept: false` deletes
+  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward). A new
   workflow type: roll `scadbuddy-print` with `Recreate` (README, "A release that needs
   `Recreate`").
   History and metrics (#6269, spec §5.7; plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,

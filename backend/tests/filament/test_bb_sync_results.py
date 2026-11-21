@@ -19,7 +19,7 @@ from scadbuddy.filament import bb_sync_plan
 from scadbuddy.filament.bambuddy_pull import Pulls, pull
 from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op, ResultsReport
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
-from scadbuddy.filament.bb_sync_results import adopt_instance, apply_results
+from scadbuddy.filament.bb_sync_results import adopt_instance, apply_results, same_bambuddy
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.models import (
     InsertTypeCreate,
@@ -1029,3 +1029,47 @@ def test_boot_keeps_an_instance_already_recorded(pg_pool: PgPool) -> None:
         conn.execute("UPDATE filament_bb_sync_state SET instance = 'ffffffffffff'")
     adopt_instance(f, INSTANCE)
     assert _instance(pg_pool) == "ffffffffffff"
+
+
+#: When the links' Bambuddy last changed a linked spool, to the microsecond (#6845).
+SEEN = datetime(2026, 11, 20, 10, 0, 0, 123456, tzinfo=UTC)
+
+
+def _held(bb_id: int, at: datetime | None = SEEN) -> BbSpool:
+    return BbSpool.model_validate(
+        {"id": bb_id, "material": "PLA", "label_weight": 1000, "weight_used": 0.0}
+        | ({} if at is None else {"updated_at": at.isoformat()})
+    )
+
+
+@pytest.mark.parametrize(
+    ("links", "rows", "bad", "same"),
+    [
+        # Every linked spool is there, one as last seen, one changed since.
+        ({11: SEEN, 12: SEEN}, [_held(11), _held(12, SEEN + timedelta(hours=1))], [], True),
+        # A link with no time (a pre-#6265 link) only needs its row there, while at
+        # least half the links have a time on both sides (Decision 199).
+        ({11: SEEN, 12: None}, [_held(11), _held(12, None)], [], True),
+        # Most links have no time: one exact match is too little to prove it.
+        ({11: SEEN, 12: None, 13: None}, [_held(11), _held(12), _held(13)], [], False),
+        # Most of Bambuddy's rows have no time: the same.
+        ({11: SEEN, 12: SEEN, 13: SEEN}, [_held(11), _held(12, None), _held(13, None)], [], False),
+        # A linked spool this Bambuddy does not hold.
+        ({11: SEEN, 12: SEEN}, [_held(11)], [], False),
+        # A row older than ScadBuddy saw it: an older copy, or another Bambuddy.
+        ({11: SEEN, 12: SEEN}, [_held(11), _held(12, SEEN - timedelta(hours=1))], [], False),
+        # Every row changed since: nothing ties this Bambuddy to the links.
+        ({11: SEEN}, [_held(11, SEEN + timedelta(seconds=1))], [], False),
+        # A row that did not parse may be a linked one: the listing proves nothing.
+        ({11: SEEN}, [_held(11)], [None], False),
+        # No spool link: nothing to prove it by.
+        ({}, [_held(11)], [], False),
+    ],
+)
+def test_the_proof_of_the_same_bambuddy(
+    links: dict[int, datetime | None], rows: list[BbSpool], bad: list[int | None], same: bool
+) -> None:
+    """#6845 R-6845-2: the configured Bambuddy is the links' Bambuddy only when it holds
+    every linked spool, none older than its link's `bb_updated_at`, one exactly that,
+    and at least half the links have a time on both sides (Decision 199)."""
+    assert same_bambuddy(links, rows, bad) is same

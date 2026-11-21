@@ -441,23 +441,37 @@ class LinksResetCounts(BaseModel, extra="forbid"):
 
 class LinksResetPreview(BaseModel, extra="forbid"):
     """``GET /filament/sync/reset-links``: the instance the links belong to (what
-    ``confirm_instance`` must name), the configured one, and what a reset would delete."""
+    ``confirm_instance`` must name), the configured one, and what a reset would delete.
+    ``same_bambuddy``: the configured Bambuddy holds the linked spools as ScadBuddy last
+    saw them (`bb_sync_results.same_bambuddy`, #6845), so a reset with ``expect_kept``
+    keeps every link and deletes nothing. ``bambuddy_unreadable``: the configured
+    Bambuddy could not be read, so ``same_bambuddy`` is false and only the delete is
+    offered (Decision 198)."""
 
     instance: str | None
     configured_instance: str | None
     counts: LinksResetCounts
+    same_bambuddy: bool
+    bambuddy_unreadable: bool = False
 
 
 class LinksResetRequest(BaseModel, extra="forbid"):
     """``POST /filament/sync/reset-links``'s body: the instance the person confirms the
-    links belong to, so a stale page cannot reset another Bambuddy's links."""
+    links belong to, so a stale page cannot reset another Bambuddy's links.
+    ``expect_kept`` (#6845 R-6845-6): the preview's ``same_bambuddy``. True keeps the
+    links only while the configured Bambuddy is still proven the links' own, and is
+    refused ``proof_changed`` otherwise, deleting nothing; false is the confirmed
+    delete, which reads no Bambuddy."""
 
     confirm_instance: str = Field(min_length=1, max_length=64)
+    expect_kept: bool = False
 
 
 class LinksResetDone(BaseModel, extra="forbid"):
     """``POST /filament/sync/reset-links``'s answer: the instance whose links were
-    deleted, and what was deleted."""
+    reset, whether they were ``kept`` (the configured Bambuddy is the same one, #6845:
+    nothing deleted, the links now belong to it), and what was deleted."""
 
     instance: str
+    kept: bool
     deleted: LinksResetCounts
