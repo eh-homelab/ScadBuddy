@@ -663,8 +663,9 @@ class _Planner:
     #: R-6688-9: rows missing from their listing whose probe the round's cap left out.
     #: They count ``deferred``, and a spool that names one waits as for a probe.
     capped: set[tuple[str, UUID]] = field(default_factory=set)
-    #: The round's write cap (`plan`'s ``limit``), which `missing` checks a probe against.
-    limit: int = 200
+    #: The round's write cap (`plan`'s ``limit``, bounded by `PlanRequest`), which
+    #: `missing` checks a probe against.
+    limit: int = field(kw_only=True)
 
     @property
     def full(self) -> bool:
@@ -1645,7 +1646,8 @@ def plan(
         planner.rows("filament", _filaments(conn), snap.filaments, sync.spools, _FILAMENT_FIELDS)
         # R-6688-5: a spool names a row Bambuddy may have deleted as a `Pending`, so it
         # waits for the row's probe (and its create again) instead of sending its old id.
-        planner.refs = planner.refs.without(planner.unconfirmed())
+        unconfirmed = planner.unconfirmed()
+        planner.refs = planner.refs.without(unconfirmed)
         planner.spools()
         writes = planner.take(limit)
     return SyncPlan(
@@ -1657,4 +1659,7 @@ def plan(
         conflicts=planner.conflicts,
         directions=sync,
         interval_s=interval_s,
+        unconfirmed=cast(
+            "list[tuple[Kind, UUID]]", sorted(unconfirmed, key=lambda k: (k[0], str(k[1])))
+        ),
     )

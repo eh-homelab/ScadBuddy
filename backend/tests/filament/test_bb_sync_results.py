@@ -45,6 +45,7 @@ from tests.filament.test_bb_sync_plan import (
     _matching,
     _only,
     _plan,
+    _refuse,
     _row,
     _snap,
     _spool,
@@ -82,9 +83,16 @@ def _apply(
     results: list[BbWriteResult],
     instance: str = INSTANCE,
     pass_id: str | None = None,
+    unconfirmed: list[tuple[Kind, UUID]] | None = None,
 ) -> ResultsReport:
     return apply_results(
-        f, writes, results, instance=instance, now=datetime.now(UTC), pass_id=pass_id
+        f,
+        writes,
+        results,
+        instance=instance,
+        now=datetime.now(UTC),
+        pass_id=pass_id,
+        unconfirmed=unconfirmed or [],
     )
 
 
@@ -378,6 +386,38 @@ def test_a_spool_probe_beside_its_locations_probe_keeps_its_seen_location(
     probe = _write("spool", spool, "probe", 50)
     results = [_refused(location, 503), _ok(probe, _answer(50, location_id=40))]
     _apply(f, [location, probe], results)
+    link = _link_row(pg_pool, spool)
+    assert link is not None and link["bb_seen"]["location_id"] == 7
+
+
+def test_a_spool_probe_while_its_locations_probe_failed_keeps_its_seen_location(
+    pg_pool: PgPool,
+) -> None:
+    """R-6688-11: the location's probe failed earlier in this pass (``unsure``), so this
+    round sends no write for it, and only the plan knows it is unconfirmed. ``results``
+    takes the plan's ``unconfirmed`` rows, so a spool's probe in this round still does not
+    take the answer's ``location_id`` into ``bb_seen`` as SB's."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (shelf, spool))
+    _link(
+        pg_pool, spool, 50, seen={"location_id": 7}, seen_at=datetime.now(UTC) - timedelta(hours=1)
+    )
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    _refuse(pg_pool, "location", shelf)
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    planned = _plan(f, _snap([], locations=[], read_at=read_at), sync)
+    probe = _only(planned.writes, "probe")
+    assert (probe.kind, probe.sb_id) == ("spool", spool)
+    assert planned.unconfirmed == [("location", shelf)]
+    _apply(
+        f,
+        planned.writes,
+        [_ok(probe, _answer(50, location_id=40))],
+        unconfirmed=planned.unconfirmed,
+    )
     link = _link_row(pg_pool, spool)
     assert link is not None and link["bb_seen"]["location_id"] == 7
 

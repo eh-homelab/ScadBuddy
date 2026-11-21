@@ -1667,6 +1667,7 @@ def test_a_spool_is_blocked_while_its_locations_probe_failed(pg_pool: PgPool) ->
     result = _plan(f, snap, _ROWS_PUSH)
     assert result.writes == []
     assert (result.deferred, result.blocked) == (0, 1)
+    assert result.unconfirmed == [("location", shelf)]
 
 
 def test_an_unlinked_row_is_made_again(pg_pool: PgPool) -> None:
@@ -1710,13 +1711,18 @@ def test_a_probe_the_cap_cuts_is_not_planned(pg_pool: PgPool) -> None:
     never sending the id Bambuddy may have deleted."""
     f = _filament(pg_pool)
     spool = _spool(f, _type(f))
-    _linked(pg_pool, f, "location", 40)
+    first = _linked(pg_pool, f, "location", 40)
     second = f.locations.create(LocationCreate(name="Shelf B", kind_id=_kind(f, "Shelf"))).id
     with pg_pool.connection() as conn:
         conn.execute("UPDATE filament_locations SET bb_location_id = 41 WHERE id = %s", (second,))
     _put(pg_pool, spool, second)
     row = _matching(pg_pool, spool, 50, _ROWS_PUSH) | {"location_id": None, "color_name": "X"}
     _link(pg_pool, spool, 50)
+    # The spool's last write failed in an earlier pass, so it is a retry: a retry the cap
+    # cuts counts nothing (R-T4-15), and the spool counts ``deferred`` only because it
+    # waits on the capped row (R-6688-9).
+    _refuse(pg_pool, "spool", spool, at=datetime.now(UTC) - timedelta(hours=1))
     result = _plan(f, _snap([row], locations=[]), _ROWS_PUSH, limit=1)
     assert [(w.kind, w.op, w.bb_id) for w in result.writes] == [("location", "probe", 40)]
-    assert (result.deferred, result.blocked) == (2, 0)
+    assert (result.deferred, result.blocked, result.failed) == (2, 0, 0)
+    assert sorted(result.unconfirmed) == sorted([("location", first), ("location", second)])

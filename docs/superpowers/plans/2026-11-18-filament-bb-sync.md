@@ -2049,11 +2049,35 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_probe_the_cap_cuts_is_not_planned`.
 203. R-6688-10 (PR #6870 review): `results` compares a spool's answer with SB's values as
     the plan made them: the rows this round probes are taken out of its `BbRefs`
-    (`_Reads.probed`, `BbRefs.without`), as the plan took them out of the spool's desired
+    (`_Reads.unconfirmed`, `BbRefs.without`), as the plan took them out of the spool's desired
     values. So a spool probe or write answered beside a location probe does not take the
     answer's `location_id` into `bb_seen` as SB's value. Why: the location may be gone, and
     the plan never sent that id. Cost: none known. Test: `test_bb_sync_results.py`
     `test_a_spool_probe_beside_its_locations_probe_keeps_its_seen_location`.
+204. R-6688-11 (PR #6883 review): `results` leaves out of a spool's compare every row the
+    plan left out of the spool's desired values (`_Planner.unconfirmed()`: probe planned,
+    probe failed in this pass, or probe cut by the cap), not only the rows this round
+    probes. A row whose probe failed earlier in the pass gets no write in a later round,
+    so only the plan knows it. `SyncPlan` and `ResultsRequest` carry it as `unconfirmed`
+    (a list of `[kind, sb_id]`), and the pass sends the plan's list back with the results
+    (`FilamentSyncApi.results`). `results` still adds the round's own probes, so the
+    results of a worker that sends no list keep Decision 203. Both models forbid extra
+    keys, so an empty list is left out of the body (`without_empty_unconfirmed`, the plan
+    route and `RemoteFilamentSync.results`), as `started_at` is (#6846). A body that names a
+    row is refused by a build from before this (the pass fails, and the next signal or
+    the timer runs another), so roll the API and the print worker together, the API
+    first. Why: send it, not rebuild it in `results`. "Failed in this pass" is an error
+    row newer than the snapshot's `read_at`, and `results` has no snapshot; a cut by the
+    cap depends on the round's `limit`. Cost: one optional field on two CRUD bodies.
+    Also: `_Planner.limit` has no default; `plan` passes it, and `PlanRequest` bounds it.
+    Tests: `test_bb_sync_results.py`
+    `test_a_spool_probe_while_its_locations_probe_failed_keeps_its_seen_location`,
+    `test_bb_sync_run.py` `test_each_round_sends_its_plans_unconfirmed_rows`,
+    `test_crud_filament_sync.py` `test_the_sync_bodies_leave_out_an_empty_unconfirmed`;
+    `test_bb_sync_plan.py` `test_a_probe_the_cap_cuts_is_not_planned` now gives the spool
+    an error row from an earlier pass, so its write is a retry that a cut by the cap
+    would not count (R-T4-15): it counts `deferred` only because it waits on the capped
+    row.
 
 ## Self-review
 

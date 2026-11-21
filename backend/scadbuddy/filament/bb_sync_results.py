@@ -131,9 +131,10 @@ class _Reads:
 
     rows: dict[str, dict[UUID, dict[str, Any]]] = field(default_factory=dict)
     refs: BbRefs | None = None
-    #: R-6688-10: the rows this round probes. Bambuddy may have deleted them, so the plan
-    #: named none of them to a spool (`BbRefs.without`), and a spool's compare names none.
-    probed: frozenset[tuple[str, UUID]] = frozenset()
+    #: R-6688-10, R-6688-11: the plan's unconfirmed rows (probed this round, refused in
+    #: this pass, or cut by the cap). Bambuddy may have deleted them, so the plan named
+    #: none of them to a spool (`BbRefs.without`), and a spool's compare names none.
+    unconfirmed: frozenset[tuple[str, UUID]] = frozenset()
 
     def desired(self, conn: Conn, kind: str, sb_id: UUID) -> dict[str, Any] | None:
         if kind not in self.rows:
@@ -142,7 +143,7 @@ class _Reads:
 
     def bb_refs(self, conn: Conn) -> BbRefs:
         if self.refs is None:
-            self.refs = BbRefs.read(conn).without(self.probed)
+            self.refs = BbRefs.read(conn).without(self.unconfirmed)
         return self.refs
 
     def linked(self, kind: str, sb_id: UUID, bb_id: int) -> None:
@@ -163,6 +164,7 @@ def apply_results(
     instance: str,
     now: datetime,
     pass_id: str | None = None,
+    unconfirmed: Sequence[tuple[str, UUID]] = (),
 ) -> ResultsReport:
     """Record what Bambuddy answered to ``plan_writes``, as the module says, each result
     in a transaction of its own. ``now`` is the stored seen copies' ``bb_seen_at``.
@@ -178,16 +180,16 @@ def apply_results(
     intent (R-T4-18). The upsert adds an attempt and sets ``at = now()``, unless the row's
     ``last_pass_id`` is ``pass_id`` (the plan round these results answer): results sent
     again after a lost answer count once (R-T6-5). A ``None`` ``pass_id`` is a round of
-    its own, so it always adds one. The state row's instance
+    its own, so it always adds one. A spool's answer is compared with its desired
+    values less the rows in ``unconfirmed`` (the plan's, R-6688-11) and the rows the
+    round probes, as the plan made them. The state row's instance
     is set by the first result that links anything (Decision 12; the pull sets it too,
     `bambuddy_pull.record_instance`), and results for another instance are all ignored.
     A result whose link another SB row holds by now is ignored (review I1)."""
     report = ResultsReport()
-    reads = _Reads(
-        probed=frozenset(
-            (w.kind, w.sb_id) for w in plan_writes if w.op == "probe" and w.kind != "spool"
-        )
-    )
+    # The round's own probes too: a worker from before R-6688-11 sends no `unconfirmed`.
+    probed = {(w.kind, w.sb_id) for w in plan_writes if w.op == "probe" and w.kind != "spool"}
+    reads = _Reads(unconfirmed=frozenset(probed | set(unconfirmed)))
     writes = {write.key: write for write in plan_writes}
     for result in results:
         write = writes.get(result.key)
@@ -729,6 +731,7 @@ class LocalFilamentSync:
         writes: Sequence[BbWrite],
         results: Sequence[BbWriteResult],
         pass_id: str | None,
+        unconfirmed: Sequence[tuple[Kind, UUID]] = (),
     ) -> ResultsReport:
         read = await asyncio.to_thread(self._settings.read, {"bambuddy_url"})
         # This reads bambuddy_url before apply_results takes the state row's lock. After a
@@ -749,6 +752,7 @@ class LocalFilamentSync:
             instance=instance,
             now=datetime.now(UTC),
             pass_id=pass_id,
+            unconfirmed=unconfirmed,
         )
 
     async def record_pass(self, result: SyncPassResult) -> None:
