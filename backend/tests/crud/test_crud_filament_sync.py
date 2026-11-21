@@ -270,6 +270,23 @@ async def test_the_pass_records_when_it_started_and_the_status_returns_it(
     assert _state(store)["last_pass_started_at"] > started  # type: ignore[operator]
 
 
+async def test_the_pass_body_leaves_out_a_missing_start() -> None:
+    """#6846: ``SyncPassResult`` is ``extra="forbid"``, so a worker with no start to report
+    sends no ``started_at`` key, and an API from before #6836 still takes the pass."""
+    sent: list[dict[str, object]] = []
+
+    class Recorder:
+        async def request(self, method: str, path: str, **kw: object) -> None:
+            sent.append(kw["json"])  # type: ignore[arg-type]
+
+    remote = RemoteFilamentSync(Recorder())  # type: ignore[arg-type]
+    await remote.record_pass(_pass())
+    assert "started_at" not in sent[0]
+    assert sent[0]["error"] is None  # only started_at is left out, not other Nones
+    await remote.record_pass(_pass(started_at=datetime(2026, 11, 20, 7, 0, tzinfo=UTC)))
+    assert sent[1]["started_at"] == "2026-11-20T07:00:00Z"
+
+
 @pg
 async def test_a_failed_pass_keeps_last_ok_at(store: SettingsStore, crud: CrudClient) -> None:
     remote = RemoteFilamentSync(crud)
