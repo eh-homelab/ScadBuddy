@@ -962,7 +962,7 @@ the zones: [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md
    rollout keeps the old pods. The maintainers' own prod never takes this step, on purpose
    (the owner's decision of 2026-11-17: its front door already gates people). It runs
    `off`, or `observe` while a measurement runs (`observe` for #5297 on 2026-11-21, read
-   with `kubectl get deploy scadbuddy`), so its manifest is not an unfinished rollout.
+   with `kubectl -n bambuddy get deploy scadbuddy`), so its manifest is not an unfinished rollout.
 
 The way back is `SCADBUDDY_AUTH_MODE=observe` and a rollout; with the issuer down, a
 person signs in with the break-glass link
