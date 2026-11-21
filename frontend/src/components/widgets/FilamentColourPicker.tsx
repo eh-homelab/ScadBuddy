@@ -118,7 +118,18 @@ export function FilamentColourPicker({
 
   const materials = [...new Set(state.spools.map(materialOf).filter((m): m is string => m !== null))].sort((a, b) => a.localeCompare(b))
   const material = filters.material !== null && materials.includes(filters.material) ? filters.material : null
-  const shown = state.spools.filter((row) => (!filters.loadedOnly || row.loaded) && (material === null || materialOf(row) === material))
+  // A remembered tick means nothing while no spool is loaded, so it is not offered then.
+  const anyLoaded = state.spools.some((row) => row.loaded)
+  const loadedOnly = anyLoaded && filters.loadedOnly
+  // The spool of the colour now stays on the list, whatever the filters, so its mark shows.
+  const isChosen = (row: FilamentInventorySpool) => {
+    const look = { rgba: row.spool.effective?.rgba ?? row.spool.rgba }
+    const colour = spoolColour(look)
+    return colour !== null && (alpha ? spoolValue(look) : colour.hex) === value
+  }
+  const shown = state.spools.filter(
+    (row) => isChosen(row) || ((!loadedOnly || row.loaded) && (material === null || materialOf(row) === material)),
+  )
 
   return (
     <Command className="rounded-lg! border p-0">
@@ -140,10 +151,12 @@ export function FilamentColourPicker({
             ))}
           </div>
         )}
-        <Label className="ml-auto cursor-pointer text-xs font-normal text-muted-foreground">
-          <Checkbox checked={filters.loadedOnly} onCheckedChange={(checked) => setFilter({ loadedOnly: checked === true })} />
-          Loaded in a printer
-        </Label>
+        {anyLoaded && (
+          <Label className="ml-auto cursor-pointer text-xs font-normal text-muted-foreground">
+            <Checkbox checked={loadedOnly} onCheckedChange={(checked) => setFilter({ loadedOnly: checked === true })} />
+            Loaded in a printer
+          </Label>
+        )}
       </div>
       <CommandList label={`Filaments for ${label}`} className="max-h-60">
         <CommandEmpty>No filament matches.</CommandEmpty>
@@ -154,7 +167,7 @@ export function FilamentColourPicker({
             const look = { rgba: spool.effective?.rgba ?? spool.rgba }
             const colour = spoolColour(look)
             const name = spoolName(row)
-            const chosen = colour !== null && (alpha ? spoolValue(look) : colour.hex) === value
+            const chosen = isChosen(row)
             // The printer too: on a farm, two spools can both be in AMS-A slot 1.
             const where = row.loaded ? trayPlace(row.loaded, { printer: true }) : null
             const grams = spool.grams_left === null ? null : `${Math.round(spool.grams_left)} g`
