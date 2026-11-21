@@ -2078,6 +2078,14 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     an error row from an earlier pass, so its write is a retry that a cut by the cap
     would not count (R-T4-15): it counts `deferred` only because it waits on the capped
     row.
+205. R-6688-12 (PR #6883, CI): `test_crud_filament_pull.py`
+    `test_a_body_past_the_gate_is_413_on_its_headers` and
+    `test_a_body_with_no_content_type_is_413_too` send the headers only, with a
+    `Content-Length` past 8 MiB and no body, over a plain socket. Why: they sent the whole
+    8 MiB body with httpx, and the gate answers 413 on the headers and the server closes;
+    the client could still be writing, and it failed with `httpx.WriteTimeout` (shard 4 on
+    main, run 44936881958, and on this PR). With no body to write there is no race, and
+    the test still proves the answer comes from the headers alone. Cost: none.
 
 ## Self-review
 
