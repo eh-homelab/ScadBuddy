@@ -226,8 +226,8 @@ Decisions of the PR #6856 review (2026-11-21; the controller's rulings A and B, 
 findings):
 
 - R-6714-18 (ruling A, overturns R-6714-11; the owner's rule: every value can be overridden on
-  the instance): a spool has its own nullable `drying_temp_c` and `drying_hours` (the same
-  unmerged migration, `20261121T0840Z_filament_type_drying.sql`). They are `OVERRIDABLE`
+  the instance): a spool has its own nullable `drying_temp_c` and `drying_hours`
+  (a new migration, `20261121T1007Z_filament_spool_drying_k_source.sql`, since #6856 merged the first). They are `OVERRIDABLE`
   (`EffectiveValues`, `_INHERITED`): the effective value is the spool's, else the type's, else
   the subtype's, else the material's, and `drying_defaults` names the level (`temp_from` and
   `hours_from` take `spool` too). So a type's drying edit writes an `edited` event on each spool
