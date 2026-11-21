@@ -271,6 +271,8 @@ document's claim and the code. These specs and docs were not changed in this PR.
 
 **`docs/security/trust-boundaries.md`**
 
+- `:97` cites `agent/src/approvals/service.ts:719` for the browser principal approving any
+  outward call / that check is now at `agent/src/approvals/service.ts:805`.
 - `:95` cites `core/settings.py:248` for the `off` default / now
   `backend/scadbuddy/core/settings.py:386`.
 - `:320` the storefront "not built yet" / it exists (`backend/scadbuddy/storefront/__main__.py`,

@@ -31,7 +31,7 @@ Measured on 2026-11-05 (UTC):
   `get ciliumnetworkpolicy`, `get ciliumclusterwidenetworkpolicy` and `get deploy`.
 - The database, read only, on the CNPG primary `scadbuddy-db-1`: a count of `pg_tables`
   in `public` by name prefix and owner, and `pg_stat_activity` grouped by `usename`.
-- This repository's code, at `67d7ff6` (2026-11-21). A `file:line` is in this
+- This repository's code, at the commit that adds this page. A `file:line` is in this
   repository unless it names `clusters`.
 
 A claim marked **not tested** is an inference from the configuration. Nobody has run it.
