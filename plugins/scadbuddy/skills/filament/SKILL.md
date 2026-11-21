@@ -178,6 +178,9 @@ printer model that SB's printers have and per nozzle in the setting
 local presets, sets them as the type's presets for those keys, and sets K values
 from the printers' K tables where one matches exactly. An old K value of a fetched
 key that the new preset does not match is removed, and the run's `notes` name it.
+The fetch writes and removes only K values an earlier fetch set (`source`
+`profile_fetch`): a K value a person, the fill or a printer calibration set stays, and
+the `notes` name each one it kept (README "Profile-fetch worker").
 The fetched keys replace the type's presets for those keys. The type's other presets stay. A spool's own presets
 still win.
 

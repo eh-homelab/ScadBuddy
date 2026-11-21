@@ -141,7 +141,8 @@ def test_merge_replaces_only_the_given_keys(pg_pool: PgPool) -> None:
         )
 
     types.set_presets(type_id, [preset("X1C", "0.4", "1"), preset("H2C", "0.4", "2")], actor="ann")
-    types.set_k_values(type_id, [k(0, "0.4", "0.02"), k(1, "0.4", "0.03")], actor="ann")
+    with pg_pool.connection() as conn, conn.transaction():
+        types.merge_k_values(conn, type_id, [k(0, "0.4", "0.02"), k(1, "0.4", "0.03")])
     with pg_pool.connection() as conn, conn.transaction():
         types.merge_presets(conn, type_id, [preset("H2C", "0.4", "9"), preset("H2C", "0.2", "8")])
         types.merge_k_values(conn, type_id, [k(0, "0.4", "0.05")])

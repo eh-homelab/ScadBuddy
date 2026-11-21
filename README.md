@@ -2495,9 +2495,12 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   checks each file, removes its G-code keys, posts the files as one zip to Bambuddy's
   `POST /local-presets/import`, sets the type's presets for the fetched
   `(printer model, nozzle)` keys, reads K values from `GET /printers/{id}/kprofiles/`
-  where one matches exactly, removes an old K value of a fetched key that the new preset
-  does not match (the run's notes name each one; a printer whose K table did not answer
-  keeps its values), and refreshes the kept copy of the local presets (unless the
+  where one matches exactly, and removes an old K value of a fetched key that the new
+  preset does not match (the run's notes name each one; a printer whose K table did not
+  answer keeps its values). It writes and removes only K values an earlier fetch set
+  (`source` `profile_fetch`): a K value a person, the profile fill or a printer
+  calibration set keeps its value and its source, and the run's notes name each one it
+  kept (#6857, plan Decision 127). It then refreshes the kept copy of the local presets (unless the
   setting `spool_overlay_refresh_seconds` is 0; build Decision 18). The worker
   never calls Bambuddy and never has a Bambuddy key. The nozzles are the remembered setting
   `profile_fetch_nozzles` (Settings → Printing → Filament; default 0.2, 0.4, 0.6, 0.8). The
