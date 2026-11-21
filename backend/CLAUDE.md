@@ -10,9 +10,10 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
-`auth/caller_grants.py` `AGENT_GRANTS`, empty since its gate's grant check runs here (#5299
-step 10); the API revokes what it held at every start (`auth/revoke.py` `RETIRED_GRANTS`). The print worker holds no Postgres pool (#5298
+database owner and runs SQL on the agent's `ai_*` tables. No caller has a role or a grant
+list: the API revokes what the retired roles held, the agent's `scadbuddy_agent` among them
+(#5299 step 12), at every start (`auth/revoke.py` `RETIRED_ROLES`), and logs what each one
+that still exists is granted, owns and has open (`retired_state`). The print worker holds no Postgres pool (#5298
 Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
 revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
 Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
@@ -219,8 +220,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   either), so such a deployment keeps the API and the agent on one role
   until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
-  every start, `auth/revoke.py`, and every caller's grant list goes through
-  `auth/caller_grants.py` `grant_role`): it reads the store settings and
+  every start, `auth/revoke.py`): it reads the store settings and
   writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
