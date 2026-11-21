@@ -8,6 +8,13 @@ id up among SB numbers only."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+from uuid import UUID, uuid4
+
+import pytest
+
+from scadbuddy.bambuddy import print_run
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import (
     AmsTray,
@@ -175,3 +182,56 @@ async def test_a_rack_side_slot_with_no_spool_chosen_says_so() -> None:
             slot_id=3, reason="no_spool", material="PLA", colour="#FFFFFF", colour_word="white"
         )
     ]
+
+
+class _StopError(Exception):
+    """Ends the native check once its rack preview ran: the rest needs the image."""
+
+
+async def test_the_native_check_passes_the_trays_sb_spools_to_the_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner's case through `_native_check` (#6872): HT-A holds an SB Glow spool,
+    the plan names HT-A by its tray id, and the preview finds and tests that spool."""
+    status = _status()
+    previews: list[RackPickView | None] = []
+    real_preview = print_run.rack_preview
+
+    async def prepared(*_: object, **__: object) -> SimpleNamespace:
+        return SimpleNamespace(printer_status=status, printer_id=1, printer="p", warnings=[])
+
+    async def preview(*args: Any, **kwargs: Any) -> Any:
+        found = await real_preview(*args, **kwargs)
+        previews.append(found[0])
+        raise _StopError
+
+    class Trays:
+        def trays(self, printer_id: UUID, seen: object) -> TrayView:
+            return _held(7, "Glow")
+
+    class Source:
+        native = None
+        is_sliced = False
+
+        async def states_nozzles(self, _client: object) -> bool:
+            return False
+
+    monkeypatch.setattr(print_run, "prepare_run", prepared)
+    monkeypatch.setattr(print_run, "rack_preview", preview)
+    route = SimpleNamespace(row=SimpleNamespace(id=str(uuid4())), status=status)
+
+    with pytest.raises(_StopError):
+        await print_run._native_check(
+            cast(Any, Source()),
+            StoredSettings(),
+            _request(SlotChoice(slot_id=2, spool_id=HT_A)),
+            cast(Any, route),
+            rack=None,
+            profiles=cast(Any, object()),
+            sb_trays=cast(Any, Trays()),
+        )
+
+    [view] = previews
+    assert view is not None
+    assert view.unchecked == []
+    assert view.unsafe_material is True
