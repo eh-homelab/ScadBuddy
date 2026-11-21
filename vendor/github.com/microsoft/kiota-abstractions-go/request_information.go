@@ -94,21 +94,27 @@ func (request *RequestInformation) GetUri() (*u.URL, error) {
 		return request.uri, nil
 	} else if request.UrlTemplate == "" {
 		return nil, errors.New("uri cannot be empty")
-	} else if request.PathParameters == nil {
+	} else if request.PathParameters == nil && request.PathParametersAny == nil {
 		return nil, errors.New("uri template parameters cannot be nil")
 	} else if request.QueryParameters == nil {
 		return nil, errors.New("uri query parameters cannot be nil")
 	} else if request.QueryParametersAny == nil {
 		return nil, errors.New("uri query parameters cannot be nil")
-	} else if request.PathParameters[raw_url_key] != "" {
-		uri, err := u.Parse(request.PathParameters[raw_url_key])
+	} else if rawUrl := request.getRawUrl(); rawUrl != "" {
+		uri, err := u.Parse(rawUrl)
 		if err != nil {
 			return nil, err
 		}
 		request.SetUri(*uri)
 		return request.uri, nil
 	} else {
-		_, baseurlExists := request.PathParameters["baseurl"]
+		var baseurlExists bool
+		if request.PathParameters != nil {
+			_, baseurlExists = request.PathParameters["baseurl"]
+		}
+		if !baseurlExists && request.PathParametersAny != nil {
+			_, baseurlExists = request.PathParametersAny["baseurl"]
+		}
 		if !baseurlExists && strings.Contains(strings.ToLower(request.UrlTemplate), "{+baseurl}") {
 			return nil, errors.New("pathParameters must contain a value for \"baseurl\" for the url to be built")
 		}
@@ -137,11 +143,15 @@ func (request *RequestInformation) GetUri() (*u.URL, error) {
 
 func castItem[T any, R interface{}](collection []T, mutator func(t T) R) []R {
 	if len(collection) > 0 {
-		cast := make([]R, len(collection))
-		for i, v := range collection {
-			cast[i] = mutator(v)
+		cast := make([]R, 0, len(collection))
+		for _, v := range collection {
+			if !isNil(v) {
+				cast = append(cast, mutator(v))
+			}
 		}
-		return cast
+		if len(cast) > 0 {
+			return cast
+		}
 	}
 	return nil
 }
@@ -254,6 +264,22 @@ func (request *RequestInformation) sanitizeValue(value any) any {
 	return value
 }
 
+func (request *RequestInformation) getRawUrl() string {
+	if request.PathParameters != nil && request.PathParameters[raw_url_key] != "" {
+		return request.PathParameters[raw_url_key]
+	}
+	if request.PathParametersAny != nil {
+		if val, ok := request.PathParametersAny[raw_url_key]; ok {
+			if s, ok := val.(string); ok && s != "" {
+				return s
+			} else if s, ok := val.(*string); ok && s != nil && *s != "" {
+				return *s
+			}
+		}
+	}
+	return ""
+}
+
 // SetUri updates the URI for the request from a raw URL.
 func (request *RequestInformation) SetUri(url u.URL) {
 	if request == nil {
@@ -262,6 +288,9 @@ func (request *RequestInformation) SetUri(url u.URL) {
 	request.uri = &url
 	for k := range request.PathParameters {
 		delete(request.PathParameters, k)
+	}
+	for k := range request.PathParametersAny {
+		delete(request.PathParametersAny, k)
 	}
 	for k := range request.QueryParameters {
 		delete(request.QueryParameters, k)
@@ -280,7 +309,7 @@ func (request *RequestInformation) AddRequestOptions(options []RequestOption) {
 		request.options = make(map[string]RequestOption, len(options))
 	}
 	for _, option := range options {
-		if option != nil {
+		if !isNil(option) {
 			request.options[option.GetKey().Key] = option
 		}
 	}
@@ -298,6 +327,18 @@ func (request *RequestInformation) GetRequestOptions() []RequestOption {
 		idx++
 	}
 	return result
+}
+
+// RemoveRequestOptions removes the given options from the request.
+func (request *RequestInformation) RemoveRequestOptions(options ...RequestOption) {
+	if request == nil || request.options == nil || len(options) == 0 {
+		return
+	}
+	for _, option := range options {
+		if !isNil(option) {
+			delete(request.options, option.GetKey().Key)
+		}
+	}
 }
 
 const contentTypeHeader = "Content-Type"
@@ -345,19 +386,19 @@ func (request *RequestInformation) setContentAndContentType(writer s.Serializati
 func (request *RequestInformation) getSerializationWriter(requestAdapter RequestAdapter, contentType string, items ...interface{}) (s.SerializationWriter, error) {
 	if contentType == "" {
 		return nil, errors.New("content type cannot be empty")
-	} else if requestAdapter == nil {
+	} else if isNil(requestAdapter) {
 		return nil, errors.New("requestAdapter cannot be nil")
 	} else if len(items) == 0 {
 		return nil, errors.New("items cannot be nil or empty")
 	}
 	factory := requestAdapter.GetSerializationWriterFactory()
-	if factory == nil {
+	if isNil(factory) {
 		return nil, errors.New("factory cannot be nil")
 	}
 	writer, err := factory.GetSerializationWriter(contentType)
 	if err != nil {
 		return nil, err
-	} else if writer == nil {
+	} else if isNil(writer) {
 		return nil, errors.New("writer cannot be nil")
 	} else {
 		return writer, nil
@@ -662,12 +703,24 @@ func (request *RequestInformation) AddQueryParameters(source any) {
 		return
 	}
 	valOfP := reflect.ValueOf(source)
-	fields := reflect.TypeOf(source)
+	for valOfP.Kind() == reflect.Pointer {
+		if valOfP.IsNil() {
+			return
+		}
+		valOfP = valOfP.Elem()
+	}
+	if valOfP.Kind() != reflect.Struct {
+		return
+	}
+	fields := valOfP.Type()
 	numOfFields := fields.NumField()
 	for i := 0; i < numOfFields; i++ {
 		field := fields.Field(i)
 		fieldName := field.Name
 		fieldValue := valOfP.Field(i)
+		if !fieldValue.CanInterface() {
+			continue
+		}
 		tagValue := field.Tag.Get("uriparametername")
 		if tagValue != "" {
 			fieldName = tagValue
@@ -675,6 +728,12 @@ func (request *RequestInformation) AddQueryParameters(source any) {
 		value := request.sanitizeValue(fieldValue.Interface())
 		if isNil(value) {
 			continue
+		}
+		if request.QueryParameters == nil {
+			request.QueryParameters = make(map[string]string)
+		}
+		if request.QueryParametersAny == nil {
+			request.QueryParametersAny = make(map[string]any)
 		}
 		valueOfValue := reflect.ValueOf(value)
 		str, ok := value.(*string)
