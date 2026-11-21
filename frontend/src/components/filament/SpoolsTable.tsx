@@ -61,7 +61,7 @@ function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, str
     }
     case 'location': {
       const name = spool.names?.location
-      return name ? <EntityLink to={filamentLinks.location(name)}>{name}</EntityLink> : ''
+      return name && spool.location_id ? <EntityLink to={filamentLinks.location(spool.location_id)}>{name}</EntityLink> : (name ?? '')
     }
     case 'type': {
       const code = spool.type_id ? typeCodes.get(spool.type_id) : undefined

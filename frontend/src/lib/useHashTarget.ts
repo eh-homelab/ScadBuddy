@@ -12,9 +12,9 @@ function hashId(hash: string): string | null {
 }
 
 /**
- * #6869 — a row a link names by anchor (`filamentLinks` `invoiceLine`, `supplierProduct`,
- * `shoppingItem`): scrolled into view once, when `ready` (its rows have rendered). Returns the
- * named id, so the row can mark itself.
+ * #6869 — a row a link names by anchor (`filamentLinks` `invoiceLine`, `supplierProduct`):
+ * scrolled into view once, when `ready` (its rows have rendered). Returns the named id, so the
+ * row can mark itself.
  */
 export function useHashTarget(ready: boolean): string | null {
   const { hash } = useLocation()

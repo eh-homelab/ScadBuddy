@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { listPrices, listProducts } from '../../api/filamentPurchasing'
+import { listPrices, listProducts, patchProduct } from '../../api/filamentPurchasing'
 import { T } from '../../mocks/features/filament/seed'
 import { PRODUCT, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
@@ -54,6 +54,21 @@ describe('the supplier page', () => {
     expect(within(productRow(PRODUCT.JADE)).getByRole('link', { name: /BL-PLA-BASIC|Jade|A00/i })).toHaveAttribute('href', `/filament/types/${T.JADE}`)
     const sheet = screen.getByRole('table', { name: 'Price sheet' })
     expect(within(sheet).getByRole('link', { name: 'A00-W1' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.BAMBU}#product-${PRODUCT.JADE}`)
+  })
+
+  it('shows an archived product a link names, with "Show archived" off, and no other archived one (#6869)', async () => {
+    await patchProduct(PRODUCT.JADE, { archived: true })
+    await patchProduct(PRODUCT.ORANGE, { archived: true })
+    renderPage(
+      <Routes>
+        <Route path="/filament/suppliers/:id" element={<SupplierPage />} />
+      </Routes>,
+      { route: `/filament/suppliers/${SUPPLIER.BAMBU}#product-${PRODUCT.JADE}` },
+    )
+    await heading('Bambu Lab')
+    expect(screen.getByRole('checkbox', { name: 'Show archived products' })).not.toBeChecked()
+    await waitFor(() => expect(productRow(PRODUCT.JADE)).toHaveAttribute('aria-current', 'location'))
+    expect(productRow(PRODUCT.ORANGE)).toBeUndefined()
   })
 
   it('renders a product page as a link that opens safely', async () => {

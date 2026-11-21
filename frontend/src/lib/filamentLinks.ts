@@ -47,8 +47,8 @@ export const filamentLinks = {
   invoice: (id: string) => at(invoices, id),
   invoiceLine: (invoiceId: string, lineId: string) => anchored(at(invoices, invoiceId), anchors.invoiceLine(lineId)),
   locations: `${BASE}/locations`,
-  /** A place has no page: the spools in it (the Spools tab's `location` filter, which matches its name). */
-  location: (name: string) => query(spools, { location: name }),
+  /** A place has no page: the spools in it (the Spools tab's `place` filter, by id, so two places of one name stay apart). */
+  location: (id: string) => query(spools, { place: id }),
   /** A catalog entry's list (the Catalog tab opens on materials). */
   catalog: (kind: CatalogKind) => (kind === 'materials' ? catalog : query(catalog, { kind })),
   shoppingList,

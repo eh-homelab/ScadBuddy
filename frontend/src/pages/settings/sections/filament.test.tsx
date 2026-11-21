@@ -168,7 +168,7 @@ describe('Filament (#6262)', () => {
     renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
-    expect(within(failed).getByRole('link', { name: 'Location Dry box' })).toHaveAttribute('href', expect.stringContaining('/filament/spools?location=Dry+box'))
+    expect(within(failed).getByRole('link', { name: 'Location Dry box' })).toHaveAttribute('href', expect.stringContaining('/filament/spools?place=0badc0de-0000-4000-8000-000000000002'))
   })
 
   /** The sync status reads made so far, counted from msw's request events. */

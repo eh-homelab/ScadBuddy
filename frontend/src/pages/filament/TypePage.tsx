@@ -670,7 +670,7 @@ export function TypePage() {
                       {spool.archived_at && <span className="ml-2 text-[12px] text-muted-foreground">Archived</span>}
                     </td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{spool.grams_left ?? ''}</td>
-                    <td className="px-2 py-1.5">{spool.names?.location ? <EntityLink to={filamentLinks.location(spool.names.location)}>{spool.names.location}</EntityLink> : ''}</td>
+                    <td className="px-2 py-1.5">{spool.names?.location && spool.location_id ? <EntityLink to={filamentLinks.location(spool.location_id)}>{spool.names.location}</EntityLink> : ''}</td>
                   </tr>
                 ))}
                 {mine.length === 0 && (

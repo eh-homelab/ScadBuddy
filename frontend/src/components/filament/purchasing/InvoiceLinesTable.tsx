@@ -286,8 +286,15 @@ function Editable({ rows, computed, errors, pending = false, products, types, sp
   )
 }
 
+interface FrozenOnly {
+  lines: InvoiceLine[]
+  supplierId?: string
+  /** `spools` was read after the invoice was confirmed, so a spool it lacks is gone. */
+  spoolsCurrent?: boolean
+}
+
 /** A confirmed invoice's lines: what was bought, what it cost, and the spools it made. */
-function Frozen({ lines, types, spools, money, supplierId }: Shared & { lines: InvoiceLine[]; supplierId?: string }) {
+function Frozen({ lines, types, spools, spoolsCurrent = false, money, supplierId }: Shared & FrozenOnly) {
   const spoolNumber = new Map(spools.map((spool) => [spool.id, spool.number]))
   // A link to one line (`filamentLinks.invoiceLine`) scrolls to it and marks it (#6869).
   const target = useHashTarget(lines.length > 0)
@@ -348,8 +355,8 @@ function Frozen({ lines, types, spools, money, supplierId }: Shared & { lines: I
                   <ul className="flex flex-wrap gap-x-2 gap-y-1">
                     {line.spool_ids.map((id) => (
                       <li key={id}>
-                        {/* A spool missing from every spool, archived too, was deleted (R-6869-5). */}
-                        {spools.length > 0 && !spoolNumber.has(id) ? (
+                        {/* A spool missing from a read that covers it, archived too, was deleted (R-6869-5). */}
+                        {spoolsCurrent && !spoolNumber.has(id) ? (
                           <EntityLink to={filamentLinks.spool(id)} deleted>
                             Spool
                           </EntityLink>
@@ -371,6 +378,6 @@ function Frozen({ lines, types, spools, money, supplierId }: Shared & { lines: I
   )
 }
 
-export function InvoiceLinesTable(props: ({ editable: true } & EditableProps) | ({ editable: false; lines: InvoiceLine[]; supplierId?: string } & Shared)) {
+export function InvoiceLinesTable(props: ({ editable: true } & EditableProps) | ({ editable: false } & FrozenOnly & Shared)) {
   return props.editable ? <Editable {...props} /> : <Frozen {...props} />
 }

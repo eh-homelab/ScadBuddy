@@ -1,6 +1,6 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useLocation, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listTypes, type SpoolType } from '../../api/filament'
 import {
@@ -24,7 +24,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { useAdvanced } from '../../lib/advanced'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 import { message } from '../../components/filament/purchasing/priceFormat'
-import { filamentLinks } from '../../lib/filamentLinks'
+import { anchors, filamentLinks } from '../../lib/filamentLinks'
 
 /** Remembered per browser: whether archived products are listed. */
 export const SHOW_ARCHIVED_PRODUCTS_KEY = 'scadbuddy.filament.supplier.showArchivedProducts'
@@ -44,10 +44,24 @@ const trimmed = (draft: object) => JSON.stringify(Object.fromEntries(Object.entr
  * navigation), its products with their newest prices and an inline "Add price", and its price
  * sheet. A product is added by picking one of the types.
  */
+/** The product id an address's hash names (`anchors.supplierProduct`), or null. */
+function namedProduct(hash: string): string | null {
+  const prefix = `#${anchors.supplierProduct('')}`
+  if (!hash.startsWith(prefix) || hash.length === prefix.length) return null
+  try {
+    return decodeURIComponent(hash.slice(prefix.length))
+  } catch {
+    return null
+  }
+}
+
 export function SupplierPage() {
   const { id = '' } = useParams()
   const money = useMoney()
   const [showArchived, toggleArchived] = useAdvanced(SHOW_ARCHIVED_PRODUCTS_KEY)
+  /** #6869: the product a link names by anchor is listed even when archived ones are hidden. */
+  const { hash } = useLocation()
+  const named = namedProduct(hash)
   const [data, setData] = useState<Loaded | null>(null)
   const [types, setTypes] = useState<SpoolType[]>([])
   const [draft, setDraft] = useState(BLANK_SUPPLIER)
@@ -62,7 +76,7 @@ export function SupplierPage() {
     async (resetDraft: boolean) => {
       const mine = ++latest.current
       try {
-        const [supplier, products, sheet] = await Promise.all([getSupplier(id), listProducts(id, { includeArchived: showArchived }), getPriceSheet(id)])
+        const [supplier, products, sheet] = await Promise.all([getSupplier(id), listProducts(id, { includeArchived: showArchived || named !== null }), getPriceSheet(id)])
         if (mine !== latest.current) return
         setData({ supplier, products, sheet })
         if (resetDraft) setDraft(draftOfSupplier(supplier))
@@ -72,7 +86,7 @@ export function SupplierPage() {
         setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That supplier is gone. Pick another from the Suppliers tab.' : message(cause, 'The supplier could not be loaded. Try again.'))
       }
     },
-    [id, showArchived],
+    [id, showArchived, named],
   )
 
   // The first read fills the form; a read after a price or a product keeps the person's edits.
@@ -221,7 +235,7 @@ export function SupplierPage() {
             Add product
           </Button>
         </div>
-        <ProductsTable products={data.products} types={typeMap} money={money} onChanged={() => void read(false)} />
+        <ProductsTable products={showArchived ? data.products : data.products.filter((one) => !one.archived_at || one.id === named)} types={typeMap} money={money} onChanged={() => void read(false)} />
       </section>
 
       <section aria-label="Price sheet" className="flex flex-col gap-2">

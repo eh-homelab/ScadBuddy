@@ -19,8 +19,8 @@ export const filamentPaths = {
   supplierProduct: (supplierId: string, productId: string) => anchored(at(`${BASE}/suppliers`, supplierId), `product-${productId}`),
   invoice: (id: string) => at(`${BASE}/invoices`, id),
   invoiceLine: (invoiceId: string, lineId: string) => anchored(at(`${BASE}/invoices`, invoiceId), `line-${lineId}`),
-  /** A place has no page: the spools in it (the Spools tab filters by the place's own name). */
-  location: (name: string) => query(`${BASE}/spools`, { location: name }),
+  /** A place has no page: the spools in it (the Spools tab's `place` filter, by id, so two places of one name stay apart). */
+  location: (id: string) => query(`${BASE}/spools`, { place: id }),
   /** A catalog row's catalog (the Catalog tab opens on materials). */
   catalog: (kind: string) => (kind === 'materials' ? `${BASE}/catalog` : query(`${BASE}/catalog`, { kind })),
   shoppingList: `${BASE}/shopping-list`,
@@ -51,9 +51,10 @@ const str = (value: unknown): value is string => typeof value === 'string' && va
 function ownPath(kind: LinkKind, row: Row): string | null {
   if (kind.startsWith('catalog:')) return filamentPaths.catalog(kind.slice('catalog:'.length))
   if (kind === 'shopping_item') return filamentPaths.shoppingList
-  if (kind === 'location') return str(row.name) ? filamentPaths.location(row.name) : null
   if (!str(row.id)) return null
   switch (kind) {
+    case 'location':
+      return filamentPaths.location(row.id)
     case 'spool':
       return filamentPaths.spool(row.id)
     case 'type':
@@ -84,6 +85,7 @@ const FOREIGN: Record<string, (id: string) => string> = {
   spool_id: filamentPaths.spool,
   sb_spool_id: filamentPaths.spool,
   empty_spool_id: filamentPaths.spool,
+  location_id: filamentPaths.location,
   type_id: filamentPaths.type,
   supplier_id: filamentPaths.supplier,
   invoice_id: filamentPaths.invoice,
@@ -105,7 +107,7 @@ function syncItemPath(row: Row): string | null {
     case 'supplier':
       return filamentPaths.supplier(row.sb_id)
     case 'location':
-      return filamentPaths.location(row.label)
+      return filamentPaths.location(row.sb_id)
     case 'insert_type':
       return filamentPaths.catalog('insert-types')
     default:
@@ -116,8 +118,7 @@ function syncItemPath(row: Row): string | null {
 /**
  * `value` with each entity's `ui_path` beside its `id` (when `kind` says what it is) and,
  * beside each field that names another entity by id (`type_id`, `spool_ids`, ...), that
- * entity's page as `<field>_ui_path` (`type_ui_path`, `spool_ui_paths`). A spool's place
- * is named by `names.location`, so a spool gets `location_ui_path` too.
+ * entity's page as `<field>_ui_path` (`type_ui_path`, `location_ui_path`, `spool_ui_paths`).
  */
 export function withUiPaths(value: unknown, kind?: LinkKind): unknown {
   if (Array.isArray(value)) return value.map((one) => withUiPaths(one, kind))
@@ -137,8 +138,6 @@ export function withUiPaths(value: unknown, kind?: LinkKind): unknown {
   if (own && !('ui_path' in out)) out.ui_path = own
   const lineId = row.invoice_line_id ?? row.line_id
   if (str(row.invoice_id) && str(lineId)) out.invoice_line_ui_path = filamentPaths.invoiceLine(row.invoice_id, lineId)
-  const place = kind === 'spool' ? (row.names as Row | undefined)?.location : undefined
-  if (str(place)) out.location_ui_path = filamentPaths.location(place)
   const synced = syncItemPath(row)
   if (synced) out.ui_path = synced
   return out

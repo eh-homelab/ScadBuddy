@@ -39,7 +39,7 @@ import { EntityLink } from '../../components/filament/EntityLink'
 const DIMENSION_TITLES: Record<Dimension, string> = { material: 'Material', brand: 'Brand', type: 'Type', supplier: 'Supplier', location: 'Location' }
 
 /** A dimension value's page (#6869): its catalog, type, supplier, or the spools in a place; none for "none" (no key). */
-function dimensionHref(dimension: Dimension, key: string | null | undefined, label: string): string | null {
+function dimensionHref(dimension: Dimension, key: string | null | undefined): string | null {
   if (!key) return null
   switch (dimension) {
     case 'material':
@@ -51,7 +51,7 @@ function dimensionHref(dimension: Dimension, key: string | null | undefined, lab
     case 'supplier':
       return filamentLinks.supplier(key)
     case 'location':
-      return filamentLinks.location(label)
+      return filamentLinks.location(key)
   }
 }
 const BUCKET_TITLES: Record<MetricsBucket, string> = { week: 'Weeks', month: 'Months' }
@@ -193,7 +193,7 @@ function Consumption({ metrics, order }: { metrics: InventoryMetrics; order: rea
                     <td className={TD}>{bucketTitle(row.bucket, bucket)}</td>
                     <td className={TD}>
                       {(() => {
-                        const href = dimensionHref(dimension, row.key, row.label)
+                        const href = dimensionHref(dimension, row.key)
                         return href ? <EntityLink to={href}>{row.label}</EntityLink> : row.label
                       })()}
                     </td>

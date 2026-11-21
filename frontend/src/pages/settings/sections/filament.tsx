@@ -157,7 +157,7 @@ const KIND_LABELS: Record<SyncError['kind'], string> = {
   filament: 'Spool type',
 }
 
-/** Where an item that failed to sync is shown (`lib/filamentLinks.ts`), from its id or, for a place, its name. */
+/** Where an item that failed to sync is shown (`lib/filamentLinks.ts`), from its id. */
 function itemHref(error: SyncError): string {
   switch (error.kind) {
     case 'spool':
@@ -167,7 +167,7 @@ function itemHref(error: SyncError): string {
     case 'filament':
       return filamentLinks.type(error.sb_id)
     case 'location':
-      return error.label ? filamentLinks.location(error.label) : filamentLinks.locations
+      return filamentLinks.location(error.sb_id)
     case 'insert_type':
       return filamentLinks.catalog('insert-types')
   }

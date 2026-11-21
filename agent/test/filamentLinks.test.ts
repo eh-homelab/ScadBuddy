@@ -54,7 +54,7 @@ describe('filament ui paths (#6869)', () => {
   it("gives a spool its page, its type's and its place's", async () => {
     server.use(
       http.get(`${FILAMENT}/spools/${SPOOL}`, () =>
-        HttpResponse.json({ id: SPOOL, number: 12, type_id: TYPE, names: { location: 'Dry box' }, invoice: { invoice_id: INVOICE, line_id: LINE, supplier_id: SUPPLIER } }),
+        HttpResponse.json({ id: SPOOL, number: 12, type_id: TYPE, location_id: 'dry-box', names: { location: 'Dry box' }, invoice: { invoice_id: INVOICE, line_id: LINE, supplier_id: SUPPLIER } }),
       ),
     )
     expect(firstText(await runTool(tool('filament_spool_get'), { spool_id: SPOOL }, ctx()))).toEqual({
@@ -63,6 +63,8 @@ describe('filament ui paths (#6869)', () => {
       number: 12,
       type_id: TYPE,
       type_ui_path: `/filament/types/${TYPE}`,
+      location_id: 'dry-box',
+      location_ui_path: '/filament/spools?place=dry-box',
       names: { location: 'Dry box' },
       invoice: {
         invoice_id: INVOICE,
@@ -72,7 +74,6 @@ describe('filament ui paths (#6869)', () => {
         supplier_ui_path: `/filament/suppliers/${SUPPLIER}`,
         invoice_line_ui_path: `/filament/invoices/${INVOICE}#line-${LINE}`,
       },
-      location_ui_path: '/filament/spools?location=Dry+box',
     })
   })
 
@@ -96,13 +97,19 @@ describe('filament ui paths (#6869)', () => {
   it('places each node of the location tree at the spools in it', async () => {
     server.use(http.get(`${FILAMENT}/locations`, () => HttpResponse.json([{ id: 'a', name: 'Shelf', children: [{ id: 'b', name: 'Box 1', children: [] }] }])))
     const [shelf] = firstText(await runTool(tool('filament_location_list'), {}, ctx())) as { ui_path: string; children: { ui_path: string }[] }[]
-    expect(shelf!.ui_path).toBe('/filament/spools?location=Shelf')
-    expect(shelf!.children[0]!.ui_path).toBe('/filament/spools?location=Box+1')
+    expect(shelf!.ui_path).toBe('/filament/spools?place=a')
+    expect(shelf!.children[0]!.ui_path).toBe('/filament/spools?place=b')
   })
 
   it("anchors a price sheet's product on its supplier's page", () => {
     const [row] = withUiPaths([{ product: { id: PRODUCT, supplier_id: SUPPLIER, type_id: TYPE } }], 'price_sheet_row') as { product: Record<string, unknown> }[]
     expect(row!.product.ui_path).toBe(`/filament/suppliers/${SUPPLIER}#product-${PRODUCT}`)
+  })
+
+  it.each(vectors.filter((one) => one.kind === 'catalog'))('gives a $key row from filament_catalog_list the frontend\'s $path', async ({ key, path }) => {
+    server.use(http.get(`${FILAMENT}/catalog/${key}`, () => HttpResponse.json([{ id: 'row-1', name: 'Cardboard spool' }])))
+    const [row] = firstText(await runTool(tool('filament_catalog_list'), { kind: key }, ctx())) as Record<string, unknown>[]
+    expect(row!.ui_path).toBe(path)
   })
 
   it("links an automatic shopping item to the spool that ran out", () => {

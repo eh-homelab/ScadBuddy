@@ -321,7 +321,7 @@ const named = (nodes: LocationNode[], path: string[] = []): { id: string; name: 
 
 /** Every place, trays too, and its page. */
 const placeLinks = (nodes: LocationNode[]): [string, string][] =>
-  nodes.flatMap((node) => [[node.id, filamentLinks.location(node.name)] as [string, string], ...placeLinks(node.children ?? [])])
+  nodes.flatMap((node) => [[node.id, filamentLinks.location(node.id)] as [string, string], ...placeLinks(node.children ?? [])])
 
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
 
@@ -889,10 +889,10 @@ export function SpoolPage() {
                 </Select>
                 <p className="text-[12px] text-muted-foreground">
                   Saved through a move, which the history records.
-                  {saved?.names?.location && (
+                  {saved?.names?.location && saved.location_id && (
                     <>
                       {' '}
-                      <EntityLink to={filamentLinks.location(saved.names.location)} className="underline">
+                      <EntityLink to={filamentLinks.location(saved.location_id)} className="underline">
                         Spools in {saved.names.location}
                       </EntityLink>
                     </>

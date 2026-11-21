@@ -77,6 +77,7 @@ describe('the invoice lines table', () => {
           supplierId="s1"
           types={[{ id: 't1', code: 'BL-PLA-WHITE', rgba: '#FFFFFFFF' } as never]}
           spools={[spool('a', 12, null)]}
+          spoolsCurrent
           money={(amount) => formatCost(amount, 'USD', 2)}
         />
       </MemoryRouter>,
