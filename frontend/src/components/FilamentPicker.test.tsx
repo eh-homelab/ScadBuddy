@@ -411,6 +411,16 @@ describe('FilamentPicker', () => {
     expect(screen.queryByText(/has no filament chosen/)).not.toBeInTheDocument()
   })
 
+  it("keeps a reset through a new slice's grams (#6885 review)", async () => {
+    const options = { ...fixtures.filamentOptions, suggested: [{ slot_id: 1, spool_id: 21 }] }
+    const { user, rerender } = renderPage(<FilamentPicker options={options} plan={[]} copies={1} onChange={vi.fn()} />)
+    await user.click(screen.getByTestId('reset-filaments'))
+
+    const sliced = { ...options, slots: (options.slots ?? []).map((slot) => ({ ...slot, used_grams: 9.9 })) }
+    rerender(<FilamentPicker options={sliced} plan={[]} copies={1} onChange={vi.fn()} />)
+    expect(screen.getByTestId('filament-warnings-2')).toHaveTextContent('Slot 2 has no filament chosen.')
+  })
+
   it('forgets a reset for another output with no library file (#6885 review)', async () => {
     // #2720: an output read from its own 3MF has no library file, so its slots tell it apart.
     const options = { ...fixtures.filamentOptions, library_file_id: null, suggested: [{ slot_id: 1, spool_id: 21 }] }
