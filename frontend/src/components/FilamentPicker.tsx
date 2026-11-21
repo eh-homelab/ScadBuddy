@@ -288,7 +288,7 @@ function SpoolTile({
   return (
     <label
       className={cn(
-        'relative flex min-w-0 cursor-pointer flex-col gap-1 rounded-md border px-2 py-1.5 text-xs transition-colors',
+        'relative flex w-42 max-w-full min-w-0 cursor-pointer flex-col gap-1 rounded-md border px-2 py-1.5 text-xs transition-colors',
         'has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/50',
         checked ? 'border-primary bg-accent' : 'hover:bg-muted',
         !matches && !checked && 'text-muted-foreground',
@@ -594,20 +594,20 @@ export function FilamentPicker({
                   aria-labelledby={heading}
                   value={chosen === null ? '' : String(chosen)}
                   onValueChange={(next) => choose(slot.slot_id, Number(next))}
-                  className={cn('gap-2.5', !trays && listOpen && 'max-h-96 overflow-y-auto pr-1')}
+                  className={cn('flex flex-wrap items-start gap-x-4 gap-y-2.5', !trays && listOpen && 'max-h-96 overflow-y-auto pr-1')}
                 >
                   {/* Closed, the chosen tile stays in the group it has when open, its heading
                       hidden: the same keys keep the same tile, so the focus and the radio
                       stay put when a pick closes the grid. */}
                   {tileGroups(rows, slot, options.printer_id).map(
                     (group) => (
-                      <div key={group.key} className="grid gap-1" data-testid={`slot-${slot.slot_id}-group-${group.key}`}>
+                      <div key={group.key} className="flex max-w-full min-w-0 flex-col gap-1" data-testid={`slot-${slot.slot_id}-group-${group.key}`}>
                         {listOpen && (
                           <p className="text-[11px] font-medium text-muted-foreground">{group.label}</p>
                         )}
-                        {/* Tiles of at least 9.5rem: two across in the dialog's column, one on a
-                            phone (#944), four across an AMS on a wide screen. */}
-                        <div className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-1.5">
+                        {/* Tiles of 10.5rem side by side, and the units side by side, as Bambu
+                            Studio maps them; on a phone, one tile a row (#944). */}
+                        <div className="flex flex-wrap gap-1.5">
                           {group.spools.map((spool) => {
                             // Shown, not hidden: printing two slots from one spool is a real
                             // thing to want, and Bambuddy accepts it. It just should not be a
