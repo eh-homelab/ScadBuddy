@@ -23,7 +23,8 @@ from playwright.async_api import Error as PlaywrightError
 from pydantic import SecretStr
 
 from scadbuddy.profile_fetch import site
-from scadbuddy.profile_fetch.site import USER_AGENT, SiteError, ThreeDfpSite
+from scadbuddy.profile_fetch.site import USER_AGENT, ThreeDfpSite
+from scadbuddy.profile_fetch.steps import SiteError
 from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES
 from tests.profile_fetch.site.server import (
     EXPORT_FILE,

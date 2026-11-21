@@ -29,7 +29,7 @@ from scadbuddy.profile_fetch.activities import (
     SiteHolder,
     site_failure,
 )
-from scadbuddy.profile_fetch.site import ExportedFile, Kind, SiteError
+from scadbuddy.profile_fetch.steps import ExportedFile, Kind, SiteError
 from scadbuddy.profile_fetch.wire import (
     MAX_FILE_BYTES,
     NOT_RUNNING,

@@ -844,17 +844,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (#6625, #6780, plan `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
   scadbuddy.profile_fetch` (`worker.py`) polls the queue `profile-fetch`, serves `/healthz` and
   `/metrics` on 9090, holds the CRUD credential and runs no browser; it refuses `FORBIDDEN_ENV`
-  and the 3DFP login (`settings.py`) and imports no Postgres code (`psycopg` is not in
-  `sys.modules`). `python -m scadbuddy.profile_fetch.browser` (`browser.py`) is the browser
+  and the 3DFP login (`settings.py`) and imports no Postgres code and no Playwright (neither
+  `psycopg` nor `playwright` is in `sys.modules`, #6815). `python -m scadbuddy.profile_fetch.browser` (`browser.py`) is the browser
   service, a pod of its own with no route to Temporal or the API: it holds the 3DFP login and
   the RPC token, refuses a proof, a Temporal or API address, a mounted ServiceAccount token and a
   `DEBUG` that turns on a Playwright channel, imports no Temporal or CRUD client, sets
   `RLIMIT_CORE` to 0 and signs in at start. `remote.py` is the RPC (`RemoteSite`, the worker's
-  `site.Site` over HTTP on 8091 with the token; the export's bytes are the answer's body, a
+  `steps.Site` over HTTP on 8091 with the token, each step bounded whole by `STEP_REQUEST_TIMEOUT`; the export's bytes are the answer's body, a
   failure crosses as its kind only and the worker writes its text). `site.py` drives
-  3dfilamentprofiles.com with a headed Chromium (Playwright for Python, under Xvfb), holds the
-  `Site` protocol and the `SiteHolder` that keeps one signed-in browser, and maps each failure to
-  a `SiteError` kind (`login_failed`, only when the site sends the browser back to
+  3dfilamentprofiles.com with a headed Chromium (Playwright for Python, under Xvfb) and maps each failure to a
+  `SiteError` kind. `steps.py` imports no Playwright and holds the `Site` protocol, the
+  `SiteHolder` that keeps one signed-in browser, `SiteError` and its kinds (`login_failed`, only when the site sends the browser back to
   `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, an export over 512 KiB,
   which the driver refuses from the text's length before it reads the text (`_read_export`,
   #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
