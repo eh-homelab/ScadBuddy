@@ -118,8 +118,9 @@ export function choiceReasons(
 /**
  * #6885 review — the material families of the plate, for a slot that declares none: the
  * families the other slots declare, as `filaments.py` `suggest` takes them. With none
- * declared, the family most of the chosen spools share (the suggestion's anchor family,
- * `_anchor_family`, picks most slots in one family); none on a tie.
+ * declared, the family most of the chosen spools share; none on a tie. This follows the
+ * plan on screen, so it follows the user's edits: the server's `_anchor_family` reads the
+ * slots with a loaded spool and can differ once the user changes a slot.
  */
 export function plateFamilies(options: Pick<FilamentOptions, 'slots' | 'spools'>, plan: SlotChoice[]): string[] {
   const declared = [
@@ -185,7 +186,7 @@ export function tileGroups(spools: SpoolOption[], slot: SlotNeed, printerId: num
     })
   }
   const byUnit = [...units.values()]
-    .sort((a, b) => a.order[0].localeCompare(b.order[0]) || a.order[1] - b.order[1] || a.order[2] - b.order[2])
+    .sort((a, b) => a.order[0].localeCompare(b.order[0], undefined, { numeric: true }) || a.order[1] - b.order[1] || a.order[2] - b.order[2])
     .map((entry) => entry.group)
   return [
     ...(best.length > 0 ? [{ key: 'best', label: 'Closest to the file', spools: best }] : []),
