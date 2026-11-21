@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AccessStore } from '../src/access/store.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import { TOOL_LOADING_KEY } from '../src/harness/toolSearch.js'
 import { SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
-import { PluginStore } from '../src/plugins/registry.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { SETTING_MODEL, SETTING_SESSION_BUDGET_USD, type SessionManager } from '../src/sessions/manager.js'
@@ -85,8 +86,8 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`warm evicti
   })
 
   it('a plugin registry write tells every replica to evict everything', async () => {
-    const store = new PluginStore(db.sql)
-    await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+    const store = new PostgresPluginStore(db.sql, kek)
+    await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
     await expect.poll(() => received).toContain('*')
   })
 
@@ -97,7 +98,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`warm evicti
   })
 
   it('an ai_access write tells every cache', async () => {
-    const access = new AccessStore(db.sql)
+    const access = new AccessStore(new SqlAccessRows(db.sql))
     await access.setItem('builtin:scadbuddy', 'get_model', 'read')
     await expect.poll(() => received).toContain('*')
     received.length = 0

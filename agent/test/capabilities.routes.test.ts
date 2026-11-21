@@ -45,7 +45,7 @@ function memoryPlugins(names: readonly string[]) {
       disabled_tools: disabledTools,
       created_at: '2026-10-10T00:00:00.000Z',
       updated_at: '2026-10-10T00:00:00.000Z',
-      kekId: null,
+      opens: true,
       oauth: null,
     }
   }
@@ -67,7 +67,7 @@ function memoryPlugins(names: readonly string[]) {
     list: async () => names.map(summary),
     get: async (name) => (names.includes(name) ? summary(name) : undefined),
     create: reject,
-    update: async (name: string, patch: PluginPatch, _kek, context) => {
+    update: async (name: string, patch: PluginPatch, context) => {
       known(name)
       if (patch.enabled !== undefined) put(remoteSource(name), SOURCE_ITEM, patch.enabled ? 'on' : 'off', by(context))
       return summary(name)

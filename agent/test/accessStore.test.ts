@@ -1,27 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { AccessError, AccessStore } from '../src/access/store.js'
-import type { Database } from './support/database.js'
 import type { AuditContext } from '../src/audit/log.js'
+import { MemoryAccessRows } from './support/memoryAccess.js'
 import { MemoryAudit } from './support/memoryAudit.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 const ctx: AuditContext = { actor: { kind: 'browser', id: 'browser', label: 'You' }, surface: 'http' }
 const SCAD = 'builtin:scadbuddy'
 
-describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
-  let db: Database
-  let drop: () => Promise<void>
+// AccessStore's model checks and audit rows, over the API's rows kept in memory
+// (test/support/memoryAccess.ts); the routes' own transactions are tested in the backend.
+describe('AccessStore', () => {
+  let rows: MemoryAccessRows
   let audit: MemoryAudit
   let store: AccessStore
 
-  beforeEach(async () => {
-    ;({ db, drop } = await throwawayDatabase())
-    expect(await db.ready()).toBe(true)
+  beforeEach(() => {
+    rows = new MemoryAccessRows()
     audit = new MemoryAudit()
-    store = new AccessStore(db.sql, audit)
-  })
-  afterEach(async () => {
-    await drop()
+    store = new AccessStore(rows, audit)
   })
 
   it('stores an override and reads it back by source', async () => {
@@ -64,15 +60,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     ])
   })
 
-  it("forget deletes the source's rows and its ai_tool_listings row", async () => {
+  it("forget deletes the source's rows", async () => {
     await store.setItem('remote:mem', 'a', 'read', ctx)
     await store.setItem('remote:other', 'a', 'read', ctx)
-    await db.sql`INSERT INTO ai_tool_listings (source, tools) VALUES ('remote:mem', '[]'::jsonb), ('remote:other', '[]'::jsonb)`
     await store.forget('remote:mem')
     expect(await store.rows(['remote:mem'])).toEqual([])
     expect(await store.rows(['remote:other'])).toHaveLength(1)
-    const listings = await db.sql<{ source: string }[]>`SELECT source FROM ai_tool_listings`
-    expect(listings.map((l) => l.source)).toEqual(['remote:other'])
   })
 
   it("refuses on for a tool, a tier for '*', and an unknown source with AccessError", async () => {
@@ -90,7 +83,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
       expect(err).toBeInstanceOf(AccessError)
       expect((err as AccessError).status).toBe(400)
     }
-    expect(await db.sql`SELECT 1 FROM ai_access`).toHaveLength(0)
+    expect(rows.stored).toHaveLength(0)
   })
 
   it('stores on for a package skill and the own plugin\'s subagent', async () => {
@@ -127,7 +120,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
       expect(err).toBeInstanceOf(AccessError)
       expect((err as AccessError).status).toBe(400)
     }
-    expect(await db.sql`SELECT 1 FROM ai_access`).toHaveLength(0)
+    expect(rows.stored).toHaveLength(0)
   })
 
   // Review I1: only a package's own source and the own plugin hold named items; elsewhere a
@@ -154,13 +147,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
       detail: 'builtin:scadbuddy/get_model = "read"',
     })
   })
-  it('replaceToolsOf writes every source in one transaction: a failure on the second leaves the first unchanged', async () => {
+  it('replaceToolsOf writes every source in one call: a failure on the second leaves the first unchanged', async () => {
     await store.setItem(SCAD, 'get_model', 'outward', ctx)
-    await db.sql.unsafe(`
-      CREATE FUNCTION test_refuse_browser() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN RAISE EXCEPTION 'refused for the test'; END $$;
-      CREATE TRIGGER test_refuse_browser BEFORE INSERT ON ai_access
-        FOR EACH ROW WHEN (NEW.source = 'builtin:browser') EXECUTE FUNCTION test_refuse_browser();`)
+    rows.refuse = 'builtin:browser'
     await expect(store.replaceToolsOf({ [SCAD]: { list_models: 'off' }, 'builtin:browser': { browser_click: 'off' } }, ctx)).rejects.toThrow(
       /refused for the test/,
     )
@@ -178,29 +167,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     await store.replaceToolsOf({ [SCAD]: { get_model: 'outward' }, 'builtin:browser': {} }, ctx)
     expect(audit.entries).toHaveLength(2)
     expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
-  })
-
-  it('replaceToolsOf writes both registry sources in one transaction', async () => {
-    await store.replaceToolsOf({ [SCAD]: { get_model: 'outward' }, 'builtin:browser': {} }, ctx)
-    await db.sql.unsafe(`
-      CREATE FUNCTION test_refuse_browser() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN RAISE EXCEPTION 'refused for the test'; END $$;
-      CREATE TRIGGER test_refuse_browser BEFORE INSERT ON ai_access
-        FOR EACH ROW WHEN (NEW.source = 'builtin:browser') EXECUTE FUNCTION test_refuse_browser();`)
-    await expect(
-      store.replaceToolsOf({ [SCAD]: { list_models: 'off' }, 'builtin:browser': { browser_click: 'off' } }, ctx),
-    ).rejects.toThrow(/refused for the test/)
-    expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
-  })
-
-  it('an access write writes none of the old ai_settings keys (#4828)', async () => {
-    await store.replaceToolsOf({ [SCAD]: { get_model: 'outward', list_models: 'off' } }, ctx)
-    await store.setItem(SCAD, 'get_printer_camera', 'off', ctx)
-    await store.setEnabled('builtin:http', false, ctx)
-    await store.setEnabled('builtin:own-plugin', false, ctx)
-    expect(
-      await db.sql`SELECT key FROM ai_settings WHERE key IN ('builtin_tools.scadbuddy', 'printer_camera_enabled', 'http_request_enabled', 'scadbuddy_plugin_enabled')`,
-    ).toEqual([])
   })
 
   it('replacing the scadbuddy tools while builtin:browser is off leaves the browser rows alone', async () => {

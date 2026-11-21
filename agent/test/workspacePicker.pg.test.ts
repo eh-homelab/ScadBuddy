@@ -6,8 +6,9 @@ import { originPolicy } from '../src/http/origins.js'
 import { acceptList, accepts, type PickerSession } from '../src/routes/workspacePicker.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { PgResourceRows, SessionResources } from '../src/sessions/touched.js'
-import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
-import { PluginStore } from '../src/plugins/registry.js'
+import { PluginOAuth } from '../src/plugins/oauthStore.js'
+import { grantAad, SqlOAuthRows } from './support/sql/oauth.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
 import { SessionFiles } from '../src/workspace/store.js'
@@ -48,7 +49,7 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
   let files: SessionFiles
   let touched: SessionResources
   let app: ReturnType<typeof createApp>
-  let plugins: PluginStore
+  let plugins: PostgresPluginStore
   let oauth: PluginOAuth
   const failures: unknown[] = []
 
@@ -59,8 +60,8 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     touched = new SessionResources(new PgResourceRows(db.sql), (err) => failures.push(err))
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     files = new SessionFiles(db.sql)
-    oauth = new PluginOAuth(db.sql)
-    plugins = new PluginStore(db.sql, { oauth })
+    oauth = new PluginOAuth(new SqlOAuthRows(db.sql, kek))
+    plugins = new PostgresPluginStore(db.sql, kek, { oauth })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, workspace: files })
     const saved = new MemoryCredentials()
     await saved.create({ kind: 'anthropic_api_key', secret: SECRET }, kek)
@@ -227,15 +228,15 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     expect((await download('leak.txt', `?expected_sha256=${sha(`key=${SECRET}`)}`)).status).toBe(422)
 
     // A remote plugin's header value, found without its scheme too.
-    await plugins.create({ name: 'tracker', url: 'https://tracker.example/mcp', secret: 'Bearer plugin-header-secret-42' }, kek)
-    await plugins.update('tracker', { enabled: true }, kek)
+    await plugins.create({ name: 'tracker', url: 'https://tracker.example/mcp', secret: 'Bearer plugin-header-secret-42' })
+    await plugins.update('tracker', { enabled: true })
     await put(s.id, 'header.txt', 'token: plugin-header-secret-42')
     const header = await download('header.txt', `?expected_sha256=${sha('token: plugin-header-secret-42')}`)
     expect(header.status).toBe(422)
     expect(((await header.json()) as { detail: string }).detail).toMatch(/header value or OAuth token/)
 
     // An OAuth sign-in's tokens and client secret, on a plugin that is not even enabled.
-    await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' }, kek)
+    await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' })
     const grant = {
       plugin: 'drive',
       plugin_url: 'https://drive.example/mcp',

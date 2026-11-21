@@ -407,7 +407,7 @@ export async function testAndList(
     if (held === 'full') {
       return { status: 429, body: { detail: 'too many connection tests are running; try again shortly' }, retryAfter: RETRY_AFTER_S }
     }
-    // The lock client's database is down: the same answer as the ready check above, not a 500.
+    // The API did not answer the lease: the same answer as the ready check above, not a 500.
     if (held === 'unreachable') return { status: 503, body: { detail: NOT_READY } }
     return { status: 200, body: held.value }
   } finally {

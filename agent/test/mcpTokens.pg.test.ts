@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { hashToken, PostgresTokenStore } from '../src/auth/tokens.js'
+import { hashToken } from '../src/auth/tokens.js'
+import { PostgresTokenStore } from './support/sql/tokens.js'
 import type { Database } from './support/database.js'
 import { migrate } from './support/migrations.js'
 import type { McpTokenList, MintedMcpToken } from '../src/routes/mcpTokens.js'

@@ -3,13 +3,15 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { toStoredTools, ToolListings } from '../src/access/listings.js'
+import { SqlToolListings } from './support/sql/listings.js'
 import { AccessStore } from '../src/access/store.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import { createApp } from '../src/app.js'
 import type { Database } from './support/database.js'
 import { buildHarnessOptions } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { PluginForwarder } from '../src/plugins/forwarder.js'
-import { PluginStore } from '../src/plugins/registry.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { CAPABILITIES_PATH } from '../src/routes/capabilities.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { existsSync } from 'node:fs'
@@ -21,7 +23,7 @@ import { AccessResolver } from '../src/access/resolver.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { LoadedPackage } from '../src/plugins/packages/install.js'
 import { forwardPackageServers } from '../src/plugins/packages/mcp.js'
-import { PackageStore } from '../src/plugins/packages/store.js'
+import { PackageStore } from './support/sql/packages.js'
 import { vetPackage } from '../src/plugins/packages/vet.js'
 import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
 import { turnRunnerForTest } from './support/turnRunner.js'
@@ -54,12 +56,12 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
   })
 
   async function rig() {
-    const store = new PluginStore(db.sql)
-    const listings = new ToolListings(db.sql, db.locks)
-    const { url } = await store.create({ name: 'hs', url: mcp.url }, kek)
+    const store = new PostgresPluginStore(db.sql, kek)
+    const listings = new ToolListings(new SqlToolListings(db.sql))
+    const { url } = await store.create({ name: 'hs', url: mcp.url })
     await listings.exclusive('hs', (put) => put(url, toStoredTools([{ name: 'a' }, { name: 'b' }]), {}))
     const app = createApp({
-      access: new AccessStore(db.sql),
+      access: new AccessStore(new SqlAccessRows(db.sql)),
       database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
       backend: () => Promise.resolve(true),
       kek: { ok: true, kek },
@@ -81,7 +83,7 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
     const off = await put('/items/b', { access: 'off' })
     expect(off.status).toBe(200)
 
-    const [plugin] = (await store.enabled(kek)).plugins
+    const [plugin] = (await store.enabled()).plugins
     const registration = forwarder.register(plugin!, '127.0.0.1')
     const client = new Client({ name: 't', version: '0' })
     try {
@@ -101,7 +103,7 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
   it('a remote tool given read in Settings is allowed at the classic seam; one left at the default asks first', async () => {
     const { store, put } = await rig()
     expect((await put('/items/a', { access: 'read' })).status).toBe(200)
-    const [plugin] = (await store.enabled(kek)).plugins
+    const [plugin] = (await store.enabled()).plugins
     const registration = forwarder.register(plugin!, '127.0.0.1')
     try {
       const options = buildHarnessOptions({
@@ -135,9 +137,9 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
     await packages.create({ source: { kind: 'git', url: 'https://git.example/notes.git', ref: 'main', path: '' }, fetchUrl: 'https://git.example/notes.git', fetchPath: '', commit, contentHash: tree.hash, files: tree.files, review })
     await packages.approve('notes', commit, tree.hash)
     await packages.setEnabled('notes', true)
-    const listings = new ToolListings(db.sql, db.locks)
+    const listings = new ToolListings(new SqlToolListings(db.sql))
     await listings.exclusiveServer('notes', 'api', (put) => put(tree.hash, toStoredTools([{ name: 'a' }, { name: 'b' }]), {}))
-    const access = new AccessStore(db.sql)
+    const access = new AccessStore(new SqlAccessRows(db.sql))
     const app = createApp({
       access,
       database: { ping: () => Promise.resolve(true), ready: () => db.ready() },

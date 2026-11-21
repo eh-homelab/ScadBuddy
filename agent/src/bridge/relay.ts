@@ -159,8 +159,8 @@ export type TemporalTabRelayOptions = {
 export type SealingClient = { client: Client; dropKey: (subject: string) => Promise<void> }
 
 const SEALING_NEEDED =
-  'no browser attached: the tab is connected to another agent replica, and reaching it there needs the agent ' +
-  "service's secret key (SCADBUDDY_SECRET_KEY_FILE), which seals the call's contents in Temporal. Ask the operator to mount it."
+  'no browser attached: the tab is connected to another agent replica, and reaching it there needs the payload ' +
+  "codec that seals the call's contents in Temporal, with the data keys the API releases. Ask the operator to check the agent's service credential."
 
 const NO_SEALING: RelayAnswer = { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } }
 

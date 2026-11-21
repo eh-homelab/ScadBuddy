@@ -12,8 +12,9 @@ import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { loadPackagesForRun, PackageInstaller } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
-import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
-import { PluginStore } from '../src/plugins/registry.js'
+import { PluginOAuth } from '../src/plugins/oauthStore.js'
+import { grantAad, SqlOAuthRows } from './support/sql/oauth.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -49,19 +50,19 @@ describe.skipIf(skip !== undefined)(`a non-durable turn's uploads${skip ? ` (ski
   let m: SessionManager
   let files: SessionFiles
   let oauth: PluginOAuth
-  let plugins: PluginStore
+  let plugins: PostgresPluginStore
   let credentials: MemoryCredentials
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     files = new SessionFiles(db.sql)
-    oauth = new PluginOAuth(db.sql)
-    plugins = new PluginStore(db.sql, { oauth })
+    oauth = new PluginOAuth(new SqlOAuthRows(db.sql, kek))
+    plugins = new PostgresPluginStore(db.sql, kek, { oauth })
     credentials = new MemoryCredentials()
     await credentials.create({ kind: 'anthropic_api_key', secret: SAVED }, kek)
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner, workspace: files })
-    await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' }, kek)
+    await plugins.create({ name: 'drive', url: 'https://drive.example/mcp' })
     const grant = {
       plugin: 'drive',
       plugin_url: 'https://drive.example/mcp',

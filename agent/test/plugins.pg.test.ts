@@ -7,9 +7,11 @@ import { migrate, MIGRATIONS } from './support/migrations.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
-import { loadEnabledPlugins, PluginError, PluginStore } from '../src/plugins/registry.js'
+import { loadEnabledPlugins, PluginError } from '../src/plugins/registry.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { Capabilities } from '../src/access/capabilities.js'
 import { ToolListings } from '../src/access/listings.js'
+import { SqlToolListings } from './support/sql/listings.js'
 import { remoteProvider } from '../src/access/providers.js'
 import type { PluginTest } from '../src/plugins/testConnection.js'
 import type { PluginView } from '../src/routes/plugins.js'
@@ -36,12 +38,12 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
   agentSessions()
     let db: Database
     let drop: () => Promise<void>
-    let store: PluginStore
+    let store: PostgresPluginStore
 
     beforeEach(async () => {
       ;({ db, drop } = await throwawayDatabase())
       expect(await db.ready()).toBe(true)
-      store = new PluginStore(db.sql)
+      store = new PostgresPluginStore(db.sql, kek)
     })
     afterEach(async () => {
       await drop()
@@ -57,7 +59,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
             tool_tiers: { recall: 'read' },
             disabled_tools: ['delete_bank'],
           },
-          kek,
         )
         expect(created).toMatchObject({
           name: 'hindsight',
@@ -67,12 +68,12 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           secret_last4: TOKEN.slice(-4),
           tool_tiers: { recall: 'read' },
           disabled_tools: ['delete_bank'],
-          kekId: kek.id,
+          opens: true,
         })
-        await store.create({ name: 'another', url: 'https://other.example/mcp' }, undefined)
+        await store.create({ name: 'another', url: 'https://other.example/mcp' })
         expect((await store.list()).map((p) => p.name)).toEqual(['another', 'hindsight'])
 
-        const updated = await store.update('hindsight', { enabled: true, tool_tiers: { recall: 'read', reflect: 'read' } }, kek)
+        const updated = await store.update('hindsight', { enabled: true, tool_tiers: { recall: 'read', reflect: 'read' } })
         expect(updated).toMatchObject({ enabled: true, tool_tiers: { recall: 'read', reflect: 'read' } })
         expect(updated.secret_last4).toBe(TOKEN.slice(-4)) // kept
 
@@ -82,13 +83,13 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it('refuses a duplicate name, and an update of a missing plugin', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
-        await expect(store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)).rejects.toMatchObject({ status: 409 })
-        await expect(store.update('nope', { enabled: true }, kek)).rejects.toMatchObject({ status: 404 })
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
+        await expect(store.create({ name: 'mem', url: 'https://hs.example/mcp' })).rejects.toMatchObject({ status: 409 })
+        await expect(store.update('nope', { enabled: true })).rejects.toMatchObject({ status: 404 })
       })
 
       it('stores the secret sealed, never in the clear, and never in a summary', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: `Bearer ${TOKEN}` }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: `Bearer ${TOKEN}` })
         const [raw] = await db.sql<{ secret_sealed: Buffer; dek_sealed: Buffer }[]>`
           SELECT secret_sealed, dek_sealed FROM ai_plugins WHERE name = 'mem'`
         expect(raw!.secret_sealed.toString('latin1')).not.toContain(TOKEN)
@@ -96,48 +97,48 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         expect(JSON.stringify(dump)).not.toContain(TOKEN)
         expect(JSON.stringify(await store.list())).not.toContain(TOKEN)
         expect(JSON.stringify(await store.get('mem'))).not.toContain(TOKEN)
-        expect((await store.reveal('mem', kek))?.header).toEqual({ name: 'Authorization', value: `Bearer ${TOKEN}` })
+        expect((await store.reveal('mem'))?.header).toEqual({ name: 'Authorization', value: `Bearer ${TOKEN}` })
       })
 
       it('needs a key to save a secret', async () => {
         await expect(
-          store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN }, undefined),
+          new PostgresPluginStore(db.sql, undefined).create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN }),
         ).rejects.toMatchObject({ status: 503 })
       })
 
       it('binds the secret to the URL: an edited row fails to open instead of sending it elsewhere', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN })
         await db.sql`UPDATE ai_plugins SET url = 'https://attacker.example/mcp' WHERE name = 'mem'`
-        await expect(store.reveal('mem', kek)).rejects.toThrow(SealError)
+        await expect(store.reveal('mem')).rejects.toThrow(SealError)
         await db.sql`UPDATE ai_plugins SET url = 'https://hs.example/mcp' WHERE name = 'mem'`
-        await store.update('mem', { enabled: true }, kek)
-        await expect(store.reveal('mem', otherKek)).rejects.toThrow(SealError)
+        await store.update('mem', { enabled: true })
+        await expect(new PostgresPluginStore(db.sql, otherKek).reveal('mem')).rejects.toThrow(SealError)
         // A plugin that cannot be opened is reported and left out, not loaded without its header.
-        const loaded = await store.enabled(otherKek)
+        const loaded = await new PostgresPluginStore(db.sql, otherKek).enabled()
         expect(loaded.plugins).toEqual([])
         expect(loaded.problems[0]).toMatch(/plugin mem was not loaded/)
       })
 
       it('needs the secret again to change the URL or the header name; secret: null removes it', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN }, kek)
-        await expect(store.update('mem', { url: 'https://new.example/mcp' }, kek)).rejects.toMatchObject({ status: 409 })
-        await expect(store.update('mem', { auth_header: 'X-Api-Key' }, kek)).rejects.toMatchObject({ status: 409 })
-        const moved = await store.update('mem', { url: 'https://new.example/mcp', auth_header: 'X-Api-Key', secret: TOKEN }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN })
+        await expect(store.update('mem', { url: 'https://new.example/mcp' })).rejects.toMatchObject({ status: 409 })
+        await expect(store.update('mem', { auth_header: 'X-Api-Key' })).rejects.toMatchObject({ status: 409 })
+        const moved = await store.update('mem', { url: 'https://new.example/mcp', auth_header: 'X-Api-Key', secret: TOKEN })
         expect(moved).toMatchObject({ url: 'https://new.example/mcp', auth_header: 'X-Api-Key' })
-        expect((await store.reveal('mem', kek))?.header).toEqual({ name: 'X-Api-Key', value: TOKEN })
-        const cleared = await store.update('mem', { secret: null }, kek)
-        expect(cleared).toMatchObject({ auth_header: null, secret_last4: null, kekId: null })
-        expect((await store.reveal('mem', kek))?.header).toBeUndefined()
+        expect((await store.reveal('mem'))?.header).toEqual({ name: 'X-Api-Key', value: TOKEN })
+        const cleared = await store.update('mem', { secret: null })
+        expect(cleared).toMatchObject({ auth_header: null, secret_last4: null, opens: true })
+        expect((await store.reveal('mem'))?.header).toBeUndefined()
         // With no secret, the URL can change freely.
-        expect(await store.update('mem', { url: 'https://third.example/mcp' }, kek)).toMatchObject({
+        expect(await store.update('mem', { url: 'https://third.example/mcp' })).toMatchObject({
           url: 'https://third.example/mcp',
         })
-        await expect(store.update('mem', { auth_header: 'X-Api-Key' }, kek)).rejects.toThrow(/needs a secret/)
+        await expect(store.update('mem', { auth_header: 'X-Api-Key' })).rejects.toThrow(/needs a secret/)
       })
 
       it('validates in the store too, and the table refuses a bad name', async () => {
-        await expect(store.create({ name: 'Bad_Name', url: 'https://hs.example/mcp' }, kek)).rejects.toThrow(PluginError)
-        await expect(store.create({ name: 'mem', url: 'https://hs.example/mcp?t=1' }, kek)).rejects.toThrow(PluginError)
+        await expect(store.create({ name: 'Bad_Name', url: 'https://hs.example/mcp' })).rejects.toThrow(PluginError)
+        await expect(store.create({ name: 'mem', url: 'https://hs.example/mcp?t=1' })).rejects.toThrow(PluginError)
         await expect(
           db.sql`INSERT INTO ai_plugins (name, kind, url) VALUES ('mem__x', 'remote_mcp', 'https://x')`,
         ).rejects.toThrow(/check constraint/)
@@ -145,11 +146,11 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
 
       it('loads only enabled plugins whose endpoint passes the egress check now', async () => {
         for (const name of ['good', 'moved', 'off']) {
-          await store.create({ name, url: `https://${name}.example/mcp` }, kek)
+          await store.create({ name, url: `https://${name}.example/mcp` })
         }
-        await store.update('good', { enabled: true }, kek)
-        await store.update('moved', { enabled: true }, kek)
-        const loaded = await loadEnabledPlugins(store, kek, (host) =>
+        await store.update('good', { enabled: true })
+        await store.update('moved', { enabled: true })
+        const loaded = await loadEnabledPlugins(store, (host) =>
           Promise.resolve(host === 'moved.example' ? ['169.254.169.254'] : ['203.0.113.10']),
         )
         // With the address the check passed, for the forwarder to connect to.
@@ -162,19 +163,19 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           SELECT item, access FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
 
       it('stores tool_tiers, disabled_tools and enabled in ai_access only', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { c: 'write' } }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { c: 'write' } })
         expect(await accessRows('mem')).toEqual([
           { item: '*', access: 'off' },
           { item: 'c', access: 'write' },
         ])
-        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
         expect(await accessRows('mem')).toEqual([
           { item: '*', access: 'on' },
           { item: 'a', access: 'read' },
           { item: 'b', access: 'off' },
         ])
         // Disabled wins over a tier for the same tool.
-        await store.update('mem', { tool_tiers: { a: 'read', b: 'read' } }, kek)
+        await store.update('mem', { tool_tiers: { a: 'read', b: 'read' } })
         expect(await accessRows('mem')).toEqual([
           { item: '*', access: 'on' },
           { item: 'a', access: 'read' },
@@ -183,18 +184,18 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it('enabled() lists a plugin whose ai_access says on, with its tiers and disabled tools from ai_access', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
-        await store.create({ name: 'other', url: 'https://other.example/mcp' }, kek)
-        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
-        const { plugins } = await store.enabled(kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
+        await store.create({ name: 'other', url: 'https://other.example/mcp' })
+        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        const { plugins } = await store.enabled()
         expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
         expect(await store.get('mem')).toMatchObject({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
         expect(await store.get('other')).toMatchObject({ enabled: false })
       })
 
       it('delete forgets the plugin\'s access rows', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' } }, kek)
-        await store.update('mem', { enabled: true }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' } })
+        await store.update('mem', { enabled: true })
         await db.sql`INSERT INTO ai_tool_listings (source, tools) VALUES ('remote:mem', '[]')`
         expect(await store.delete('mem')).toBe(true)
         expect(await accessRows('mem')).toEqual([])
@@ -202,12 +203,12 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it("a URL change drops the old server's listing; any other change keeps it (#4994)", async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
         await db.sql`INSERT INTO ai_tool_listings (source, tools) VALUES ('remote:mem', '[]')`
-        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' } }, kek)
-        await store.update('mem', { url: 'https://hs.example/mcp' }, kek)
+        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' } })
+        await store.update('mem', { url: 'https://hs.example/mcp' })
         expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(1)
-        await store.update('mem', { url: 'https://new.example/mcp' }, kek)
+        await store.update('mem', { url: 'https://new.example/mcp' })
         expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(0)
       })
 
@@ -217,7 +218,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           SELECT item, access, updated_by FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
 
       it('setToolAccess writes ai_access only', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
         await store.setToolAccess('mem', 'b', 'off', UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'a', 'read', UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: { a: 'read' }, disabled_tools: ['b'], enabled: false })
@@ -238,7 +239,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         const names = Array.from({ length: 256 }, (_, i) => `t${i}`)
         await store.create(
           { name: 'mem', url: 'https://hs.example/mcp', disabled_tools: names, tool_tiers: Object.fromEntries(names.map((n) => [`r${n}`, 'read'])) },
-          kek,
         )
         const off = store.setToolAccess('mem', 'x', 'off', UI_CONTEXT)
         await expect(off).rejects.toMatchObject({ name: 'PluginError', status: 400 })
@@ -252,7 +252,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it("setToolAccess attributes only the changed row: the others keep their author and time", async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
         await db.sql`UPDATE ai_access SET updated_by = 'migration:2171', updated_at = now() - interval '1 day'
           WHERE source = 'remote:mem' AND item = 'a'`
         const times = () =>
@@ -268,9 +268,9 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it("a URL-only update keeps every access row's author and time (#4828)", async () => {
-        // Guards PluginStore.writeAccess: it must not write the old columns from ai_access, which
+        // Guards PostgresPluginStore.writeAccess: it must not write the old columns from ai_access, which
         // (with the old mirror trigger in place) would re-attribute every row to migration:2171.
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
         await db.sql`UPDATE ai_access SET updated_by = 'browser:browser', updated_at = now() - interval '1 day' WHERE source = 'remote:mem'`
         const rows = () =>
           db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access WHERE source = 'remote:mem' ORDER BY item`
@@ -278,12 +278,12 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         await db.sql`DELETE FROM ai_access WHERE source = 'remote:mem'`
         await db.sql`INSERT INTO ai_access ${db.sql(saved.map((r) => ({ ...r })) as never)}`
         const before = await rows()
-        await store.update('mem', { url: 'https://hs2.example/mcp' }, kek)
+        await store.update('mem', { url: 'https://hs2.example/mcp' })
         expect(await rows()).toEqual(before)
       })
 
       it('setToolAccess keeps a tool named __proto__ as its own key', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
         await store.setToolAccess('mem', '__proto__', 'read', UI_CONTEXT)
         expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
         // A write to another tool keeps it, and the summary names it.
@@ -294,16 +294,16 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it("a source switch through the tree records the UI's actor", async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
         const caps = new Capabilities([
-          remoteProvider({ plugins: store, listings: new ToolListings(db.sql, db.locks), refresh: () => Promise.reject(new Error('not called')) }),
+          remoteProvider({ plugins: store, listings: new ToolListings(new SqlToolListings(db.sql)), refresh: () => Promise.reject(new Error('not called')) }),
         ])
         expect((await caps.setEnabled('remote:mem', true, UI_CONTEXT)).enabled).toBe(true)
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'on', updated_by: 'browser:browser' }])
       })
 
       it('setToolAccess null removes the tool\'s row', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
         await store.setToolAccess('mem', 'a', null, UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'b', null, UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: {}, disabled_tools: [] })
@@ -312,7 +312,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
 
       it('registers plugins disabled: enabled: true is refused at create', async () => {
         await expect(
-          store.create({ name: 'mem', url: 'https://hs.example/mcp', enabled: true }, kek),
+          store.create({ name: 'mem', url: 'https://hs.example/mcp', enabled: true }),
         ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/review its tools, then enable/) as unknown })
         expect(await store.list()).toEqual([])
       })
@@ -373,7 +373,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         bodies.push(await one.text())
 
         // The switch is the capabilities API's (spec §4.6); the store enables it here.
-        await store.update('hindsight', { enabled: true }, kek)
+        await store.update('hindsight', { enabled: true })
         const enabled = await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })
         bodies.push(await enabled.text())
         expect(JSON.parse(bodies.at(-1)!)).toMatchObject({ enabled: true })
@@ -455,7 +455,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it('checks the endpoint again before a test', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' })
         const testPlugin = vi.fn()
         const a = createApp({
           database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
@@ -487,12 +487,11 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       it('loads the enabled plugins into each turn through the forwarder, reports the unavailable ones, and redacts secrets', async () => {
         await store.create(
           { name: 'hindsight', url: 'https://hs.example/mcp/', secret: `Bearer ${TOKEN}`, tool_tiers: { recall: 'read' } },
-          kek,
         )
-        await store.update('hindsight', { enabled: true }, kek)
-        await store.create({ name: 'moved', url: 'https://moved.example/mcp/' }, kek)
-        await store.update('moved', { enabled: true }, kek)
-        await store.create({ name: 'off', url: 'https://off.example/mcp/' }, kek)
+        await store.update('hindsight', { enabled: true })
+        await store.create({ name: 'moved', url: 'https://moved.example/mcp/' })
+        await store.update('moved', { enabled: true })
+        await store.create({ name: 'off', url: 'https://off.example/mcp/' })
         // The "model" echoes the BARE token, without its Bearer prefix.
         const scripted = scriptedRunner(() => ({ reply: `the token is ${TOKEN}` }))
         const runs: HarnessRun[] = []
@@ -512,7 +511,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           sql: db.sql,
           paths: await tempPaths(),
           run: runner,
-          remotePlugins: async () => forwardForRun(await loadEnabledPlugins(store, kek, resolve), forwarder),
+          remotePlugins: async () => forwardForRun(await loadEnabledPlugins(store, resolve), forwarder),
         })
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
         await turn!.done
@@ -560,7 +559,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
           VALUES ('mem', 'remote_mcp', 'https://hs.example/mcp', true, '{"a":"read"}', ${['b']})`
         await migrate(empty.sql, MIGRATIONS)
-        const { plugins } = await new PluginStore(empty.sql).enabled(kek)
+        const { plugins } = await new PostgresPluginStore(empty.sql, kek).enabled()
         expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
       })
 
@@ -574,7 +573,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
           VALUES ('mem', 'remote_mcp', 'https://hs.example/mcp', true, '{"a":"read"}', ${['b']})`
         await migrate(empty.sql, MIGRATIONS)
-        const { plugins } = await new PluginStore(empty.sql).enabled(kek)
+        const { plugins } = await new PostgresPluginStore(empty.sql, kek).enabled()
         expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
       })
     })
