@@ -137,6 +137,11 @@ def test_a_deny_claim_holds_the_entry_until_released(agent: Agent, tables: PgPoo
     assert _row(tables, rid)["claimed"] is True
     assert agent.post("/escalations/claim-deny", claim) == {"hop_until": None}
     assert agent.post("/escalations/pass-up", claim) == {"moved": False}
+    # A skip leaves an entry a deny holds alone too, with no step added.
+    before = _row(tables, rid)
+    agent.post("/escalations/skip", {"session": parent, "child": [rid], "own": []})
+    assert _row(tables, rid) == before
+    assert before["hop"] == "parent" and before["claimed"] is True
     assert agent.get("/escalations/entry", request_id=rid)["entry"]["claimed"] is True
     # The sweep leaves a fresh claim alone, and the run's queue reads it as `infinity`.
     assert agent.post("/escalations/move-due", {}) == {"moved": 0}

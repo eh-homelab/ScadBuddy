@@ -108,7 +108,7 @@ export const flowTools: Tool[] = [
       '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +
       '`save_output(slug, job_id, name)` (returns the output id), and two that wait for a person to approve them ' +
       'in ScadBuddy: `queue_print(source, request)` (source {output_id} or {file_id}; request is the print ' +
-      "route's body, filament_plan and choices; returns {run_id, status, may_have_queued, error}) and " +
+      "route's body, filament_plan (send ids: 'sb' with the ScadBuddy spool numbers reads return) and choices; returns {run_id, status, may_have_queued, error}) and " +
       "`arrange(request)` (the arrange route's body; returns {job_id, status, output_id, error}). " +
       '`agent(prompt, skills, result_schema, images=None)` starts a durable agent session as the run\'s starter and returns ' +
       'its answer (skills a list, maybe empty; with a JSON Schema the JSON value it answered, else its text), and ' +

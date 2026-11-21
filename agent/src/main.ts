@@ -34,10 +34,9 @@ import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
 import { BackgroundTaskStore, CrudBackgroundTasks } from './background/store.js'
 import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
-import { connectDatabase } from './db.js'
-import { MigrationChecksumError } from './db/schema.js'
-import { CrudEventLogReads } from './events/eventLogReads.js'
-import { PgEventListener } from './events/pgListener.js'
+import { connectDatabase, type Database } from './db.js'
+import { crudLedger, type LedgerReader, MigrationChecksumError, sqlLedger } from './db/schema.js'
+import { ChangeStream } from './events/changeStream.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
 import { ensureStateDirs, removeLegacyBrowserDir, sessionsRoot, StateDirError } from './harness/stateDirs.js'
@@ -71,17 +70,17 @@ import {
   withServiceCredential,
 } from './api/serviceCredential.js'
 import { untilBackendAnswers } from './api/backendUp.js'
-import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, SECRET_AREAS, SESSION_AREAS, TASK_AREAS, WORKSPACE_AREAS } from './api/crudAreas.js'
+import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, RELAY_AREAS, SECRET_AREAS, SESSION_AREAS, START_AREAS, TASK_AREAS, TURN_AREAS, WORKSPACE_AREAS, REST_AREAS, SWEEP_AREAS } from './api/crudAreas.js'
 import { CrudApprovals } from './approvals/crudApprovals.js'
 import { CrudAudit } from './audit/crudAudit.js'
 import { CrudPending } from './gate/crudPending.js'
 import { CrudQuestions } from './gate/crudQuestions.js'
 import { CrudEscalations } from './flows/crudEscalations.js'
 import { CrudGate } from './gate/crudStore.js'
+import { dataHealthOf, ledgerOf } from './api/dataHealth.js'
 import { gated, STORE_AREAS, type StoreArea } from './api/crudStores.js'
 import { CrudFlowRunReads } from './flows/backendReads.js'
-import { BrowserSessions } from './auth/browserSession.js'
-import { sealBackfill } from './sessions/sealBackfill.js'
+import { BrowserSessions, CrudSessionLookup, PgSessionLookup, type SessionLookup } from './auth/browserSession.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { fetchGrantKey, fetchGrantMinter } from './tools/fetchGrant.js'
@@ -92,11 +91,15 @@ import { hostTabs, TemporalTabRelay } from './bridge/relay.js'
 import { CrudTabOwnerStore, PostgresTabOwnerStore, type TabOwnerStore } from './bridge/tabOwners.js'
 import { CrudSessionTabStore, PostgresSessionTabStore, type SessionTabStore } from './bridge/sessionTabs.js'
 import { CrudTabImageStore, PostgresTabImageStore, type TabImageStore } from './bridge/tabImages.js'
-import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
+import { CrudRelayRows, PgRelayRows, type RelayRows } from './mcp/relayRows.js'
+import { SharedMcpSessionRelay } from './mcp/sessionRelay.js'
 import { CrudPairingStore, type PairingStore, PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
+import { CrudPublisher, PgPublisher, type Publisher } from './sessions/publish.js'
+import { CrudSessionReads, PgSessionReads, type SessionReads } from './sessions/sessionReads.js'
+import { CrudSessionPresence, PgSessionPresence, type SessionPresence } from './sessions/presence.js'
 import { resolveTabWaits, SessionManager, type SessionManagerDeps, SETTING_MODEL } from './sessions/manager.js'
 import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
@@ -109,15 +112,17 @@ import { CrudTranscriptRows } from './sessions/crudTranscripts.js'
 import { CrudEventRows } from './sessions/crudEvents.js'
 import { type EventRows, PgEventRows } from './sessions/eventLog.js'
 import { PgTranscriptRows, type TranscriptRows } from './sessions/store.js'
-import { crudCostPoster, OrderCosts, touchedSinks } from './sessions/orderCosts.js'
+import { CrudOrderCostRows, crudCostPoster, OrderCosts, type OrderCostRows, PgOrderCostRows, touchedSinks } from './sessions/orderCosts.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { CrudFlowBlobs, gatedFlowBlobs, PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
-import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, RowSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
 import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
+import { CrudTurnRows, PgTurnRows, type TurnRows } from './sessions/turnRows.js'
+import { CrudEditRows, type EditRows, PgEditRows } from './sessions/edits.js'
 import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
 import { startHostWorkers, stopAfter } from './temporal/session/hostWorkers.js'
@@ -228,22 +233,22 @@ if (previousKek && !previousKek.ok) {
   console.error(`previous secret key: ${previousKek.detail ?? previousKek.reason}; rows sealed under it will not open here`)
 }
 
-const database = config.databaseUrl
+const database: Database | undefined = config.databaseUrl
   ? connectDatabase(config.databaseUrl, {
       onMigrationError: (err) => {
         console.error('the database is not ready:', (err as Error).message)
         // An edited migration is not a transient failure: stop, visibly.
         if (err instanceof MigrationChecksumError) process.exit(1)
       },
+      // The ledger through the API once it lists area `migrations` (#6501), over SQL until then.
+      // Read when ready() asks, after crudAreas and crudTarget below exist.
+      ledger: (sql: Sql): LedgerReader => ledgerOf(crudAreas, crudLedger(crudTarget), sqlLedger)(sql),
     })
   : undefined
-// Migrate in the background: a database that is down at start-up is retried
-// by the next /healthz or API call instead of stopping the pod.
-void database?.ready()
 // #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
-// #5494: exchanged for its proof when one is configured, falling back to the view while the
-// agent has a database (an old backend answers the exchange 404); otherwise read from the view.
-const credentialView = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
+// #5494: exchanged for its proof when one is configured: the API checks the proof, and the agent
+// reads no view (#6501; every API answers the exchange since #5494). Without a proof it is read
+// from the view `service_credentials_agent` over SQL, until #5299 step 12 makes a proof required.
 const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
 const serviceCredential: CredentialSource | undefined =
   proofFile !== undefined
@@ -251,9 +256,10 @@ const serviceCredential: CredentialSource | undefined =
         backendUrl: config.backendUrl,
         proofFile,
         proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap',
-        ...(credentialView ? { fallback: credentialView } : {}),
       })
-    : credentialView
+    : database
+      ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined)
+      : undefined
 // The agent's settings, its Claude credentials and its payload data keys (#5299 step 4, D5) go
 // through the backend's CRUD routes once the API lists their areas, read from the start and
 // again with back-off until it does (api/crudAreas.ts); over SQL until then, as an API pod older
@@ -264,11 +270,17 @@ const serviceCredential: CredentialSource | undefined =
 // gate's writes (#5299 step 10, `GATE_AREAS`), but for a run grant's check, which only the API runs,
 // and the sessions' rows and what their calls touched (#5299 step 9, `SESSION_AREAS`).
 const crudFetch = serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...REST_AREAS, ...TURN_AREAS, ...RELAY_AREAS, ...START_AREAS, ...SWEEP_AREAS] })
 crudAreas.start()
 // The small stores (#5299 step 5, api/crudStores.ts): each through its CRUD routes once the API
 // lists its area, over SQL until then.
 const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
+// Wait for the schema in the background: an API that has not migrated yet, or a database that is
+// down at start-up, is retried by the next /healthz or API call instead of stopping the pod.
+void database?.ready()
+// Health's probe of the agent's data (#6501, api/dataHealth.ts): the Postgres ping and, once the
+// API lists every area, its answer to them too.
+const dataHealth = database ? dataHealthOf(database, crudAreas) : undefined
 const storeArea = (area: StoreArea) => () => crudAreas.has(area)
 // The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py).
 const gateRoutes = { crud: new CrudGate(crudTarget), use: () => crudAreas.has('gate') }
@@ -297,6 +309,25 @@ const transcriptRows = (sql: Sql, keys: PayloadKeys | undefined): TranscriptRows
 // the API lists area `session-events`. An append in a caller's own transaction stays SQL.
 const crudEvents = new CrudEventRows(config.backendUrl, { fetch: crudFetch })
 const eventRows = (sql: Sql): EventRows => gated<EventRows>(new PgEventRows(sql), crudEvents, () => crudAreas.has('session-events'))
+// The NOTIFYs sent outside a store's write and a session's last event reads (#6501, backend
+// api/crud_agent_publish.py): over SQL until the API lists areas `publish` and `session-reads`.
+const crudPublisher = new CrudPublisher(crudTarget)
+const publisher = (sql: Sql): Publisher => gated<Publisher>(new PgPublisher(sql), crudPublisher, () => crudAreas.has('publish'))
+const crudSessionReads = new CrudSessionReads(crudTarget)
+const sessionReads = (sql: Sql): SessionReads => gated<SessionReads>(new PgSessionReads(sql), crudSessionReads, () => crudAreas.has('session-reads'))
+// A durable turn's writes of its session's row with their events (#6449, backend
+// api/crud_agent_turns.py): a send's claim, a placement's, its spend, the turn's end with the
+// queue's head and the sweep's end of a lost turn, over SQL until the API lists area `session-turns`.
+const crudTurns = new CrudTurnRows(config.backendUrl, { fetch: crudFetch })
+const turnRows = (sql: Sql): TurnRows => gated<TurnRows>(new PgTurnRows(sql), crudTurns, () => crudAreas.has('session-turns'))
+// An edit of a session with its events (#6449, backend api/crud_agent_edits.py): over SQL until
+// the API lists area `session-edits`.
+const crudEdits = new CrudEditRows(config.backendUrl, { fetch: crudFetch })
+const editRows = (sql: Sql): EditRows => gated<EditRows>(new PgEditRows(sql), crudEdits, () => crudAreas.has('session-edits'))
+// Which sessions still have a row, for the directory sweeps (#6501): over SQL until the API lists area `session-sweeps`.
+const crudPresence = new CrudSessionPresence(crudTarget)
+const sessionPresence = (sql: Sql): SessionPresence =>
+  gated<SessionPresence>(new PgSessionPresence(sql), crudPresence, () => crudAreas.has('session-sweeps'))
 // The headless browser's approved origins (#982), over `sql` or through area `browser-origins`.
 const browserOriginsOn = (sql: Sql) =>
   new BrowserOrigins(sql, settings, { crud: new CrudSessionOrigins(crudTarget), use: storeArea('browser-origins') })
@@ -380,11 +411,10 @@ const backend = createBackendClient(
 // with the step 4 areas.
 const flowReads = new CrudFlowRunReads(config.backendUrl, { fetch: crudFetch })
 
-// The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
-// of its own, retried in the background, feeding MCP resource subscriptions.
-const events = config.databaseUrl
-  ? new PgEventListener(config.databaseUrl, { eventLog: new CrudEventLogReads(config.backendUrl, { fetch: crudFetch }) })
-  : undefined
+// The event bus (spec §7, #264) and the agent's other NOTIFY channels: one server-sent event
+// stream from the backend's CRUD routes (#5299 D4, events/changeStream.ts), opened with the service
+// credential, retried in the background, feeding MCP resource subscriptions. No LISTEN connection.
+const events = serviceCredential ? new ChangeStream(config.backendUrl, { fetch: crudFetch }) : undefined
 // The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
 const pendingChanges = events ? new PendingChanges(events) : undefined
 // This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
@@ -405,12 +435,23 @@ const tabRelay = database
   : undefined
 // The rows a process before this one left under the same identity (a container restart).
 void tabRelay?.releaseAll()
-// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), on
-// the listener's connection: made before start(), so its first LISTEN covers it.
-const mcpRelay = role.http && database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
+// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), heard on the
+// change stream's `scadbuddy_mcp`. Its directory and
+// messages go through the backend's CRUD routes once the API lists area `mcp-relay` (#5299 step 11,
+// mcp/relayRows.ts), over SQL until then.
+const mcpRelay =
+  role.http && database && events
+    ? new SharedMcpSessionRelay(
+        gated<RelayRows>(new PgRelayRows(database.sql), new CrudRelayRows(crudTarget), () => crudAreas.has('mcp-relay')),
+        { listen: (c, f) => events.listenAlso(c, f) },
+      )
+    : undefined
 // #4975 phase 5 (spec 2026-11-01 §5.6): the signed-in person on /api/v1/ai/*, from the
 // backend's `auth_sessions_agent`; a revocation the backend publishes drops its cache.
-const browserSessions = role.http && database ? new BrowserSessions(database.sql) : undefined
+const browserSessions =
+  role.http && database
+    ? new BrowserSessions(gated<SessionLookup>(new PgSessionLookup(database.sql), new CrudSessionLookup(crudTarget), () => crudAreas.has('auth-sessions')))
+    : undefined
 if (browserSessions && events) browserSessions.follow(events)
 events?.start()
 const resources = new ResourceHub(events)
@@ -458,9 +499,11 @@ toolServices.browser = tabs
 // service credential (#5330, sessions/orderCosts.ts).
 const orderCosts = database
   ? new OrderCosts({
-      sql: database.sql,
-      // The session's report lock is held across its posts on the lock client's own connections.
-      locks: database.locks,
+      // The session's report lock is held across its posts on the lock client's own connections
+      // over SQL, or as a lease row once the API lists area `session-order-costs` (#5299 step 9).
+      rows: gated<OrderCostRows>(new PgOrderCostRows(database.sql, database.locks), new CrudOrderCostRows(crudTarget), () =>
+        crudAreas.has('session-order-costs'),
+      ),
       post: crudCostPoster(config.backendUrl, serviceCredential ? withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) : globalThis.fetch),
       onError: (err) => console.error('order costs: could not record or report:', (err as Error).message),
     })
@@ -606,9 +649,9 @@ const tokens =
     : new FailClosedTokenStore()
 
 // `session.*` on the event bus (#300, sessions/busEvents.ts): every event-log
-// append is announced on `scadbuddy_events`, and this replica's LISTEN
+// append is announced on `scadbuddy_events`, and this replica's change-stream
 // consumer (below) wakes its followers for sessions other replicas write.
-const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
+const sessionEvents = database ? new SessionEventPublisher(publisher(database.sql)) : undefined
 
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
 // a recurring cron job a Schedule, any other a `BackgroundTask` workflow, on agent-tools, that
@@ -640,18 +683,6 @@ if (backgroundClient && backgroundTasks) {
 // by a restart.
 const runtime = await readStartSettings({ database, settings }, console.log)
 if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written until the API lists area `transcripts`')
-// Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
-if (role.http && database && dataKeys) {
-  void database
-    .untilReady()
-    .then(async () => {
-      const { sealed, deleted } = await sealBackfill(database.sql, dataKeys)
-      if (sealed || deleted) console.log(`session transcripts: sealed ${sealed} row(s); deleted ${deleted} of forgotten sessions`)
-    })
-    .catch((err: unknown) => console.error('session transcripts: sealing the existing rows failed; retried at the next start:', (err as Error).message))
-} else if (role.http && database) {
-  console.warn('session transcripts: no secret key, so the existing rows are not sealed')
-}
 // Automatic Hindsight memory's hook knobs for every turn (SessionManager, #2420).
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
@@ -680,6 +711,9 @@ const sessions =
         resourceRows: resourceRows(database.sql),
         transcripts: transcriptRows(database.sql, dataKeys),
         eventRows: eventRows(database.sql),
+        sessionReads: sessionReads(database.sql),
+        publish: publisher(database.sql),
+        editRows: editRows(database.sql),
         pendingRoutes,
         approvalRoutes: { crud: new CrudApprovals(crudTarget), use: () => crudAreas.has('approvals') },
         questionRoutes: { crud: new CrudQuestions(crudTarget), use: () => crudAreas.has('questions') },
@@ -741,7 +775,7 @@ const sessions =
     : undefined
 // A credential, plugin or package change on any replica, and a session handed
 // off, marked done, archived or forgotten, evict warm processes everywhere
-// (sessions/warmEvict.ts): on the event bus's connection, like the relays above.
+// (sessions/warmEvict.ts): on the change stream, like the relays above.
 const stopWarmSync =
   sessions && settings && events
     ? wireRuntimeSync({
@@ -773,7 +807,7 @@ if (attachments) toolServices.attachments = attachments
 const stopAttachmentSweep = !role.http ? undefined : attachments?.startSweeper(ATTACHMENT_SWEEP_MS, {
   log: (message) => console.error(message),
 })
-// The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
+// The change-stream consumer that calls EventLog.wake() for other replicas' `session.*`.
 const stopSessionWake =
   sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
 const stopSweeper = !role.http ? undefined : sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
@@ -857,7 +891,7 @@ const workerDataConverter = dataConverter
 if (database) {
   const sweepRoot = path.join(paths.stateDir, DURABLE_TURNS_DIR)
   const sweep = () =>
-    void sweepTurnDirs(sweepRoot, database.sql).catch((err: unknown) =>
+    void sweepTurnDirs(sweepRoot, sessionPresence(database.sql)).catch((err: unknown) =>
       console.error('durable http body sweep failed:', (err as Error).message),
     )
   sweep()
@@ -891,9 +925,9 @@ const SESSION_HOST_QUEUE = sessionHostQueue(replicaIdentity())
 const durableToolDeps: ToolActivityDeps | undefined = temporal
   ? {
       services: toolServices,
-      sessions: new PgSessionOwners(temporal.sql),
+      sessions: new RowSessionOwners(sessionRows(temporal.sql)),
       approvals: new PgApprovalRecords(temporal.sql, flowReads, pendingRoutes),
-      flows: new PgFlowRuns(temporal.sql, flowReads),
+      flows: new PgFlowRuns(temporal.sql, flowReads, sessionRows(temporal.sql)),
       audit,
       currentTiers: liveTokenTiers(tokens),
       // A result's images, for the durable segment's view_tool_images (#2320).
@@ -909,7 +943,7 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
 // placement. The directories of sessions gone since are swept every hour, by every process that runs turns.
 const sessionDirectory =
   role.sessionHost && workspace
-    ? new SessionDirectory(workspace, sessionsRoot(paths), { sql: database?.sql, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
+    ? new SessionDirectory(workspace, sessionsRoot(paths), { presence: database ? sessionPresence(database.sql) : undefined, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
     : undefined
 // A session's copy goes once its warm process here has: this disk holds the warm sessions' copies only.
 if (sessionDirectory && sessions) {
@@ -921,17 +955,18 @@ if (sessionDirectory && database) {
   const sweep = () =>
     void database
       .ready()
-      .then((ok) => (ok ? sessionDirectory.sweep(database.sql) : []))
+      .then((ok) => (ok ? sessionDirectory.sweep(sessionPresence(database.sql)) : []))
       .catch((err: unknown) => console.error('session directory sweep failed:', (err as Error).message))
   sweep()
   setInterval(sweep, 3600_000).unref()
 }
-// A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
+// A parked call holds on its entry's row, woken by `scadbuddy_input` on the change stream (§5.4).
 const turnHost =
   role.sessionHost && temporal && sessions
     ? new TurnHost({
         core: sessions.turnCore,
         sql: temporal.sql,
+        turns: turnRows(temporal.sql),
         pendingRoutes,
         images: sessionImages(temporal.sql),
         hostQueue: SESSION_HOST_QUEUE,
@@ -939,7 +974,7 @@ const turnHost =
         ...(durableToolDeps ? { runCall: decidedCalls(ALL_TOOLS, durableToolDeps) } : {}),
         // A restarted turn's calls that finished as ToolCall workflows (Step 9.2), read with the client below.
         finishedCalls: (sessionId: string, turnId: string) =>
-          temporalClient ? finishedToolCalls({ sql: temporal.sql, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
+          temporalClient ? finishedToolCalls({ reads: sessionReads(temporal.sql), client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
         // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
@@ -995,9 +1030,9 @@ toolServices.messaging = pluginMessaging({
 })
 const turnToolDeps = temporal
   ? {
-      sessions: new PgSessionOwners(temporal.sql),
+      sessions: new RowSessionOwners(sessionRows(temporal.sql)),
       // A flow's tool(name, ...) reaches the same tools, as the run's starter (#2320).
-      flows: new PgFlowRuns(temporal.sql, flowReads),
+      flows: new PgFlowRuns(temporal.sql, flowReads, sessionRows(temporal.sql)),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         access: accessResolver,
@@ -1130,7 +1165,7 @@ const temporalWorker =
           ...toolCallActivities(ALL_TOOLS, durableToolDeps),
           ...gateActivities({
             audit,
-            sessions: new PgSessionOwners(temporal.sql),
+            sessions: new RowSessionOwners(sessionRows(temporal.sql)),
             workspace,
             // A tool that resolves what it names parks that, by name (#4442).
             tools: ALL_TOOLS,
@@ -1142,14 +1177,14 @@ const temporalWorker =
           // Its events through this replica's event log, so they wake its followers at once and
           // go on the bus under its id (#3365); with no session manager, a log that only publishes.
           ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend, gateRoutes), settings),
-          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events, orderCosts, sessionImages(temporal.sql)) : {}),
+          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events, orderCosts, sessionImages(temporal.sql), turnRows(temporal.sql)) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
-          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql, flowReads), events: eventRows(temporal.sql) }),
+          ...flowSessionActivities({ sql: temporal.sql, sessions: sessionRows(temporal.sql), flows: new PgFlowRuns(temporal.sql, flowReads, sessionRows(temporal.sql)), events: eventRows(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
           ...(background ?? {}),
         },
@@ -1265,6 +1300,7 @@ if (sessions && temporalClient && payloadKeys && database) {
     client: temporalClient,
     sql: database.sql,
     blobs: sessionImages(database.sql),
+    turns: turnRows(database.sql),
     events: sessions.events,
     audit,
     pendingRoutes,
@@ -1276,6 +1312,7 @@ const stopDurableSweep =
   role.http && sessions && temporalClient && database
     ? new DurableRunningSweep({
         sql: database.sql,
+        turns: turnRows(database.sql),
         events: sessions.events,
         describe: durableDescriber(temporalClient),
       }).start(
@@ -1378,7 +1415,7 @@ if (pushDispatcher && database) {
 const app = !role.http
   ? undefined
   : createApp({
-  database,
+  database: dataHealth,
   backend: () => backendReachable(backend),
   ...(workspaceBytesStatus ? { workspaceBytes: workspaceBytesStatus } : {}),
   kek,
@@ -1414,6 +1451,8 @@ const app = !role.http
   // Settings → Orders' messaging binding check and test send (#5660, routes/messagingBinding.ts).
   orderMessaging: toolServices.messaging,
   orderSends: { backend: toolServices.backend, messaging: toolServices.messaging },
+  // The invoice page's Import button (#6267, routes/invoiceImport.ts).
+  invoiceImport: { backend: toolServices.backend },
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
@@ -1459,7 +1498,7 @@ const app = !role.http
 const health = role.http
   ? undefined
   : workerHealthApp({
-      ...(database ? { database } : {}),
+      ...(dataHealth ? { database: dataHealth } : {}),
       kek,
       workers: () =>
         Object.fromEntries(

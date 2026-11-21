@@ -27,6 +27,13 @@ Two kinds of key:
   the entry, as the SQL path holds the transaction lock on
   ``hashtextextended('scadbuddy:attention-rate', 0)``. An acquire also tries that lock as a
   transaction lock: while an SQL pod counts, the lease is ``busy``.
+- ``order-cost:<session id>``: a session's report of its assistant spend to its orders
+  (``agent/src/sessions/orderCosts.ts`` ``report``, #5299 step 9). It replaces the session
+  advisory lock on ``hashtextextended('ai_session_order_costs:<session id>', 0)``, which an
+  agent pod still on SQL takes, so an acquire also tries it as a transaction lock: while such a
+  pod reports the session, the lease is ``busy``. An SQL pod does not read this table, so during
+  a rolling deploy it can report while a lease holds; the worst case is one share sent twice,
+  which the backend's ``ai_session:<id>`` source writes once.
 
 A holder names its lease by a token of its own. An acquire by the holder answers it held;
 a renew or release sent again renews or deletes what the first did. A lease past its
@@ -48,13 +55,17 @@ MAX_TTL = 300.0
 #: The keys the agent may take: a listing's source, a remote plugin's name.
 KEY_PATTERN = (
     r"^(tool-listing:(remote:[a-z][a-z0-9-]{0,30}[a-z0-9]|package:[^\x00-\x1f]{1,400})"
-    r"|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9]|attention-rate)$"
+    r"|plugin-oauth:[a-z][a-z0-9-]{0,30}[a-z0-9]|attention-rate"
+    r"|order-cost:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
 _KEY = re.compile(KEY_PATTERN)
 #: The prefix of the advisory lock key the SQL path takes (``access/listings.ts``).
 ADVISORY_PREFIX = "scadbuddy:ai_tool_listings:test:"
 #: The SQL path's attention rate lock (``agent/src/gate/questions.ts`` ``ATTENTION_RATE_LOCK``).
 ATTENTION_RATE_LOCK = "scadbuddy:attention-rate"
+#: The prefix of the advisory lock key the SQL path takes for a session's order-cost report
+#: (``sessions/orderCosts.ts`` ``LOCK_PREFIX``).
+ORDER_COST_PREFIX = "ai_session_order_costs:"
 
 
 def valid_key(key: str) -> bool:
@@ -77,9 +88,15 @@ def acquire(
     transaction. ``wait`` (seconds) bounds the wait for an SQL pod's grant row lock; past
     it the lease is busy."""
     name = advisory_name(key)
-    lock = ATTENTION_RATE_LOCK if key == "attention-rate" else None
-    if name is not None:
-        lock = ADVISORY_PREFIX + name
+    lock = (
+        ADVISORY_PREFIX + name
+        if name is not None
+        else ATTENTION_RATE_LOCK
+        if key == "attention-rate"
+        else ORDER_COST_PREFIX + key[len("order-cost:") :]
+        if key.startswith("order-cost:")
+        else None
+    )
     if lock is not None:
         row = conn.execute(
             "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS held", (lock,)

@@ -129,6 +129,14 @@ BED_TYPES: dict[str, tuple[str, ...]] = {bed_types}
 #: by-object plate whose objects sit closer than the radius, or where more than one is
 #: taller than the rod (the gantry) or any is taller than the lid.
 CLEARANCES: dict[str, tuple[float, float, float]] = {clearances}
+
+#: ``printer_model`` -> (``extruder_clearance_max_radius``, ``nozzle_height``, the
+#: largest ``z_hop``), mm: what a prime tower printed with ``wipe_tower_no_sparse_layers``
+#: must keep from the objects (#6735). Bambu Studio refuses to slice a plate whose
+#: objects taller than ``nozzle_height`` stand closer to the tower than the radius
+#: (``compacted_wipe_tower_clearance`` in ``Print.cpp``); the tower is grown by the
+#: spiral lift ``z_hop`` sets first (``compacted_wipe_tower_zone``).
+TOWER_KEEP_OUTS: dict[str, tuple[float, float, float]] = {keep_outs}
 """
 
 
@@ -225,32 +233,49 @@ def collect(root: Path) -> dict[str, tuple[Any, ...]]:
     return table
 
 
-def collect_clearances(root: Path) -> dict[str, tuple[float, float, float]]:
-    """Each model's toolhead and gantry clearance, from its resolved machine profiles."""
+def _number(value: Any) -> float:
+    """A profile value as one number: a per-extruder list by its largest entry."""
+    if isinstance(value, list):
+        return max(float(item) for item in value)
+    return float(value)
+
+
+def _collect_numbers(root: Path, keys: tuple[str, ...], what: str) -> dict[str, tuple[float, ...]]:
+    """Each model's ``keys``, from its resolved machine profiles."""
     files = _load_profiles(root)
-    keys = (
-        "extruder_clearance_radius",
-        "extruder_clearance_height_to_rod",
-        "extruder_clearance_height_to_lid",
-    )
-    table: dict[str, tuple[float, float, float]] = {}
+    table: dict[str, tuple[float, ...]] = {}
     for stem in sorted(files):
         raw = json.loads(files[stem].read_text(encoding="utf-8"))
         if raw.get("type") != "machine" or " template " in stem:
             continue
         resolved = _resolve(stem, files)
         model = resolved.get("printer_model")
-        if not model or any(resolved.get(key) in (None, "") for key in keys):
+        if not model or any(resolved.get(key) in (None, "", []) for key in keys):
             continue
-        radius, rod, lid = (float(resolved[key]) for key in keys)
-        entry = (radius, rod, lid)
+        entry = tuple(_number(resolved[key]) for key in keys)
         previous = table.setdefault(model, entry)
         if previous != entry:
             raise SystemExit(
-                f"{model}: nozzle variants disagree on clearances; the table's "
+                f"{model}: nozzle variants disagree on {what}; the table's "
                 "one-entry-per-model shape no longer holds"
             )
     return table
+
+
+def collect_clearances(root: Path) -> dict[str, tuple[float, ...]]:
+    """Each model's toolhead and gantry clearance, from its resolved machine profiles."""
+    keys = (
+        "extruder_clearance_radius",
+        "extruder_clearance_height_to_rod",
+        "extruder_clearance_height_to_lid",
+    )
+    return _collect_numbers(root, keys, "clearances")
+
+
+def collect_keep_outs(root: Path) -> dict[str, tuple[float, ...]]:
+    """Each model's "No sparse layers" prime tower keep-out (#6735)."""
+    keys = ("extruder_clearance_max_radius", "nozzle_height", "z_hop")
+    return _collect_numbers(root, keys, "tower keep-outs")
 
 
 def collect_bed_types(root: Path) -> dict[str, tuple[str, ...]]:
@@ -302,6 +327,7 @@ def main() -> None:
         labels=_mapping(BED_TYPE_LABELS),
         bed_types=_mapping({model: bed_types[model] for model in sorted(table)}),
         clearances=_mapping(dict(sorted(collect_clearances(root).items()))),
+        keep_outs=_mapping(dict(sorted(collect_keep_outs(root).items()))),
     )
     OUTPUT.write_text(HEADER + body + footer, encoding="utf-8")
     # The rows are far past the 100-column limit as one line each; ruff owns the

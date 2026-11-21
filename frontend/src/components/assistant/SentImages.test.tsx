@@ -122,6 +122,13 @@ describe('sent images (#1891)', () => {
     for (const src of sources) expect(src).not.toMatch(/^data:/)
   })
 
+  it('counts images only, so a PDF does not make "Image 1 of 1" read "Image 2 of 2"', () => {
+    const pdf = { name: `${'c'.repeat(64)}.pdf`, mediaType: 'application/pdf' as const }
+    render(<SentImages images={[pdf, preview('a')]} sessionId={SESSION} />)
+    expect(screen.getByRole('button', { name: 'View image 1 of 1 larger' })).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'Image 1 of 1' })).toBeInTheDocument()
+  })
+
   it('opens from the keyboard and shows the preview enlarged for a turn that names no stored image', async () => {
     const user = userEvent.setup()
     render(<SentImages images={[preview('a'), preview('b')]} sessionId={SESSION} />)
@@ -136,5 +143,42 @@ describe('sent images (#1891)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Close' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('button', { name: 'View image 2 of 2 larger' })).toHaveFocus())
+  })
+
+  it('shows a PDF as a file chip that names it and says PDF, linking to the blob (#6267)', () => {
+    const name = `${'c'.repeat(64)}.pdf`
+    render(<SentImages images={[{ name, mediaType: 'application/pdf' }]} sessionId={SESSION} />)
+    const link = within(screen.getByRole('list', { name: 'Images sent' })).getByRole('link')
+    expect(link).toHaveAttribute('href', blobUrl(SESSION, name))
+    expect(link).toHaveTextContent('Invoice PDF')
+    expect(link).not.toHaveTextContent(name)
+    expect(link).toHaveTextContent('PDF')
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+  })
+
+  it('names a PDF chip by the file the person uploaded when the turn carries it', () => {
+    const name = `${'c'.repeat(64)}.pdf`
+    render(<SentImages images={[{ name, mediaType: 'application/pdf', fileName: 'Bambu order 4411.pdf' }]} sessionId={SESSION} />)
+    const link = within(screen.getByRole('list', { name: 'Images sent' })).getByRole('link')
+    expect(link).toHaveTextContent('Bambu order 4411.pdf')
+    expect(link).toHaveAttribute('href', blobUrl(SESSION, name))
+  })
+
+  it('shows an image with no preview by its full image (#6267)', () => {
+    const name = `${'d'.repeat(64)}.png`
+    render(<SentImages images={[{ name, mediaType: 'image/png' }]} sessionId={SESSION} />)
+    expect(screen.getByRole('img', { name: 'Image 1 of 1' })).toHaveAttribute('src', blobUrl(SESSION, name))
+  })
+
+  it('does not call an image with no preview a preview when its full image fails to load (#6267)', async () => {
+    const user = userEvent.setup()
+    const name = `${'d'.repeat(64)}.png`
+    render(<SentImages images={[{ name, mediaType: 'image/png' }]} sessionId={SESSION} />)
+    await user.click(screen.getByRole('button', { name: 'View image 1 of 1 larger' }))
+    const dialog = screen.getByRole('dialog', { name: 'Image 1 of 1' })
+    fireEvent.error(within(dialog).getByAltText('Image 1 of 1, as sent'))
+    expect(dialog).toHaveTextContent(/the image could not be loaded/i)
+    expect(dialog).not.toHaveTextContent(/preview/i)
+    expect(within(dialog).queryByRole('img', { name: /preview/ })).not.toBeInTheDocument()
   })
 })

@@ -87,6 +87,30 @@ describe('analyzer tools (#4966)', () => {
     expect(bodies).toEqual([{ target: { slug: 'keychain', params: { name: 'Ada' } }, request: {}, detail: 'simple' }])
   })
 
+  it("run_analyzers sends the print's prime tower only when it is given (#6721)", async () => {
+    const bodies = posted('/api/v1/analyzers/run', { diagnostics: [] })
+    await runTool(tool('run_analyzers'), { output_id: OUTPUT, prime_tower: { enabled: true } }, ctx('read'))
+    await runTool(tool('run_analyzers'), { output_id: OUTPUT }, ctx('read'))
+    expect(bodies[0]).toMatchObject({ request: { prime_tower: { enabled: true } } })
+    expect((bodies[1] as { request: object }).request).not.toHaveProperty('prime_tower')
+  })
+
+  it("preview_analyzer_fix sends the print's prime tower in the shared request (#6725)", async () => {
+    const bodies = posted('/api/v1/analyzers/fixes/preview', { fingerprint: FINGERPRINT })
+    await runTool(
+      tool('preview_analyzer_fix'),
+      {
+        output_id: OUTPUT,
+        diagnostic_key: 'SB4001',
+        fix_id: 'turn-off-tower',
+        scope: { kind: 'print', key: OUTPUT },
+        prime_tower: { enabled: false },
+      },
+      ctx('read'),
+    )
+    expect(bodies).toEqual([expect.objectContaining({ request: { prime_tower: { enabled: false } } })])
+  })
+
   it('run_analyzers refuses no subject or two, before calling the backend', async () => {
     for (const args of [{}, { output_id: OUTPUT, library_file_id: 4 }]) {
       const result = await runTool(tool('run_analyzers'), args, ctx('read'))

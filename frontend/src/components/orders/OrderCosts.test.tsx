@@ -6,7 +6,7 @@ import type { Fulfilment } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
-import { BROWSER, ITEM_APPROVED, ORDER_ACCEPTED, QUOTE_ACCEPTED, state } from '../../mocks/features/orders/state'
+import { BROWSER, ITEM_APPROVED, ORDER_ACCEPTED, ORDER_CLOSED, QUOTE_ACCEPTED, state } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { timerKey } from './CostEntryForms'
 import { MarginBadge, OrderCosts } from './OrderCosts'
@@ -65,7 +65,7 @@ describe('OrderCosts', () => {
 
     await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
     const attempts = await screen.findByRole('list', { name: 'Attempts' })
-    expect(within(attempts).getByText(/Attempt 1 \(production, failed\): 7.5 g · 8m · filament \$0.15 · machine \$0.00 · estimated machine rate/)).toBeInTheDocument()
+    expect(within(attempts).getAllByRole('listitem')[0]).toHaveTextContent(/Attempt 1 \(production, failed\): 7.5 g · 8m · filament \$0.15 · machine \$0.00 \(estimate\) · estimated machine rate/)
     // The order adds its shipping charge to what was charged.
     expect(within(screen.getByRole('row', { name: 'Order total' })).getByText('$35.00')).toBeInTheDocument()
   })
@@ -215,5 +215,37 @@ describe('MarginBadge', () => {
     expect(screen.getByText('Thin margin')).toBeInTheDocument()
     rerender(<MarginBadge state="ok" />)
     expect(screen.queryByText(/Loss|Thin/)).toBeNull()
+  })
+})
+
+// #6665 (machine-rate actuals spec §6): which rate priced each attempt's machine time.
+describe('OrderCosts · the machine-rate tag (#5774)', () => {
+  beforeEach(() => resetMockState())
+
+  function ClosedCard() {
+    const view = useAsync(() => api.orderCosts(ORDER_CLOSED), [])
+    return view.data ? <OrderCosts costs={view.data} onChanged={view.refresh} /> : null
+  }
+
+  it('tags each machine figure actuals or estimate with its confidence, and names the source on hover', async () => {
+    const { user } = renderPage(<ClosedCard />)
+    expect(await screen.findByText('Machine time partly priced from actuals.')).toBeInTheDocument()
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+    const attempts = await screen.findByRole('list', { name: 'Attempts' })
+    const actual = within(attempts).getByText('actuals, 66 % confidence')
+    const estimate = within(attempts).getByText('estimate, 33 % confidence')
+    expect(actual).toHaveAttribute('title', 'Today’s rate for the printer')
+    expect(estimate).toHaveAttribute('title', 'Today’s rate for the printer')
+    expect(actual.closest('li')).toHaveTextContent(/machine \$0\.92 \(actuals, 66 % confidence\)/)
+  })
+
+  it('says nothing about actuals when no attempt used them', async () => {
+    attempt(1, 'failed', 7.5)
+    const { user } = renderPage(<Card />)
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+    await screen.findByRole('list', { name: 'Attempts' })
+    expect(screen.queryByText(/priced from actuals/)).toBeNull()
   })
 })

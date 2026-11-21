@@ -6,7 +6,8 @@ library file downloads its bytes, wrapping an STL in a 3MF of ScadBuddy's own.
 
 Everything after that is one pipeline (:class:`PrintPipeline`), the same for both: the
 3MF is laid out for the printer chosen as whoever laid it out allows (replated for the
-plate, #105, when ScadBuddy did; an author's placement and plates kept), states the
+plate, #105, when ScadBuddy did; an author's plates kept, each moved as one group
+where every extruder reaches, as Bambu Studio adapts a project, #6820), states the
 nozzle side (#834) and each side's flow (#484), is recolored for the spools (#476) and
 uploaded into the project's folder (#79) as a copy recorded under the subject (#316);
 each queued plate is recorded by its :class:`PrintSubject` (#1750), its slice against
@@ -74,6 +75,7 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartOverrides,
     PartSettingsUnwritableError,
+    PlateOverrides,
     part_settings_slots,
     plates_of,
     stl_3mf,
@@ -202,18 +204,25 @@ class PrintSource(Protocol):
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
-        tray_colours: Mapping[int, str] | None = None,
+        chosen_colours: Mapping[int, str] | None = None,
         native_copy: bool = False,
         printer_model: str | None = None,
         attempt_since: datetime | None = None,
         part_settings: PartOverrides | None = None,
+        tower_on: bool = False,
+        plate_settings: PlateOverrides | None = None,
     ) -> PrintFile:
         """The library file the run slices: laid out for the printer and copied into
         Bambuddy's library, or with ``native_copy`` into ScadBuddy's own (#3818 tier A
         Task 4), which needs no ``client`` and lays out for ``printer_model``.
+        ``chosen_colours`` is the colour of each id ``plan`` may name (`_spool_colours`).
         ``attempt_since`` is when the run's first attempt was scheduled: only a native
         upload made since then is an earlier attempt's (#4312 re-review N-a).
-        ``part_settings`` are written into the copy as per-part overrides (#5571)."""
+        ``part_settings`` are written into the copy as per-part overrides (#5571).
+        ``tower_on``: the print turns the prime tower on over a file that states it off,
+        so the copy keeps room for it (``send.Target.tower_on``, #3770).
+        ``plate_settings`` are the print's overrides a plate can state, written over the
+        plates' own values (``send.Target.plate_settings``, #6820)."""
         ...
 
     async def record(
@@ -305,27 +314,18 @@ async def _fetch_once(source: _Fetching, client: BambuddyClient | None) -> _Fetc
     return _Fetched(payload, stated)
 
 
-async def _spool_colours(
-    client: BambuddyClient | None,
-    colours: list[str],
-    plan: FilamentPlan,
-    trays: Mapping[int, str] | None = None,
+def _spool_colours(
+    colours: list[str], plan: FilamentPlan, chosen: Mapping[int, str] | None = None
 ) -> list[str] | None:
-    """One colour per filament of the file: the chosen spool's, or the file's own for a
-    slot with no spool (#476). ``None`` when no spool is chosen at all, which leaves the
-    file in its own colours. Without a ``client`` (a native run, #3818) only trays are
-    chosen, so Bambuddy's spools are not read."""
+    """One colour per filament of the file: the chosen spool's (``chosen``, by the id the
+    plan names: an SB spool's number or a tray chosen for itself, #2164, #6262 Task 7), or
+    the file's own for a slot with no spool or none known (#476). ``None`` when no spool
+    is chosen at all, which leaves the file in its own colours."""
     if not plan.slots:
         return None
-    rgba: dict[int, str | None] = (
-        {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
-        if client is not None
-        else {}
-    )
-    # A tray chosen for itself (#2164) prints in the tray's colour.
-    rgba.update(trays or {})
+    known = chosen or {}
     return [
-        rgba.get(plan.spool_for(index + 1) or 0) or colour for index, colour in enumerate(colours)
+        known.get(plan.spool_for(index + 1) or 0) or colour for index, colour in enumerate(colours)
     ]
 
 
@@ -583,11 +583,13 @@ class PrintPipeline:
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
         filament_map: FilamentMap | None = None,
-        tray_colours: Mapping[int, str] | None = None,
+        chosen_colours: Mapping[int, str] | None = None,
         native_copy: bool = False,
         printer_model: str | None = None,
         attempt_since: datetime | None = None,
         part_settings: PartOverrides | None = None,
+        tower_on: bool = False,
+        plate_settings: PlateOverrides | None = None,
     ) -> PrintFile:
         uploads, settings = PrintPipeline._stores(self)
         if native_copy:
@@ -602,10 +604,12 @@ class PrintPipeline:
                 nozzle_stats=nozzle_stats,
                 nozzle_volume_type=nozzle_volume_type,
                 filament_map=filament_map,
-                tray_colours=tray_colours,
+                chosen_colours=chosen_colours,
                 printer_model=printer_model,
                 attempt_since=attempt_since,
                 part_settings=part_settings,
+                tower_on=tower_on,
+                plate_settings=plate_settings,
             )
         if client is None:
             raise _misuse("a copy in Bambuddy's library needs a Bambuddy client")
@@ -624,6 +628,8 @@ class PrintPipeline:
         if (
             self.origin_id is not None
             and part_settings is None
+            and not tower_on
+            and not plate_settings
             and (fetched.payload is None or (not fetched.stated and folder_id is None))
         ):
             # Nothing to lay out, or nothing that would change it: the file in Bambuddy
@@ -636,11 +642,13 @@ class PrintPipeline:
             settings,
             printer_id=printer_id,
             nozzle_diameter=nozzle_size,
-            colours=await _spool_colours(client, list(self.colours), plan, tray_colours),
+            colours=_spool_colours(list(self.colours), plan, chosen_colours),
             nozzle_stats=nozzle_stats,
             nozzle_volume_type=nozzle_volume_type,
             filament_map=filament_map,
             part_settings=part_settings,
+            tower_on=tower_on,
+            plate_settings=plate_settings,
         )
         file_id = await ensure_uploaded(
             client,
@@ -665,10 +673,12 @@ class PrintPipeline:
         nozzle_stats: list[str] | None,
         nozzle_volume_type: list[str] | None,
         filament_map: FilamentMap | None,
-        tray_colours: Mapping[int, str] | None,
+        chosen_colours: Mapping[int, str] | None,
         printer_model: str | None,
         attempt_since: datetime | None,
         part_settings: PartOverrides | None = None,
+        tower_on: bool = False,
+        plate_settings: PlateOverrides | None = None,
     ) -> PrintFile:
         """:meth:`file_to_print` on a native run (#3818 tier A Task 4): the copy is laid
         out as Bambuddy's is, for ``printer_model`` with no printer list read, and goes
@@ -697,12 +707,14 @@ class PrintPipeline:
             settings,
             printer_id=printer_id,
             nozzle_diameter=nozzle_size,
-            colours=await _spool_colours(client, list(self.colours), plan, tray_colours),
+            colours=_spool_colours(list(self.colours), plan, chosen_colours),
             nozzle_stats=nozzle_stats,
             nozzle_volume_type=nozzle_volume_type,
             filament_map=filament_map,
             model=printer_model,
             part_settings=part_settings,
+            tower_on=tower_on,
+            plate_settings=plate_settings,
         )
         file_id = await ensure_native_copy(
             native,

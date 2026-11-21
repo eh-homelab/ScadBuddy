@@ -43,7 +43,9 @@ MAX_TEXT_BODY_BYTES = 8 * 1024 * 1024
 MAX_MULTIPART_BODY_BYTES = 32 * 1024 * 1024
 
 #: The gated content types and what each may carry. A url-encoded form holds no
-#: files, so it gets the text ceiling; anything else is not a body any route reads.
+#: files, so it gets the text ceiling. A body with no Content-Type, or one outside this
+#: table, gets the text ceiling too (#6861): FastAPI reads a body with no type as JSON, so
+#: leaving the header out must not skip the cap. A route that reads more has a `RouteLimit`.
 BODY_LIMITS: Mapping[str, int] = {
     "application/json": MAX_TEXT_BODY_BYTES,
     "text/plain": MAX_TEXT_BODY_BYTES,
@@ -63,6 +65,8 @@ ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/prints/\d+/attachments$")
 ORDER_ATTACHMENT_UPLOAD_PATH = re.compile(
     r"^/api/v1/orders/[^/]+(?:/items/[^/]+(?:/(?:fulfilments|revisions)/[^/]+)?)?/attachments$"
 )
+#: A filament invoice's file (#6266): as large as a template's media.
+INVOICE_FILE_UPLOAD_PATH = re.compile(r"^/api/v1/filament/invoices/[^/]+/file$")
 #: A mesh model's upload (#2146): a 3MF up to the library download cap, streamed like
 #: a media upload, so it has its own limit in place of the multipart cap.
 MESH_UPLOAD_PATH = re.compile(r"^/api/v1/models/from-mesh/upload$")
@@ -98,7 +102,11 @@ class _BodyTooLargeError(Exception):
 
 
 class BodySizeGate:
-    """Refuse a gated body larger than its content type's limit with a 413 problem.
+    """Refuse a gated body larger than its limit with a 413 problem.
+
+    A route with a `RouteLimit` gets that limit, whatever its content type. Any other
+    body gets its content type's limit from ``limits``; a body with no type, or a type
+    ``limits`` does not list, gets `MAX_TEXT_BODY_BYTES`.
 
     A declared length is judged on the headers alone. An undeclared one is counted
     chunk by chunk, and reading stops at the first chunk that crosses the limit.
@@ -121,7 +129,7 @@ class BodySizeGate:
             return
         headers = Headers(scope=scope)
         route = next((route for route in self.routes if route.matches(scope)), None)
-        limit: int | None
+        limit: int
         if route is not None:
             # Whatever the content type: the route's limit is the only one it has.
             limit = route.limit() if callable(route.limit) else route.limit
@@ -132,12 +140,9 @@ class BodySizeGate:
             declared_too_large = too_large
         else:
             kind = headers.get("content-type", "").split(";")[0].strip().lower()
-            limit = self.limits.get(kind)
+            limit = self.limits.get(kind, MAX_TEXT_BODY_BYTES)
             too_large = f"the body passed {limit} bytes, which is the most this API reads"
             declared_too_large = ""
-        if limit is None:
-            await self.app(scope, receive, send)
-            return
         declared = headers.get("content-length", "")
         if declared.isdigit():
             if int(declared) > limit:

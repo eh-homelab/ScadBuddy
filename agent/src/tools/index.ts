@@ -10,6 +10,7 @@ import { farmTools } from './farm.js'
 import { printerTools } from './printers.js'
 import { fileTools } from './files.js'
 import { filamentTools } from './filament.js'
+import { filamentPurchasingTools } from './filamentPurchasing.js'
 import { flowTools } from './flows.js'
 import { flowTriggerTools } from './flowTriggers.js'
 import { guideTools } from './guide.js'
@@ -17,7 +18,6 @@ import { historyTools } from './history.js'
 import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { meshModelTools } from './meshModels.js'
-import { nativeSpoolTools } from './nativeSpools.js'
 import { orderTools } from './orders.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
@@ -69,8 +69,8 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...farmTools,
   ...analyzerTools,
   ...traySpoolTools,
-  ...nativeSpoolTools,
   ...filamentTools,
+  ...filamentPurchasingTools,
   ...printerTools,
   ...browserTools,
   ...delegationTools,

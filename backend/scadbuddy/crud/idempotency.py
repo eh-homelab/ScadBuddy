@@ -1,4 +1,5 @@
-"""The idempotency ledger of the CRUD routes' non-natural writes (#5298, plan D5).
+"""The idempotency ledger of the CRUD routes' non-natural writes (#5298, plan D5), and
+of the spools' CSV import (`api/filament.py`, #6262 Task 15).
 
 A write whose retry after a lost answer would change the state or the answer takes an
 ``Idempotency-Key``. A route runs it through `idempotent_write`, which opens the write's
@@ -20,7 +21,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Annotated, Any, Final
+from typing import Annotated, Any, Final, Literal
 
 from fastapi import Header
 from psycopg import Connection
@@ -29,6 +30,11 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import CrudCaller
+
+#: Who a ledger row is keyed under: a CRUD caller, or a public route's area whose
+#: writes take a person's key (``filament``: the spools' CSV import, #6262 Task 15, which
+#: keys the person into the key itself).
+LedgerCaller = CrudCaller | Literal["filament"]
 
 #: How long a reply is kept for a retry (D5).
 RETENTION: Final = timedelta(hours=24)
@@ -72,7 +78,7 @@ def _digest(body: Any) -> str:
 
 
 def idempotent(
-    conn: Connection[DictRow], caller: CrudCaller, key: str, route: str, body: Any
+    conn: Connection[DictRow], caller: LedgerCaller, key: str, route: str, body: Any
 ) -> Replay | None:
     """In the write's transaction, before it: the stored reply of ``key``, or None when
     the key is new (then write, and `record` the reply in the same transaction). It holds
@@ -86,7 +92,7 @@ def idempotent(
 
 
 def stored(
-    conn: Connection[DictRow], caller: CrudCaller, key: str, route: str, body: Any
+    conn: Connection[DictRow], caller: LedgerCaller, key: str, route: str, body: Any
 ) -> Replay | None:
     """The reply stored under ``key``, read with no lock: what a route looks up before
     any other work, so a retry gets the first answer whatever changed since. None when
@@ -107,7 +113,7 @@ def stored(
     return Replay(row["status"], row["body"])
 
 
-def has_reply(conn: Connection[DictRow], caller: CrudCaller, key: str, route: str) -> bool:
+def has_reply(conn: Connection[DictRow], caller: LedgerCaller, key: str, route: str) -> bool:
     """Whether ``key`` holds a committed reply of ``route``, whatever its body: what a
     route reads before a refusal it makes ahead of the body, so a retry still reaches
     `stored` and its first answer."""
@@ -120,7 +126,7 @@ def has_reply(conn: Connection[DictRow], caller: CrudCaller, key: str, route: st
 
 def record(
     conn: Connection[DictRow],
-    caller: CrudCaller,
+    caller: LedgerCaller,
     key: str,
     route: str,
     body: Any,
@@ -136,7 +142,7 @@ def record(
 
 def idempotent_write(
     conn: Connection[DictRow],
-    caller: CrudCaller,
+    caller: LedgerCaller,
     key: str,
     route: str,
     body: Any,
@@ -154,7 +160,7 @@ def idempotent_write(
         return reply
 
 
-def forget(conn: Connection[DictRow], caller: CrudCaller, key: str, route: str) -> None:
+def forget(conn: Connection[DictRow], caller: LedgerCaller, key: str, route: str) -> None:
     """Drop ``key``'s reply of ``route``, in the caller's transaction: for a write undone
     after its commit (a presign whose watchers could not start), so a retry of the key
     writes afresh instead of answering what no longer stands."""

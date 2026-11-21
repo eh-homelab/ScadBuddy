@@ -81,6 +81,7 @@ from scadbuddy.bambuddy.library_objects import (
     read_library_objects,
 )
 from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.bambuddy.print_run import registry_printer
 from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.bambuddy.project_file import (
@@ -423,6 +424,12 @@ class ArrangeRequest(BaseModel):
     #: What reading each plain library file may spend (#2087), each omitted budget the
     #: setting's; none past its ceiling.
     read_budget: ReadBudgetOverride | None = None
+    #: The print's prime tower (#3770), as `print_output` takes it. ``enabled`` false
+    #: packs with no room kept for a tower and writes the 3MF with none, stating the
+    #: tower off. Omitted keeps room for one on each plate with more than one colour.
+    #: ``no_sparse_layers`` is stated in the 3MF, and each plate keeps the slicer's
+    #: keep-out round its tower (#6735).
+    prime_tower: PrimeTowerChoice | None = None
 
     @model_validator(mode="after")
     def _copies_within_the_cap(self) -> ArrangeRequest:
@@ -690,6 +697,7 @@ def arrange_inputs(
         provenance=provenance,
         # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
         sources=[*chosen, *files],
+        prime_tower=body.prime_tower,
     )
 
 

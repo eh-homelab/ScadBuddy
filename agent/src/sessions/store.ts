@@ -564,8 +564,20 @@ async function transcriptOf(sql: Sql, keyOf: KeyOf, sessionId: string): Promise<
 
 /** A session with forks that read through it, forgotten without the data keys that copy its transcript into them. */
 export class ForksNeedKeys extends Error {
-  constructor(parentId: string) {
-    super(`session ${parentId} has forks that read its transcript; forgetting it needs SCADBUDDY_SECRET_KEY_FILE to copy it into them first`)
+  /**
+   * `begun`: what the forget had already done when the API refused it: its background tasks
+   * cancelled and, with a Temporal client (`terminated`), their workflows and its open tool
+   * calls terminated.
+   */
+  constructor(parentId: string, begun?: { terminated: boolean }) {
+    const done = begun?.terminated
+      ? 'its background tasks were cancelled and their workflows and its open tool calls terminated'
+      : 'its background tasks were cancelled (no Temporal client, so no workflow or tool call was terminated)'
+    super(
+      begun
+        ? `session ${parentId} has forks that read its transcript, and the API has no SCADBUDDY_SECRET_KEY_FILE to copy it into them; ${done}, but its key, transcript and rows remain. Run the forget again once the API has the key`
+        : `session ${parentId} has forks that read its transcript; forgetting it needs SCADBUDDY_SECRET_KEY_FILE to copy it into them first`,
+    )
     this.name = 'ForksNeedKeys'
   }
 }

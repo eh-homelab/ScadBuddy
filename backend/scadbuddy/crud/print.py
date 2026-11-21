@@ -49,21 +49,24 @@ watch's `settle_lan_ended`, whose one long activity repeats `WriteKeys`' keys ac
 attempts. The watch's call is bounded by `WATCH_CALL_BUDGET`. ``spool_history`` is the
 API's (the rack usage route).
 
-`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets` and `RemoteNativeSlices`
-are `spools/store.py` `SpoolStore`, `spools/native.py` `NativeSpoolStore`,
-`slicing/held_presets.py` `HeldPresetStore` and `slicing/store.py` `NativeSliceStore`
-(Q28-Q30, #5298 Task 31) for the methods the print worker calls: a native run's overlay
-and the native provider's recache after a print (``overlay``, ``replace_records``,
-``failed``), the shelf, a LAN start's uses and their settle (``list``, ``any``,
-``record_uses``, ``settle_uses``), the kept presets a native run reads (``rows``,
-``documents``) and a native slice's ``start``. None holds a pool, and none is called in
-the printer watch. Each SQL write is one transaction, under the spools' advisory lock,
-the uses' row locks or the slice key's lock, so each is one route run whole on the API
-(plan D6). ``failed``, ``record_uses`` and ``start`` are natural (an upsert, ``ON CONFLICT
-DO NOTHING``, and the key's newest row). ``replace_records`` and ``settle_uses`` take an
-``Idempotency-Key`` of their own, a new UUID per call, sent again on the client's
-retries: a refresh's body carries its time, and a settle runs in the follow's one long
-activity. The refresh, the tray links and the shelf's edits are the API's.
+`RemoteHeldPresets` and `RemoteNativeSlices` are `slicing/held_presets.py`
+`HeldPresetStore` and `slicing/store.py` `NativeSliceStore` (Q30, #5298 Task 31) for the
+methods the print worker calls: the kept presets a native run reads (``rows``,
+``documents``) and a native slice's ``start``. Neither holds a pool, and neither is called
+in the printer watch. A start is one transaction under the slice key's lock, so it is one
+route run whole on the API (plan D6), and natural (the key's newest row). The spool
+overlay's `RemoteSpoolStore` went with the overlay (#6262 Task 12).
+
+`RemoteFilamentTrays` and `RemotePrintUses` (area ``filament``, #6262 Task 6) are a native
+run's reads of the SB spools in its printer's trays and their presets
+(`filament/inventory.py` `SbSpoolReads`, natural reads), and a LAN start's uses and their
+settle (`filament/print_uses.py` `PrintUses`), each of which takes an
+``Idempotency-Key`` of its own, a new UUID per call: each answers what that call
+booked.
+
+`RemoteSensorNotifications` (area ``sensor-notify``, #6646) claims the sensors' queued
+alert notifications and ends each after its Bambuddy call: the claim under an
+``Idempotency-Key`` of its own per call, the end natural.
 
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
@@ -112,7 +115,6 @@ from collections.abc import (
     Callable,
     Collection,
     Iterable,
-    Mapping,
     Sequence,
 )
 from datetime import datetime, timedelta
@@ -123,9 +125,10 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+from pydantic import BaseModel
 
 from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
-from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail
+from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail, SpoolAssignment
 from scadbuddy.bambuddy.print_links import (
     LinkedPrint,
     PrintLink,
@@ -151,16 +154,48 @@ from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.client import (
     CrudClient,
     CrudRefusedError,
     CrudSyncClient,
-    CrudUnavailableError,
 )
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
 from scadbuddy.crud.wire import NOT_CONFIGURED
+from scadbuddy.filament.bb_pull_models import (
+    INSTANCE_CHANGED,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    TraysBody,
+    TraysReconciled,
+    UsageBody,
+    UsageBooked,
+)
+from scadbuddy.filament.bb_sync_models import (
+    BbSnapshot,
+    BbWrite,
+    BbWriteResult,
+    Kind,
+    PlanRequest,
+    ResultsReport,
+    ResultsRequest,
+    SyncPassResult,
+    SyncPlan,
+    without_empty_unconfirmed,
+)
+from scadbuddy.filament.models import (
+    ClaimedNotification,
+    EffectivePreset,
+    FilamentInventorySpool,
+    NotificationClaim,
+    NotificationEnd,
+    TrayView,
+)
+from scadbuddy.filament.print_uses import SlotUse
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings
@@ -181,9 +216,7 @@ from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
 from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
-from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
-from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
-from scadbuddy.spools.store import SpoolStore
+from scadbuddy.spools.models import SeenTray
 
 logger = logging.getLogger(__name__)
 
@@ -1363,192 +1396,221 @@ def _when(value: str | None) -> datetime | None:
 _refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
 
 
-# -- spools, native spools, held presets, native slices (Q28-Q30, #5298 Task 31) ---------
+# -- held presets, native slices (Q30, #5298 Task 31) -----------------------------------
 
-#: The route's reason for a refresh's write that ran past its deadline
-#: (`api/crud_print.py`): it rolled back, as `SpoolStore.replace_records`' does.
-PAST_DEADLINE = "past-deadline"
-#: Seconds a `RemoteSpoolStore.replace_records` with a timeout keeps between the API's
-#: deadline and its own: the request's way there and the commit after the last check.
-DEADLINE_MARGIN = 1.0
 #: The route's reason for a slice start of a copy another subject's row holds.
 SLICE_SUBJECT = "slice-subject"
 
-#: The `SpoolStore` methods only the API calls: the refresh's ``seen`` half and the
-#: providers' list, on the ``library`` worker (`spools/activities.py`), a person's tray
-#: links (`api/tray_spools.py`), and the ``_in`` write, which runs on the API's connection.
-SPOOLS_API_ONLY = ("seen", "refreshes", "link", "unlink", "replace_records_in", "deadline")
 
-
-class RemoteSpoolStore(SpoolStore):
-    """`spools/store.py` `SpoolStore` (Q28) over ``…/print/spools`` (area ``spools``).
-    Async, as the SQL store is. No pool. The print worker calls it for a native run's
-    overlay (`spools/overlay.py`) and the native provider's recache after a print took
-    its grams (`spools/spool_providers.py` `recache`). Every SQL write is one transaction
-    under the store's advisory lock, so each is one route, run whole on the API (plan
-    D6)."""
+class RemoteFilamentTrays:
+    """`filament/inventory.py` `SbSpoolReads` over ``…/print/filament`` (area ``filament``,
+    #6262 Task 6): the SB spool in each tray a native run's printer reports (the trays
+    only: the route sends no shelf), and the held
+    spools' presets, as the API's own inventory reads them; and (Task 7) the Bambuddy
+    path's SB spools with their trays and the SB number of each Bambuddy spool id an
+    older plan names. All are reads, natural, sent
+    again on the client's retries; the trays as a ``POST`` so their RFID keys stay out
+    of the URL (spec 2026-10-01 §7)."""
 
     def __init__(self, client: CrudClient) -> None:
         self._client = client
 
-    @property
-    def pool(self) -> ConnectionPool[Connection[DictRow]]:
-        raise ApiOnlyError("SpoolStore.pool is the API's; the worker has none")
-
-    async def replace_records(
-        self,
-        provider: str,
-        snapshots: Sequence[SpoolSnapshot],
-        at: datetime,
-        *,
-        timeout: float | None = None,
-    ) -> None:
-        """Under an ``Idempotency-Key`` of its own, a new UUID per call, which the client
-        sends again on its retries (plan D5): the body carries the refresh's ``at``, so a
-        retried activity's `WriteKeys` key would never replay, and a refresh is a whole
-        new answer, never a replay of an earlier one.
-
-        With a ``timeout`` the API does not commit after this call gives up, as the SQL
-        store never does, as long as the request reaches the route and its last insert
-        and commit end within `DEADLINE_MARGIN`: a longer wait in front of the handler,
-        or a slower commit, can still commit after the raise. The call is sent once,
-        with no retry, and waits ``timeout`` seconds for its answer; the API's deadline
-        is ``timeout`` less `DEADLINE_MARGIN` from its receipt, so it rolls back (409
-        ``past-deadline``, raised here as `TimeoutError`) before this call stops
-        waiting. A call that gets no answer waits out its ``timeout`` before it raises,
-        so the API is past its deadline by then. Less than the margin left raises
-        `TimeoutError` unsent."""
-        body: dict[str, Any] = {
-            "provider": provider,
-            "snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots],
-            "at": at.isoformat(),
-        }
-        if timeout is None:
-            await self._send_records(provider, body)
-            return
-        if timeout <= DEADLINE_MARGIN:
-            raise TimeoutError(f"the refresh of {provider} ran past its deadline")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        try:
-            await self._send_records(
-                provider,
-                {**body, "timeout": timeout - DEADLINE_MARGIN},
-                budget=0.0,
-                timeout=timeout,
-            )
-        except CrudUnavailableError:
-            await asyncio.sleep(max(0.0, deadline - loop.time()))
-            raise
-
-    async def _send_records(
-        self,
-        provider: str,
-        body: dict[str, Any],
-        *,
-        budget: float | None = None,
-        timeout: float | None = None,
-    ) -> None:
-        try:
-            await self._client.request(
-                "POST",
-                f"{BASE}/spools/records",
-                json=body,
-                idempotency_key=uuid.uuid4().hex,
-                budget=budget,
-                timeout=timeout,
-            )
-        except CrudRefusedError as error:
-            if _refused_as(error, PAST_DEADLINE):
-                raise TimeoutError(f"the refresh of {provider} ran past its deadline") from None
-            raise
-
-    async def failed(self, provider: str, at: datetime, failure: str) -> None:
-        """Natural: an upsert of the provider's failure."""
-        await self._client.request(
-            "POST",
-            f"{BASE}/spools/refreshes/{quote(provider, safe='')}/failed",
-            json={"at": at.isoformat(), "failure": failure},
-        )
-
-    async def overlay(
-        self,
-        printer_id: UUID,
-        trays: Sequence[SeenTray],
-        *,
-        now: datetime,
-        providers: Sequence[str],
-        located: Mapping[str, str] | None = None,
-    ) -> Overlay:
-        """A ``POST`` read: the trays' RFID keys stay out of the URL (spec §7)."""
+    async def trays(self, printer_id: UUID, seen: Sequence[SeenTray]) -> TrayView:
         body = {
             "printer_id": str(printer_id),
-            "trays": [tray.model_dump(mode="json") for tray in trays],
-            "now": now.isoformat(),
-            "providers": list(providers),
-            "located": dict(located or {}),
+            "seen": [tray.model_dump(mode="json") for tray in seen],
         }
-        response = await self._client.request("POST", f"{BASE}/spools/overlay", json=body)
-        return Overlay.model_validate(response.json())
+        response = await self._client.request("POST", f"{BASE}/filament/trays", json=body)
+        return TrayView.model_validate(response.json())
+
+    async def presets(self, numbers: Sequence[int]) -> dict[int, list[EffectivePreset]]:
+        if not numbers:
+            return {}
+        response = await self._client.request(
+            "POST", f"{BASE}/filament/presets", json={"numbers": list(numbers)}
+        )
+        return {
+            int(number): [EffectivePreset.model_validate(row) for row in rows]
+            for number, rows in response.json().items()
+        }
+
+    async def rows(self, bb_assignments: Sequence[SpoolAssignment]) -> list[FilamentInventorySpool]:
+        # Without each assignment's nested spool: the route reads where a spool is, and
+        # Bambuddy's whole spool row would only grow the body. Only each spool's last
+        # row, the one `FilamentInventory.rows` reads: Bambuddy keeps history rows, which
+        # could pass the route's `MAX_ASSIGNMENTS` (#6262 Task 7 review M3).
+        last = {assignment.spool_id: assignment for assignment in bb_assignments}
+        body = {
+            "bb_assignments": [
+                assignment.model_dump(mode="json", exclude={"spool"})
+                for assignment in last.values()
+            ]
+        }
+        response = await self._client.request("POST", f"{BASE}/filament/rows", json=body)
+        return [FilamentInventorySpool.model_validate(row) for row in response.json()]
+
+    async def bb_to_sb(self, ids: Sequence[int]) -> dict[int, int]:
+        if not ids:
+            return {}
+        response = await self._client.request(
+            "POST", f"{BASE}/filament/bb-to-sb", json={"ids": sorted(set(ids))}
+        )
+        return {int(bb_id): int(number) for bb_id, number in response.json().items()}
 
 
-_refuse(RemoteSpoolStore, "SpoolStore", SPOOLS_API_ONLY)
+class RemoteFilamentSync:
+    """`filament/bb_sync_models.py` `FilamentSyncApi` over ``…/print/filament/sync`` (area
+    ``filament-sync``, #6265 Task 6): the plan, what Bambuddy answered, and a pass's
+    state row. Each is natural, so each is sent again on the client's retries: a plan
+    finds the intent it recorded, results sent again carry the plan's ``pass_id`` and add
+    no attempt (R-T6-5), and the pass row is set, not added to."""
 
-
-#: The `NativeSpoolStore` methods only the API calls: the shelf's routes
-#: (`api/native_spools.py`), and the ``_in`` settle, which runs on the API's connection.
-NATIVE_SPOOLS_API_ONLY = ("get", "create", "update", "delete", "settle_uses_in")
-
-
-class RemoteNativeSpools(NativeSpoolStore):
-    """`spools/native.py` `NativeSpoolStore` (Q29) over ``…/print/native-spools`` (area
-    ``spools``). Blocking, as the SQL store is: callers on the loop use a thread. No
-    pool. The worker reads the shelf (the native provider), saves what a LAN start uses
-    and settles a run's uses once its print settles."""
-
-    def __init__(self, client: CrudSyncClient) -> None:
+    def __init__(self, client: CrudClient) -> None:
         self._client = client
 
-    @property
-    def pool(self) -> ConnectionPool[Connection[DictRow]]:
-        raise ApiOnlyError("NativeSpoolStore.pool is the API's; the worker has none")
+    async def directions(self) -> FilamentSync:
+        response = await self._client.request("GET", f"{BASE}/filament/sync/directions")
+        return FilamentSync.model_validate(response.json())
 
-    def list(self, *, include_archived: bool = False) -> list[NativeSpool]:
-        query = urlencode({"include_archived": "true" if include_archived else "false"})
-        body = self._client.request("GET", f"{BASE}/native-spools?{query}").json()
-        return [NativeSpool.model_validate(row) for row in body]
+    async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
+        body = PlanRequest(snapshot=snap, limit=limit).model_dump(mode="json")
+        response = await self._client.request("POST", f"{BASE}/filament/sync/plan", json=body)
+        return SyncPlan.model_validate(response.json())
 
-    def any(self) -> bool:
-        return bool(self._client.request("GET", f"{BASE}/native-spools/any").json()["any"])
+    async def results(
+        self,
+        instance: str,
+        writes: Sequence[BbWrite],
+        results: Sequence[BbWriteResult],
+        pass_id: str | None,
+        unconfirmed: Sequence[tuple[Kind, UUID]] = (),
+    ) -> ResultsReport:
+        # An empty `unconfirmed` is left out of the body, for an API from before R-6688-11.
+        body = without_empty_unconfirmed(
+            ResultsRequest(
+                instance=instance,
+                writes=list(writes),
+                results=list(results),
+                pass_id=pass_id,
+                unconfirmed=list(unconfirmed),
+            )
+        )
+        response = await self._client.request("POST", f"{BASE}/filament/sync/results", json=body)
+        return ResultsReport.model_validate(response.json())
 
-    def record_uses(self, run_id: str, subtask_name: str, uses: Sequence[SpoolUse]) -> None:
-        """Natural: ``ON CONFLICT DO NOTHING`` on the start's slot, so a resend keeps the
-        rows one send wrote."""
+    async def record_pass(self, result: SyncPassResult) -> None:
+        body = result.model_dump(mode="json")
+        if result.started_at is None:
+            # The API's model forbids extra keys: one from before #6836 refuses the key.
+            del body["started_at"]
+        await self._client.request("POST", f"{BASE}/filament/sync/pass", json=body)
+
+
+class RemoteBbPull:
+    """`filament/bb_pull_models.py` `BbPullApi` over ``…/print/filament/pull`` (area
+    ``filament-pull``, #6772): what the print worker read of Bambuddy for the pull, applied
+    by the API. Each is natural, so each is sent again on the client's retries: a pull of
+    the same rows changes nothing the first did not, a usage row is booked once (its
+    ``bb_usage`` event names it), a Home Assistant reading of the same value within 15
+    minutes is not stored again, and a tray already set right is left alone. The API's
+    409 ``instance_changed`` (the body's Bambuddy is no longer the configured one) is
+    `PullInstanceChangedError`."""
+
+    #: The pull applies one transaction per BB spool, so a large inventory takes longer
+    #: than the client's default; under ``FilamentBbPull``'s activity timeout.
+    APPLY_TIMEOUT = 180.0
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def _post(self, path: str, body: BaseModel, timeout: float | None = None) -> Any:
+        try:
+            response = await self._client.request(
+                "POST",
+                f"{BASE}/filament/pull{path}",
+                json=body.model_dump(mode="json"),
+                timeout=timeout,
+            )
+        except CrudRefusedError as refused:
+            if refused.status == 409 and refused.problem.get("reason") == INSTANCE_CHANGED:
+                raise PullInstanceChangedError(str(refused)) from refused
+            raise
+        return response.json() if response.content else None
+
+    async def apply(self, body: PullBody) -> PullApplied:
+        return PullApplied.model_validate(await self._post("", body, self.APPLY_TIMEOUT))
+
+    async def book_usage(self, body: UsageBody) -> UsageBooked:
+        return UsageBooked.model_validate(await self._post("/usage", body, self.APPLY_TIMEOUT))
+
+    async def ha_states(self, body: HaBody) -> None:
+        await self._post("/ha-states", body)
+
+    async def reconcile_trays(self, body: TraysBody) -> int:
+        return TraysReconciled.model_validate(await self._post("/trays", body)).moved
+
+
+class RemoteSensorNotifications:
+    """`filament/sensor_notify.py` `SensorNotificationsApi` over
+    ``…/print/filament/sensor-notifications`` (area ``sensor-notify``, #6646): a claim
+    takes an ``Idempotency-Key`` of its own, a new UUID per call, which the client sends
+    again on its retries, so a claim whose answer was lost answers the rows it claimed; an
+    end is natural."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def claim(self, limit: int) -> list[ClaimedNotification]:
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/filament/sensor-notifications/claim",
+            json=NotificationClaim(limit=limit).model_dump(mode="json"),
+            idempotency_key=uuid.uuid4().hex,
+        )
+        return [ClaimedNotification.model_validate(row) for row in response.json()]
+
+    async def end(self, row_id: UUID, end: NotificationEnd) -> None:
+        await self._client.request(
+            "POST",
+            f"{BASE}/filament/sensor-notifications/{row_id}/end",
+            json=end.model_dump(mode="json", exclude_none=True),
+        )
+
+
+class RemotePrintUses:
+    """`filament/print_uses.py` `PrintUses` over ``…/print/filament/print-uses`` (area
+    ``filament``, #6262 Task 6): a LAN start's uses and their settle, each one route, one
+    transaction on the API, its row locks included (plan D6). Each answer is what that
+    call booked, which a resend would not repeat (the rows read booked then), so each
+    takes an ``Idempotency-Key`` of its own, a new UUID per call, sent again on the
+    client's retries: a start's booking runs in ``lan_print``, which an attempt that
+    starts again books nothing new from, and the follow's read hook settles a run from
+    one long activity, whose ordinals would not name one settle."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def record_uses(self, run_id: str, subtask: str, uses: Sequence[SlotUse]) -> int:
         if not uses:
-            return
+            return 0
         body = {
             "run_id": run_id,
-            "subtask_name": subtask_name,
+            "subtask": subtask,
             "uses": [use.model_dump(mode="json") for use in uses],
         }
-        self._client.request("POST", f"{BASE}/native-spools/uses", json=body)
+        response = await self._client.request(
+            "POST", f"{BASE}/filament/print-uses", json=body, idempotency_key=uuid.uuid4().hex
+        )
+        return int(response.json()["recorded"])
 
-    def settle_uses(self, run_id: str, stages: Sequence[str]) -> set[UUID]:
-        """One route, one transaction on the API, its row locks included (plan D6). The
-        answer is the spools this settle changed, which a resend would not repeat (the
-        rows read settled then), so an ``Idempotency-Key`` of its own, a new UUID per
-        call, sent again on the client's retries: the follow's read hook settles a run
-        from one long activity, whose ordinals would not name one settle."""
-        response = self._client.request(
+    async def settle_uses(self, run_id: str, stages: Sequence[str]) -> bool:
+        response = await self._client.request(
             "POST",
-            f"{BASE}/native-spools/uses/settle",
+            f"{BASE}/filament/print-uses/settle",
             json={"run_id": run_id, "stages": list(stages)},
             idempotency_key=uuid.uuid4().hex,
         )
-        return {UUID(spool_id) for spool_id in response.json()["changed"]}
-
-
-_refuse(RemoteNativeSpools, "NativeSpoolStore", NATIVE_SPOOLS_API_ONLY)
+        return bool(response.json()["settled"])
 
 
 #: The `HeldPresetStore` methods only the API calls: the copy's refresh, on the

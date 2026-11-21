@@ -552,7 +552,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           madeHome.current = null
           if (slug === NEW_HOME && homeFile) {
             // #3638 — the file's own model, made once: arranging it again files there too.
-            setProgress(`Making a model for ${homeFile.filename}…`)
+            say(`Making a model for ${homeFile.filename}…`)
             // The slug is guessed here; a model the list did not show (or a name the
             // guess gets wrong) is a 409, and the next free name is tried.
             const first = freeName(stemOf(homeFile.filename), models ?? [], `Library file ${homeFile.id}`)

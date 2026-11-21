@@ -7,6 +7,7 @@ import {
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import { context as otelContext, trace } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
+import { CrudReadError } from '../api/crudRead.js'
 import { traceparentOf } from '../telemetry/trace.js'
 import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
@@ -21,9 +22,10 @@ import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { SweepRoutes } from '../gate/crudPending.js'
 import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
-import type { UserImage } from './images.js'
-import { POOL_BUDGET, POOL_COST, SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
+import type { UserAttachment } from './images.js'
+import { SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
 import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, type SessionStatus } from './protocol.js'
+import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './turnRows.js'
 
 // A session's turns (unified runtime spec 2026-10-13 §5, plan Step 6.3): every session is an
 // AgentSession, `session-<id>` on `agent-sessions`; this service hands it the message and reads
@@ -62,9 +64,8 @@ import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, 
 // ai_session_entries, which the turn resumes. A row still `durable` is a DurableSession that
 // closed before plan Step 7.2 moved the open ones (six in production on 2026-11-01, all
 // archived, none with a transcript): no worker runs its workflow, so a send is refused `closed`
-// and a fork of it starts an AgentSession (manager.ts `fork`). `dist/recover-durable-sessions.js`
-// rebuilds such a row's conversation from its closed run's archived history and sets it
-// `unified` (recoverDurable.ts, #4772). No prompt, image or tool content is logged or traced here.
+// and a fork of it starts an AgentSession (manager.ts `fork`). Its recovery CLI is gone (#6501):
+// prod's one such row is archived (measured 2026-11-16). No prompt, image or tool content is logged or traced here.
 
 export const SEND_MESSAGE_UPDATE = 'send_message'
 /** `ai_sessions.runtime`: AgentSession (`unified`), or a closed DurableSession (`durable`, see the header). */
@@ -127,7 +128,7 @@ export type DurableTurn = {
   /** What the model gets: the words and the page context. */
   text: string
   author: Owner
-  images: readonly UserImage[]
+  images: readonly UserAttachment[]
   /** What the engine appends to Claude Code's own system prompt (Ruling 15). */
   systemAppend: string
   /** The sender's tiers, for a turn sent through the sessions_* tools (`turn_tiers`, #2320). */
@@ -147,6 +148,8 @@ export type DurableTurnsDeps = {
   sql: Sql
   /** A session's images (`SessionBlobs` on `sql` when omitted). */
   blobs?: SessionImages
+  /** The row's turn writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
+  turns?: TurnRows
   events: EventLog
   /** Tests only: a queue other than `agent-sessions`. */
   sessionQueue?: string
@@ -217,6 +220,7 @@ export class DurableTurns {
   readonly #pendingRoutes: DurableTurnsDeps['pendingRoutes']
   readonly #gate: DurableGate
   readonly #blobs: SessionImages
+  readonly #turns: TurnRows
   readonly #sessionQueue: string
   readonly #toolsQueue: string
   readonly #liveHosts: () => Promise<ReadonlySet<string>>
@@ -233,6 +237,7 @@ export class DurableTurns {
     this.#pendingRoutes = deps.pendingRoutes
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = deps.blobs ?? new SessionBlobs(deps.sql)
+    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
@@ -316,28 +321,15 @@ export class DurableTurns {
     // session's): AgentSession. Every DurableSession row has its own, `unified` or `durable`
     // (the six closed ones, refused below: such a row's conversation is in its DurableSession's
     // history, not in `ai_session_entries`, so an AgentSession would run on with none of it).
-    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; runtime: SessionRuntime }[]>(
-      `WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, turn_flow = $6, updated_at = now(), turn_started_at = now(),
-         interrupt_requested = false, runtime = coalesce(runtime, 'unified')
-       FROM prior
-       WHERE id = $1 AND owner_kind = $2 AND (owner_id = $3 OR owner_kind = 'browser')
-         AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
-         AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
-       RETURNING prior.prior_status, ai_sessions.runtime`,
+    const claimed = await this.#claim(id, {
+      author: turn.author,
+      turnId: turn.turnId,
       // The turn's tool activities run with these, cut to what the owner holds then (#2320).
-      [
-        id,
-        turn.author.kind,
-        turn.author.id,
-        turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
-        // The running turn (#2320).
-        turn.turnId,
-        // A turn a flow run sent, or a session with none sent, is offered no background built-in
-        // (#5870, manager.ts BACKGROUND_TOOLS).
-        turn.flow !== undefined || turn.withoutBackground === true,
-      ],
-    )
+      tiers: turn.tiers ?? null,
+      // A turn a flow run sent, or a session with none sent, is offered no background built-in
+      // (#5870, manager.ts BACKGROUND_TOOLS).
+      bare: turn.flow !== undefined || turn.withoutBackground === true,
+    })
     if (!claimed) {
       if (!turn.queue) return undefined
       const queued = await this.#queue(session, turn)
@@ -374,7 +366,7 @@ export class DurableTurns {
         return this.#turn(id, turn.turnId, seq)
       }
       // The refusal is what the caller hears, whatever the give-back meets.
-      await this.#giveBack(id, claimed.prior_status).catch(() => {
+      await this.#giveBack(id, claimed.prior_status, turn.turnId).catch(() => {
         console.warn(`durable send: session ${id}'s claim could not be given back`)
       })
       throw err
@@ -390,14 +382,8 @@ export class DurableTurns {
    */
   async #queue(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
     const id = session.id
-    const [row] = await this.#sql.unsafe<{ seq: string }[]>(
-      `SELECT event_seq AS seq FROM ai_sessions
-       WHERE id = $1 AND owner_kind = $2 AND (owner_id = $3 OR owner_kind = 'browser')
-         AND status IN ('running', 'waiting_approval', 'waiting_input') AND runtime = 'unified'
-         AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}`,
-      [id, turn.author.kind, turn.author.id],
-    )
-    if (!row) return undefined
+    const seq = await this.#turns.queueable(id, turn.author)
+    if (seq === undefined) return undefined
     const { blobs, sent } = sentImageBlobs(turn.images)
     // What this write made goes with the entry, so it is deleted if the message never runs (#6413).
     const made = await this.#blobs.putMade(id, blobs).catch(() => {
@@ -439,7 +425,7 @@ export class DurableTurns {
       }
       throw refusal
     }
-    return this.#queuedTurn(id, turn.turnId, answer, Number(row.seq))
+    return this.#queuedTurn(id, turn.turnId, answer, seq)
   }
 
   /** A queued turn: its place, and `done` once it ran (it started, then settled) or left the queue unrun. */
@@ -505,11 +491,7 @@ export class DurableTurns {
    */
   async queue(session: SessionRecord): Promise<{ version: number; queue: QueuedEntry[] }> {
     if (session.status === 'done') return { version: 0, queue: [] }
-    const [row] = await this.#sql<{ event: string }[]>`
-      SELECT event FROM ai_session_events
-      WHERE session_id = ${session.id} AND event::jsonb->>'type' = 'session.queue'
-      ORDER BY seq DESC LIMIT 1`
-    const last = row ? (JSON.parse(row.event) as ServerEventOf<'session.queue'>) : undefined
+    const last = (await this.#turns.lastQueue(session.id)) as ServerEventOf<'session.queue'> | undefined
     return last ? { version: last.version, queue: last.queue } : { version: 0, queue: [] }
   }
 
@@ -536,10 +518,8 @@ export class DurableTurns {
     // before the workflow continues as new), so the read finds it gone and nothing is sent.
     const state = await this.#describe(sessionWorkflowId(session.id))
     if (state !== 'between_turns' && state !== 'not_found') return
-    const [held] = await this.#sql`
-      SELECT 1 FROM ai_sessions
-      WHERE id = ${session.id} AND durable_turn_id = ${turn.turnId} AND status IN ${this.#sql(TURN_STATUSES)}`
-    if (!held) return
+    const row = await this.#turns.state(session.id)
+    if (!row || row.durable_turn_id !== turn.turnId.toLowerCase() || !TURN_STATUSES.includes(row.status)) return
     await this.#sendMessage(session, turn, sent)
   }
 
@@ -615,11 +595,33 @@ export class DurableTurns {
     }
   }
 
+  /**
+   * The send's claim. When its answer is lost (no answer from the route: the claim may have
+   * committed), the row is read, and a claim of this turn is given back before the error is
+   * thrown, so the row does not run a turn no workflow was told of until the running sweep ends
+   * it. The status before is not known then: it is given back `idle`.
+   */
+  async #claim(id: string, claim: SendClaim): Promise<SendClaimed | undefined> {
+    try {
+      return await this.#turns.sendClaim(id, claim)
+    } catch (err) {
+      if (!(err instanceof CrudReadError && err.fromRoute)) {
+        const row = await this.#turns.state(id).catch(() => undefined)
+        if (row?.durable_turn_id === claim.turnId.toLowerCase()) {
+          await this.#giveBack(id, 'idle', claim.turnId).catch(() => {
+            console.warn(`durable send: session ${id}'s claim could not be given back`)
+          })
+        }
+      }
+      throw err
+    }
+  }
+
   /** Gives back a claim whose message the workflow refused (Ruling 7), to the status it had. */
-  async #giveBack(id: string, prior: SessionStatus): Promise<void> {
-    const released = await this.#sql`
-      UPDATE ai_sessions SET status = ${prior}, durable_turn_id = NULL, updated_at = now() WHERE id = ${id} AND status = 'running'`
-    if (released.count > 0) await this.#events.append(id, [event({ type: 'session.status', sessionId: id, status: prior })])
+  async #giveBack(id: string, prior: SessionStatus, turnId: string): Promise<void> {
+    // The status event in the give-back's transaction, only while the row runs this turn.
+    const logged = await this.#turns.giveBack(id, prior, turnId)
+    if (logged) this.#events.committed(id, logged.events, logged.seqs)
   }
 
   /** The turn's end, as `session.finish_turn` wrote it (temporal/session/finishActivity.ts). */
@@ -646,7 +648,7 @@ export class DurableTurns {
     }
     // The outcome carries the session's own spend, as a classic turn's does: its event's is the
     // lineage's (the meter), which a fork shares with its parent (#823).
-    const [own] = await this.#sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}`
+    const own = await this.#turns.state(id)
     return {
       kind: 'result',
       // A result subtype classic reports for an end that leaves the session idle (AgentSession carries it, turnHost.ts).
@@ -663,17 +665,15 @@ export class DurableTurns {
    * yet is left to it.
    */
   async interrupt(session: SessionRecord, reason: string): Promise<boolean> {
-    const [row] = await this.#sql<(RunningRow & { status: SessionStatus; settled: boolean; runtime: SessionRuntime | null })[]>`
-      SELECT id, status, event_seq, runtime,
-        updated_at < now() - make_interval(secs => ${RUNNING_GRACE_MS / 1000}) AS settled
-      FROM ai_sessions WHERE id = ${session.id}`
-    if (!row || !RUNNING.includes(row.status)) return false
+    const state = await this.#turns.state(session.id, RUNNING_GRACE_MS)
+    if (!state || !RUNNING.includes(state.status)) return false
+    const row = { ...state, id: session.id }
     if (row.runtime === 'unified') {
       // The fast path (spec §5.6): the turn's replica reads the flag on its next tick and stops
       // the turn there, a held call included, with no further model request. Its parked
       // entries are not cancelled first (a cancelled one is a refusal the model would answer):
       // the Signal below cancels them as the turn ends, and is the backstop for a missed tick.
-      await this.#sql`UPDATE ai_sessions SET interrupt_requested = true WHERE id = ${session.id} AND durable_turn_id IS NOT NULL`
+      await this.#turns.interrupt(session.id)
     } else {
       try {
         await this.#gate.cancelInput(session.id, reason)
@@ -715,7 +715,7 @@ export class DurableTurns {
     // `graceMs` (durableSweep.ts, the constructor): a sweep given a longer one would still be
     // waiting on a claim this ends.
     if (state !== 'closed' && !row.settled) return false
-    const ended = await endLostTurn(this.#sql, this.#events, row, state)
+    const ended = await endLostTurn(this.#turns, this.#events, row, state)
     // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
     // rather than left for PendingInputSweep's next look, ten minutes or more away.
     const cancelled = await cancelOrphanedEntries(
@@ -732,7 +732,7 @@ export class DurableTurns {
    * them and the turn; a session with no workflow has nothing parked.
    */
   async handoff(session: SessionRecord, reason: string, to: Owner): Promise<void> {
-    const [row] = await this.#sql<{ runtime: SessionRuntime | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${session.id}`
+    const row = await this.#turns.state(session.id)
     try {
       await this.#gate.cancelInput(session.id, reason)
       // An AgentSession's gate checks each later response against the new owner (§5.6).

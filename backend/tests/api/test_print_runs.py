@@ -62,10 +62,11 @@ from tests.api.test_print_run_choices import (
 )
 from tests.api.test_send import configure, died_after_the_upload, stored_files, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 
 class Gate:
@@ -895,6 +896,7 @@ def test_the_run_survives_the_app_that_accepted_it(
     """The process that answered 202 goes away mid-slice; the next one, on the same
     database and queue, finishes the run (#1052: run 3c241a88 was lost this way)."""
     with TestClient(create_app(settings)) as first:
+        seed_app_sb_spools(first)
         output_id = prepared(first, model)
         upload_route()
         run_routes()
@@ -928,24 +930,26 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
         plain.model_dump(
             mode="json",
             exclude={
-                "request_id",
-                "print_sequence",
-                "rack_position",
-                "rack_algorithm",
-                "filament_profiles",
-                "supports",
-                "prime_tower",
-                "plate_ids",
-                "folder_id",
-                "printer",
-                "accepted_fixes",
+                "request_id": True,
+                "print_sequence": True,
+                "rack_position": True,
+                "rack_algorithm": True,
+                "filament_profiles": True,
+                "supports": True,
+                "prime_tower": True,
+                "plate_ids": True,
+                "folder_id": True,
+                "printer": True,
+                "accepted_fixes": True,
                 # #5352: a field the old model did not have, so not in its dump.
-                "path",
+                "path": True,
                 # #5571: nor this one.
-                "part_settings",
+                "part_settings": True,
                 # #2998: nor these.
-                "process_overrides",
-                "dropped_settings",
+                "process_overrides": True,
+                "dropped_settings": True,
+                # #6262 Task 7 review I1: nor the plan's ``ids``, here its default "bb".
+                "filament_plan": {"ids"},
             },
         ),
         sort_keys=True,

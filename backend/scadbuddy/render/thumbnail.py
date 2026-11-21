@@ -58,7 +58,7 @@ MARGIN = 0.08
 AMBIENT = 0.42
 LIGHT_DIRECTION = (0.35, 0.45, 1.0)
 
-# Upper bound on the pixels one batch of triangle bounding boxes may cover, so a
+# Upper bound on the candidate pixels one batch of triangle rows may test, so a
 # model made of thousands of large triangles cannot turn into a multi-gigabyte
 # temporary.
 BATCH_PIXELS = 1 << 22
@@ -221,8 +221,8 @@ class _Canvas:
     ~140 us a triangle almost regardless of the triangle's size — numpy call
     overhead, not pixels — which puts an 80k-face model at half a minute for
     three views. So fragments are generated for many triangles at once
-    (`_fragments` batches triangles by the size of their pixel bounding box, so
-    one set of numpy calls covers thousands of them), and each batch is resolved
+    (`_fragments` scans every pixel row of thousands of triangles in one set of
+    numpy calls, testing only the pixels near each row's span), and each batch is resolved
     into the buffer before the next is made: only the nearest fragment of each pixel
     is kept, so memory follows the batch (:data:`BATCH_PIXELS`), never the mesh
     (#2573). Of equally deep fragments the one drawn last wins, so the image stays a
@@ -339,18 +339,26 @@ class _Canvas:
 def _fragments(
     triangles: np.ndarray, size: int
 ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Covered pixel index, depth and triangle index, a batch of triangles at a time,
-    each batch covering at most :data:`BATCH_PIXELS` candidate pixels.
+    """Covered pixel index, depth and triangle index, at most :data:`BATCH_PIXELS`
+    candidate pixels a batch (one triangle's row is never split).
 
-    Triangles are grouped by their pixel bounding box rounded up to a power of
-    two on each axis, so every member of a group rasterises in one broadcast
-    against the same block of pixel centres.
+    A vectorised scanline (#3789): each pixel row a triangle crosses is tested only
+    from just left of where the triangle starts on that row to just right of where it
+    ends, not across the triangle's whole bounding box. An OpenSCAD mesh is mostly
+    long thin triangles, whose boxes are mostly empty. Each candidate gets the exact
+    barycentric test, so the margin only costs a few pixels a row.
+
+    The order the fragments come in breaks depth ties (the last one wins, `_Canvas`).
+    It is triangle by triangle, then row, then column, with the triangles ordered by
+    their pixel bounding box rounded up to a power of two on each axis, then by index:
+    the order the block rasteriser this replaces drew them in, so the images are the
+    same bytes it drew.
     """
     xs, ys = triangles[..., 0], triangles[..., 1]
-    x0 = np.clip(np.floor(xs.min(axis=1)), 0, size).astype(np.int64)
-    x1 = np.clip(np.ceil(xs.max(axis=1)) + 1, 0, size).astype(np.int64)
-    y0 = np.clip(np.floor(ys.min(axis=1)), 0, size).astype(np.int64)
-    y1 = np.clip(np.ceil(ys.max(axis=1)) + 1, 0, size).astype(np.int64)
+    x0 = np.clip(np.floor(_least(xs)), 0, size).astype(np.int64)
+    x1 = np.clip(np.ceil(_most(xs)) + 1, 0, size).astype(np.int64)
+    y0 = np.clip(np.floor(_least(ys)), 0, size).astype(np.int64)
+    y1 = np.clip(np.ceil(_most(ys)) + 1, 0, size).astype(np.int64)
     width = x1 - x0
     height = y1 - y0
 
@@ -364,47 +372,140 @@ def _fragments(
 
     block_w = 1 << np.ceil(np.log2(width[live])).astype(np.int64)
     block_h = 1 << np.ceil(np.log2(height[live])).astype(np.int64)
+    order = live[np.argsort(block_w * (size + 1) + block_h, kind="stable")]
 
-    for key in np.unique(block_w * (size + 1) + block_h):
-        member = (block_w * (size + 1) + block_h) == key
-        group = live[member]
-        bw, bh = int(block_w[member][0]), int(block_h[member][0])
-        batches = max(1, -(-len(group) * bw * bh // BATCH_PIXELS))
-        for batch in np.array_split(group, batches):
-            yield _block(triangles, batch, (x0, x1, y0, y1), (bw, bh), size, area)
+    # A row costs about 330 B at `_rows`' peak and a candidate about 80 B at
+    # `_span_fragments`', so a run takes a sixteenth as many rows as a batch takes
+    # candidates (at most about 90 MB). On a 123,572-face keychain the cover then peaks
+    # at 145 MiB: 187 MiB with a quarter, 151 MiB with the whole-box rasteriser this
+    # replaced. Measured with tracemalloc on 2026-11-18 on an idle WSL2 machine with
+    # numpy 2.5.4 (uv.lock): the row and candidate costs by calling `_rows` and
+    # `_span_fragments` alone on 20,000 seeded triangles at 1024 px, the MiB figures as
+    # the peak of one `render_plate_thumbnails` call. The table is in PR #6631.
+    for start, stop in _runs(height[order], BATCH_PIXELS // 16):
+        rows = _rows(triangles, order[start:stop], (x0, x1, y0, y1), area)
+        for first, last in _runs(rows.count, BATCH_PIXELS):
+            yield _span_fragments(rows, first, last, size)
 
 
-def _block(
+def _runs(counts: np.ndarray, limit: int) -> Iterator[tuple[int, int]]:
+    """Consecutive ``[start, stop)`` runs of ``counts`` that each sum to at most
+    ``limit``, or hold one item when that one alone is more."""
+    total = np.cumsum(counts)
+    start = 0
+    while start < len(counts):
+        before = int(total[start - 1]) if start else 0
+        stop = max(start + 1, int(np.searchsorted(total, before + limit, side="right")))
+        yield start, stop
+        start = stop
+
+
+@dataclass(frozen=True)
+class _Rows:
+    """One entry per pixel row of each triangle of a batch, in drawing order: where
+    its candidates start and how many there are, and the triangle's terms that are
+    the same along the row."""
+
+    owner: np.ndarray
+    y: np.ndarray
+    start: np.ndarray
+    count: np.ndarray
+    ax: np.ndarray
+    ay: np.ndarray
+    az: np.ndarray
+    by_ay: np.ndarray
+    cy_ay: np.ndarray
+    bz_az: np.ndarray
+    cz_az: np.ndarray
+    #: ``(bx - ax) * (py - ay)`` and ``(py - ay) * (cx - ax)``: the halves of the two
+    #: barycentric numerators that only the row's centre line changes.
+    row_c: np.ndarray
+    row_b: np.ndarray
+    denominator: np.ndarray
+
+
+def _rows(
     triangles: np.ndarray,
     batch: np.ndarray,
     box: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    block: tuple[int, int],
-    size: int,
     area: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """One broadcast: barycentric coverage and depth for a batch of triangles
-    whose bounding boxes all fit the same (height, width) block."""
-    x0, x1, y0, y1 = (bound[batch][:, None, None] for bound in box)
-    bw, bh = block
-    x = x0 + np.arange(bw, dtype=np.int64)[None, None, :]
-    y = y0 + np.arange(bh, dtype=np.int64)[None, :, None]
-    px = x + 0.5
+) -> _Rows:
+    x0, x1, y0, y1 = (bound[batch] for bound in box)
+    heights = y1 - y0
+    local = np.repeat(np.arange(len(batch)), heights)
+    y = y0[local] + (np.arange(len(local)) - np.repeat(np.cumsum(heights) - heights, heights))
     py = y + 0.5
 
-    # (vertex, axis, triangle, 1, 1): the leading axes are what the unpacking
-    # below reads, the trailing ones broadcast against the pixel block.
-    corner = triangles[batch].transpose(1, 2, 0)[..., None, None]
-    (ax, ay, az), (bx, by, bz), (cx, cy, cz) = corner
-    denominator = area[batch][:, None, None]
+    corner = triangles[batch][local]
+    vx, vy = corner[..., 0], corner[..., 1]
+    # Where the row's centre line crosses each edge, the line held inside the
+    # triangle's height so a row past a vertex still gets the pixels around it.
+    line = np.clip(py, _least(vy), _most(vy))[:, None]
+    nx, ny = np.roll(vx, -1, axis=1), np.roll(vy, -1, axis=1)
+    rise = ny - vy
+    with np.errstate(divide="ignore", invalid="ignore"):
+        along = (line - vy) / rise
+    crosses = (rise != 0) & (along >= -1e-9) & (along <= 1 + 1e-9)
+    at = vx + along * (nx - vx)
+    low = _least(np.where(crosses, at, np.inf))
+    high = _most(np.where(crosses, at, -np.inf))
+    # A pixel's centre is at x + 0.5. One pixel of margin each side covers rounding;
+    # the exact test decides, and the box keeps every candidate one the box had.
+    start = np.maximum(x0[local], np.floor(low - 0.5).astype(np.int64) - 1)
+    stop = np.minimum(x1[local], np.ceil(high - 0.5).astype(np.int64) + 2)
+
+    (ax, ay, az), (bx, by, bz), (cx, cy, cz) = corner.transpose(1, 2, 0)
+    return _Rows(
+        owner=batch[local],
+        y=y,
+        start=start,
+        count=np.maximum(stop - start, 0),
+        ax=ax,
+        ay=ay,
+        az=az,
+        by_ay=by - ay,
+        cy_ay=cy - ay,
+        bz_az=bz - az,
+        cz_az=cz - az,
+        row_c=(bx - ax) * (py - ay),
+        row_b=(py - ay) * (cx - ax),
+        denominator=area[batch][local],
+    )
+
+
+def _least(columns: np.ndarray) -> np.ndarray:
+    """Each row's smallest of its three values: elementwise, as numpy's ``min(axis=1)``
+    over three columns is several times slower."""
+    least: np.ndarray = np.minimum(np.minimum(columns[:, 0], columns[:, 1]), columns[:, 2])
+    return least
+
+
+def _most(columns: np.ndarray) -> np.ndarray:
+    most: np.ndarray = np.maximum(np.maximum(columns[:, 0], columns[:, 1]), columns[:, 2])
+    return most
+
+
+def _span_fragments(
+    rows: _Rows, first: int, last: int, size: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The covered pixels of rows ``first`` to ``last``: barycentric coverage and
+    depth, each an operation for operation the same arithmetic as a whole-box test,
+    so the same pixels pass and the same depths come out."""
+    count = rows.count[first:last]
+    row = np.repeat(np.arange(first, last), count)
+    offset = np.cumsum(count) - count
+    x = rows.start[row] + (np.arange(len(row)) - np.repeat(offset, count))
+    px = x + 0.5
+    ax = rows.ax[row]
+    denominator = rows.denominator[row]
     # Barycentric weights of C and of B. Their signs flip together with the
     # signed area, so the inside test holds for either winding.
-    wc = ((bx - ax) * (py - ay) - (by - ay) * (px - ax)) / denominator
-    wb = ((px - ax) * (cy - ay) - (py - ay) * (cx - ax)) / denominator
-
-    inside = (wc >= 0) & (wb >= 0) & (wc + wb <= 1) & (x < x1) & (y < y1)
-    depth = az + wb * (bz - az) + wc * (cz - az)
-    owner = np.broadcast_to(batch[:, None, None], inside.shape)
-    return (np.broadcast_to(y * size + x, inside.shape)[inside], depth[inside], owner[inside])
+    wc = (rows.row_c[row] - rows.by_ay[row] * (px - ax)) / denominator
+    wb = ((px - ax) * rows.cy_ay[row] - rows.row_b[row]) / denominator
+    inside = (wc >= 0) & (wb >= 0) & (wc + wb <= 1)
+    row, x, wc, wb = row[inside], x[inside], wc[inside], wb[inside]
+    depth = rows.az[row] + wb * rows.bz_az[row] + wc * rows.cz_az[row]
+    return rows.y[row] * size + x, depth, rows.owner[row]
 
 
 def _downsample(image: np.ndarray, size: int) -> np.ndarray:

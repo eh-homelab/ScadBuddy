@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import type { CustomizerSchema, Filament, ListingBound, MediaView, ModelSummary, ModelVersion, Param, ParamValue } from '../../api/types'
 import { Button } from '@/components/ui/button'
@@ -24,6 +24,8 @@ import { ListingPictures, type LivePictures, type MediaState } from './ListingPi
  * and the media, and saves.
  */
 export interface ListingEditorProps {
+  /** A listing not saved yet: the design and version pickers stay open. */
+  isNew?: boolean
   draft: ListingDraft
   onChange: (draft: ListingDraft) => void
   models: readonly ModelSummary[]
@@ -55,8 +57,8 @@ export interface ListingEditorProps {
   refusal?: ListingRefusal | null
 }
 
-/** Where the price book's filaments are added (Settings → Printing → Orders). */
-export const PRICE_BOOK_PATH = '/settings/printing#orders'
+/** Where the price book's filaments are added (Filament → Types). */
+export const PRICE_BOOK_PATH = '/filament/types'
 
 function shown(value: ParamValue | undefined): string {
   if (value === undefined) return 'its default'
@@ -493,13 +495,16 @@ function ColourProblems({ draft, schema, filaments, onChange }: { draft: Listing
   )
 }
 
-/** The design line: the template and its version, with "Change" opening both pickers. */
-function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorProps, 'draft' | 'onChange' | 'models' | 'versions'>) {
+/**
+ * The design line: the template and its version. A saved listing folds it to one line, with
+ * "Change" opening both pickers; a new listing keeps the pickers open.
+ */
+function DesignLine({ isNew = false, draft, onChange, models, versions }: Pick<ListingEditorProps, 'isNew' | 'draft' | 'onChange' | 'models' | 'versions'>) {
   const id = useId()
   const [changing, setChanging] = useState(false)
   const model = models.find((m) => m.slug === draft.slug)
   const version = versions?.find((v) => v.commit === draft.commit)
-  if (!changing && model && draft.commit) {
+  if (!isNew && !changing && model && draft.commit) {
     return (
       <div className="flex flex-wrap items-center gap-2 text-sm" data-testid="listing-design">
         <span className="text-muted-foreground">Design</span>
@@ -547,7 +552,7 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
           </SelectContent>
         </Select>
       </div>
-      {changing && model && draft.commit && (
+      {!isNew && changing && model && draft.commit && (
         <Button variant="link" size="sm" className="h-auto justify-self-start p-0" onClick={() => setChanging(false)}>
           Done
         </Button>
@@ -681,7 +686,10 @@ function ColoursOnOffer({
   const [chosen, setChosen] = useState<boolean | null>(null)
   const open = chosen ?? ticked.length === 0
   // The decision on load, made once: later ticks never change it.
-  if (settled && chosen === null) setChosen(ticked.length === 0)
+  const none = ticked.length === 0
+  useEffect(() => {
+    if (settled) setChosen((cur) => cur ?? none)
+  }, [settled, none])
 
   const customer = customerFilaments(filaments)
   const support = filaments.filter((filament) => !customer.includes(filament))
@@ -815,14 +823,14 @@ function ColoursOnOffer({
   )
 }
 
-export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true, bookState = 'ready', schemaState = 'loading', shopMaterials, refusal = null }: ListingEditorProps) {
+export function ListingEditor({ isNew = false, draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true, bookState = 'ready', schemaState = 'loading', shopMaterials, refusal = null }: ListingEditorProps) {
   const id = useId()
   const params = shownParams(schema)
   const offersColour = params.some((param) => param.type === 'color' && draft.params[param.name])
   const inTitle = titleColours(draft, schema, filaments)
   return (
     <div className="flex flex-col gap-5">
-      <DesignLine draft={draft} onChange={onChange} models={models} versions={versions} />
+      <DesignLine isNew={isNew} draft={draft} onChange={onChange} models={models} versions={versions} />
       <ColourProblems draft={draft} schema={schema} filaments={filaments} onChange={onChange} />
 
       <section className="flex flex-col gap-3" aria-label="Product">

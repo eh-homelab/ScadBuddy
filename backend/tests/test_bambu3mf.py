@@ -48,6 +48,8 @@ from scadbuddy.render.bambu3mf import (
     replate_3mf,
     single_plate,
     state_nozzles,
+    stated_no_sparse_layers,
+    stated_tower_off,
     stl_3mf,
     write_bambu_3mf,
     write_plates_3mf,
@@ -162,10 +164,12 @@ def test_filament_colours_follow_part_order(written: Path) -> None:
 
 
 def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
-    """Bambu Studio writes every vector option as an array of strings."""
+    """Bambu Studio writes every vector option as an array of strings. The tower is the
+    two-filament one of a one-nozzle plate, 24 mm square (#6735), centred on the object's
+    x 128 with its 3 mm brim."""
     with zipfile.ZipFile(written) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
-    assert settings["wipe_tower_x"] == ["98"]
+    assert settings["wipe_tower_x"] == ["115.985986"]
     assert settings["wipe_tower_y"] == ["5"]
 
 
@@ -286,6 +290,148 @@ def test_writing_for_a_printer_centres_on_its_reachable_area(tmp_path: Path) -> 
     assert float(settings["wipe_tower_x"][0]) >= 25.0
 
 
+def _crowded_parts() -> list[ColourPart]:
+    """Two colours over nearly all of the H2C's reachable area (300 x 320 mm): no room
+    for a prime tower beside them."""
+    return [
+        ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box(extents=(290, 300, 4))),
+        ColourPart(
+            2,
+            "Color 2",
+            "#1F6FEB",
+            trimesh.creation.box(extents=(2, 2, 2), transform=_translate(0, 0, 3)),
+        ),
+    ]
+
+
+def test_a_plate_written_with_the_tower_off_places_and_states_none(tmp_path: Path) -> None:
+    """#3770: Arrange's tower off writes no tower and says so, where one would not fit."""
+    parts = _crowded_parts()
+    colours = [p.colour for p in parts]
+    with pytest.raises(PlateFitError, match="prime tower"):
+        write_plates_3mf(
+            [single_plate(parts)],
+            colours,
+            tmp_path / "on.3mf",
+            thumbnails=None,
+            plate=plate_for("H2C"),
+        )
+    out = tmp_path / "off.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        colours,
+        out,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    settings = _settings_of(out)
+    assert "wipe_tower_x" not in settings
+    assert settings["enable_prime_tower"] == "0"
+    assert "wipe_tower_no_sparse_layers" not in settings
+
+
+def test_a_stated_tower_choice_is_written_and_none_writes_nothing(
+    written: Path, tmp_path: Path
+) -> None:
+    parts = _parts()
+    out = tmp_path / "on.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        prime_tower=True,
+        no_sparse_layers=False,
+    )
+    settings = _settings_of(out)
+    assert settings["wipe_tower_x"] == ["115.985986"]
+    assert (settings["enable_prime_tower"], settings["wipe_tower_no_sparse_layers"]) == ("1", "0")
+    omitted = _settings_of(written)
+    assert "enable_prime_tower" not in omitted
+    assert "wipe_tower_no_sparse_layers" not in omitted
+
+
+def test_re_placing_a_file_with_the_tower_off_keeps_no_room_for_one(tmp_path: Path) -> None:
+    """The send re-places an arranged file (#3770): a tower the file turns off is not
+    reserved again, while a file that does not say so still gets one."""
+    parts = _crowded_parts()
+    out = tmp_path / "off.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    moved = replate_3mf(out.read_bytes(), plate_for("H2C"))
+    assert "wipe_tower_x" not in _settings_of_bytes(moved)
+    with pytest.raises(PlateFitError, match="prime tower"):
+        replate_3mf(_restated(out.read_bytes(), enable_prime_tower=None), plate_for("H2C"))
+    # Bambu Studio may write the scalar as a list: read by its first value.
+    listed = _restated(out.read_bytes(), enable_prime_tower=["0"])
+    assert "wipe_tower_x" not in _settings_of_bytes(replate_3mf(listed, plate_for("H2C")))
+    assert stated_tower_off(listed)
+
+
+def test_a_print_that_turns_the_tower_on_gets_room_over_the_files_off(tmp_path: Path) -> None:
+    """#3770: the slice sends the print's tower on over the file's "0", so the send keeps
+    room for it, and refuses a plate it does not fit, as for any other file."""
+    crowded = tmp_path / "crowded.3mf"
+    write_plates_3mf(
+        [single_plate(_crowded_parts())],
+        [p.colour for p in _crowded_parts()],
+        crowded,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    with pytest.raises(PlateFitError, match="prime tower"):
+        replate_3mf(crowded.read_bytes(), plate_for("H2C"), tower_on=True)
+    roomy = tmp_path / "roomy.3mf"
+    parts = _parts()
+    write_plates_3mf(
+        [single_plate(parts)], [p.colour for p in parts], roomy, thumbnails=None, prime_tower=False
+    )
+    assert stated_tower_off(roomy.read_bytes())
+    assert "wipe_tower_x" not in _settings_of_bytes(
+        replate_3mf(roomy.read_bytes(), plate_for("H2C"))
+    )
+    moved = _settings_of_bytes(replate_3mf(roomy.read_bytes(), plate_for("H2C"), tower_on=True))
+    tower_x = moved["wipe_tower_x"]
+    assert isinstance(tower_x, list)
+    assert float(tower_x[0]) >= 25.0
+
+
+def test_only_a_scadbuddy_file_that_states_the_tower_off_reads_as_off(written: Path) -> None:
+    assert not stated_tower_off(written.read_bytes())
+    assert not stated_tower_off(_restated(written.read_bytes(), enable_prime_tower=["1"]))
+    # An author's file keeps its own settings: the print run does not restate them.
+    author = _restated(
+        written.read_bytes(), enable_prime_tower=["0"], print_settings_id=["0.20mm Standard"]
+    )
+    assert not stated_tower_off(author)
+    assert not stated_tower_off(b"not a zip")
+
+
+def test_no_sparse_layers_reads_as_the_send_reads_it(written: Path) -> None:
+    """#6757: the send keeps the keep-out for an author's file that states "No sparse
+    layers" (`send.file_tower`), so plate fit (SB4001) reads it from such a file too.
+    A file the send prints as it is (`as_is`) reads as off."""
+    author = _restated(
+        written.read_bytes(),
+        wipe_tower_no_sparse_layers=["1"],
+        print_settings_id=["0.20mm Standard"],
+    )
+    assert layout_of(author) == "author"
+    assert stated_no_sparse_layers(author)
+    assert not stated_no_sparse_layers(
+        _restated(written.read_bytes(), print_settings_id=["0.20mm Standard"])
+    )
+    assert not stated_no_sparse_layers(b"not a zip")
+
+
 class TestReplate:
     def test_replating_moves_the_object_and_the_tower(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
@@ -296,7 +442,8 @@ class TestReplate:
         assert item is not None
         transform = [float(v) for v in (item.get("transform") or "").split()]
         assert transform[9:11] == [175.0, 160.0]
-        assert settings["wipe_tower_x"] == ["145"]
+        # The H2C's two-filament tower, 35.5 mm square (#6735), centred on x 175.
+        assert settings["wipe_tower_x"] == ["157.24278"]
         assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB"]
 
     def test_replating_is_what_writing_for_that_plate_would_have_produced(
@@ -926,7 +1073,7 @@ def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> 
         "printable_height": "250",
         "filament_diameter": ["1.75", "1.75"],
         "filament_is_support": ["0", "0"],
-        "wipe_tower_x": ["98"],
+        "wipe_tower_x": ["115.985986"],
         "wipe_tower_y": ["5"],
     }
 
@@ -2602,3 +2749,46 @@ def test_painting_in_the_root_model_is_named_too() -> None:
     )
     hinted = hint_painted_slots(_with_entries(payload, {"3D/3dmodel.model": root.encode()}))
     assert _bambuddy_slots(hinted, 2) == {1, 2}
+
+
+def test_a_file_that_states_no_sparse_layers_keeps_the_keep_out(tmp_path: Path) -> None:
+    """#6735: an Arrange asked for "No sparse layers", so the file states it, and the
+    send's re-placing keeps the slicer's keep-out round the tower, as the writer did. A
+    60 mm, 20 mm tall body centred on the H2C leaves 86 mm in front of it, less than the
+    keep-out, so the plate is laid out another way."""
+    h2c = plate_for("H2C")
+    parts = [
+        ColourPart(1, "Body", "#FF6AC1", trimesh.creation.box(extents=(60, 60, 20))),
+        ColourPart(2, "Eye", "#1F6FEB", trimesh.creation.box(extents=(4, 4, 4))),
+    ]
+    render = tmp_path / "render.3mf"
+    write_plates_3mf([single_plate(parts)], [p.colour for p in parts], render, thumbnails=None)
+    no_sparse = _restated(render.read_bytes(), wipe_tower_no_sparse_layers=["1"])
+    assert stated_no_sparse_layers(no_sparse)
+    assert not stated_no_sparse_layers(render.read_bytes())
+
+    def layout(payload: bytes) -> tuple[object, object, list[float]]:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            item = ET.fromstring(archive.read("3D/3dmodel.model")).find(".//{*}item")
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert item is not None
+        moved = [float(v) for v in (item.get("transform") or "").split()][9:11]
+        return settings["wipe_tower_x"], settings["wipe_tower_y"], moved
+
+    plain = layout(replate_3mf(render.read_bytes(), h2c))
+    kept = layout(replate_3mf(no_sparse, h2c))
+
+    # Centred, the body's front edge is 86.5 mm past the tower; moved back, 100.6 mm.
+    assert plain[2] == [175.0, 160.0]
+    assert kept[2][1] > 160.0
+    out = tmp_path / "no-sparse.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        plate=h2c,
+        prime_tower=True,
+        no_sparse_layers=True,
+    )
+    assert layout(out.read_bytes()) == kept

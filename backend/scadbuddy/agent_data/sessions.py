@@ -4,9 +4,8 @@
 
 Each function is the SQL of ``agent/src/sessions/rows.ts`` `PgSessionRows` (the session
 manager's reads and writes of the row) or ``agent/src/sessions/touched.ts``
-`SessionResources`, statement for statement, a transaction as one transaction. The turn's
-writes of the row that go with its event log (a send's claim, a turn's end, an edit) are
-part b's, with the event log.
+`SessionResources`, statement for statement, a transaction as one transaction. A durable
+turn's writes of the row with its events are ``turns.py``'s (#6449).
 
 ``insert`` takes the owner's start lock (``ai_sessions.start:<kind>:<id>``) before it counts
 the owner's recent sessions, and a fork's parent's payload-key lock shared before it reads

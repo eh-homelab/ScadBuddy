@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import os
 import shutil
 import socket
 import struct
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -34,6 +37,7 @@ from scadbuddy import main as scadbuddy_main
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
 from scadbuddy.bambuddy.catalogue import forget_catalogues
 from scadbuddy.bambuddy.print_run import forget_out_of_memory_logs
+from scadbuddy.bambuddy.tower_check import forget_laid_out
 from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
@@ -96,6 +100,15 @@ def _forget_catalogues() -> Iterator[None]:
     forget_catalogues()
     yield
     forget_catalogues()
+
+
+@pytest.fixture(autouse=True)
+def _forget_laid_out() -> Iterator[None]:
+    """The tower check keeps laid-out files by payload digest and printer (#6796); a
+    test's stubbed layout must not answer another test's check of the same bytes (#6833)."""
+    forget_laid_out()
+    yield
+    forget_laid_out()
 
 
 @pytest.fixture(autouse=True)
@@ -276,6 +289,50 @@ def _sandbox_only_real_openscad(
 def _skip_without_openscad_lsp(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_openscad_lsp") and openscad_lsp_binary() is None:
         pytest.skip("openscad-lsp is not on PATH")
+
+
+#: Set to ``1`` to make a `requires_chromium` test fail, not skip, when Playwright's
+#: Chromium is missing (#6625: the profile-fetch image's run must not skip silently).
+#: Read at import, as the database URL is.
+TEST_CHROMIUM_REQUIRED_ENV = "SCADBUDDY_TEST_CHROMIUM_REQUIRED"
+_CHROMIUM_REQUIRED = os.environ.get(TEST_CHROMIUM_REQUIRED_ENV) == "1"
+
+
+@functools.cache
+def chromium_missing() -> str | None:
+    """Why Playwright's Chromium cannot run here, or None. Asked in a child process,
+    because Playwright's sync API refuses to start inside a running event loop."""
+    if importlib.util.find_spec("playwright") is None:
+        return "Playwright for Python is not installed (uv sync --group profile-fetch)"
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from playwright.sync_api import sync_playwright\n"
+            "with sync_playwright() as p:\n"
+            "    print(p.chromium.executable_path)",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    path = probe.stdout.strip()
+    if probe.returncode != 0 or not path or not Path(path).is_file():
+        return "Playwright's Chromium is not installed (uv run playwright install chromium)"
+    return None
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_chromium(request: pytest.FixtureRequest) -> None:
+    if not request.node.get_closest_marker("requires_chromium"):
+        return
+    missing = chromium_missing()
+    if missing is None:
+        return
+    if _CHROMIUM_REQUIRED:
+        pytest.fail(f"{TEST_CHROMIUM_REQUIRED_ENV}=1, but {missing}")
+    pytest.skip(missing)
 
 
 #: A Postgres the tests may create and drop schemas in. Unset, `requires_postgres`

@@ -13,6 +13,7 @@ import {
   printPath,
   printSequence,
   processOverrides,
+  sbPlanIds,
   setupPhrase,
   slotChoice,
   supportsChoice,
@@ -615,6 +616,8 @@ const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int(
 
 /** A decimal string, as the price book keeps every rate (§3.6: never a float). */
 const decimal = z.string().regex(/^\d+(\.\d+)?$/).describe('A decimal string, such as "25.50"')
+/** #5774 §3.5: which figure prices a machine-rate row. */
+const PRICED_BY = z.enum(['estimate', 'actual']).describe('`estimate` (the typed figures) or `actual` (the logged events)')
 const policyFields = z
   .object({
     machine_rate_per_hour: decimal.optional(),
@@ -674,7 +677,7 @@ const sliceQuote = z
           'and a printer a run reaches over the LAN is sliced for with no Bambuddy call',
       ),
     filament_plan: z
-      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) })
+      .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true), ids: sbPlanIds })
       .describe('One spool per slot (slot_id from 1), as the print dialog sends it'),
     choices: printChoices,
     filaments: z
@@ -2002,7 +2005,10 @@ export const orderTools: Tool[] = [
       'storefront cart is refused `order_not_submitted` first. `archive` (#4777): priced from what a past print used, ' +
       'with no re-slice: every plate archive of its print run, grams per slot as the slicer estimated them and the ' +
       "actual seconds, at the price book in force, each slot at `filaments`' filament (written onto the item first). " +
-      '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). Refused ' +
+      '`archive_id` defaults to the first archive the item was taken from (order_item_add `archive_id`). `units` ' +
+      '(default 1) is the number of units of the item the print run made: the run\'s grams and seconds are divided ' +
+      'by it, so a plate that held 2 units prices one unit at half the run. Set it whenever the run made more than ' +
+      'one unit, or the unit price is too high by that factor. Refused ' +
       '409 `archive_plates_missing` (a plate of the run has no archive), `archive_not_succeeded` (a failed or ' +
       'cancelled print: quote by slice or by hand) and `archive_gone`. When the unit price leaves a margin below the thin ' +
       "threshold against the model's real cost per unit in its last fulfilled jobs, the answer adds " +
@@ -2034,6 +2040,13 @@ export const orderTools: Tool[] = [
           filament_id: ID.optional().describe(
             'For an item with no colour slots yet (a library file item): the filament of every slot the print used',
           ),
+          units: z
+            .number()
+            .int()
+            .min(1)
+            .max(1000)
+            .optional()
+            .describe('The units of the item the print run made (default 1): its grams and seconds are divided by it'),
         })
         .strict()
         .optional(),
@@ -2760,7 +2773,15 @@ export const orderTools: Tool[] = [
       'the price of a kWh) and the purchase price over the life, in the shop\'s currency. A printer linked to Bambuddy ' +
       'takes its tasks and intervals from Bambuddy (`intervals` `bambuddy`, or `stored` when Bambuddy did not ' +
       "answer). A printer with no inputs is the price book's machine rate (`source` `price_book`). A slice quote " +
-      'for the printer is priced at this rate and records each part.',
+      'for the printer is priced at this rate and records each part. Actuals (#5774): each wear part and task ' +
+      'row has `priced_by` (`estimate` or `actual`), `basis` (the figure that priced it), `estimate_per_hour`, ' +
+      '`actual_per_hour` from the logged events, `have` of `need` (the printer\'s window, `actuals_window`) usable ' +
+      'gaps or replacements, `confidence` (0 to 100, floor(100 x have / need)) and `actual_why` (`too_few`, ' +
+      '`no_events`) when the actual does not price; the breakdown\'s `actuals` and `confidence` (the lowest of the ' +
+      'rows set to `actual`). `actuals` lists each row\'s events in its window with `skipped_gaps`, ' +
+      '`events_read_at` and `orphaned` names. `counter` is the print-hour counter events read: `source` ' +
+      '(`bambuddy`, `lan_watch` or `typed`), `hours` (null with none) and `lan_watch`, ScadBuddy\'s own count. ' +
+      'Every event: machine_rate_events_list.',
     input: z.object({ printer: ID.describe("The registry printer (list_printers' `id`)") }),
     risk: 'read',
     routes: ['GET /api/v1/printers/{printer_id}/machine-rate'],
@@ -2778,10 +2799,14 @@ export const orderTools: Tool[] = [
     description:
       "Keep a registry printer's machine rate inputs (machine_rate_get): `inputs` replaces them whole: `profile` " +
       '(purchase_price, life_hours (null: no depreciation), watts, kwh_price, labour_rate_per_hour (null: the ' +
-      "shop's labour rate)), `wear_parts` ({name, cost, life_hours}) and `maintenance` ({task, minutes, " +
-      'consumables, interval_hours}; a printer linked to Bambuddy names its Bambuddy tasks and keeps Bambuddy\'s ' +
-      "intervals). `remove: true` drops them, so the printer is priced at the price book's machine rate again. " +
-      'Decimals are strings. A recorded quote keeps the rate it was priced at.',
+      "shop's labour rate), actuals_window (1 to 20: the usable gaps or replacements a row set to `actual` " +
+      'needs before its actual prices), lan_hours_offset (the hours a LAN-only printer ran before ScadBuddy ' +
+      "counted it)), `wear_parts` ({name, cost, life_hours, priced_by}) and `maintenance` ({task, minutes, " +
+      'consumables, interval_hours, priced_by}; a printer linked to Bambuddy names its Bambuddy tasks and keeps ' +
+      "Bambuddy's intervals). `priced_by` is `estimate` (the typed figures) or `actual` (the logged events, once " +
+      'the window has enough). actuals_window, lan_hours_offset and a row\'s priced_by left out keep the stored ' +
+      "values (a new row starts at `estimate`). `remove: true` drops them, so the printer is priced at the price " +
+      "book's machine rate again. Decimals are strings. A recorded quote keeps the rate it was priced at.",
     input: z.object({
       printer: ID.describe("The registry printer (list_printers' `id`)"),
       inputs: z
@@ -2793,10 +2818,12 @@ export const orderTools: Tool[] = [
               watts: decimal.optional(),
               kwh_price: decimal.optional(),
               labour_rate_per_hour: decimal.nullable().optional(),
+              actuals_window: z.number().int().min(1).max(20).optional(),
+              lan_hours_offset: decimal.optional(),
             })
             .strict(),
           wear_parts: z
-            .array(z.object({ name: z.string().min(1).max(100), cost: decimal, life_hours: decimal }).strict())
+            .array(z.object({ name: z.string().min(1).max(100), cost: decimal, life_hours: decimal, priced_by: PRICED_BY.optional() }).strict())
             .max(50)
             .default([]),
           maintenance: z
@@ -2807,6 +2834,7 @@ export const orderTools: Tool[] = [
                   minutes: decimal.optional(),
                   consumables: decimal.optional(),
                   interval_hours: decimal.nullable().optional(),
+                  priced_by: PRICED_BY.optional(),
                 })
                 .strict(),
             )
@@ -2843,20 +2871,151 @@ export const orderTools: Tool[] = [
       )
     },
   }),
+  // #5774 (spec 2026-11-17-machine-rate-actuals §5): a printer's logged maintenance and
+  // replaced parts. `write`: they change the shop's records and reach no printer and no
+  // customer. No delete tool: deleting an event is a person's correction in Settings.
+  defineTool({
+    name: 'machine_rate_events_list',
+    label: "List a printer's maintenance events",
+    description:
+      "A registry printer's logged events, newest first, a page at a time (`next` is the cursor of the page " +
+      'after, null at the end): each maintenance task done (`kind` `task`, imported from Bambuddy\'s log on a ' +
+      'linked printer, `origin` `bambuddy`) and each wear part replaced (`part`, logged in ScadBuddy). Each has ' +
+      '`at`, `hours_at` (the print-hour counter then) on `hours_source`\'s scale, a task\'s `minutes` and ' +
+      '`consumables` (null: the typed ones price it), a part\'s `cost` and `hours_used` (typed, else derived), ' +
+      'and `notes`. machine_rate_get shows the events in each row\'s window and the actuals they give.',
+    input: z
+      .object({
+        printer: ID.describe("The registry printer (list_printers' `id`)"),
+        kind: z.enum(['task', 'part']).optional(),
+        name: z.string().min(1).max(100).optional().describe('One task or wear part, by name'),
+        cursor: z.string().min(1).optional().describe("The previous page's `next`"),
+        limit: z.number().int().min(1).max(200).optional(),
+      })
+      .strict(),
+    risk: 'read',
+    routes: ['GET /api/v1/printers/{printer_id}/machine-rate/events'],
+    handler: async ({ printer, ...query }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/printers/{printer_id}/machine-rate/events', {
+            params: { path: { printer_id: printer }, query },
+          }),
+          `list printer ${printer}'s maintenance events`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'machine_rate_event_add',
+    label: 'Log maintenance or a replaced part',
+    description:
+      "Log on a registry printer a wear part replaced (`kind` `part`, with `cost`, what the new part cost) or a " +
+      "maintenance task done (`task`, with its real `minutes` and `consumables`; left out, the task's typed " +
+      'figures price it). `name` is one of the printer\'s wear parts or tasks (machine_rate_get). Leave `hours_at` ' +
+      "out: it is read from the printer's counter (Bambuddy's on a linked printer, ScadBuddy's LAN count on a " +
+      'LAN-only one) and its source recorded; give it only to correct the reading of an event logged late. A ' +
+      'printer with no counter needs `hours_at`, or for a part `hours_used` (the hours the removed part ran, for ' +
+      'one fitted before the counter): 422 `counter_reading_required`. A task on a printer linked to Bambuddy is ' +
+      '409 `maintenance_from_bambuddy`: it is marked done in Bambuddy and read from there. 503 ' +
+      '`counter_unavailable` when the counter cannot be read now. A second call with the same `source` (one is ' +
+      "made from the call's key when left out) returns the first event and writes nothing.",
+    input: z
+      .object({
+        printer: ID.describe("The registry printer (list_printers' `id`)"),
+        kind: z.enum(['task', 'part']),
+        name: z.string().min(1).max(100),
+        at: datetime.optional().describe('When it was done; now when left out'),
+        hours_at: decimal.optional().describe("A correction of the counter reading; read from the printer's counter when left out"),
+        hours_used: decimal.optional().describe('A part only: the hours the removed part ran'),
+        minutes: decimal.optional().describe('A task only'),
+        consumables: decimal.optional().describe('A task only, in the shop\'s currency'),
+        cost: decimal.optional().describe("A part only: what the new part cost, in the shop's currency"),
+        notes: z.string().max(1000).optional(),
+        source: z.string().min(1).max(200).optional().describe('What wrote it, so a retry writes once'),
+      })
+      .strict(),
+    risk: 'write',
+    routes: ['POST /api/v1/printers/{printer_id}/machine-rate/events'],
+    title: ({ printer, kind, name }) => (kind === 'part' ? `Log a replaced ${name} on printer ${printer}` : `Log ${name} done on printer ${printer}`),
+    handler: async ({ printer, source, ...fields }, ctx) => {
+      // These kind checks copy the backend's rule in `MachineRateEventCreate._fields`
+      // (backend/scadbuddy/orders/machine_rate.py), here only to give a clearer error before the
+      // call. A change to one must change the other: test/orders.test.ts pins the rule's text
+      // and checks each shape it refuses is refused here with its words.
+      if (fields.kind === 'part') {
+        if (fields.cost === undefined) throw new ToolError('a replaced part needs its cost')
+        if (fields.minutes !== undefined || fields.consumables !== undefined) {
+          throw new ToolError('a replaced part takes no minutes or consumables')
+        }
+      } else if (fields.cost !== undefined || fields.hours_used !== undefined) {
+        throw new ToolError('a task takes no cost or hours_used')
+      }
+      const given = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      const body = { ...given, source: source ?? `agent:${idempotencyKey(ctx)}` }
+      return json(
+        await ok(
+          ctx.backend.POST('/api/v1/printers/{printer_id}/machine-rate/events', {
+            params: { path: { printer_id: printer } },
+            body: body as components['schemas']['MachineRateEventCreate'],
+          }),
+          `log an event on printer ${printer}`,
+        ),
+      )
+    },
+  }),
+  defineTool({
+    name: 'machine_rate_event_update',
+    label: 'Correct a maintenance event',
+    description:
+      "Correct a printer's logged event (machine_rate_events_list): the fields given are set, a null clears one. " +
+      "A task's `minutes` and `consumables` (null: the task's typed figures price it, as for an event read from " +
+      "Bambuddy with none), a part's `cost` and `hours_used`, `hours_at` (a correction on the event's own " +
+      'counter) and `notes`. An event read from Bambuddy keeps its time, counter source and Bambuddy id, and its ' +
+      'reading cannot be cleared (422 `imported_event`). 422 for a field the event\'s kind has not.',
+    input: z
+      .object({
+        printer: ID.describe("The registry printer (list_printers' `id`)"),
+        event_id: ID,
+        minutes: decimal.nullable().optional(),
+        consumables: decimal.nullable().optional(),
+        cost: decimal.optional(),
+        hours_at: decimal.nullable().optional(),
+        hours_used: decimal.nullable().optional(),
+        notes: z.string().max(1000).nullable().optional(),
+      })
+      .strict(),
+    risk: 'write',
+    routes: ['PATCH /api/v1/printers/{printer_id}/machine-rate/events/{event_id}'],
+    title: ({ printer, event_id }) => `Correct event ${event_id} on printer ${printer}`,
+    handler: async ({ printer, event_id, ...fields }, { backend }) => {
+      const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      if (Object.keys(body).length === 0) throw new ToolError('nothing to change: give the fields to set')
+      return json(
+        await ok(
+          backend.PATCH('/api/v1/printers/{printer_id}/machine-rate/events/{event_id}', {
+            params: { path: { printer_id: printer, event_id } },
+            body: body as components['schemas']['MachineRateEventPatch'],
+          }),
+          `correct event ${event_id} on printer ${printer}`,
+        ),
+      )
+    },
+  }),
   defineTool({
     name: 'price_book_import_spools',
-    label: "Import filaments from Bambuddy's spools",
+    label: "Import filaments from ScadBuddy's spools",
     description:
-      "Make or update the price book's filament records from Bambuddy's spool inventory: one record per filament " +
-      '(material, subtype, brand and colour), made when the book has none, else given the most recent priced ' +
-      "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
+      "Make or update the price book's filament records from ScadBuddy's own spools: one record per filament " +
+      '(effective material, subtype, brand and `#RRGGBBAA`, so an opaque and a translucent spool of one hue are ' +
+      'two records), made when the book has none, else given the most recent priced spool\'s cost per kilogram ' +
+      "(the highest spool number); `spool_ids` are spool numbers; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
       'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
       "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
-      'A filament known only by its colour name, with no priced spool, or whose colour another record of its ' +
-      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched record ' +
-      "whose spools' colour another record of its names holds keeps its own colour, alpha, stops and effect, and " +
-      'comes back `updated` or `unchanged` with `reason` `colour_taken`. ' +
-      "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
+      'A filament known only by its colour name, with no priced spool, or whose colour and alpha another record ' +
+      'of its material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. A matched ' +
+      "record whose spools' colour another record of its names holds keeps its own colour, alpha, stops and " +
+      'effect, and comes back `updated` or `unchanged` with `reason` `colour_taken`. Needs no Bambuddy. Quotes ' +
+      'never read spools.',
     input: z.object({}),
     risk: 'write',
     routes: ['POST /api/v1/orders/price-book/import-spools'],
@@ -2868,11 +3027,12 @@ export const orderTools: Tool[] = [
     name: 'price_book_fill_densities',
     label: 'Fill empty filament densities',
     description:
-      'Give every price-book filament with no density the one its Bambuddy spools link to: the preset id ' +
-      "(the spool's slicer preset, then its K-profile's, then its AMS tray's) gives Bambuddy's local preset or " +
-      "the Bambu Studio vendor preset's `filament_density`, then Bambuddy's filament catalogue. Never " +
-      "overwrites a density that is set. Each row is filled with its `density_profile` (the source) or has no " +
-      "`density_g_cm3` (no source: enter it with price_book_set). Only when Bambuddy is linked; else `not_linked`.",
+      "Give every price-book filament with no density the one ScadBuddy's spools of its material, subtype, " +
+      "brand and `#RRGGBBAA` give: the newest spool's own effective density, else the `filament_density` of " +
+      "its slicer preset id (Bambuddy's local preset while Bambuddy is linked, else the Bambu Studio vendor " +
+      "preset), else that of the preset id (`tray_info_idx`) the tray holding it reports. Never overwrites a " +
+      'density that is set. Each row is filled with its `density_profile` ' +
+      '(the source) or has no `density_g_cm3` (no source: enter it with price_book_set). Needs no Bambuddy.',
     input: z.object({}),
     risk: 'write',
     routes: ['POST /api/v1/orders/price-book/fill-densities'],

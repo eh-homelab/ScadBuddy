@@ -1,4 +1,3 @@
-import { FilamentsEditor } from '../../../components/orders/FilamentsEditor'
 import { MachineRates } from '../../../components/orders/MachineRates'
 import { DepositPolicyEditor } from '../../../components/settings/DepositPolicyEditor'
 import { CustomerMessaging } from '../../../components/settings/CustomerMessaging'
@@ -24,8 +23,7 @@ export function Component() {
       description="What a new order records, how a quote is priced, and the tax, deposits and shipping options an order takes (#4249, #4250, #5281). A recorded quote keeps the rates it was priced at."
     >
       <RuntimeRows form={form} section="orders" />
-      {/* #4250 — the price book's filaments, saved on their own: each edit is a row. */}
-      <FilamentsEditor />
+      {/* #6262 Task 16 — the price book's filaments are on the Filament section's Types tab. */}
       {/* #4625 — each printer's machine rate, from its inputs, saved on its own. */}
       <MachineRates />
       {/* #5281 — the deposit policy and the shipping options, each saved on its own. */}

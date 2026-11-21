@@ -11,6 +11,8 @@ import type { EscalationRoutes, SessionCalls } from './crudEscalations.js'
 import { childReasoning, childStep, FlowQueue, ownStep, type QueueStep } from './queue.js'
 import { SessionError } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRow, type SessionRows } from '../sessions/rows.js'
+import { PgSessionReads, type SessionReads } from '../sessions/sessionReads.js'
 import { principalHeader } from '../tools/authorship.js'
 
 // A flow run's calls outside its grant, at the starting session (#2482, spec 2026-10-11
@@ -62,6 +64,10 @@ export type EscalationDeps = {
   currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
   /** The API's routes, once it lists area `escalations` (#5299 step 10); the SQL above until then. */
   routes?: { crud: EscalationRoutes; use: () => boolean } | undefined
+  /** The sessions' rows, for a parent's owner (`gated` in main.ts; `PgSessionRows` on `sql` when omitted). */
+  sessions?: Pick<SessionRows, 'get'> | undefined
+  /** A child's reasoning (`gated` in main.ts; `PgSessionReads` on `sql` when omitted). */
+  sessionReads?: Pick<SessionReads, 'reasoningDeltas'> | undefined
 }
 
 export const CLAIM_HOLD_MS = 30_000
@@ -172,11 +178,15 @@ export class Escalations {
   readonly #queue: FlowQueue
   readonly #reads: FlowRunReads
   readonly #currentTiers: (owner: Owner) => Promise<readonly Tier[] | undefined>
+  readonly #sessions: Pick<SessionRows, 'get'>
+  readonly #sessionReads: Pick<SessionReads, 'reasoningDeltas'>
 
   constructor(deps: EscalationDeps) {
     this.#deps = deps
     this.#reads = deps.reads
-    this.#queue = new FlowQueue(deps.sql, this.#reads, deps.routes)
+    this.#sessions = deps.sessions ?? new PgSessionRows(deps.sql)
+    this.#sessionReads = deps.sessionReads ?? new PgSessionReads(deps.sql)
+    this.#queue = new FlowQueue(deps.sql, this.#reads, deps.routes, this.#sessionReads)
     this.#currentTiers = deps.currentTiers ?? liveTokenTiers(new PostgresTokenStore(deps.sql))
   }
 
@@ -389,7 +399,7 @@ export class Escalations {
       await Promise.all(
         calls.map(async (c) => {
           if (c.child_session === undefined) return
-          const text = await childReasoning(this.#deps.sql, c.request_id)
+          const text = await childReasoning(this.#sessionReads, c.request_id)
           if (text !== undefined) reasoning.set(c.request_id, text)
           // Postgres's clock both stamps `created_at` and judges the grace (#3411): a
           // replica's skewed clock neither shortens nor stretches it.
@@ -465,7 +475,14 @@ export class Escalations {
       await withinHold(send(session, owner.owner, text, owner.tiers), this.#deps.claimHoldMs ?? CLAIM_HOLD_MS)
     } catch (err) {
       if (err instanceof SessionError && err.code !== 'busy' && err.code !== 'unavailable') {
-        await crud.skip(callsOf(session, claimed))
+        try {
+          await crud.skip(callsOf(session, claimed))
+        } catch (lost) {
+          // As a failed hand back below: the calls stay marked sent and reach the person when
+          // their hop ends; say why the parent's turn never happened.
+          console.error(`escalations: session ${session} cannot be asked (${err.code}), and its calls were not passed to the person`)
+          throw lost
+        }
         return 0
       }
       try {
@@ -579,8 +596,7 @@ export class Escalations {
    * principal that owned the session when it parked; only entries naming this one are its.
    */
   async #parentOwner(session: string): Promise<{ owner: Owner; principal: string; tiers: Tier[] } | undefined> {
-    const [row] = await this.#deps.sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
-      SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id = ${session}::uuid AND archived_at IS NULL`
+    const row = await this.#liveSession(session)
     if (!row) return undefined
     const owner: Owner = { kind: row.owner_kind, id: row.owner_id, label: row.owner_label }
     const principal = principalHeader(row.owner_id)
@@ -677,11 +693,17 @@ export class Escalations {
     return (await this.#entry(requestId))?.claimed ? DENY_IN_FLIGHT : WITH_PERSON
   }
 
+  /** The session's row while it is not archived; a throw for an id that is no UUID, as the SQL's cast threw. */
+  async #liveSession(session: string): Promise<SessionRow | undefined> {
+    if (!isUuid(session)) throw new Error(`session ${JSON.stringify(session)} is not a session id`)
+    const row = await this.#sessions.get(session)
+    return row && row.archived_at === null ? row : undefined
+  }
+
   /** The caller's session is the parent, still owned by the run's starter, and the caller is its owner. */
   async #authorise(caller: EscalationCaller, parentSession: string, parentPrincipal: string): Promise<void> {
     if (caller.session !== parentSession) throw new EscalationError(403, NOT_PARENT)
-    const [owner] = await this.#deps.sql<{ owner_kind: string; owner_id: string }[]>`
-      SELECT owner_kind, owner_id FROM ai_sessions WHERE id = ${parentSession}::uuid AND archived_at IS NULL`
+    const owner = await this.#liveSession(parentSession)
     // Kind and id, as PendingProjection matches an owner (#2861): an id alone could name
     // another kind's principal.
     const who = ownerOf(caller.principal)

@@ -77,7 +77,7 @@ def append(
         if fence is not None:
             held = conn.execute(
                 "SELECT 1 FROM ai_sessions WHERE id = %s::uuid AND turn_attempt = %s"
-                " AND durable_turn_id::text = %s FOR UPDATE",
+                " AND durable_turn_id = %s::uuid FOR UPDATE",
                 (session_id, fence.attempt, fence.turn_id),
             ).fetchone()
             if held is None:
@@ -216,3 +216,142 @@ def fork_log(
             (cut, cut, child_id),
         )
         return first + append_in(conn, child_id, then)
+
+
+def copy_fork_events(conn: Connection[Any], session_id: str) -> list[str]:
+    """``copyForkEvents``: before the parent of ``session_id`` goes (the forget's transaction),
+    the events it reads through its chain become rows of its own, at the same seqs, re-addressed
+    to it. The caller clears its link. The events' JSON texts, so their images can be copied."""
+    rows = conn.execute(
+        (
+            _CHAIN + " SELECT e.seq, e.event FROM chain c"
+            " JOIN ai_session_events e ON e.session_id = c.id"
+            " WHERE c.depth > 0 AND e.seq <= c.bound"
+            " AND e.event::jsonb->>'type' = ANY(%(types)s) ORDER BY e.seq"
+        ).encode(),
+        {"session": session_id, "types": FORK_EVENT_TYPES},
+    ).fetchall()
+    texts = []
+    for row in rows:
+        event = json.loads(row["event"])
+        event["sessionId"] = session_id
+        texts.append(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
+    for at in range(0, len(rows), 500):
+        conn.execute(
+            "INSERT INTO ai_session_events (session_id, seq, event)"
+            " SELECT %s::uuid, e.seq, e.event"
+            " FROM unnest(%s::bigint[], %s::text[]) AS e(seq, event)",
+            (
+                session_id,
+                [int(r["seq"]) for r in rows[at : at + 500]],
+                texts[at : at + 500],
+            ),
+        )
+    return texts
+
+
+def blob_names(texts: list[str]) -> list[str]:
+    """``forkPoint.ts`` ``blobNames``: the images the events name."""
+    names: dict[str, None] = {}
+    for text in texts:
+        event = json.loads(text)
+        if event.get("type") == "tool.result":
+            for image in event.get("images") or []:
+                names[image["name"]] = None
+        if event.get("type") == "user.turn":
+            for image in event.get("images") or []:
+                if image.get("name") is not None:
+                    names[image["name"]] = None
+                names[image["preview"]["name"]] = None
+    return list(names)
+
+
+def copy_fork_blobs(conn: Connection[Any], session_id: str, names: list[str]) -> None:
+    """``blobs.ts`` ``copyForkBlobs``: the images ``names`` lists, found through the chain,
+    become rows of the session's own; a new one keeps its ``created_at``, one the session
+    already has is stamped now (#6413)."""
+    if not names:
+        return
+    conn.execute(
+        (
+            _CHAIN + " INSERT INTO ai_session_blobs (session_id, name, media_type, data,"
+            " created_at) SELECT DISTINCT ON (b.name) %(session)s::uuid, b.name, b.media_type,"
+            " b.data, b.created_at FROM chain c JOIN ai_session_blobs b ON b.session_id = c.id"
+            " WHERE c.depth > 0 AND b.name = ANY(%(names)s) ORDER BY b.name, c.depth"
+            # An image the fork already holds is written again now: a queued message's images
+            # are deleted only up to its own write's time (#6413), so every write sets it.
+            " ON CONFLICT (session_id, name) DO UPDATE SET created_at = clock_timestamp()"
+        ).encode(),
+        {"session": session_id, "names": names},
+    )
+
+
+def open_calls(conn: Connection[Any], session_id: str, turn_id: str | None) -> list[dict[str, str]]:
+    """``tools/activityProjection.ts`` ``openCalls``: the session's own calls with a
+    ``tool.call`` and no ``tool.result``, oldest first, each ``{id, name}``. With ``turn_id``,
+    those after that turn's last ``user.turn`` (``finishedToolCalls``; after seq 0 when it is not
+    logged); without, every one (``terminateOpenToolCalls``). One statement: one snapshot."""
+    rows = conn.execute(
+        (
+            "WITH start AS (SELECT coalesce((SELECT seq FROM ai_session_events"
+            " WHERE %(turn)s::text IS NOT NULL AND " + _USER_TURN + " ORDER BY seq DESC LIMIT 1),"
+            " 0) AS seq)"
+            " SELECT e.event::jsonb->>'type' AS type, e.event::jsonb->>'id' AS id,"
+            " e.event::jsonb->>'name' AS name"
+            " FROM ai_session_events e, start WHERE e.session_id = %(session)s::uuid"
+            " AND e.seq > start.seq AND e.event::jsonb->>'type' IN ('tool.call', 'tool.result')"
+            " ORDER BY e.seq"
+        ).encode(),
+        {"session": session_id, "turn": turn_id},
+    ).fetchall()
+    calls: dict[str, str] = {}
+    for row in rows:
+        if row["type"] == "tool.call":
+            calls[row["id"]] = row["name"] or ""
+        else:
+            calls.pop(row["id"], None)
+    return [{"id": i, "name": n} for i, n in calls.items()]
+
+
+def reasoning_deltas(
+    conn: Connection[Any], session_id: str, tool_use_id: str, scan: int
+) -> list[dict[str, str | None]] | None:
+    """``flows/queue.ts`` ``childReasoning``'s reads, statement for statement: the
+    ``assistant.text.delta`` events (``message``, ``delta``) since the turn's last ``user.turn``
+    before the call's ``tool.call``, oldest first, within the log's last ``scan`` events; None
+    when that ``tool.call`` is not among them."""
+    params: dict[str, Any] = {"session": session_id, "id": tool_use_id, "scan": scan}
+    found = conn.execute(
+        (
+            b"WITH top AS (SELECT coalesce(max(seq), 0) - %(scan)s AS floor"
+            b" FROM ai_session_events WHERE session_id = %(session)s::uuid)"
+            b" SELECT top.floor, (SELECT seq FROM ai_session_events"
+            b" WHERE session_id = %(session)s::uuid AND seq > top.floor"
+            b" AND strpos(event, %(id)s) > 0 AND event::jsonb ->> 'type' = 'tool.call'"
+            b" AND event::jsonb ->> 'id' = %(id)s ORDER BY seq DESC LIMIT 1) AS seq FROM top"
+        ),
+        params,
+    ).fetchone()
+    if found is None or found["seq"] is None:
+        return None
+    params.update(floor=found["floor"], call=found["seq"])
+    start = conn.execute(
+        (
+            b"SELECT seq FROM ai_session_events WHERE session_id = %(session)s::uuid"
+            b" AND seq > %(floor)s AND seq < %(call)s AND strpos(event, '\"user.turn\"') > 0"
+            b" AND event::jsonb ->> 'type' = 'user.turn' ORDER BY seq DESC LIMIT 1"
+        ),
+        params,
+    ).fetchone()
+    params["from"] = start["seq"] if start is not None else found["floor"]
+    rows = conn.execute(
+        (
+            b"SELECT event::jsonb ->> 'messageId' AS message, event::jsonb ->> 'delta' AS delta"
+            b" FROM ai_session_events WHERE session_id = %(session)s::uuid"
+            b" AND seq < %(call)s AND seq > %(from)s"
+            b" AND strpos(event, '\"assistant.text.delta\"') > 0"
+            b" AND event::jsonb ->> 'type' = 'assistant.text.delta' ORDER BY seq"
+        ),
+        params,
+    ).fetchall()
+    return [{"message": r["message"], "delta": r["delta"]} for r in rows]

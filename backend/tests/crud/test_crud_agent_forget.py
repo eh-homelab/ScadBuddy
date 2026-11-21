@@ -1,18 +1,21 @@
 """Forgetting a durable subject, the key deletes nothing forgets, and a flow run's images
 through the agent's CRUD routes (#5299 step 6, area ``forget``): only the ``agent``
 credential reaches them; a forget writes the tombstone and deletes the key and a run's
-images in one transaction under the subject's lock, and refuses a session with forks; a
-flow image put is refused for a forgotten run and keeps at most the run's cap; the bytes
-travel as they are, never base64."""
+images in one transaction under the subject's lock, a session's forks first taking their
+ranges of its transcript, events and images (#5299 step 9, part c), refused only when a fork
+takes transcript entries and the API has no KEK; a flow image put is refused for a
+forgotten run and keeps at most the run's cap; the bytes travel as they are, never base64."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import threading
 import time
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,7 +24,8 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.agent_data import flow_blobs
+from scadbuddy.agent_data import events, flow_blobs, transcripts
+from scadbuddy.agent_data.workspace import Keks
 from scadbuddy.api import crud_agent_forget, crud_areas
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
@@ -33,6 +37,7 @@ from scadbuddy.auth.service_credentials import (
 )
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import install_problem_handlers
+from scadbuddy.core.secrets import kek_from_base64
 from scadbuddy.render.agent_migrations import migrate_agent
 from scadbuddy.workflows.payload_codec import payload_key_lock
 from tests.conftest import PgPool
@@ -42,9 +47,11 @@ pytestmark = pytest.mark.requires_postgres
 
 BASE = "/api/v1/internal/crud/agent"
 PNG = b"\x89PNG\r\n\x1a\n" + b"sealed by the agent" * 4
+KEK_B64 = base64.b64encode(b"\x42" * 32).decode()
+KEYS = Keks(kek_from_base64(KEK_B64), None)
 
 
-def _app(pool: PgPool) -> FastAPI:
+def _app(pool: PgPool, key_file: Path | None = None) -> FastAPI:
     credentials = ServiceCredentialStore(pool)
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(
@@ -56,7 +63,9 @@ def _app(pool: PgPool) -> FastAPI:
     }
     app = FastAPI(dependencies=[Depends(auth_check)])
     app.state.scadbuddy = SimpleNamespace(
-        settings=SimpleNamespace(auth_mode="enforce"),
+        settings=SimpleNamespace(
+            auth_mode="enforce", secret_key_file=key_file, secret_key_previous_file=None
+        ),
         components=SimpleNamespace(get=lambda key: parts[key]),
         settings_store=SimpleNamespace(pool=pool),
     )
@@ -112,6 +121,15 @@ def agent(app: FastAPI) -> Iterator[Agent]:
         yield Agent(client, _token(app))
 
 
+@pytest.fixture
+def keyed(tables: PgPool, tmp_path: Path) -> Iterator[Agent]:
+    key_file = tmp_path / "kek"
+    key_file.write_text(KEK_B64)
+    app = _app(tables, key_file)
+    with TestClient(app) as client:
+        yield Agent(client, _token(app))
+
+
 def _sql(pool: PgPool, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with pool.connection() as conn:
         cur = conn.execute(query.encode(), params)
@@ -135,15 +153,29 @@ def _tombstones(pool: PgPool) -> set[str]:
     return {r["subject"] for r in _sql(pool, "SELECT subject FROM ai_forgotten_subjects")}
 
 
-def _session(pool: PgPool, session: uuid.UUID, parent: uuid.UUID | None = None) -> None:
+def _session(
+    pool: PgPool,
+    session: uuid.UUID,
+    parent: uuid.UUID | None = None,
+    cut: int = 0,
+    event_cut: int | None = None,
+) -> None:
     _sql(
         pool,
         "INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind,"
-        " creator_id, status, max_turns, budget_usd, fork_parent_id, fork_cut)"
+        " creator_id, status, max_turns, budget_usd, fork_parent_id, fork_cut, fork_event_cut)"
         " VALUES (%s, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10,"
-        " 1, %s, %s)",
-        (session, parent, None if parent is None else 0),
+        " 1, %s, %s, %s)",
+        (session, parent, None if parent is None else cut, event_cut),
     )
+
+
+def _link(pool: PgPool, session: uuid.UUID) -> dict[str, Any]:
+    return _sql(
+        pool,
+        "SELECT fork_parent_id, fork_cut, fork_event_cut FROM ai_sessions WHERE id = %s",
+        (session,),
+    )[0]
 
 
 def _image(data: bytes = PNG, ext: str = "png", media: str = "image/png") -> tuple[str, str, bytes]:
@@ -213,22 +245,122 @@ def test_a_flow_run_is_forgotten_with_its_images(agent: Agent, tables: PgPool) -
     assert _sql(tables, "SELECT 1 FROM ai_flow_blobs WHERE subject = %s", (flow,)) == []
 
 
-def test_a_session_with_forks_is_refused_and_one_without_is_forgotten(
+def test_without_a_kek_a_fork_that_takes_entries_refuses_and_one_that_takes_none_goes(
     agent: Agent, tables: PgPool
 ) -> None:
-    parent, child, alone = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    parent, taker, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     _session(tables, parent)
-    _session(tables, child, parent)
-    _session(tables, alone)
-    for s in (parent, child, alone):
+    _session(tables, taker, parent, cut=2)
+    for s in (parent, taker):
         _key(tables, f"session-{s}")
+    # It never fails open: no tombstone, no key gone, the link kept.
     refused = agent.post(f"/forgotten-subjects/session-{parent}")
     assert (refused.status_code, refused.json()["reason"]) == (409, "forks-take-ranges")
     assert f"session-{parent}" in _keys(tables) and _tombstones(tables) == set()
-    for s in (child, alone):
-        assert agent.post(f"/forgotten-subjects/session-{s}").json() == {"key": True}
-    assert _keys(tables) == {f"session-{parent}"}
-    assert _tombstones(tables) == {f"session-{child}", f"session-{alone}"}
+    assert _link(tables, taker)["fork_parent_id"] == parent
+    # A fork of a closed DurableSession takes no entries (fork_cut 0): no key is needed.
+    other_parent = uuid.uuid4()
+    _session(tables, other_parent)
+    _session(tables, other, other_parent, cut=0)
+    _key(tables, f"session-{other_parent}")
+    assert agent.post(f"/forgotten-subjects/session-{other_parent}").json() == {"key": True}
+    assert _link(tables, other) == {
+        "fork_parent_id": None,
+        "fork_cut": None,
+        "fork_event_cut": None,
+    }
+    assert _tombstones(tables) == {f"session-{other_parent}"}
+
+
+def test_forks_take_their_ranges_before_the_parent_goes(keyed: Agent, tables: PgPool) -> None:
+    parent, child, grand, gone = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    _session(tables, parent)
+    image = _image()
+    other = _image(PNG + b"other")
+    entries = [json.dumps({"type": "user", "uuid": f"p-{i}", "n": i}) for i in range(4)]
+    logged = [
+        json.dumps({"type": "session.started", "sessionId": str(parent)}),
+        json.dumps({"type": "user.turn", "sessionId": str(parent), "text": "hi"}),
+        json.dumps(
+            {
+                "type": "tool.result",
+                "sessionId": str(parent),
+                "images": [{"name": image[0]}, {"name": other[0]}],
+            }
+        ),
+        json.dumps({"type": "user.turn", "sessionId": str(parent), "text": "late"}),
+    ]
+    with tables.connection() as conn:
+        assert transcripts.append(conn, str(parent), "p", "", entries, None, KEYS)
+        with conn.transaction():
+            events.append_in(conn, str(parent), logged)
+    _sql(
+        tables,
+        "INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)"
+        " VALUES (%s, %s, %s, %s, now() - interval '1 day')",
+        (parent, *image),
+    )
+    _session(tables, child, parent, cut=3, event_cut=3)
+    # An image the fork already holds, as a queued message's write in it left it (#6413).
+    for owner in (parent, child):
+        _sql(
+            tables,
+            "INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)"
+            " VALUES (%s, %s, %s, %s, now() - interval '2 days')",
+            (owner, *other),
+        )
+    _session(tables, grand, child, cut=1, event_cut=1)
+    _session(tables, gone, parent, cut=2, event_cut=3)
+    with tables.connection() as conn:
+        assert transcripts.append(
+            conn, str(child), "p", "", [json.dumps({"type": "user", "uuid": "c-0"})], None, KEYS
+        )
+    _sql(tables, "INSERT INTO ai_forgotten_subjects (subject) VALUES (%s)", (f"session-{gone}",))
+
+    assert keyed.post(f"/forgotten-subjects/session-{parent}").json() == {"key": True}
+
+    with tables.connection() as conn:
+        # The child's range of the transcript is its own now, sealed under its key, read first.
+        loaded = [json.loads(t)["uuid"] for t in transcripts.transcript(conn, str(child), KEYS)]
+        assert loaded == ["p-0", "p-1", "p-2", "c-0"]
+        # Its own fork reads through it, and the cut it had still holds.
+        assert [json.loads(t)["uuid"] for t in transcripts.transcript(conn, str(grand), KEYS)] == [
+            "p-0"
+        ]
+        read = events.read(conn, str(child), 0, 100)
+    assert [(r["seq"], json.loads(r["event"])["type"], r["inherited"]) for r in read] == [
+        (2, "user.turn", False),
+        (3, "tool.result", False),
+    ]
+    assert all(json.loads(r["event"])["sessionId"] == str(child) for r in read)
+    rows = _sql(
+        tables, "SELECT inherited FROM ai_session_entries WHERE session_id = %s", (str(child),)
+    )
+    assert sorted(r["inherited"] for r in rows) == [False, True, True, True]
+    blobs = _sql(
+        tables,
+        "SELECT name, data, created_at < now() - interval '1 hour' AS old"
+        " FROM ai_session_blobs WHERE session_id = %s",
+        (child,),
+    )
+    # A copied image keeps the parent's time; one the fork held is stamped by this write.
+    assert sorted((b["name"], b["data"], b["old"]) for b in blobs) == sorted(
+        [(image[0], image[2], True), (other[0], other[2], False)]
+    )
+    for fork in (child, gone):
+        assert _link(tables, fork) == {
+            "fork_parent_id": None,
+            "fork_cut": None,
+            "fork_event_cut": None,
+        }
+    # A fork forgotten itself takes nothing, and gets no key made for it.
+    assert (
+        _sql(tables, "SELECT 1 FROM ai_session_entries WHERE session_id = %s", (str(gone),)) == []
+    )
+    assert _sql(tables, "SELECT 1 FROM ai_session_events WHERE session_id = %s", (gone,)) == []
+    assert f"session-{gone}" not in _keys(tables)
+    assert _link(tables, grand)["fork_parent_id"] == child
+    assert f"session-{parent}" in _tombstones(tables) and f"session-{parent}" not in _keys(tables)
 
 
 def test_bad_subjects_are_refused(agent: Agent) -> None:

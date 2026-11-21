@@ -21,7 +21,7 @@ CLAUDE.md of its own, which Claude Code reads when it works on files there:
 - `workers/rust/CLAUDE.md`: the Rust workers' commands, toolchain and crates.
 - `e2e-stack/CLAUDE.md`: the real-stack e2e runs (login and native hot path) and the stack's layout.
 - `models/CLAUDE.md`: the template checks (`verify.sh`, the `models` job) and the bundled models.
-- `deploy/CLAUDE.md`: the Grafana dashboards.
+- `deploy/CLAUDE.md`: the Grafana dashboards and the browser pods' security profiles (`deploy/security/`).
 - `plugins/CLAUDE.md`: ScadBuddy's Claude plugin.
 
 ## Database access (#5295)
@@ -51,11 +51,12 @@ agent sidecar, the agent worker and agent-durable), and the agent and the API sh
 tables through grants. The render, print and projects workers hold none: #5298 is done,
 and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
-#3566 and #3578). The API still revokes those roles at every start where they exist, and
-the agent what it granted `scadbuddy_projects`. Template Python still runs in the render
+#3566 and #3578). The API still revokes those roles at every start where they exist; the
+agent revokes nothing since #6501. Template Python still runs in the render
 worker's pod, which holds no database secret now but holds its `crud.render` credential,
 the S3 keys and the Bambuddy render key. Do the rest in this order: #5299 (the agent),
-#5297 (authenticate `/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of
+#5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
+of 2026-11-17), #5296 (untrusted code out of
 pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
 are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
 
@@ -71,7 +72,10 @@ Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.t
 client. `typecheck`, `test` and (in the agent) `build` run it first, so both packages need
 uv and the backend tree. With `SCADBUDDY_OPENAPI_JSON` set, it reads that spec and skips
 the export. That's how the Dockerfile's `frontend` and `agent-build` stages use the spec
-from its `api-spec` stage. The frontend's `gen:api` also writes
+from its `api-spec` stage. Both scripts make a defaulted property optional when only
+request bodies reach its schema, with the shared `scripts/gen-api-request-defaults.mjs`
+(#6602, #6660; test `agent/test/genApiRequestDefaults.test.ts`), which both stages copy to
+`/src/scripts/`. The frontend's `gen:api` also writes
 `src/storefront/api/schema.d.ts` (gitignored) from the storefront edge's spec
 (`export_openapi --storefront`, `backend/storefront-openapi.json`, gitignored), or from
 `SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). It also writes `src/api/settingDocs.json`
@@ -100,8 +104,8 @@ The Go client's generator and checks: `tools/go/CLAUDE.md`.
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
-kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
-repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as
+kustomize v5.8.1, which the job downloads and checks by sha256 because ArgoCD's
+repo-server runs that version, measured 2026-11-18 after eh-homelab/clusters#3740), `lint-base64-images.sh` (#2479: no image is built as
 base64 in JSON or text outside its allowlisted Messages API boundaries; images move as
 blobs and `{name, mediaType}` pointers), and the `.github/scripts/*.test.sh` suites. Every
 `docker run` in a `verify.sh` must carry
@@ -144,9 +148,9 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-09@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-16@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.09). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.16). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
@@ -213,7 +217,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   there. It is used on the hosted runners in `ci.yml` and `build-image.yml`.
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
-  `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
+  `agent*` stages and the `frontend`, `frontend-unit`, `agent` and `freshness` jobs.
   `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
   the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
@@ -252,7 +256,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   `slicer-build` stage's cargo-chef dependency layer is kept. Only `build-image.yml`'s
   `slicer` job writes it; `ci.yml`'s `slicer-image` and `hot-path-e2e.yml` only read it,
   which works on fork PRs too because the package is public.
-- No CI job builds arm64. `build-image.yml` (all three images) and `build-go-image.yml`
+- No CI job builds arm64. `build-image.yml` (every image) and `build-go-image.yml`
   publish `linux/amd64` only, and nothing in `build-image.yml` runs on PRs. arm64
   (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
   Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus
@@ -273,8 +277,8 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 - Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
   shared with `go-select`) and `select-lanes.sh` (tested by `select-lanes.test.sh`) picks
   the lanes: `backend` (`lfs-fixtures`, `backend-pytest`), `agent_durable`, `rust`
-  (`rust`, `slicer-image`) and `image` (the app image job: any backend change, plus
-  `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
+  (`rust`, `slicer-image`) and `image` (the app image job and `profile-fetch-image`: any
+  backend change, plus `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
   where the lane was needed is a failure. A push, the schedule, a dispatch, the
   Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
@@ -350,11 +354,6 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
 - Frontend vitest tests can time out when the machine is under heavy load (e.g.
   several builds or agents at once). Re-run before debugging; a failure that repeats
   on an idle machine is real.
-- Backend: `test_a_cancelled_slice_is_recorded_cancelled` can error with
-  `httpx.ReadTimeout` on a slow runner (#6301). Re-run the shard.
-- Backend: `test_submit.py::test_a_slow_first_accept_is_retried_in_the_same_run`
-  (`assert 3 == 2`) is timing-sensitive under CI load. Re-run the failed jobs once
-  before you debug it.
 
 ## Prod gotchas
 

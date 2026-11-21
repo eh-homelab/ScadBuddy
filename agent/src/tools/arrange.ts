@@ -3,7 +3,7 @@ import { ok } from './call.js'
 import { ACCEPTING_MS, command } from './command.js'
 import { outputId, slug } from './common.js'
 import { acquireRenderSlot, releaseWhenSettled, renderDeadline, waitForJob } from './customizer.js'
-import { slotChoice } from './print.js'
+import { primeTowerChoice, slotChoice } from './print.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
 
 // Arrange (#1864, spec 2026-09-27 §7): objects from saved outputs of any template,
@@ -116,6 +116,13 @@ export const arrangeTools: Tool[] = [
         .partial()
         .optional()
         .describe('What reading each library file may spend, for this arrange only; omitted, the Settings values'),
+      prime_tower: primeTowerChoice.describe(
+        "The print's prime tower (#3770), as print_output takes it. `enabled: false` packs with no room kept for " +
+          'a tower and writes the file with none, so more fits; a print of it with no prime_tower of its own ' +
+          'prints no tower, and one that turns the tower on needs room for it. Omit to keep room for one on each ' +
+          'plate with more than one colour. `no_sparse_layers` is stated in the file, and each plate keeps the ' +
+          "slicer's \"No sparse layers\" keep-out round its tower (#6735), so fewer parts fit on a plate.",
+      ),
     }),
     risk: 'write',
     bambuddyScope: ['Read Status'],
@@ -124,7 +131,10 @@ export const arrangeTools: Tool[] = [
       `Arrange ${objects.length} object${objects.length === 1 ? '' : 's'} (${goal.replaceAll('_', ' ')}) and save the result`,
     // Its own wait for the render, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
-    handler: async ({ objects, goal, printer_id, printer, filament_plan, colours, name, slug, read_budget }, ctx) => {
+    handler: async (
+      { objects, goal, printer_id, printer, filament_plan, colours, name, slug, read_budget, prime_tower },
+      ctx,
+    ) => {
       // A job on the render queue: under the same per-principal bounds as render_model,
       // its slot held until the job settles, past this call when it is handed back running.
       const deadline = renderDeadline(ctx)
@@ -138,11 +148,12 @@ export const arrangeTools: Tool[] = [
             goal,
             printer_id: printer_id ?? null,
             printer: printer ?? null,
-            filament_plan: filament_plan ?? null,
+            filament_plan: filament_plan ? { ...filament_plan, ids: 'sb' as const } : null,
             colours: colours ?? null,
             name: name ?? null,
             slug: slug ?? null,
             read_budget: read_budget ?? null,
+            ...(prime_tower === undefined ? {} : { prime_tower }),
           },
           signal: ctx.signal,
         })

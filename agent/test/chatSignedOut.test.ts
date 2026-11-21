@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { UpgradeWebSocket, WSContext, WSEvents } from 'hono/ws'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { BrowserSessions, CACHE_MS, personSessions, SESSION_COOKIE, sessionIdHash } from '../src/auth/browserSession.js'
+import { BrowserSessions, CACHE_MS, PgSessionLookup, personSessions, SESSION_COOKIE, sessionIdHash } from '../src/auth/browserSession.js'
 import type { AuthMode } from '../src/config.js'
 import { MemoryEventSource } from '../src/events/bus.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -23,7 +23,7 @@ async function openSocket(mode: AuthMode) {
   let failing = false
   let now = 0
   const sql = (() => (failing ? Promise.reject(new Error('down')) : Promise.resolve(rows))) as unknown as Sql
-  const browserSessions = new BrowserSessions(sql, () => now)
+  const browserSessions = new BrowserSessions(new PgSessionLookup(sql), () => now)
   const bus = new MemoryEventSource()
   browserSessions.follow(bus)
 

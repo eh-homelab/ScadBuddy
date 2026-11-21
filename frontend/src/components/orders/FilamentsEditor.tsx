@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { api } from '../../api/client'
+import type { SpoolType } from '../../api/filament'
 import type { DensityFillRow, Filament, FilamentInput, SpoolImportRow } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { displayHex, swatchStyle } from '../../lib/filamentSwatch'
@@ -7,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { MakeTypeError, makeTypeFromBook } from '../filament/makeType'
 import { DataTable, type Column } from '../records/DataTable'
 import { refusalText } from './refusal'
 
@@ -81,8 +84,9 @@ function importLine(row: SpoolImportRow): string {
 }
 
 /**
- * Where a record's density came from (#6136): the preset Bambuddy linked it to, or a
- * person. An empty one says that an estimate of it is refused, never a bare dash.
+ * Where a record's density came from (#6136, #6262 Task 9): a spool's own density, the
+ * slicer preset its spools name, the preset the tray holding it reports, or a person. An
+ * empty one says that an estimate of it is refused, never a bare dash.
  */
 function densityText(f: Pick<Filament, 'density_g_cm3' | 'density_profile'>): { text: string; missing: boolean } {
   if (f.density_g_cm3) return { text: f.density_profile ? `${f.density_g_cm3} g/cm³, from ${f.density_profile}` : `${f.density_g_cm3} g/cm³`, missing: false }
@@ -91,21 +95,26 @@ function densityText(f: Pick<Filament, 'density_g_cm3' | 'density_profile'>): { 
 
 function fillLine(row: DensityFillRow): string {
   const name = filamentLabel(row) || row.material
-  return row.density_g_cm3 ? `${name}: filled, ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : `${name}: no source (Bambuddy links no preset or density to it); enter its density`
+  return row.density_g_cm3 ? `${name}: filled, ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : `${name}: no source (none of its spools has a density or names a preset, nor does its tray); enter its density`
 }
 
 /**
- * #4250 — the price book's filaments (spec 2026-10-18 §5.1, plan Ruling 4), under the
- * Settings page's Orders section: what a kilogram of each costs, and its density for the
- * rough estimate. A record is never deleted, only archived: a quote priced with it keeps
- * its lines, and an item may still name it. "Show archived" lists the archived ones, each
- * with an Unarchive that brings the same record back (#4977). With Bambuddy linked
- * (`spool_import`), "Import from spools" makes or updates one record per filament of its
- * spool inventory, on click only: a quote never reads Bambuddy (#4253, spec §8.3).
- * Each density says where it came from; "Fill densities" writes into every empty one
- * the density Bambuddy's link to the slicer preset gives (#6136).
+ * #4250 — the price book's filaments (spec 2026-10-18 §5.1, plan Ruling 4): what a
+ * kilogram of each costs, and its density for the rough estimate. A record is never
+ * deleted, only archived: a quote priced with it keeps its lines, and an item may still name it. "Show archived" lists the archived ones, each
+ * with an Unarchive that brings the same record back (#4977). "Import from spools" makes
+ * or updates one record per filament of ScadBuddy's spools (names and `#RRGGBBAA`, so an
+ * opaque and a translucent spool are two records, #6316), on click only: a quote never
+ * reads spools (#4253, spec §8.3; #6262 Task 9: no Bambuddy needed, `spool_import` is
+ * always true). Each density says where it came from; "Fill densities" writes into every
+ * empty one the density its spools give: their own, else their slicer preset's, else
+ * the preset's their tray reports (#6136).
+ *
+ * #6262 Task 16 (Decision 8): the Filament section's Types tab mounts this as its "Price
+ * book" panel, the book's one UI. With `types`, each row shows the type it is linked to
+ * (`SpoolType.filament_id`) as a link, or "Make a type" for a row with none.
  */
-export function FilamentsEditor() {
+export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]; onTypesChanged?: () => void } = {}) {
   const [showArchived, setShowArchived] = useState(false)
   const book = useAsync(() => api.priceBook(showArchived), [showArchived])
   const [draft, setDraft] = useState<Draft>(EMPTY)
@@ -141,6 +150,23 @@ export function FilamentsEditor() {
       book.refresh()
     } catch (err) {
       setError(refusalText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Not `act`: a draft being typed stays.
+  async function makeType(filament: Filament) {
+    setBusy(true)
+    setError(null)
+    try {
+      await makeTypeFromBook(filament)
+      onTypesChanged?.()
+    } catch (err) {
+      if (err instanceof MakeTypeError) {
+        const kept = err.added.length > 0 ? ` ${err.added.join(', ')} stays in the catalog.` : ''
+        setError(`${refusalText(err.cause)}${kept}`)
+      } else setError(refusalText(err))
     } finally {
       setBusy(false)
     }
@@ -217,6 +243,31 @@ export function FilamentsEditor() {
         return <span className={missing ? 'text-xs text-warn' : 'sb-num'}>{text}</span>
       },
     },
+    ...(types
+      ? [
+          {
+            key: 'type',
+            header: 'Type',
+            className: 'whitespace-nowrap',
+            cell: (f: Filament) => {
+              const linked = types.find((one) => one.filament_id === f.id)
+              if (linked) {
+                return (
+                  <Link to={`/filament/types/${linked.id}`} className="underline-offset-4 hover:underline">
+                    {linked.code}
+                  </Link>
+                )
+              }
+              if (f.archived_at) return <span className="text-xs text-muted-foreground">None</span>
+              return (
+                <Button size="xs" variant="outline" disabled={busy} onClick={() => void makeType(f)} aria-label={`Make a type from ${filamentLabel(f)}`}>
+                  Make a type
+                </Button>
+              )
+            },
+          } satisfies Column<Filament>,
+        ]
+      : []),
     {
       key: 'actions',
       header: <span className="sr-only">Actions</span>,
@@ -305,7 +356,7 @@ export function FilamentsEditor() {
       {imported && (
         <div role="status" aria-label="Spool import" className="text-xs text-muted-foreground">
           {imported.length === 0 ? (
-            <p>Bambuddy has no spools to import.</p>
+            <p>ScadBuddy has no spools to import.</p>
           ) : (
             <ul className="list-disc pl-4">
               {imported.map((row) => (

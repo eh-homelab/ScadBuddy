@@ -267,8 +267,8 @@ TRANSFER_URL_HEARTBEAT = 10.0
 
 
 class BlobMissingAnswerError(LookupError):
-    """The API has no blob under the key (its own 404), or no live sliced file to mint a
-    read URL of (its 403 ``transfer-refused``)."""
+    """The API has no blob under the key (its own 404), or no live sliced file of a run in
+    use to mint a read URL of (its 403 ``transfer-refused``)."""
 
 
 class SlicedBlobs(Protocol):
@@ -283,9 +283,9 @@ class RemoteBlobs:
     `RemoteOutputs` reads outputs: the print worker holds no store and no key to sign
     with. Each read first asks the API for a URL of its one key (``POST
     …/print/transfer-urls``, #5298 Task 32), which the API mints only for a key its
-    content index holds live as a slicer's output. The URL's header carries a bearer
-    token, never logged; the URL is fetched with ``client``, which sends no service
-    credential."""
+    content index holds live as a slicer's output, of a run in use (#6122). The URL's
+    header carries a bearer token, never logged; the URL is fetched with ``client``,
+    which sends no service credential."""
 
     def __init__(self, crud: CrudClient, *, client: httpx.AsyncClient | None = None) -> None:
         self._crud = crud
@@ -296,10 +296,10 @@ class RemoteBlobs:
 
     async def _url(self, key: str) -> TransferUrl:
         """The API's read URL of ``key``. A 403 ``transfer-refused`` (the API holds no live
-        sliced file under the key: the content sweep took it) is `BlobMissingAnswerError`,
-        which the LAN upload reports as a file no longer stored, the key logged at DEBUG
-        only. Any other refusal, such as the API's 503 ``not_configured``, is an
-        `ApiError`. The LAN upload retries neither."""
+        sliced file of a run in use under the key: the content sweep took it, or the run
+        ended) is `BlobMissingAnswerError`, which the LAN upload reports as a file no
+        longer stored, the key logged at DEBUG only. Any other refusal, such as the API's
+        503 ``not_configured``, is an `ApiError`. The LAN upload retries neither."""
         try:
             response = await heartbeating(
                 self._crud.request(

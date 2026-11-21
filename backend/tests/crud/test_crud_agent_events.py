@@ -184,12 +184,19 @@ def test_the_fence_holds_a_turns_events_to_its_placement(agent: Agent, tables: P
     sid = _session(tables, attempt="run:1", turn=turn)
     fence = {"attempt": "run:1", "turn_id": turn}
     assert agent.append(sid, [_delta(sid, "a")], fence=fence) == [1]
+    # The uuid itself is compared, as PgEventRows does: any spelling of the id matches, and a
+    # turn id that is no UUID is refused, as the SQL path's cast throws.
+    upper = {"attempt": "run:1", "turn_id": turn.upper()}
+    assert agent.append(sid, [_delta(sid, "a2")], fence=upper) == [2]
+    bad = {"events": [json.dumps(_delta(sid, "x"))], "fence": {"attempt": "run:1", "turn_id": "t"}}
+    refused = agent.status("POST", f"/sessions/{sid}/events", bad)
+    assert (refused.status_code, refused.json()["reason"]) == (422, "turn_id")
     stale = {"attempt": "run:0", "turn_id": turn}
     assert agent.append(sid, [_delta(sid, "b")], fence=stale) is None
     # Unlike the transcript's, no turn running is no placement holding it.
     _sql(tables, "UPDATE ai_sessions SET durable_turn_id = NULL WHERE id = %s", (sid,))
     assert agent.append(sid, [_delta(sid, "c")], fence=fence) is None
-    assert [r["seq"] for r in agent.read(sid)] == [1]
+    assert [r["seq"] for r in agent.read(sid)] == [1, 2]
 
 
 def test_the_fence_waits_for_a_writer_of_the_row(agent: Agent, tables: PgPool) -> None:

@@ -222,3 +222,15 @@ def test_an_account_orders_status_is_the_order_status_enum(tmp_path: Path) -> No
     spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
     status = spec["components"]["schemas"]["AccountOrder"]["properties"]["status"]
     assert status["enum"] == list(get_args(OrderStatus))
+
+
+def test_openapi_has_no_module_qualified_names(tmp_path: Path) -> None:
+    """#6262 F16: two models of one name in the spec get module-qualified names
+    (``scadbuddy__bambuddy__farm__InventorySpool``), which the clients then carry. Each
+    schema is named by its class alone, and ScadBuddy's spool inventory is
+    `FilamentInventorySpool`, apart from Bambuddy's."""
+    schema = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))
+    names = set(schema["components"]["schemas"])
+    assert [name for name in sorted(names) if name.startswith("scadbuddy__")] == []
+    assert {"FilamentInventoryView", "FilamentInventorySpool", "FilamentSpoolSummary"} <= names
+    assert not {"InventoryView", "SpoolSummary", "InventorySpool"} & names

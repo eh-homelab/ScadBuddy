@@ -1,0 +1,134 @@
+"""The end of a plate's use of an SB spool (#6263 Task 5).
+
+A plate's ``print_started`` estimate (`print_uses.record_uses`) is closed by one
+``print_ended``. Two readers book it, and the ledger keeps one per ``ref_id``:
+
+- the printer report that shows the plate end (`plate_ended`, from
+  `printers/reports.py` `advance_in`), at the report's time: ``data.ended`` ``report``;
+- the run's settle (`print_uses.settle_uses_in`), for an end no report timed (the
+  printer moved on, or went ``IDLE``), at the clock: ``data.ended`` ``settle``.
+
+The estimate carries its job in ``data.job`` (the printer's ``subtask_name``), so a
+report finds it without the run id (`filament_spool_events_job`).
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Final
+from uuid import UUID
+
+from psycopg import Connection
+from psycopg.rows import DictRow
+
+from scadbuddy.filament import ledger
+from scadbuddy.filament import models as m
+
+logger = logging.getLogger(__name__)
+
+Conn = Connection[DictRow]
+
+#: Log message of a capture that failed and was dropped; the write it ran in goes on.
+FILAMENT_CAPTURE_FAILED: Final = "filament capture failed; the report is written"
+
+#: Who a report-booked end names.
+PRINTER_WATCH: Final = "system:printer-watch"
+
+
+@dataclass(frozen=True)
+class OpenUse:
+    """A ``print_started`` with no ``print_ended`` yet."""
+
+    spool_id: UUID
+    ref_id: str
+    delta_g: float | None
+    job: str
+
+
+_OPEN = (
+    "SELECT e.spool_id, e.ref_id, e.delta_g, e.data ->> 'job' AS job"
+    " FROM filament_spool_events e WHERE e.kind = %(started)s AND e.ref_kind = %(kind)s"
+    " AND {where} AND NOT EXISTS (SELECT 1 FROM filament_spool_events d"
+    " WHERE d.spool_id = e.spool_id AND d.kind = %(ended)s"
+    " AND d.ref_kind = %(kind)s AND d.ref_id = e.ref_id)"
+    " ORDER BY e.spool_id, e.ref_id"
+)
+
+
+def _open(conn: Conn, where: str, params: dict[str, Any]) -> list[OpenUse]:
+    rows = conn.execute(
+        _OPEN.format(where=where),
+        {
+            "started": ledger.PRINT_STARTED,
+            "ended": ledger.PRINT_ENDED,
+            "kind": ledger.PRINT_RUN,
+            **params,
+        },
+    ).fetchall()
+    return [
+        OpenUse(
+            spool_id=row["spool_id"],
+            ref_id=row["ref_id"],
+            delta_g=row["delta_g"],
+            # An estimate from before #6263 and the migration's reach has no `data.job`.
+            job=row["job"] or row["ref_id"].split("/", 1)[-1].rsplit("/", 1)[0],
+        )
+        for row in rows
+    ]
+
+
+def open_for_run(conn: Conn, run_id: str) -> list[OpenUse]:
+    """The run's uses still open, by `filament_spool_events_print_ref`: a prefix match
+    on ``ref_id`` (``run/subtask/slot``), the run id escaped."""
+    escaped = run_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return _open(conn, "e.ref_id LIKE %(prefix)s", {"prefix": f"{escaped}/%"})
+
+
+def open_for_job(conn: Conn, printer_id: str, job: str) -> list[OpenUse]:
+    """The uses of one job still open, by `filament_spool_events_job`, on one printer: a
+    use whose run (``print_runs.printer``) names another printer is not matched, since
+    two printers can run a job of the same name. A run with no printer, or no run row,
+    is matched."""
+    return _open(
+        conn,
+        "(e.data ->> 'job') = %(job)s AND NOT EXISTS (SELECT 1 FROM print_runs r"
+        " WHERE r.id = split_part(e.ref_id, '/', 1)"
+        " AND r.printer IS NOT NULL AND r.printer <> %(printer)s::uuid)",
+        {"job": job, "printer": printer_id},
+    )
+
+
+def book_end(
+    conn: Conn,
+    use: OpenUse,
+    *,
+    applied: bool,
+    at: datetime | None,
+    actor: str,
+    ended: str,
+) -> m.SpoolEvent | None:
+    """The ``print_ended`` of ``use``: its sliced grams as the actual when ``applied``,
+    else 0, which drops the estimate. ``None`` when the use is ended already. ``at`` is
+    when the plate ended; with none the ledger books it now. ``ended`` is ``report`` or
+    ``settle``."""
+    return ledger.record(
+        conn,
+        use.spool_id,
+        ledger.PRINT_ENDED,
+        source=ledger.PRINT_ACTUAL,
+        delta_g=use.delta_g if applied else 0.0,
+        ref_kind=ledger.PRINT_RUN,
+        ref_id=use.ref_id,
+        actor=actor,
+        at=at,
+        data={"basis": "sliced" if applied else "not_applied", "job": use.job, "ended": ended},
+    )
+
+
+def plate_ended(conn: Conn, printer_id: str, subtask_name: str, state: str, at: datetime) -> None:
+    """Book the end of every open use of ``subtask_name`` on ``printer_id``, at the report
+    that shows it: its grams when the printer says ``FINISH``, else none."""
+    for use in open_for_job(conn, printer_id, subtask_name):
+        book_end(conn, use, applied=state == "FINISH", at=at, actor=PRINTER_WATCH, ended="report")

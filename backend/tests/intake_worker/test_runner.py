@@ -97,6 +97,14 @@ def test_the_child_gets_none_of_the_workers_environment(
     assert env["MPLCONFIGDIR"] == str(tmp_path)
 
 
+def test_the_childs_temporary_folder_is_its_box_never_the_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sandbox's own TMPDIR is its spool, which the confined child sees covered (#6523)."""
+    monkeypatch.setenv("TMPDIR", "/var/lib/scadbuddy-intake")
+    assert runner.child_env(tmp_path)["TMPDIR"] == str(tmp_path)
+
+
 # -- what the worker reads back ---------------------------------------------------------
 
 
@@ -227,7 +235,12 @@ def _hardened(code: str, *args: str) -> str:
 
 
 def _confined(
-    hide: Path, code: str, *args: str, cwd: Path | None = None, covers: tuple[str, ...] = ()
+    hide: Path,
+    code: str,
+    *args: str,
+    cwd: Path | None = None,
+    covers: tuple[str, ...] = (),
+    env: dict[str, str] | None = None,
 ) -> str:
     """``code`` run through the launcher with ``--strict``, as the sandbox runs a parse."""
     out = subprocess.run(
@@ -238,6 +251,7 @@ def _confined(
         text=True,
         timeout=60,
         cwd=cwd,
+        env=env,
     )
     assert out.returncode == 0, out.stderr
     return out.stdout.strip()
@@ -317,6 +331,32 @@ def test_a_confined_child_reaches_only_its_own_box(tmp_path: Path) -> None:
         "print(','.join(seen))"
     )
     assert _confined(spool, code, str(other / "secret"), cwd=mine) == "mine,hidden,hidden"
+
+
+@needs_confinement
+def test_a_confined_child_makes_temporary_files_in_its_box_by_its_absolute_path(
+    tmp_path: Path,
+) -> None:
+    """``tempfile`` resolves ``TMPDIR`` to an absolute path through the covered spool. The
+    child reaches its box that way and lists nothing of the spool (#6523: with the spool's
+    tmpfs at mode 0, no temporary folder was usable and every STL check crashed)."""
+    spool = tmp_path / "spool"
+    box = spool / "jobs" / "check-a" / "box"
+    box.mkdir(parents=True)
+    code = (
+        "import os, sys, tempfile\n"
+        "with tempfile.TemporaryDirectory() as scratch:\n"
+        "    open(os.path.join(scratch, 'part.stl'), 'w').write('x')\n"
+        "try:\n"
+        "    os.listdir(sys.argv[1])\n"
+        "    listed = 'listed'\n"
+        "except OSError:\n"
+        "    listed = 'unlisted'\n"
+        "print(tempfile.gettempdir(), listed)"
+    )
+    inner = spool / runner.BOX
+    env = runner.child_env(inner)
+    assert _confined(spool, code, str(spool), cwd=box, env=env) == f"{inner} unlisted"
 
 
 @needs_confinement

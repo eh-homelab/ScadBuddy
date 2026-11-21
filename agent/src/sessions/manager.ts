@@ -54,14 +54,14 @@ import {
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, type SessionImages, type StoredBlob } from './blobs.js'
+import { SessionBlobs, type SessionImages, type StoredSessionBlob } from './blobs.js'
 import { type HttpBodiesFor, pgHttpBodies } from './httpBodies.js'
 import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
-import { SessionEdits } from './edits.js'
+import { SessionEdits, type EditRows } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore, type TranscriptRows } from './store.js'
-import type { UserImage } from './images.js'
+import type { UserAttachment } from './images.js'
 import { PgResourceRows, type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
 import { type ListFilter, PgSessionRows, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
@@ -75,7 +75,8 @@ import type { FlowRunReads } from '../flows/backendReads.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
-import { notifyWarmEvict } from './warmEvict.js'
+import { PgPublisher, type Publisher } from './publish.js'
+import { PgSessionReads, type SessionReads } from './sessionReads.js'
 import type { TurnCoreDeps } from './turnCore.js'
 import { systemAppend } from './turnShared.js'
 import { FlowQueue } from '../flows/queue.js'
@@ -116,7 +117,7 @@ import { FlowQueue } from '../flows/queue.js'
 //     scrubForLog must read that declaration.
 //   - #266's WebSocket gateway maps the panel's client messages onto send
 //     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
-//   - `onAppend` publishes `session.*` on the bus, and main.ts's LISTEN
+//   - `onAppend` publishes `session.*` on the bus, and main.ts's change-stream
 //     consumer calls EventLog.wake() (busEvents.ts, #300).
 //
 // Turns (plan Step 6.3: every session is an AgentSession). `send` claims the row and
@@ -560,7 +561,7 @@ export type StartOptions = {
   /** With `prompt`: see SendOptions.context. */
   context?: string
   /** With `prompt`: see SendOptions.images. */
-  images?: readonly UserImage[]
+  images?: readonly UserAttachment[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
   /** With `prompt`: see SendOptions.flow. */
@@ -587,7 +588,7 @@ export type SendOptions = {
    * them as image blocks before the text; the `user.turn` event names them and
    * their previews, stored with the session first (#2479).
    */
-  images?: readonly UserImage[]
+  images?: readonly UserAttachment[]
   /**
    * The sender's tiers (spec §8.1), for the turn's in-process tools: an MCP
    * token's, as `/mcp` authenticated it for this send (tools/sessions.ts).
@@ -677,6 +678,12 @@ export type SessionManagerDeps = {
   transcripts?: TranscriptRows
   /** Where the sessions' event logs are kept (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
   eventRows?: EventRows
+  /** A child's reasoning before its call (`PgSessionReads` on `sql` when omitted; gated in main.ts, #6501). */
+  sessionReads?: SessionReads
+  /** A warm process's eviction on every replica (`PgPublisher` on `sql` when omitted; gated in main.ts, #6501). */
+  publish?: Pick<Publisher, 'warmEvict'>
+  /** An edit's transaction (edits.ts `PgEditRows` on `sql` when omitted; gated in main.ts, #6449). */
+  editRows?: EditRows
   /** The backend's flow tables, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
   flowReads: FlowRunReads
   paths: HarnessPaths
@@ -928,7 +935,7 @@ export class SessionManager {
    * This replica's warm Claude Code processes (warm.ts, spec 2026-10-13 §5.3):
    * one per classic session, serving its turns until it no longer matches
    * them, goes idle, or is evicted (a handoff, done, an archive, a credential,
-   * plugin or package change on any replica: warmEvict.ts; main.ts LISTENs).
+   * plugin or package change on any replica: warmEvict.ts; main.ts hears it on the change stream).
    */
   readonly warm: WarmSessions
   /** The sessions' rows (rows.ts): over SQL, or the API's CRUD routes once it lists area `sessions` (main.ts). */
@@ -985,11 +992,14 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
-    this.queue = new FlowQueue(deps.sql, deps.flowReads, deps.escalationRoutes)
+    const sessionReads = deps.sessionReads ?? new PgSessionReads(deps.sql)
+    this.queue = new FlowQueue(deps.sql, deps.flowReads, deps.escalationRoutes, sessionReads)
     this.escalations = new Escalations({
       sql: deps.sql,
       reads: deps.flowReads,
       routes: deps.escalationRoutes,
+      sessions: this.rows,
+      sessionReads,
       durable: () => this.durable,
       ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
@@ -999,6 +1009,7 @@ export class SessionManager {
     })
     this.edits = new SessionEdits({
       sql: deps.sql,
+      ...(deps.editRows ? { rows: deps.editRows } : {}),
       events: this.events,
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
@@ -1076,7 +1087,7 @@ export class SessionManager {
    * its name; not_found for a session the principal may not see, a name that is
    * not a blob's, or one that is not this session's.
    */
-  async blob(id: string, name: string, principal: Owner): Promise<StoredBlob> {
+  async blob(id: string, name: string, principal: Owner): Promise<StoredSessionBlob> {
     await this.get(id, principal)
     const blob = await this.blobs.get(id, name)
     if (!blob) throw new SessionError('not_found', `no image ${name} in session ${id}`)
@@ -1542,7 +1553,7 @@ export class SessionManager {
     // fingerprint, and its question gate is the browser user's): gone here and
     // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
     void this.warm.evict(id, 'handed off')
-    await notifyWarmEvict(this.deps.sql, id)
+    await (this.deps.publish ?? new PgPublisher(this.deps.sql)).warmEvict(id)
     return this.get(id, to)
   }
 

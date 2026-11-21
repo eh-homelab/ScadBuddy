@@ -4,7 +4,7 @@ import { OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import { designColorOf, designOpacityOf } from '../../lib/glbColor'
-import { seeThrough } from '../../lib/partOpacity'
+import { applyPartOpacity, recolourParts } from '../../lib/partOpacity'
 import { cameraFraming } from '../../lib/previewFrame'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Button } from '@/components/ui/button'
@@ -124,20 +124,16 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
       const owned = materials.map((material) => {
         const own = material.clone() as THREE.MeshStandardMaterial
         own.userData.designColor = designColorOf(mesh, own)
-        own.side = THREE.DoubleSide
-        if (opacity < 1) {
-          // A translucent filament's part draws see-through, as in the Customize preview
-          // and the covers: its front faces only, one layer over what is behind it. So
-          // the Layers view's cut (`cutAt`) shows no inner wall of such a part, where an
-          // opaque part's `DoubleSide` does. That is on purpose: back faces would blend
-          // in as a second layer and draw it more opaque than the preview (#6289 review).
-          own.side = THREE.FrontSide
-          seeThrough(own, opacity)
-        }
+        own.userData.designOpacity = opacity
+        // A translucent filament's part draws see-through, as in the Customize preview
+        // and the covers: its front faces only, one layer over what is behind it. So
+        // the Layers view's cut (`cutAt`) shows no inner wall of such a part, where an
+        // opaque part's `DoubleSide` does. That is on purpose: back faces would blend
+        // in as a second layer and draw it more opaque than the preview (#6289 review).
+        applyPartOpacity(mesh, own, opacity)
         return own
       })
       mesh.material = Array.isArray(mesh.material) ? owned : owned[0]!
-      if (opacity < 1) mesh.renderOrder = 1
     })
     // Y-up: x wide, y tall, z deep. The framing reads (wide, deep, tall).
     const extent = box.getSize(new THREE.Vector3())
@@ -158,14 +154,7 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
   )
 
   useEffect(() => {
-    scene.traverse((node) => {
-      const mesh = node as THREE.Mesh
-      if (!mesh.isMesh) return
-      for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-        const own = material as THREE.MeshStandardMaterial
-        own.color.set(colors.get(own.userData.designColor as string) ?? (own.userData.designColor as string))
-      }
-    })
+    recolourParts(scene, colors)
     invalidate()
   }, [scene, colors, invalidate])
 

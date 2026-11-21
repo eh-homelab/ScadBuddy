@@ -11,7 +11,10 @@ import type { AppendFence, TranscriptHead, TranscriptRows } from './store.js'
 // (the SDK's one invariant, store.ts). A session id goes into a path only as `sessionPath` makes
 // it; a subpath and a project key travel in the query or the body.
 
-/** One append's entries and body at most (backend `ENTRIES_MAX`, `BODY_BYTES_MAX`, less room for the rest of the body). */
+/**
+ * One append's entries, and the bytes a request groups (backend `ENTRIES_MAX`; its `BODY_BYTES_MAX`
+ * is 64 MiB, so a larger entry, such as a tool result with its images inline, goes alone).
+ */
 export const APPEND_ENTRIES_MAX = 1000
 export const APPEND_BYTES_MAX = 30 * 1024 * 1024
 /** The uuids `moved` sends at most (backend `OWN_MAX`): past it the tail counts as moved, and the process is spawned again. */

@@ -61,8 +61,13 @@ from tests.api.test_send import API, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
+from tests.support.sb_rows import seed_app_sb_spools
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 HISTORIES = Path(__file__).parents[1] / "fixtures" / "print_run_histories"
 #: The first sliced file Bambuddy's fake library answers an upload of a ``.gcode.3mf``
@@ -551,6 +556,7 @@ def test_bambuddy_runs_are_unchanged(
     )
     library.next_id = SLICED + 1  # Bambuddy's own slice is file 77
     for client in _app(settings, s3, kek_file, tmp_path, slicer_backend="bambuddy"):
+        seed_app_sb_spools(client)
         output_id = prepared(client, model)
         run_id = _post_run(client, output_id)
         run = follow_run(client, run_id, timeout=120)
@@ -575,6 +581,7 @@ def test_native_library_run(
     lays its copy out in Bambuddy's library, which its queue reads, so the sliced file
     goes there too."""
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as fake:
             output_id = prepared(client, model)
             run = _run(client, output_id)
@@ -693,6 +700,7 @@ def test_an_outputs_check_asked_through_bambuddy_is_bambuddys_check(
     the Bambuddy run it will be: a 200, with Bambuddy's status read, never a 500 from a
     client the native check did not build."""
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         output_id = prepared(client, model)
         row = _lan_routed(client)
         before = _status_reads()
@@ -713,6 +721,7 @@ def test_a_library_files_check_asked_through_bambuddy_is_bambuddys_check(
     library: FakeLibrary,
 ) -> None:
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         prepared(client, model)
         plug = _upload(client, _one_colour(tmp_path / "plug.3mf"))
         row = _lan_routed(client)
@@ -741,6 +750,7 @@ def test_an_analysis_asked_through_bambuddy_reads_bambuddy(
     ask Bambuddy nothing (#4629), and with `path: "bambuddy"` they read it, as that run
     does."""
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         output_id = prepared(client, model)
         row = _lan_routed(client)
         request = {k: v for k, v in body().items() if k != "printer_id"}
@@ -774,6 +784,7 @@ def test_a_calibration_over_the_lan_is_refused_in_words_for_its_caller(
     request (``X-ScadBuddy-Request: 1``) gets the Settings wording alone; a caller of the
     API also gets `path: "bambuddy"`. The dialog's background slice is refused too."""
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         output_id = prepared(client, model)
         row = _lan_routed(client)
         request = {k: v for k, v in body().items() if k != "printer_id"}
@@ -845,6 +856,7 @@ def test_a_batchs_calibration_over_the_lan_is_refused_in_words_for_its_caller(
     caller of the API gets `path: "bambuddy"` in the file's refusal; the page's Queue
     all (``X-ScadBuddy-Request: 1``) gets the Settings wording alone."""
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         prepared(client, model)
         plug = _upload(client, _one_colour(tmp_path / "plug.3mf"))
         row = _lan_routed(client)
@@ -872,6 +884,7 @@ def test_a_calibration_on_a_lan_only_printer_names_no_bambuddy_path(
     """#5602 review: a row that links no Bambuddy printer refuses `path: "bambuddy"` too
     (`_not_on_bambuddy`), so an API caller's refusal does not name that path."""
     for client in _app(settings, s3, kek_file, tmp_path, library_backend="native"):
+        seed_app_sb_spools(client)
         output_id = prepared(client, model)
         printers: Printers = _state(client).components.get(PRINTERS)
         row = printers.store.create(

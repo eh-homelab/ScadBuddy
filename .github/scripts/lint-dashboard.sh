@@ -56,6 +56,9 @@
 #     so a name that only a fixture or log line quotes does not count. That
 #     search runs once the service's tracing module (agent/src/telemetry/setup.ts,
 #     frontend/src/lib/tracing.ts) exists, and is noted as unchecked until then
+#   - deploy/grafana holds only kustomization.yaml and `[a-z0-9-]+.json`
+#     regular files, the names deploy.reusable.yml vendors into clusters
+#     (eh-homelab/clusters#3734)
 #   - `kustomize build deploy/grafana` succeeds and yields one ConfigMap per
 #     dashboard and nothing else: `<name>-dashboard` in `cattle-dashboards`,
 #     labelled `grafana_dashboard: "1"`, whose one file `<name>.json` is the
@@ -83,6 +86,17 @@ problem() {
   printf '%s: %s\n' "$1" "$2"
   problems=$((problems + 1))
 }
+
+# clusters vendors this directory and the deploy copies only these names
+# (eh-homelab/clusters#3734); it rejects anything else, so it fails here first.
+while IFS= read -r -d '' entry; do
+  name=${entry##*/}
+  if [ -L "$entry" ] || [ ! -f "$entry" ]; then
+    problem "deploy/grafana/$name" "is not a regular file; the deploy vendors only kustomization.yaml and [a-z0-9-]+.json files"
+  elif ! [[ "$name" =~ ^(kustomization\.yaml|[a-z0-9-]+\.json)$ ]]; then
+    problem "deploy/grafana/$name" "is not kustomization.yaml or a [a-z0-9-]+.json dashboard, so the deploy cannot vendor it"
+  fi
+done < <(find "$root/deploy/grafana" -mindepth 1 -maxdepth 1 -print0)
 
 # Every dashboard, by its path from the repo root.
 mapfile -t dashboards < <(find "$root/deploy/grafana" -maxdepth 1 -name '*.json' -printf 'deploy/grafana/%f\n' | sort)
@@ -117,7 +131,36 @@ suffixes = {
     "Summary": lambda n: [n + "_sum", n + "_count"],
     "Info": lambda n: [n.removesuffix("_info") + "_info"],
 }
-for call in ast.walk(ast.parse(open(sys.argv[1]).read())):
+tree = ast.parse(open(sys.argv[1]).read())
+# FILAMENT_SERIES: a table of (name, help, labels), each a Gauge family (#6785).
+for node in ast.walk(tree):
+    target = node.target if isinstance(node, ast.AnnAssign) else (
+        node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
+    )
+    if not (isinstance(target, ast.Name) and target.id == "FILAMENT_SERIES"):
+        continue
+    if not isinstance(node.value, (ast.Tuple, ast.List)):
+        continue
+    for row in node.value.elts:
+        if not (
+            isinstance(row, (ast.Tuple, ast.List))
+            and len(row.elts) == 3
+            and isinstance(row.elts[0], ast.Constant)
+            and str(row.elts[0].value).startswith("scadbuddy_")
+        ):
+            print("MALFORMED_ROW line %d" % row.lineno)
+            continue
+        name, _, labels = row.elts
+        if not (
+            isinstance(labels, (ast.Tuple, ast.List))
+            and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in labels.elts
+            )
+        ):
+            print("MALFORMED_ROW line %d" % row.lineno)
+            continue
+        print(" ".join([name.value, *(e.value for e in labels.elts)]))
+for call in ast.walk(tree):
     if not isinstance(call, ast.Call):
         continue
     kind = getattr(call.func, "id", getattr(call.func, "attr", None))
@@ -136,6 +179,12 @@ for call in ast.walk(ast.parse(open(sys.argv[1]).read())):
         print(" ".join([series, *names, *extra]))
 PY
 ) || exposed=""
+# A FILAMENT_SERIES row the parse above could not read is an error, never skipped.
+while IFS= read -r bad; do
+  problem "backend/scadbuddy/core/metrics.py" \
+    "FILAMENT_SERIES row at ${bad#MALFORMED_ROW } is not a (\"scadbuddy_...\", help, (\"label\", ...)) tuple"
+done < <(grep '^MALFORMED_ROW ' <<< "$exposed" || true)
+exposed=$(grep -v '^MALFORMED_ROW ' <<< "$exposed" || true)
 [ -n "$exposed" ] \
   || problem "backend/scadbuddy/core/metrics.py" "no scadbuddy_* metric declarations found"
 

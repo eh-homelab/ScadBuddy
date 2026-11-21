@@ -30,6 +30,7 @@ from scadbuddy.orders.models import (
     PricingPolicy,
     Quote,
     Reference,
+    WearPartRate,
 )
 from scadbuddy.orders.operations import preview_request
 from scadbuddy.orders.problems import PROBLEMS
@@ -38,6 +39,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotPresets,
     ensure_output,
     operation_output_id,
     output_matches,
@@ -158,11 +160,19 @@ class FakeSlicer:
     def __init__(self, files: Mapping[int, bytes]) -> None:
         self.files = dict(files)
         self.subjects: list[str] = []
+        #: Each start's ``slot_presets`` (#6574).
+        self.slot_presets: list[SlotPresets | None] = []
 
     async def start(
-        self, output_id: str, request: SliceQuoteRequest, subject: str
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
         self.subjects.append(subject)
+        self.slot_presets.append(slot_presets)
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
     async def start_library(
@@ -1125,6 +1135,23 @@ async def test_a_quote_is_priced_at_its_printers_machine_rate(shop: Shop, tmp_pa
         currency="USD",
         depreciation_per_hour="0.89",
         intervals="typed",
+        # #5774 §6: the quote keeps which parts priced from actuals, and how sure.
+        wear=[
+            WearPartRate(
+                name="Nozzle",
+                cost="35",
+                life_hours="1000",
+                per_hour="0",
+                priced_by="actual",
+                basis="actual",
+                have=3,
+                need=3,
+                confidence=100,
+            )
+        ],
+        actuals=True,
+        actuals_window=3,
+        confidence=100,
     )
     machine = FakeMachineRate(rate)
     run = run_of(shop, tmp_path, {1: sliced_plate(1, 7200, [10.0, 5.0])}, machine_rate=machine)
