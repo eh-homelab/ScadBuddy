@@ -306,16 +306,12 @@ def test_a_place_that_maps_later_is_seeded_then(pg_pool: PgPool) -> None:
 
 
 def _map_place(pg_pool: PgPool, place: UUID, bb_id: int, *, archived: bool = False) -> None:
-    with pool_conn(pg_pool) as conn:
+    with pg_pool.connection() as conn:
         conn.execute(
             "UPDATE filament_locations SET bb_location_id = %s,"
             " archived_at = CASE WHEN %s THEN now() END WHERE id = %s",
             (bb_id, archived, place),
         )
-
-
-def pool_conn(pg_pool: PgPool) -> Any:
-    return pg_pool.connection()
 
 
 def test_a_place_mapping_only_to_an_archived_location_is_not_seeded(pg_pool: PgPool) -> None:
@@ -359,6 +355,27 @@ def test_an_old_unmapped_seed_is_replaced_once_it_maps(pg_pool: PgPool) -> None:
     assert first.moved == 0
     assert _link_seen(pg_pool, made)["location_id"] == 6
     report = pull(f, [bb(location_id=7, updated_at=_bb_time(2))], now=NOW, pulls=ROWS)
+    assert report.moved == 1
+
+
+def test_a_seed_of_a_place_archived_since_still_counts(pg_pool: PgPool) -> None:
+    """Decision 171: a seed of a place SB once mapped stays a real seen value after its SB
+    location is archived, so Bambuddy's move to a mapped place still moves the spool."""
+    f = _filament(pg_pool)
+    made, shelf = _unseen_place(pg_pool, f)
+    places = _locations([{"id": 5, "name": "Garage"}, {"id": 6, "name": "Attic"}])
+    pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS, locations=places)
+    assert _link_seen(pg_pool, made)["location_id"] == 5
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET archived_at = now() WHERE bb_location_id = 5")
+    kept = pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    assert kept.moved == 0
+    assert _link_seen(pg_pool, made)["location_id"] == 5
+    report = pull(f, [bb(location_id=6, updated_at=_bb_time(2))], now=NOW, pulls=ROWS)
+    attic = _row(pg_pool, "filament_locations", "bb_location_id", 6)
+    spool = f.spools.get(made)
+    assert attic is not None and spool is not None and spool.location_id == attic["id"]
+    assert spool.location_id != shelf
     assert report.moved == 1
 
 

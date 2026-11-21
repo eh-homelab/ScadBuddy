@@ -791,7 +791,9 @@ below are the plan's):
   seen location (`bb_seen.location_id`) on the first pull where BB's place is null or maps
   to an open SB location in no printer's place, with BB's value and moves nothing on that
   pull, so a link seen before #6265 is not archived or moved on the first pull (Decisions
-  150, 152, 164 and 171). It never moves a spool out of a printer place.
+  150, 152, 164 and 171). A seen location of a BB place SB has never mapped (in any
+  state) counts as absent and is seeded again; one SB mapped once stays seen. It never
+  moves a spool out of a printer place.
 - SB writes that do not nudge (Decision 17). The API nudges the workflow after a write
   on `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py`, and after
   a settings save that changes `filament_sync`. Capture and `sync_ams_weights`

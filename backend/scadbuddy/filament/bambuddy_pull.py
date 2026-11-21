@@ -1473,13 +1473,21 @@ def _sb_newer(conn: Conn, spool_id: UUID, field: str, bb_at: datetime) -> bool:
     return row is None or at != row["created_at"]
 
 
-def _place_mapped(conn: Conn, bb_location_id: int) -> bool:
-    """BB's place maps to an open SB location that is in no printer's place."""
+def _mapped_place(conn: Conn, bb_location_id: int) -> UUID | None:
+    """The SB location BB's place maps to now: open, and in no printer's place."""
+    row = conn.execute(
+        "SELECT id FROM filament_locations WHERE bb_location_id = %s"
+        " AND archived_at IS NULL AND printer_id IS NULL",
+        (bb_location_id,),
+    ).fetchone()
+    return None if row is None else row["id"]
+
+
+def _place_ever_mapped(conn: Conn, bb_location_id: int) -> bool:
+    """SB has mapped BB's place, in any state (archived and printer places included)."""
     return (
         conn.execute(
-            "SELECT 1 FROM filament_locations WHERE bb_location_id = %s"
-            " AND archived_at IS NULL AND printer_id IS NULL",
-            (bb_location_id,),
+            "SELECT 1 FROM filament_locations WHERE bb_location_id = %s", (bb_location_id,)
         ).fetchone()
         is not None
     )
@@ -1516,11 +1524,11 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
         if on
     }
     if "location_id" in seeds:
-        if seen["location_id"] is not None and not _place_mapped(conn, seen["location_id"]):
+        if seen["location_id"] is not None and _mapped_place(conn, seen["location_id"]) is None:
             del seeds["location_id"]
         held = _link_seen(conn, spool_id).get("location_id")
-        if held is not None and not _place_mapped(conn, held):
-            # Decision 171: a seed of a place that does not map is no seed. The link's
+        if held is not None and not _place_ever_mapped(conn, held):
+            # Decision 171: a seed of a place SB has never mapped is no seed. The link's
             # seen value goes, so the first pull where BB's place maps seeds it fresh.
             conn.execute(
                 "UPDATE filament_bb_links SET bb_seen = bb_seen - 'location_id'"
@@ -1606,14 +1614,9 @@ def _follow_location(
         return False
     target: UUID | None = None
     if bb.location_id is not None:
-        found = conn.execute(
-            "SELECT id FROM filament_locations WHERE bb_location_id = %s"
-            " AND archived_at IS NULL AND printer_id IS NULL",
-            (bb.location_id,),
-        ).fetchone()
-        if found is None:
+        target = _mapped_place(conn, bb.location_id)
+        if target is None:
             return False
-        target = found["id"]
     if target == row["location_id"]:
         return False
     if not new:
@@ -1621,8 +1624,8 @@ def _follow_location(
         held = seen.get("location_id")
         if held is None and "location_id" not in seen:
             return False
-        if held is not None and not _place_mapped(conn, held):
-            return False  # Decision 171: an unmapped seed is absent; `_write_seen` repairs it.
+        if held is not None and not _place_ever_mapped(conn, held):
+            return False  # Decision 171: a never-mapped seed is absent; `_write_seen` repairs it.
         if held == bb.location_id:
             return False
     at = as_utc(bb.updated_at) or run.now

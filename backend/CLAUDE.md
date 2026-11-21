@@ -814,8 +814,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and 152): a link whose `bb_seen` has no `location_id` or no `archived_at` only has that
   value seeded from BB (`_write_seen`): the archive state on its first pull, the location
   on the first pull where BB's `location_id` is null or maps to an open SB location in no
-  printer's place (Decisions 164 and 171; a seed of a place that does not map counts as
-  absent). A pull that seeds neither moves nor archives or restores it, so no link made before #6265 is archived or moved by the
+  printer's place (Decisions 164 and 171; a seed of a BB place SB has never mapped, in
+  any state, counts as absent). A pull that seeds neither moves nor archives or restores it, so no link made before #6265 is archived or moved by the
   first pull. A spool in a printer place (an AMS unit, a tray, the external spool place)
   is never moved by BB (R-T9-4, Decision 151). The pull writes `bb_seen` as a merge
   (R-T4-28), and takes nothing for a field both sides changed since `bb_seen`, counted in
