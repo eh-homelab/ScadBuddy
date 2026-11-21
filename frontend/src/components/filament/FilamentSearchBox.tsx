@@ -1,13 +1,10 @@
 import { SearchIcon } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { activeDialog } from '../../agent/dom'
+import { isTyping } from '../../lib/isTyping'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
-function isTyping(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
-  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
-}
 
 /**
  * #6894 — the Spools and Types tabs' text search (`lib/filamentSearch.ts`), kept in the URL

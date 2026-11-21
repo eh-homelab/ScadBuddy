@@ -5,6 +5,7 @@ import { ApiError } from '../../api/client'
 import { getInventory, listCatalog, listTypes, type SpoolType } from '../../api/filament'
 import type { FilamentInventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
+import { isTyping } from '../../lib/isTyping'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { readPickerFilters, writePickerFilters, type PickerFilters } from '../../lib/filamentPickerFilters'
 import { loadTypeSkus, matchesSearch, namesNumber, parseSearch, spoolSearchDoc, traysBySpool, typeSearchDoc } from '../../lib/filamentSearch'
@@ -73,7 +74,7 @@ export function FilamentQuickFind() {
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (!isQuickFindKey(event) || event.defaultPrevented) return
+      if (!isQuickFindKey(event) || event.defaultPrevented || isTyping(event.target)) return
       event.preventDefault()
       setOpen(true)
     }
@@ -156,7 +157,9 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
 
   const go = (path: string) => {
     onDone()
-    void navigate(path, { state: { back: location.search } })
+    // Only the Spools and Types tabs keep a search in the address that the page can go back to.
+    const searchable = location.pathname === '/filament/spools' || location.pathname === '/filament/types'
+    void navigate(path, searchable ? { state: { back: location.search } } : undefined)
   }
 
   return (
