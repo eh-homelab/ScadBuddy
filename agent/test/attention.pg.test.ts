@@ -16,8 +16,7 @@ import { pendingInput, respond } from '../src/routes/pendingInput.js'
 import { ASK_USER, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../src/gate/entry.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
-import { CLAIMED_AT, resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
-import { PgSessionRows } from '../src/sessions/rows.js'
+import { resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import { browserTools } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -29,6 +28,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { CLAIMED_AT, PgSessionRows } from './support/sql/sessionRows.js'
 
 // Attention requests (#815) at the question gate, in Postgres: parked as an
 // `ai_questions` row of kind 'attention', answered like a question, and timed

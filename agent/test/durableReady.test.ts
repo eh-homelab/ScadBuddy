@@ -3,6 +3,7 @@ import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { DurableTurns } from '../src/sessions/durable.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
+import { durableStores } from './support/agentSessions.js'
 
 // DurableTurns.unready (plan 5d Ruling 2b) against a stubbed DescribeTaskQueue: only a
 // poller Temporal saw lately counts, since it lists one for minutes after its worker went.
@@ -19,7 +20,7 @@ function turns(pollers: { lastAccessTime?: { seconds: number; nanos?: number } }
       },
     },
   } as unknown as Client
-  const t = new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog, liveHosts: () => Promise.resolve(new Set(['agent-sessions.worker-a'])) })
+  const t = new DurableTurns({ client, ...durableStores({} as Sql), events: {} as EventLog, liveHosts: () => Promise.resolve(new Set(['agent-sessions.worker-a'])) })
   return { t, calls: () => calls }
 }
 
@@ -75,7 +76,7 @@ describe('whether a unified session can start now', () => {
       listed++
       return hosts instanceof Error ? Promise.reject(hosts) : Promise.resolve(new Set(hosts))
     }
-    return { t: new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog, liveHosts }), asked, listed: () => listed }
+    return { t: new DurableTurns({ client, ...durableStores({} as Sql), events: {} as EventLog, liveHosts }), asked, listed: () => listed }
   }
 
   it('is ready with fresh pollers on both shared queues and a live session host, and never asks about `agent`', async () => {

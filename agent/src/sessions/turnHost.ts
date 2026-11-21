@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
-import type { Sql } from 'postgres'
 import type { GateTrace } from '../approvals/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
@@ -28,7 +27,7 @@ import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
 import { type Placement, type SessionDirectory, watchCaps } from '../workspace/directory.js'
-import { PgTurnRows, type TurnRows } from './turnRows.js'
+import type { TurnRows } from './turnRows.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -182,9 +181,8 @@ const CUT_TEXT: Record<Cut, string> = {
 export type TurnHostDeps = {
   /** The replica's turn machinery (SessionManager.turnCore): its warm processes, events, audit. */
   core: TurnCoreDeps
-  sql: Sql
-  /** The row's turn writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
-  turns?: TurnRows
+  /** The row's turn writes (turnRows.ts, #6449). */
+  turns: TurnRows
   /** The message's images, by the names DurableTurns.send stored them under; and a tool result's, stored under the fence. */
   images: Pick<SessionImages, 'get' | 'putIf'>
   /** This replica's session host queue (`agent-sessions.<identity>`), what each result names. */
@@ -196,10 +194,10 @@ export type TurnHostDeps = {
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
   /**
-   * The API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), used while `use()` holds:
-   * a held call's response read, and its span mark, fenced there by this placement. SQL otherwise.
+   * The API's `pending-input` routes (gate/crudPending.ts, #5299 step 10): a held call's response
+   * read, and its span mark, fenced there by this placement.
    */
-  pendingRoutes?: { crud: TurnRoutes; use: () => boolean } | undefined
+  pendingRoutes: TurnRoutes
   /** The calls in flight at a restart whose ToolCall finished, and whether each succeeded (activityProjection.ts `finishedToolCalls`); absent, none. */
   finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
@@ -296,7 +294,7 @@ export class TurnHost {
 
   constructor(deps: TurnHostDeps) {
     this.#deps = deps
-    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
+    this.#turns = deps.turns
     // The only listener of this channel on the stream: listenAlso keeps one per channel, so a second would replace this one.
     deps.listen?.(INPUT_CHANNEL, (requestId) => {
       for (const wake of this.#waiters.get(requestId) ?? []) wake()
@@ -889,11 +887,7 @@ export class TurnHost {
   }
 
   async #row(requestId: string): Promise<Response | undefined> {
-    const routes = this.#deps.pendingRoutes
-    if (routes?.use()) return await routes.crud.response(requestId)
-    const [row] = await this.#deps.sql<Response[]>`
-      SELECT outcome, response, reason, responder, decision_traceparent FROM ai_input_responses WHERE request_id = ${requestId}`
-    return row
+    return await this.#deps.pendingRoutes.response(requestId)
   }
 
   /**
@@ -903,15 +897,8 @@ export class TurnHost {
    */
   async #traceEntry(requestId: string, traceparent: string | undefined, fence: TurnFence): Promise<void> {
     if (!traceparent) return
-    const routes = this.#deps.pendingRoutes
-    // On the API, only while this placement still holds the session (the turn fence, #5299 step 10).
-    if (routes?.use()) {
-      await routes.crud.markPark(requestId, traceparent, fence).catch((err: unknown) => {
-        this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
-      })
-      return
-    }
-    await this.#deps.sql`UPDATE ai_pending_input SET traceparent = ${traceparent} WHERE request_id = ${requestId}`.catch((err: unknown) => {
+    // Only while this placement still holds the session (the turn fence, #5299 step 10).
+    await this.#deps.pendingRoutes.markPark(requestId, traceparent, fence).catch((err: unknown) => {
       this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
     })
   }

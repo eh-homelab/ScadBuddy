@@ -1,14 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
-import type { Sql } from 'postgres'
 import { type Attributes, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { AuditLog } from '../audit/log.js'
 import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
-import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
+import type { SessionRows } from '../sessions/rows.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { withApprovalLine } from '../approvals/service.js'
 import {
@@ -65,7 +64,7 @@ export interface SessionOwners {
   ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null; turnId?: string | null }) | undefined>
 }
 
-/** A session's owner from its row (sessions/rows.ts `SessionRows.get`, `gated` in main.ts). */
+/** A session's owner from its row (sessions/rows.ts `SessionRows.get`). */
 export class RowSessionOwners implements SessionOwners {
   readonly #rows: Pick<SessionRows, 'get'>
 
@@ -74,7 +73,7 @@ export class RowSessionOwners implements SessionOwners {
   }
 
   async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null; turnId: string | null }) | undefined> {
-    // An id that is no UUID throws, as the SQL's uuid cast did.
+    // An id that is no UUID is no session: a throw.
     if (!isUuid(sessionId)) throw new Error(`session ${JSON.stringify(sessionId)} is not a session id`)
     const row = await this.#rows.get(sessionId)
     if (!row) return undefined
@@ -84,13 +83,6 @@ export class RowSessionOwners implements SessionOwners {
     const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
     const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
     return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers, turnId: row.durable_turn_id }
-  }
-}
-
-/** `RowSessionOwners` on the session rows' SQL (tests, and a process with no API). */
-export class PgSessionOwners extends RowSessionOwners {
-  constructor(sql: Sql) {
-    super(new PgSessionRows(sql))
   }
 }
 
@@ -119,18 +111,13 @@ export interface ApprovalRecords {
 /** A run grant's responder in `ai_input_responses` (#2481): `{kind: 'run_grant', id}`. */
 type Responder = { kind?: unknown; id?: unknown }
 
-export class PgApprovalRecords implements ApprovalRecords {
-  readonly #sql: Sql
+/** The gate's approvals as the API's `pending-input` routes answer them (gate/crudPending.ts, #5299 step 10). */
+export class RecordedApprovals implements ApprovalRecords {
   readonly #grants: Pick<FlowRunReads, 'grantInForce'>
-  readonly #routes: { crud: ApprovalRoutes; use: () => boolean } | undefined
+  readonly #routes: ApprovalRoutes
 
-  /**
-   * `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7).
-   * `routes`: the API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), which the
-   * approval's read takes while `use()` holds; SQL otherwise.
-   */
-  constructor(sql: Sql, grants: Pick<FlowRunReads, 'grantInForce'>, routes?: { crud: ApprovalRoutes; use: () => boolean }) {
-    this.#sql = sql
+  /** `grants`: the backend's `flow_grants`, through its CRUD routes (flows/backendReads.ts, #5299 D7). */
+  constructor(grants: Pick<FlowRunReads, 'grantInForce'>, routes: ApprovalRoutes) {
     this.#grants = grants
     this.#routes = routes
   }
@@ -147,30 +134,17 @@ export class PgApprovalRecords implements ApprovalRecords {
 
   async byPerson(requestId: string, call?: ApprovalBinding): Promise<boolean> {
     if (call === undefined) return false
-    if (this.#routes?.use()) return (await this.#routes.crud.approval(requestId, call.inputHash))?.kind === 'browser'
-    const rows = await this.#sql`
-      SELECT 1 FROM ai_input_responses r
-      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
-      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
-        AND a.input_hash = ${call.inputHash} AND r.responder->>'kind' = 'browser'`
-    return rows.length > 0
+    return (await this.#routes.approval(requestId, call.inputHash))?.kind === 'browser'
   }
 
   /** The approval for this call: undefined for none, null for a person's, a grant id for a run grant's. */
   async #approval(requestId: string, call?: ApprovalBinding): Promise<string | null | undefined> {
     // Without the call's hash nothing can be matched, so nothing is approved.
     if (call === undefined) return undefined
-    const [row] = this.#routes?.use()
-      ? await this.#routes.crud.approval(requestId, call.inputHash).then((responder) => (responder ? [{ responder }] : []))
-      : await this.#sql<{ responder: Responder }[]>`
-      SELECT r.responder FROM ai_input_responses r
-      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
-      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
-        AND a.input_hash = ${call.inputHash}
-      LIMIT 1`
-    if (!row) return undefined
-    if (row.responder.kind !== 'run_grant') return null
-    return typeof row.responder.id === 'string' ? row.responder.id : ''
+    const responder: Responder | null = await this.#routes.approval(requestId, call.inputHash)
+    if (!responder) return undefined
+    if (responder.kind !== 'run_grant') return null
+    return typeof responder.id === 'string' ? responder.id : ''
   }
 
   /** Whether the run grant is in force; the backend's table, asked only for a grant's approval. */

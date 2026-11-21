@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SessionBlobs } from '../src/sessions/blobs.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event, type Owner, type ServerEvent } from '../src/sessions/protocol.js'
-import { copyForkRanges, hasForks } from '../src/sessions/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
+import { copyForkRanges, hasForks } from './support/sql/transcriptRows.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
+import { PgEventRows } from './support/sql/eventRows.js'
 
 // A fork's event log and images are copy-on-write too (#4212): the child reads its parent's
 // conversation events through its event cut, and its parent's images by name, and forgetting the
@@ -23,7 +24,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`fork event logs and images${TEST_DATABASE_U
   beforeEach(async () => {
     t = await throwawayDatabase()
     expect(await t.db.ready()).toBe(true)
-    log = new EventLog(t.db.sql)
+    log = new EventLog(new PgEventRows(t.db.sql))
     blobs = new SessionBlobs(t.db.sql)
   })
   afterEach(async () => {

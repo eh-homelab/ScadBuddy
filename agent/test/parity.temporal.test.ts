@@ -136,7 +136,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
       remotePlugins,
       packagePlugins,
       httpRequest: {},
-      approvalHashKey: Buffer.alloc(32, 5),
+      approvalHashKey: () => Buffer.alloc(32, 5),
     })
   }
 

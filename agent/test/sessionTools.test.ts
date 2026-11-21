@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryEventSource } from '../src/events/bus.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import { busKindOf, followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
-import { PgPublisher } from '../src/sessions/publish.js'
 import { event } from '../src/sessions/protocol.js'
 import { turnPrincipal } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -11,6 +10,7 @@ import { runTool } from '../src/tools/registry.js'
 import { condense, HANDOFF_TARGET, sessionTools } from '../src/tools/sessions.js'
 import { firstText, services } from './helpers/mcp.js'
 import { agentA, browser } from './support/sessions.js'
+import { PgPublisher } from './support/sql/publisher.js'
 
 // The `sessions_*` tools' and the `session.*` bus events' own logic, without
 // a database (#300). End to end over /mcp and Postgres: test/sessionTools.pg.test.ts.

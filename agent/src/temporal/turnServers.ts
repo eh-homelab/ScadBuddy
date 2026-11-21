@@ -1,6 +1,5 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
-import type { Sql } from 'postgres'
 import type { SessionPresence } from '../sessions/presence.js'
 import { toolOffReason } from '../access/items.js'
 import { BUILTIN_SOURCES, packageServerSource } from '../access/model.js'
@@ -18,7 +17,7 @@ import {
   httpTierOf,
   type SavedBodies,
 } from '../harness/httpRequest.js'
-import { type HttpBodiesFor, pgHttpBodies } from '../sessions/httpBodies.js'
+import type { HttpBodiesFor } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -102,21 +101,20 @@ export type TurnServerDeps = {
   /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
   credentialSecrets?: (() => Promise<readonly string[]>) | undefined
   /**
-   * http_request, as a classic turn has it. A session's saved bodies are in Postgres
-   * (`sql`, #2374), as a classic turn's are; a flow's, which has no session, under
+   * http_request, as a classic turn has it. A session's saved bodies are the API's
+   * (`bodies`, #2374), as a classic turn's are; a flow's, which has no session, under
    * `saveRoot/flow-<run>/http` on this pod's own disk (never the shared payload volume).
    */
   httpRequest?:
     | {
         saveRoot: string
-        sql: Sql
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
         /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a classic turn's. */
         files?: WorkspaceFiles | undefined
-        /** A session's saved bodies (`PgHttpBodies` on `sql` when omitted). */
-        bodies?: HttpBodiesFor | undefined
+        /** A session's saved bodies. */
+        bodies: HttpBodiesFor
       }
     | undefined
   /** The enabled plugin packages (`loadPackagesForRun`, as a turn's): their MCP servers offered as turn tools. */
@@ -203,7 +201,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         const saveDir = path.join(http.saveRoot, context.session, 'http')
         await mkdir(saveDir, { recursive: true })
         saved = dirBodies(saveDir)
-      } else saved = (http.bodies ?? pgHttpBodies(http.sql))(context.session)
+      } else saved = http.bodies(context.session)
       servers.push({
         name: HTTP_SERVER,
         connect: () =>

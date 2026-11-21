@@ -13,17 +13,7 @@ import { AccessStore } from '../src/access/store.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME } from '../src/harness/httpRequest.js'
 import { userMessage } from '../src/harness/inbox.js'
 import { sessionWorkDir } from '../src/harness/stateDirs.js'
-import {
-  BROWSER_TOOLS_GUIDE,
-  listQuery,
-  SessionError,
-  SETTING_SESSION_BUDGET_USD,
-  SETTING_SESSION_MAX_TURNS,
-  TITLE_MAX,
-  systemAppend,
-  titleFrom,
-  type TurnOutcome,
-} from '../src/sessions/manager.js'
+import { BROWSER_TOOLS_GUIDE, SessionError, SETTING_SESSION_BUDGET_USD, SETTING_SESSION_MAX_TURNS, TITLE_MAX, systemAppend, titleFrom, type TurnOutcome } from '../src/sessions/manager.js'
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { AuditLog } from '../src/audit/log.js'
@@ -33,6 +23,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 import { warmHarness } from './support/warm.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { listQuery } from './support/sql/sessionRows.js'
 
 /** `text` as a regular expression that matches only itself. */
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

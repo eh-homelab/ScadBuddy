@@ -18,7 +18,6 @@ import { sessionWorkflowId } from '../src/gate/durable.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
@@ -29,12 +28,7 @@ import { sessionFinishActivities } from '../src/temporal/session/finishActivity.
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
 import type { AcquireInput } from '../src/temporal/session/models.js'
-import {
-  ACQUIRE_WORKER_ACTIVITY,
-  SESSION_QUEUE,
-  SESSION_SETTINGS_ACTIVITY,
-  sessionHostQueue,
-} from '../src/temporal/session/names.js'
+import { ACQUIRE_WORKER_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, REPLY_COST_USD, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -44,6 +38,11 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { dumpThenCleanUp, dumpWorkflow } from './support/workflowDump.js'
+import { PgTurnRows } from './support/sql/turnRows.js'
+import { durableStores, hostStores } from './support/agentSessions.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
+import { sqlGateDb } from './support/sql/gate.js'
+import { sqlSettings } from './support/sql/settings.js'
 
 // Session affinity (unified runtime spec 2026-10-13 §5.2, plan Task 5.2) end to end: AgentSession
 // on a Temporal dev server, two replicas (A, B), each with its own manager, warm cache, shared
@@ -337,10 +336,10 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
         }),
       ...options.extra,
     })
-    r.m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: r.m.events, liveHosts: polledHosts(env.client, hostQueue) })
+    r.m.durableTurns = new DurableTurns({ client: env.client, ...durableStores(pool.sql), events: r.m.events, liveHosts: polledHosts(env.client, hostQueue) })
     r.turnHost = new TurnHost({
       core: r.m.turnCore,
-      sql: options.turnHostSql ? options.turnHostSql(pool.sql) : pool.sql,
+      ...hostStores(options.turnHostSql ? options.turnHostSql(pool.sql) : pool.sql),
       images: new SessionBlobs(pool.sql),
       hostQueue,
       ...(options.fenceMs ? { fenceMs: options.fenceMs } : {}),
@@ -380,9 +379,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       identity: workerIdentity(identity),
       activities: {
         [ACQUIRE_WORKER_ACTIVITY]: counted,
-        ...sessionFinishActivities(pool.sql, r.m.events),
+        ...sessionFinishActivities(new PgTurnRows(pool.sql), r.m.events),
         // `gate.settings`, read as each turn starts, and the gate's writers (main.ts).
-        ...sessionGateActivities({ sql: pool.sql, events: r.m.events }),
+        ...sessionGateActivities(sqlGateDb(pool.sql, r.m.events), sqlSettings(pool.sql)),
       },
       shutdownGraceMs: 1_000,
       log: () => {},

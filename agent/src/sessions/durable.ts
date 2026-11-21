@@ -6,7 +6,6 @@ import {
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import { context as otelContext, trace } from '@opentelemetry/api'
-import type { Sql } from 'postgres'
 import { CrudReadError } from '../api/crudRead.js'
 import { traceparentOf } from '../telemetry/trace.js'
 import type { Tier } from '../auth/principal.js'
@@ -16,16 +15,15 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { EDIT_QUEUED_UPDATE, QUEUE_MESSAGE_UPDATE, REMOVE_QUEUED_UPDATE, SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { NOT_QUEUED, QUEUE_FULL, type QueueAnswer, type QueuedMessage, type QueueState } from '../temporal/session/models.js'
-import { SessionBlobs, type SessionImages, sentImageBlobs } from './blobs.js'
+import { type SessionImages, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow, TURN_STATUSES } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { SweepRoutes } from '../gate/crudPending.js'
-import type { AuditSink } from '../audit/log.js'
 import type { EventLog } from './eventLog.js'
 import type { UserAttachment } from './images.js'
 import { SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
 import { event, type Owner, type QueuedEntry, type SentImage, type ServerEvent, type SessionStatus } from './protocol.js'
-import { PgTurnRows, type SendClaim, type SendClaimed, type TurnRows } from './turnRows.js'
+import type { SendClaim, SendClaimed, TurnRows } from './turnRows.js'
 
 // A session's turns (unified runtime spec 2026-10-13 §5, plan Step 6.3): every session is an
 // AgentSession, `session-<id>` on `agent-sessions`; this service hands it the message and reads
@@ -145,11 +143,10 @@ export type DurableTurn = {
 
 export type DurableTurnsDeps = {
   client: Client
-  sql: Sql
-  /** A session's images (`SessionBlobs` on `sql` when omitted). */
-  blobs?: SessionImages
-  /** The row's turn writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
-  turns?: TurnRows
+  /** A session's images. */
+  blobs: SessionImages
+  /** The row's turn writes (turnRows.ts, #6449). */
+  turns: TurnRows
   events: EventLog
   /** Tests only: a queue other than `agent-sessions`. */
   sessionQueue?: string
@@ -161,10 +158,8 @@ export type DurableTurnsDeps = {
    * the API's process (`SCADBUDDY_AGENT_ROLE=api`, §14.3) hosts none itself.
    */
   liveHosts?: () => Promise<ReadonlySet<string>>
-  /** Where a Stop records the approvals it cancels on a session whose workflow is gone (#4018). */
-  audit?: AuditSink | undefined
-  /** The API's `pending-input` routes, which a Stop's cancels take while `use()` holds (gate/sweep.ts, #5299 step 10). */
-  pendingRoutes?: { crud: SweepRoutes; use: () => boolean } | undefined
+  /** The API's `pending-input` routes, which a Stop's cancels take, with their audit rows (gate/sweep.ts, #5299 step 10). */
+  pendingRoutes: SweepRoutes
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
@@ -214,9 +209,7 @@ function queueRefusal(err: unknown, id: string, what: string): SessionError {
 
 export class DurableTurns {
   readonly #client: Client
-  readonly #sql: Sql
   readonly #events: EventLog
-  readonly #audit: AuditSink | undefined
   readonly #pendingRoutes: DurableTurnsDeps['pendingRoutes']
   readonly #gate: DurableGate
   readonly #blobs: SessionImages
@@ -231,13 +224,11 @@ export class DurableTurns {
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
-    this.#sql = deps.sql
     this.#events = deps.events
-    this.#audit = deps.audit
     this.#pendingRoutes = deps.pendingRoutes
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
-    this.#blobs = deps.blobs ?? new SessionBlobs(deps.sql)
-    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
+    this.#blobs = deps.blobs
+    this.#turns = deps.turns
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
@@ -719,7 +710,7 @@ export class DurableTurns {
     // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
     // rather than left for PendingInputSweep's next look, ten minutes or more away.
     const cancelled = await cancelOrphanedEntries(
-      { sql: this.#sql, events: this.#events, audit: this.#audit, routes: this.#pendingRoutes },
+      { events: this.#events, routes: this.#pendingRoutes },
       { sessionId: row.id },
     )
     return ended || cancelled > 0

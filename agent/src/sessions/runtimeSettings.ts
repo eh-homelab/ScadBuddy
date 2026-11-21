@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsRepo } from '../credentials.js'
 import type { WarmSessions } from './warm.js'
 
@@ -60,11 +59,6 @@ export async function readRuntimeSettings(settings: Pick<SettingsRepo, 'get'>): 
 
 export const SETTINGS_CHANNEL = 'scadbuddy_settings'
 export const RUNTIME_PAYLOAD = 'session-runtime'
-
-/** Tells every replica to re-read the runtime settings; inside the writer's transaction, so it goes out on commit. */
-export async function notifyRuntimeSettings(sql: Sql | TransactionSql): Promise<void> {
-  await sql`SELECT pg_notify(${SETTINGS_CHANNEL}, ${RUNTIME_PAYLOAD})`
-}
 
 /**
  * Re-reads the settings and resizes `warm`, one at a time in the order asked:

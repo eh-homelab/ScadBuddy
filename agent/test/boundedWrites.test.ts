@@ -2,7 +2,7 @@ import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
 import { WriteTimeout } from '../src/db/bounded.js'
-import { PgResourceRows, SessionResources } from '../src/sessions/touched.js'
+import { SessionResources } from '../src/sessions/touched.js'
 import { json } from '../src/tools/registry.js'
 
 // #1076: a tool call never waits long on the rows that record it. A database that
@@ -16,9 +16,10 @@ function stalledSql(): Sql {
 }
 
 describe('bounded record writes', () => {
-  it("SessionResources.record returns after waitMs when the INSERT hangs, and says so", async () => {
+  it("SessionResources.record returns after waitMs when the write hangs, and says so", async () => {
     const errors: unknown[] = []
-    const sink = new SessionResources(new PgResourceRows(stalledSql()), (err) => errors.push(err), { waitMs: 20 })
+    const stalled = { insert: () => new Promise<void>(() => undefined), list: () => Promise.resolve([]) }
+    const sink = new SessionResources(stalled, (err) => errors.push(err), { waitMs: 20 })
     const started = performance.now()
     await sink.record({
       sessionId: '00000000-0000-4000-8000-000000000001',

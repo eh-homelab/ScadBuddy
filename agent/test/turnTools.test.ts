@@ -24,7 +24,8 @@ import { AccessResolver } from '../src/access/resolver.js'
 import { memoryAccess } from './support/memoryAccess.js'
 import { exportedText, flushTracing, resetTracing, testTracing } from './support/tracing.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
-import { PgHttpBodies } from '../src/sessions/httpBodies.js'
+import type { SavedBodies } from '../src/harness/httpRequest.js'
+import type { HttpBodiesFor } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
 import { FLOW_IMAGES_FULL, GRANT_REVOKED } from '../src/temporal/toolActivities.js'
 import { CALL_ID_META } from '../src/builtins/callId.js'
@@ -52,14 +53,12 @@ const FLOW = '7c2d9a10-3b4e-4f5a-8b6c-1d2e3f4a5b6c'
 const noPackageServers = async (): Promise<PackageServers> => ({ plugins: [], servers: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} })
 
 /**
- * An `sql` for a test that saves no http body: a call (a read) throws, and so does any
- * property, `begin` included, which a save opens with.
+ * A session's saved bodies for a test that saves no http body: every call, a save or a read,
+ * is refused.
  */
-function noDatabase(): unknown {
-  const refuse = () => {
-    throw new Error('this test saves no http body: no database is set up for one')
-  }
-  return new Proxy(refuse, { apply: refuse, get: refuse })
+function noBodies(): HttpBodiesFor {
+  const refuse = () => Promise.reject(new Error('this test saves no http body: no store is set up for one'))
+  return () => new Proxy({}, { get: () => refuse }) as SavedBodies
 }
 
 function notes(calls: string[]): () => McpServer {
@@ -373,11 +372,11 @@ describe('turn tools in a durable session', () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-      // Its saved bodies are in Postgres; this test saves none, and says so if it ever does.
+      // Its saved bodies are the API's; this test saves none, and says so if it ever does.
       servers: turnServers({
         httpRequest: {
           saveRoot,
-          sql: noDatabase() as never,
+          bodies: noBodies(),
         },
       }),
       approvals: { approved: async () => false },
@@ -406,7 +405,7 @@ describe('turn tools in a durable session', () => {
       const store = memoryAccess(initial)
       const deps: TurnToolsDeps = {
         sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-        servers: turnServers({ httpRequest: { saveRoot, sql: noDatabase() as never }, access: new AccessResolver(store.access) }),
+        servers: turnServers({ httpRequest: { saveRoot, bodies: noBodies() }, access: new AccessResolver(store.access) }),
         approvals: { approved: async () => false },
       }
       const activities = turnToolActivities(deps)
@@ -813,9 +812,9 @@ describe("the headless browser's lists in a durable turn (#982)", () => {
   })
 })
 
-describe('the no-database sql stub (#2963 review)', () => {
-  it('says why on a save, which opens with sql.begin, as well as on a read', async () => {
-    const bodies = new PgHttpBodies(noDatabase() as never, SESSION)
+describe('the no-store bodies stub (#2963 review)', () => {
+  it('says why on a save as well as on a read', async () => {
+    const bodies = noBodies()(SESSION)
     const meta = { url: 'http://example.test/', content_type: null, size_bytes: 1, complete: true }
     await expect(bodies.save('b1', Buffer.from('x'), meta)).rejects.toThrow('this test saves no http body')
     await expect(bodies.meta('b1')).rejects.toThrow('this test saves no http body')

@@ -5,7 +5,7 @@ import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { acceptList, accepts, type PickerSession } from '../src/routes/workspacePicker.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { PgResourceRows, SessionResources } from '../src/sessions/touched.js'
+import { SessionResources } from '../src/sessions/touched.js'
 import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
@@ -14,6 +14,7 @@ import { SessionFiles } from '../src/workspace/store.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { PgResourceRows } from './support/sql/resourceRows.js'
 
 // #4703: the UI's workspace file picker. GET /api/v1/ai/workspace-files lists the
 // sessions (and their files) the browser user may pick from, and a download with

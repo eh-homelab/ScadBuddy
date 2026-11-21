@@ -6,7 +6,7 @@ import { kekFromBase64 } from '../src/secrets.js'
 import type { Database } from './support/database.js'
 import { PgEventListener } from './support/pgListener.js'
 import { userMessage } from '../src/harness/inbox.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { WarmSessions } from '../src/sessions/warm.js'
@@ -19,6 +19,7 @@ import { nextResult } from './support/warm.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 
 // How the warm cache follows the settings and evictions when a NOTIFY never
 // arrives (sessions/runtimeSync.ts): the start read, the reconnect and the resync.
@@ -58,14 +59,14 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
   let url: string
   let schema: string
   let warm: WarmSessions
-  let store: PostgresSessionStore
+  let store: TranscriptStore
   let scripted: ReturnType<typeof scriptedRunner>
   let stops: (() => void | Promise<void>)[]
 
   beforeEach(async () => {
     ;({ db, drop, url, schema } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
+    store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
     warm = new WarmSessions({ store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
     stops = []

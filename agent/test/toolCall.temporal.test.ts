@@ -8,18 +8,16 @@ import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { respond } from '../src/routes/pendingInput.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { event } from '../src/sessions/protocol.js'
 import { RESTARTED_PROMPT, restartedPrompt } from '../src/sessions/turnHost.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { finishedToolCalls, toolCallResult, toolCallStarter } from '../src/tools/activityProjection.js'
-import { PgSessionReads } from '../src/sessions/sessionReads.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { defineTool, json, text, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { toolCallTools } from '../src/tools/toolCalls.js'
 import { redact } from '../src/secrets.js'
-import { PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolCallActivities } from '../src/temporal/toolActivities.js'
+import { type ToolActivityDeps, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
 import { services } from './helpers/mcp.js'
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
@@ -29,6 +27,9 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
 import { AuditLog } from '../src/audit/log.js'
+import { PgSessionReads } from './support/sql/sessionReads.js'
+import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 
 // A turn's ScadBuddy tool calls as activities (unified runtime plan 2026-10-13 Step 9.2, decision
 // Q1): each call of an AgentSession turn (the real SDK and its bundled Claude Code, against the
@@ -179,7 +180,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === 'turn_max_seconds' ? TURN_MAX_SECONDS : undefined) as T) },
       ...harnessTools(services(), TOOLS),
       toolCalls: () => start,
-      approvalHashKey: Buffer.alloc(32, 5),
+      approvalHashKey: () => Buffer.alloc(32, 5),
       audit: deps!.audit!,
     })
   }

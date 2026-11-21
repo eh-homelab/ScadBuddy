@@ -13,12 +13,10 @@ import { forwardForRun, PluginForwarder, type PluginsForRun } from '../src/plugi
 import type { PackagesForRun } from '../src/plugins/packages/install.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { respond } from '../src/routes/pendingInput.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { toolCallStarter } from '../src/tools/activityProjection.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SessionClients } from '../src/temporal/sessionClients.js'
-import { PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { listTurnTools, type ListedTools, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
 import { services } from './helpers/mcp.js'
@@ -29,6 +27,8 @@ import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
+import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 
 // A turn's plugin and http tools as activities (unified runtime plan 2026-10-13 Step 9.3): an
 // AgentSession turn (the real SDK and its bundled Claude Code against the fake Anthropic endpoint) is given in-process proxies of its remote plugins in place of the
@@ -142,7 +142,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's plug
       packagePlugins,
       toolCalls: () => start,
       turnTools: (context, only) => listTurnTools(listDeps, context, only),
-      approvalHashKey: Buffer.alloc(32, 5),
+      approvalHashKey: () => Buffer.alloc(32, 5),
     })
   }
 

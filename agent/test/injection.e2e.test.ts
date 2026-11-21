@@ -118,7 +118,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt inje
       mcpServers: () => ({
         [SERVER_NAME]: createHarnessServer(ALL_TOOLS, services, { id: 'browser', kind: 'browser', tiers: tiersUpTo('outward') }),
       }),
-      approvalHashKey: HASH_KEY,
+      approvalHashKey: () => HASH_KEY,
       audit,
     })
   })

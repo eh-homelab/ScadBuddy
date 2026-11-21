@@ -104,7 +104,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...harnessTools(toolServices),
-      approvalHashKey: Buffer.alloc(32, 9),
+      approvalHashKey: () => Buffer.alloc(32, 9),
     })
     agent = await startLiveAgent(m, {
       database: { ping: () => Promise.resolve(true), ready: db.ready },
