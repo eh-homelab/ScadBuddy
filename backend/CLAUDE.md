@@ -818,7 +818,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `tests/fixtures/filament_sync_histories/`). The API nudges after a write on
   `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py` and after a
   settings save that changes `filament_sync`; capture, `sync_ams_weights` and the worker's
-  CRUD `filament` writes are not nudged and reach Bambuddy on the timer. The print worker
+  CRUD `filament` writes are not nudged and reach Bambuddy on the timer, and the Bambuddy
+  import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
   and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. A new

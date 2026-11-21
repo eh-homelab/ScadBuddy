@@ -4,10 +4,17 @@ changes ``filament_sync``. ``filament_nudges`` (`tests/api/conftest.py`) records
 
 from __future__ import annotations
 
+from typing import Any
+
+import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.filament import ntag
+from scadbuddy.filament.models import ScanResult
 from tests.api.test_filament import SPOOLS, _spool
+from tests.api.test_send import API, configure
 from tests.api.test_tray_spools import _path, _sb_spool, lan_printer  # noqa: F401
 
 pytestmark = pytest.mark.requires_postgres
@@ -46,6 +53,29 @@ def test_the_ams_weights_sync_does_not_nudge(
     assert filament_nudges == [False]
 
 
+@respx.mock
+def test_the_bambuddy_import_and_the_rfid_scan_do_not_nudge(
+    client: TestClient, filament_nudges: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 163: the import pulls and the scan writes nothing, so neither nudges a
+    push pass."""
+    configure(client)
+    filament_nudges.clear()
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/inventory/catalog").mock(return_value=httpx.Response(200, json=[]))
+    imported = client.post("/api/v1/filament/bambuddy/import")
+    assert imported.status_code == 200, imported.text
+
+    async def scan(*args: Any, **kwargs: Any) -> ScanResult:
+        return ScanResult(status="timeout")
+
+    monkeypatch.setattr(ntag, "scan", scan)
+    scanned = client.post("/api/v1/filament/rfid/scan", json={"timeout_s": 1})
+    assert scanned.status_code == 200, scanned.text
+    assert scanned.json()["status"] == "timeout"
+    assert filament_nudges == []
+
+
 def test_a_purchasing_write_nudges(client: TestClient, filament_nudges: list[bool]) -> None:
     made = client.post("/api/v1/filament/suppliers", json={"name": "Bambu Lab"})
     assert made.status_code == 201, made.text
@@ -74,7 +104,7 @@ def test_saving_filament_sync_nudges(client: TestClient, filament_nudges: list[b
 
 
 def test_a_save_that_stops_every_push_signals_only(
-    client: TestClient, filament_nudges: list[bool], filament_signals: list[None]
+    client: TestClient, filament_nudges: list[bool], filament_signals: list[str | None]
 ) -> None:
     """R-T10-3: a running workflow learns that nothing pushes (its next pass is
     ``nothing_pushes`` and it ends); no workflow is started for it."""
@@ -93,7 +123,7 @@ def test_a_save_that_stops_every_push_signals_only(
 
 
 def test_a_save_of_the_interval_signals_a_running_workflow(
-    client: TestClient, filament_nudges: list[bool], filament_signals: list[None]
+    client: TestClient, filament_nudges: list[bool], filament_signals: list[str | None]
 ) -> None:
     """Decision 153: a running workflow waits the interval its last pass read; a new one
     reaches it by a signal (a pass then reads it), also from 0 (no timer). Nothing is
@@ -116,7 +146,7 @@ def test_a_save_of_the_interval_signals_a_running_workflow(
 
 
 def test_a_save_of_the_bambuddy_url_nudges_when_something_pushes(
-    client: TestClient, filament_nudges: list[bool], filament_signals: list[None]
+    client: TestClient, filament_nudges: list[bool], filament_signals: list[str | None]
 ) -> None:
     """Decision 153: a new ``bambuddy_url`` starts that instance's workflow at once when
     something pushes (its plan answers ``instance_changed`` when the links belong to the
@@ -129,7 +159,29 @@ def test_a_save_of_the_bambuddy_url_nudges_when_something_pushes(
     filament_nudges.clear()
     moved = client.put("/api/v1/settings", json={"bambuddy_url": "http://bambuddy-b.test"})
     assert moved.status_code == 200, moved.text
-    assert (filament_nudges, filament_signals) == ([False], [])
+    assert (filament_nudges, filament_signals) == ([False], ["http://bambuddy-a.test"])
+
+
+def test_a_save_of_the_bambuddy_url_signals_the_old_instance(
+    client: TestClient, filament_nudges: list[bool], filament_signals: list[str | None]
+) -> None:
+    """Decision 161: a new ``bambuddy_url`` signals the old instance's workflow, so its
+    next pass is ``instance_changed`` and it ends now, not at its next timer. The same URL
+    again, and a first URL, signal nothing."""
+    assert client.put(
+        "/api/v1/settings", json={"bambuddy_url": "http://bambuddy-a.test"}
+    ).is_success
+    filament_signals.clear()
+    same = client.put("/api/v1/settings", json={"bambuddy_url": "http://bambuddy-a.test"})
+    assert same.status_code == 200, same.text
+    assert filament_signals == []
+    moved = client.put("/api/v1/settings", json={"bambuddy_url": "http://bambuddy-b.test"})
+    assert moved.status_code == 200, moved.text
+    assert filament_signals == ["http://bambuddy-a.test"]
+    cleared = client.put("/api/v1/settings", json={"bambuddy_url": None})
+    assert cleared.status_code == 200, cleared.text
+    assert filament_signals == ["http://bambuddy-a.test", "http://bambuddy-b.test"]
+    assert filament_nudges == []
 
 
 def test_saving_another_setting_does_not_nudge(

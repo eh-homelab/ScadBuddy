@@ -189,6 +189,42 @@ describe('Filament (#6262)', () => {
     }
   })
 
+  it('keeps reading the status when a pass from before the request lands first', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { filament } = await startSync()
+      // A timer pass (or an earlier nudge's) that started before the run lands first.
+      let early = true
+      server.use(
+        http.get('*/api/v1/filament/sync/status', () => {
+          if (!early) return
+          early = false
+          return HttpResponse.json({
+            instance: null,
+            last_pass_at: '2026-11-15T07:00:30Z',
+            last_ok_at: '2026-11-15T07:00:30Z',
+            last_error: null,
+            counts: {},
+            errors: [],
+            directions: { ...DEFAULT_SYNC, weights: 'two_way' },
+            skipped: null,
+          })
+        }),
+      )
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      await waitFor(() => expect(within(filament).queryByRole('list', { name: 'Items not synced' })).toBeNull())
+      expect(within(filament).queryByText('Sync finished.')).toBeNull()
+      expect(within(filament).getByText(/Sync started/)).toBeInTheDocument()
+      // The pass the run asked for lands on the mock's second read.
+      await act(() => vi.advanceTimersByTimeAsync(6_000))
+      expect(await within(filament).findByText('Sync finished.')).toBeInTheDocument()
+      const failed = within(filament).getByRole('list', { name: 'Items not synced' })
+      expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('3 attempts')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('says the pass is still running after 60 s with no new pass', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     server.use(http.post('*/api/v1/filament/sync/run', () => HttpResponse.json({ started: true }, { status: 202 })))

@@ -14,13 +14,12 @@ type S = components['schemas']
  * type but `tags` set to push (tags go through the refresh's drain). The seed holds one spool Bambuddy refused and one supplier held back
  * because Bambuddy has its name. Each "sync now" asks for a pass that, like the server's,
  * runs in the background: it lands on the second status read after the run (`READS_TO_LAND`),
- * a minute later than the last, with the refused spool failing once more. Ids and times are
- * fixed strings.
+ * at that read's time, with the refused spool failing once more. Ids and the seed's times
+ * are fixed strings.
  */
 
 const BASE = '/api/v1/filament/sync'
-const FIRST_PASS = Date.parse('2026-11-15T07:00:00Z')
-const MINUTE = 60_000
+const FIRST_PASS = '2026-11-15T07:00:00Z'
 
 const seedErrors = (): S['SyncError'][] => [
   { kind: 'spool', sb_id: spoolId(3), label: '#3', error: 'https://scadbuddy.dev/problems/bambuddy-rejected:422', attempts: 2, at: '2026-11-15T07:00:00Z' },
@@ -30,24 +29,23 @@ const seedErrors = (): S['SyncError'][] => [
 /** The status reads after a run before its pass lands (R-T11-2): not the first, so a page must read again. */
 const READS_TO_LAND = 2
 
-let passes = 0
+let lastPassAt = FIRST_PASS
 let errors = seedErrors()
 /** Status reads left before the pass asked for lands; null when none is running. */
 let running: number | null = null
 
 export function reset() {
-  passes = 0
+  lastPassAt = FIRST_PASS
   errors = seedErrors()
   running = null
 }
 
 function land() {
-  passes += 1
+  // Now, as the server's pass ends after the run that asked for it (the page waits for a later one).
+  lastPassAt = new Date().toISOString()
   // A held-back row is never sent, so only the refused one is tried again.
-  errors = errors.map((error) => (error.error === 'name_taken' ? error : { ...error, attempts: error.attempts + 1, at: at(passes) }))
+  errors = errors.map((error) => (error.error === 'name_taken' ? error : { ...error, attempts: error.attempts + 1, at: lastPassAt }))
 }
-
-const at = (pass: number) => new Date(FIRST_PASS + pass * MINUTE).toISOString()
 
 function skipped(): S['SyncStatus']['skipped'] {
   const settings = mockSettings()
@@ -62,8 +60,8 @@ function status(): S['SyncStatus'] {
   const settings = mockSettings()
   return {
     instance: settings.bambuddy_url ?? null,
-    last_pass_at: at(passes),
-    last_ok_at: at(passes),
+    last_pass_at: lastPassAt,
+    last_ok_at: lastPassAt,
     last_error: null,
     counts: { written: 4, failed: errors.length, deferred: 0, conflicts: 0, unmapped_k: 0 },
     errors,

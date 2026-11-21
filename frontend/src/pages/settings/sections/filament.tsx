@@ -239,13 +239,15 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
   const [pending, setPending] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [problem, setProblem] = useState<ReactNode>(null)
-  /** While a pass asked for has not landed: the `last_pass_at` before it. */
-  const [waiting, setWaiting] = useState<{ before: string | null } | null>(null)
+  /** While a pass asked for has not landed: when the run's 202 arrived, as an ISO string. */
+  const [waiting, setWaiting] = useState<{ since: string } | null>(null)
   const data = status.data
   const { setData } = status
 
   // R-T11-2 — the pass runs in the background: read the status every SYNC_POLL_MS until
-  // `last_pass_at` moves, for at most SYNC_POLL_LIMIT_MS. Unmounting stops it.
+  // `last_pass_at` is later than the run's answer, for at most SYNC_POLL_LIMIT_MS. A timer
+  // pass or an earlier nudge's pass that lands first does not end it (Decision 162).
+  // Unmounting stops it.
   useEffect(() => {
     if (!waiting) return
     let stopped = false
@@ -257,7 +259,7 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
         const next = await getSyncStatus()
         if (stopped) return
         setData(next, { supersede: true })
-        if (next.last_pass_at !== waiting.before) {
+        if (next.last_pass_at && new Date(next.last_pass_at) > new Date(waiting.since)) {
           setNote('Sync finished.')
           setWaiting(null)
           return
@@ -283,11 +285,10 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
     setPending(true)
     setNote(null)
     setProblem(null)
-    const before = data?.last_pass_at ?? null
     try {
       await runSync()
       setNote('Sync started. It runs in the background; this status updates when the pass is done.')
-      setWaiting({ before })
+      setWaiting({ since: new Date().toISOString() })
     } catch (cause) {
       setProblem(runProblem(cause))
     } finally {

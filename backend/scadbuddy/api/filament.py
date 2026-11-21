@@ -113,8 +113,11 @@ from scadbuddy.printers.component import PrintersDep
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
-#: (Decision 17, R-T8-3), and "Sync now" nudges a full pass itself.
-NOT_NUDGED = frozenset({"sync_ams_weights", "run_filament_sync"})
+#: (Decision 17, R-T8-3); "Sync now" nudges a full pass itself; the Bambuddy import pulls
+#: and the RFID scan writes nothing, so neither has anything to push (Decision 163).
+NOT_NUDGED = frozenset(
+    {"sync_ams_weights", "run_filament_sync", "import_bambuddy", "scan_rfid_tag"}
+)
 
 
 async def nudge_after_write(request: Request, state: StateDep) -> AsyncIterator[None]:

@@ -794,7 +794,8 @@ below are the plan's):
 - SB writes that do not nudge (Decision 17). The API nudges the workflow after a write
   on `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py`, and after
   a settings save that changes `filament_sync`. Capture and `sync_ams_weights`
-  (`filament/capture.py`) and the print worker's CRUD `filament` writes
+  (`filament/capture.py`), the Bambuddy import and the RFID scan (Decision 163) and the
+  print worker's CRUD `filament` writes
   (`…/print-uses/settle`, `bb-to-sb`) do not. They reach Bambuddy on the timer only,
   against "SB events signal it" above.
 - Status (Decision 19). `GET /filament/sync/status` and `POST /filament/sync/run` show and

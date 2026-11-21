@@ -108,16 +108,19 @@ class FilamentSyncNudger:
             logger.warning("could not nudge the filament sync", extra={"full": full}, exc_info=True)
         return None
 
-    async def signal_running(self) -> None:
+    async def signal_running(self, url: str | None = None) -> None:
         """Signal ``changed`` to the configured Bambuddy's workflow only when one runs;
         never start one (R-T10-3). A save that leaves nothing pushing sends it, so the
         workflow's next pass is ``nothing_pushes`` and it ends (R-T8-4), even with no
-        timer. No workflow (or no ``bambuddy_url``) is nothing; another failure is logged,
-        never raised."""
+        timer. With ``url`` it signals that Bambuddy's workflow instead, without reading the
+        settings: a save that changes ``bambuddy_url`` tells the old one, whose next pass is
+        ``instance_changed`` (Decision 161). No workflow (or no ``bambuddy_url``) is
+        nothing; another failure is logged, never raised."""
         try:
             async with asyncio.timeout(NUDGE_TIMEOUT):
-                read = await asyncio.to_thread(self.load_settings, NUDGE_SETTINGS)
-                url = read["bambuddy_url"]
+                if url is None:
+                    read = await asyncio.to_thread(self.load_settings, NUDGE_SETTINGS)
+                    url = read["bambuddy_url"]
                 if not url:
                     return
                 handle = self.client_getter().get_workflow_handle(workflow_id(instance_for(url)))
@@ -132,9 +135,9 @@ class FilamentSyncNudger:
         """`nudge` in a task of its own, kept until it ends."""
         self._keep(asyncio.create_task(self.nudge(full=full), name="filament sync nudge"))
 
-    def signal_running_soon(self) -> None:
+    def signal_running_soon(self, url: str | None = None) -> None:
         """`signal_running` in a task of its own, kept until it ends."""
-        self._keep(asyncio.create_task(self.signal_running(), name="filament sync signal"))
+        self._keep(asyncio.create_task(self.signal_running(url), name="filament sync signal"))
 
     def _keep(self, task: asyncio.Task[Any]) -> None:
         self._running.add(task)

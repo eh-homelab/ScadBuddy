@@ -650,6 +650,12 @@ async def put_settings(
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
+    timer_after = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
+    old_url = timer_before.get("bambuddy_url")
+    if old_url and timer_after.get("bambuddy_url") != old_url:
+        # Decision 161: the old Bambuddy's workflow is told now, so its next pass is
+        # `instance_changed` and it ends, even with no timer. None running is nothing.
+        state.filament_sync.signal_running_soon(old_url)
     if sync_touched and snapshot.runtime.filament_sync != sync_before:
         if pushes_anything(snapshot.runtime.filament_sync):
             # #6265 Decision 17: a direction that now pushes pushes at once.
@@ -659,7 +665,6 @@ async def put_settings(
             # `nothing_pushes` and it ends; none is started.
             state.filament_sync.signal_running_soon()
     elif pushes_anything(snapshot.runtime.filament_sync):
-        timer_after = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
         if timer_after.get("bambuddy_url") != timer_before.get("bambuddy_url"):
             # Another Bambuddy: its own workflow starts now (Decision 153).
             state.filament_sync.nudge_soon()

@@ -225,6 +225,16 @@ async def test_signal_running_signals_and_never_starts() -> None:
     assert client.signals == [(workflow_id(instance_for(URL)), (CHANGED_SIGNAL, False))]
 
 
+async def test_signal_running_with_a_url_signals_that_instance() -> None:
+    """Decision 161: a save that changes ``bambuddy_url`` tells the old instance's
+    workflow, whatever the settings now name."""
+    client = FakeClient()
+    old = "https://old-bambuddy.test"
+    await nudger(client, URL).signal_running(old)
+    assert client.starts == []
+    assert client.signals == [(workflow_id(instance_for(old)), (CHANGED_SIGNAL, False))]
+
+
 @pytest.mark.parametrize("url", [None, ""])
 async def test_signal_running_without_bambuddy_does_nothing(url: str | None) -> None:
     client = FakeClient()

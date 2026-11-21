@@ -273,13 +273,14 @@ def filament_nudges(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
 
 
 @pytest.fixture(autouse=True)
-def filament_signals(monkeypatch: pytest.MonkeyPatch) -> list[None]:
-    """R-T10-3: the signal-only nudges a save sends when nothing pushes now, recorded and
-    never sent, as `filament_nudges` does."""
-    signals: list[None] = []
+def filament_signals(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """R-T10-3: the signal-only nudges a save sends when nothing pushes now, recorded (each
+    one's ``url``, ``None`` for the configured Bambuddy) and never sent, as
+    `filament_nudges` does."""
+    signals: list[str | None] = []
 
-    def soon(self: FilamentSyncNudger) -> None:
-        signals.append(None)
+    def soon(self: FilamentSyncNudger, url: str | None = None) -> None:
+        signals.append(url)
 
     monkeypatch.setattr(FilamentSyncNudger, "signal_running_soon", soon)
     return signals

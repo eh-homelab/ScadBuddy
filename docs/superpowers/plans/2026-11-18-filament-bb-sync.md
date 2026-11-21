@@ -1641,7 +1641,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     belong to the old one. A `filament_sync` change in the same save keeps decision 134's
     rule. Tests: `test_a_save_of_the_interval_signals_a_running_workflow`,
     `test_a_save_of_the_bambuddy_url_nudges_when_something_pushes`. Cost: the old
-    instance's workflow ends only at its next timer or signal.
+    instance's workflow ends only at its next timer or signal (decision 161 signals it).
 154. Final review (I1; widens 10): the pull also skips a BB supplier or location that no SB
     row links and whose upper case name is the name an unlinked SB row with an open intent
     pushes (a location's ` / ` path), counted in `PullReport.claimed`. `apply_results`
@@ -1695,6 +1695,24 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_spool_whose_create_has_no_answer_is_not_deleted`,
     `test_a_spool_whose_create_failed_is_not_deleted`,
     `test_a_spool_deletes_once_its_create_intent_is_closed`.
+161. PR #6805 review (changes 153's cost): a settings save that changes `bambuddy_url`
+    away from a set URL signals the old URL's workflow (`signal_running_soon(old_url)`,
+    `workflow_id(instance_for(old_url))`), whatever the directions say, so its next pass is
+    `instance_changed` and it ends now, not at its next timer (never, with
+    `spool_overlay_refresh_seconds` 0). The old URL is read before the save; the signal
+    goes after it, so the pass it runs reads the new URL. No such workflow is nothing.
+    Tests: `test_a_save_of_the_bambuddy_url_signals_the_old_instance`,
+    `test_signal_running_with_a_url_signals_that_instance`.
+162. PR #6805 review (changes 137): after "Sync now" the page reads the status until
+    `last_pass_at` is later than the time the run's 202 arrived (an ISO string, compared
+    as a `Date`), not until it moves: a timer pass or an earlier nudge's pass that lands
+    first does not end the reads. The mock's pass lands at its read's time. Test:
+    `keeps reading the status when a pass from before the request lands first`. Cost: a
+    browser clock ahead of the server's by more than the pass takes reads to the limit.
+163. PR #6805 review (widens 126): `NOT_NUDGED` also holds `import_bambuddy` (`POST
+    /filament/bambuddy/import`, a pull) and `scan_rfid_tag` (`POST /filament/rfid/scan`,
+    writes nothing): neither has anything to push. Test:
+    `test_the_bambuddy_import_and_the_rfid_scan_do_not_nudge`.
 
 ## Self-review
 
