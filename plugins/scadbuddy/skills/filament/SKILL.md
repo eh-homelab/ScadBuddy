@@ -5,11 +5,33 @@ description: Manage ScadBuddy's own filament inventory - spool types, spools, ta
 
 # Filament inventory and invoice import
 
-ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy that SB pulls.
-SB writes no spool records to BB yet; that push is planned in
-[#6265](https://github.com/eh-homelab/ScadBuddy/issues/6265) (filament spec §8). Tag pushes
-(`filament_sync.tags` set to `sb_to_bb`), override mode, AMS slot setup and NTAG writes do
-write BB.
+ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy. The setting
+`filament_sync` gives each of six data types (`spools`, `weights`, `tags`, `suppliers`,
+`locations`, `presets`) one direction: `off`, `sb_to_bb`, `bb_to_sb` or `two_way`. SB
+writes BB only for a type set to `sb_to_bb` or `two_way`. The sync pass never sends
+`tags`: tags reach BB through the spool refresh's tag drain, so `tags` alone set to push
+gives `nothing_pushes`. The defaults pull `spools`,
+`weights`, `tags` and `presets` and leave `suppliers` and `locations` off
+(`backend/scadbuddy/core/settings.py` `FilamentSync`; plan
+`docs/superpowers/plans/2026-11-18-filament-bb-sync.md`, Decision 3). Override mode, AMS
+slot setup and NTAG writes write BB whatever `filament_sync` says.
+
+## Sync with Bambuddy
+
+- `filament_sync_status` reads how the sync stands: the directions, the last pass, its
+  error, and each item whose last write to BB failed or was held back. Use it to explain
+  why a spool is not in BB. An error `name_taken` means another BB row has the item's name,
+  so SB never sent it. `skipped` says why no pass runs: `no_bambuddy` or `nothing_pushes`.
+  `last_ok_at` is the last pass with no error, a skipped pass too, so do not report it as
+  the last sync (plan Decision 19; `agent/src/tools/filament.ts`).
+- `filament_sync_run` asks for a full pass now. It writes BB, so it needs approval. It
+  answers `started: true` at once; read `filament_sync_status` afterwards. A 409
+  `no_bambuddy` or `nothing_pushes` means there is nothing to run: say so, and do not
+  change `filament_sync` for the person.
+- Child data types (weights, presets, suppliers per spool, a spool's location) move only
+  on spools that are linked to a BB spool already (plan Decision 16).
+- A spool deleted in BB comes back under `sb_to_bb` or `two_way` with `spools` set to
+  push (plan Decision 13).
 
 Sources, relative to the root of
 [eh-homelab/ScadBuddy](https://github.com/eh-homelab/ScadBuddy):

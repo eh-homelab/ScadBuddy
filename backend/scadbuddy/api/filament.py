@@ -7,21 +7,31 @@ Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`,
 (`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
 Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind,
 and the NTAG confirm,
-`filament/rfid_push.py`, #6264) tells Bambuddy only with ``filament_sync.tags`` ``sb_to_bb``;
+`filament/rfid_push.py`, #6264) tells Bambuddy only while ``filament_sync.tags`` pushes
+(``sb_to_bb`` or ``two_way``);
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
 tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
-(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks."""
+(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
+`POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
+which writes Bambuddy only for the data types set to push; `GET /filament/sync/status`
+reads how its passes went.
+
+Every 2xx answer to a write here, in `api/filament_purchasing.py` and in
+`api/tray_spools.py` nudges the ScadBuddy-to-Bambuddy sync (`nudge_after_write`, #6265
+Decision 17)."""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
@@ -40,7 +50,9 @@ from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
 from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
-from scadbuddy.filament.bambuddy_pull import PullReport, read_and_pull, try_assignments
+from scadbuddy.filament.bambuddy_pull import PullReport, Pulls, read_and_pull, try_assignments
+from scadbuddy.filament.bb_sync_models import SyncRun, SyncStatus, skip_reason
+from scadbuddy.filament.bb_sync_results import sync_status
 from scadbuddy.filament.catalog import (
     CATALOGS,
     CatalogExistsError,
@@ -82,7 +94,7 @@ from scadbuddy.filament.profile_fill import (
     fill_quietly,
 )
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
-from scadbuddy.filament.rfid_push import push_pending
+from scadbuddy.filament.rfid_push import failure_label, push_pending
 from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
@@ -99,7 +111,28 @@ from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
 
-router = APIRouter(prefix="/filament", tags=["filament"])
+#: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
+#: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
+#: (Decision 17, R-T8-3); "Sync now" nudges a full pass itself; the Bambuddy import pulls
+#: and the RFID scan writes nothing, so neither has anything to push (Decision 163).
+NOT_NUDGED = frozenset(
+    {"sync_ams_weights", "run_filament_sync", "import_bambuddy", "scan_rfid_tag"}
+)
+
+
+async def nudge_after_write(request: Request, state: StateDep) -> AsyncIterator[None]:
+    """A router's dependency: after a write's 2xx answer, nudge the filament sync in the
+    background (Decision 17). A route that raised (any error answer, a 422 of its body
+    too) nudges nothing, and neither does a read or a route in `NOT_NUDGED`."""
+    yield
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    if getattr(request.scope.get("route"), "name", None) in NOT_NUDGED:
+        return
+    state.filament_sync.nudge_soon()
+
+
+router = APIRouter(prefix="/filament", tags=["filament"], dependencies=[Depends(nudge_after_write)])
 logger = logging.getLogger(__name__)
 
 #: How long a tag change waits to tell Bambuddy before the reply goes (#6264); the
@@ -847,9 +880,11 @@ async def patch_spool(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a spool",
     description=(
-        "Only a spool that never printed and has no Bambuddy link: its ledger and tag "
-        "bindings go with it. 404 for no such spool, 409 when its ledger holds a print or "
-        "Bambuddy links it (the next pull would make it again); archive it instead."
+        "Only a spool that never printed, has no Bambuddy link and is not being created in "
+        "Bambuddy: its ledger and tag bindings go with it. 404 for no such spool, 409 when "
+        "its ledger holds a print, Bambuddy links it, or the sync's create of it in "
+        "Bambuddy is open (failed or unanswered ones included; the next pull would make "
+        "it again); archive it instead."
     ),
 )
 async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
@@ -893,7 +928,8 @@ async def archive_spool(
         "had to another tag, is closed, with a `tag_unbound` ledger event on that spool and "
         "`tag_bound` on this one. 404 for no such spool, 409 when the two keys name two "
         "tags, 422 when neither key is left once cleaned. With `filament_sync.tags` set to "
-        "`sb_to_bb` the change is also told to Bambuddy, for at most 2.5 seconds; what is not "
+        "`sb_to_bb` or `two_way` the change is also told to Bambuddy, for at most 2.5 seconds; "
+        "what is not "
         "done by then is finished by the spool refresh, and a Bambuddy that is down never "
         "fails the request."
     ),
@@ -1571,8 +1607,12 @@ async def move_spool(
         "refresh Schedule does the same). A BB spool already linked takes the fields BB changed "
         "since the last pull, unless ScadBuddy changed that field later; a change of what is "
         "left is a `bb` reading unless the spool's weight is locked. "
-        "With `filament_sync.weights` off, no Bambuddy scale weighing and no `bb` weight reading "
-        "is booked on a spool ScadBuddy already tracks; a new spool still gets its first weight. "
+        "It pulls the spools whatever `filament_sync.spools` says. With `filament_sync.weights` "
+        "`off` or `sb_to_bb`, no Bambuddy scale weighing or drying is booked, and a spool "
+        "ScadBuddy already tracks takes no `bb` weight reading and no weight lock; a new spool "
+        "still gets its first weight and Bambuddy's lock. With `filament_sync.tags` or "
+        "`presets` `off` or `sb_to_bb`, a linked or newly linked spool takes no tag and no "
+        "preset from Bambuddy. Usage rows are booked on linked spools. "
         "A BB spool whose tag a "
         "ScadBuddy spool holds, or whose record a ScadBuddy spool is linked to, is linked; any "
         "other becomes a new spool, typed by `material_number`, else by brand, material, "
@@ -1594,9 +1634,9 @@ async def import_bambuddy(
 ) -> PullReport:
     settings = await asyncio.to_thread(store.load)
     sync = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
-    return await read_and_pull(
-        filament, settings, actor=actor(caller), weights=sync.weights != "off"
-    )
+    # A person's import pulls the spools whatever `spools` says; the rest follow the setting.
+    pulls = dataclasses.replace(Pulls.of(sync), spools=True)
+    return await read_and_pull(filament, settings, actor=actor(caller), pulls=pulls)
 
 
 @router.get(
@@ -1646,7 +1686,7 @@ async def set_rfid_override_mode(
     description=(
         "Runs once what the spool refresh Schedule runs: Bambuddy's `auto_add_unknown_rfid` "
         "is brought to the override mode, then the queued tag changes are pushed (only with "
-        "`filament_sync.tags` `sb_to_bb`), then the AMS slot of each override tag is "
+        "`filament_sync.tags` `sb_to_bb` or `two_way`), then the AMS slot of each override tag is "
         "configured with its type's preset. Answers the mode's status and the tag push "
         "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
     ),
@@ -1679,6 +1719,81 @@ async def reconcile_rfid(
         logger.warning("could not configure the slots", extra={"error": type(error).__name__})
         slots = m.SlotReport(failed=1)
     return m.RfidReconcileReport(mode=mode, tags=tags, slots=slots)
+
+
+@router.get(
+    "/sync/status",
+    response_model=SyncStatus,
+    summary="Bambuddy sync status",
+    description=(
+        "How the ScadBuddy-to-Bambuddy sync stands. `directions` is the stored "
+        "`filament_sync`: one of `off`, `sb_to_bb`, `bb_to_sb` or `two_way` for each of the "
+        "six data types `spools`, `weights`, `tags`, `presets`, `suppliers` and "
+        "`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or "
+        "`two_way`, and never for `tags`, which reach Bambuddy through the spool refresh's "
+        "tag drain. `instance` is the Bambuddy the links belong to. `last_pass_at` is the "
+        "last pass, `last_error` its error label (null when it worked), and `last_ok_at` the "
+        "last pass with no error, a skipped one too. `counts` is the last pass's: `written`, "
+        "`failed`, `deferred`, `conflicts` and `unmapped_k`. `errors` holds one row per item "
+        "whose last write failed (Bambuddy refused it or did not answer) or was held back "
+        "(`name_taken`: another Bambuddy row has its name, so ScadBuddy never sent it): its "
+        "`kind` (`spool`, `supplier`, `location`, `insert_type` or `filament`), its ScadBuddy "
+        "id (`sb_id`), its `label` (a spool's `#N`, a spool type's code, any other row's "
+        "name; null when the item is gone), the error label, the `attempts` and when (`at`), "
+        "newest first; a later write that works drops the row. `skipped` says why no pass "
+        "runs now: "
+        "`no_bambuddy` (no Bambuddy is configured) or `nothing_pushes` (no data type but "
+        "`tags` is set to push); else null. Reads ScadBuddy only."
+    ),
+)
+async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDep) -> SyncStatus:
+    read = await asyncio.to_thread(store.read, {"bambuddy_url", "filament_sync"})
+    sync = read["filament_sync"]
+    return await asyncio.to_thread(
+        sync_status, filament, sync, skip_reason(read["bambuddy_url"], sync)
+    )
+
+
+@router.post(
+    "/sync/run",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SyncRun,
+    summary="Sync with Bambuddy now",
+    description=(
+        "Asks for a full sync pass now: the print worker reads Bambuddy, then writes it only "
+        "for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`); a type "
+        "set to `off` or `bb_to_sb` is never written, and nor is `tags` (the spool "
+        'refresh\'s tag drain sends tags). Answers 202 `{"started": true}` '
+        "once the pass is asked for; it runs in the background, and "
+        "`GET /filament/sync/status` shows how it went. 409 with `code` `no_bambuddy` when "
+        "no Bambuddy is configured, and `nothing_pushes` when no data type but `tags` is set "
+        "to push. "
+        "503 when the pass could not be asked for (the settings read or the workflow service "
+        "failed, or the two took over 5 seconds); `detail` ends in an error label "
+        "(`internal` for any failure outside Bambuddy), and nothing started."
+    ),
+)
+async def run_filament_sync(state: StateDep) -> SyncRun:
+    try:
+        reason = await state.filament_sync.nudge(full=True, raise_errors=True)
+    except Exception as exc:
+        # R-T10-2: no 202 for a pass that was not asked for. The label, never the message.
+        label = failure_label(exc)
+        logger.warning("could not start the filament sync", extra={"error": label})
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"could not ask the sync workflow for a pass: {label}",
+        ) from None
+    if reason == "no_bambuddy":
+        raise ApiError(status.HTTP_409_CONFLICT, "no Bambuddy is configured", code=reason)
+    if reason == "nothing_pushes":
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "no data type the sync pushes is set to push to Bambuddy (filament_sync; tags"
+            " go with the refresh)",
+            code=reason,
+        )
+    return SyncRun()
 
 
 @router.post(

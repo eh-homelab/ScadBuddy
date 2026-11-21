@@ -365,6 +365,33 @@ async def test_the_drain_is_off_unless_tags_is_sb_to_bb(pg_pool: PgPool) -> None
 
 
 @respx.mock
+async def test_tags_two_way_pushes(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _bind(f, _spool(f, pg_pool, 11), uid=UID)
+    _by_tag(None)
+    respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
+        return_value=httpx.Response(200, json=_bb(11, tag_uid=UID))
+    )
+
+    both = await push_pending(f, _settings, lambda: FilamentSync(tags="two_way"))
+
+    assert both.pushed == 1
+    assert _pending(pg_pool) == []
+
+
+@respx.mock
+async def test_tags_bb_to_sb_pushes_nothing(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _bind(f, _spool(f, pg_pool, 11), uid=UID)
+
+    pulled = await push_pending(f, _settings, lambda: FilamentSync(tags="bb_to_sb"))
+
+    assert pulled == TagPushReport()
+    assert len(respx.calls) == 0
+    assert len(_pending(pg_pool)) == 1
+
+
+@respx.mock
 async def test_a_second_drain_touches_nothing_while_one_runs(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     _bind(f, _spool(f, pg_pool, 11), uid=UID)

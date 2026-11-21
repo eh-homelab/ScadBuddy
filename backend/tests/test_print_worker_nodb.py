@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.print import (
+    RemoteFilamentSync,
     RemoteFilamentTrays,
     RemoteHeldPresets,
     RemoteNativeSlices,
@@ -149,6 +150,14 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
         assert settings.secret_key_file is None
         blobs = lan.__self__.d.blobs  # type: ignore[attr-defined]
         assert isinstance(blobs, RemoteBlobs) and blobs._crud is deps.crud
+        # The filament sync's pass reaches SB through the API's routes (#6265).
+        [sync_pass] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "filament_bb_sync_pass"
+        ]
+        api = sync_pass.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(api, RemoteFilamentSync) and api._client is deps.crud
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

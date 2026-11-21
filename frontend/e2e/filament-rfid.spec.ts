@@ -68,7 +68,7 @@ test('Settings turns the RFID override mode on and says what Bambuddy does', asy
   const filament = page.getByRole('region', { name: 'Filament' })
   await filament.getByRole('switch', { name: 'RFID override mode' }).click()
   await expect(filament.getByText('Bambuddy no longer adds unknown RFID spools')).toBeVisible()
-  await expect(filament.getByRole('combobox', { name: 'Tags to Bambuddy' })).toBeVisible()
+  await expect(filament.getByRole('combobox', { name: 'Tags', exact: true })).toBeVisible()
 })
 
 test.describe('at 390 px', () => {

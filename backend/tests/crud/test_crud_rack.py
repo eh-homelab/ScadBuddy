@@ -66,12 +66,13 @@ def test_the_area_is_served_and_awaited() -> None:
     assert "rack" in PRINT_CRUD_AREAS
     # Appended, so an older API's list is a prefix of a newer one's; Task 31's ``spools``
     # came after it, and #6262's ``filament``.
-    assert CRUD_AREAS["print"][-5:] == [
+    assert CRUD_AREAS["print"][-6:] == [
         "rack",
         "spools",
         "transfer-urls",
         "access-codes",
         "filament",
+        "filament-sync",
     ]
 
 

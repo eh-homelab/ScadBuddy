@@ -149,6 +149,7 @@ from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.client import (
     CrudClient,
     CrudRefusedError,
@@ -158,6 +159,16 @@ from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
 from scadbuddy.crud.wire import NOT_CONFIGURED
+from scadbuddy.filament.bb_sync_models import (
+    BbSnapshot,
+    BbWrite,
+    BbWriteResult,
+    PlanRequest,
+    ResultsReport,
+    ResultsRequest,
+    SyncPassResult,
+    SyncPlan,
+)
 from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayView
 from scadbuddy.filament.print_uses import SlotUse
 from scadbuddy.library.output_prints import OutputPrintStore
@@ -1420,6 +1431,44 @@ class RemoteFilamentTrays:
             "POST", f"{BASE}/filament/bb-to-sb", json={"ids": sorted(set(ids))}
         )
         return {int(bb_id): int(number) for bb_id, number in response.json().items()}
+
+
+class RemoteFilamentSync:
+    """`filament/bb_sync_models.py` `FilamentSyncApi` over ``…/print/filament/sync`` (area
+    ``filament-sync``, #6265 Task 6): the plan, what Bambuddy answered, and a pass's
+    state row. Each is natural, so each is sent again on the client's retries: a plan
+    finds the intent it recorded, results sent again carry the plan's ``pass_id`` and add
+    no attempt (R-T6-5), and the pass row is set, not added to."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def directions(self) -> FilamentSync:
+        response = await self._client.request("GET", f"{BASE}/filament/sync/directions")
+        return FilamentSync.model_validate(response.json())
+
+    async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
+        body = PlanRequest(snapshot=snap, limit=limit).model_dump(mode="json")
+        response = await self._client.request("POST", f"{BASE}/filament/sync/plan", json=body)
+        return SyncPlan.model_validate(response.json())
+
+    async def results(
+        self,
+        instance: str,
+        writes: Sequence[BbWrite],
+        results: Sequence[BbWriteResult],
+        pass_id: str | None,
+    ) -> ResultsReport:
+        body = ResultsRequest(
+            instance=instance, writes=list(writes), results=list(results), pass_id=pass_id
+        ).model_dump(mode="json")
+        response = await self._client.request("POST", f"{BASE}/filament/sync/results", json=body)
+        return ResultsReport.model_validate(response.json())
+
+    async def record_pass(self, result: SyncPassResult) -> None:
+        await self._client.request(
+            "POST", f"{BASE}/filament/sync/pass", json=result.model_dump(mode="json")
+        )
 
 
 class RemotePrintUses:

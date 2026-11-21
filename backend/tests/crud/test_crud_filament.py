@@ -47,10 +47,11 @@ STARTED = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
 
 
 def test_the_print_worker_waits_for_the_filament_area() -> None:
-    """The routes are an area of their own, appended last, so a new worker waits for an
-    API that serves them (`wait_for_areas`) rather than booking into a 404 mid-roll."""
+    """The routes are an area of their own, so a new worker waits for an API that serves
+    them (`wait_for_areas`) rather than booking into a 404 mid-roll. Where it stands in
+    the list is checked by the tail asserts of the areas added after it."""
     assert "filament" in PRINT_CRUD_AREAS
-    assert CRUD_AREAS["print"][-1] == "filament"
+    assert "filament" in CRUD_AREAS["print"]
 
 
 @pytest.fixture

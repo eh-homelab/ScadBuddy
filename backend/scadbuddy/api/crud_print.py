@@ -211,6 +211,7 @@ from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import (
     MaybeIdempotencyKey,
@@ -230,6 +231,14 @@ from scadbuddy.crud.print import (
 )
 from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.filament import print_uses
+from scadbuddy.filament.bb_sync_models import (
+    PlanRequest,
+    ResultsReport,
+    ResultsRequest,
+    SyncPassResult,
+    SyncPlan,
+)
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayView
 from scadbuddy.filament.print_uses import SlotUse
@@ -1851,6 +1860,75 @@ async def settle_print_uses(
         write,
     )
     return PrintUsesSettled.model_validate(answer)
+
+
+def _sync(filament: FilamentDep, settings: SettingsStoreDep) -> LocalFilamentSync:
+    return LocalFilamentSync(filament, settings)
+
+
+SyncDep = Annotated[LocalFilamentSync, Depends(_sync)]
+
+
+@router.get(
+    "/filament/sync/directions",
+    name="crud_print_filament_sync_directions",
+    summary="Which way each kind of filament data moves",
+    description=(
+        "The stored `filament_sync` (#6265 R-T8-2): a pass reads it before Bambuddy, and"
+        " skips the pass when no data type pushes."
+    ),
+)
+async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
+    return await sync.directions()
+
+
+@router.post(
+    "/filament/sync/plan",
+    name="crud_print_filament_sync_plan",
+    summary="The writes SB wants Bambuddy to take next",
+    description=(
+        "What SB wants Bambuddy to hold, from the `snapshot` the print worker read of it,"
+        " at most `limit` writes (#6265): a pass's rounds together stay within 200. The"
+        " route reads `filament_sync` and the timer's interval itself. A kept create"
+        " records its intent in this call, so a plan sent again plans the same create"
+        " from that intent."
+    ),
+)
+async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
+    """Natural: a plan sent again finds the intent it recorded."""
+    return await sync.plan(body.snapshot, body.limit)
+
+
+@router.post(
+    "/filament/sync/results",
+    name="crud_print_filament_sync_results",
+    summary="Record what Bambuddy answered to a plan's writes",
+    description=(
+        "Records the answers to `writes` (#6265): each is checked against SB's links, and"
+        " a result whose write names no SB item, or another Bambuddy row, is ignored. A"
+        ' list `PUT`\'s answer is `{"k_profiles": rows}` or `{"suppliers": rows}`. Answers'
+        " the counts of items linked, updated, failed and unlinked."
+    ),
+)
+async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsReport:
+    """Natural: a result sent again finds its item linked or recorded and is ignored, and a
+    refusal sent again with the plan's `pass_id` adds no attempt (R-T6-5)."""
+    return await sync.results(body.instance, body.writes, body.results, body.pass_id)
+
+
+@router.post(
+    "/filament/sync/pass",
+    name="crud_print_filament_sync_pass",
+    summary="Record what one sync pass did",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "Writes the sync's state row (#6265): the pass's time and counts, its error, and"
+        " the time of the last clean pass only when `error` is null."
+    ),
+)
+async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
+    """Natural: the row is set, not added to."""
+    await sync.record_pass(body)
 
 
 @router.get("/held-presets", name="crud_print_held_presets")

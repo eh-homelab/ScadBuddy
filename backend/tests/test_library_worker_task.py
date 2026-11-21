@@ -31,6 +31,7 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_SWEEPS,
     SWEEPS,
 )
+from tests.test_library_versioning import _Nudges
 from tests.test_print_worker_task import StubWorker
 
 
@@ -78,6 +79,7 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
         previews=None,
         components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
         settings_store=None,
+        filament_sync=_Nudges(),
     )
     stop = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
@@ -203,6 +205,7 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
             content=object(), remote_assets=SimpleNamespace(backfill=backfill), fonts=None
         ),
         assets=object(),
+        filament_sync=_Nudges(),
     )
     stop = asyncio.Event()
     task = asyncio.create_task(main._run_library_worker(state, stop))  # type: ignore[arg-type]

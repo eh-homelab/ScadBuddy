@@ -29,6 +29,9 @@ CONFLICT_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-conflict"
 REJECTED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-rejected"
 UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-unavailable"
 NOT_CONFIGURED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-configured"
+#: Bambuddy answered a listing with a success whose body is not JSON, or not a JSON array
+#: (a proxy's error page, say; R-T7-10). Its own type, so a stored `error_label` says so.
+BAD_BODY_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-bad-body"
 PLATE_FIT_PROBLEM = "https://scadbuddy.dev/problems/plate-does-not-fit"
 #: Several library files asked by id and Bambuddy has none: a misrouted base URL more
 #: likely than every file deleted (the names route, #2349). Its own type, so a client can
@@ -65,6 +68,19 @@ class Scope(StrEnum):
     #: (``backend/app/core/auth.py`` line 90, maziggy/bambuddy v1.3.1),
     #: so such a write works only while Bambuddy's auth is off.
     ADMIN_SETTINGS = "Settings (admin only)"
+    #: Bambuddy's ``FILAMENTS_CREATE`` and ``FILAMENTS_UPDATE``, which the filament
+    #: catalog's writes need (#6265). No API key can hold them: they are absent from
+    #: ``_APIKEY_SCOPE_BY_PERMISSION`` and listed in ``_APIKEY_DENIED_PERMISSIONS``
+    #: (``backend/app/core/auth.py`` lines 90 and 300-301, maziggy/bambuddy v1.3.1), so
+    #: such a write works only while Bambuddy's auth is off.
+    ADMIN_FILAMENTS = "Filament catalog (admin only)"
+
+
+#: What no API key can do, per admin-only scope, for the 403 that says so.
+_ADMIN_ONLY = {
+    Scope.ADMIN_SETTINGS: "change its settings",
+    Scope.ADMIN_FILAMENTS: "change its filament catalog",
+}
 
 
 class TagAlreadyLinkedError(ApiError):
@@ -212,11 +228,11 @@ def _mapped(
     body = None if scope == Scope.ADMIN_SETTINGS else upstream_body(response)
 
     if code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
-        if scope == Scope.ADMIN_SETTINGS and code == status.HTTP_403_FORBIDDEN:
+        if scope in _ADMIN_ONLY and code == status.HTTP_403_FORBIDDEN:
             return ApiError(
                 status.HTTP_409_CONFLICT,
                 f"Bambuddy refused the API key when asked to {what}. No Bambuddy API key can"
-                " change its settings while Bambuddy's auth is on: turn its auth off, or"
+                f" {_ADMIN_ONLY[scope]} while Bambuddy's auth is on: turn its auth off, or"
                 f" make the change in Bambuddy{suffix}",
                 title="Bambuddy API key scope",
                 type_=SCOPE_PROBLEM,

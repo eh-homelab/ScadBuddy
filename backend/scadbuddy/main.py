@@ -93,6 +93,9 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync, adopt_instance
+from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.print_uses import PoolPrintUses
@@ -891,6 +894,21 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
 
 #: How long the boot's virtual-printer pass may wait for Bambuddy's two lists.
 VP_BOOT_TIMEOUT = 60.0
+
+
+async def _adopt_bb_instance_logged(state: AppState) -> None:
+    """The filament links #6261's pull made before the sync's state row belong to the
+    configured Bambuddy (`adopt_instance`, #6265 Decision 12). Nothing without a
+    Bambuddy. A failure is logged, never raised: the boot goes on, and the first pass
+    or pull that links anything records the instance itself."""
+    try:
+        read = await asyncio.to_thread(state.settings_store.read, {"bambuddy_url"})
+        if read["bambuddy_url"]:
+            await asyncio.to_thread(
+                adopt_instance, state.components.get(FILAMENT), instance_for(read["bambuddy_url"])
+            )
+    except Exception:
+        logger.exception("could not record the Bambuddy the filament links belong to")
 
 
 async def _adopt_virtual_rows_logged(state: AppState) -> None:
@@ -1720,7 +1738,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         uses=PoolPrintUses(state.settings_store.pool),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
-    activities = [
+    activities: list[Callable[..., Any]] = [
         *PrintActivities(deps).all(),
         *LanActivities(lan).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
@@ -1732,6 +1750,12 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(PRINT_LIBRARY).serving_native,
             StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
         ).lan_auto_import,
+        # The filament sync's pass (#6265) on this process's own stores, as the CRUD
+        # routes run it for the print worker.
+        FilamentSyncActivities(
+            LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
+            settings_loader(state.settings_store.load),
+        ).sync_pass,
     ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
@@ -1854,6 +1878,9 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     client = await _connect_until(state, stop, "library")
     if client is None:
         return
+    # #6265 Decision 17: once Temporal answers, a full filament sync pass, for what
+    # changed while no replica nudged.
+    boot_nudge = asyncio.create_task(state.filament_sync.nudge(full=True))
     settings = state.settings
     queue = settings.temporal_task_queue_library
     build_id = settings.revision
@@ -1946,6 +1973,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     finally:
         current.cancel()
         schedules.cancel()
+        boot_nudge.cancel()
         await stop_triggers()
 
 
@@ -2210,6 +2238,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the bus are up. One that fails exits those already running and fails the
         # boot; closed below, before the queue it may be using.
         await components.enter_async_context(state.components.running())
+        # #6265 Decision 12: before the first nudge, so before any write.
+        await _adopt_bb_instance_logged(state)
         if state.temporal is not None:
             deps = worker_deps_from_state(state)
             task = asyncio.create_task(

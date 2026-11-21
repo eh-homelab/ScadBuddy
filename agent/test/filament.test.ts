@@ -4,6 +4,9 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { tiersUpTo } from '../src/auth/principal.js'
+import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
+import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
+import { toolCallActivity } from '../src/temporal/toolCall.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -829,6 +832,88 @@ describe('filament RFID tools (#6264)', () => {
     server.use(http.post(`${RFID}/reconcile`, () => HttpResponse.json(report)))
     const t = tool('filament_rfid_reconcile')
     expect(firstText(await t.execute(t.parse({}), ctx('outward')))).toEqual(report)
+  })
+})
+
+const SYNC = `${BACKEND}/api/v1/filament/sync`
+
+describe('filament Bambuddy sync tools (#6265)', () => {
+  it.each([
+    ['filament_sync_status', 'read', false],
+    // It writes Bambuddy, as filament_rfid_reconcile does: outward and approved first.
+    ['filament_sync_run', 'outward', true],
+  ])('%s is %s tier, gated: %s', (name, risk, gated) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(gated)
+  })
+
+  it('classifies the run as touching no recorded resource', () => {
+    expect(TOUCHES_NOTHING.has('filament_sync_run')).toBe(true)
+  })
+
+  it('both run in durable mode: activities of the agent-tools worker', () => {
+    const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
+    const activities = toolActivities(ALL_TOOLS, deps)
+    const calls = toolCallActivities(ALL_TOOLS, deps)
+    for (const name of ['filament_sync_status', 'filament_sync_run']) {
+      expect(activities[name]).toBeTypeOf('function')
+      expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
+    }
+  })
+
+  it('says tag sync pushes with sb_to_bb or two_way, never sb_to_bb alone', () => {
+    for (const t of ALL_TOOLS) expect(t.description).not.toContain('`filament_sync.tags` `sb_to_bb`')
+    expect(tool('filament_rfid_reconcile').description).toContain('`two_way`')
+    expect(tool('link_tray_spool').description).toContain('`two_way`')
+  })
+
+  it('reads the status', async () => {
+    const status = { instance: null, errors: [], skipped: 'no_bambuddy' }
+    server.use(http.get(`${SYNC}/status`, () => HttpResponse.json(status)))
+    expect(firstText(await runTool(tool('filament_sync_status'), {}, ctx()))).toEqual(status)
+  })
+
+  it('asks for a full pass with POST', async () => {
+    let posted = 0
+    server.use(
+      http.post(`${SYNC}/run`, () => {
+        posted += 1
+        return HttpResponse.json({ started: true }, { status: 202 })
+      }),
+    )
+    const t = tool('filament_sync_run')
+    const result = await t.execute(t.parse({}), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual({ started: true })
+    expect(posted).toBe(1)
+  })
+
+  it('fails on the 503 when nothing started, and says so', async () => {
+    const detail = 'could not ask the sync workflow for a pass: internal'
+    server.use(
+      http.post(`${SYNC}/run`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Service Unavailable', status: 503, detail },
+          { status: 503, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    expect(tool('filament_sync_run').description).toContain('503')
+    const t = tool('filament_sync_run')
+    await expect(t.execute(t.parse({}), ctx('outward'))).rejects.toThrow(detail)
+  })
+
+  it('fails on the 409 with no Bambuddy, naming why', async () => {
+    server.use(
+      http.post(`${SYNC}/run`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'no Bambuddy is configured', code: 'no_bambuddy' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const t = tool('filament_sync_run')
+    await expect(t.execute(t.parse({}), ctx('outward'))).rejects.toThrow('no Bambuddy is configured')
   })
 })
 

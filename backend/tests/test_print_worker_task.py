@@ -12,6 +12,8 @@ import pytest
 
 from scadbuddy import main
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync
+from scadbuddy.filament.component import FILAMENT
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import PRINTERS
@@ -106,6 +108,9 @@ REGISTRY = SimpleNamespace(store=SimpleNamespace(get=lambda printer_id: None), r
 #: through its LAN store, never here.
 WATCHER = SimpleNamespace(lan=None)
 
+#: SB's filament store, which the filament sync's pass is built over (#6265); never read.
+FILAMENT_STORE: Any = SimpleNamespace()
+
 
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
@@ -135,6 +140,7 @@ def _state() -> SimpleNamespace:
                 SLICING: SLICER,
                 PRINTERS: REGISTRY,
                 AUTO_IMPORTS: WATCHER,
+                FILAMENT: FILAMENT_STORE,
             }.get(key, BAMBUDDY_LIBRARY)
         ),
         projection=SimpleNamespace(pool=None),
@@ -290,3 +296,33 @@ def test_the_api_serves_the_print_queue_only_when_told_to(
         temporal_print_worker_inprocess=print_inprocess,
     )
     assert main.serves_print_queue(settings) is serves
+
+
+async def test_the_api_serves_the_filament_sync_pass_on_its_own_stores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6265: the API's in-process print worker runs the sync pass with
+    `LocalFilamentSync` over its own filament store and settings, as the CRUD routes do for
+    the print worker."""
+    entered = asyncio.Event()
+    given: list[Any] = []
+
+    def build(client: Any, queue: str, activities: list[Any], **kwargs: Any) -> StubWorker:
+        given.extend(activities)
+        return StubWorker(False, entered)
+
+    monkeypatch.setattr(main, "bambuddy_worker", build)
+    state = _state()
+    stop = asyncio.Event()
+    task = asyncio.create_task(main._run_print_worker(state, stop))  # type: ignore[arg-type]
+    await asyncio.wait_for(entered.wait(), 5)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    [sync_pass] = [
+        fn
+        for fn in given
+        if getattr(fn, "__temporal_activity_definition").name == "filament_bb_sync_pass"
+    ]
+    api: Any = sync_pass.__self__.api
+    assert isinstance(api, LocalFilamentSync)
+    assert api._filament is FILAMENT_STORE and api._settings is state.settings_store

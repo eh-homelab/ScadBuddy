@@ -1117,10 +1117,12 @@ class KProfileTable(BambuddyModel):
 class SpoolKProfile(BambuddyModel):
     """A spool's K-profile, as ``GET /inventory/spools`` nests it: the preset it names
     (#6136), and the calibration a spool type imports (#6714). The fields are
-    ``SpoolKProfileResponse`` in the live Bambuddy's OpenAPI (read 2026-11-20); each is
-    optional here, so a row without them still reads."""
+    ``SpoolKProfileResponse`` in the live Bambuddy's OpenAPI (read 2026-11-20;
+    ``tests/bambuddy/recordings/openapi/sync-routes.json``, v1.3.1); each is optional
+    here, so a row without them still reads."""
 
-    setting_id: str | None = None
+    id: int | None = None
+    spool_id: int | None = None
     #: Bambuddy's printer id, which a ScadBuddy printer links (``bambuddy_printer_id``).
     printer_id: int | None = None
     extruder: int | None = None
@@ -1129,6 +1131,58 @@ class SpoolKProfile(BambuddyModel):
     k_value: float | None = None
     name: str | None = None
     cali_idx: int | None = None
+    setting_id: str | None = None
+    created_at: datetime | None = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
+
+
+class SpoolSupplier(BambuddyModel):
+    """One of a spool's supplier links, as ``GET /inventory/spools`` nests it: Bambuddy's
+    ``SpoolSupplierResponse`` (``sync-routes.json``, v1.3.1). ``supplier_id`` names a
+    :class:`BbSupplier`; at most one link is the purchase source."""
+
+    id: int | None = None
+    supplier_id: int
+    supplier_name: str | None = None
+    supplier_article_number: str | None = None
+    quoted_price_per_kg: float | None = None
+    is_purchase_source: bool = False
+
+
+class BbSupplier(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/suppliers``: Bambuddy's ``SupplierResponse``
+    (``sync-routes.json``, v1.3.1). Its time is naive UTC and reads as UTC."""
+
+    id: int
+    name: str
+    website: str | None = None
+    customer_number: str | None = None
+    note: str | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("updated_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
+
+
+class BbLocation(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/locations``: Bambuddy's ``LocationResponse``
+    (``sync-routes.json``, v1.3.1). Its time is naive UTC and reads as UTC."""
+
+    id: int
+    name: str
+    identifier: str | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("updated_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
 
 
 class CatalogFilament(BambuddyModel):
@@ -1187,10 +1241,16 @@ class Spool(BambuddyModel):
     #: or ``None``, for a spool with no tag (``tests/bambuddy/recordings/inventory-spools.json``).
     tag_uid: str | None = None
     tray_uuid: str | None = None
-    #: Its pressure-advance calibrations, each naming the ``setting_id`` of the preset it
-    #: was made with (#6136; ``SpoolKProfileResponse`` in Bambuddy's
-    #: ``backend/app/schemas/spool.py`` at v1.3.2b1-daily.20261113).
+    #: Its pressure-advance calibrations, each with its printer, extruder, nozzle and K
+    #: value and the ``setting_id`` of the preset it was made with (#6136, #6265;
+    #: ``SpoolKProfileResponse`` in Bambuddy's ``backend/app/schemas/spool.py`` at
+    #: v1.3.2b1-daily.20261113, and in ``sync-routes.json`` at v1.3.1).
     k_profiles: list[SpoolKProfile] = Field(default_factory=list)
+    #: The free note, the low-stock threshold in percent and the supplier links
+    #: (``SpoolResponse`` in ``sync-routes.json``, v1.3.1; #6265).
+    note: str | None = None
+    low_stock_threshold_pct: int | None = None
+    suppliers: list[SpoolSupplier] = Field(default_factory=list)
     #: What ScadBuddy's import reads (#6261, spec §8.1): the product code ScadBuddy's
     #: spool type keeps as ``code`` (beside ``extra_colors`` and ``effect_type`` above),
     #: Bambuddy's spool catalog entry of the core, when the row last changed, the last
@@ -1210,8 +1270,12 @@ class Spool(BambuddyModel):
     #: ``data_origin`` in ``tests/bambuddy/recordings/openapi/rfid-routes.json`` (v1.3.1).
     tag_type: str | None = None
     data_origin: str | None = None
+    #: When Bambuddy made the row (``SpoolResponse.created_at``, ``sync-routes.json``,
+    #: v1.3.1): the pull leaves a row made after an open create intent to the push
+    #: (#6265 Decision 10).
+    created_at: datetime | None = None
 
-    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at")
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at", "created_at")
     @classmethod
     def _utc(cls, value: datetime | None) -> datetime | None:
         return as_utc(value)

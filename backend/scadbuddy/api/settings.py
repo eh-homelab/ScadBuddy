@@ -55,6 +55,7 @@ from scadbuddy.core.settings import (
     Settings,
     env_var,
 )
+from scadbuddy.filament.bb_sync_models import pushes_anything
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
@@ -636,11 +637,40 @@ async def put_settings(
             msg,
             errors=[{"loc": ["body", "storefront_turnstile_secret"], "msg": msg}],
         )
+    touched = patch.model_fields_set | set(patch.reset)
+    sync_touched = "filament_sync" in touched
+    if sync_touched:
+        sync_before = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
+    # Decision 153: a running workflow waits the interval its last pass read, for the
+    # instance it was started for.
+    timer_keys = {"spool_overlay_refresh_seconds", "bambuddy_url"} & touched
+    timer_before = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     try:
         await asyncio.to_thread(store.save, patch)
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
+    timer_after = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
+    old_url = timer_before.get("bambuddy_url")
+    if old_url and timer_after.get("bambuddy_url") != old_url:
+        # Decision 161: the old Bambuddy's workflow is told now, so its next pass is
+        # `instance_changed` and it ends, even with no timer. None running is nothing.
+        state.filament_sync.signal_running_soon(old_url)
+    if sync_touched and snapshot.runtime.filament_sync != sync_before:
+        if pushes_anything(snapshot.runtime.filament_sync):
+            # #6265 Decision 17: a direction that now pushes pushes at once.
+            state.filament_sync.nudge_soon()
+        elif pushes_anything(sync_before):
+            # R-T10-3: nothing pushes now. A running workflow is told, so its next pass is
+            # `nothing_pushes` and it ends; none is started.
+            state.filament_sync.signal_running_soon()
+    elif pushes_anything(snapshot.runtime.filament_sync):
+        if timer_after.get("bambuddy_url") != timer_before.get("bambuddy_url"):
+            # Another Bambuddy: its own workflow starts now (Decision 153).
+            state.filament_sync.nudge_soon()
+        elif timer_after != timer_before:
+            # A new interval: the running workflow's next pass reads it.
+            state.filament_sync.signal_running_soon()
     if "print_auto_import" in patch.model_fields_set:
         # #4699: the watcher takes the prints started from this moment on, not from its
         # next pass; switched off, it forgets the moment. It reads the committed switch

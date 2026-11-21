@@ -39,6 +39,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 
 from scadbuddy.bambuddy.errors import (
+    BAD_BODY_PROBLEM,
     REJECTED_PROBLEM,
     Scope,
     TagAlreadyLinkedError,
@@ -56,6 +57,8 @@ from scadbuddy.bambuddy.models import (
     ArchiveRunList,
     ArchiveStats,
     AvailableFilament,
+    BbLocation,
+    BbSupplier,
     CatalogFilament,
     ExternalLink,
     FilamentRequirements,
@@ -181,6 +184,10 @@ Operation = Literal[
     "external_links.create",
     "external_links.list",
     "external_links.update",
+    "catalog.create",
+    "catalog.update",
+    "filament_catalog.create",
+    "filament_catalog.update",
     "filaments.catalog",
     "library.annotate",
     "library.bulk_delete",
@@ -205,6 +212,9 @@ Operation = Literal[
     "library.trash.list",
     "library.trash.restore",
     "library.upload",
+    "locations.create",
+    "locations.list",
+    "locations.update",
     "media.download",
     "media.photo",
     "media.plate_thumbnail",
@@ -257,6 +267,16 @@ Operation = Literal[
     "spools.filament_presets",
     "spools.list",
     "spools.usage",
+    "spools.create",
+    "spools.update",
+    "spools.archive",
+    "spools.restore",
+    "spools.k_profiles",
+    "spools.presets_put",
+    "spools.suppliers_put",
+    "suppliers.create",
+    "suppliers.list",
+    "suppliers.update",
     "ha.entities",
     "spoolbuddy.cancel_write",
     "spoolbuddy.devices",
@@ -420,12 +440,23 @@ class BambuddyClient:
 
     @staticmethod
     def _rows(response: httpx.Response, *, what: str) -> list[Any]:
-        """Bambuddy answers these routes with a bare JSON array."""
-        body = response.json()
+        """Bambuddy answers these routes with a bare JSON array. A body that is not JSON,
+        or not an array, is a 502 `BAD_BODY_PROBLEM` (R-T7-8, R-T7-10). As for the other
+        answers of the wrong shape, no ``bambuddy_status`` is set: Bambuddy's status was a
+        success."""
+        try:
+            body = response.json()
+        except ValueError:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered something that is not JSON when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
+            ) from None
         if not isinstance(body, list):
             raise ApiError(
                 status.HTTP_502_BAD_GATEWAY,
                 f"Bambuddy answered {type(body).__name__}, not a list, when asked to {what}",
+                type_=BAD_BODY_PROBLEM,
             )
         return body
 
@@ -2133,6 +2164,244 @@ class BambuddyClient:
             what=f"read spool {spool_id}",
         )
         return Spool.model_validate(response.json())
+
+    # --- the filament sync's writes (#6265) -----------------------------------
+    # Routes, bodies and permissions: ``tests/bambuddy/recordings/openapi/sync-routes.json``
+    # (Bambuddy 1.3.1, the source at tag v1.3.1). The ``INVENTORY_UPDATE`` routes take
+    # Manage Inventory (``can_manage_inventory``); the lists take Read Status.
+
+    async def create_spool(self, body: dict[str, Any]) -> Spool:
+        """``POST /api/v1/inventory/spools`` with a ``SpoolCreate`` (``routes/inventory.py``
+        line 1625)."""
+        response = await self._send(
+            "POST",
+            "/inventory/spools",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.create",
+            what="create a spool",
+            json=body,
+        )
+        return Spool.model_validate(response.json())
+
+    async def update_spool(self, spool_id: int, body: dict[str, Any]) -> Spool:
+        """``PATCH /api/v1/inventory/spools/{id}`` with a ``SpoolUpdate``: only the fields
+        sent change (``model_dump(exclude_unset=True)``, ``routes/inventory.py`` lines
+        1693-1716). A sent ``weight_used`` locks the weight unless ``weight_locked`` is
+        sent too."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/spools/{spool_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.update",
+            what=f"update spool {spool_id}",
+            json=body,
+        )
+        return Spool.model_validate(response.json())
+
+    async def archive_spool(self, spool_id: int) -> Spool:
+        """``POST /api/v1/inventory/spools/{id}/archive``, no body (``routes/inventory.py``
+        line 1774). It also frees the trays the spool was assigned to."""
+        response = await self._send(
+            "POST",
+            f"/inventory/spools/{spool_id}/archive",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.archive",
+            what=f"archive spool {spool_id}",
+        )
+        return Spool.model_validate(response.json())
+
+    async def restore_spool(self, spool_id: int) -> Spool:
+        """``POST /api/v1/inventory/spools/{id}/restore``, no body (``routes/inventory.py``
+        line 1796)."""
+        response = await self._send(
+            "POST",
+            f"/inventory/spools/{spool_id}/restore",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.restore",
+            what=f"restore spool {spool_id}",
+        )
+        return Spool.model_validate(response.json())
+
+    async def put_spool_k_profiles(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
+        """``PUT /api/v1/inventory/spools/{id}/k-profiles`` with ``SpoolKProfileBase`` rows:
+        the spool's whole list is replaced (``routes/inventory.py`` line 2020). Answers the
+        list Bambuddy stored, as sent (``SpoolKProfileResponse`` rows, not validated)."""
+        what = f"replace the K-profiles of spool {spool_id}"
+        response = await self._send(
+            "PUT",
+            f"/inventory/spools/{spool_id}/k-profiles",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.k_profiles",
+            what=what,
+            json=rows,
+        )
+        return self._rows(response, what=what)
+
+    async def put_spool_presets(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
+        """``PUT /api/v1/inventory/spools/{id}/filament-presets`` with
+        ``SpoolFilamentPresetBase`` rows: the whole list is replaced
+        (``routes/inventory.py`` line 2126). Answers the list Bambuddy stored, as sent
+        (``SpoolFilamentPresetResponse`` rows, not validated)."""
+        what = f"replace the per-nozzle presets of spool {spool_id}"
+        response = await self._send(
+            "PUT",
+            f"/inventory/spools/{spool_id}/filament-presets",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.presets_put",
+            what=what,
+            json=rows,
+        )
+        return self._rows(response, what=what)
+
+    async def put_spool_suppliers(self, spool_id: int, rows: list[dict[str, Any]]) -> list[Any]:
+        """``PUT /api/v1/inventory/spools/{id}/suppliers`` with ``SpoolSupplierLinkInput``
+        rows: the whole list is replaced; a duplicate supplier or two purchase sources is
+        a 400 and an unknown supplier a 404 (``routes/inventory.py`` lines 2060-2081). Answers
+        the list Bambuddy stored, as sent (``SpoolSupplierResponse`` rows, not validated)."""
+        what = f"replace the suppliers of spool {spool_id}"
+        response = await self._send(
+            "PUT",
+            f"/inventory/spools/{spool_id}/suppliers",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.suppliers_put",
+            what=what,
+            json=rows,
+        )
+        return self._rows(response, what=what)
+
+    async def suppliers(self) -> list[BbSupplier]:
+        """``GET /api/v1/inventory/suppliers`` (``INVENTORY_READ``: Read Status;
+        ``routes/inventory.py`` line 896)."""
+        what = "list the suppliers"
+        response = await self._send(
+            "GET",
+            "/inventory/suppliers",
+            scope=Scope.READ_STATUS,
+            operation="suppliers.list",
+            what=what,
+        )
+        return [BbSupplier.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def create_supplier(self, body: dict[str, Any]) -> BbSupplier:
+        """``POST /api/v1/inventory/suppliers`` with a ``SupplierCreate``: 201, or 409 for
+        a name another supplier has (``routes/inventory.py`` line 916)."""
+        response = await self._send(
+            "POST",
+            "/inventory/suppliers",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="suppliers.create",
+            what="create a supplier",
+            json=body,
+        )
+        return BbSupplier.model_validate(response.json())
+
+    async def update_supplier(self, supplier_id: int, body: dict[str, Any]) -> BbSupplier:
+        """``PATCH /api/v1/inventory/suppliers/{id}`` with a ``SupplierUpdate``: only the
+        fields sent change (``routes/inventory.py`` line 939)."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/suppliers/{supplier_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="suppliers.update",
+            what=f"update supplier {supplier_id}",
+            json=body,
+        )
+        return BbSupplier.model_validate(response.json())
+
+    async def locations(self) -> list[BbLocation]:
+        """``GET /api/v1/inventory/locations`` (``INVENTORY_READ``: Read Status;
+        ``routes/inventory.py`` line 700)."""
+        what = "list the storage locations"
+        response = await self._send(
+            "GET",
+            "/inventory/locations",
+            scope=Scope.READ_STATUS,
+            operation="locations.list",
+            what=what,
+        )
+        return [BbLocation.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def create_location(self, body: dict[str, Any]) -> BbLocation:
+        """``POST /api/v1/inventory/locations`` with a ``LocationCreate``: 201, or 409 for
+        a name another location has (``routes/inventory.py`` line 716)."""
+        response = await self._send(
+            "POST",
+            "/inventory/locations",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="locations.create",
+            what="create a storage location",
+            json=body,
+        )
+        return BbLocation.model_validate(response.json())
+
+    async def update_location(self, location_id: int, body: dict[str, Any]) -> BbLocation:
+        """``PATCH /api/v1/inventory/locations/{id}`` with a ``LocationUpdate``; a rename
+        carries over to the spools in it (``routes/inventory.py`` line 740)."""
+        response = await self._send(
+            "PATCH",
+            f"/inventory/locations/{location_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="locations.update",
+            what=f"update storage location {location_id}",
+            json=body,
+        )
+        return BbLocation.model_validate(response.json())
+
+    async def create_catalog_entry(self, name: str, weight: float) -> SpoolCatalogEntry:
+        """``POST /api/v1/inventory/catalog`` (``routes/inventory.py`` line 530).
+        ``CatalogEntryCreate.weight`` is whole grams, so ``weight`` is rounded."""
+        response = await self._send(
+            "POST",
+            "/inventory/catalog",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="catalog.create",
+            what="create a spool catalog entry",
+            json={"name": name, "weight": round(weight)},
+        )
+        return SpoolCatalogEntry.model_validate(response.json())
+
+    async def update_catalog_entry(
+        self, entry_id: int, name: str, weight: float
+    ) -> SpoolCatalogEntry:
+        """``PUT /api/v1/inventory/catalog/{id}``: name and whole grams, both required
+        (``routes/inventory.py`` line 545)."""
+        response = await self._send(
+            "PUT",
+            f"/inventory/catalog/{entry_id}",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="catalog.update",
+            what=f"update spool catalog entry {entry_id}",
+            json={"name": name, "weight": round(weight)},
+        )
+        return SpoolCatalogEntry.model_validate(response.json())
+
+    async def create_filament(self, body: dict[str, Any]) -> CatalogFilament:
+        """``POST /api/v1/filament-catalog/`` with a ``FilamentCreate``
+        (``FILAMENTS_CREATE``, ``routes/filaments.py`` line 34). No API key can hold it, so
+        a 403 is the admin-only scope 409 (`Scope.ADMIN_FILAMENTS`)."""
+        response = await self._send(
+            "POST",
+            "/filament-catalog/",
+            scope=Scope.ADMIN_FILAMENTS,
+            operation="filament_catalog.create",
+            what="add a filament to Bambuddy's catalog",
+            json=body,
+        )
+        return CatalogFilament.model_validate(response.json())
+
+    async def update_filament(self, filament_id: int, body: dict[str, Any]) -> CatalogFilament:
+        """``PATCH /api/v1/filament-catalog/{id}`` with a ``FilamentUpdate``: only the
+        fields sent change (``FILAMENTS_UPDATE``, ``routes/filaments.py`` line 63; no API
+        key can hold it, as for `create_filament`)."""
+        response = await self._send(
+            "PATCH",
+            f"/filament-catalog/{filament_id}",
+            scope=Scope.ADMIN_FILAMENTS,
+            operation="filament_catalog.update",
+            what=f"update filament {filament_id} in Bambuddy's catalog",
+            json=body,
+        )
+        return CatalogFilament.model_validate(response.json())
 
     async def auto_add_unknown_rfid(self) -> bool:
         """Bambuddy's ``auto_add_unknown_rfid`` setting (``AppSettings`` in

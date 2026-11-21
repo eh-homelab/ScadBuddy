@@ -21,6 +21,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
+from scadbuddy.filament.bb_sync_models import forget_sync
 from scadbuddy.filament.catalog import (
     CatalogExistsError,
     CatalogRefError,
@@ -195,6 +196,8 @@ class SpoolTypeStore:
                     [*values, type_id],
                 ).fetchone()
                 assert row is not None
+                if archived:
+                    forget_sync(conn, "filament", type_id)
                 row = self._link_price_book(conn, row, changed=bool(set(columns) & _PRICED))
                 changes = {
                     n: [current[n], row[n]]

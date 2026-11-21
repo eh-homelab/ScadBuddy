@@ -40,6 +40,7 @@ from scadbuddy.workflows.commands import (
     namespace_not_found,
     temporal_failure,
 )
+from scadbuddy.workflows.filament_sync import FilamentBbSync
 from scadbuddy.workflows.follow import FollowPrint, VersionedFollowPrint, follow_queue
 from scadbuddy.workflows.lan_auto_import import LanAutoImport
 from scadbuddy.workflows.operation import OperationWorkflow
@@ -159,7 +160,8 @@ def bambuddy_worker(
     build_id: str | None = None,
 ) -> Worker:
     """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun``,
-    ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves).
+    ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves), and the
+    filament sync's ``FilamentBbSync`` (#6265).
     With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned, and
     every workflow on it is AUTO_UPGRADE (`print_deployment`): each run moves to the
     current build. Pinned runs were stranded by every deploy (#2066): the Deployment
@@ -201,6 +203,9 @@ def bambuddy_worker(
             PrinterWatch,
             # A LAN-only printer's job, recorded by the print watcher (#4699 phase 4).
             LanAutoImport,
+            # ScadBuddy's filament pushed to Bambuddy, one per instance (#6265); beside
+            # its pass activity, AUTO_UPGRADE by the worker's default.
+            FilamentBbSync,
         ],
         activities=activities,
         workflow_runner=sandboxed_runner(),

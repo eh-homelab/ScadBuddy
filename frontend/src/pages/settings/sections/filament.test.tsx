@@ -1,6 +1,8 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { api } from '../../../api/client'
+import { describe, expect, it, vi } from 'vitest'
+import { spoolId } from '../../../mocks/features/filament/seed'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -17,7 +19,7 @@ describe('Filament (#6262)', () => {
     renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
-    expect(within(filament).getByRole('combobox', { name: 'Spools' })).toHaveTextContent('Bambuddy → ScadBuddy')
+    expect(within(filament).getByRole('combobox', { name: 'Spools and types' })).toHaveTextContent('Bambuddy → ScadBuddy')
     expect(within(filament).getByLabelText('Pull from Bambuddy every')).toHaveValue(300)
     expect(within(filament).getByLabelText('Low stock below, percent')).toHaveValue(20)
     expect(within(filament).getByLabelText('Default cost per kg')).toHaveValue('')
@@ -46,36 +48,257 @@ describe('Filament (#6262)', () => {
     await waitFor(() => expect(mockSettings()).toMatchObject({ filament_burn_window_days: 14, filament_lead_time_days: 21, filament_safety_margin_days: 10 }))
   })
 
-  it('saves the sync choice as one object per data type', async () => {
-    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
-    await seeded()
-    await choose(user, within(region('Filament')).getByRole('combobox', { name: 'Spools' }), 'Off')
-    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'off', weights: 'bb_to_sb' }))
-  })
+  const DEFAULT_SYNC = { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' } as const
 
-  it('saves the tags choice with Save Filament, as filament_sync.tags beside the spools choice', async () => {
+  it('offers the four directions for each of the six data types', async () => {
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
-    await choose(user, within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' }), "Send ScadBuddy's bindings")
-    await choose(user, within(filament).getByRole('combobox', { name: 'Spools' }), 'Off')
-    // Each choice keeps the other: both parts are one setting until it is saved.
-    expect(within(filament).getByRole('combobox', { name: 'Tags to Bambuddy' })).toHaveTextContent("Send ScadBuddy's bindings")
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'bb_to_sb' })
-    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'off', tags: 'sb_to_bb', weights: 'bb_to_sb' }))
+    for (const [label, shown] of [
+      ['Spools and types', 'Bambuddy → ScadBuddy'],
+      ['Weights', 'Bambuddy → ScadBuddy'],
+      ['Tags', 'Bambuddy → ScadBuddy'],
+      ['Suppliers and prices', 'Off'],
+      ['Locations', 'Off'],
+      ['Presets and K values', 'Bambuddy → ScadBuddy'],
+    ] as const) {
+      expect(within(filament).getByRole('combobox', { name: label })).toHaveTextContent(shown)
+    }
+    await user.click(within(filament).getByRole('combobox', { name: 'Locations' }))
+    expect((await screen.findAllByRole('option')).map((option) => option.textContent)).toEqual([
+      'Off',
+      'ScadBuddy → Bambuddy',
+      'Bambuddy → ScadBuddy',
+      'Both ways (newer change wins)',
+    ])
   })
 
-  it('saves the weights choice as filament_sync.weights without touching spools or tags', async () => {
+  it('saves every direction in one filament_sync value', async () => {
+    let sent: Record<string, unknown> | undefined
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PUT' && new URL(request.url).pathname === '/api/v1/settings') sent = (await request.clone().json()) as Record<string, unknown>
+    })
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')
-    expect(within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' })).toHaveTextContent('Bambuddy → ScadBuddy')
-    await choose(user, within(filament).getByRole('combobox', { name: 'Weights from Bambuddy' }), 'Off')
-    expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'bb_to_sb' })
+    await choose(user, within(filament).getByRole('combobox', { name: 'Weights' }), 'Both ways (newer change wins)')
+    expect(mockSettings().filament_sync).toEqual(DEFAULT_SYNC)
     await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
-    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ spools: 'bb_to_sb', tags: 'off', weights: 'off' }))
+    await waitFor(() => expect(sent?.filament_sync).toEqual({ ...DEFAULT_SYNC, weights: 'two_way' }))
+    await waitFor(() => expect(mockSettings().filament_sync).toEqual({ ...DEFAULT_SYNC, weights: 'two_way' }))
+    server.events.removeAllListeners()
+  })
+
+  it('keeps each choice beside the others until the save', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Tags' }), 'ScadBuddy → Bambuddy')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Spools and types' }), 'Off')
+    await choose(user, within(filament).getByRole('combobox', { name: 'Suppliers and prices' }), 'Bambuddy → ScadBuddy')
+    expect(within(filament).getByRole('combobox', { name: 'Tags' })).toHaveTextContent('ScadBuddy → Bambuddy')
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() =>
+      expect(mockSettings().filament_sync).toEqual({ ...DEFAULT_SYNC, spools: 'off', tags: 'sb_to_bb', suppliers: 'bb_to_sb' }),
+    )
+  })
+
+  it('the mock accepts two_way on every key', async () => {
+    const everyWay = { spools: 'two_way', weights: 'two_way', tags: 'two_way', presets: 'two_way', suppliers: 'two_way', locations: 'two_way' } as const
+    await api.putSettings({ filament_sync: everyWay })
+    expect(mockSettings().filament_sync).toEqual(everyWay)
+    await expect(api.putSettings({ filament_sync: { ...everyWay, tags: 'sideways' as 'off' } })).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('shows a failed spool with its error', async () => {
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
+    const [spool, supplier] = within(failed).getAllByRole('listitem') as [HTMLElement, HTMLElement]
+    expect(within(spool).getByRole('link', { name: 'Spool #3' })).toHaveAttribute('href', expect.stringContaining(`/filament/spools/${spoolId(3)}`))
+    expect(within(supplier).getByRole('link', { name: 'Supplier Micro Center' })).toBeInTheDocument()
+    expect(spool).toHaveTextContent('Bambuddy refused it (HTTP 422).')
+    expect(spool).toHaveTextContent('2 attempts')
+    expect(supplier).toHaveTextContent('Not sent: another Bambuddy row has this name.')
+    expect(within(region('Filament')).getByText(/No pass runs: no data type but tags is set to send to Bambuddy/)).toBeInTheDocument()
+  })
+
+  it('names an item that is gone by its id', async () => {
+    const gone = '0badc0de-0000-4000-8000-000000000001'
+    server.use(
+      http.get('*/api/v1/filament/sync/status', () =>
+        HttpResponse.json({
+          instance: null,
+          last_pass_at: null,
+          last_ok_at: null,
+          last_error: null,
+          counts: {},
+          errors: [{ kind: 'location', sb_id: gone, label: null, error: 'internal', attempts: 1, at: '2026-11-15T07:00:00Z' }],
+          directions: DEFAULT_SYNC,
+          skipped: null,
+        }),
+      ),
+    )
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
+    expect(within(failed).getByRole('link', { name: 'Location 0badc0de' })).toBeInTheDocument()
+  })
+
+  /** The sync status reads made so far, counted from msw's request events. */
+  function countStatusReads() {
+    const count = { reads: 0 }
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname === '/api/v1/filament/sync/status') count.reads += 1
+    })
+    return count
+  }
+
+  async function startSync() {
+    await api.putSettings({ filament_sync: { ...DEFAULT_SYNC, weights: 'two_way' } })
+    const rendered = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    const failed = await within(filament).findByRole('list', { name: 'Items not synced' })
+    expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('2 attempts')
+    await rendered.user.click(within(filament).getByRole('button', { name: 'Sync now' }))
+    // Announced politely: the note is its own live region.
+    expect(await within(filament).findByText(/Sync started/)).toHaveAttribute('aria-live', 'polite')
+    return { ...rendered, filament, failed }
+  }
+
+  it('sync now re-reads the status every 3 s until the pass lands', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const count = countStatusReads()
+    try {
+      const { filament, failed } = await startSync()
+      // The mock's pass lands on the second read after the run, as a background pass would.
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('2 attempts')
+      const before = count.reads
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      await waitFor(() => expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('3 attempts'))
+      expect(within(filament).getByText('Sync finished.')).toBeInTheDocument()
+      expect(count.reads).toBe(before + 1)
+      // Landed: no more reads.
+      await act(() => vi.advanceTimersByTimeAsync(9_000))
+      expect(count.reads).toBe(before + 1)
+    } finally {
+      server.events.removeAllListeners()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps reading the status when a pass from before the request lands first', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { filament } = await startSync()
+      // A timer pass (or an earlier nudge's) that started before the run lands first.
+      let early = true
+      server.use(
+        http.get('*/api/v1/filament/sync/status', () => {
+          if (!early) return
+          early = false
+          return HttpResponse.json({
+            instance: null,
+            last_pass_at: '2026-11-15T07:00:30Z',
+            last_ok_at: '2026-11-15T07:00:30Z',
+            last_error: null,
+            counts: {},
+            errors: [],
+            directions: { ...DEFAULT_SYNC, weights: 'two_way' },
+            skipped: null,
+          })
+        }),
+      )
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      await waitFor(() => expect(within(filament).queryByRole('list', { name: 'Items not synced' })).toBeNull())
+      expect(within(filament).queryByText('Sync finished.')).toBeNull()
+      expect(within(filament).getByText(/Sync started/)).toBeInTheDocument()
+      // The pass the run asked for lands on the mock's second read.
+      await act(() => vi.advanceTimersByTimeAsync(6_000))
+      expect(await within(filament).findByText('Sync finished.')).toBeInTheDocument()
+      const failed = within(filament).getByRole('list', { name: 'Items not synced' })
+      expect(within(failed).getAllByRole('listitem')[0]).toHaveTextContent('3 attempts')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says the pass is still running after 60 s with no new pass', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    server.use(http.post('*/api/v1/filament/sync/run', () => HttpResponse.json({ started: true }, { status: 202 })))
+    const count = countStatusReads()
+    try {
+      const { filament } = await startSync()
+      const before = count.reads
+      await act(() => vi.advanceTimersByTimeAsync(60_000))
+      expect(await within(filament).findByText('The pass is still running. Check back later.')).toBeInTheDocument()
+      expect(count.reads - before).toBe(20)
+      await act(() => vi.advanceTimersByTimeAsync(9_000))
+      expect(count.reads - before).toBe(20)
+    } finally {
+      server.events.removeAllListeners()
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops reading the status when the page goes away', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const count = countStatusReads()
+    try {
+      const { unmount } = await startSync()
+      const before = count.reads
+      unmount()
+      // Five intervals: a poll left running would read the status again (twice, until the mock pass lands).
+      await act(() => vi.advanceTimersByTimeAsync(15_000))
+      expect(count.reads).toBe(before)
+    } finally {
+      server.events.removeAllListeners()
+      vi.useRealTimers()
+    }
+  })
+
+  it('links to Connection when no Bambuddy is set up', async () => {
+    server.use(
+      http.post('*/api/v1/filament/sync/run', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'no Bambuddy is configured', code: 'no_bambuddy' }, { status: 409 }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Sync now' }))
+    const alert = await within(filament).findByRole('alert')
+    expect(within(alert).getByRole('link', { name: 'Connection' })).toHaveAttribute('href', expect.stringContaining('/settings/general#connection'))
+  })
+
+  it('names the sync status block for its label', async () => {
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    expect(document.getElementById('filament-sync-status')).not.toBeNull()
+    expect(within(region('Filament')).getByText('Sync status').closest('label')).toHaveAttribute('for', 'filament-sync-status')
+  })
+
+  it('says what to change when nothing is set to go to Bambuddy', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Sync now' }))
+    expect(await within(filament).findByRole('alert')).toHaveTextContent(/Nothing is set to go to Bambuddy\. Set a data type to "ScadBuddy → Bambuddy" or "Both ways"/)
+  })
+
+  it('says to try again later when the sync could not be started', async () => {
+    server.use(
+      http.post('*/api/v1/filament/sync/run', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the sync could not be started: internal' }, { status: 503 }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(await within(filament).findByRole('button', { name: 'Sync now' }))
+    expect(await within(filament).findByRole('alert')).toHaveTextContent('The sync could not be started. Try again later.')
   })
 
   it('switches the RFID override mode on and says Bambuddy no longer adds unknown spools', async () => {

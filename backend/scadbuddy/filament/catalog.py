@@ -32,6 +32,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.filament import models as m
+from scadbuddy.filament.bb_sync_models import forget_sync
 
 Conn = Connection[DictRow]
 
@@ -452,6 +453,8 @@ class CatalogStore:
                         f"UPDATE {spec.table} SET {', '.join(sets)} WHERE id = %s RETURNING id",
                         [*values, row_id],
                     ).fetchone()
+                    if row is not None and archived and kind == "insert-types":
+                        forget_sync(conn, "insert_type", row_id)
                     changed = None if row is None else self._read(conn, spec, row_id)
             except errors.UniqueViolation as exc:
                 if not _is_names(exc, spec):
