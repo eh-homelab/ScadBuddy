@@ -326,7 +326,14 @@ class Settings(BaseSettings):
     # to say the plate is clear before it starts the next, as Bambuddy's queue does with
     # its `require_plate_clear` on (off by default there too: maziggy/bambuddy 98ecaf50,
     # `backend/app/services/print_scheduler.py`). Read by each run's plan, which keeps it.
+    # #6871: a run queued on a busy printer also reads a printer that holds an ended
+    # print as busy while this is on.
     lan_require_plate_clear: bool = False
+    # #6871: whether a native (LAN) run reads the printer before its first upload and,
+    # finding it busy, sends nothing and waits until it is free and someone says the plate
+    # is clear. Off, the run sends at once and a busy printer refuses it. Read by each
+    # run's plan, which keeps it.
+    lan_queue_when_busy: bool = True
     # SCADBUDDY_SLICER_BACKEND: who slices a print: Bambuddy, or the `scadbuddy-slicer`
     # worker on `temporal_task_queue_slicer` (`native`, which needs a content store).
     slicer_backend: Slicer = "bambuddy"
@@ -1209,6 +1216,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.
         "lan_require_plate_clear": "live",
+        "lan_queue_when_busy": "live",
         # Read from the store by every slice's start.
         "slicer_backend": "live",
         "bambuddy_render_api_key": "restart",

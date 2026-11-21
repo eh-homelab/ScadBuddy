@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import type { PrintProgress, PrintRunResult } from '../../api/types'
 import { queuedResult } from '../../mocks/choices'
@@ -137,5 +138,51 @@ describe('QueuedPanel · a LAN run of several plate copies', () => {
       <QueuedPanel result={{ ...queuedResult, path: 'native', copies: 2, lan_waiting: [1] }} printerName="H2C" progress={progress} polling />,
     )
     expect(screen.queryByTestId('lan-run-controls')).toBeNull()
+  })
+})
+
+// #6871 — the printer was busy, so the run sent nothing and waits in ScadBuddy's queue.
+describe('QueuedPanel · a run queued on a busy printer', () => {
+  const theirs = { subtask_name: 'Bambu Refill spool', started_at: '2026-11-21T14:29:33Z' }
+  const queued: PrintRunResult = {
+    ...queuedResult,
+    path: 'native',
+    lan: [],
+    lan_waiting: [1],
+    lan_queued: { state: 'RUNNING', job: theirs, place: 2 },
+  }
+
+  function renderQueued(result: PrintRunResult) {
+    render(
+      <MemoryRouter>
+        <QueuedPanel result={result} printerName="H2C" progress={null} polling={false} />
+      </MemoryRouter>,
+    )
+  }
+
+  it('says it is queued, that nothing was sent, its place, and links to the queue', () => {
+    renderQueued(queued)
+    const items = screen.getByTestId('queued-items')
+    expect(items).toHaveTextContent('Queued for H2C: it is busy with another print, so nothing was sent to it yet.')
+    expect(items).toHaveTextContent(
+      'ScadBuddy sends it once the printer has finished and someone says the plate is clear.',
+    )
+    expect(screen.getByTestId('lan-queued-place')).toHaveTextContent('Place 2 in the queue for H2C.')
+    expect(screen.getByRole('link', { name: 'Open the queue' })).toHaveAttribute('href', '/prints')
+    expect(items).not.toHaveTextContent('Sliced and sent')
+    expect(items).not.toHaveTextContent('may still have been queued')
+  })
+
+  it('says the plate must be cleared when the printer holds an ended print', () => {
+    renderQueued({ ...queued, lan_queued: { state: 'FINISH', job: null, place: 1 } })
+    expect(screen.getByTestId('queued-items')).toHaveTextContent(
+      'Queued for H2C: its plate must be cleared first, so nothing was sent to it yet.',
+    )
+  })
+
+  it('names no place when it could not be read', () => {
+    renderQueued({ ...queued, lan_queued: { state: 'RUNNING', job: theirs, place: null } })
+    expect(screen.queryByTestId('lan-queued-place')).toBeNull()
+    expect(screen.getByRole('link', { name: 'Open the queue' })).toBeInTheDocument()
   })
 })

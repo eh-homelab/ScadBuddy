@@ -260,5 +260,10 @@ def test_the_printers_card_names_the_runs_controls(
         printer=printer,
     )
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
-    assert card["lan_run"] == {"run_id": run_id, "waiting": 2, "awaiting_clear": True}
+    assert card["lan_run"] == {
+        "run_id": run_id,
+        "waiting": 2,
+        "awaiting_clear": True,
+        "queued": False,
+    }
     assert card["awaiting_plate_clear"] is True

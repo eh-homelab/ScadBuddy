@@ -215,6 +215,8 @@ class SettingsView(BaseModel):
     orders_allow_unfulfil: bool = True
     #: Whether a native run waits for a cleared plate between its prints (#4939).
     lan_require_plate_clear: bool = False
+    #: Whether a native run waits for a busy printer rather than send (#6871).
+    lan_queue_when_busy: bool = True
     store_s3_endpoint: str | None = None
     store_s3_region: str = "us-east-1"
     store_s3_bucket: str | None = None

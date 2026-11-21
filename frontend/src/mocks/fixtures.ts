@@ -1077,6 +1077,8 @@ export const settingsDefaults = {
   orders_thin_margin_percent: '15',
   // #4939 — whether a native run waits for a cleared plate between its prints.
   lan_require_plate_clear: false,
+  // #6871 — whether a native run waits for a busy printer rather than send.
+  lan_queue_when_busy: true,
   fonts_catalogue_ttl: 86400,
   // #4974 — the off-box git remote; the token is reported only as `has_git_remote_token`.
   git_remote_url: null,

@@ -1399,6 +1399,22 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     expect(alert).not.toHaveTextContent('may still have been queued')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
+
+  it('says nothing was sent when the printer refused the start, never that it may be queued (#6871)', async () => {
+    const detail =
+      '3DP-31B-598 refused the print: ERROR STATE. Nothing was sent to print, so it is safe to print again.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({ title: 'Bad Gateway', status: 502, detail, may_have_queued: false }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(detail)
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
 })
 
 describe('PrintPicker · A run that got no answer (#470)', () => {

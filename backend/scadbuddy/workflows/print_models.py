@@ -26,7 +26,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
-from scadbuddy.printers.lan_models import LanStarted
+from scadbuddy.printers.lan_models import LanQueued, LanStarted
 from scadbuddy.printers.nozzle_mapping import SlicedRack
 
 #: The workflow type every print route starts.
@@ -66,6 +66,11 @@ SLICE_GONE = "PrintSliceGone"
 #: uploads again under a new name and starts again; ``lan_print`` first looks for the
 #: plate in the printer's report, so a start it did take is not sent twice.
 LAN_UNSURE = "PrintLanUnsure"
+#: A LAN start that started nothing, for sure (#6871): the printer refused the
+#: ``project_file`` (``ERROR STATE``, a missing file), or ``lan_print`` stopped before it
+#: sent one. Recorded as ``FAILED`` is, but the run's first start refused so queued
+#: nothing, and the run says so (``print_fail``'s ``unqueued``).
+LAN_REFUSED = "PrintLanRefused"
 
 
 class SourceSpec(BaseModel):
@@ -256,6 +261,23 @@ LAN_WAIT_ACTIVITY = "lan_wait"
 LAN_WAIT_POLL = 10.0
 #: A succeeded run's result rewritten as its later LAN starts are made (#4541).
 PRINT_LAN_UPDATE_ACTIVITY = "print_lan_update"
+#: The printer read before a LAN run's first upload (#6871): busy, the run waits.
+LAN_CHECK_ACTIVITY = "lan_check"
+
+
+class LanCheckInput(BaseModel):
+    """``lan_check``: the registry row, the run it reads for (its place in the queue),
+    and whether an ended print's plate counts as busy (`lan_models.busy_with`)."""
+
+    printer: str
+    run_id: str
+    plate_clear: bool = False
+
+
+class LanCheck(BaseModel):
+    """What ``lan_check`` read: ``queued`` when the printer cannot take the print now."""
+
+    queued: LanQueued | None = None
 
 
 class SlicedSource(BaseModel):
@@ -357,6 +379,9 @@ class LanSequenceInput(BaseModel):
     #: The plates already recorded: a plate is recorded once, by its first copy.
     recorded: list[int] = Field(default_factory=list)
     sent: list[PlateSend] = Field(default_factory=list)
+    #: The run started nothing: the printer was busy (#6871), so the first start waits
+    #: for it to be free and its plate cleared. ``None`` in a sequence from before it.
+    queued: LanQueued | None = None
 
 
 class LanUpdateInput(BaseModel):

@@ -1742,6 +1742,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         uses=PoolPrintUses(state.settings_store.pool),
+        # A run queued on a busy printer says its place (#6871).
+        runs=state.print_runs.store,
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities: list[Callable[..., Any]] = [

@@ -465,6 +465,18 @@ async def lan_waiting(
     return await runs.store.lan_waiting(printers)
 
 
+@router.get("/runs/{run_id}/queue-place", name="crud_print_queue_place")
+async def queue_place(run_id: str, runs: PrintRunsDep, printer: str) -> int:
+    """#6871: a run queued on a busy printer's place, as `PrintRunStore.queue_place`."""
+    try:
+        UUID(printer)
+    except ValueError:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"Not a printer id: {printer!r}."
+        ) from None
+    return await runs.store.queue_place(printer, run_id)
+
+
 @router.get("/runs/running", name="crud_print_running_runs")
 async def running_runs(
     runs: PrintRunsDep, output_id: Annotated[list[str], Query(default_factory=list)]

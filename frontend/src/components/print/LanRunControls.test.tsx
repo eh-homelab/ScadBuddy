@@ -70,3 +70,13 @@ describe('LanRunControls (#4942, #4939)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('no prints still to start')
   })
 })
+
+// #6871 — a run queued on a busy printer has started nothing yet.
+describe('LanRunControls · a run queued on a busy printer', () => {
+  it('says it waits for the print the printer runs', () => {
+    controls({ waiting: 1, queued: true })
+    expect(screen.getByTestId('lan-run-controls')).toHaveTextContent(
+      'Queued until H2C has finished the print it is running. 1 print still to start.',
+    )
+  })
+})

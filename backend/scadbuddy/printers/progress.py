@@ -176,6 +176,8 @@ WAITING = "Waiting for the printer to finish the print before it."
 #: The next copy, once the printer has ended the one before, while the run waits for
 #: someone to say the plate is clear (#4939, ``lan_require_plate_clear``).
 AWAITING_CLEAR = "Waiting for someone to say the plate of {printer} is clear."
+#: A run's first print, queued because the printer was busy with another (#6871).
+QUEUED_BUSY = "Queued: {printer} is busy with another print. Nothing was sent to it yet."
 
 
 def waiting_plate(
@@ -209,7 +211,10 @@ def lan_control(run: PrintRun) -> LanRunControl | None:
     if not result.lan_waiting or result.lan_stopped is not None:
         return None
     return LanRunControl(
-        run_id=run.id, waiting=len(result.lan_waiting), awaiting_clear=result.lan_awaiting_clear
+        run_id=run.id,
+        waiting=len(result.lan_waiting),
+        awaiting_clear=result.lan_awaiting_clear,
+        queued=result.lan_queued is not None,
     )
 
 
@@ -250,7 +255,8 @@ class LanProgress:
             return None
         started = run.result.lan
         printer = run.printer
-        if not started or printer is None:
+        # A run queued on a busy printer (#6871) has started nothing yet.
+        if not (started or run.result.lan_queued) or printer is None:
             return None
         try:
             report = await asyncio.to_thread(self.reports.get, printer)
@@ -270,9 +276,12 @@ class LanProgress:
         reasons = [WAITING] * len(result.lan_waiting)
         if reasons and result.lan_awaiting_clear:
             reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
+        elif reasons and result.lan_queued is not None:
+            reasons[0] = QUEUED_BUSY.format(printer=name or "the printer")
         plates += [waiting_plate(name, result.lan_stopped, reason) for reason in reasons]
         if len(plates) == 1:
-            return plates[0].model_copy(update={"run_id": run.id})
+            # A run of one print queued on a busy printer still has its controls.
+            return plates[0].model_copy(update={"run_id": run.id, "lan_run": lan_control(run)})
         merged = from_plates(
             plates,
             [

@@ -1429,6 +1429,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             # A run's next plate copy waits on the printer's report (#4541).
             reports=reports,
             uses=print_uses,
+            # A run queued on a busy printer says its place (#6871).
+            runs=print_runs,
         )
     )
     return PrintWorkerDeps(

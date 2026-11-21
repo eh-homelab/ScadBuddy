@@ -196,19 +196,24 @@ def lan_plates(result: PrintRunResult) -> list[LanPlateSend]:
 def plate_clear_of(
     planned: PlannedRun, settings: SettingsReader, loaded: StoredSettings
 ) -> PlannedRun:
-    """``planned`` with ``lan_require_plate_clear`` (#4939), for a native run of several
-    prints: the run keeps it, so a change applies from the next run. Any other run has no
-    print to wait between, and reads nothing. ``loaded`` are the settings the plan read:
-    the print worker's (`PrintSettings`, #5298) hold the field, so it is read from them
-    and nothing is fetched again; the API's `StoredSettings` do not, so ``settings``
-    reads it as it is now."""
-    if not planned.lan_start or planned.copies * len(planned.plates) < 2:
+    """``planned`` with ``lan_require_plate_clear`` (#4939) and ``lan_queue_when_busy``
+    (#6871), for a native run: the run keeps them, so a change applies from the next run.
+    A run of several prints waits for a cleared plate between them; every native run
+    reads the printer before its first upload and, with ``lan_queue_when_busy``, waits
+    for it while it is busy, an ended print whose plate must be cleared counting as busy.
+    A run on Bambuddy's path reads nothing. ``loaded`` are the settings the plan read:
+    the print worker's (`PrintSettings`, #5298) hold the fields, so they are read from
+    them and nothing is fetched again; the API's `StoredSettings` do not, so ``settings``
+    reads them as they are now."""
+    if not planned.lan_start:
         return planned
     if isinstance(loaded, PrintSettings):
         required = loaded.lan_require_plate_clear
+        queue = loaded.lan_queue_when_busy
     else:
         required = settings.plate_clear_required()
-    return planned.model_copy(update={"plate_clear": required})
+        queue = settings.queue_when_busy()
+    return planned.model_copy(update={"plate_clear": required, "queue_when_busy": queue})
 
 
 def problem(error: ApiError) -> PrintRunError:

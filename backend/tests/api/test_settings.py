@@ -76,6 +76,7 @@ DEFAULTS: dict[str, object] = {
     "storefront_payment_instructions": None,
     "storefront_slice_profile": None,
     "lan_require_plate_clear": False,
+    "lan_queue_when_busy": True,
     "git_remote_url": None,
     "git_remote_username": None,
     "has_git_remote_token": False,
