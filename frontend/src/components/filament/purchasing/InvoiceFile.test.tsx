@@ -1,8 +1,17 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { invoiceFileUrl } from '../../../api/filamentPurchasing'
+import type * as embed from '../../../lib/embed'
+import { isEmbedded } from '../../../lib/embed'
 import { InvoiceFile } from './InvoiceFile'
+
+vi.mock('../../../lib/embed', async (original) => ({
+  ...(await original<typeof embed>()),
+  isEmbedded: vi.fn(() => false),
+}))
+
+afterEach(() => vi.mocked(isEmbedded).mockReturnValue(false))
 
 const ID = '00000000-0000-4000-8000-000000000001'
 
@@ -28,6 +37,14 @@ describe('the invoice file preview (#6889)', () => {
     expect(container.querySelector('object')).toBeNull()
     expect(screen.getByRole('link', { name: 'Open' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument()
+  })
+
+  it('points a PDF at Open and Download inside Bambuddy, where the frame has no PDF viewer', () => {
+    vi.mocked(isEmbedded).mockReturnValue(true)
+    const { container } = show('application/pdf', 'receipt.pdf')
+    expect(container.querySelector('iframe, object')).toBeNull()
+    expect(screen.getByText(/PDF cannot be shown inside Bambuddy\. Use Open or Download/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open' })).toBeInTheDocument()
   })
 
   it('points another kind of file at Open and Download', () => {
@@ -87,5 +104,21 @@ describe('the invoice file preview (#6889)', () => {
     fireEvent.pointerUp(viewport, { pointerId: 1, pointerType: 'touch' })
     fireEvent.pointerUp(viewport, { pointerId: 2, pointerType: 'touch' })
     expect(scaleOf()).toBe(2)
+  })
+
+  it('keeps a tall receipt inside its letterboxed bounds', () => {
+    show('image/png')
+    const viewport = sizeViewport()
+    // 100 x 400 in a 400 x 300 box: fitted 75 x 300, so there is no vertical slack at 1x.
+    Object.defineProperty(photo(), 'naturalWidth', { value: 100 })
+    Object.defineProperty(photo(), 'naturalHeight', { value: 400 })
+    fireEvent.load(photo())
+    fireEvent.doubleClick(viewport, { clientX: 200, clientY: 150 })
+    expect(scaleOf()).toBe(2.5)
+    fireEvent.pointerDown(viewport, { pointerId: 1, clientX: 100, clientY: 100, button: 0, pointerType: 'mouse' })
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 2000, clientY: 2000, pointerType: 'mouse' })
+    fireEvent.pointerUp(viewport, { pointerId: 1, pointerType: 'mouse' })
+    // x: (75 * 2.5 - 400) / 2 < 0, so none; y: (300 * 2.5 - 300) / 2 = 225.
+    expect(offsetOf()).toEqual([0, 225])
   })
 })

@@ -6,12 +6,12 @@ import { Button } from '@/components/ui/button'
 import { AppLink } from '../../AppLink'
 import { acceptableInvoiceFile } from './invoiceLines'
 import { InvoicePhoto } from './InvoicePhoto'
-import { downloadBlob, NEW_TAB } from '../../../lib/embed'
+import { downloadBlob, isEmbedded, NEW_TAB } from '../../../lib/embed'
 
 /**
  * #6266 — an invoice's file beside its lines: a PDF in an `<iframe>` (#6889: the page CSP's
  * `object-src 'none'` blocks an `<object>`; `frame-src 'self'` allows a same-origin frame), a
- * photo in `InvoicePhoto` (zoom and pan), any other file a line that points at Open and
+ * photo in `InvoicePhoto` (zoom and pan), any other file (and a PDF inside Bambuddy's sandboxed frame, which has no PDF viewer) a line that points at Open and
  * Download, "Open" in a new tab and "Download" through `downloadBlob` (the app can run in a sandboxed
  * frame, which drops a plain download). The file can be added or replaced on a confirmed
  * invoice too. `onChanged` runs after an upload.
@@ -24,6 +24,8 @@ export function InvoiceFile({ invoiceId, file, onChanged }: { invoiceId: string;
   const kind = file?.media_type.toLowerCase() ?? ''
   const isImage = kind.startsWith('image/')
   const isPdf = kind === 'application/pdf'
+  // Chromium runs no PDF viewer (a plugin) in Bambuddy's sandboxed frame: the iframe would be blank.
+  const embedded = isEmbedded()
 
   async function upload(chosen: File | undefined) {
     if (!chosen) return
@@ -58,11 +60,11 @@ export function InvoiceFile({ invoiceId, file, onChanged }: { invoiceId: string;
         {file ? (
           isImage ? (
             <InvoicePhoto key={`${file.name}-${file.size}`} src={url} alt={`Photo of the invoice, ${file.name}`} />
-          ) : isPdf ? (
+          ) : isPdf && !embedded ? (
             <iframe key={`${file.name}-${file.size}`} src={url} title={`Invoice PDF, ${file.name}`} className="h-[75vh] min-h-72 w-full border-0 bg-background lg:min-h-[32rem]" />
           ) : (
             <p className="flex w-full items-center justify-center p-6 text-center text-[13px] text-muted-foreground">
-              This file cannot be shown here. Use Open or Download.
+              {isPdf ? 'A PDF cannot be shown inside Bambuddy. Use Open or Download.' : 'This file cannot be shown here. Use Open or Download.'}
             </p>
           )
         ) : (

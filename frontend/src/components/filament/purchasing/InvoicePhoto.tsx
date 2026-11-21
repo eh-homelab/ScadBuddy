@@ -57,6 +57,15 @@ export function InvoicePhoto({ src, alt }: { src: string; alt: string }) {
     [bounded],
   )
 
+  // A resize changes the box the offset is bounded by: clamp a zoomed photo again.
+  useEffect(() => {
+    const element = viewport.current
+    if (!element) return
+    const observer = new ResizeObserver(() => setView((current) => bounded(current)))
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [bounded])
+
   // React's wheel listener is passive, so it cannot stop the page from scrolling.
   useEffect(() => {
     const element = viewport.current
