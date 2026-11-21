@@ -49,9 +49,12 @@ test.describe('native hot path (msw)', () => {
     await expect(dialog.getByTestId('slice-time')).toHaveText('30m')
 
     // The trays, each with the SB spool it holds (D1, #6262).
-    await expect(dialog.getByTestId('filament-slot-1')).toContainText('PLA blue in AMS-A slot 1')
-    await expect(dialog.getByTestId('filament-slot-1')).toContainText('81%')
-    await expect(dialog.getByTestId('filament-slot-1')).toContainText('Spool #1: Bambu Lab Blue · 812 g')
+    // One name per tray (#6885): the SB spool's own colour name, the tray's code, its grams.
+    const tray = dialog.getByTestId('filament-slot-1').getByRole('radio', { name: /PLA Blue in AMS-A slot 1/ })
+    await expect(tray).toBeChecked()
+    await expect(dialog.getByTestId('filament-slot-1')).toContainText('A1')
+    await expect(dialog.getByTestId('filament-slot-1')).toContainText('812 g')
+    await expect(dialog.getByTestId('filament-slot-1').getByTestId('sb-spool--1')).toHaveText('#1')
     // Projects are Bambuddy's (D6): none is named, asked for or offered.
     await expect(dialog.getByText(/project/i)).toHaveCount(0)
     await expect(dialog.getByText('Filed under:')).toContainText('the template’s folder')
@@ -65,7 +68,8 @@ test.describe('native hot path (msw)', () => {
     await question.getByRole('button', { name: 'Yes, that one' }).click()
     expect((await link).postDataJSON()).toEqual({ spool_id: '7a2c1f0e-0000-4000-8000-000000000002' })
     await expect(question).toHaveCount(0)
-    await expect(dialog.getByTestId('filament-slot-2')).toContainText('Spool #2: Pink · 640 g')
+    await expect(dialog.getByTestId('filament-slot-2').getByTestId('sb-spool--2')).toHaveText('#2')
+    await expect(dialog.getByTestId('filament-slot-2')).toContainText('640 g')
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toContainText('Sliced and sent to H2C over the LAN')
