@@ -184,6 +184,9 @@ class _Bounds:
             return self.painted[key]
         self.painted[key] = frozenset()  # a cycle reads as unpainted
         found = self.object(path, object_id)
+        # Never reached past `_MAX_DEPTH` today: `box` refuses that depth first, and
+        # only an object `box` read is asked for. If that changes, the empty set cached
+        # above would be wrong for the object (#6835).
         if found is None or depth > _MAX_DEPTH:
             return frozenset()
         painted: set[int] = set()
@@ -340,14 +343,18 @@ def _placed_by_plate(
             else frozenset()
             for _, object_id, _, _ in found
         }
-        try:
-            used = {
-                object_id: stated[object_id]
-                | _painted(bounds, object_id, object_settings.get(object_id))
-                for object_id in stated
-            }
-        except PaintDigitsSpentError:
-            used = stated  # past the digit budget: the painting is left out (#6823)
+        # Past the digit budget, the object that crossed it and every one after count
+        # their stated filaments only; those decoded before keep their painting (#6823,
+        # #6835).
+        used: dict[str, frozenset[int]] = {}
+        spent = False
+        for object_id, own in stated.items():
+            if not spent:
+                try:
+                    own = own | _painted(bounds, object_id, object_settings.get(object_id))
+                except PaintDigitsSpentError:
+                    spent = True
+            used[object_id] = own
     placed: dict[int, list[PlacedObject]] = {plate: [] for plate in plates}
     for name, object_id, where, wanted in found:
         low, high = where.min(axis=0), where.max(axis=0)

@@ -415,6 +415,36 @@ def test_painting_past_the_digit_budget_is_left_out(
     assert [obj.extruders for obj in by_plate[1]] == [frozenset({1})]
 
 
+def test_painting_decoded_before_the_budget_ran_out_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claude-review on #6832: the object whose codes pass the budget, and every object
+    after it, count their stated filaments only; an object decoded before keeps its
+    painting. Plate 1's object is painted with filament 2 (code "8", one digit); plate
+    2's with filament 3 (code "0C", two more), past a budget of one digit."""
+    first = _painted_part(True)
+    second = _part(1)
+    faces = len(second.mesh.faces)
+    codes = tuple(single_code(3) if face < 4 else "" for face in range(faces))
+    colours = ("#FF6AC1", "#00AEEF", "#FFD700")
+    second = replace(second, paint=Paint(codes, colours))
+    out = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts((first,), (1,)), PlateParts((second,), (1,))],
+        list(colours),
+        out,
+        thumbnails=None,
+        model_name="menorah",
+    )
+    payload = out.read_bytes()
+    monkeypatch.setattr(clearance, "MAX_HINT_PAINT_DIGITS", len(single_code(2)))
+
+    by_plate, _ = check_plates(payload, [1, 2], None)
+
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})]
+    assert [obj.extruders for obj in by_plate[2]] == [frozenset({1})]
+
+
 def test_a_painted_object_stating_no_extruder_prints_its_own_in_filament_1(
     tmp_path: Path,
 ) -> None:
