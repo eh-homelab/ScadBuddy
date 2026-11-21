@@ -14,6 +14,7 @@ from scadbuddy import main
 from scadbuddy.core.settings import Settings
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync
 from scadbuddy.filament.component import FILAMENT
+from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import PRINTERS
@@ -326,3 +327,10 @@ async def test_the_api_serves_the_filament_sync_pass_on_its_own_stores(
     api: Any = sync_pass.__self__.api
     assert isinstance(api, LocalFilamentSync)
     assert api._filament is FILAMENT_STORE and api._settings is state.settings_store
+    [notify] = [
+        fn
+        for fn in given
+        if getattr(fn, "__temporal_activity_definition").name == "sensor_notify_send"
+    ]
+    assert isinstance(notify.__self__.api, PoolSensorNotifications)
+    assert notify.__self__.api.pool is state.settings_store.pool

@@ -76,6 +76,7 @@ from scadbuddy.crud.print import (
     RemoteRackUsage,
     RemoteReports,
     RemoteReprints,
+    RemoteSensorNotifications,
     RemoteSettingsStore,
     RemoteUploadStore,
 )
@@ -93,6 +94,7 @@ from scadbuddy.crud.render import (
 )
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.print_uses import print_use_hook
+from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.library.assets import RemoteAssetStore
@@ -1453,6 +1455,11 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             FilamentSyncActivities(
                 RemoteFilamentSync(crud), settings_loader(settings_store.load)
             ).sync_pass,
+            # The sensors' alert notifications (#6646): claimed and ended through the
+            # API's ``sensor-notify`` routes, sent to Bambuddy from here.
+            SensorNotifyActivities(
+                RemoteSensorNotifications(crud), settings_loader(settings_store.load)
+            ).deliver,
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
         library=library,
@@ -1498,6 +1505,7 @@ PRINT_CRUD_AREAS = frozenset(
         "access-codes",
         "filament",
         "filament-sync",
+        "sensor-notify",
     }
 )
 

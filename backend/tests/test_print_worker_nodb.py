@@ -44,6 +44,7 @@ from scadbuddy.crud.print import (
     RemoteNativeSlices,
     RemotePrinterStore,
     RemotePrintUses,
+    RemoteSensorNotifications,
 )
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
@@ -158,6 +159,15 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
         ]
         api = sync_pass.__self__.api  # type: ignore[attr-defined]
         assert isinstance(api, RemoteFilamentSync) and api._client is deps.crud
+        # The sensors' notifications are claimed and ended through the API's routes (#6646).
+        [notify] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "sensor_notify_send"
+        ]
+        notify_api = notify.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(notify_api, RemoteSensorNotifications)
+        assert notify_api._client is deps.crud
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

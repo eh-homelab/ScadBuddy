@@ -72,7 +72,10 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(
-            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+            temporal_task_queue_library="library",
+            temporal_task_queue_bambuddy="bambuddy",
+            revision="test",
+            spool_overlay_refresh_seconds=0,
         ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
@@ -186,6 +189,11 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "ensure_spool_schedule", no_spool_schedule)
+
+    async def no_notify_schedule(client: object, queue: str) -> None:
+        pass
+
+    monkeypatch.setattr(main, "ensure_sensor_notify_schedule", no_notify_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
 
     async def no_triggers() -> None:
@@ -194,7 +202,10 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(
-            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+            temporal_task_queue_library="library",
+            temporal_task_queue_bambuddy="bambuddy",
+            revision="test",
+            spool_overlay_refresh_seconds=0,
         ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
