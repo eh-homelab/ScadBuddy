@@ -397,6 +397,30 @@ class SpoolTypeStore:
             raise CatalogRefError() from None
         return added
 
+    def drying_inherited(self, type_id: UUID) -> dict[str, str]:
+        """Each drying field (``drying_temp_c``, ``drying_hours``) the type's subtype or
+        material sets, with the level that sets it (``subtype`` first): what a spool of the
+        type takes while the type leaves it empty (#6856, R-6714-20)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT st.drying_temp_c AS s_temp, st.drying_hours AS s_hours,"
+                " mt.drying_temp_c AS m_temp, mt.drying_hours AS m_hours"
+                " FROM filament_spool_types t"
+                " LEFT JOIN filament_subtypes st ON st.id = t.subtype_id"
+                " LEFT JOIN filament_materials mt ON mt.id = t.material_id"
+                " WHERE t.id = %s",
+                (type_id,),
+            ).fetchone()
+        found: dict[str, str] = {}
+        if row is None:
+            return found
+        for field, column in (("drying_temp_c", "temp"), ("drying_hours", "hours")):
+            for level, prefix in (("subtype", "s"), ("material", "m")):
+                if row[f"{prefix}_{column}"] is not None:
+                    found[field] = level
+                    break
+        return found
+
     def linked_printers(self) -> _Printers:
         """Each registry printer linked to a Bambuddy printer, with its model (#6720)."""
         with self._pool.connection() as conn:

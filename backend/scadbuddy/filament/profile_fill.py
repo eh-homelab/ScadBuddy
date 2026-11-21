@@ -76,6 +76,10 @@ Value = int | Decimal
 #: gives that value.
 DRYING_AT = 1
 
+#: The drying fields, which an empty-field fill leaves to a subtype or material that sets
+#: them (#6856, R-6714-20).
+_DRYING: frozenset[Field] = frozenset({"drying_temp_c", "drying_hours"})
+
 
 logger = logging.getLogger(__name__)
 
@@ -636,6 +640,16 @@ class TypeFiller:
                 if (current[name] != value if refresh else current[name] is None)
             }
             result.skipped = _ranges(current, wanted)
+            if not refresh and _DRYING & wanted.keys():
+                # The type comes first in a spool's drying defaults (R-6714-10): a value
+                # the subtype or material sets stands, and only a refresh offers the
+                # profile's (#6856, R-6714-20).
+                inherited = await asyncio.to_thread(self.types.drying_inherited, row.id)
+                for name in [n for n in wanted if n in inherited]:
+                    del wanted[name]
+                    result.skipped[name] = (
+                        f"its {inherited[name]} sets it; a refresh offers the profile's value"
+                    )
             if refresh:
                 result.filled = wanted
                 result.previous = {name: current[name] for name in wanted}

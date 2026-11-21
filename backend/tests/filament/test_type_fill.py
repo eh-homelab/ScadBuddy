@@ -16,6 +16,7 @@ from scadbuddy.filament import profile_fill
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import (
     Material,
+    MaterialPatch,
     SpoolCreate,
     SpoolTypeCreate,
     SpoolTypePatch,
@@ -116,6 +117,33 @@ async def test_only_empty_fields_are_filled_from_the_h2c_04_preset(
 
     again = await filler.fill(UNLINKED, [type_id], actor=ACTOR)
     assert (again[0].filled, again[0].written) == ({}, False)
+
+
+async def test_a_fill_leaves_a_drying_field_the_material_sets_and_a_refresh_offers_it(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """#6856 (R-6714-20): the type comes first in a spool's drying defaults, so a fill that
+    wrote the profile's drying value would hide the one a person set on the material. The
+    fill leaves that field empty and says why; a refresh still offers it."""
+    catalog = CatalogStore(pg_pool)
+    material = next(
+        r.id for r in catalog.list("materials") if isinstance(r, Material) and r.name == "PLA"
+    )
+    catalog.update("materials", material, MaterialPatch(drying_temp_c=50))
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+
+    (done,) = await filler.fill(UNLINKED, None, actor=ACTOR)
+
+    assert "drying_temp_c" not in done.filled
+    assert done.filled["drying_hours"] == Decimal("12")
+    assert "material" in done.skipped["drying_temp_c"]
+    row = types.get(type_id)
+    assert row is not None
+    assert row.drying_temp_c is None
+
+    (preview,) = await filler.fill(UNLINKED, [type_id], actor=ACTOR, refresh=True)
+    assert preview.filled == {"drying_temp_c": 45}
 
 
 async def test_a_fill_writes_edited_on_spools_that_inherit_the_fields(
