@@ -197,7 +197,6 @@ def test_a_second_check_of_the_same_file_and_printer_does_not_lay_it_out_again(
         return real(given, target)  # type: ignore[arg-type]
 
     monkeypatch.setattr(tower_check_module, "_laid_out_for", counted)
-    tower_check_module.forget_laid_out()
 
     first = tower_check(payload, H2C, choice=NO_SPARSE, overrides={}, template={}, plates=None)
     again = tower_check(payload, H2C, choice=NO_SPARSE, overrides={}, template={}, plates=None)
@@ -211,7 +210,6 @@ def test_a_second_check_of_the_same_file_and_printer_does_not_lay_it_out_again(
 
 def test_the_laid_out_files_kept_are_bounded(tmp_path: Path) -> None:
     """The cache keeps at most `LAID_OUT_KEPT` files and `LAID_OUT_BYTES` in all."""
-    tower_check_module.forget_laid_out()
     for n in range(tower_check_module.LAID_OUT_KEPT + 3):
         tower_check_module._keep_laid_out((str(n), H2C, False), b"x")
     assert len(tower_check_module._LAID_OUT) == tower_check_module.LAID_OUT_KEPT
@@ -221,7 +219,6 @@ def test_the_laid_out_files_kept_are_bounded(tmp_path: Path) -> None:
     assert list(tower_check_module._LAID_OUT) == [("b", H2C, False)]
     tower_check_module._keep_laid_out(("c", H2C, False), big + big)
     assert ("c", H2C, False) not in tower_check_module._LAID_OUT
-    tower_check_module.forget_laid_out()
 
 
 def test_an_explicit_override_wins_over_the_choice_and_the_template() -> None:
