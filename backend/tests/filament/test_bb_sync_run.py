@@ -656,6 +656,185 @@ async def test_a_catalog_update_of_the_weight_takes_the_name_read() -> None:
     assert (result.written, result.failed) == (1, 1)
 
 
+# -- probes of rows Bambuddy may have deleted (#6688, decisions 187-192) -------------------
+
+
+@respx.mock
+async def test_a_row_probe_reads_its_listing_again() -> None:
+    """R-6688-2, R-6688-3: Bambuddy has no ``GET`` of one supplier, location or catalog
+    entry, so a probe reads the kind's listing again. A row it holds is the answer; a row
+    it lacks, in a listing read whole, is a 404. No probe writes anything."""
+    routes = _listings()
+    supplier = shaped("SupplierResponse", id=2, name="Shop")
+    location = shaped("LocationResponse", id=3, name="Shelf A")
+    routes["suppliers"].mock(return_value=httpx.Response(200, json=[supplier]))
+    routes["locations"].mock(return_value=httpx.Response(200, json=[location]))
+    found = [
+        _write("probe", 2, {}, kind="supplier"),
+        _write("probe", 3, {}, kind="location"),
+        _write("probe", 5, {}, kind="insert_type"),
+    ]
+    gone = [
+        _write("probe", 20, {}, kind="supplier"),
+        _write("probe", 30, {}, kind="location"),
+        _write("probe", 50, {}, kind="insert_type"),
+    ]
+    sync = FakeSync([_plan(found + gone)])
+
+    result = await _run(sync)
+
+    [(_, _, results, _)] = sync.sent
+    assert [(r.ok, r.bb_id, (r.answer or {}).get("id")) for r in results[:3]] == [
+        (True, 2, 2),
+        (True, 3, 3),
+        (True, 5, 5),
+    ]
+    assert [(r.ok, r.status, r.error) for r in results[3:]] == [(False, 404, "not_found")] * 3
+    # Each probe read its listing once more; nothing but GETs went to Bambuddy.
+    assert [routes[n].call_count for n in ("suppliers", "locations", "catalog")] == [3, 3, 3]
+    assert {call.request.method for call in respx.calls} == {"GET"}
+    assert (result.written, result.failed) == (0, 0)
+
+
+@respx.mock
+async def test_a_filament_probe_gets_the_entry() -> None:
+    """R-6688-2: Bambuddy has ``GET /filament-catalog/{id}``; its 404 is the answer."""
+    _listings()
+    found = _write("probe", 8, {}, kind="filament")
+    gone = _write("probe", 9, {}, kind="filament")
+    respx.get(f"{API}/filament-catalog/8").mock(
+        return_value=httpx.Response(
+            200, json=shaped("FilamentResponse", id=8, name="PLA-R", type="PLA")
+        )
+    )
+    respx.get(f"{API}/filament-catalog/9").mock(return_value=httpx.Response(404))
+    sync = FakeSync([_plan([found, gone])])
+
+    result = await _run(sync)
+
+    [(_, _, [ok, missing], _)] = sync.sent
+    assert (ok.ok, ok.bb_id) == (True, 8)
+    assert (missing.ok, missing.status) == (False, 404)
+    assert (result.written, result.failed) == (0, 0)
+
+
+@respx.mock
+async def test_a_filament_404_is_confirmed_by_the_listing() -> None:
+    """R-6688-8: a 404 of ``GET /filament-catalog/{id}`` may be a Bambuddy build that
+    lacks the route, which says nothing of the entry. The probe reads the listing again:
+    an entry the listing holds keeps its link (the listing's row is the answer); only a
+    listing read whole without it is the row's 404."""
+    routes = _listings()
+    held = shaped("FilamentResponse", id=8, name="PLA-R", type="PLA")
+    routes["filaments"].mock(return_value=httpx.Response(200, json=[held]))
+    missing_route = httpx.Response(404, json={"detail": "Not Found"})
+    respx.get(f"{API}/filament-catalog/8").mock(return_value=missing_route)
+    respx.get(f"{API}/filament-catalog/9").mock(return_value=missing_route)
+    kept = _write("probe", 8, {}, kind="filament")
+    gone = _write("probe", 9, {}, kind="filament")
+    sync = FakeSync([_plan([kept, gone])])
+
+    result = await _run(sync)
+
+    [(_, _, [ok, missing], _)] = sync.sent
+    assert (ok.ok, ok.bb_id, (ok.answer or {}).get("id")) == (True, 8, 8)
+    assert (missing.ok, missing.status, missing.error) == (False, 404, "not_found")
+    # The snapshot's read, then one more read per 404.
+    assert routes["filaments"].call_count == 3
+    assert (result.written, result.failed) == (0, 0)
+
+
+@respx.mock
+async def test_a_filament_404_whose_listing_fails_is_no_404() -> None:
+    """R-6688-8: a 404 the listing cannot confirm keeps the link."""
+    routes = _listings()
+    routes["filaments"].mock(side_effect=[httpx.Response(200, json=[]), httpx.Response(503)])
+    respx.get(f"{API}/filament-catalog/8").mock(return_value=httpx.Response(404))
+    sync = FakeSync([_plan([_write("probe", 8, {}, kind="filament")])])
+
+    result = await _run(sync)
+
+    [(_, _, [failed], _)] = sync.sent
+    assert failed.ok is False and failed.status != 404
+    assert result.failed == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(500),
+        httpx.Response(404),
+        httpx.Response(200, json=[{"id": "not a row"}]),
+        httpx.Response(200, text="not json"),
+    ],
+    ids=["5xx", "listing-404", "unparsed", "not-json"],
+)
+async def test_a_failed_listing_probe_is_no_404(answer: httpx.Response) -> None:
+    """R-6688-3: only a listing read whole that lacks the row is a 404. A listing that
+    fails, a 404 of the listing itself, or one that does not parse is a failure with no
+    404, so `results` keeps the link and records an error."""
+    routes = _listings()
+    routes["locations"].mock(side_effect=[httpx.Response(200, json=[]), answer])
+    probe = _write("probe", 3, {}, kind="location")
+    sync = FakeSync([_plan([probe])])
+
+    result = await _run(sync)
+
+    [(_, _, [failed], _)] = sync.sent
+    assert failed.ok is False and failed.status != 404 and failed.error
+    assert result.failed == 1
+
+
+@respx.mock
+async def test_a_filament_probe_that_fails_is_no_404() -> None:
+    _listings()
+    probe = _write("probe", 8, {}, kind="filament")
+    respx.get(f"{API}/filament-catalog/8").mock(return_value=httpx.Response(503))
+    sync = FakeSync([_plan([probe])])
+
+    result = await _run(sync)
+
+    [(_, _, [failed], _)] = sync.sent
+    assert (failed.ok, failed.status) == (False, 503)
+    assert result.failed == 1
+
+
+@respx.mock
+async def test_a_spool_is_written_after_its_deleted_location_is_made_again() -> None:
+    """R-6688-5 end to end on the worker's side: round 1 probes the location (gone),
+    round 2 makes it again, round 3 sends the spool with the new location's id. No
+    spool write names the deleted location."""
+    routes = _listings()
+    made = shaped("LocationResponse", id=31, name="Shelf A")
+    create = respx.post(f"{API}/inventory/locations").mock(
+        return_value=httpx.Response(201, json=made)
+    )
+    updates = _spool_updates()
+    probe = _write("probe", 3, {}, kind="location")
+    remake = BbWrite(
+        key=f"location:{probe.sb_id}:create",
+        kind="location",
+        sb_id=probe.sb_id,
+        op="create",
+        bb_id=None,
+        body={"name": "Shelf A", "identifier": None},
+        hashes={},
+    )
+
+    def third(_limit: int, done: list[list[BbWriteResult]]) -> SyncPlan:
+        new_id = done[1][0].bb_id
+        return _plan([_write("update", 50, {"location_id": new_id})])
+
+    sync = FakeSync([_plan([probe], deferred=1), _plan([remake], deferred=1), third])
+
+    await _run(sync)
+
+    assert routes["locations"].call_count == 2
+    assert create.call_count == 1
+    assert json.loads(updates.calls.last.request.content) == {"location_id": 31}
+
+
 @respx.mock
 async def test_a_spool_create_archive_and_restore() -> None:
     _listings()

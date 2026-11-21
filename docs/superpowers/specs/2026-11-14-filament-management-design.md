@@ -837,6 +837,9 @@ below are the plan's):
 - Lifecycle (Decision 13). A spool is created in Bambuddy only when it is unarchived and
   `pushes(spools)`. Archive and restore are pushed. A 404 on a linked spool, or on the
   probe of one a complete listing lacks, deletes the link; a partial listing never does.
+  A linked supplier, location, insert type or filament entry a complete listing lacks is
+  probed too; its 404 deletes the link, and the next round creates the row again under
+  its direction (#6688, plan Decisions 187-192, 200 and 201).
 - Fields (Decisions 14, 15). The fields each data type carries are in Decision 14. Not
   pushed: SKU settings (#6270 owns them) and `last_scale_weight`. Supplier links and
   prices go to Bambuddy only, and are never pulled.
