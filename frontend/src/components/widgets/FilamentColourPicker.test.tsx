@@ -89,6 +89,14 @@ describe('the colour picker filters', () => {
     ])
   })
 
+  it('keeps the spool of the colour now on the list under a material filter (#6827 review)', async () => {
+    localStorage.setItem('scadbuddy.colourPicker.filters', JSON.stringify({ material: 'PETG', loadedOnly: false }))
+    server.use(inventory(row(50, 'Blue', '#0086D6FF', 1000, null, 'PLA'), row(51, 'Black', '#000000FF', 900, null, 'PETG')))
+    const { user } = setup('#0086D6')
+    const list = await openList(user)
+    expect(names(list)).toEqual(['Bambu Lab PLA Basic — Blue#50 · 1000 g(the colour now)', 'Bambu Lab PETG Basic — Black#51 · 900 g'])
+  })
+
   it('offers "Loaded in a printer" only when a spool is loaded, and ignores a remembered tick (#6818 review)', async () => {
     localStorage.setItem('scadbuddy.colourPicker.filters', JSON.stringify({ material: null, loadedOnly: true }))
     server.use(inventory(row(50, 'Shelf Blue', '#0086D6FF'), row(52, 'Shelf Red', '#FF0000FF')))
