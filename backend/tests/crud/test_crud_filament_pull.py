@@ -84,10 +84,10 @@ def _body(**over: Any) -> PullBody:
 
 
 def test_the_print_areas_list_filament_pull() -> None:
-    """The routes are an area of their own, appended last, so a new worker waits for an
-    API that serves them (`wait_for_areas`) rather than sending its reads into a 404."""
+    """The routes are an area of their own, appended after the older ones, so a new worker waits
+    for an API that serves them (`wait_for_areas`) rather than sending its reads into a 404."""
     assert "filament-pull" in PRINT_CRUD_AREAS
-    assert CRUD_AREAS["print"][-1] == "filament-pull"
+    assert CRUD_AREAS["print"].index("filament-pull") > CRUD_AREAS["print"].index("filament-sync")
     assert set(CRUD_AREAS["print"]) == PRINT_CRUD_AREAS
 
 

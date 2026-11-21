@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { listSensors } from '../../api/filament'
+import { mockSettings } from '../../mocks/handlers'
 import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -48,9 +49,62 @@ describe('the sensors of a place', () => {
     expect(within(row).getByText('Not reachable')).toBeInTheDocument()
   })
 
-  it('does not promise a notification', async () => {
+  it('shows the last notification sent through Bambuddy', async () => {
     await show(L.SHELF_A)
-    expect(screen.queryByText(/notif|email|push/i)).toBeNull()
+    const row = screen.getByRole('listitem', { name: 'Shelf A humidity' })
+    expect(within(row).getByText('Notifies through Bambuddy')).toBeInTheDocument()
+    expect(within(row).getByText(/Notified through Bambuddy \(alert started\)/)).toHaveTextContent(/, to 2 channels\.$/)
+  })
+
+  it('says why the last notification was not sent', async () => {
+    await show(L.DRY_BOX)
+    const row = screen.getByRole('listitem', { name: 'Dry box humidity' })
+    expect(within(row).getByText(/Notification not sent \(alert ended/)).toHaveTextContent(/Give the key the Send notifications permission in Bambuddy\./)
+  })
+
+  async function waiting() {
+    const [shelf] = await listSensors(L.SHELF_A)
+    const queued = { ...shelf!, last_notification: { ...shelf!.last_notification!, kind: 'stopped' as const, state: 'queued' as const, sent_at: null, channels: null } }
+    renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[queued]} canAdd={false} onChanged={vi.fn()} />)
+    return screen.findByText(/Notification waiting \(alert ended/)
+  }
+
+  it('promises a queued notice within a minute when Bambuddy is connected', async () => {
+    const notice = await waiting()
+    await waitFor(() => expect(notice).toHaveTextContent(/goes out through Bambuddy within about a minute/))
+  })
+
+  it('says a queued notice waits for Bambuddy when none is connected', async () => {
+    const settings = { ...mockSettings(), bambuddy_url: '' }
+    server.use(http.get('/api/v1/settings', () => HttpResponse.json(settings)))
+    const notice = await waiting()
+    await waitFor(() => expect(notice).toHaveTextContent(/goes out once Bambuddy is connected in Settings/))
+    expect(notice).not.toHaveTextContent(/within about a minute/)
+  })
+
+  it.each([
+    ['unauthorized', /Notification not sent .*Check the key in Settings\./],
+    ['not_found', /Notification not sent .*Bambuddy must be 1\.3\.1 or later\./],
+    ['interrupted', /Notification may not have been sent .*It is not sent again\./],
+  ] as const)('says what a %s failure means', async (error, text) => {
+    const [shelf] = await listSensors(L.SHELF_A)
+    const failed = { ...shelf!, last_notification: { ...shelf!.last_notification!, state: 'failed' as const, channels: null, error } }
+    renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[failed]} canAdd={false} onChanged={vi.fn()} />)
+    expect(screen.getByText(/Notification (not|may not have been) sent/)).toHaveTextContent(text)
+  })
+
+  it('shows no notification line for a sensor that never sent one', async () => {
+    await show(L.AMS_A)
+    expect(screen.queryByText(/notif/i)).toBeNull()
+  })
+
+  it('turns notifications on for a sensor', async () => {
+    const { user, changed } = await show(L.DRY_BOX)
+    await user.click(screen.getByRole('button', { name: 'Edit Dry box temperature' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Notify me through Bambuddy when it starts and stops alerting' }))
+    await user.click(screen.getByRole('button', { name: 'Save sensor' }))
+    await waitFor(() => expect(changed).toHaveBeenCalled())
+    expect((await listSensors(L.DRY_BOX)).find((one) => one.name === 'Dry box temperature')).toMatchObject({ notify: true })
   })
 
   it('opens a sensor history chart from the readings', async () => {

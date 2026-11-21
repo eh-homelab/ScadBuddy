@@ -168,7 +168,9 @@ def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
 @pytest.mark.requires_postgres
 def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> None:
     response = crud.request("GET", "/api/v1/internal/crud/print/areas")
-    assert response.json()["areas"] == [
+    areas = response.json()["areas"]
+    # Appended, so an older API's list is a prefix of a newer one's.
+    assert areas[:19] == [
         "settings",
         "runs",
         "operations",
@@ -189,3 +191,4 @@ def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> Non
         "filament-sync",
         "filament-pull",
     ]
+    assert "sensor-notify" in areas[19:]
