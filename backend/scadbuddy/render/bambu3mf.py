@@ -1519,6 +1519,125 @@ def _pin_plates(model_settings: str, filament_map: FilamentMap) -> str:
     )
 
 
+#: Settings a print writes over its plates' own (#6820): each ``(key, value)`` as a
+#: ``<plate>`` of ``model_settings.config`` states it, sorted by key.
+PlateOverrides = tuple[tuple[str, str], ...]
+
+#: Every setting a ``<plate>`` of ``model_settings.config`` can state, by its process key:
+#: the key the plate writes it under, and how the value is written. These are the keys
+#: Bambu Studio v02.08.02.61 reads from a plate into the plate's config, and writes back
+#: (``src/libslic3r/Format/bbs_3mf.cpp``, ``_handle_start_config_metadata`` and
+#: ``_add_model_config_file_to_archive``,
+#: https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/src/libslic3r/Format/bbs_3mf.cpp,
+#: read 2026-11-20). The reader ignores any other key on a plate, so no other override
+#: can lose to one. The CLI applies the plate's config over the process file
+#: (``--load-settings``): ``new_print_config.apply(*part_plate->config())``,
+#: ``src/BambuStudio.cpp`` ~6890. Measured on 2026-11-20 with the prod slicer pod's
+#: binary: a plate's ``print_sequence`` "by object" beat the process file's "by layer"
+#: (#6820). This is not a list of allowed settings: every override still goes into the
+#: process file; these are only the ones a plate can also state.
+#: ``ints``: a list of numbers, split on blanks (``get_vector_from_string``), written
+#: space-separated; ``bool``: read with ``std::boolalpha``, so ``true``/``false``.
+PLATE_KEYS: dict[str, tuple[str, Literal["text", "ints", "bool"]]] = {
+    "curr_bed_type": ("bed_type", "text"),
+    "print_sequence": ("print_sequence", "text"),
+    "first_layer_print_sequence": ("first_layer_print_sequence", "ints"),
+    "other_layers_print_sequence": ("other_layers_print_sequence", "ints"),
+    "other_layers_print_sequence_nums": ("other_layers_print_sequence_nums", "text"),
+    "spiral_mode": ("spiral_mode", "bool"),
+    "filament_map_mode": ("filament_map_mode", "text"),
+    "filament_map": ("filament_maps", "ints"),
+    "filament_volume_map": ("filament_volume_maps", "ints"),
+}
+
+_LIST_SEPARATOR = re.compile(r"[,\s]+")
+
+
+def _plate_value(value: str | Sequence[str], kind: Literal["text", "ints", "bool"]) -> str:
+    """``value`` (as a process preset stores it: a string, or a list of strings) as a
+    plate writes it."""
+    items = [value] if isinstance(value, str) else list(value)
+    if kind == "ints":
+        return " ".join(
+            part for item in items for part in _LIST_SEPARATOR.split(item.strip()) if part
+        )
+    text = ",".join(items)
+    if kind == "bool":
+        return {"1": "true", "0": "false"}.get(text.strip().lower(), text.strip().lower())
+    return text
+
+
+def plate_overrides(overrides: Mapping[str, str | Sequence[str]]) -> PlateOverrides | None:
+    """The settings of ``overrides`` (a print's ``process_overrides``, #2998) that a
+    plate can state (:data:`PLATE_KEYS`), as the plate writes them, sorted; ``None`` for
+    none. A host-side key is never one of them."""
+    found = sorted(
+        (PLATE_KEYS[key][0], _plate_value(value, PLATE_KEYS[key][1]))
+        for key, value in overrides.items()
+        if key in PLATE_KEYS
+    )
+    return tuple(found) or None
+
+
+_PLATE_BLOCK = re.compile(r"(<plate\b[^<>]*+>)((?:(?!<plate\b|</plate>).)*+)(</plate>)", re.DOTALL)
+_ANY_VALUE_ATTRIBUTE = re.compile(r"""(\svalue=)(?:"[^"<>]*+"|'[^'<>]*+')""")
+
+
+def set_plate_settings(model_settings: str, settings: PlateOverrides) -> str:
+    """``model_settings`` with each ``<plate>``'s own value of a key in ``settings``
+    replaced (#6820). A key a plate does not state is left to the process file, so a file
+    whose plates state none of them comes back unchanged. Only the plates' own
+    ``<metadata>`` change; an object's or a part's key of the same name stays. Read back
+    with ElementTree; raises :class:`PartSettingsUnwritableError` for a file
+    :func:`_parsed_model_settings` refuses, or one whose plates did not take a value."""
+    _parsed_model_settings(model_settings)
+    wanted = dict(settings)
+
+    def metadata(tag: re.Match[str]) -> str:
+        text = tag.group(0)
+        key = _KEY_ATTRIBUTE.search(text)
+        value = wanted.get(key.group(1)) if key is not None else None
+        if value is None:
+            return text
+        return _ANY_VALUE_ATTRIBUTE.sub(
+            lambda found: found.group(1) + quoteattr(value), text, count=1
+        )
+
+    def plate(block: re.Match[str]) -> str:
+        head, body, tail = block.groups()
+        # The plate's own metadata only, not its model instances'.
+        own, instances, rest = body.partition("<model_instance")
+        return head + _METADATA_TAG.sub(metadata, own) + instances + rest + tail
+
+    written = _PLATE_BLOCK.sub(plate, model_settings)
+    for each in _parsed_model_settings(written).iter("plate"):
+        for entry in each.findall("metadata"):
+            key = entry.get("key", "")
+            if key in wanted and entry.get("value") != wanted[key]:
+                raise PartSettingsUnwritableError(f"a plate did not take {key}")
+    return written
+
+
+def with_plate_settings(payload: bytes, settings: PlateOverrides | None) -> bytes:
+    """``payload`` with :func:`set_plate_settings` applied to its
+    ``model_settings.config``; unchanged with no settings or no such file. Raises
+    :class:`PartSettingsUnwritableError` as :func:`with_part_settings` does."""
+    if not settings:
+        return payload
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if MODEL_SETTINGS_NAME not in archive.namelist():
+                return payload
+            raw = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_MODEL_SETTINGS_BYTES)
+        text = raw.decode("utf-8")
+    except (zipfile.BadZipFile, ValueError) as error:
+        raise PartSettingsUnwritableError(str(error)) from error
+    written = set_plate_settings(text, settings)
+    if written == text:
+        return payload
+    return rezipped(payload, {MODEL_SETTINGS_NAME: written.encode("utf-8")})
+
+
 #: Process settings for the parts of one filament slot (#5571), by slot from 1: each
 #: slot's ``(key, value)`` pairs as Bambu Studio's config stores them, sorted by key.
 PartOverrides = tuple[tuple[int, tuple[tuple[str, str], ...]], ...]

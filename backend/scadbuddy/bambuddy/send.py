@@ -44,6 +44,7 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartOverrides,
     PartSettingsUnwritableError,
+    PlateOverrides,
     hint_painted_slots,
     layout_of,
     plate_origin,
@@ -53,6 +54,7 @@ from scadbuddy.render.bambu3mf import (
     state_nozzles,
     stated_value,
     with_part_settings,
+    with_plate_settings,
 )
 from scadbuddy.render.objects3mf import (
     UnreadableObjectsError,
@@ -227,6 +229,9 @@ PART_SETTINGS_UNWRITABLE = (
 #: Marks a :attr:`Target.key` whose file carries settings on its parts (#5571),
 #: followed by :func:`part_settings_digest`.
 _PART_SETTINGS = "&parts:"
+#: Marks a :attr:`Target.key` whose plates take the print's overrides (#6820), followed
+#: by :func:`plate_settings_digest`.
+_PLATE_SETTINGS = "&plates:"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
@@ -237,6 +242,12 @@ _STANDARD = VOLUME_TYPE["standard"]
 def part_settings_digest(overrides: PartOverrides) -> str:
     """A short, stable name for ``overrides`` in a :attr:`Target.key` (#5571)."""
     canonical = json.dumps([[slot, list(map(list, pairs))] for slot, pairs in overrides])
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def plate_settings_digest(settings: PlateOverrides) -> str:
+    """A short, stable name for ``settings`` in a :attr:`Target.key` (#6820)."""
+    canonical = json.dumps([list(pair) for pair in settings])
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
@@ -276,6 +287,10 @@ class Target:
     #: The print turns the prime tower on over a file that states it off (#3770): the
     #: layout keeps room for the tower (:func:`replate_3mf` ``tower_on``).
     tower_on: bool = False
+    #: The print's overrides a plate can state (#6820, ``bambu3mf.plate_overrides``),
+    #: written over each plate's own value, which the slicer would apply over the
+    #: process file's. ``None`` writes none.
+    plate_settings: PlateOverrides | None = None
 
     @property
     def key(self) -> str:
@@ -316,6 +331,9 @@ class Target:
             # A file with settings on its parts must not be reused for one without, nor
             # for other settings. Before the colours, so the uncoloured key has it too.
             key = f"{key}{_PART_SETTINGS}{part_settings_digest(self.part_settings)}"
+        if self.plate_settings:
+            # Nor a file whose plates state other values (#6820).
+            key = f"{key}{_PLATE_SETTINGS}{plate_settings_digest(self.plate_settings)}"
         if self.tower_on:
             key = f"{key}{_TOWER_ON}"
         if self.colours is not None:
@@ -341,6 +359,7 @@ class Target:
             filament_map=self.filament_map,
             part_settings=self.part_settings,
             tower_on=self.tower_on,
+            plate_settings=self.plate_settings,
         ).key
 
 
@@ -357,6 +376,7 @@ async def target_for(
     model: str | None = None,
     part_settings: PartOverrides | None = None,
     tower_on: bool = False,
+    plate_settings: PlateOverrides | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -374,7 +394,8 @@ async def target_for(
     list is not. Without a ``client`` a printer's plate needs it.
 
     ``part_settings`` are the print's settings per slot (#5571), only the print run's.
-    ``tower_on`` is the run's too (:attr:`Target.tower_on`, #3770).
+    ``tower_on`` is the run's too (:attr:`Target.tower_on`, #3770), and so are
+    ``plate_settings`` (:attr:`Target.plate_settings`, #6820).
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
@@ -389,6 +410,7 @@ async def target_for(
             filament_map,
             part_settings,
             tower_on,
+            plate_settings,
         )
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is not None and client is None:
@@ -408,6 +430,7 @@ async def target_for(
             filament_map,
             part_settings,
             tower_on,
+            plate_settings,
         )
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
@@ -420,6 +443,7 @@ async def target_for(
         filament_map,
         part_settings,
         tower_on,
+        plate_settings,
     )
 
 
@@ -443,6 +467,18 @@ def _with_parts(payload: bytes, overrides: PartOverrides | None) -> bytes:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, PART_SETTINGS_UNWRITABLE) from None
 
 
+def _with_plates(payload: bytes, settings: PlateOverrides | None) -> bytes:
+    """:func:`with_plate_settings`, last, so the print's explicit override wins over the
+    plate's own value and over ScadBuddy's pinned plate map (#6820, #3955). A file whose
+    ``model_settings.config`` cannot be read or written keeps its plates: the slicer
+    then still reads the override from the process file wherever no plate states it."""
+    try:
+        return with_plate_settings(payload, settings)
+    except PartSettingsUnwritableError:
+        logger.warning("the 3MF's plates could not take the print's settings")
+        return payload
+
+
 def _laid_out_for(payload: bytes, target: Target) -> bytes:
     """Lay the 3MF out for ``target`` as whoever laid it out allows (:func:`layout_of`),
     the same for a render and a library file (#1752).
@@ -463,8 +499,9 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     unchanged, and so takes no settings per part: a ``target`` with some is refused
     (422, :data:`PART_SETTINGS_AS_IS`), as the run refuses it first
     (``print_run.part_settings_refusal``), so no copy's key names settings its bytes
-    lack. Otherwise the print's settings per part (#5571) are written last, into whatever
-    the file's own layout came to (:func:`with_part_settings`).
+    lack. Otherwise the print's settings per part (#5571) are written into whatever
+    the file's own layout came to (:func:`with_part_settings`), and last the print's
+    overrides over each plate's own value of the same key (:func:`_with_plates`, #6820).
     """
     layout = layout_of(payload)
     if layout == "as_is":
@@ -498,7 +535,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             logger.warning("the 3MF inflates past the cap; printing it as it is")
             laid = payload
         # Outside the guard: a copy keyed with its part settings always carries them.
-        return _with_parts(laid, target.part_settings)
+        return _with_plates(_with_parts(laid, target.part_settings), target.plate_settings)
     try:
         payload = replate_3mf(
             payload,
@@ -516,7 +553,9 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
     # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
     # which hint_painted_slots answers with the payload unchanged.
-    return _with_parts(hint_painted_slots(payload), target.part_settings)
+    return _with_plates(
+        _with_parts(hint_painted_slots(payload), target.part_settings), target.plate_settings
+    )
 
 
 #: The most triangles an author's file may hold, every covered plate's together, for its

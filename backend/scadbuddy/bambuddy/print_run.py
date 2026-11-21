@@ -219,6 +219,7 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartSettingsUnwritableError,
     part_settings_slots,
+    plate_overrides,
     stated_tower_off,
 )
 from scadbuddy.render.plate import plate_for
@@ -3706,6 +3707,19 @@ async def plan_run(
         # the template's own under the request's (#5626).
         part_settings=overrides_of(await run_part_settings(source, request, client)),
         tower_on=stated_off and asked is True,
+        # #6820: the slicer applies a plate's own settings over the process file, so
+        # the request's choices a plate can state are written over the plates' too, the
+        # explicit override over the `print_sequence` shorthand, as in the plan below.
+        plate_settings=plate_overrides(
+            {
+                **(
+                    {}
+                    if request.print_sequence is None
+                    else {"print_sequence": request.print_sequence}
+                ),
+                **request.overrides(),
+            }
+        ),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
