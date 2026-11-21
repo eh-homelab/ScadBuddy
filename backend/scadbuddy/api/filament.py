@@ -426,13 +426,18 @@ _FILL_DESCRIPTION = (
     "H2C plates' temperatures (SuperTack, Engineering, Textured PEI; above 0), "
     "`filament_density`, `filament_diameter` and the AMS HT's idle drying temperature and "
     "time (`filament_dev_ams_drying_temperature`/`_time`, the second value) onto the type, "
-    "and fills only its empty fields (`diameter_mm` is never empty). `filament_cost` is "
+    "and fills only its empty fields (`diameter_mm` is never empty); a drying field the "
+    "type's subtype or material sets is left empty, said in `skipped`, and only a refresh "
+    "offers it. `filament_cost` is "
     "`cost_hint`, never written. A type with no K values takes those of the Bambuddy spools "
-    "its spools are linked to; then each Bambuddy-linked printer of a preset's model gives "
-    "its K calibrations for the preset's nozzle (`GET /printers/{id}/kprofiles/`), and one "
-    "whose `filament_id` is the preset's `slicer_filament` fills that printer, extruder and "
-    "nozzle when the type has no row there (a row is never overwritten; calibrations of one "
-    "key that differ are skipped, said in `k_reason`). "
+    "its spools are linked to (`source` `profile`); then each Bambuddy-linked printer of a "
+    "preset's model gives its K calibrations for the preset's nozzle "
+    "(`GET /printers/{id}/kprofiles/`, a row of another shape skipped and counted in "
+    "`k_reason`), and one whose `filament_id` is the preset's `slicer_filament` fills that "
+    "printer, extruder and nozzle (`source` `printer_calibration`) when the type has no row "
+    "there, or replaces a `printer_calibration` row there that differs (a `person`, "
+    "`profile` or `profile_fetch` row is never overwritten; calibrations of one key that "
+    "differ are skipped, said in `k_reason`). "
     "A profile that cannot be read leaves the type alone and says why in `reason`. "
 )
 
@@ -462,8 +467,9 @@ async def fill_types_from_profile(
         _FILL_DESCRIPTION + "`refresh: true` answers the profile's values that differ from "
         "the type's, set or not (`filled`, with `previous`), and writes nothing. `apply` "
         "writes those fields, as the refresh showed them, over what the type has, and with "
-        "`k_values: true` the K values it showed (sent back as `shown_k_values`): the "
-        "spools' while the type has none, the printers' into keys it has no row for; 409 "
+        "`k_values: true` the K values it showed (sent back as `shown_k_values`; a row's "
+        "`type_id` and `source` may be sent and are ignored): the spools' while the type "
+        "has none, the printers' into keys it has no row for or an older calibration holds; 409 "
         "when the profile, or Bambuddy's spools or printers, no longer give one of "
         "them, 422 for `k_values: true` without `shown_k_values` (`[]` for none), a field "
         "it does not fill or a "
@@ -580,7 +586,9 @@ async def put_type_presets(
     response_model=list[m.TypeKValue],
     summary="Replace a spool type's pressure-advance values",
     description=(
-        "The whole list: one K value per printer, extruder and nozzle diameter. 404 for "
+        "The whole list: one K value per printer, extruder and nozzle diameter. A row it "
+        "adds or changes is `source` `person`; a row sent as it was keeps its `source`, so a "
+        "later printer calibration may still replace a `printer_calibration` row. 404 for "
         "no such type, 422 for a printer that does not exist or a repeated key."
     ),
 )

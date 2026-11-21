@@ -59,11 +59,17 @@ import { listBack } from '../../components/filament/spoolsQuery'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
 
-/** Where the drying form's values come from, or `null` when the spool has none (#6720). */
+/**
+ * Where the drying form's values come from, or `null` when the spool has none (#6720). A
+ * profile fill takes the AMS HT's values, which can be above what an AMS 2 Pro dries at
+ * (65 °C), so the line says so (R-6714-9).
+ */
 function dryingDefaultsText(defaults: NonNullable<SpoolDetail['drying_defaults']>): string | null {
   const from = [...new Set([defaults.temp_from, defaults.hours_from].filter((one) => one != null))]
   if (from.length === 0) return null
-  return `Filled from its ${from.join(' and ')}. Change them if this drying differs.`
+  const levels = from.filter((one) => one !== 'spool')
+  const where = [from.includes('spool') ? 'this spool' : null, levels.length > 0 ? `its ${levels.join(' and ')}` : null].filter(Boolean).join(' and ')
+  return `Filled from ${where}. A slicer profile gives the AMS HT's values; lower them when you dry in an AMS 2 Pro (65 °C at most).`
 }
 
 /** What a field holds while it is edited: text, `''` for none (the spool takes its type's value). */
@@ -87,6 +93,8 @@ interface Draft {
   nozzle_temp_max: string
   bed_temp_min: string
   bed_temp_max: string
+  drying_temp_c: string
+  drying_hours: string
   weight_locked: boolean
   note: string
   location_id: string
@@ -117,6 +125,8 @@ const BLANK: Draft = {
   nozzle_temp_max: '',
   bed_temp_min: '',
   bed_temp_max: '',
+  drying_temp_c: '',
+  drying_hours: '',
   weight_locked: false,
   note: '',
   location_id: '',
@@ -148,6 +158,8 @@ function draftOf(spool: SpoolDetail): Draft {
     nozzle_temp_max: str(spool.nozzle_temp_max),
     bed_temp_min: str(spool.bed_temp_min),
     bed_temp_max: str(spool.bed_temp_max),
+    drying_temp_c: str(spool.drying_temp_c),
+    drying_hours: str(spool.drying_hours),
     weight_locked: spool.weight_locked,
     note: str(spool.note),
     location_id: str(spool.location_id),
@@ -188,16 +200,19 @@ function bodyOf(draft: Draft): SpoolPatch | string {
     nozzle_temp_max: whole('maximum nozzle temperature', draft.nozzle_temp_max),
     bed_temp_min: whole('minimum bed temperature', draft.bed_temp_min),
     bed_temp_max: whole('maximum bed temperature', draft.bed_temp_max),
+    drying_temp_c: whole('drying temperature', draft.drying_temp_c),
   }
   for (const value of Object.values(ints)) if (typeof value === 'string') return value
   const decimals = {
     diameter_mm: decimal(draft.diameter_mm),
     density_g_cm3: decimal(draft.density_g_cm3),
     cost_per_kg: decimal(draft.cost_per_kg),
+    drying_hours: decimal(draft.drying_hours),
   }
   if (decimals.diameter_mm === undefined) return 'Enter the filament diameter as a number, such as 1.75.'
   if (decimals.density_g_cm3 === undefined) return 'Enter the density as a number, such as 1.24.'
   if (decimals.cost_per_kg === undefined) return 'Enter the cost per kg as a number, such as 15.91.'
+  if (decimals.drying_hours === undefined) return 'Enter the drying hours as a number, such as 8.'
   if (!draft.type_id && !draft.material_id) return 'Choose a type. A spool with no type needs its material.'
   return {
     type_id: draft.type_id || null,
@@ -549,10 +564,10 @@ export function SpoolPage() {
   const kValueTypeKeys = new Set(typeKValues.map(kValueKey))
   /** The type's rows as a spool shows them while it holds none of its own: "From type". */
   const typeAsPresets = typePresets.map(({ type_id: _t, ...row }) => ({ ...row, overridden: false, migrated: false }))
-  const typeAsKValues = typeKValues.map(({ type_id: _t, ...row }) => ({ ...row, overridden: false }))
+  const typeAsKValues = typeKValues.map(({ type_id: _t, source: _s, ...row }) => ({ ...row, overridden: false }))
   const savedPresets = saved?.presets ?? []
 
-  const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
+  const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'drying_temp_c' | 'drying_hours' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
     <OverrideField name={key} label={label} value={draft[key]} effective={eff(key)} overridden={own(key)} hasType={hasType} inputMode={extra.mode} hint={extra.hint} onChange={(next) => set(key, next)} onReset={() => void reset(key)} />
   )
   const pick = (key: 'material_id' | 'subtype_id' | 'brand_id' | 'category_id' | 'effect_id' | 'insert_type_id', label: string, options: { id: string; name: string }[], extra: { required?: boolean; invalidBy?: string; onChange?: (id: string) => void } = {}) => (
@@ -841,6 +856,10 @@ export function SpoolPage() {
                 {!creating && saved && (
                   <p className={saved.needs_drying ? 'text-[13px] font-medium text-warn' : 'text-[13px] text-muted-foreground'}>{outsideDryText(saved.hours_outside_dry)}</p>
                 )}
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:max-w-md">
+                {field('drying_temp_c', 'Default drying temperature (°C)', { mode: 'numeric' })}
+                {field('drying_hours', 'Default drying hours', { mode: 'decimal' })}
               </div>
               {!creating && (
                 <form

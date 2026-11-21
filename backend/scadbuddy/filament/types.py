@@ -71,7 +71,15 @@ PROFILE_FIELDS: frozenset[str] = frozenset(
 #: What a subtype and a material give a spool: their print defaults, nothing else (a
 #: subtype's own ``material_id`` names its parent, not the spool's material).
 _INHERITED: frozenset[str] = frozenset(
-    {"density_g_cm3", "nozzle_temp_min", "nozzle_temp_max", "bed_temp_min", "bed_temp_max"}
+    {
+        "density_g_cm3",
+        "nozzle_temp_min",
+        "nozzle_temp_max",
+        "bed_temp_min",
+        "bed_temp_max",
+        "drying_temp_c",
+        "drying_hours",
+    }
 )
 
 
@@ -93,6 +101,43 @@ def k_value_key(row: Mapping[str, Any]) -> tuple[str, int, Decimal | str]:
     except InvalidOperation:
         number = nozzle
     return str(row["printer_id"]), int(row["extruder"]), number
+
+
+def k_identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """A K value row's key and values, without its source: equal when a save left the row
+    as it was, or a calibration gives what its key's row holds (``0.40`` is ``0.4``,
+    ``0.020`` is ``0.02``). The one comparison for both the fill's preview
+    (`TypeFiller._printer_k`) and the writes (`add_k_values`, `set_k_values`)."""
+    k = row["k_value"]
+    return (
+        *k_value_key(row),
+        row.get("nozzle_type"),
+        None if k is None else Decimal(str(k)).normalize(),
+        row.get("name"),
+        row.get("cali_idx"),
+        row.get("setting_id"),
+    )
+
+
+def _insert_k(conn: Conn, type_id: UUID, row: m.TypeKValue, source: m.KSource) -> None:
+    """One K value row of the type, tagged ``source`` (R-6714-19)."""
+    conn.execute(
+        "INSERT INTO filament_spool_type_k_values (type_id, printer_id, extruder,"
+        " nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id, source)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            type_id,
+            row.printer_id,
+            row.extruder,
+            row.nozzle_diameter,
+            row.nozzle_type,
+            row.k_value,
+            row.name,
+            row.cali_idx,
+            row.setting_id,
+            source,
+        ),
+    )
 
 
 _Printers = list[LinkedPrinter]
@@ -272,16 +317,26 @@ class SpoolTypeStore:
 
     def set_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
         """The type's pressure-advance values, replaced by ``rows``; ``None`` for no such
-        type. `set_presets`'s events, with ``changes.k_values``."""
+        type. `set_presets`'s events, with ``changes.k_values``. A person's save: a row it
+        adds or changes says ``person``; a row it leaves as it was keeps its source, so a
+        save of other rows does not turn a printer's calibration into a person's (#6856,
+        R-6714-19)."""
         return self._replace_k_values(type_id, rows, actor=actor, only_if_none=False)
 
     def _replace_k_values(
-        self, type_id: UUID, rows: _KValues, *, actor: str, only_if_none: bool
+        self,
+        type_id: UUID,
+        rows: _KValues,
+        *,
+        actor: str,
+        only_if_none: bool,
+        source: m.KSource | None = None,
     ) -> _KValues | None:
         """`set_k_values`'s one transaction under the type's row lock; with
         ``only_if_none`` it writes only while the type has no K values (#6714, R-6714-c),
         checked under that same lock, and answers ``None`` when it has some. A change
-        fans out as ``actor`` (`list_edit`)."""
+        fans out as ``actor`` (`list_edit`). Each row is tagged ``source``; with none, a
+        person's save (`set_k_values`)."""
         try:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
@@ -293,27 +348,20 @@ class SpoolTypeStore:
                     ).fetchone()
                     if has is not None:
                         return None
+                was = {
+                    k_identity(r): r["source"]
+                    for r in conn.execute(
+                        f"SELECT {_K_COLUMNS} FROM filament_spool_type_k_values WHERE type_id = %s",
+                        (type_id,),
+                    ).fetchall()
+                }
                 with list_edit(conn, type_id, "k_values", actor):
                     conn.execute(
                         "DELETE FROM filament_spool_type_k_values WHERE type_id = %s", (type_id,)
                     )
                     for row in rows:
-                        conn.execute(
-                            "INSERT INTO filament_spool_type_k_values (type_id, printer_id,"
-                            " extruder, nozzle_diameter, nozzle_type, k_value, name, cali_idx,"
-                            " setting_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                            (
-                                type_id,
-                                row.printer_id,
-                                row.extruder,
-                                row.nozzle_diameter,
-                                row.nozzle_type,
-                                row.k_value,
-                                row.name,
-                                row.cali_idx,
-                                row.setting_id,
-                            ),
-                        )
+                        tag = source or was.get(k_identity(row.model_dump()), "person")
+                        _insert_k(conn, type_id, row, tag)
         except errors.UniqueViolation:
             raise TypeRowsDuplicateError() from None
         except errors.ForeignKeyViolation:
@@ -350,22 +398,26 @@ class SpoolTypeStore:
     def fill_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
         """`set_k_values`, only while the type has none (#6714); ``None`` when it has some
         or does not exist. The check and the write are one transaction (R-6714-c)."""
-        return self._replace_k_values(type_id, rows, actor=actor, only_if_none=True)
+        return self._replace_k_values(
+            type_id, rows, actor=actor, only_if_none=True, source="profile"
+        )
 
     def add_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
-        """Each of ``rows`` whose key (printer, extruder and nozzle, ``0.40`` being
-        ``0.4``) the type has no row for, checked and written under the type's row lock,
-        so a K value a person set, before or meanwhile, stands (#6720, R-6714-13). The rows
-        written, which fan out as ``actor`` (`list_edit`); ``None`` for no such type."""
+        """Each of ``rows`` (a printer's calibrations) whose key (printer, extruder and
+        nozzle, ``0.40`` being ``0.4``) the type has no row for, or only a
+        ``printer_calibration`` row that differs, which it replaces; checked and written
+        under the type's row lock, so a K value a person, the profile fill or the fetch set,
+        before or meanwhile, stands (#6720, R-6714-13, R-6714-19). Each written row says
+        ``printer_calibration``. The rows written, which fan out as ``actor``
+        (`list_edit`); ``None`` for no such type."""
         try:
             with self._orders.transaction() as conn:
                 if self._row(conn, type_id, lock=True) is None:
                     return None
-                taken = {
-                    k_value_key(row)
+                held = {
+                    k_value_key(row): row
                     for row in conn.execute(
-                        "SELECT printer_id, extruder, nozzle_diameter"
-                        " FROM filament_spool_type_k_values WHERE type_id = %s",
+                        f"SELECT {_K_COLUMNS} FROM filament_spool_type_k_values WHERE type_id = %s",
                         (type_id,),
                     ).fetchall()
                 }
@@ -373,29 +425,58 @@ class SpoolTypeStore:
                 with list_edit(conn, type_id, "k_values", actor):
                     for row in rows:
                         key = k_value_key(row.model_dump())
-                        if key in taken:
+                        old = held.get(key)
+                        if old is not None and (
+                            old["source"] != "printer_calibration"
+                            or k_identity(old) == k_identity(row.model_dump())
+                        ):
                             continue
-                        taken.add(key)
-                        conn.execute(
-                            "INSERT INTO filament_spool_type_k_values (type_id, printer_id,"
-                            " extruder, nozzle_diameter, nozzle_type, k_value, name, cali_idx,"
-                            " setting_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                            (
-                                type_id,
-                                row.printer_id,
-                                row.extruder,
-                                row.nozzle_diameter,
-                                row.nozzle_type,
-                                row.k_value,
-                                row.name,
-                                row.cali_idx,
-                                row.setting_id,
-                            ),
+                        if old is not None:
+                            conn.execute(
+                                "DELETE FROM filament_spool_type_k_values WHERE type_id = %s"
+                                " AND printer_id = %s AND extruder = %s"
+                                " AND nozzle_diameter = %s",
+                                (
+                                    type_id,
+                                    old["printer_id"],
+                                    old["extruder"],
+                                    old["nozzle_diameter"],
+                                ),
+                            )
+                        _insert_k(conn, type_id, row, "printer_calibration")
+                        held[key] = {**row.model_dump(), "source": "printer_calibration"}
+                        added.append(
+                            row.model_copy(
+                                update={"type_id": type_id, "source": "printer_calibration"}
+                            )
                         )
-                        added.append(row.model_copy(update={"type_id": type_id}))
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         return added
+
+    def drying_inherited(self, type_id: UUID) -> dict[str, str]:
+        """Each drying field (``drying_temp_c``, ``drying_hours``) the type's subtype or
+        material sets, with the level that sets it (``subtype`` first): what a spool of the
+        type takes while the type leaves it empty (#6856, R-6714-20)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT st.drying_temp_c AS s_temp, st.drying_hours AS s_hours,"
+                " mt.drying_temp_c AS m_temp, mt.drying_hours AS m_hours"
+                " FROM filament_spool_types t"
+                " LEFT JOIN filament_subtypes st ON st.id = t.subtype_id"
+                " LEFT JOIN filament_materials mt ON mt.id = t.material_id"
+                " WHERE t.id = %s",
+                (type_id,),
+            ).fetchone()
+        found: dict[str, str] = {}
+        if row is None:
+            return found
+        for field, column in (("drying_temp_c", "temp"), ("drying_hours", "hours")):
+            for level, prefix in (("subtype", "s"), ("material", "m")):
+                if row[f"{prefix}_{column}"] is not None:
+                    found[field] = level
+                    break
+        return found
 
     def linked_printers(self) -> _Printers:
         """Each registry printer linked to a Bambuddy printer, with its model (#6720)."""
@@ -459,16 +540,17 @@ class SpoolTypeStore:
     @staticmethod
     def merge_k_values(conn: Conn, type_id: UUID, rows: _KValues) -> None:
         """``rows`` replace the type's K values of their own keys (printer, extruder and
-        nozzle); its other rows stay. On ``conn``, in the caller's transaction (#6625)."""
+        nozzle), whoever set them (#6857 may change that); its other rows stay. Each says
+        ``profile_fetch`` (R-6714-19). On ``conn``, in the caller's transaction (#6625)."""
         for row in rows:
             conn.execute(
                 "INSERT INTO filament_spool_type_k_values (type_id, printer_id, extruder,"
-                " nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id, source)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'profile_fetch')"
                 " ON CONFLICT (type_id, printer_id, extruder, nozzle_diameter) DO UPDATE SET"
                 " nozzle_type = EXCLUDED.nozzle_type, k_value = EXCLUDED.k_value,"
                 " name = EXCLUDED.name, cali_idx = EXCLUDED.cali_idx,"
-                " setting_id = EXCLUDED.setting_id",
+                " setting_id = EXCLUDED.setting_id, source = EXCLUDED.source",
                 (
                     type_id,
                     row.printer_id,

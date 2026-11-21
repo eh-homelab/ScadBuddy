@@ -717,6 +717,16 @@ class TypeKValueCreate(_In):
     setting_id: Text | None = None
 
 
+class ShownKValue(TypeKValueCreate):
+    """A K value row a fill's refresh showed, sent back as ``shown_k_values`` to compare.
+    It takes the refresh's ``type_id`` and ``source`` too, so a client may echo the rows as
+    it got them, and drops both (#6859, R-6714-22): only the server sets a row's source,
+    and the comparison and the write never read them."""
+
+    type_id: Annotated[UUID | None, Field(exclude=True)] = None
+    source: Annotated[str | None, Field(exclude=True)] = None
+
+
 class TypeKValuePatch(_Patch):
     not_null = frozenset({"k_value"})
     nozzle_type: Text | None = None
@@ -724,6 +734,12 @@ class TypeKValuePatch(_Patch):
     name: Text | None = None
     cali_idx: CaliIdx | None = None
     setting_id: Text | None = None
+
+
+#: Who set a type's K value (#6856, R-6714-19): a person (an edit, and every row made
+#: before the column), the profile fill from its linked Bambuddy spools, a printer's
+#: calibration, or the 3DFP profile fetch (#6625).
+KSource = Literal["person", "profile", "printer_calibration", "profile_fetch"]
 
 
 class TypeKValue(BaseModel):
@@ -736,6 +752,8 @@ class TypeKValue(BaseModel):
     name: str | None
     cali_idx: int | None
     setting_id: str | None
+    #: Who set it; a write never takes it from a body (R-6714-19).
+    source: KSource = "person"
 
 
 class SpoolTypeDetail(SpoolType):
@@ -919,6 +937,8 @@ class EffectiveValues(BaseModel):
     nozzle_temp_max: int | None = None
     bed_temp_min: int | None = None
     bed_temp_max: int | None = None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
     label_weight_g: int | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: int | None = None
@@ -943,6 +963,8 @@ class SpoolCreate(_In):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -977,6 +999,8 @@ class SpoolPatch(_Patch):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -1015,6 +1039,8 @@ class Spool(_Row):
     nozzle_temp_max: int | None
     bed_temp_min: int | None
     bed_temp_max: int | None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
     label_weight_g: int | None
     insert_type_id: UUID | None
     low_stock_pct: int | None
@@ -1523,13 +1549,13 @@ class SpoolTypeSupplier(BaseModel):
     price_per_kg: Decimal | None
 
 
-DryingFrom = Literal["type", "subtype", "material"]
+DryingFrom = Literal["spool", "type", "subtype", "material"]
 
 
 class DryingDefaults(BaseModel):
-    """What a drying of the spool records when it does not say (#6720, R-6714-10): each
-    field from the spool's type, else its subtype, else its material; ``*_from`` names
-    which. ``None`` when none of them sets it."""
+    """What a drying of the spool records when it does not say (#6720, R-6714-10,
+    R-6714-18): each field from the spool's own override, else its type, else its subtype,
+    else its material; ``*_from`` names which. ``None`` when none of them sets it."""
 
     temp_c: int | None = None
     hours: Decimal | None = None

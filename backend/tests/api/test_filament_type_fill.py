@@ -203,6 +203,91 @@ def test_the_route_writes_the_k_values_shown_and_refuses_others(client: TestClie
     assert [Decimal(row["k_value"]) for row in saved] == [Decimal("0.02")]
 
 
+@respx.mock
+def test_a_shown_row_s_source_and_type_id_are_ignored(client: TestClient) -> None:
+    """R-6714-22: the refresh's rows may go back as they came, `type_id` and `source`
+    included, and a client's `source` never reaches the stored row: the server tags the
+    spools' import `profile`, whatever the shown row says."""
+    configure(client)
+    made = _type(client)
+    url = f"{TYPES}/{made['id']}/fill-from-profile"
+    _linked_k_values(client, made["id"])
+
+    diff = client.post(url, json={"refresh": True})
+    assert diff.status_code == 200, diff.text
+    assert [row["source"] for row in diff.json()["k_values"]] == ["profile"]
+    shown = [
+        row | {"source": "person", "type_id": "00000000-0000-0000-0000-000000000001"}
+        for row in diff.json()["k_values"]
+    ]
+
+    done = client.post(url, json={"apply": {}, "k_values": True, "shown_k_values": shown})
+    assert done.status_code == 200, done.text
+    assert [row["source"] for row in done.json()["k_values"]] == ["profile"]
+    saved = client.get(f"{TYPES}/{made['id']}").json()["k_values"]
+    assert [(row["type_id"], row["source"]) for row in saved] == [(made["id"], "profile")]
+
+
+def _calibration(k: str) -> httpx.Response:
+    """Bambuddy printer 1's K table at 0.4 mm: one calibration of GFA05 on extruder 0."""
+    row = {
+        "slot_id": 2,
+        "extruder_id": 0,
+        "nozzle_id": "HS00-0.4",
+        "nozzle_diameter": "0.4",
+        "filament_id": "GFA05",
+        "name": "cal",
+        "k_value": k,
+        "n_coef": "0.000000",
+        "ams_id": 0,
+        "tray_id": 0,
+        "setting_id": "SGFA05",
+    }
+    return httpx.Response(200, json={"profiles": [row], "nozzle_diameter": "0.4"})
+
+
+@respx.mock
+def test_a_put_that_changes_a_calibration_s_k_makes_it_a_person_s(client: TestClient) -> None:
+    """R-6714-19, through the routes: a person's `PUT …/k-values` that changes only the K of
+    a `printer_calibration` row tags it `person`, and a later fill, with the printer
+    recalibrated, leaves it alone."""
+    configure(client)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.settings_store.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, model, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST00000006859', 'H2C', 'H2C', 1)"
+        )
+    table = respx.get(f"{API}/printers/1/kprofiles/")
+    table.mock(return_value=_calibration("0.020"))
+    made = _type(client)
+    # The first presets fill the type (R-6714-6), the printer's calibration with it.
+    assert client.put(f"{TYPES}/{made['id']}/presets", json=SILK_04).status_code == 200
+    first = client.get(f"{TYPES}/{made['id']}").json()["k_values"]
+    assert [(Decimal(r["k_value"]), r["source"]) for r in first] == [
+        (Decimal("0.02"), "printer_calibration")
+    ]
+
+    edited = [
+        {k: v for k, v in row.items() if k not in ("type_id", "source")} | {"k_value": "0.05"}
+        for row in first
+    ]
+    put = client.put(f"{TYPES}/{made['id']}/k-values", json=edited)
+    assert put.status_code == 200, put.text
+    after = client.get(f"{TYPES}/{made['id']}").json()["k_values"]
+    assert [(Decimal(r["k_value"]), r["source"]) for r in after] == [(Decimal("0.05"), "person")]
+    same = ("k_value", "source")
+    assert {k: v for k, v in after[0].items() if k not in same} == {
+        k: v for k, v in first[0].items() if k not in same
+    }
+
+    table.mock(return_value=_calibration("0.030"))
+    fill = client.post(f"{TYPES}/{made['id']}/fill-from-profile", json={})
+    assert fill.status_code == 200, fill.text
+    assert fill.json()["k_values"] == []
+    assert client.get(f"{TYPES}/{made['id']}").json()["k_values"] == after
+
+
 def _spy_fill(monkeypatch: pytest.MonkeyPatch) -> list[list[UUID]]:
     asked: list[list[UUID]] = []
     fill = TypeFiller.fill

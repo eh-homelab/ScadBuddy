@@ -11,7 +11,7 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.errors import Scope
+from scadbuddy.bambuddy.errors import BAD_BODY_PROBLEM, Scope
 from scadbuddy.bambuddy.models import KProfile, PresetImport
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL
@@ -90,6 +90,23 @@ async def test_k_profiles_passes_the_nozzle(bambuddy: BambuddyClient) -> None:
             setting_id="PFUS1",
         )
     ]
+
+
+@respx.mock
+@pytest.mark.parametrize("body", ["<html>", ""])
+async def test_k_profiles_body_that_is_not_json_is_a_502(
+    bambuddy: BambuddyClient, body: str
+) -> None:
+    """#6856: a 200 whose body is not JSON (a proxy's HTML page, an empty body) is a 502
+    `BAD_BODY_PROBLEM`, an `ApiError` the profile fill and the fetch catch, never a
+    `JSONDecodeError` that answers 500."""
+    respx.get(f"{API}/printers/3/kprofiles/").mock(return_value=httpx.Response(200, text=body))
+
+    with pytest.raises(ApiError) as caught:
+        await bambuddy.k_profiles(3, "0.4")
+
+    assert caught.value.status == 502
+    assert caught.value.type == BAD_BODY_PROBLEM
 
 
 @pytest.mark.parametrize(
