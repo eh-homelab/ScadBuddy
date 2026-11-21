@@ -606,6 +606,8 @@ class SpoolTypeCreate(_In):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -633,6 +635,8 @@ class SpoolTypePatch(_Patch):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -660,6 +664,8 @@ class SpoolType(_Row):
     nozzle_temp_max: int | None
     bed_temp_min: int | None
     bed_temp_max: int | None
+    drying_temp_c: int | None
+    drying_hours: Decimal | None
     label_weight_g: int
     insert_type_id: UUID | None
     low_stock_pct: int | None
@@ -1393,7 +1399,9 @@ class SpoolEvent(BaseModel):
 
 class SpoolEventAdd(_In):
     """What a person records on a spool: a weighing (``grams`` is the filament left,
-    without the empty spool) or a drying (its temperature and hours)."""
+    without the empty spool) or a drying (its temperature and hours). A drying that leaves
+    out ``temp_c`` or ``hours`` takes the spool's `DryingDefaults` for it; ``null`` records
+    none (#6720)."""
 
     kind: Literal["weighed", "dried"]
     source: Literal["person", "scale"] = "person"
@@ -1508,9 +1516,25 @@ class SpoolTypeSupplier(BaseModel):
     price_per_kg: Decimal | None
 
 
+DryingFrom = Literal["type", "subtype", "material"]
+
+
+class DryingDefaults(BaseModel):
+    """What a drying of the spool records when it does not say (#6720, R-6714-10): each
+    field from the spool's type, else its subtype, else its material; ``*_from`` names
+    which. ``None`` when none of them sets it."""
+
+    temp_c: int | None = None
+    hours: Decimal | None = None
+    temp_from: DryingFrom | None = None
+    hours_from: DryingFrom | None = None
+
+
 class SpoolDetail(Spool):
     """A spool with what its page shows: its tags, effective presets and K values, the
-    basis of its grams and whether it ever printed."""
+    basis of its grams, whether it ever printed and its drying defaults."""
+
+    drying_defaults: DryingDefaults = Field(default_factory=DryingDefaults)
 
     #: The tag bound to it now.
     tag: Tag | None = None

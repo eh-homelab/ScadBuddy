@@ -270,6 +270,22 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     expect(start).toMatch(/Approved first\.$/)
   })
 
+  it('takes the drying values in the upsert fields (#6720)', () => {
+    const upsert = (fields: unknown) => tool('filament_type_upsert').parse({ fields })
+    expect(upsert({ drying_temp_c: 55, drying_hours: '8' }).fields).toEqual({ drying_temp_c: 55, drying_hours: '8' })
+    expect(upsert({ drying_temp_c: null, drying_hours: null }).fields).toEqual({ drying_temp_c: null, drying_hours: null })
+    for (const bad of [-1, 1.5, 1001]) expect(() => upsert({ drying_temp_c: bad })).toThrow()
+    expect(tool('filament_type_upsert').description).toContain('drying_hours')
+  })
+
+  it('records a drying with the spool defaults for what it leaves out (#6720)', () => {
+    const parsed = tool('filament_spool_add_event').parse({ spool_id: ROW, kind: 'dried' })
+    expect(parsed).not.toHaveProperty('temp_c')
+    expect(parsed).not.toHaveProperty('hours')
+    expect(tool('filament_spool_add_event').parse({ spool_id: ROW, kind: 'dried', temp_c: null }).temp_c).toBeNull()
+    expect(tool('filament_spool_add_event').description).toContain('drying_defaults')
+  })
+
   it('bounds tdfp_id in the upsert fields to a positive integer below 2^31, or null', () => {
     const upsert = (tdfp_id: unknown) => tool('filament_type_upsert').parse({ fields: { tdfp_id } })
     for (const bad of [0, -1, 1.5, 2147483648, '12']) expect(() => upsert(bad)).toThrow()
@@ -1064,6 +1080,15 @@ describe('filament_type_fill_from_profile (#6714)', () => {
       { url: `${TYPES}/fill-from-profile`, body: { refresh: true } },
       { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown } },
     ])
+  })
+
+  it('applies the drying values and says it reads the printers K calibrations (#6720)', () => {
+    const parsed = tool('filament_type_fill_from_profile').parse({ type_id: ROW, apply: { drying_temp_c: 55, drying_hours: '8' } })
+    expect(parsed.apply).toEqual({ drying_temp_c: 55, drying_hours: '8' })
+    const description = tool('filament_type_fill_from_profile').description
+    expect(description).toMatch(/drying/)
+    expect(description).toMatch(/K calibrations/)
+    expect(description).toMatch(/never overwritten/)
   })
 
   it('refuses apply without a type', async () => {

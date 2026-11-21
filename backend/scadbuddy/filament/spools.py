@@ -300,6 +300,33 @@ def _low_stock(grams_left: float | None, values: m.EffectiveValues, default_pct:
     return grams_left / label * 100 < pct
 
 
+def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
+    """The spool's drying defaults (#6720, R-6714-10): each of temperature and hours from
+    its type, else from its subtype, else from its material, the subtype and material
+    being the spool's own override, else its type's."""
+    row = conn.execute(
+        "SELECT t.drying_temp_c AS t_temp, t.drying_hours AS t_hours,"
+        " st.drying_temp_c AS s_temp, st.drying_hours AS s_hours,"
+        " mt.drying_temp_c AS m_temp, mt.drying_hours AS m_hours"
+        " FROM filament_spools s"
+        " LEFT JOIN filament_spool_types t ON t.id = s.type_id"
+        " LEFT JOIN filament_subtypes st ON st.id = COALESCE(s.subtype_id, t.subtype_id)"
+        " LEFT JOIN filament_materials mt ON mt.id = COALESCE(s.material_id, t.material_id)"
+        " WHERE s.id = %s",
+        (spool_id,),
+    ).fetchone()
+    found: dict[str, Any] = {}
+    if row is None:
+        return m.DryingDefaults()
+    fields = (("temp_c", "temp_from", "temp"), ("hours", "hours_from", "hours"))
+    for field, origin, column in fields:
+        for level, prefix in (("type", "t"), ("subtype", "s"), ("material", "m")):
+            if row[f"{prefix}_{column}"] is not None:
+                found[field], found[origin] = row[f"{prefix}_{column}"], level
+                break
+    return m.DryingDefaults.model_validate(found)
+
+
 class FilamentSpoolStore:
     """The spool and tag tables over a pool whose connections autocommit and return dict
     rows (the settings store's). Synchronous: callers run it in a thread."""
@@ -413,6 +440,7 @@ class FilamentSpoolStore:
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
+                    "drying_defaults": _drying_defaults(conn, spool_id),
                     "invoice": None
                     if line is None
                     else m.SpoolInvoiceRef.model_validate(
@@ -1063,13 +1091,10 @@ class FilamentSpoolStore:
     def add_event(
         self, spool_id: UUID, body: m.SpoolEventAdd, *, actor: str
     ) -> m.SpoolEvent | None:
-        """A person's weighing or drying; ``None`` for no such spool."""
+        """A person's weighing or drying; ``None`` for no such spool. A drying's
+        ``temp_c`` or ``hours`` left out (not sent) is the spool's drying default
+        (`_drying_defaults`, #6720)."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
-        if body.kind == "dried":
-            data |= {
-                "temp_c": body.temp_c,
-                "hours": None if body.hours is None else float(body.hours),
-            }
         with self._pool.connection() as conn, conn.transaction():
             if (
                 conn.execute(
@@ -1078,6 +1103,16 @@ class FilamentSpoolStore:
                 is None
             ):
                 return None
+            if body.kind == "dried":
+                sent = body.model_fields_set
+                defaults = (
+                    m.DryingDefaults()
+                    if {"temp_c", "hours"} <= sent
+                    else _drying_defaults(conn, spool_id)
+                )
+                temp = body.temp_c if "temp_c" in sent else defaults.temp_c
+                hours = body.hours if "hours" in sent else defaults.hours
+                data |= {"temp_c": temp, "hours": None if hours is None else float(hours)}
             return ledger.record(
                 conn,
                 spool_id,

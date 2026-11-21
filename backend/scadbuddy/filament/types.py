@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from decimal import Decimal
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast, get_args
 from uuid import UUID
 
@@ -62,6 +63,8 @@ PROFILE_FIELDS: frozenset[str] = frozenset(
         "bed_temp_max",
         "density_g_cm3",
         "diameter_mm",
+        "drying_temp_c",
+        "drying_hours",
     }
 )
 
@@ -70,6 +73,29 @@ PROFILE_FIELDS: frozenset[str] = frozenset(
 _INHERITED: frozenset[str] = frozenset(
     {"density_g_cm3", "nozzle_temp_min", "nozzle_temp_max", "bed_temp_min", "bed_temp_max"}
 )
+
+
+@dataclass(frozen=True)
+class LinkedPrinter:
+    """A registry printer linked to a Bambuddy printer."""
+
+    id: UUID
+    name: str
+    model: str | None
+    bambuddy_printer_id: int
+
+
+def k_value_key(row: Mapping[str, Any]) -> tuple[str, int, Decimal | str]:
+    """A K value row's key, its nozzle as a number when it is one (``0.40`` is ``0.4``)."""
+    nozzle = str(row["nozzle_diameter"]).strip()
+    try:
+        number: Decimal | str = Decimal(nozzle).normalize()
+    except InvalidOperation:
+        number = nozzle
+    return str(row["printer_id"]), int(row["extruder"]), number
+
+
+_Printers = list[LinkedPrinter]
 
 
 class TypeRowsDuplicateError(ValueError):
@@ -325,6 +351,68 @@ class SpoolTypeStore:
         """`set_k_values`, only while the type has none (#6714); ``None`` when it has some
         or does not exist. The check and the write are one transaction (R-6714-c)."""
         return self._replace_k_values(type_id, rows, actor=actor, only_if_none=True)
+
+    def add_k_values(self, type_id: UUID, rows: _KValues, *, actor: str) -> _KValues | None:
+        """Each of ``rows`` whose key (printer, extruder and nozzle, ``0.40`` being
+        ``0.4``) the type has no row for, checked and written under the type's row lock,
+        so a K value a person set, before or meanwhile, stands (#6720, R-6714-13). The rows
+        written, which fan out as ``actor`` (`list_edit`); ``None`` for no such type."""
+        try:
+            with self._orders.transaction() as conn:
+                if self._row(conn, type_id, lock=True) is None:
+                    return None
+                taken = {
+                    k_value_key(row)
+                    for row in conn.execute(
+                        "SELECT printer_id, extruder, nozzle_diameter"
+                        " FROM filament_spool_type_k_values WHERE type_id = %s",
+                        (type_id,),
+                    ).fetchall()
+                }
+                added: _KValues = []
+                with list_edit(conn, type_id, "k_values", actor):
+                    for row in rows:
+                        key = k_value_key(row.model_dump())
+                        if key in taken:
+                            continue
+                        taken.add(key)
+                        conn.execute(
+                            "INSERT INTO filament_spool_type_k_values (type_id, printer_id,"
+                            " extruder, nozzle_diameter, nozzle_type, k_value, name, cali_idx,"
+                            " setting_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (
+                                type_id,
+                                row.printer_id,
+                                row.extruder,
+                                row.nozzle_diameter,
+                                row.nozzle_type,
+                                row.k_value,
+                                row.name,
+                                row.cali_idx,
+                                row.setting_id,
+                            ),
+                        )
+                        added.append(row.model_copy(update={"type_id": type_id}))
+        except errors.ForeignKeyViolation:
+            raise CatalogRefError() from None
+        return added
+
+    def linked_printers(self) -> _Printers:
+        """Each registry printer linked to a Bambuddy printer, with its model (#6720)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, name, model, bambuddy_printer_id FROM printers"
+                " WHERE bambuddy_printer_id IS NOT NULL ORDER BY name, id"
+            ).fetchall()
+        return [
+            LinkedPrinter(
+                id=row["id"],
+                name=row["name"],
+                model=row["model"],
+                bambuddy_printer_id=row["bambuddy_printer_id"],
+            )
+            for row in rows
+        ]
 
     def linked_bb_spools(self, type_id: UUID) -> _Ids:
         """The Bambuddy spool ids the type's spools are linked to, the newest spool's

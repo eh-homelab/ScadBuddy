@@ -29,7 +29,7 @@ describe('ProfileFillDialog (#6714)', () => {
     setMockBambuddyKValues(T.PINK, [K])
     const onApplied = show()
     const apply = await screen.findByRole('button', { name: /^Apply \d+ changes?$/ })
-    expect(screen.getByText('Add 1 K value from its Bambuddy spools')).toBeInTheDocument()
+    expect(screen.getByText('Add 1 K value from its Bambuddy spools and printers')).toBeInTheDocument()
     setMockBambuddyKValues(T.PINK, [{ ...K, k_value: '0.03' }])
     await userEvent.click(apply)
     expect(await screen.findByRole('alert')).toHaveTextContent('the K values now are not the ones shown: refresh again')

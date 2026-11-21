@@ -30,7 +30,7 @@ export type TypeKValue = Schemas['TypeKValue']
 export type TypeFill = Schemas['TypeFill']
 export type FillRequest = Schemas['FillRequest']
 /** The type fields a slicer profile fills (#6714, `filament/profile_fill.py` `Field`). */
-export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm', 'drying_temp_c', 'drying_hours'] as const
 export type FillField = (typeof FILL_FIELDS)[number]
 export type Location = Schemas['Location']
 export type LocationNode = Schemas['LocationNode']

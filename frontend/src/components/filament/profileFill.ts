@@ -8,6 +8,8 @@ export const FILL_LABELS: Record<FillField, string> = {
   bed_temp_max: 'Bed temperature, max (°C)',
   density_g_cm3: 'Density (g/cm³)',
   diameter_mm: 'Diameter (mm)',
+  drying_temp_c: 'Drying temperature (°C)',
+  drying_hours: 'Drying time (h)',
 }
 
 /** Where a profile came from, as a person reads it. */
