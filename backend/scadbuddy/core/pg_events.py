@@ -107,8 +107,10 @@ calls only, all on the event loop:
 
 ``subscribe`` is the :class:`~.events.EventBus` protocol, so it works on the
 in-process bus too; ``position``/``replay``/``bus.resync`` exist only here, where
-there is a database. The agent service LISTENs on ``scadbuddy_events`` itself, on its
-own connection, and reads the same ``events`` table.
+there is a database. The agent service opens no LISTEN connection and reads no
+``events`` row itself: it hears this channel over the API's change stream
+(``agent_changes/hub.py``), which taps this bus and replays this log after its
+``Last-Event-ID``.
 
 Channels are per database and the log is per schema: two deployments sharing one
 database in different schemas would hear each other's events. Give each its own
@@ -380,6 +382,10 @@ class PgNotifyEventBus:
         self._drainer: asyncio.Task[None] | None = None
         #: Set on the listener's first connect: what `start` waits for.
         self._listening = asyncio.Event()
+        #: Told of every payload heard on the channel, as it was heard, with its event when
+        #: it decodes and None when not: the agent's change stream (`agent_changes/hub.py`,
+        #: #5299 D4). Each runs on the event loop and must not block.
+        self.taps: list[Callable[[str, Event | None], None]] = []
         listener.listen(PG_CHANNEL, on_notify=self._received, on_connect=self._connected)
 
     # -- lifecycle ------------------------------------------------------------------
@@ -572,6 +578,14 @@ class PgNotifyEventBus:
             row = await cursor.fetchone()
         return None if row is None else int(row[0])
 
+    async def newest(self) -> str | None:
+        """The id of the newest logged event, or None while the log is empty: a place to
+        :meth:`position` from later."""
+        async with self._pool.connection() as conn:
+            cursor = await conn.execute("SELECT event_id FROM events ORDER BY seq DESC LIMIT 1")
+            row = await cursor.fetchone()
+        return None if row is None else str(row[0])
+
     async def positions(self, event_ids: list[str]) -> dict[str, int]:
         """`position` for several ids in one query; an unknown or pruned one is absent."""
         async with self._pool.connection() as conn:
@@ -644,15 +658,24 @@ class PgNotifyEventBus:
         try:
             event = decode_event(payload)
         except ValueError:
+            self._tap(payload, None)
             # Another version's kind, or something else NOTIFYing on the channel.
             logger.warning("ignored an undecodable event payload", extra={"bytes": len(payload)})
             return
+        self._tap(payload, event)
         self.metrics.events_received.inc()
         # Listeners first: one that applies the event later takes `settle` here, before
         # any read can be stamped with it (#1039).
         self.local.publish(event)
         self.last_event_id = event.id
         self.live_event_id = event.id
+
+    def _tap(self, payload: str, event: Event | None) -> None:
+        for tap in self.taps:
+            try:
+                tap(payload, event)
+            except Exception:
+                logger.exception("an event bus tap failed")
 
     def _connected(self, reconnected: bool) -> None:
         self._listening.set()

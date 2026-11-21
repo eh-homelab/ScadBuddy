@@ -35,14 +35,14 @@ ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.8 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-11-09@sha256:3a040760d376ccbb3bff07e44a1be3c2570435f093f5fa4bf08e3991e7412b8c AS base
+FROM openscad/openscad:dev.2026-11-16@sha256:c7e532e701d3add64de98c317abbbcacbf1ab9efb656014dcb001b90e7538c38 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -169,6 +169,8 @@ ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json \
     SCADBUDDY_STOREFRONT_OPENAPI_JSON=/src/storefront-openapi.json
 
 COPY frontend/ ./
+# gen-api.mjs imports the request-body defaults it shares with the agent (#6660).
+COPY scripts/gen-api-request-defaults.mjs /src/scripts/
 # The browser's `service.version` (tracing spec 2026-10-01 §3): the same label the
 # runtime stage gets. Declared here, after the copy, so a new version reruns only this
 # build step. build-image.yml passes it; ci.yml's builds keep the default.
@@ -204,6 +206,8 @@ COPY --from=api-spec /src/openapi.json /src/openapi.json
 ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY agent/ ./
+# gen-api.mjs imports the request-body defaults it shares with the frontend (#6660).
+COPY scripts/gen-api-request-defaults.mjs /src/scripts/
 # ScadBuddy's own plugin's skills and subagents (#896): agent/plugins/scadbuddy
 # links to them, and `pnpm build` copies the authoring skill into dist/docs for
 # `scadbuddy://docs/authoring` (#252, agent/src/tools/guide.ts).
@@ -442,7 +446,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # volume, no credentials: its whole configuration is its environment (README.md,
 # "Slicer worker").
 #
-# The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.99.1);
+# The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.100.0);
 # bump the two together, tag and digest. The Temporal Core SDK's build runs protoc,
 # and imports protobuf's well-known types (google/protobuf/field_mask.proto …), which
 # Debian ships in libprotobuf-dev, not protobuf-compiler: without it temporalio-protos'
@@ -454,7 +458,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # own code keeps the recipe, so the cook layer comes from the cache and only the
 # workspace crates compile. A change to a Cargo.toml or Cargo.lock cooks again.
 # build-image.yml keeps these layers in a GHCR registry cache at mode=max.
-FROM rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS slicer-chef
+FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS slicer-chef
 
 # hadolint ignore=DL3008
 RUN apt-get update \
@@ -604,6 +608,145 @@ EXPOSE 9090
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["scadbuddy-slicer"]
 
+# ── profile-fetch: the 3DFP profile-fetch worker and browser service (#6625, #6780)
+# One image, two Deployments (README.md, "Profile-fetch worker"). Its default command,
+# `xvfb-run -a python -m scadbuddy.profile_fetch.browser`, is the browser service: a
+# headed Chromium under Xvfb on 3dfilamentprofiles.com (plan
+# 2026-11-18-profile-fetch-worker.md, Decisions 4 to 6), with the 3DFP login from the
+# pod's env and no route to Temporal or the API. The worker's Deployment runs
+# `python -m scadbuddy.profile_fetch`: the Temporal worker, which holds the CRUD
+# credential, runs no browser and drives the service over its RPC (#6780). Neither holds
+# a database secret or database client config. Published as
+# ghcr.io/eh-homelab/scadbuddy-profile-fetch. The browser runs untrusted web content, so
+# the image carries nothing else.
+#
+# Three stages. `profile-fetch-deps` builds the venv: the backend with the
+# `profile-fetch` group (Playwright, pinned exactly) and without the dev group, and
+# without the editable install (`--no-editable`), so the venv alone holds scadbuddy and
+# no source tree is copied on. It needs git, for the git-pinned
+# temporal-agent-harness, which the runtime does not. `profile-fetch` is the image;
+# `profile-fetch-test` adds the dev group and backend/tests, for ci.yml's
+# `profile-fetch-image` job, and is never published.
+# The base is python:3.12, the backend's `requires-python`, by tag and index digest
+# (Docker Hub through the buildx mirror; Dependabot moves it).
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch-deps
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+WORKDIR /app/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+# Without psycopg: the worker has no database (#5295), so no database client library
+# ships in its image. Every psycopg package in uv.lock is named; uv skips a name that
+# the resolution does not install (psycopg-binary is the dev group's).
+RUN uv sync --frozen --no-dev --group profile-fetch --no-install-project \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
+COPY backend/scadbuddy ./scadbuddy
+RUN uv sync --frozen --no-dev --group profile-fetch --no-editable \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
+
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch
+
+ARG TARGETARCH
+# Playwright publishes Chromium for amd64 and arm64, but no CI job builds arm64 and the
+# image has only been measured on amd64.
+RUN [ "$TARGETARCH" = amd64 ] \
+    || { echo "ERROR: the profile-fetch image is built for amd64 only, not '${TARGETARCH}'." >&2; exit 1; }
+
+# xvfb and xauth for `xvfb-run` (headed Chromium, Decision 5), tini to reap what a
+# crashed browser leaves behind, as in the other stages.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tini xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=profile-fetch-deps /opt/venv /opt/venv
+# The browsers in a fixed, root-owned, world-readable directory, not under a user's
+# cache: uid 10001 reads them, and a read-only root file system cannot change them.
+# Playwright's own installer, at the version the lockfile pins: `chromium` is the FULL
+# build (the worker runs it headed, and the env test wraps its binary with
+# --renderer-cmd-prefix, build Decision 60) plus the headless shell the other driver
+# tests launch; `--with-deps` apt-installs the OS libraries and fonts it needs.
+ENV PATH=/opt/venv/bin:$PATH \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+RUN playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /ms-playwright
+
+# Fails the build when a psycopg package is installed, when the worker's or the browser
+# service's start imports Postgres code (#5295: neither has a database), when the browser
+# service's start imports the Temporal SDK (#6780: it has no route to Temporal), or when
+# Playwright's full Chromium is not where the driver looks. `-B`, so it writes no bytecode.
+RUN python -B - <<'CHECK'
+import importlib.util, os, sys
+for name in ("psycopg", "psycopg_binary", "psycopg_pool", "psycopg_c"):
+    if importlib.util.find_spec(name) is not None:
+        sys.exit(f"ERROR: {name} is installed in the profile-fetch image")
+import scadbuddy.profile_fetch.browser
+if any(m.split(".")[0] in ("psycopg", "temporalio") for m in sys.modules):
+    sys.exit("ERROR: importing scadbuddy.profile_fetch.browser imported psycopg or temporalio")
+import scadbuddy.profile_fetch.worker
+if any(m == "psycopg" or m.startswith("psycopg.") for m in sys.modules):
+    sys.exit("ERROR: importing scadbuddy.profile_fetch.worker imported psycopg")
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    path = p.chromium.executable_path
+if not os.access(path, os.X_OK) or "headless_shell" in path:
+    sys.exit(f"ERROR: Playwright's full Chromium is not installed at {path}")
+CHECK
+
+RUN groupadd --gid 10001 profilefetch \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin profilefetch
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+# HOME is /tmp, as the slicer's: Chromium writes under ~, and a read-only root file
+# system with an emptyDir /tmp keeps that working. The browser's profile goes under
+# SCADBUDDY_PROFILE_FETCH_WORK_DIR (default /tmp).
+ENV HOME=/tmp \
+    SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+WORKDIR /tmp
+# Numeric, as the other stages: Kubernetes' runAsNonRoot cannot check a name (DL3066).
+USER 10001:10001
+# The worker's /healthz and /metrics (`profile_fetch.settings.HEALTH_PORT`), and the
+# browser service's RPC and /healthz (`profile_fetch.remote.BROWSER_PORT`).
+EXPOSE 9090 8091
+# Decision 4's `tini -- xvfb-run -a python -m …`, with xvfb-run in the command, so a
+# one-off `docker run <image> python …` needs no display. The default is the browser
+# service; the worker's Deployment sets `args: [python, -m, scadbuddy.profile_fetch]`,
+# which keeps `tini` as the entrypoint.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["xvfb-run", "-a", "python", "-m", "scadbuddy.profile_fetch.browser"]
+
+# ── profile-fetch-test: the driver tests in the profile-fetch image ───────────
+# Never published. ci.yml's `profile-fetch-image` job runs
+# tests/profile_fetch/test_site.py here with `--network none` and
+# SCADBUDDY_TEST_CHROMIUM_REQUIRED=1, so the image's own Chromium, OS libraries and
+# Xvfb are what the driver tests drive. The venv gains the dev group (pytest; and
+# psycopg with its binary wheel, which tests/conftest.py imports and the published
+# stage leaves out).
+FROM profile-fetch-deps AS profile-fetch-test-deps
+RUN uv sync --frozen --group profile-fetch --no-editable
+
+FROM profile-fetch AS profile-fetch-test
+COPY --from=profile-fetch-test-deps /opt/venv /opt/venv
+WORKDIR /app/backend
+COPY backend/pyproject.toml ./
+COPY backend/tests ./tests
+# The test run writes its cache and temporary files under /tmp.
+ENV PYTEST_ADDOPTS="-p no:cacheprovider"
+CMD ["xvfb-run", "-a", "python", "-m", "pytest", "tests/profile_fetch/test_site.py"]
+
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
 # the browser by backend/scadbuddy/library/lsp.py. Upstream publishes prebuilt
@@ -722,7 +865,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.11.09
+ARG OPENSCAD_VERSION=2026.11.16
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.

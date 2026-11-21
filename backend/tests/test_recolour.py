@@ -88,6 +88,18 @@ def test_a_colour_list_of_the_wrong_length_is_refused(tmp_path: Path) -> None:
         recolour_3mf(_written(tmp_path), ["#00C000"])
 
 
+def test_settings_past_the_cap_are_refused(tmp_path: Path) -> None:
+    """#6799: the file is untrusted, so its settings are read within
+    `MAX_SETTINGS_BYTES`, as plate fit and the send read them."""
+    payload = _written(tmp_path)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings["padding"] = "x" * bambu3mf.MAX_SETTINGS_BYTES
+    padded = bambu3mf.rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+    with pytest.raises(bambu3mf.ArchiveTooLargeError):
+        recolour_3mf(padded, ["#00C000", "#FF9425"])
+
+
 def test_recolouring_copies_what_it_does_not_change_and_writes_nothing_to_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

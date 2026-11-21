@@ -144,6 +144,11 @@ def test_the_archive_quote_prices_the_item_from_its_print(
     monkeypatch.setattr(OrdersComponent, "integrations", property(lambda self: seam))
     quoted = client.post(path, json={"filaments": slots})
     assert quoted.status_code == 201, quoted.text
+    # The run made at least one unit (#6336).
+    for units in (0, 1001):
+        refused = client.post(path, json={"filaments": slots, "units": units})
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["errors"][0]["loc"] == ["body", "units"]
     quote = quoted.json()
     assert (quote["source"], quote["plates"][0]["archive_id"]) == ("archive", 81)
     assert quote["plates"][0]["print_seconds"] == 1800

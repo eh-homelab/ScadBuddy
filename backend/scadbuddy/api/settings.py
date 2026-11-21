@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
-from typing import Any, Literal, Self
+from decimal import Decimal
+from typing import Any, Literal, Self, get_args
 
 import psycopg
 from fastapi import APIRouter, Response, status
@@ -32,7 +33,7 @@ from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.api.storefront_slice import check_profile
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
-from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
+from scadbuddy.bambuddy.models import Folder, NozzleSize, Printer, RackAlgorithm
 from scadbuddy.bambuddy.options import (
     BAMBUDDY_DEFAULTS,
     OptionScope,
@@ -49,11 +50,13 @@ from scadbuddy.core.setting_docs import SETTING_DOCS
 from scadbuddy.core.settings import (
     APPLIES,
     BOOTSTRAP_FIELDS,
-    ENV_SEEDED,
     Applies,
+    FilamentSync,
     Settings,
     env_var,
 )
+from scadbuddy.filament.bb_sync_models import pushes_anything
+from scadbuddy.filament.component import FilamentDep
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
@@ -76,7 +79,6 @@ from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
-from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -172,6 +174,10 @@ class SettingsView(BaseModel):
     storefront_materials: list[str] = Field(default_factory=lambda: ["PETG", "PLA"])
     #: The most colour combinations one prepare of a listing queues (#6237).
     storefront_prepare_cap: int = 256
+    #: The nozzle diameters one profile fetch exports per printer model (#6625).
+    profile_fetch_nozzles: list[NozzleSize] = Field(
+        default_factory=lambda: list(get_args(NozzleSize))
+    )
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
     #: (`starttls`, `implicit` or `none`). The password is sealed apart
     #: (`GET /storefront/mail/password` says whether it is set).
@@ -202,8 +208,8 @@ class SettingsView(BaseModel):
     storefront_payment_instructions: str | None = None
     #: The messaging plugin tool bound to "customer messages" (#5660); null is none.
     orders_customer_messaging: MessagingBinding | None = None
-    #: The shop slice profile (#6153): the printer and a spool per material; null is none,
-    #: and the storefront then shows no price.
+    #: The shop slice profile (#6153, #6574): the printer and a filament type per
+    #: material; null is none, and the storefront then shows no price.
     storefront_slice_profile: StorefrontSliceProfile | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
@@ -247,6 +253,8 @@ class SettingsView(BaseModel):
     print_auto_import_skip_printers: list[int] = Field(default_factory=list)
     #: The LAN-only printers it leaves alone, by registry id (#4699 phase 4).
     print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
+    #: #6868: whether an empty spool adds its type to the shopping list.
+    filament_shopping_auto_add_empty: bool = True
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -289,6 +297,12 @@ class SettingsView(BaseModel):
     event_log_retention_rows: int
     flow_approval_timeout_seconds: int
     spool_overlay_refresh_seconds: int
+    filament_sync: FilamentSync = Field(default_factory=FilamentSync)
+    filament_low_stock_pct: int = 20
+    filament_default_cost_per_kg: Decimal | None = None
+    filament_burn_window_days: int = 30
+    filament_lead_time_days: int = 7
+    filament_safety_margin_days: int = 3
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None
@@ -514,6 +528,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_auto_import_sources=list(stored.auto_import_sources()),
         print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
         print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
+        filament_shopping_auto_add_empty=stored.filament_shopping_auto_add_empty,
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
@@ -583,26 +598,6 @@ async def _check_operation_retention(
         )
 
 
-def _pending(store: SettingsStore, patch: SettingsPatch) -> StoredSettings:
-    """The stored settings as ``patch`` leaves them, for a check that reads the connection
-    this same PUT sets or resets (#6255): a given field takes the patch's value, a reset
-    one the deployment's (the environment's, else the default)."""
-    stored = store.load()
-    fields = StoredSettings.model_fields
-    update: dict[str, Any] = {}
-    for name in patch.reset:
-        if name in fields:
-            update[name] = (
-                getattr(store.defaults, name)
-                if name in ENV_SEEDED
-                else fields[name].get_default(call_default_factory=True)
-            )
-    for name in patch.model_fields_set & fields.keys():
-        if name != "reset":
-            update[name] = getattr(patch, name)
-    return stored.model_copy(update=update)
-
-
 @router.put("/settings", response_model=SettingsView, summary="Update the settings")
 async def put_settings(
     patch: SettingsPatch,
@@ -610,7 +605,7 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
@@ -620,14 +615,13 @@ async def put_settings(
     client's ``printer_id`` (a Bambuddy id) is saved as the registry printer that links
     it; ``default_printer`` sent beside it wins. 422 for a ``default_printer`` the
     registry does not hold, and for a ``printer_id`` no registry printer links. 422 for a
-    ``storefront_slice_profile`` whose printer the registry does not hold, or whose spool
-    the print dialog does not offer on that printer (#6153)."""
+    ``storefront_slice_profile`` whose printer the registry does not hold, or that names a
+    filament type that is archived or gone (#6153, #6574)."""
     _mail_connection_by_a_person(patch)
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
-        pending = await asyncio.to_thread(_pending, store, patch)
-        await check_profile(patch.storefront_slice_profile, pending, registry, spools)
+        await check_profile(patch.storefront_slice_profile, registry, filament)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:
@@ -646,11 +640,41 @@ async def put_settings(
             msg,
             errors=[{"loc": ["body", "storefront_turnstile_secret"], "msg": msg}],
         )
+    touched = patch.model_fields_set | set(patch.reset)
+    sync_touched = "filament_sync" in touched
+    if sync_touched:
+        sync_before = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
+    # Decision 153: a running workflow waits the interval its last pass read, for the
+    # instance it was started for.
+    timer_keys = {"spool_overlay_refresh_seconds", "bambuddy_url"} & touched
+    timer_before = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     try:
         await asyncio.to_thread(store.save, patch)
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
+    timer_after = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
+    old_url = timer_before.get("bambuddy_url")
+    if old_url and timer_after.get("bambuddy_url") != old_url:
+        # Decision 161: the old Bambuddy's workflow is told now, so its next pass ends it,
+        # even with no timer: `instance_changed` for another URL, the `no_bambuddy` skip
+        # when the save cleared it. None running is nothing.
+        state.filament_sync.signal_running_soon(old_url)
+    if sync_touched and snapshot.runtime.filament_sync != sync_before:
+        if pushes_anything(snapshot.runtime.filament_sync):
+            # #6265 Decision 17: a direction that now pushes pushes at once.
+            state.filament_sync.nudge_soon()
+        elif pushes_anything(sync_before):
+            # R-T10-3: nothing pushes now. A running workflow is told, so its next pass is
+            # `nothing_pushes` and it ends; none is started.
+            state.filament_sync.signal_running_soon()
+    elif pushes_anything(snapshot.runtime.filament_sync):
+        if timer_after.get("bambuddy_url") != timer_before.get("bambuddy_url"):
+            # Another Bambuddy: its own workflow starts now (Decision 153).
+            state.filament_sync.nudge_soon()
+        elif timer_after != timer_before:
+            # A new interval: the running workflow's next pass reads it.
+            state.filament_sync.signal_running_soon()
     if "print_auto_import" in patch.model_fields_set:
         # #4699: the watcher takes the prints started from this moment on, not from its
         # next pass; switched off, it forgets the moment. It reads the committed switch

@@ -35,6 +35,7 @@ RouteClass = Literal[
     "crud.storefront",
     "crud.agent",
     "crud.intake",
+    "crud.profile-fetch",
     # The projects worker's flow host routes (#5298): `api` routes it may call too.
     "flow.host",
 ]
@@ -205,7 +206,7 @@ SCRIPTLESS_GETS = frozenset(
 )
 
 #: A CRUD route's path (#5298): the class is its caller's, whatever the module.
-CRUD_PATH = re.compile(r"(?:/api/v1)?/internal/crud/([a-z]+)(?:/|$)")
+CRUD_PATH = re.compile(r"(?:/api/v1)?/internal/crud/([a-z-]+)(?:/|$)")
 CRUD_CLASSES: dict[str, RouteClass] = {
     "projects": "crud.projects",
     "render": "crud.render",
@@ -213,6 +214,7 @@ CRUD_CLASSES: dict[str, RouteClass] = {
     "storefront": "crud.storefront",
     "agent": "crud.agent",
     "intake": "crud.intake",
+    "profile-fetch": "crud.profile-fetch",
 }
 CRUD_CALLERS = frozenset(CRUD_CLASSES)
 

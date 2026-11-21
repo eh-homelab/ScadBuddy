@@ -47,7 +47,14 @@ from scadbuddy.render.split import ColourPart
 from scadbuddy.store.download_cache import DownloadCache, TooLargeError
 from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
-from tests.api.test_print_run_choices import body, follow_run, run_routes
+from tests.api.test_print_run_choices import (
+    LIVE_READS,
+    bambuddy_reads,
+    body,
+    dialog_clock,
+    follow_run,
+    run_routes,
+)
 from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
 from tests.api.test_send import BASE, _uploaded_3mf, configure, make_output
@@ -55,9 +62,10 @@ from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.printers import linked_printer
-from tests.test_clearance import two_objects_3mf
+from tests.support.sb_rows import drop_app_sb_presets, seed_app_sb_spools
+from tests.test_clearance import one_object_two_colours_3mf, two_objects_3mf
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
 
@@ -556,6 +564,37 @@ def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
         for call in respx.calls
         if "/library/files/89" in call.request.url.path and call.request.method != "GET"
     ]
+
+
+@respx.mock
+def test_the_check_reads_the_file_and_printers_choices_read_only_once(
+    client: TestClient,
+) -> None:
+    """#4196 lever 4: the check that follows ``choices`` uses the library file, its
+    plates, the printer list and the printer that ``choices`` read. It reads the
+    printer's state, trays and spools again, and the file's bytes, which no kept read
+    holds."""
+    dialog_clock(client)
+    configure(client)
+    library_file(89)
+    one_color(89)
+    run_routes()
+
+    choices = client.get("/api/v1/print/library/89/choices?printer_id=1")
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert choices.status_code == 200, choices.text
+    assert check.status_code == 200, check.text
+    asked = bambuddy_reads()
+    kept = [
+        "/api/v1/library/files/89",
+        "/api/v1/library/files/89/plates",
+        "/api/v1/printers/",
+        "/api/v1/printers/1",
+    ]
+    assert [asked[path] for path in kept] == [1, 1, 1, 1]
+    assert [asked[path] for path in LIVE_READS] == [2, 2, 2]
+    assert asked["/api/v1/library/files/89/download"] == 2
 
 
 @respx.mock
@@ -1509,6 +1548,141 @@ def test_a_library_files_check_fetches_the_file_once(
     assert fetches == [89]
     # #4495: the slot read reads this fetch's bytes rather than spooling its own.
     assert download.call_count == 1
+
+
+@respx.mock
+def test_a_library_files_check_reads_the_printer_beside_prepare_run_and_each_read_once(
+    client: TestClient,
+) -> None:
+    """#4196: the slot refusals' printer and inventory-remain reads waited for the whole
+    of `prepare_run`. Here Bambuddy's printer list, which `prepare_run` reads, answers only
+    once both have been asked for, so a check that still read them after it hangs. Every
+    resource is read once."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    printer_asked = asyncio.Event()
+    remain_asked = asyncio.Event()
+
+    def marks(asked: asyncio.Event, name: str) -> Any:
+        def answer(request: httpx.Request) -> httpx.Response:
+            asked.set()
+            return httpx.Response(200, json=recording(name))
+
+        return answer
+
+    printer = respx.get(f"{API}/printers/1").mock(side_effect=marks(printer_asked, "printer.json"))
+    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+        side_effect=marks(remain_asked, "inventory-remain.json")
+    )
+
+    async def listed(request: httpx.Request) -> httpx.Response:
+        await printer_asked.wait()
+        await remain_asked.wait()
+        return httpx.Response(200, json=recording("printers.json"))
+
+    printers = respx.get(f"{API}/printers/").mock(side_effect=listed)
+    status = respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=recording("printer-status-rack.json"))
+    )
+    plates = respx.get(f"{API}/library/files/89/plates").mock(
+        return_value=httpx.Response(
+            200, json={**recording("library-plates-single.json"), "file_id": 89}
+        )
+    )
+    file_read = respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "file-89.3mf", "file_type": "3mf", "file_hash": None}
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=library_3mf())
+    )
+
+    request = {
+        **body(),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]},
+    }
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+
+    assert check.status_code == 200, check.text
+    counts = [
+        route.call_count
+        for route in (file_read, plates, download, printers, status, printer, remain)
+    ]
+    assert counts == [1] * 7
+
+
+@respx.mock
+def test_a_library_files_check_reads_the_printer_list_beside_the_file(
+    client: TestClient,
+) -> None:
+    """#4196: the check read the file and its plates, then Bambuddy's printer list. Here
+    the file answers only once the list has been asked for, so a check that still read
+    them one after the other hangs. Each is read once."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    listed = asyncio.Event()
+
+    def list_printers(request: httpx.Request) -> httpx.Response:
+        listed.set()
+        return httpx.Response(200, json=recording("printers.json"))
+
+    printers = respx.get(f"{API}/printers/").mock(side_effect=list_printers)
+
+    async def file_after_list(request: httpx.Request) -> httpx.Response:
+        await listed.wait()
+        return httpx.Response(
+            200, json={"id": 89, "filename": "file-89.3mf", "file_type": "3mf", "file_hash": None}
+        )
+
+    file_read = respx.get(f"{API}/library/files/89").mock(side_effect=file_after_list)
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert (file_read.call_count, printers.call_count) == (1, 1)
+
+
+@respx.mock
+def test_a_library_files_check_reads_the_spools_presets_beside_the_printers_status(
+    client: TestClient,
+) -> None:
+    """#4196: the plan's spools' Bambuddy presets were read only after `prepare_run`.
+    Here the printer's status, which `prepare_run` reads, answers only once a spool's
+    presets have been asked for, so a check that still read them after it hangs. Each
+    spool's presets are read once."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    seed_app_sb_spools(client)
+    drop_app_sb_presets(client, [5, 9])  # the plan reads their Bambuddy spools' presets
+    presets_asked = asyncio.Event()
+
+    def spool_presets(request: httpx.Request) -> httpx.Response:
+        presets_asked.set()
+        return httpx.Response(200, json=[])
+
+    presets = respx.route(
+        method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets"
+    ).mock(side_effect=spool_presets)
+
+    async def status_after_presets(request: httpx.Request) -> httpx.Response:
+        await presets_asked.wait()
+        return httpx.Response(200, json=recording("printer-status-rack.json"))
+
+    status = respx.get(f"{API}/printers/1/status").mock(side_effect=status_after_presets)
+
+    check = client.post("/api/v1/print/library/89/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert status.call_count == 1
+    assert sorted(call.request.url.path for call in presets.calls) == [
+        "/api/v1/inventory/spools/5/filament-presets",
+        "/api/v1/inventory/spools/9/filament-presets",
+    ]
 
 
 @respx.mock
@@ -2964,6 +3138,38 @@ def test_a_by_object_check_warns_when_the_toolhead_would_hit_an_object(
     # #2976: by object or not, the file is downloaded as often: once, for the nozzle
     # check, whose read the objects and (#4495) the slots come from.
     assert download.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("overrides", "warned"),
+    [({"print_sequence": "by object"}, True), ({"print_sequence": "by layer"}, False)],
+)
+def test_a_by_object_check_of_one_multi_colour_object_warns_and_names_the_plate(
+    client: TestClient, tmp_path: Path, overrides: dict[str, str], warned: bool
+) -> None:
+    """#6781: a plate that is one object of two colours, printed by object through the
+    generic process overrides. The check warns with the plate id and refuses nothing."""
+    configure(client)
+    library_file(89, content=one_object_two_colours_3mf(tmp_path / "menorah.3mf"))
+    run_routes()
+    # The overrides are checked against the process preset's values (#2998).
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(
+            200, json={"resolved": True, "values": {"print_sequence": "by layer"}}
+        )
+    )
+    sliced = slice_routes()
+
+    check = client.post(
+        "/api/v1/print/library/89/check", json={**body(), "process_overrides": overrides}
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    found = [w for w in check.json()["warnings"] if w["kind"] == "by-object-one-object"]
+    assert [w.get("plate_id") for w in found] == ([1] if warned else [])
+    assert not sliced.called
 
 
 @respx.mock

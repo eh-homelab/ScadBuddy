@@ -20,6 +20,7 @@ from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     cover_names,
     laid_out_plates,
+    read_project_settings,
     rezipped,
 )
 from scadbuddy.render.geometry import parts_from_3mf
@@ -42,7 +43,8 @@ def recolour_3mf(
     cover images redrawn in them.
 
     ``colours`` is one per filament of the file, in filament order; a different count
-    raises :class:`ValueError`, since the extruder numbers of every part index into it.
+    raises :class:`ValueError`, since the extruder numbers of every part index into it,
+    as does a ``project_settings.config`` past its cap (:func:`read_project_settings`, #6799).
     A file written without covers gets none. Written in the writer's policy, every entry
     it does not change copied as its compressed bytes (:func:`rezipped`, #3679). An
     author's ``plate_no_light_<n>.png`` is replaced by the lit cover.
@@ -55,7 +57,7 @@ def recolour_3mf(
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
-        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+        settings = read_project_settings(archive)
         plates = [each.index for each in laid_out_plates(archive)]
     current = settings.get("filament_colour") or []
     if len(colours) != len(current):

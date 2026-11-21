@@ -13,10 +13,12 @@
 # pins the agent too, to the same version at its own digest, and a manifest
 # without the agent's line fails.
 #
-# The dashboard's `ref=` in clusters/prod/scadbuddy/kustomization.yaml (#988,
-# spec 2026-10-01 §7) is optional: an overlay that never mentions
-# deploy/grafana deploys the images alone, one exact line is moved to the
-# revision, and a near miss or a second line fails the deploy.
+# The dashboards' vendored copy in clusters/prod/scadbuddy/grafana/ (#988,
+# spec 2026-10-01 §7, eh-homelab/clusters#3734) is optional: an overlay without
+# it deploys the images alone, a copy is replaced with deploy/grafana at the
+# revision and its .revision moved, and an overlay that still names the old
+# remote resource (`deploy/grafana?ref=`) fails the deploy. The fetch step
+# (step id `grafana`) runs against a stub gh.
 #
 # Runs in ci.yml's `lint` job. Needs mikefarah yq v4 (as the step does).
 set -euo pipefail
@@ -34,6 +36,7 @@ export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
 export AGENT_DURABLE_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent-durable
 export SLICER_IMAGE=ghcr.io/eh-homelab/scadbuddy-slicer
 export SANDBOX_IMAGE=ghcr.io/eh-homelab/scadbuddy-sandbox
+export PROFILE_FETCH_IMAGE=ghcr.io/eh-homelab/scadbuddy-profile-fetch
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
@@ -42,9 +45,11 @@ export MANIFEST_AGENT_DURABLE=applications/scadbuddy/scadbuddy-agent-durable.yam
 export MANIFEST_SLICER=applications/scadbuddy/scadbuddy-slicer.yaml
 export MANIFEST_STOREFRONT=applications/scadbuddy/scadbuddy-storefront.yaml
 export MANIFEST_INTAKE=applications/scadbuddy/scadbuddy-intake.yaml
+export MANIFEST_PROFILE_FETCH=applications/scadbuddy/scadbuddy-profile-fetch.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
-export DASHBOARD_RESOURCE=https://github.com/eh-homelab/ScadBuddy//deploy/grafana
-# What the step before it found: deploy/grafana exists at REVISION.
+export DASHBOARD_DIR=clusters/prod/scadbuddy/grafana
+# What the step before it found: deploy/grafana exists at REVISION (its files
+# are in $DASHBOARD_SOURCE, set with the dashboard cases).
 export DASHBOARD_AT_REVISION=true
 export VERSION=sha-2222222
 DIGEST="sha256:$(printf '2%.0s' {1..64})"
@@ -53,7 +58,8 @@ AGENT_DIGEST="sha256:$(printf '4%.0s' {1..64})"
 AGENT_DURABLE_DIGEST="sha256:$(printf '5%.0s' {1..64})"
 SLICER_DIGEST="sha256:$(printf '7%.0s' {1..64})"
 SANDBOX_DIGEST="sha256:$(printf '9%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST
+PROFILE_FETCH_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -65,6 +71,8 @@ slicer_old="$SLICER_IMAGE:sha-3333333@sha256:$(printf '8%.0s' {1..64})"
 slicer_pinned="$SLICER_IMAGE:$VERSION@$SLICER_DIGEST"
 sandbox_old="$SANDBOX_IMAGE:sha-3333333@sha256:$(printf 'a%.0s' {1..64})"
 sandbox_pinned="$SANDBOX_IMAGE:$VERSION@$SANDBOX_DIGEST"
+pf_old="$PROFILE_FETCH_IMAGE:sha-3333333@sha256:$(printf 'c%.0s' {1..64})"
+pf_pinned="$PROFILE_FETCH_IMAGE:$VERSION@$PROFILE_FETCH_DIGEST"
 failures=0
 
 fail() {
@@ -102,15 +110,15 @@ EOF
 }
 
 # `overlay [line]...` prints the clusters overlay's kustomization with the given
-# extra resource lines; with none, it is today's overlay, which has no
-# dashboard pin. `run` writes $overlay, which a case sets before calling it.
+# extra resource lines; with none, it is an overlay with no vendored
+# dashboards. `run` writes $overlay, which a case sets before calling it.
 overlay() {
   printf '%s\n' '---' 'kind: Kustomization' 'namespace: bambuddy' 'resources:' \
     '  - ../../../applications/scadbuddy' "$@"
 }
-# The overlay a dashboard line needs: no top-level `namespace:`, which would
-# move the ConfigMap out of cattle-dashboards, but a NamespaceTransformer with
-# unsetOnly (clusters#1596 Phase 5).
+# The overlay the vendored dashboards need: no top-level `namespace:`, which
+# would move the ConfigMaps out of cattle-dashboards, but a NamespaceTransformer
+# with unsetOnly (clusters#1596 Phase 5).
 overlay_ns() {
   printf '%s\n' '---' 'kind: Kustomization' 'resources:' \
     '  - ../../../applications/scadbuddy' "$@" 'transformers:' '  - |-' \
@@ -119,12 +127,12 @@ overlay_ns() {
 }
 overlay=$(overlay)
 old_ref="$(printf '1%.0s' {1..40})"
-dashboard_line="  - $DASHBOARD_RESOURCE?ref="
 
 # `run <api-manifest> [worker-manifest] [print-manifest] [projects-manifest]`: a fresh repo, then the
 # step. Output lands in $work/log, and the manifests stay in $work/repo for the checks.
 # With $durable_manifest set, it is written as agent-durable's own Deployment.
 # With $extra_path set, $extra_content is written there (relative to the repo).
+# With $vendored set, clusters' copy of the dashboards is written (vendor_dir).
 run() {
   rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
   printf '%s\n' "$1" > "$work/repo/$MANIFEST"
@@ -133,8 +141,10 @@ run() {
   [ $# -lt 4 ] || printf '%s\n' "$4" > "$work/repo/$MANIFEST_PROJECTS"
   [ -z "${durable_manifest:-}" ] || printf '%s\n' "$durable_manifest" > "$work/repo/$MANIFEST_AGENT_DURABLE"
   [ -z "${slicer_manifest:-}" ] || printf '%s\n' "$slicer_manifest" > "$work/repo/$MANIFEST_SLICER"
+  [ -z "${pf_manifest:-}" ] || printf '%s\n' "$pf_manifest" > "$work/repo/$MANIFEST_PROFILE_FETCH"
   [ -z "${extra_path:-}" ] || printf '%s\n' "$extra_content" > "$work/repo/$extra_path"
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
+  [ -z "${vendored:-}" ] || vendor_dir
   (cd "$work/repo" && git init -q)
   rerun
 }
@@ -386,6 +396,47 @@ else
 fi
 slicer_manifest=
 
+# 8a. The profile-fetch worker (#6625), pinned exactly as the slicer is: its own
+#     file, optional until clusters has it; a build with no image keeps the pin.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^profile_fetch=none$' "$work/out" || fail "no profile-fetch file: output is not none"
+else
+  fail "no profile-fetch file: step failed: $(grep '::error' "$work/log")"
+fi
+pf_manifest=$(deployment scadbuddy-profile-fetch "$pf_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "profile-fetch: api image not pinned"
+  has_line "$pf_pinned" "$MANIFEST_PROFILE_FETCH" || fail "profile-fetch: image not pinned"
+  grep -q '^profile_fetch=pinned$' "$work/out" || fail "profile-fetch: output is not pinned"
+  grep -q "$MANIFEST_PROFILE_FETCH" "$work/out" || fail "profile-fetch: not among the changed files"
+else
+  fail "profile-fetch: step failed: $(grep '::error' "$work/log")"
+fi
+if PROFILE_FETCH_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "profile-fetch, no image: api image not pinned"
+  has_line "$pf_old" "$MANIFEST_PROFILE_FETCH" || fail "profile-fetch, no image: old pin was not kept"
+  grep -q '^profile_fetch=kept$' "$work/out" || fail "profile-fetch, no image: output is not kept"
+  grep -q '::warning.*keeping the profile-fetch pin' "$work/log" || fail "profile-fetch, no image: no warning: $(cat "$work/log")"
+  grep -q "$MANIFEST_PROFILE_FETCH" "$work/out" && fail "profile-fetch, no image: kept file listed as changed"
+else
+  fail "profile-fetch, no image: step failed: $(grep '::error' "$work/log")"
+fi
+pf_manifest=$(deployment scadbuddy-profile-fetch "$pf_old" "$pf_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "two profile-fetch lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one profile-fetch image line, found 2' "$work/log" \
+    || fail "two profile-fetch lines: wrong error: $(grep '::error' "$work/log")"
+fi
+pf_manifest=$(deployment scadbuddy-profile-fetch "ghcr.io/eh-homelab/other:1")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "profile-fetch file without its line: step passed, expected an error"
+else
+  grep -q 'expected exactly one profile-fetch image line, found 0' "$work/log" \
+    || fail "profile-fetch file without its line: wrong error: $(grep '::error' "$work/log")"
+fi
+pf_manifest=
+
 # 8b. Every other file that runs the agent is pinned too, found by the image
 #     (#5037): the agent's worker Deployment, scadbuddy-agent-worker.yaml.
 worker_path=applications/scadbuddy/scadbuddy-agent-worker.yaml
@@ -456,6 +507,8 @@ stale_fails "agent-durable outside its files" applications/scadbuddy/scadbuddy-e
   "$(deployment scadbuddy-extra "$durable")" "names $durable, $not_moved"
 stale_fails "slicer outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
   "$(deployment scadbuddy-extra "$slicer_old")" "names $slicer_old, $not_moved"
+stale_fails "profile-fetch outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
+  "$(deployment scadbuddy-extra "$pf_old")" "names $pf_old, $not_moved"
 stale_fails "an overlay images: entry" clusters/prod/scadbuddy/images.yaml \
   "$(printf '%s\n' 'images:' "  - name: $IMAGE" "    newName: $IMAGE:sha-1111111")" "names $IMAGE:sha-1111111, $not_moved"
 stale_fails "an alias of an old pin" applications/scadbuddy/scadbuddy-alias.yaml \
@@ -511,67 +564,114 @@ else
   fail "no sandbox: step failed: $(grep '::error' "$work/log")"
 fi
 
-# `dashboard_fails <name> <expected-error> <overlay-line>...`: the API and agent
-# beside an overlay carrying those lines; the step must fail with that error.
+# The vendored dashboards (eh-homelab/clusters#3734). $work/src stands for
+# deploy/grafana at REVISION as the fetch step leaves it; `vendored` (set by a
+# case) makes `run` write clusters' copy at an old revision, with a dashboard
+# the new revision dropped.
 api_and_agent="$(deployment scadbuddy "$IMAGE:$old" "$agent")"
+src_files() { # dir
+  mkdir -p "$1"
+  printf '%s\n' 'configMapGenerator:' '  - name: new' > "$1/kustomization.yaml"
+  printf '%s\n' '{"uid": "scadbuddy", "v": 2}' > "$1/scadbuddy.json"
+  printf '%s\n' '{"uid": "scadbuddy-added", "v": 2}' > "$1/scadbuddy-added.json"
+}
+rm -rf "$work/src" && src_files "$work/src"
+export DASHBOARD_SOURCE="$work/src"
+vendor_dir() { # writes clusters' copy into $work/repo
+  local d="$work/repo/$DASHBOARD_DIR"
+  mkdir -p "$d"
+  printf '%s\n' 'configMapGenerator:' '  - name: old' > "$d/kustomization.yaml"
+  printf '%s\n' '{"uid": "scadbuddy", "v": 1}' > "$d/scadbuddy.json"
+  printf '%s\n' '{"uid": "scadbuddy-dropped", "v": 1}' > "$d/scadbuddy-dropped.json"
+  printf '%s\n' "$old_ref" > "$d/.revision"
+}
+grafana_entry="  - grafana/"
+vendored=
+# `run_vendored [overlay]`: `run` with clusters' copy written before the commit.
+run_vendored() {
+  overlay=${1:-$(overlay_ns "$grafana_entry")}
+  vendored=1
+  run "$api_and_agent"
+  local status=$?
+  vendored=
+  return "$status"
+}
+# `dashboard_fails <name> <expected-error> <overlay>`: the step must fail with that error.
 dashboard_fails() {
-  local name=$1 expected=$2; shift 2
-  overlay=$(overlay "$@")
-  if run "$api_and_agent"; then
+  local name=$1 expected=$2
+  if run_vendored "$3"; then
     fail "$name: step passed, expected an error"
   else
     grep -qF "$expected" "$work/log" || fail "$name: wrong error: $(grep '::error' "$work/log")"
   fi
 }
-near_miss="mentions eh-homelab/ScadBuddy//deploy/grafana but no line is exactly"
+same_as_src() { # name
+  local f
+  for f in "$work/src"/*; do
+    cmp -s "$f" "$work/repo/$DASHBOARD_DIR/${f##*/}" || fail "$1: ${f##*/} is not byte-identical to the source"
+  done
+}
 
-# 8. Not configured: today's overlay. A notice, the images pinned, the overlay
-#    untouched and not among the files the PR names.
+# 8. Not vendored: today's overlay with no grafana/ and no remote line. A
+#    notice, the images pinned, the overlay untouched and not among the files.
 overlay=$(overlay)
 if run "$api_and_agent"; then
-  grep -q '::notice::.*has no dashboard pin yet' "$work/log" || fail "no dashboard: no notice"
+  grep -q "::notice::${DASHBOARD_DIR} is not in clusters" "$work/log" || fail "no dashboard: no notice"
   has_line "$pinned" "$MANIFEST" || fail "no dashboard: api image not pinned"
   (cd "$work/repo" && git diff --quiet -- "$KUSTOMIZATION") || fail "no dashboard: overlay changed"
   grep -qx 'dashboard=none' "$work/out" || fail "no dashboard: dashboard output is not none"
-  grep -q "^files=.*kustomization" "$work/out" && fail "no dashboard: overlay listed in files"
+  grep -q "^files=.*\(kustomization\|grafana\)" "$work/out" && fail "no dashboard: overlay listed in files"
 else
   fail "no dashboard: step failed: $(grep '::error' "$work/log")"
 fi
 
-# 9. One exact line: moved to REVISION, and the overlay is among the files.
-overlay=$(overlay_ns "${dashboard_line}${old_ref}")
-if run "$api_and_agent"; then
-  grep -qxF "${dashboard_line}${REVISION}" "$work/repo/$KUSTOMIZATION" || fail "dashboard: ref not moved"
-  grep -qF "$old_ref" "$work/repo/$KUSTOMIZATION" && fail "dashboard: old ref survived"
-  grep -qx 'dashboard=pinned' "$work/out" || fail "dashboard: dashboard output is not pinned"
-  grep -q "^files=.*$KUSTOMIZATION" "$work/out" || fail "dashboard: overlay not listed in files"
-  has_line "$pinned" "$MANIFEST" || fail "dashboard: api image not pinned"
+# 9. A refresh: the copy's kustomization.yaml and *.json are replaced with the
+#    revision's, byte for byte, a dashboard the revision dropped is gone, the
+#    directory holds those files and .revision and nothing else, and .revision
+#    is the revision and a newline. Every changed path is among the files, the
+#    overlay is not (clusters' deploy-PR classifier allows only grafana/ to
+#    change for the dashboards), and the PR step's `git add` of them stages the
+#    whole change, the deletion included.
+if run_vendored; then
+  d="$work/repo/$DASHBOARD_DIR"
+  same_as_src "refresh"
+  [ ! -e "$d/scadbuddy-dropped.json" ] || fail "refresh: a dashboard the revision dropped survived"
+  [ "$(cd "$d" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" = "$( (cd "$work/src" && find . -mindepth 1 -maxdepth 1 -printf '%f\n'; echo .revision) | sort)" ] \
+    || fail "refresh: the copy holds more or less than deploy/grafana's files and .revision: $(ls -A "$d")"
+  [ "$(od -An -v -c "$d/.revision" | tr -d ' \n')" = "${REVISION}\\n" ] \
+    || fail "refresh: .revision is not exactly the revision and a newline: $(od -c "$d/.revision")"
+  grep -qx 'dashboard=vendored' "$work/out" || fail "refresh: dashboard output is not vendored"
+  for f in scadbuddy.json scadbuddy-added.json scadbuddy-dropped.json kustomization.yaml .revision; do
+    grep -q "^files=.*$DASHBOARD_DIR/$f" "$work/out" || fail "refresh: $f not among the files"
+  done
+  grep -q "^files=.*$KUSTOMIZATION" "$work/out" && fail "refresh: the overlay listed in files"
+  (cd "$work/repo" && git diff --quiet -- "$KUSTOMIZATION") || fail "refresh: the overlay changed"
+  has_line "$pinned" "$MANIFEST" || fail "refresh: api image not pinned"
+  (
+    cd "$work/repo"
+    read -ra files <<< "$(sed -n 's/^files=//p' "$work/out")"
+    git add -- "${files[@]}"
+    git diff --quiet -- "$DASHBOARD_DIR"
+  ) || fail "refresh: git add of the files left part of the change unstaged"
+  # The same deploy again, once clusters merged it: nothing to deploy.
+  rerun || fail "refresh: rerun failed: $(grep '::error' "$work/log")"
+  grep -qx 'unchanged=true' "$work/out" || fail "refresh: rerun expected unchanged=true"
+  # Only the dashboards behind: the deploy PR moves just them.
+  printf '%s\n' '{"uid": "scadbuddy", "v": 3}' > "$work/src/scadbuddy.json"
+  rerun || fail "dashboards behind: step failed: $(grep '::error' "$work/log")"
+  grep -qx 'unchanged=false' "$work/out" || fail "dashboards behind: expected unchanged=false"
+  grep -qx "files=$DASHBOARD_DIR/scadbuddy.json" "$work/out" || fail "dashboards behind: expected only the dashboard in files: $(grep '^files=' "$work/out")"
+  rm -rf "$work/src" && src_files "$work/src"
 else
-  fail "dashboard: step failed: $(grep '::error' "$work/log")"
+  fail "refresh: step failed: $(grep '::error' "$work/log")"
 fi
 
-# 9a. The one allowed suffix, `&timeout=<n>s|m|h` (kustomize's git timeout):
-#     the ref moves and the suffix is carried over unchanged, and a rerun once
-#     clusters merged it finds nothing to deploy.
-for timeout in 180s 3m 1h; do
-  overlay=$(overlay_ns "${dashboard_line}${old_ref}&timeout=${timeout}")
-  if run "$api_and_agent"; then
-    grep -qxF "${dashboard_line}${REVISION}&timeout=${timeout}" "$work/repo/$KUSTOMIZATION" \
-      || fail "dashboard timeout=${timeout}: ref not moved or suffix lost: $(grep -F deploy/grafana "$work/repo/$KUSTOMIZATION")"
-    grep -qF "$old_ref" "$work/repo/$KUSTOMIZATION" && fail "dashboard timeout=${timeout}: old ref survived"
-    grep -qx 'dashboard=pinned' "$work/out" || fail "dashboard timeout=${timeout}: dashboard output is not pinned"
-    rerun || fail "dashboard timeout=${timeout}: rerun failed: $(grep '::error' "$work/log")"
-    grep -qx 'unchanged=true' "$work/out" || fail "dashboard timeout=${timeout}: rerun expected unchanged=true"
-  else
-    fail "dashboard timeout=${timeout}: step failed: $(grep '::error' "$work/log")"
-  fi
-done
-
 # 9b. A rollback to a revision without deploy/grafana: the images move, the
-#     dashboard line stays at its old ref, with a warning.
-overlay=$(overlay_ns "${dashboard_line}${old_ref}")
-if DASHBOARD_AT_REVISION=false run "$api_and_agent"; then
-  grep -qxF "${dashboard_line}${old_ref}" "$work/repo/$KUSTOMIZATION" || fail "rollback: dashboard ref moved"
+#     copy stays as it is, with a warning.
+if DASHBOARD_AT_REVISION=false run_vendored; then
+  [ "$(cat "$work/repo/$DASHBOARD_DIR/.revision")" = "$old_ref" ] || fail "rollback: .revision moved"
+  [ -f "$work/repo/$DASHBOARD_DIR/scadbuddy-dropped.json" ] || fail "rollback: the copy changed"
+  (cd "$work/repo" && git diff --quiet -- "$DASHBOARD_DIR") || fail "rollback: the copy changed"
   grep -q '::warning .*has no deploy/grafana' "$work/log" || fail "rollback: no warning"
   grep -qx 'dashboard=kept' "$work/out" || fail "rollback: dashboard output is not kept"
   has_line "$pinned" "$MANIFEST" || fail "rollback: api image not pinned"
@@ -579,55 +679,126 @@ else
   fail "rollback: step failed: $(grep '::error' "$work/log")"
 fi
 
-# 10. The same deploy again, once clusters merged the first: nothing to deploy.
-overlay=$(overlay_ns "${dashboard_line}${old_ref}")
-if run "$api_and_agent" && rerun; then
-  grep -qx 'unchanged=true' "$work/out" || fail "dashboard current: expected unchanged=true"
+# 10. The fetch step could not tell (#1179): a vendored copy is an error, since
+#     it may be refreshed only from the revision's files, but an overlay with
+#     no copy deploys the images as before.
+if DASHBOARD_AT_REVISION=unknown run_vendored; then
+  fail "presence unknown with a copy: step passed, expected an error"
 else
-  fail "dashboard current: step failed: $(grep '::error' "$work/log")"
+  grep -qF "could not tell whether ${REVISION} has deploy/grafana" "$work/log" \
+    || fail "presence unknown with a copy: wrong error: $(grep '::error' "$work/log")"
+fi
+overlay=$(overlay)
+if DASHBOARD_AT_REVISION=unknown run "$api_and_agent"; then
+  grep -qx 'dashboard=none' "$work/out" || fail "presence unknown without a copy: dashboard not none"
+  has_line "$pinned" "$MANIFEST" || fail "presence unknown without a copy: api image not pinned"
+else
+  fail "presence unknown without a copy: step failed: $(grep '::error' "$work/log")"
 fi
 
-# 11. Only the dashboard is behind (clusters added the line after the last
-#     deploy): the deploy PR moves just the ref.
-overlay=$(overlay_ns)
-if run "$api_and_agent" \
-  && yq -i ".resources += [\"$DASHBOARD_RESOURCE?ref=$old_ref\"]" "$work/repo/$KUSTOMIZATION" \
-  && rerun; then
-  grep -qx 'unchanged=false' "$work/out" || fail "dashboard behind: expected unchanged=false"
-  grep -qx "files=$KUSTOMIZATION" "$work/out" || fail "dashboard behind: expected only the overlay in files"
+# 11. The old remote line, in any form, with or without the copy: an error
+#     naming clusters#3734, never a silent images-only deploy.
+old_line="  - https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=${old_ref}"
+remote="still names eh-homelab/ScadBuddy//deploy/grafana"
+dashboard_fails "remote line beside the copy" "$remote" "$(overlay_ns "$grafana_entry" "$old_line")"
+dashboard_fails "remote line with a timeout" "$remote" "$(overlay_ns "${old_line}&timeout=180s")"
+dashboard_fails "remote .git form, lower case" "$remote" \
+  "$(overlay_ns "  - https://github.com/eh-homelab/scadbuddy.git//deploy/grafana?ref=main")"
+# A large overlay with the remote line near the top still fails: the check must
+# not read grep's early exit (SIGPIPE to its writer, 141 under pipefail) as no match.
+mapfile -t padding < <(for i in $(seq 6000); do printf '  - padding-resource-%05d.yaml\n' "$i"; done)
+dashboard_fails "remote line atop a large overlay" "$remote" "$(overlay_ns "$old_line" "$grafana_entry" "${padding[@]}")"
+# A comment that names the old source is not the remote line.
+if run_vendored "$(overlay_ns "  # A copy of https://github.com/eh-homelab/ScadBuddy//deploy/grafana" "$grafana_entry  # was eh-homelab/ScadBuddy//deploy/grafana?ref=x")"; then
+  grep -qx 'dashboard=vendored' "$work/out" || fail "comment naming the remote: not vendored"
 else
-  fail "dashboard behind: step failed: $(grep '::error' "$work/log")"
+  fail "comment naming the remote: step failed: $(grep '::error' "$work/log")"
 fi
-
-# 11b. The same line under transformers: instead of resources: is a mention,
-#      not the pin.
-overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' \
-  'transformers:' "${dashboard_line}${old_ref}")
+overlay=$(overlay_ns "$old_line")
 if run "$api_and_agent"; then
-  fail "line under transformers: step passed, expected an error"
+  fail "remote line, no copy: step passed, expected an error"
 else
-  grep -qF "$near_miss" "$work/log" || fail "line under transformers: wrong error: $(grep '::error' "$work/log")"
+  grep -qF "eh-homelab/clusters#3734" "$work/log" || fail "remote line, no copy: error does not name clusters#3734: $(grep '::error' "$work/log")"
 fi
 
-# 11c. The NamespaceTransformer as a map, and as a file the overlay names.
+# 12. The revision's deploy/grafana holds something that is not
+#     kustomization.yaml or `[a-z0-9-]+.json`: rejected, the copy untouched.
+for bad in README.md Scadbuddy.json scadbuddy_api.json; do
+  printf 'x\n' > "$work/src/$bad"
+  dashboard_fails "bad name $bad" "deploy/grafana/$bad at ${REVISION} is not kustomization.yaml" "$(overlay_ns "$grafana_entry")"
+  [ -f "$work/repo/$DASHBOARD_DIR/scadbuddy-dropped.json" ] || fail "bad name $bad: the copy changed"
+  rm -f "$work/src/$bad"
+done
+mkdir "$work/src/panels"
+dashboard_fails "subdirectory" "deploy/grafana/panels at ${REVISION} is not a regular file" "$(overlay_ns "$grafana_entry")"
+rmdir "$work/src/panels"
+
+# 12b. clusters' copy holds something other than deploy/grafana's files and
+#      .revision (a README, a subdirectory): an error, never left beside the
+#      refreshed copy.
+for extra in NOTES.txt panels; do
+  overlay=$(overlay_ns "$grafana_entry")
+  rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
+  printf '%s\n' "$api_and_agent" > "$work/repo/$MANIFEST"
+  printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
+  vendor_dir
+  if [ "$extra" = panels ]; then
+    mkdir "$work/repo/$DASHBOARD_DIR/panels" && printf 'x\n' > "$work/repo/$DASHBOARD_DIR/panels/a.json"
+  else
+    printf 'notes\n' > "$work/repo/$DASHBOARD_DIR/$extra"
+  fi
+  (cd "$work/repo" && git init -q)
+  if rerun; then
+    fail "extra $extra in the copy: step passed, expected an error"
+  else
+    grep -qF "$DASHBOARD_DIR/$extra::is not kustomization.yaml, a [a-z0-9-]+.json dashboard or .revision" "$work/log" \
+      || fail "extra $extra in the copy: wrong error: $(grep '::error' "$work/log")"
+  fi
+done
+
+# 13. A grafana/ that is not the vendored copy, or one the overlay does not list.
+rm_revision() { rm "$work/repo/$DASHBOARD_DIR/.revision"; }
+overlay=$(overlay_ns "$grafana_entry")
+rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
+printf '%s\n' "$api_and_agent" > "$work/repo/$MANIFEST"
+printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
+vendor_dir && rm_revision
+(cd "$work/repo" && git init -q)
+if rerun; then
+  fail "no .revision: step passed, expected an error"
+else
+  grep -qF "has no .revision" "$work/log" || fail "no .revision: wrong error: $(grep '::error' "$work/log")"
+fi
+dashboard_fails "copy not listed" "lists grafana/ (or grafana, ./grafana/) 0 time(s)" "$(overlay_ns)"
+dashboard_fails "copy listed twice" "lists grafana/ (or grafana, ./grafana/) 2 time(s)" "$(overlay_ns "$grafana_entry" "  - grafana")"
+# `grafana`, `./grafana/` and `./grafana` are the same directory.
+for entry in grafana ./grafana/ ./grafana; do
+  if run_vendored "$(overlay_ns "  - $entry")"; then
+    grep -qx 'dashboard=vendored' "$work/out" || fail "listed as $entry: not vendored"
+  else
+    fail "listed as $entry: step failed: $(grep '::error' "$work/log")"
+  fi
+done
+
+# 14. The namespace guard (clusters#1596 Phase 5): the vendored ConfigMaps
+#     keep cattle-dashboards only through an unsetOnly NamespaceTransformer.
+dashboard_fails "plain namespace" "top-level namespace:" "$(overlay "$grafana_entry")"
+dashboard_fails "transformer without unsetOnly" "NamespaceTransformer with unsetOnly: true" \
+  "$(UNSET_ONLY=false overlay_ns "$grafana_entry")"
+# ...as a map, and as the string "true", which does not count.
 ns_map() {
-  printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "${dashboard_line}${old_ref}" \
+  printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "$grafana_entry" \
     'transformers:' '  - apiVersion: builtin' '    kind: NamespaceTransformer' '    metadata:' '      name: ns' \
     '    namespace: bambuddy' "    unsetOnly: $1"
 }
-overlay=$(ns_map true)
-if run "$api_and_agent"; then
-  grep -qx 'dashboard=pinned' "$work/out" || fail "map transformer: not pinned"
+if run_vendored "$(ns_map true)"; then
+  grep -qx 'dashboard=vendored' "$work/out" || fail "map transformer: not vendored"
 else
   fail "map transformer: step failed: $(grep '::error' "$work/log")"
 fi
-overlay=$(ns_map '"true"')
-if run "$api_and_agent"; then
-  fail "string \"true\": step passed, expected an error"
-else
-  grep -qF "the string \"true\" does not count" "$work/log" || fail "string true: wrong error: $(grep '::error' "$work/log")"
-fi
-overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "${dashboard_line}${old_ref}" \
+dashboard_fails "string \"true\"" "the string \"true\" does not count" "$(ns_map '"true"')"
+# ...as a file the overlay names.
+overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "$grafana_entry" \
   'transformers:' '  - ns.yaml')
 for ns_file_unset in true false; do
   rm -rf "$work/repo"
@@ -635,10 +806,11 @@ for ns_file_unset in true false; do
   printf '%s\n' "$api_and_agent" > "$work/repo/$MANIFEST"
   printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   ns_map "$ns_file_unset" | yq '.transformers[0]' > "$work/repo/$(dirname "$KUSTOMIZATION")/ns.yaml"
+  vendor_dir
   (cd "$work/repo" && git init -q)
   if rerun; then
     if [ "$ns_file_unset" = true ]; then
-      grep -qx 'dashboard=pinned' "$work/out" || fail "file transformer: not pinned"
+      grep -qx 'dashboard=vendored' "$work/out" || fail "file transformer: not vendored"
     else
       fail "file transformer unsetOnly: false: step passed, expected an error"
     fi
@@ -646,11 +818,10 @@ for ns_file_unset in true false; do
     fail "file transformer: step failed: $(grep '::error' "$work/log")"
   fi
 done
-
-# 11d. The NamespaceTransformer in a directory the overlay names: kustomize
-#      reads the transformer configs from that directory's kustomization
-#      `resources` (#1210), here one level down, beside a file that is not one.
-overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "${dashboard_line}${old_ref}" \
+# ...and in a directory the overlay names: kustomize reads the transformer
+# configs from that directory's kustomization `resources` (#1210), here one
+# level down, beside a file that is not one.
+overlay=$(printf '%s\n' '---' 'kind: Kustomization' 'resources:' '  - ../../../applications/scadbuddy' "$grafana_entry" \
   'transformers:' '  - ns')
 for ns_dir_unset in true false; do
   rm -rf "$work/repo"
@@ -662,10 +833,11 @@ for ns_dir_unset in true false; do
   printf '%s\n' 'apiVersion: builtin' 'kind: LabelTransformer' 'metadata:' '  name: l' > "$ns_dir/labels.yaml"
   printf '%s\n' 'resources:' '  - ns.yaml' > "$ns_dir/inner/kustomization.yaml"
   ns_map "$ns_dir_unset" | yq '.transformers[0]' > "$ns_dir/inner/ns.yaml"
+  vendor_dir
   (cd "$work/repo" && git init -q)
   if rerun; then
     if [ "$ns_dir_unset" = true ]; then
-      grep -qx 'dashboard=pinned' "$work/out" || fail "directory transformer: not pinned"
+      grep -qx 'dashboard=vendored' "$work/out" || fail "directory transformer: not vendored"
     else
       fail "directory transformer unsetOnly: false: step passed, expected an error"
     fi
@@ -677,61 +849,8 @@ for ns_dir_unset in true false; do
   fi
 done
 
-# 11e. The presence check could not tell (#1179): a pinned line is an error,
-#      since the ref may move only to a revision that has deploy/grafana, but
-#      an overlay with no pin deploys the images as before.
-overlay=$(overlay_ns "${dashboard_line}${old_ref}")
-if DASHBOARD_AT_REVISION=unknown run "$api_and_agent"; then
-  fail "presence unknown with a pin: step passed, expected an error"
-else
-  grep -qF "could not tell whether ${REVISION} has deploy/grafana" "$work/log" \
-    || fail "presence unknown with a pin: wrong error: $(grep '::error' "$work/log")"
-fi
-overlay=$(overlay)
-if DASHBOARD_AT_REVISION=unknown run "$api_and_agent"; then
-  grep -qx 'dashboard=none' "$work/out" || fail "presence unknown without a pin: dashboard not none"
-  has_line "$pinned" "$MANIFEST" || fail "presence unknown without a pin: api image not pinned"
-else
-  fail "presence unknown without a pin: step failed: $(grep '::error' "$work/log")"
-fi
-
-# 12-17. Near misses are errors, never "not configured".
-dashboard_fails "short sha" "$near_miss" "${dashboard_line}1111111"
-dashboard_fails "branch ref" "$near_miss" "${dashboard_line}main"
-dashboard_fails "trailing comment" "$near_miss" "${dashboard_line}${old_ref} # dashboard"
-dashboard_fails "lower case" "$near_miss" "  - https://github.com/eh-homelab/scadbuddy//deploy/grafana?ref=${old_ref}"
-dashboard_fails "commented out" "$near_miss" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
-dashboard_fails "extra space" "$near_miss" "  -  $DASHBOARD_RESOURCE?ref=${old_ref}"
-dashboard_fails ".git form" "$near_miss" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=${old_ref}"
-# Only `&timeout=<n>s|m|h`, exactly, may follow the SHA.
-dashboard_fails "timeout without unit" "$near_miss" "${dashboard_line}${old_ref}&timeout=180"
-dashboard_fails "timeout in ms" "$near_miss" "${dashboard_line}${old_ref}&timeout=180ms"
-dashboard_fails "other parameter" "$near_miss" "${dashboard_line}${old_ref}&submodules=false"
-dashboard_fails "timeout plus another parameter" "$near_miss" "${dashboard_line}${old_ref}&timeout=180s&submodules=false"
-dashboard_fails "timeout twice" "$near_miss" "${dashboard_line}${old_ref}&timeout=180s&timeout=1s"
-dashboard_fails "timeout before ref" "$near_miss" "  - $DASHBOARD_RESOURCE?timeout=180s&ref=${old_ref}"
-# ...and beside an exact line they are errors too: a second, unpinned copy.
-dashboard_fails "exact line plus .git near miss" "times but only 1 line is exactly" \
-  "${dashboard_line}${old_ref}" "  - https://github.com/eh-homelab/ScadBuddy.git//deploy/grafana?ref=main"
-dashboard_fails "exact line plus commented-out line" "times but only 1 line is exactly" \
-  "${dashboard_line}${old_ref}" "  # - $DASHBOARD_RESOURCE?ref=${old_ref}"
-
-# 17b. The line beside a plain namespace: the ConfigMap would leave
-#      cattle-dashboards and the sidecar never see it: an error.
-dashboard_fails "plain namespace" "top-level namespace:" "${dashboard_line}${old_ref}"
-overlay=$(UNSET_ONLY=false overlay_ns "${dashboard_line}${old_ref}")
-if run "$api_and_agent"; then
-  fail "transformer without unsetOnly: step passed, expected an error"
-else
-  grep -qF "NamespaceTransformer with unsetOnly: true" "$work/log" || fail "no unsetOnly: wrong error: $(grep '::error' "$work/log")"
-fi
-
-# 18. Two exact lines: an error, as for any other pinned line.
-dashboard_fails "two dashboard lines" "expected at most one dashboard line, found 2" \
-  "${dashboard_line}${old_ref}" "${dashboard_line}${old_ref}"
-
-# 19. No overlay at all: an error, not a silent skip. clusters moved it, and
-#     this run cannot tell whether the new one pins the dashboard.
+# 15. No overlay at all: an error, not a silent skip. clusters moved it, and
+#     this run cannot tell whether the new one vendors the dashboards.
 overlay=""
 if run "$api_and_agent"; then
   fail "no overlay: step passed, expected an error"
@@ -739,12 +858,14 @@ else
   grep -qF "$KUSTOMIZATION is not in clusters" "$work/log" || fail "no overlay: wrong error: $(grep '::error' "$work/log")"
 fi
 
-# 20-23. The presence check (step id `grafana`, #1179), with a stub `gh` that
+# 20-25. The fetch step (step id `grafana`, #1179), with a stub `gh` that
 #        answers from $work/gh-answers one line per call (`ok`, or an error
 #        message; the last line repeats), and a `sleep` that returns at once.
-#        Only a 404 is "absent"; any other error is retried, and one that
-#        persists is `unknown`, which fails the deploy only if the overlay pins
-#        the dashboard (11e).
+#        On `ok`, a directory listing prints $GH_FILES/listing.json and a raw
+#        file read prints $GH_FILES/<name>. Only a 404 of kustomization.yaml is
+#        "absent"; any other error is retried, and one that persists, or a
+#        file that does not hash to its listed blob, is `unknown`, which fails
+#        the deploy only if clusters vendors the dashboards (10).
 yq '.jobs[].steps[] | select(.id == "grafana") | .run' "$workflow" > "$work/grafana.sh"
 [ -s "$work/grafana.sh" ] || { echo "FAIL: no step with id 'grafana' in $workflow" >&2; exit 1; }
 mkdir -p "$work/bin"
@@ -754,32 +875,112 @@ n=$(( $(cat "$GH_CALLS" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$GH_CALLS"
 answer=$(sed -n "${n}p" "$GH_ANSWERS")
 [ -n "$answer" ] || answer=$(tail -n 1 "$GH_ANSWERS")
-[ "$answer" = ok ] && exit 0
-echo "$answer" >&2
-exit 1
+if [ "$answer" != ok ]; then
+  echo "$answer" >&2
+  exit 1
+fi
+raw=false path=
+for a in "$@"; do
+  case "$a" in
+    *vnd.github.raw*) raw=true ;;
+    repos/*) path=${a%%\?*} ;;
+  esac
+done
+if [ "$raw" = true ]; then
+  cat "$GH_FILES/${path##*/}"
+elif [ "${path##*/}" = grafana ]; then
+  cat "$GH_FILES/listing.json"
+fi
 STUB
 printf '#!/bin/sh\n' > "$work/bin/sleep"
 chmod +x "$work/bin/gh" "$work/bin/sleep"
+# The listing GitHub gives for $work/src (blob shas from git hash-object),
+# plus any extra entries passed as `<type>:<name>`.
+listing() {
+  local f
+  {
+    for f in "$work/src"/*; do
+      jq -n --arg n "${f##*/}" --arg s "$(git hash-object "$f")" '{type: "file", name: $n, sha: $s}'
+    done
+    for f in "$@"; do
+      jq -n --arg t "${f%%:*}" --arg n "${f#*:}" '{type: $t, name: $n, sha: "0000000000000000000000000000000000000000"}'
+    done
+  } | jq -s '.' > "$work/src-listing.json"
+}
+mkdir -p "$work/rt"
 # `presence <answer>...`: run the step; "<exit>:<present>:<gh calls>".
 presence() {
   local status=0
   printf '%s\n' "$@" > "$work/gh-answers"
   rm -f "$work/gh-calls" && : > "$work/out"
-  PATH="$work/bin:$PATH" GH_ANSWERS="$work/gh-answers" GH_CALLS="$work/gh-calls" GITHUB_OUTPUT="$work/out" \
-    GITHUB_REPOSITORY=eh-homelab/ScadBuddy bash -e "$work/grafana.sh" > "$work/log" 2>&1 || status=$?
+  rm -rf "$work/gh-files" && cp -R "$work/src" "$work/gh-files" && cp "$work/src-listing.json" "$work/gh-files/listing.json"
+  PATH="$work/bin:$PATH" GH_ANSWERS="$work/gh-answers" GH_CALLS="$work/gh-calls" GH_FILES="$work/gh-files" \
+    GITHUB_OUTPUT="$work/out" RUNNER_TEMP="$work/rt" GITHUB_REPOSITORY=eh-homelab/ScadBuddy \
+    bash -e "$work/grafana.sh" > "$work/log" 2>&1 || status=$?
   printf '%s:%s:%s' "$status" "$(sed -n 's/^present=//p' "$work/out")" "$(cat "$work/gh-calls")"
 }
+fetched="$work/rt/grafana-at-revision"
 not_found='gh: Not Found (HTTP 404)'
 server_error='gh: Internal Server Error (HTTP 500)'
+listing
+# kustomization.yaml, the listing, then each of the three files.
 got=$(presence ok)
-[ "$got" = 0:true:1 ] || fail "presence: present: got $got, expected 0:true:1"
+[ "$got" = 0:true:5 ] || fail "fetch: present: got $got, expected 0:true:5: $(cat "$work/log")"
+grep -qx "dir=$fetched" "$work/out" || fail "fetch: no dir output"
+diff -r "$work/src" "$fetched" > /dev/null || fail "fetch: the fetched files differ from the source"
 got=$(presence "$not_found")
-[ "$got" = 0:false:1 ] || fail "presence: 404: got $got, expected 0:false:1"
+[ "$got" = 0:false:1 ] || fail "fetch: 404: got $got, expected 0:false:1"
 got=$(presence "$server_error" "$server_error" ok)
-[ "$got" = 0:true:3 ] || fail "presence: 500 then ok: got $got, expected 0:true:3"
+[ "$got" = 0:true:7 ] || fail "fetch: 500 then ok: got $got, expected 0:true:7"
 got=$(presence "$server_error")
-[ "$got" = 0:unknown:5 ] || fail "presence: 500 every time: got $got, expected 0:unknown:5"
-grep -qF '::warning::could not tell whether' "$work/log" || fail "presence: 500 every time: no warning: $(cat "$work/log")"
+[ "$got" = 0:unknown:5 ] || fail "fetch: 500 every time: got $got, expected 0:unknown:5"
+grep -qF '::warning::could not tell whether' "$work/log" || fail "fetch: 500 every time: no warning: $(cat "$work/log")"
+# A file read that keeps failing is `unknown` too, not a partial copy.
+got=$(presence ok ok ok "$server_error")
+[ "$got" = 0:unknown:8 ] || fail "fetch: file read 500: got $got, expected 0:unknown:8"
+# A file that does not hash to its listed blob: `unknown`.
+cp "$work/src-listing.json" "$work/listing-good.json"
+jq '(.[] | select(.name == "scadbuddy.json") | .sha) = "1111111111111111111111111111111111111111"' "$work/listing-good.json" > "$work/src-listing.json"
+got=$(presence ok)
+[ "$got" = 0:unknown:5 ] || fail "fetch: hash mismatch: got $got, expected 0:unknown:5"
+grep -qF 'does not hash to its blob' "$work/log" || fail "fetch: hash mismatch: no warning: $(cat "$work/log")"
+# A subdirectory and a bad name are not fetched; they reach the edit step as an
+# empty directory and an empty file, and the edit step rejects them (12).
+listing dir:panels file:README.md
+got=$(presence ok)
+[ "$got" = 0:true:5 ] || fail "fetch: odd entries: got $got, expected 0:true:5"
+[ -d "$fetched/panels" ] || fail "fetch: the subdirectory did not reach the edit step"
+[ -f "$fetched/README.md" ] || fail "fetch: the bad name did not reach the edit step"
+if DASHBOARD_SOURCE="$fetched" run_vendored; then
+  fail "fetch then edit, odd entries: step passed, expected an error"
+else
+  grep -qE "deploy/grafana/(panels|README\.md) at ${REVISION} is not" "$work/log" \
+    || fail "fetch then edit, odd entries: wrong error: $(grep '::error' "$work/log")"
+fi
+# A name with a tab is refused up front, by name, before any file is read.
+listing "file:$(printf 'a\tb.json')"
+got=$(presence ok)
+[ "$got" = 0:unknown:2 ] || fail "fetch: tab in a name: got $got, expected 0:unknown:2"
+grep -qF 'with a tab, newline or slash' "$work/log" || fail "fetch: tab in a name: no warning: $(cat "$work/log")"
+# An entry without a blob sha: `unknown`, with that reason, before any file is read.
+listing
+jq 'map(del(.sha))' "$work/src-listing.json" > "$work/listing-nosha.json" && mv "$work/listing-nosha.json" "$work/src-listing.json"
+got=$(presence ok)
+[ "$got" = 0:unknown:2 ] || fail "fetch: no sha: got $got, expected 0:unknown:2"
+grep -qF 'without a 40-hex blob sha' "$work/log" || fail "fetch: no sha: no warning: $(cat "$work/log")"
+# A listing at the contents API's 1,000-entry cap may be cut short: `unknown`.
+jq -n '[range(1000) | {type: "file", name: "d\(.).json", sha: "0000000000000000000000000000000000000000"}]' > "$work/src-listing.json"
+got=$(presence ok)
+[ "$got" = 0:unknown:2 ] || fail "fetch: 1,000 entries: got $got, expected 0:unknown:2"
+grep -qF "the contents API's cap" "$work/log" || fail "fetch: 1,000 entries: no warning: $(cat "$work/log")"
+# ...and a clean fetch feeds a refresh end to end.
+listing
+presence ok > /dev/null
+if DASHBOARD_SOURCE="$fetched" run_vendored; then
+  same_as_src "fetch then edit"
+else
+  fail "fetch then edit: step failed: $(grep '::error' "$work/log")"
+fi
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures case(s) failed" >&2

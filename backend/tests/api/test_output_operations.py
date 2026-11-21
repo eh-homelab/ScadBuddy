@@ -22,7 +22,11 @@ from tests.api.test_library_copies import API, deletes, run, set_up, uploads
 from tests.api.test_model_operations import _workflow_ids
 from tests.support.operations import press
 
-pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
+pytestmark = [
+    pytest.mark.requires_git,
+    pytest.mark.requires_postgres,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 
 def _job(client: TestClient, slug: str, width: float = 12) -> str:

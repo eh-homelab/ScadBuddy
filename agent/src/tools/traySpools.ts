@@ -2,10 +2,10 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { defineTool, json, type Tool } from './registry.js'
 
-// Which spool is in a registry printer's tray, on the native print path (#3818 tier A,
-// plan 2026-10-18 D1, Task 6c): the manual link a person makes for an untagged tray,
-// kept in ScadBuddy's `tray_spool_links` and dropped when the tray's material or colour
-// changes. Write tier: nothing leaves ScadBuddy (not Bambuddy, not any spool provider).
+// Which SB spool is in a registry printer's tray, on the native print path (#3818 tier A,
+// #6262 Task 4): the manual link a person makes for an untagged tray. The spool moves to
+// the tray's place (backend/scadbuddy/filament/inventory.py) and holds the tray until its
+// material or colour changes. Write tier: nothing leaves ScadBuddy (not Bambuddy).
 // Routes: backend/scadbuddy/api/tray_spools.py. Not the Bambuddy path's question
 // (`POST /print/printers/{id}/trays/.../spool`), which writes Bambuddy's assignment.
 
@@ -18,27 +18,26 @@ const amsId = z
   .describe('The unit: an AMS 0-15, an AMS-HT 128-135, or 255 for the external holders')
 const trayId = z.number().int().min(0).max(3).describe('The slot in the unit, from 0; an AMS-HT has only 0')
 
-const SOURCE = "ScadBuddy's spool overlay: provider records copied from Bambuddy's inventory"
+const SOURCE = "ScadBuddy's own spool inventory (SB spools and their places)"
 
 export const traySpoolTools: Tool[] = [
   defineTool({
     name: 'link_tray_spool',
     label: 'Link a spool to a tray',
     description:
-      'Say which spool is in an untagged tray of a LAN-linked printer, for a print on the native path: a ' +
-      "physical spool (`physical_spool_id`) or one spool provider's record of it (`provider` and `record_id`, " +
-      'e.g. Bambuddy\'s spool 16 is provider "bambuddy", record_id "16"). Name exactly one. Only what the user ' +
-      'says is in the tray: the link is kept until the tray\'s material or colour changes. A record moves to ' +
-      "the tray's spool, and a spool from any other tray. An RFID tray's spool is the one its tag names. 409 " +
-      'when the printer has not reported that tray filled, or its tag names another spool; 404 for an unknown ' +
-      'printer, spool or record. Writes ScadBuddy only.',
+      'Say which ScadBuddy spool is in an untagged tray of a LAN-linked printer, for a print on the native path: ' +
+      '`spool_id` is the spool\'s uuid (the `id` filament_spool_list lists). Only what the user says is in the ' +
+      "tray. The spool moves to the tray's place and the tray's previous spool to no place, each with a moved " +
+      "ledger event; the spool holds the tray until the tray's material or colour (alpha included) changes. An " +
+      "RFID tray's spool is the one its tag names; a tagged tray's tag is bound to the spool (one on no spool or " +
+      "on an archived spool is taken), and a spool that held another tag is rebound to the tray's. 409 when the " +
+      'printer has not reported that tray filled, its tag is on another spool, or its two keys name two different ' +
+      'tags; 404 for an unknown printer or spool. Writes ScadBuddy; with tag sync set to push (`sb_to_bb` or `two_way`), the tag change is then pushed to Bambuddy.',
     input: z.object({
       printer_id: printerId,
       ams_id: amsId,
       tray_id: trayId,
-      physical_spool_id: z.string().uuid().optional(),
-      provider: z.string().min(1).max(64).optional(),
-      record_id: z.string().min(1).max(128).optional(),
+      spool_id: z.string().uuid().describe("The ScadBuddy spool's id"),
     }),
     risk: 'write',
     source: SOURCE,
@@ -60,8 +59,8 @@ export const traySpoolTools: Tool[] = [
     name: 'unlink_tray_spool',
     label: 'Unlink a spool from a tray',
     description:
-      'Forget which spool is in a tray of a LAN-linked printer (the link link_tray_spool made). The spool and ' +
-      "its providers' records stay. Writes ScadBuddy only.",
+      'Forget which spool is in a tray of a LAN-linked printer (the link link_tray_spool made): the spool moves ' +
+      'to no place, with a moved ledger event, and itself stays. Writes ScadBuddy only.',
     input: z.object({ printer_id: printerId, ams_id: amsId, tray_id: trayId }),
     risk: 'write',
     source: SOURCE,

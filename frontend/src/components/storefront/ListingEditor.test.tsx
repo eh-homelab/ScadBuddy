@@ -294,7 +294,7 @@ describe('ListingEditor (#5282, #6131)', () => {
     await user.click(screen.getByRole('switch', { name: 'Customer can change Plate' }))
     const problems = screen.getByTestId('colour-problems')
     expect(problems).toHaveTextContent('Plate is #1B6CA8')
-    expect(within(problems).getByRole('link', { name: 'add one to the price book' })).toHaveAttribute('href', '/settings/printing#orders')
+    expect(within(problems).getByRole('link', { name: 'add one to the price book' })).toHaveAttribute('href', '/filament/types')
     await user.click(within(problems).getByRole('combobox', { name: 'Filament for Plate' }))
     await user.click(await screen.findByRole('option', { name: 'PLA Red' }))
     expect(last(seen).fixed['body_color']).toBe('#FF0000')
@@ -323,6 +323,17 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(screen.getByRole('combobox', { name: 'Version' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Done' }))
     expect(screen.getByTestId('listing-design')).toBeInTheDocument()
+  })
+
+  it('keeps the design and version pickers open on a new listing', () => {
+    const versions = [{ commit: COMMIT, short: 'aaaaaaa', author: 'a', date: '2026-11-01T00:00:00Z', message: 'm', files: [], current: true }]
+    const models = [{ slug: 'name-keychain', name: 'Name Keychain' }] as unknown as ComponentProps<typeof ListingEditor>['models']
+    const draft: ListingDraft = { ...emptyDraft('name-keychain', COMMIT), title: 'Tag' }
+    renderPage(<ListingEditor isNew draft={draft} onChange={() => undefined} models={models} versions={versions} schema={keychainSchema} filaments={[]} media={[]} />)
+    expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent('Name Keychain')
+    expect(screen.getByRole('combobox', { name: 'Version' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull()
   })
 
   it('keeps an offered colour’s own label and default when it is saved (#6137, #6144)', () => {

@@ -38,6 +38,7 @@ import time
 import types
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import (
     Annotated,
@@ -71,6 +72,7 @@ from pydantic import (
 from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
     NozzleChoice,
+    NozzleSize,
     RackAlgorithm,
     SlotChoice,
     Tier,
@@ -90,7 +92,14 @@ from scadbuddy.core.secrets import (
     open_secret,
     seal_secret,
 )
-from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
+from scadbuddy.core.settings import (
+    ENV_SEEDED,
+    SECRET_FIELDS,
+    FilamentSync,
+    Settings,
+    check_value,
+    env_var,
+)
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.orders.message_models import MessagingBinding
@@ -491,6 +500,10 @@ class StoredSettings(BambuddyIds):
     #: The LAN-only printers (registry ids, #4699 phase 4) whose prints the watcher leaves
     #: alone: a printer with no Bambuddy link has no Bambuddy id to name.
     print_auto_import_skip_lan_printers: list[str] | None = None
+    #: #6868: an empty spool adds its type to the shopping list. On by default. Stored
+    #: only (no row is on), because `filament/shopping.py` `add_for_empty_on` reads it in
+    #: the emptying write's own transaction, where no environment value reaches.
+    filament_shopping_auto_add_empty: bool = True
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -502,8 +515,9 @@ class StoredSettings(BambuddyIds):
     #: The messaging plugin tool bound to "customer messages" (#5660); ``None`` is none,
     #: so `order_notify_customer` only composes. No secret: the plugin's stay in the agent.
     orders_customer_messaging: MessagingBinding | None = None
-    #: The shop slice profile (#6153): the printer and a spool per material a storefront
-    #: variant is sliced with. ``None`` slices nothing, so no visitor sees a price.
+    #: The shop slice profile (#6153, #6574): the printer and a filament type per
+    #: material a storefront variant is sliced with. ``None`` slices nothing, so no
+    #: visitor sees a price.
     storefront_slice_profile: StorefrontSliceProfile | None = None
 
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
@@ -809,6 +823,9 @@ class SettingsPatch(BaseModel):
     print_auto_import_skip_lan_printers: (
         list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
     ) = Field(default=None, max_length=200)
+    #: #6868: whether an empty spool adds its type to the shopping list; ``null`` puts
+    #: back the default (on).
+    filament_shopping_auto_add_empty: bool | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
@@ -857,6 +874,13 @@ class SettingsPatch(BaseModel):
     event_log_retention_rows: int | None = None
     flow_approval_timeout_seconds: int | None = None
     spool_overlay_refresh_seconds: int | None = None
+    #: The Filament section (#6262 Task 13): see `core.settings.FilamentSync`.
+    filament_sync: FilamentSync | None = None
+    filament_low_stock_pct: int | None = Field(default=None, ge=0, le=100)
+    filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    filament_burn_window_days: int | None = Field(default=None, ge=1, le=365)
+    filament_lead_time_days: int | None = Field(default=None, ge=0, le=365)
+    filament_safety_margin_days: int | None = Field(default=None, ge=0, le=365)
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
@@ -887,6 +911,8 @@ class SettingsPatch(BaseModel):
     storefront_materials: list[str] | None = None
     #: The most colour combinations one prepare of a listing queues (#6237).
     storefront_prepare_cap: int | None = None
+    #: The nozzle diameters one profile fetch exports per printer model (#6625).
+    profile_fetch_nozzles: list[NozzleSize] | None = Field(default=None, min_length=1)
     #: The storefront's mail (#5283); the password is sealed apart, never a setting.
     storefront_mail_host: str | None = None
     storefront_mail_port: int | None = None
@@ -954,6 +980,13 @@ class SettingsPatch(BaseModel):
         if domains is None:
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
+
+    @field_validator("profile_fetch_nozzles")
+    @classmethod
+    def _unique_nozzles(cls, nozzles: list[NozzleSize] | None) -> list[NozzleSize] | None:
+        if nozzles is not None and len(set(nozzles)) != len(nozzles):
+            raise ValueError("profile_fetch_nozzles lists each nozzle once")
+        return nozzles
 
     @field_validator("storefront_shipping_options")
     @classmethod
@@ -1644,9 +1677,8 @@ class SettingsReader(Protocol):
     def plate_clear_required(self) -> bool: ...
 
 
-#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key,
-#: which is also the Bambuddy spool provider's key (`bambuddy/spool_providers.py`). No
-#: other spool provider has a key. `print_projection` leaves every other sealed field null.
+#: The sealed settings the print worker gets opened (#5298, plan D8): the Bambuddy key.
+#: `print_projection` leaves every other sealed field null.
 PRINT_SECRETS = frozenset({"bambuddy_api_key"})
 #: The S3 store's connection, which the print worker never reads (it reaches blobs
 #: through the API's routes): `print_projection` answers each as null, or as its default

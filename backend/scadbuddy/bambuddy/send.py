@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import tempfile
 import weakref
 import zipfile
@@ -43,17 +44,22 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartOverrides,
     PartSettingsUnwritableError,
+    PlateOverrides,
     hint_painted_slots,
     layout_of,
     plate_origin,
+    read_project_settings,
     replate_3mf,
     rezipped,
     state_nozzles,
+    stated_value,
     with_part_settings,
+    with_plate_settings,
 )
 from scadbuddy.render.objects3mf import (
     UnreadableObjectsError,
     plate_boxes,
+    plates_moved,
     read_plates_parts,
 )
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
@@ -62,8 +68,11 @@ from scadbuddy.render.plate import (
     PlateFitError,
     PlateGeometry,
     Rect,
+    TowerFootprint,
+    TowerSettings,
     plate_for,
     tower_beside,
+    tower_footprint,
     tower_reaches,
 )
 from scadbuddy.render.provenance import content_key
@@ -187,6 +196,21 @@ _TOWER_BRIM = "#brim"
 #: #6170). A copy recorded before keeps the author's covers, which the slicer copies into
 #: the sliced file, so reusing it would keep Bambuddy's job cover in the wrong colours.
 _COVERS_REDRAWN = "#covers"
+#: Follows :data:`_COVERS_REDRAWN` in every :attr:`Target.key` of a copy laid out since
+#: an author's prime tower that stands on its plate's objects is moved beside them
+#: (:func:`towers_within_reach`, #3770). A copy recorded before can keep that tower,
+#: which the slicer reports as "Object conflicts were detected".
+_TOWER_CLEAR = "#clear"
+#: Follows :data:`_TOWER_CLEAR` in every :attr:`Target.key` of a copy laid out since the
+#: prime tower is the size the slice builds, with the "No sparse layers" keep-out
+#: (:func:`~scadbuddy.render.plate.tower_footprint`, #6735). A copy recorded before
+#: reserved a 60 mm square, which a plate of eight or more filaments outgrows, and kept
+#: no keep-out, which the slicer then refuses.
+_TOWER_FOOTPRINT = "#footprint"
+#: In a :attr:`Target.key` whose print turns the prime tower on over a file that states it
+#: off (:attr:`Target.tower_on`, #3770): that copy keeps room for the tower, so it is
+#: never reused for a print that leaves the file's tower off, nor the other way round.
+_TOWER_ON = "+tower"
 #: Why a print's settings per part (#5571) are refused for a 3MF nothing can be
 #: written into (``layout_of`` ``as_is``), or a library file with no 3MF to lay out: it
 #: prints as it is, so it cannot carry them.
@@ -205,6 +229,9 @@ PART_SETTINGS_UNWRITABLE = (
 #: Marks a :attr:`Target.key` whose file carries settings on its parts (#5571),
 #: followed by :func:`part_settings_digest`.
 _PART_SETTINGS = "&parts:"
+#: Marks a :attr:`Target.key` whose plates take the print's overrides (#6820), followed
+#: by :func:`plate_settings_digest`.
+_PLATE_SETTINGS = "&plates:"
 #: The flow the slicer assumes when the file states none (#484). So an all-Standard
 #: :attr:`Target.key` is the key of a copy from before #484, which states no flow: the
 #: bytes differ under one key, and reusing either is right only while Standard stays
@@ -215,6 +242,12 @@ _STANDARD = VOLUME_TYPE["standard"]
 def part_settings_digest(overrides: PartOverrides) -> str:
     """A short, stable name for ``overrides`` in a :attr:`Target.key` (#5571)."""
     canonical = json.dumps([[slot, list(map(list, pairs))] for slot, pairs in overrides])
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def plate_settings_digest(settings: PlateOverrides) -> str:
+    """A short, stable name for ``settings`` in a :attr:`Target.key` (#6820)."""
+    canonical = json.dumps([list(pair) for pair in settings])
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
@@ -251,17 +284,29 @@ class Target:
     #: Process settings for each slot's parts (#5571), written into
     #: ``model_settings.config``. ``None`` writes none.
     part_settings: PartOverrides | None = None
+    #: The print turns the prime tower on over a file that states it off (#3770): the
+    #: layout keeps room for the tower (:func:`replate_3mf` ``tower_on``).
+    tower_on: bool = False
+    #: The print's overrides a plate can state (#6820, ``bambu3mf.plate_overrides``),
+    #: written over each plate's own value, which the slicer would apply over the
+    #: process file's. ``None`` writes none.
+    plate_settings: PlateOverrides | None = None
 
     @property
     def key(self) -> str:
         """Recorded as a copy's ``target_key``: a reused upload has to match both halves.
 
-        It starts with the plate's own key, :data:`_BED_STATED`, :data:`_TOWER_BRIM` and
-        :data:`_COVERS_REDRAWN`, so a copy recorded before #4638, whose file states no bed,
-        before #5545, whose tower leaves no room for a tall plate's brim, or before #6170,
-        whose covers are the author's, is never reused.
+        It starts with the plate's own key, :data:`_BED_STATED`, :data:`_TOWER_BRIM`,
+        :data:`_COVERS_REDRAWN`, :data:`_TOWER_CLEAR` and :data:`_TOWER_FOOTPRINT`, so a
+        copy recorded before #4638, whose file states no bed, before #5545, whose tower
+        leaves no room for a tall plate's brim, before #6170, whose covers are the
+        author's, before #3770, whose tower may stand on its objects, or before #6735,
+        whose tower is a fixed square, is never reused.
         """
-        key = f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}"
+        key = (
+            f"{self.plate.key}{_BED_STATED}{_TOWER_BRIM}{_COVERS_REDRAWN}{_TOWER_CLEAR}"
+            f"{_TOWER_FOOTPRINT}"
+        )
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
         if self.nozzle_stats is not None:
@@ -286,6 +331,11 @@ class Target:
             # A file with settings on its parts must not be reused for one without, nor
             # for other settings. Before the colours, so the uncoloured key has it too.
             key = f"{key}{_PART_SETTINGS}{part_settings_digest(self.part_settings)}"
+        if self.plate_settings:
+            # Nor a file whose plates state other values (#6820).
+            key = f"{key}{_PLATE_SETTINGS}{plate_settings_digest(self.plate_settings)}"
+        if self.tower_on:
+            key = f"{key}{_TOWER_ON}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -308,6 +358,8 @@ class Target:
             nozzle_volume_type=self.nozzle_volume_type,
             filament_map=self.filament_map,
             part_settings=self.part_settings,
+            tower_on=self.tower_on,
+            plate_settings=self.plate_settings,
         ).key
 
 
@@ -323,6 +375,8 @@ async def target_for(
     filament_map: FilamentMap | None = None,
     model: str | None = None,
     part_settings: PartOverrides | None = None,
+    tower_on: bool = False,
+    plate_settings: PlateOverrides | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -340,6 +394,8 @@ async def target_for(
     list is not. Without a ``client`` a printer's plate needs it.
 
     ``part_settings`` are the print's settings per slot (#5571), only the print run's.
+    ``tower_on`` is the run's too (:attr:`Target.tower_on`, #3770), and so are
+    ``plate_settings`` (:attr:`Target.plate_settings`, #6820).
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
@@ -353,6 +409,8 @@ async def target_for(
             flows,
             filament_map,
             part_settings,
+            tower_on,
+            plate_settings,
         )
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is not None and client is None:
@@ -371,11 +429,21 @@ async def target_for(
             flows,
             filament_map,
             part_settings,
+            tower_on,
+            plate_settings,
         )
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
     return Target(
-        _plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map, part_settings
+        _plate_for_model(model),
+        nozzle_diameter,
+        chosen,
+        stats,
+        flows,
+        filament_map,
+        part_settings,
+        tower_on,
+        plate_settings,
     )
 
 
@@ -399,6 +467,18 @@ def _with_parts(payload: bytes, overrides: PartOverrides | None) -> bytes:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, PART_SETTINGS_UNWRITABLE) from None
 
 
+def _with_plates(payload: bytes, settings: PlateOverrides | None) -> bytes:
+    """:func:`with_plate_settings`, last, so the print's explicit override wins over the
+    plate's own value and over ScadBuddy's pinned plate map (#6820, #3955). A file whose
+    ``model_settings.config`` cannot be read or written keeps its plates: the slicer
+    then still reads the override from the process file wherever no plate states it."""
+    try:
+        return with_plate_settings(payload, settings)
+    except PartSettingsUnwritableError:
+        logger.warning("the 3MF's plates could not take the print's settings")
+        return payload
+
+
 def _laid_out_for(payload: bytes, target: Target) -> bytes:
     """Lay the 3MF out for ``target`` as whoever laid it out allows (:func:`layout_of`),
     the same for a render and a library file (#1752).
@@ -407,15 +487,21 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     written at render time, when no printer was chosen, so the plate it carries is the
     fallback. Moving it now is what puts the object — and the prime tower a
     multi-colour print needs — where every extruder can reach them. An author's file
-    keeps its placement and every plate it lays out; only the nozzles and colours are
+    keeps every plate it lays out and its scale. Each plate's objects move as one group,
+    as Bambu Studio adapts a project made for another printer: centred where every
+    extruder reaches when the file's bed is another size, else only when not every
+    extruder reaches them, and never when they do not fit there
+    (:func:`objects_within_reach`, #6820). Its towers then move as
+    :func:`towers_within_reach` says. The nozzles and colours are
     stated (:func:`state_nozzles`), and its covers redrawn in those colours
     (:func:`_recoloured_covers`, #6170). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
     unchanged, and so takes no settings per part: a ``target`` with some is refused
     (422, :data:`PART_SETTINGS_AS_IS`), as the run refuses it first
     (``print_run.part_settings_refusal``), so no copy's key names settings its bytes
-    lack. Otherwise the print's settings per part (#5571) are written last, into whatever
-    the file's own layout came to (:func:`with_part_settings`).
+    lack. Otherwise the print's settings per part (#5571) are written into whatever
+    the file's own layout came to (:func:`with_part_settings`), and last the print's
+    overrides over each plate's own value of the same key (:func:`_with_plates`, #6820).
     """
     layout = layout_of(payload)
     if layout == "as_is":
@@ -427,15 +513,18 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
         try:
             laid = hint_painted_slots(
                 towers_within_reach(
-                    _recoloured_covers(
-                        state_nozzles(
-                            payload,
-                            nozzle_stats=target.nozzle_stats,
-                            nozzle_volume_type=target.nozzle_volume_type,
-                            filament_colour=colours,
-                            filament_map=target.filament_map,
+                    objects_within_reach(
+                        _recoloured_covers(
+                            state_nozzles(
+                                payload,
+                                nozzle_stats=target.nozzle_stats,
+                                nozzle_volume_type=target.nozzle_volume_type,
+                                filament_colour=colours,
+                                filament_map=target.filament_map,
+                            ),
+                            colours,
                         ),
-                        colours,
+                        target.plate,
                     ),
                     target.plate,
                 )
@@ -446,7 +535,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             logger.warning("the 3MF inflates past the cap; printing it as it is")
             laid = payload
         # Outside the guard: a copy keyed with its part settings always carries them.
-        return _with_parts(laid, target.part_settings)
+        return _with_plates(_with_parts(laid, target.part_settings), target.plate_settings)
     try:
         payload = replate_3mf(
             payload,
@@ -455,6 +544,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             nozzle_stats=target.nozzle_stats,
             nozzle_volume_type=target.nozzle_volume_type,
             filament_map=target.filament_map,
+            tower_on=target.tower_on,
         )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
@@ -463,7 +553,9 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # An arranged file keeps its painting (#2070), which Bambuddy misreads (#4013).
     # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
     # which hint_painted_slots answers with the payload unchanged.
-    return _with_parts(hint_painted_slots(payload), target.part_settings)
+    return _with_plates(
+        _with_parts(hint_painted_slots(payload), target.part_settings), target.plate_settings
+    )
 
 
 #: The most triangles an author's file may hold, every covered plate's together, for its
@@ -523,22 +615,190 @@ def _tower_value(value: float) -> str:
     return "0" if text in ("", "-0") else text
 
 
+def _tower_on(corner: tuple[float, float], tower: TowerFootprint, objects: Rect) -> bool:
+    """Whether ``tower`` (:func:`tower_footprint`, brim included) at ``wipe_tower_x``/``_y``
+    ``corner`` overlaps ``objects`` (#3770), or stands closer to them than its "No sparse
+    layers" keep-out (#6735): the two the slicer refuses.
+
+    The test uses ``keep_out``, not ``TowerFootprint.clearance``, on purpose (#6757). An
+    author's tower moves only when the slicer refuses it, so a tower 0 to
+    ``TOWER_CLEARANCE`` mm from its objects stays. When the tower moves,
+    :func:`tower_beside` keeps ``clearance``, ScadBuddy's own margin for a place it
+    picks."""
+    x, y = corner[0] - tower.brim, corner[1] - tower.brim
+    gap = tower.keep_out
+    return Rect(x, y, x + tower.size[0], y + tower.size[1]).overlaps(
+        Rect(objects.min_x - gap, objects.min_y - gap, objects.max_x + gap, objects.max_y + gap)
+    )
+
+
+def file_tower(settings: dict[str, object]) -> TowerSettings:
+    """The tower an author's file asks for (#6735): every filament it lists (the plate's
+    own are not read, so this is the largest), its ``prime_tower_rib_wall`` (on unless
+    it states ``"0"``) and ``prime_tower_width``, and its ``wipe_tower_no_sparse_layers``.
+
+    These are the file's own keys. A native slice loads the process preset with
+    ``--load-settings``, and the preset's keys replace the file's (#6757). So the tower
+    the slice builds can differ from the one judged here: the print's prime tower
+    choice and its process overrides set the keys the slicer uses."""
+    colours = settings.get("filament_colour")
+    filaments = len(colours) if isinstance(colours, list) and colours else 2
+    try:
+        width = float(str(stated_value(settings, "prime_tower_width") or PRIME_TOWER_SIDE))
+    except ValueError:
+        width = PRIME_TOWER_SIDE
+    if not (math.isfinite(width) and width > 0):
+        # The file is untrusted: "0", a negative or "nan" is read as no width stated.
+        width = PRIME_TOWER_SIDE
+    return TowerSettings(
+        filaments=filaments,
+        no_sparse_layers=stated_value(settings, "wipe_tower_no_sparse_layers") == "1",
+        rib_wall=stated_value(settings, "prime_tower_rib_wall") != "0",
+        width=width,
+    )
+
+
+def _inside(low: float, high: float, start: float, end: float) -> float | None:
+    """The least shift that brings ``low``..``high`` inside ``start``..``end``, or
+    ``None`` when it is wider."""
+    if high - low > end - start:
+        return None
+    if low < start:
+        return start - low
+    if high > end:
+        return end - high
+    return 0.0
+
+
+#: Bambu Studio's tolerance for "the plate size is unchanged", in millimetres
+#: (:data:`ADAPT_SETTINGS_SOURCE`, ``plate_size_eps``).
+SAME_BED_MM = 0.1
+
+#: Bambu Studio's rule for a project opened on another printer ("Adapt Settings"):
+#: ``Plater::priv::update_objects_position_when_select_preset`` at master 8e524a3.
+ADAPT_SETTINGS_SOURCE = (
+    "https://github.com/bambulab/BambuStudio/blob/8e524a39d4c4cd0541801c1c46d2f77debb0bf1d"
+    "/src/slic3r/GUI/Plater.cpp#L20417"
+)
+
+
+def objects_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
+    """``payload`` with each plate's objects moved, as one group, where every extruder
+    of ``plate`` reaches (``PlateGeometry.usable``), as Bambu Studio adapts a project
+    made for another printer (:data:`ADAPT_SETTINGS_SOURCE`, #6820). The move is a
+    translation only: no rotation, no scale, and the objects keep their places relative
+    to each other. Only that plate's build items move
+    (:func:`~scadbuddy.render.objects3mf.plates_moved`), and every other entry keeps its
+    bytes.
+
+    - The file's bed (:func:`_source_bed`) differs from ``plate.size`` by more than
+      :data:`SAME_BED_MM`: each plate's box is centred on ``usable``'s centre, whether
+      or not it was in reach. Bambu Studio centres the plate's content on the new
+      plate's centre; here the centre is that of the area every extruder reaches, which
+      is the bed on a single-extruder printer.
+    - The beds are the same size: the author placed the objects for this bed, so only a
+      box outside ``usable`` moves, by the smallest shift that brings it inside.
+    - A box wider or deeper than ``usable`` keeps its place. Bambu Studio re-arranges
+      such content (its ``reschedule_set``, an ArrangeJob); ScadBuddy does not yet, and
+      the slicer says why it fails.
+
+    The prime tower is not moved here. :func:`towers_within_reach` then judges it on the
+    moved boxes, where Bambu Studio moves it with the content.
+
+    The measurement behind it: library copy 1000001621 put its spool at x 0..180 on an
+    A1 mini, and an H2C's right nozzle reaches only x 25..330, so the slicer moved the
+    filament to the left nozzle, which had none: "Found G-code in unprintable area",
+    T65535. The same file with the plate's objects at x 75..255 sliced on the right
+    nozzle (measured 2026-11-20 with the prod slicer pod's BambuStudio 02.08.02.61).
+
+    The ``<assemble_item>`` transforms in ``model_settings.config`` are not changed:
+    they place the objects in Bambu Studio's assembly view, not on a plate. A file that
+    cannot be read within the read budget, or one sent with no printer chosen, keeps its
+    placement. The objects are read as :func:`towers_within_reach` reads them, less
+    their plate's origin on the file's own bed."""
+    if plate.model is None:
+        return payload  # no printer chosen: nothing to judge the objects against
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            settings = read_project_settings(archive)
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return payload  # unreadable or past the cap (#6792): the slicer says why
+    if not isinstance(settings, dict):
+        return payload
+    bed = _source_bed(settings)
+    if bed is None:
+        return payload
+    try:
+        read = plate_boxes(payload)
+    except UnreadableObjectsError:
+        return payload
+    source = PlateGeometry(
+        model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
+    )
+    usable = plate.usable
+    same_bed = (
+        abs(bed[0] - plate.size[0]) <= SAME_BED_MM and abs(bed[1] - plate.size[1]) <= SAME_BED_MM
+    )
+    moves: dict[int, tuple[float, float]] = {}
+    for index, (low, high) in read.boxes.items():
+        if index > read.count:
+            continue
+        ox, oy = plate_origin(index, read.count, source)
+        box = Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
+        dx = _inside(box.min_x, box.max_x, usable.min_x, usable.max_x)
+        dy = _inside(box.min_y, box.max_y, usable.min_y, usable.max_y)
+        if dx is None or dy is None:
+            continue  # it does not fit: Bambu Studio re-arranges it, ScadBuddy not yet
+        if not same_bed:
+            dx = usable.centre[0] - box.centre[0]
+            dy = usable.centre[1] - box.centre[1]
+        if dx == 0 and dy == 0:
+            continue
+        moves[index] = (dx, dy)
+    if not moves:
+        return payload
+    try:
+        name, model = plates_moved(payload, moves)
+    except UnreadableObjectsError:
+        return payload
+    logger.info(
+        "moved the file's objects where every extruder reaches",
+        extra={"printer_model": plate.model, "plates": sorted(moves)},
+    )
+    return rezipped(payload, {name: model})
+
+
 def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     """``payload`` with each plate's prime tower that ``plate``'s extruders cannot all
-    reach moved beside that plate's objects, by #105's rule (:func:`tower_beside`),
-    else unchanged (#4014). The brim judged round each tower is the one the slicer
-    draws for its plate's height (:func:`tower_brim`, #5545).
+    reach, or that stands on that plate's objects or inside their "No sparse layers"
+    keep-out, moved beside those objects by #105's rule (:func:`tower_beside`), else
+    unchanged (#4014, #3770). Each tower is the one the slicer builds for its plate's
+    height and the file's settings (:func:`tower_footprint`, :func:`file_tower`, #6735),
+    with the brim it draws (#5545).
 
     An author's file keeps the tower where its printer put it: library file 2440, laid
     out on an A1 mini, has it at x 15, and an H2C's second extruder reaches nothing
-    below x 25, so every slice failed with "Found G-code in unprintable area". Only an
-    unreachable tower moves; a plate whose objects cannot be read, or that leaves no
-    room, keeps its own, and the slicer says why. The objects are read where the file
-    places them, less their plate's origin on the file's own bed."""
+    below x 25, so every slice failed with "Found G-code in unprintable area". A tower
+    whose square, brim included, overlaps its plate's objects' box makes the slicer
+    report "Object conflicts were detected" (#3770, Knitted Cat). Only such a tower
+    moves; a plate whose objects cannot be read, or that leaves no room, keeps its own,
+    and the slicer says why. A tower is judged even where the file seems to print none
+    (``enable_prime_tower`` ``"0"``, or one filament; claude-review on #6691): the print
+    dialog's choice (#3628) can turn the tower on at slice time, and a smooth timelapse
+    makes one for a single filament (``h2c-plate-layout`` skill), and the send knows
+    neither. Moving a tower that never prints changes only its settings. The objects are read
+    where the file places them, less their plate's origin on the file's own bed. The box
+    is the plate's objects' together, so a tower an author put in a gap between objects
+    also moves, to a place clear of them all."""
     if plate.model is None:
         return payload  # no printer chosen: nothing to judge a tower against
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            settings = read_project_settings(archive)
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return payload  # unreadable or past the cap (#6792): the slicer says why
+    if not isinstance(settings, dict):
+        return payload
     xs, ys = settings.get("wipe_tower_x"), settings.get("wipe_tower_y")
     bed = _source_bed(settings)
     if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) != len(ys) or bed is None:
@@ -547,24 +807,10 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         towers = [(float(x), float(y)) for x, y in zip(xs, ys, strict=True)]
     except ValueError:
         return payload
-    try:
-        side = float(settings.get("prime_tower_width") or PRIME_TOWER_SIDE)
-    except (TypeError, ValueError):
-        side = PRIME_TOWER_SIDE
-    # The widest brim first (#5545): a tower that clears the plate's edges with it
-    # needs no read of the objects. The rest are judged by their plate's height below.
-    unreachable = [
-        index
-        for index, tower in enumerate(towers, start=1)
-        if not tower_reaches(tower, plate, side)
-    ]
-    if not unreachable:
-        return payload
+    asked = file_tower(settings)
     try:
         # Read within the read budget, model settings included: a library file is
         # untrusted, and one this cannot read keeps its towers (claude-review on #4057).
-        # Every plate's boxes are read, though only the plates in `unreachable` need
-        # theirs: cheap at today's plate counts; read only those if counts grow (#4076).
         read = plate_boxes(payload)
     except UnreadableObjectsError:
         return payload
@@ -573,19 +819,20 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
     )
     moved = list(towers)
-    for index in unreachable:
+    for index, tower in enumerate(towers, start=1):
         if index > count or index not in boxes:
             continue
         low, high = boxes[index]
         height = float(high[2] - low[2])
-        if tower_reaches(towers[index - 1], plate, side, height):
-            continue
         ox, oy = plate_origin(index, count, source)
-        corner = tower_beside(
-            Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)),
-            plate,
-            height,
+        objects = Rect(
+            float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy)
         )
+        if tower_reaches(tower, plate, height, asked) and not _tower_on(
+            tower, tower_footprint(plate, height, asked), objects
+        ):
+            continue
+        corner = tower_beside(objects, plate, height, asked)
         if corner is not None:
             moved[index - 1] = corner
     if moved == towers:
@@ -593,7 +840,7 @@ def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
     settings["wipe_tower_x"] = [_tower_value(x) for x, _ in moved]
     settings["wipe_tower_y"] = [_tower_value(y) for _, y in moved]
     logger.info(
-        "moved the file's prime tower where every extruder reaches",
+        "moved the file's prime tower where every extruder reaches, clear of its objects",
         extra={"printer_model": plate.model, "towers": len(moved)},
     )
     return rezipped(
@@ -616,7 +863,7 @@ def _colours_for(payload: bytes, chosen: Sequence[str] | None) -> list[str] | No
     if chosen is None:
         return None
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        current = json.loads(archive.read(PROJECT_SETTINGS_NAME)).get("filament_colour") or []
+        current = read_project_settings(archive).get("filament_colour") or []
     if len(current) != len(chosen):
         logger.warning(
             "the spools chosen are not one per filament of the 3MF; keeping its colours",

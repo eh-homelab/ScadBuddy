@@ -22,7 +22,7 @@ does not parse is :class:`PaintCodeError`, never a guess.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 
@@ -114,6 +114,48 @@ def _walk(code: str, mapping: Mapping[int, int] | None) -> tuple[set[int], list[
 def states(code: str) -> set[int]:
     """The extruders ``code`` paints with, 0 (the part's own) left out."""
     return _walk(code, None)[0] - {0}
+
+
+class PaintDigitsSpentError(ValueError):
+    """More digits of distinct paint codes than a :class:`DistinctCodes` decodes."""
+
+
+class DistinctCodes:
+    """Paint codes read as :func:`states` reads them, each distinct code decoded once
+    (``""``, unpainted, skipped). The archive's caps bound a code's bytes, not what
+    decoding them costs, so with ``max_digits`` every new code's digits are counted,
+    and past it :class:`PaintDigitsSpentError` is raised. With ``skip_unreadable`` a
+    code that does not parse adds no filament, else it raises :class:`PaintCodeError`
+    (#6823: one decode for the plate box, the slot hints and the by-object count)."""
+
+    def __init__(self, max_digits: int | None = None, *, skip_unreadable: bool = False) -> None:
+        self.max_digits = max_digits
+        self.skip_unreadable = skip_unreadable
+        self.seen: dict[str, frozenset[int]] = {}
+        self.digits = 0
+
+    def states(self, codes: Iterable[str]) -> set[int]:
+        """The filaments ``codes`` paint with, 0 (the part's own) left out."""
+        found: set[int] = set()
+        for code in codes:
+            if not code:
+                continue
+            known = self.seen.get(code)
+            if known is None:
+                self.digits += len(code)
+                if self.max_digits is not None and self.digits > self.max_digits:
+                    raise PaintDigitsSpentError(
+                        f"the painting has more than {self.max_digits:,} digits of distinct codes"
+                    )
+                try:
+                    known = frozenset(states(code))
+                except PaintCodeError:
+                    if not self.skip_unreadable:
+                        raise
+                    known = frozenset()  # left out, never guessed at
+                self.seen[code] = known
+            found |= known
+        return found
 
 
 def uniform_state(code: str) -> int | None:

@@ -6,6 +6,7 @@ import errno
 import os
 import socket
 import ssl
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -522,3 +523,88 @@ def test_retry_after_keeps_only_a_delay_or_an_http_date(
     """#2037: the peer's header is carried into a problem's detail, so only what RFC
     9110 allows, at a bounded length, is kept."""
     assert retry_after(header) == kept
+
+
+@respx.mock
+async def test_spool_usage_reads_and_skips_a_bad_row(
+    bambuddy: BambuddyClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``GET /inventory/usage`` (#6263): BB's naive times read as UTC, and a row that is
+    not a usage row is logged and left out, not the whole read."""
+    good = {
+        "id": 457,
+        "spool_id": 31,
+        "printer_id": 1,
+        "print_name": "scadbuddy-ac13ac3c-p1",
+        "weight_used": 75.1,
+        "percent_used": 7.5,
+        "status": "completed",
+        "cost": 1.5,
+        "created_at": "2026-11-13T08:24:44.614397",
+    }
+    route = respx.get(f"{API}/inventory/usage").mock(
+        return_value=httpx.Response(200, json=[good, {"id": 458, "spool_id": None}])
+    )
+
+    rows = await bambuddy.spool_usage(limit=60)
+
+    assert route.calls.last.request.url.params["limit"] == "60"
+    assert [(r.id, r.spool_id, r.weight_used) for r in rows] == [(457, 31, 75.1)]
+    assert rows[0].created_at == datetime(2026, 11, 13, 8, 24, 44, 614397, tzinfo=UTC)
+    assert "is not a usage row; skipped" in caplog.text
+
+
+@respx.mock
+async def test_the_spool_catalog_is_read_from_the_inventory(bambuddy: BambuddyClient) -> None:
+    """``GET /inventory/catalog`` (1.2.6b1 ``CatalogEntry``): the empty-spool entries."""
+    route = respx.get(f"{API}/inventory/catalog").mock(
+        return_value=httpx.Response(200, json=recording("inventory-catalog.json"))
+    )
+
+    catalog = await bambuddy.spool_catalog()
+
+    assert route.called
+    assert [(e.id, e.name, e.weight) for e in catalog] == [
+        (5, "Bambu reusable", 250),
+        (6, "Bambu cardboard", 212),
+        (7, "Generic plastic", 140),
+    ]
+
+
+@respx.mock
+async def test_the_spool_catalog_declares_read_status(bambuddy: BambuddyClient) -> None:
+    respx.get(f"{API}/inventory/catalog").mock(
+        return_value=httpx.Response(403, json={"detail": "Missing permission"})
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await bambuddy.spool_catalog()
+
+    assert caught.value.extensions["required_scope"] == Scope.READ_STATUS.value
+
+
+@respx.mock
+async def test_ha_entities_are_read_with_the_search(bambuddy: BambuddyClient) -> None:
+    route = respx.get(f"{API}/location-ha-sensors/entities").mock(
+        return_value=httpx.Response(200, json=recording("ha-entities.json"))
+    )
+
+    entities = await bambuddy.ha_entities("box")
+
+    assert route.calls.last.request.url.params["search"] == "box"
+    assert [(e.entity_id, e.state, e.device_class, e.unit_of_measurement) for e in entities] == [
+        ("sensor.dry_box_humidity", "18.4", "humidity", "%"),
+        ("sensor.dry_box_temperature", "unavailable", "temperature", "°C"),
+        ("sensor.attic_humidity", None, "humidity", "%"),
+        ("sensor.no_class", "3", None, None),
+    ]
+
+
+@respx.mock
+async def test_ha_entities_with_no_search_send_none(bambuddy: BambuddyClient) -> None:
+    route = respx.get(f"{API}/location-ha-sensors/entities").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+
+    assert await bambuddy.ha_entities(None) == []
+    assert "search" not in route.calls.last.request.url.params

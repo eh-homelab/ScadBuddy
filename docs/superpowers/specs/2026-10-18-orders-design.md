@@ -1414,6 +1414,8 @@ usable on its own.
   only makes the tool outward. Whether a "customer approved the quote" step belongs in
   the lifecycle (a `quoted` → `accepted` transition the customer makes through a
   declared page) waits on §9.
+  *Settled 2026-11-17:* the storefront's customer accept (#5283) is that step, and it
+  needs no declared page (`2026-11-17-declared-pages-design.md` §11).
 - **Where the built-in flow's script lives.** Registered at start as version 1 of a
   named flow (proposed, §7.2), or as a hidden default the Flows tab offers to copy
   so a shop that never wants it never sees it.

@@ -1,6 +1,9 @@
 import type { Sql } from 'postgres'
+import { crudRead, wellFormed } from '../api/crudRead.js'
+import { CrudLeases, type CrudTarget } from '../api/crudStores.js'
 import type { LockClient, LockLease } from '../db.js'
 import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
+import { sessionPath } from './rows.js'
 import type { TouchedCall, TouchedSink } from './touched.js'
 
 // The assistant's spend on an order (#5330, job cost spec 2026-11-05 §4.4). A session works
@@ -119,11 +122,183 @@ function text(value: unknown): string | null {
 type Pending = { order_id: string; order_item_id: string; attempted_usd: number | null }
 type Order = { id: string; items: string[]; attempted: number | null }
 
+/** A report's start: the rows still to report (each now marked tried) and the session's spend. */
+export type ReportStart = { pending: Pending[]; cost: number; carried: number; principal: string; over: boolean }
+
+/** How an order's share ended: `reported` (carrying what was sent), `unsent` (sent again with more spend), `closed` (reported, nothing carried). */
+export type Settled = 'reported' | 'unsent' | 'closed'
+
+/** A report's writes, each under the session's report lock. */
+export interface ReportWrites {
+  /** The rows still to report and the session's spend; undefined when none is left or the session is gone. */
+  begin(): Promise<ReportStart | undefined>
+  /** The share about to be sent for `orderId`, split over `items`. */
+  attempt(orderId: string, items: string[], amountUsd: number): Promise<void>
+  settle(orderId: string, outcome: Settled): Promise<void>
+}
+
+/**
+ * Where a session's order-cost rows are kept and its report lock is held (#5299 step 9, part c):
+ * `PgOrderCostRows`, an advisory lock on a lock-client connection, or the API's CRUD routes under
+ * a lease row (`CrudOrderCostRows`, area `session-order-costs`).
+ */
+export interface OrderCostRows {
+  insert(sessionId: string, orderId: string, itemId: string): Promise<void>
+  sweepSessions(limit: number): Promise<string[]>
+  /** Runs `fn` holding the session's report lock; returns without running it while another holder has the lock, or with no lock to take. */
+  locked(sessionId: string, fn: (writes: ReportWrites) => Promise<void>): Promise<void>
+}
+
+const SETTLE: Record<Settled, string> = {
+  reported: 'reported_at = now(), reported_usd = COALESCE(attempted_usd, 0), attempted_usd = NULL',
+  unsent: 'attempted_usd = NULL',
+  closed: 'reported_at = now(), reported_usd = 0, attempted_usd = NULL',
+}
+
+export class PgOrderCostRows implements OrderCostRows {
+  readonly #sql: Sql
+  readonly #locks: LockClient
+
+  /** `sql` is the stores' pool, short queries only; `locks` the lock client's own connections, which hold a report's lock across its posts. */
+  constructor(sql: Sql, locks: LockClient) {
+    this.#sql = sql
+    this.#locks = locks
+  }
+
+  async insert(sessionId: string, orderId: string, itemId: string): Promise<void> {
+    await this.#sql`
+      INSERT INTO ai_session_order_costs (session_id, order_id, order_item_id)
+      SELECT ${sessionId}::uuid, ${orderId}, ${itemId}
+      WHERE NOT EXISTS (SELECT 1 FROM ai_session_order_costs
+                        WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND reported_at IS NOT NULL)
+      ON CONFLICT DO NOTHING`
+  }
+
+  async sweepSessions(limit: number): Promise<string[]> {
+    const sessions = await this.#sql<{ session_id: string }[]>`
+      SELECT c.session_id FROM ai_session_order_costs c JOIN ai_sessions s ON s.id = c.session_id
+      WHERE c.reported_at IS NULL AND c.at < now() - ${SWEEP_AFTER}::interval
+        AND s.status NOT IN ('running', 'waiting_approval', 'waiting_input')
+      GROUP BY c.session_id ORDER BY max(c.tried_at) NULLS FIRST, min(c.at) LIMIT ${limit}`
+    return sessions.map((s) => s.session_id)
+  }
+
+  async locked(sessionId: string, fn: (writes: ReportWrites) => Promise<void>): Promise<void> {
+    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
+    let healthy = false
+    const lease: LockLease | undefined = await this.#locks.take()
+    if (!lease) return
+    try {
+      const key = `${LOCK_PREFIX}${sessionId}`
+      const [lock] = await lease.sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS locked`
+      // A report already running for the session (here or on another replica) sends what
+      // this one would; what it leaves waits for the next turn's end or the sweep.
+      if (!lock?.locked) {
+        healthy = true
+        return
+      }
+      try {
+        await fn(this.#writes(sessionId))
+      } finally {
+        await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
+        healthy = true
+      }
+    } finally {
+      lease.done(healthy)
+    }
+  }
+
+  #writes(sessionId: string): ReportWrites {
+    const sql = this.#sql
+    return {
+      begin: async () => {
+        const pending = await sql<Pending[]>`
+          SELECT order_id, order_item_id, attempted_usd FROM ai_session_order_costs
+          WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
+        if (pending.length === 0) return undefined
+        await sql`UPDATE ai_session_order_costs SET tried_at = now() WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL`
+        const [row] = await sql<{ cost: number; carried: number; principal: string; over: boolean }[]>`
+          SELECT s.cost_usd AS cost, s.owner_id AS principal,
+                 (s.status IN ('done', 'failed') OR (s.status = 'idle' AND s.updated_at < now() - ${IDLE_OVER_AFTER}::interval)) AS over,
+                 (SELECT COALESCE(SUM(COALESCE(reported_usd, 0) + COALESCE(attempted_usd, 0)), 0)
+                  FROM ai_session_order_costs WHERE session_id = s.id) AS carried
+          FROM ai_sessions s WHERE s.id = ${sessionId}::uuid`
+        if (!row) return undefined
+        return { pending, cost: Number(row.cost), carried: Number(row.carried), principal: row.principal, over: row.over }
+      },
+      attempt: async (orderId, items, amountUsd) => {
+        await sql`
+          UPDATE ai_session_order_costs SET attempted_usd = ${amountUsd / items.length}
+          WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND order_item_id = ANY(${items})
+            AND reported_at IS NULL`
+      },
+      settle: async (orderId, outcome) => {
+        await sql`
+          UPDATE ai_session_order_costs SET ${sql.unsafe(SETTLE[outcome])}
+          WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND reported_at IS NULL`
+      },
+    }
+  }
+}
+
+/** The lease key of a session's report (backend agent_data/leases.py `order-cost:<id>`). */
+export const orderCostLease = (sessionId: string): string => `order-cost:${sessionId.toLowerCase()}`
+
+/**
+ * The rows and the report lock over the API's CRUD routes (#5299 step 9, part c; backend
+ * api/crud_agent_order_costs.py, area `session-order-costs`): the lock is a lease row
+ * (`order-cost:<id>`, #5299 D3), renewed while the report runs, and every write of the report
+ * names the lease's token, so one whose lease lapsed writes nothing (409 `lease-lost`).
+ */
+export class CrudOrderCostRows implements OrderCostRows {
+  readonly #fetch: typeof fetch
+  readonly #base: string
+  readonly #leases: CrudLeases
+
+  constructor(target: CrudTarget) {
+    this.#fetch = target.fetch ?? globalThis.fetch
+    this.#base = target.baseUrl
+    this.#leases = new CrudLeases(target)
+  }
+
+  #call<T>(step: string, path: string, body: unknown): Promise<T> {
+    return crudRead<T>(this.#fetch, this.#base, step, path, { method: 'POST', body: wellFormed(body) })
+  }
+
+  async insert(sessionId: string, orderId: string, itemId: string): Promise<void> {
+    const path = sessionPath(sessionId)
+    if (path === undefined) throw new Error(`session ${JSON.stringify(sessionId)} is not a session id`)
+    await this.#call(`the order cost of session ${sessionId}`, `${path}/order-costs`, { order_id: orderId, order_item_id: itemId })
+  }
+
+  async sweepSessions(limit: number): Promise<string[]> {
+    return (await this.#call<{ sessions: string[] }>('the order costs to report', '/order-costs/sweep', { limit })).sessions
+  }
+
+  async locked(sessionId: string, fn: (writes: ReportWrites) => Promise<void>): Promise<void> {
+    const path = sessionPath(sessionId)
+    if (path === undefined) return
+    const step = `the order costs of session ${sessionId}`
+    await this.#leases.holding(orderCostLease(sessionId), async ({ token }) =>
+      fn({
+        begin: async () => {
+          const { report } = await this.#call<{ report: ReportStart | null }>(step, `${path}/order-costs/report`, { token })
+          return report ?? undefined
+        },
+        attempt: async (orderId, items, amountUsd) => {
+          await this.#call(step, `${path}/order-costs/attempt`, { token, order_id: orderId, items, amount_usd: amountUsd })
+        },
+        settle: async (orderId, outcome) => {
+          await this.#call(step, `${path}/order-costs/settle`, { token, order_id: orderId, outcome })
+        },
+      }),
+    )
+  }
+}
+
 export type OrderCostsOptions = {
-  /** The stores' pool: short queries only, never held across a post. */
-  sql: Sql
-  /** The lock client's own connections, which hold a session's report lock across its posts. */
-  locks: LockClient
+  /** Where the rows are kept and the report lock is held. */
+  rows: OrderCostRows
   post: PostCost
   onError?: (err: unknown) => void
   now?: () => number
@@ -134,8 +309,7 @@ export type OrderCostsOptions = {
 }
 
 export class OrderCosts implements TouchedSink {
-  private readonly sql: Sql
-  private readonly locks: LockClient
+  private readonly rows: OrderCostRows
   private readonly post: PostCost
   private readonly onError: ((err: unknown) => void) | undefined
   private readonly now: () => number
@@ -143,8 +317,7 @@ export class OrderCosts implements TouchedSink {
   private readonly sweepLimit: number
 
   constructor(options: OrderCostsOptions) {
-    this.sql = options.sql
-    this.locks = options.locks
+    this.rows = options.rows
     this.post = options.post
     this.onError = options.onError
     this.now = options.now ?? Date.now
@@ -166,12 +339,7 @@ export class OrderCosts implements TouchedSink {
 
   private async insert(sessionId: string, order: string, item: string): Promise<void> {
     try {
-      await this.sql`
-        INSERT INTO ai_session_order_costs (session_id, order_id, order_item_id)
-        SELECT ${sessionId}::uuid, ${order}, ${item}
-        WHERE NOT EXISTS (SELECT 1 FROM ai_session_order_costs
-                          WHERE session_id = ${sessionId}::uuid AND order_id = ${order} AND reported_at IS NOT NULL)
-        ON CONFLICT DO NOTHING`
+      await this.rows.insert(sessionId, order, item)
     } catch (err) {
       this.onError?.(err)
     }
@@ -180,35 +348,15 @@ export class OrderCosts implements TouchedSink {
   /**
    * Sends each order still to report its share: the share an earlier report sent and heard no
    * answer for, else an equal part of the session's spend not yet carried or sent. The session's
-   * lock is held on a lock-client connection (db.ts `createLockClient`), never one of the stores';
-   * with every lock connection out, nothing is sent now and the next turn's end or the sweep
-   * reports it. Never throws.
+   * report lock is held throughout (`OrderCostRows.locked`): a lock-client connection over SQL,
+   * never one of the stores', or a lease row on the API; with no lock to take, nothing is sent now
+   * and the next turn's end or the sweep reports it. Never throws.
    */
   async report(sessionId: string): Promise<void> {
-    let lease: LockLease | undefined
-    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
-    let healthy = false
     try {
-      lease = await this.locks.take()
-      if (!lease) return
-      const key = `${LOCK_PREFIX}${sessionId}`
-      const [lock] = await lease.sql<{ locked: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS locked`
-      // A report already running for the session (here or on another replica) sends what
-      // this one would; what it leaves waits for the next turn's end or the sweep.
-      if (!lock?.locked) {
-        healthy = true
-        return
-      }
-      try {
-        await this.send(sessionId)
-      } finally {
-        await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
-        healthy = true
-      }
+      await this.rows.locked(sessionId, (writes) => this.send(sessionId, writes))
     } catch (err) {
       this.onError?.(err)
-    } finally {
-      lease?.done(healthy)
     }
   }
 
@@ -219,34 +367,18 @@ export class OrderCosts implements TouchedSink {
    */
   async sweep(): Promise<void> {
     try {
-      const sessions = await this.sql<{ session_id: string }[]>`
-        SELECT c.session_id FROM ai_session_order_costs c JOIN ai_sessions s ON s.id = c.session_id
-        WHERE c.reported_at IS NULL AND c.at < now() - ${SWEEP_AFTER}::interval
-          AND s.status NOT IN ('running', 'waiting_approval', 'waiting_input')
-        GROUP BY c.session_id ORDER BY max(c.tried_at) NULLS FIRST, min(c.at) LIMIT ${this.sweepLimit}`
-      for (const { session_id } of sessions) await this.report(session_id)
+      for (const sessionId of await this.rows.sweepSessions(this.sweepLimit)) await this.report(sessionId)
     } catch (err) {
       this.onError?.(err)
     }
   }
 
-  private async send(sessionId: string): Promise<void> {
-    const sql = this.sql
+  private async send(sessionId: string, writes: ReportWrites): Promise<void> {
     const deadline = this.now() + REPORT_DEADLINE_MS
-    const pending = await sql<Pending[]>`
-      SELECT order_id, order_item_id, attempted_usd FROM ai_session_order_costs
-      WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL ORDER BY at, order_id, order_item_id`
-    if (pending.length === 0) return
-    await sql`UPDATE ai_session_order_costs SET tried_at = now() WHERE session_id = ${sessionId}::uuid AND reported_at IS NULL`
-    const [row] = await sql<{ cost: number; carried: number; principal: string; over: boolean }[]>`
-      SELECT s.cost_usd AS cost, s.owner_id AS principal,
-             (s.status IN ('done', 'failed') OR (s.status = 'idle' AND s.updated_at < now() - ${IDLE_OVER_AFTER}::interval)) AS over,
-             (SELECT COALESCE(SUM(COALESCE(reported_usd, 0) + COALESCE(attempted_usd, 0)), 0)
-              FROM ai_session_order_costs WHERE session_id = s.id) AS carried
-      FROM ai_sessions s WHERE s.id = ${sessionId}::uuid`
+    const row = await writes.begin()
     if (!row) return
     const byId = new Map<string, Order>()
-    for (const p of pending) {
+    for (const p of row.pending) {
       const order = byId.get(p.order_id) ?? { id: p.order_id, items: [], attempted: null }
       order.items.push(p.order_item_id)
       if (p.attempted_usd !== null) order.attempted = (order.attempted ?? 0) + Number(p.attempted_usd)
@@ -254,7 +386,7 @@ export class OrderCosts implements TouchedSink {
     }
     const orders = [...byId.values()]
     const fresh = orders.filter((o) => o.attempted === null)
-    const share = fresh.length === 0 ? 0 : Math.max(Number(row.cost) - Number(row.carried), 0) / fresh.length
+    const share = fresh.length === 0 ? 0 : Math.max(row.cost - row.carried, 0) / fresh.length
     // Under a hundredth of a cent no new share is sent: those orders stay to report, with the
     // next turn's spend. A larger share still under one minor unit of the order's currency is
     // sent, and the backend answers it with no entry (`deferred`), which keeps it the same way.
@@ -267,7 +399,7 @@ export class OrderCosts implements TouchedSink {
     // that turn's orders.
     const over = row.over
     if (over && share < 1e-4) {
-      for (const order of fresh) await this.closeOut(sessionId, order.id)
+      for (const order of fresh) await writes.settle(order.id, 'closed')
     }
     // The rows are read whole and updated by the items read: a revision recorded while the
     // report runs is no part of this share, and is marked reported with nothing carried.
@@ -276,12 +408,7 @@ export class OrderCosts implements TouchedSink {
       const left = deadline - this.now()
       if (left < MIN_POST_MS) return
       const amount = order.attempted ?? share
-      if (order.attempted === null) {
-        await sql`
-          UPDATE ai_session_order_costs SET attempted_usd = ${amount / order.items.length}
-          WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND order_item_id = ANY(${order.items})
-            AND reported_at IS NULL`
-      }
+      if (order.attempted === null) await writes.attempt(order.id, order.items, amount)
       const answer = await this.post(
         {
           orderId: order.id,
@@ -294,26 +421,11 @@ export class OrderCosts implements TouchedSink {
       )
       if (answer === 'failed') continue
       if (answer === 'deferred') {
-        if (over) await this.closeOut(sessionId, order.id)
-        else {
-          await sql`
-            UPDATE ai_session_order_costs SET attempted_usd = NULL
-            WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
-        }
+        await writes.settle(order.id, over ? 'closed' : 'unsent')
         continue
       }
-      await sql`
-        UPDATE ai_session_order_costs
-        SET reported_at = now(), reported_usd = COALESCE(attempted_usd, 0), attempted_usd = NULL
-        WHERE session_id = ${sessionId}::uuid AND order_id = ${order.id} AND reported_at IS NULL`
+      await writes.settle(order.id, 'reported')
     }
-  }
-
-  /** An order's share that can never be written: reported, nothing carried, out of the sweep. */
-  private async closeOut(sessionId: string, orderId: string): Promise<void> {
-    await this.sql`
-      UPDATE ai_session_order_costs SET reported_at = now(), reported_usd = 0, attempted_usd = NULL
-      WHERE session_id = ${sessionId}::uuid AND order_id = ${orderId} AND reported_at IS NULL`
   }
 }
 

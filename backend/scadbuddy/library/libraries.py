@@ -46,7 +46,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -463,13 +463,13 @@ class SharedLeases(Protocol):
 
     def take(self, holder: str, checkouts: Sequence[Path]) -> uuid.UUID: ...
 
-    def renew(self, token: uuid.UUID) -> object: ...
+    def renew(self, token: uuid.UUID) -> bool: ...
 
     def drop(self, token: uuid.UUID) -> None: ...
 
     def take_pin(self) -> uuid.UUID: ...
 
-    def renew_pin(self, token: uuid.UUID) -> object: ...
+    def renew_pin(self, token: uuid.UUID) -> bool: ...
 
     def drop_pin(self, token: uuid.UUID) -> None: ...
 
@@ -562,11 +562,12 @@ class CheckoutLeases:
                 raise LeaseTokenTakenError(str(token))
 
     def renew(self, token: uuid.UUID, *, ttl: float | None = None) -> bool:
-        """Whether the lease still had a row to renew."""
+        """Whether the lease was still live: a lapsed row may have let a removal in
+        before any take swept it, so it is lost as a deleted one is (#6560)."""
         with self.pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE library_leases SET expires_at = now() + make_interval(secs => %s)"
-                " WHERE token = %s",
+                " WHERE token = %s AND expires_at > now()",
                 (self.ttl if ttl is None else ttl, token),
             )
             return bool(cur.rowcount > 0)
@@ -596,11 +597,12 @@ class CheckoutLeases:
         return token
 
     def renew_pin(self, token: uuid.UUID, *, ttl: float | None = None) -> bool:
-        """Whether the hold still had a row to renew."""
+        """Whether the hold was still live: a lapsed row may have let a removal in
+        before any take swept it, so it is lost as a deleted one is (#6560)."""
         with self.pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE library_pin_holds SET expires_at = now() + make_interval(secs => %s)"
-                " WHERE token = %s",
+                " WHERE token = %s AND expires_at > now()",
                 (self.ttl if ttl is None else ttl, token),
             )
             return bool(cur.rowcount > 0)
@@ -725,26 +727,86 @@ async def _in_thread(
         await asyncio.to_thread(manager.__exit__, None, None, None)
 
 
+class HoldLostError(RuntimeError):
+    """A renewal found its row lost: the row lapsed (swept or not), or another holder
+    took it (#6560).
+    The block that held it is ended with this, so it does not go on without its hold:
+    a pin's checkout may be removed under it, and an install slot may be another
+    clone's. A pin that ran its commit in a thread (`to_thread_to_end`) can land and
+    still end with this, so a pin sent again must be safe to repeat."""
+
+    def __init__(self, row: str, holder: str) -> None:
+        super().__init__(
+            f"this {row} ({holder}) lapsed before it was renewed, so it no longer "
+            "keeps other work out; try again"
+        )
+        self.row = row
+        self.holder = holder
+
+
 @contextlib.asynccontextmanager
 async def _renewed(
-    ttl: float, renew: Callable[[], object], drop: Callable[[], object], what: str, holder: str
+    ttl: float,
+    renew: Callable[[], bool],
+    drop: Callable[[], object],
+    what: str,
+    holder: str,
+    *,
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
 ) -> AsyncIterator[None]:
     """A row already taken, renewed every third of its TTL until the block exits, and
-    then dropped."""
+    then dropped. ``sleep`` is the wait before each renewal: a test sets it to renew
+    when it says so (#6527).
+
+    A renewal that finds the row gone (``renew()`` False) is logged as an error and
+    cancels the task that runs the block; the block then ends with
+    :class:`HoldLostError`, even when it catches that cancel and finishes (#6560). The
+    row is not taken again, and its drop changes nothing that another holder took. A
+    renewal that fails (the database does not answer) is logged, and the next one still
+    comes."""
+    block = asyncio.current_task()
+    assert block is not None
+    lost = False
 
     async def renewing() -> None:
+        nonlocal lost
         while True:
-            await asyncio.sleep(ttl / 3)
+            await sleep(ttl / 3)
             try:
-                await asyncio.to_thread(renew)
+                held = await asyncio.to_thread(renew)
             except Exception:
                 logger.exception("could not renew a row", extra={"row": what, "holder": holder})
+                continue
+            if not held:
+                lost = True
+                logger.error(
+                    "a renewal found its row gone; the block that held it ends",
+                    extra={"row": what, "holder": holder},
+                )
+                block.cancel()
+                return
 
     task = asyncio.create_task(renewing())
     try:
-        yield
-    finally:
+        try:
+            yield
+        except BaseException as error:
+            # Once cancelled, the renewal changes nothing more: it runs on this loop, and
+            # its next step raises the cancel, so it logs nothing after the drop. It is
+            # not awaited: an await here, before the block takes back its own cancel,
+            # would let a second lost hold's cancel in first (#6585 review). A renew
+            # still running in its thread can land after the drop; it then finds no row
+            # and its answer is not read.
+            task.cancel()
+            if lost:
+                await _without_own_cancel(block)
+                raise HoldLostError(what, holder) from error
+            raise
         task.cancel()
+        if lost:
+            await _without_own_cancel(block)
+            raise HoldLostError(what, holder)
+    finally:
         try:
             await asyncio.to_thread(drop)
         except Exception:
@@ -752,9 +814,27 @@ async def _renewed(
             logger.exception("could not release a row", extra={"row": what, "holder": holder})
 
 
+async def _without_own_cancel(block: asyncio.Task[Any]) -> None:
+    """Take back the cancel a lost renewal sent ``block``. One it has not received yet
+    is received here; a cancel someone else sent ``block`` still raises."""
+    block.uncancel()
+    try:
+        # On Python 3.12 `uncancel` does not clear a cancel that was sent and not yet
+        # received; this await receives it, so it does not reach the caller later.
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        if block.cancelling():
+            raise
+    if block.cancelling():
+        raise asyncio.CancelledError
+
+
 @contextlib.asynccontextmanager
 async def _shared_lease(
-    leases: SharedLeases, holder: str, checkouts: Sequence[Path]
+    leases: SharedLeases,
+    holder: str,
+    checkouts: Sequence[Path],
+    sleep: Callable[[float], Awaitable[object]],
 ) -> AsyncIterator[None]:
     """A lease row held, and renewed every third of its TTL, until the block exits."""
     token = await _taken(lambda: leases.take(holder, checkouts), leases.drop)
@@ -764,12 +844,15 @@ async def _shared_lease(
         lambda: leases.drop(token),
         "checkout lease",
         holder,
+        sleep=sleep,
     ):
         yield
 
 
 @contextlib.asynccontextmanager
-async def _shared_pin(leases: SharedLeases) -> AsyncIterator[None]:
+async def _shared_pin(
+    leases: SharedLeases, sleep: Callable[[float], Awaitable[object]]
+) -> AsyncIterator[None]:
     """A pin's hold, renewed every third of its TTL, until the block exits."""
     token = await _taken(leases.take_pin, leases.drop_pin)
     async with _renewed(
@@ -778,6 +861,7 @@ async def _shared_pin(leases: SharedLeases) -> AsyncIterator[None]:
         lambda: leases.drop_pin(token),
         "pin hold",
         str(token),
+        sleep=sleep,
     ):
         yield
 
@@ -790,7 +874,7 @@ class InstallSlots(Protocol):
 
     def claim(self, token: uuid.UUID) -> int | None: ...
 
-    def renew(self, slot: int, token: uuid.UUID) -> object: ...
+    def renew(self, slot: int, token: uuid.UUID) -> bool: ...
 
     def drop(self, slot: int, token: uuid.UUID) -> object: ...
 
@@ -832,7 +916,12 @@ class InstallSlotRows:
         return None
 
     def renew(self, slot: int, token: uuid.UUID) -> bool:
-        """Whether ``token`` still held ``slot``."""
+        """Whether ``token`` still held ``slot``.
+
+        Unlike a lease or a pin hold (`renew`, `renew_pin`), a slot that lapsed is
+        renewed while no one has claimed it: a claim takes a lapsed slot only by writing
+        its own token, so until then no other clone has used it, and after that this
+        renew finds another token (#6560)."""
         with self.pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE library_install_slots"
@@ -865,6 +954,8 @@ class InstallPermits:
     of ``library_install_slots``, renewed while its clone runs, so a crashed holder's
     lapses after one TTL. A queued install waits on the loop for this process's
     permits, then polls for a free slot.
+
+    ``sleep`` is the wait before each renewal of a slot (:func:`_renewed`).
     """
 
     def __init__(
@@ -875,11 +966,13 @@ class InstallPermits:
         slots: InstallSlots | None = None,
         ttl: float = LEASE_TTL,
         poll: float = POLL_INTERVAL,
+        sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ) -> None:
         self.limit = limit
         self.slots = slots if pool is None else InstallSlotRows(pool, limit, ttl=ttl)
         self.ttl = ttl
         self.poll = poll
+        self._sleep = sleep
         self._local = asyncio.Semaphore(limit)
 
     @contextlib.asynccontextmanager
@@ -898,6 +991,7 @@ class InstallPermits:
                 lambda: slots.drop(slot, token),
                 "library install slot",
                 str(token),
+                sleep=self._sleep,
             ):
                 yield
 
@@ -933,10 +1027,18 @@ class CheckoutGate:
     #872) is seen by a removal here and the other way round, and so is a pin (#1131).
     The render worker's ``leases`` go through the API's CRUD routes (#5298); it renders
     and pins, but removes nothing and asks no one's leases, which only SQL's answer.
+
+    ``sleep`` is the wait before each renewal of a shared row (:func:`_renewed`).
     """
 
-    def __init__(self, leases: SharedLeases | None = None) -> None:
+    def __init__(
+        self,
+        leases: SharedLeases | None = None,
+        *,
+        sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+    ) -> None:
         self.shared = leases
+        self._sleep = sleep
         self._condition = asyncio.Condition()
         self._pins = 0
         self._removing = False
@@ -955,7 +1057,7 @@ class CheckoutGate:
             if self.shared is None:
                 yield
             else:
-                async with _shared_pin(self.shared):
+                async with _shared_pin(self.shared, self._sleep):
                     yield
         finally:
             async with self._condition:
@@ -1005,7 +1107,7 @@ class CheckoutGate:
             if self.shared is None:
                 yield
             else:
-                async with _shared_lease(self.shared, holder, checkouts):
+                async with _shared_lease(self.shared, holder, checkouts, self._sleep):
                     yield
         finally:
             # Whatever ends the attempt -- done, failed, cancelled by shutdown.

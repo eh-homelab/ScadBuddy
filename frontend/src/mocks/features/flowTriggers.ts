@@ -178,7 +178,7 @@ export const handlers = [
       kind: sent.schedule ? 'schedule' : 'event',
       schedule: sent.schedule ?? null,
       event: sent.event ?? null,
-      overlap: sent.overlap,
+      overlap: sent.overlap ?? 'skip',
       inputs: sent.inputs ?? null,
       paused: false,
       created_by: { kind: 'browser' },

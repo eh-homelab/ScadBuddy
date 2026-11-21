@@ -2,8 +2,9 @@
 that reaches ``bambuddy.client`` (``tests/test_orders_bambuddy_seam.py`` checks it).
 
 :class:`BambuddyIntegrations` is the ``OrderIntegrations`` seam with ``bambuddy_url`` set
-(``orders/integrations.py``): the spool import's read (§8.3), the order's nested
-projects (§8.1) and an attempt's archives (§8.2). The functions below it are
+(``orders/integrations.py``): the spool import's local presets (#6136; its spools are
+ScadBuddy's own since #6262), the order's nested projects (§8.1) and an attempt's
+archives (§8.2). The functions below it are
 the quote's slice through Bambuddy's slicer (#4250 Ruling 2), the print dialog's own
 background slice, which the quote takes on whichever slicer the stack has; they are
 here so that ``orders/`` has one door to the client.
@@ -14,34 +15,31 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import re
-from collections import defaultdict
-from collections.abc import Awaitable
+from collections.abc import Sequence
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
-from typing import Any, cast, get_args
+from typing import Any
 
 from pydantic import ValidationError
 
-from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
+from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
     FINISH_PHOTO_PREFIX,
     ArchiveDetail,
-    CatalogFilament,
     LibraryFile,
     LocalPreset,
     PrinterMaintenanceOverview,
     SliceJob,
-    Spool,
+    SpoolAssignment,
 )
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
 from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
-from scadbuddy.bambuddy.trays import tray_at
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.bambuddy_pull import read_assignments
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.density import density_text
 from scadbuddy.orders.integrations import (
@@ -50,158 +48,14 @@ from scadbuddy.orders.integrations import (
     ArchiveSlot,
     CopiedMedia,
     LocalDensity,
+    MaintenanceDone,
     MaintenanceTask,
     MediaTooLargeError,
-    ShelfSpool,
-    SpoolGroup,
 )
-from scadbuddy.orders.models import FilamentEffect
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
 
 logger = logging.getLogger(__name__)
-
-
-def _colour(rgba: str | None) -> str | None:
-    """A spool's ``RRGGBBAA`` (no ``#``, ``models.Spool``) as a record's ``#RRGGBB``."""
-    text = (rgba or "").strip()
-    if len(text) not in (6, 8):
-        return None
-    try:
-        int(text, 16)
-    except ValueError:
-        return None
-    return "#" + text[:6].upper()
-
-
-def _hex(text: str) -> bool:
-    """Hex digits only: ``int(text, 16)`` would also take ``0x``, ``_`` and a sign."""
-    return re.fullmatch(r"[0-9a-fA-F]+", text) is not None
-
-
-def _alpha(rgba: str | None) -> int:
-    """A spool's ``RRGGBBAA`` alpha byte; 255 (opaque) for an ``RRGGBB`` or none."""
-    text = (rgba or "").strip()
-    return int(text[6:], 16) if len(text) == 8 and _hex(text) else 255
-
-
-def _stops(extra_colors: str | None) -> list[str]:
-    """Bambuddy's ``extra_colors`` (comma-separated 6- or 8-digit hex, ``#`` optional;
-    ``normalize_extra_colors`` in backend/app/schemas/spool.py at
-    https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/schemas/spool.py)
-    as ``#RRGGBB``/``#RRGGBBAA`` stops: a token it would refuse is dropped, and only
-    its ``MAX_EXTRA_COLOR_STOPS`` (8) first are kept."""
-    tokens = (t.strip().lstrip("#") for t in (extra_colors or "").split(","))
-    return ["#" + t.upper() for t in tokens if len(t) in (6, 8) and _hex(t)][:8]
-
-
-def _effect(effect_type: str | None) -> FilamentEffect | None:
-    """Bambuddy's ``effect_type`` as its ``normalize_effect_type`` spells it ("Dual
-    Color" is ``dual-color``); ``None`` for one outside ``ALLOWED_EFFECT_TYPES``."""
-    text = (effect_type or "").strip().lower().replace("_", "-").replace(" ", "-")
-    return cast(FilamentEffect, text) if text in get_args(FilamentEffect) else None
-
-
-def _identity(spool: Spool) -> tuple[str, str, str, str]:
-    colour = _colour(spool.rgba)
-    return (
-        spool.material.strip().upper(),
-        (spool.subtype or "").strip().upper(),
-        (spool.brand or "").strip().upper(),
-        colour if colour is not None else "name:" + (spool.color_name or "").strip().upper(),
-    )
-
-
-def spool_groups(
-    spools: list[Spool],
-    *,
-    local: dict[str, LocalDensity] | None = None,
-    trays: dict[int, str] | None = None,
-    catalogue: list[CatalogFilament] | None = None,
-) -> list[SpoolGroup]:
-    """Every unarchived spool by the record identity it would price (material, subtype,
-    brand and ``#RRGGBB``, upper-cased), in that order. That is ``bambuddy/farm.py``
-    ``_filament_key``'s grouping with the colour as a record holds it: the alpha byte and
-    a 6- or 8-digit spelling are dropped, so two spools that would land on one record are
-    one group, priced once (#5159 review). So a clear and an opaque spool of one RGB and
-    names are one group too, whose ``alpha`` is the newest spool's (#6209): to be two
-    records they need distinct names, such as a "Translucent" subtype. A spool with no
-    ``rgba`` keeps its colour's name as its key, never matched to an rgba one (#2918). A
-    group's names are its most recent spool's (the highest id).
-
-    Each group also carries what gives its record a density (#6136,
-    `orders/density.py`): its spools' preset ids (``slicer_filament``, newest first, and
-    their K-profiles' ``setting_id``), the ``tray_info_idx`` in ``trays`` (by spool id)
-    of a spool of it, the local preset in ``local`` (by id) that ``slicer_filament``
-    names, and the one ``density`` of the ``catalogue`` entries of its material, brand
-    and colour whose ``name`` holds each word of its subtype."""
-    groups: dict[tuple[str, str, str, str], list[Spool]] = defaultdict(list)
-    for spool in spools:
-        if spool.archived_at is None:
-            groups[_identity(spool)].append(spool)
-    out: list[SpoolGroup] = []
-    for key in sorted(groups):
-        rows = sorted(groups[key], key=lambda s: s.id)
-        latest = rows[-1]
-        newest_first = list(reversed(rows))
-        slicer_filament = next(
-            (f for s in newest_first if (f := (s.slicer_filament or "").strip())), None
-        )
-        settings = list(
-            dict.fromkeys(
-                setting
-                for s in newest_first
-                for k in s.k_profiles
-                if (setting := (k.setting_id or "").strip())
-            )
-        )
-        colour = _colour(latest.rgba)
-        out.append(
-            SpoolGroup(
-                material=latest.material.strip(),
-                subtype=(latest.subtype or "").strip() or None,
-                brand=(latest.brand or "").strip() or None,
-                colour_name=(latest.color_name or "").strip() or None,
-                colour=colour,
-                alpha=_alpha(latest.rgba),
-                extra_colours=_stops(latest.extra_colors),
-                effect=_effect(latest.effect_type),
-                spools=[(s.id, s.cost_per_kg) for s in rows],
-                slicer_filament=slicer_filament,
-                k_profile_settings=settings,
-                tray_info_idx=next(
-                    (t for s in newest_first if (t := (trays or {}).get(s.id))), None
-                ),
-                local_preset=(local or {}).get(slicer_filament or ""),
-                catalogue_density=_catalogue_density(catalogue or [], latest, colour),
-            )
-        )
-    return out
-
-
-def _catalogue_density(
-    catalogue: list[CatalogFilament], spool: Spool, colour: str | None
-) -> str | None:
-    """The one density of the catalogue's entries of the spool's material, brand and
-    colour (#6136); ``None`` for none, entries that disagree, or a spool with no brand
-    or colour. A spool with a subtype takes only an entry whose ``name`` holds each word
-    of it, so a PLA Basic spool never takes a PLA Matte entry of its colour (#6148
-    review). Bambuddy stores ``color_hex`` as ``#RRGGBB`` (``models/filament.py``,
-    validated by ``schemas/filament.py``'s ``^#[0-9A-Fa-f]{6}$`` at v1.3.2b1-daily.20261113:
-    https://github.com/maziggy/bambuddy/blob/v1.3.2b1-daily.20261113/backend/app/schemas/filament.py)."""
-    if colour is None or not (spool.brand or "").strip():
-        return None
-    subtype = set((spool.subtype or "").upper().split())
-    densities = {
-        text
-        for entry in catalogue
-        if entry.type.strip().upper() == spool.material.strip().upper()
-        and (entry.brand or "").strip().upper() == (spool.brand or "").strip().upper()
-        and (entry.color_hex or "").upper() == colour
-        and subtype <= set(entry.name.upper().split())
-        and (text := density_text(entry.density)) is not None
-    }
-    return densities.pop() if len(densities) == 1 else None
 
 
 def _local_densities(presets: list[LocalPreset]) -> dict[str, LocalDensity]:
@@ -212,57 +66,6 @@ def _local_densities(presets: list[LocalPreset]) -> dict[str, LocalDensity]:
         if preset.preset_type == "filament"
         and (density := density_text(preset.filament_density)) is not None
     }
-
-
-async def _density_read[T](read: Awaitable[T], what: str) -> T | None:
-    """One of the density chain's reads (#6136); ``None`` when Bambuddy refuses it, so
-    the spools are still imported, with no density from it."""
-    try:
-        return await read
-    except ApiError as error:
-        logger.warning("no densities from Bambuddy's %s: %s", what, error.detail)
-        return None
-    except ValidationError as error:
-        logger.warning(
-            "no densities from Bambuddy's %s: an answer of another shape: %s", what, error
-        )
-        return None
-
-
-async def _tray_presets(client: BambuddyClient, spools: list[Spool]) -> dict[int, str]:
-    """The ``tray_info_idx`` of each loaded spool that names no preset, by spool id:
-    one read of the assignments, then the status reads of the printers that hold one,
-    at once, so the slowest printer bounds them, not their sum. A printer whose read
-    Bambuddy refuses gives no tray, logged; the other printers' trays are kept, and no
-    read is left running when this returns."""
-    unnamed = {
-        s.id
-        for s in spools
-        if not (s.slicer_filament or "").strip()
-        and not any((k.setting_id or "").strip() for k in s.k_profiles)
-    }
-    if not unnamed:
-        return {}
-    loaded = [a for a in await client.spool_assignments() if a.spool_id in unnamed]
-    printer_ids = sorted({a.printer_id for a in loaded})
-    statuses = await asyncio.gather(
-        *(client.printer_status(p) for p in printer_ids), return_exceptions=True
-    )
-    found: dict[int, str] = {}
-    for printer_id, status in zip(printer_ids, statuses, strict=True):
-        if isinstance(status, ApiError | ValidationError):
-            logger.warning("no AMS trays from Bambuddy's printer %s: %s", printer_id, status)
-            continue
-        if isinstance(status, BaseException):
-            raise status
-        for assignment in loaded:
-            if assignment.printer_id != printer_id:
-                continue
-            tray = tray_at(status, assignment.ams_id, assignment.tray_id)
-            idx = (tray.tray_info_idx or "").strip() if tray is not None else ""
-            if idx:
-                found[assignment.spool_id] = idx
-    return found
 
 
 def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
@@ -305,6 +108,8 @@ def maintenance_tasks(overview: PrinterMaintenanceOverview) -> list[MaintenanceT
             interval_hours=item.interval_hours,
             interval_type=item.interval_type,
             enabled=item.enabled,
+            item_id=item.id,
+            current_hours=item.current_hours,
         )
         for item in overview.maintenance_items
     ]
@@ -328,76 +133,29 @@ class BambuddyIntegrations:
     def linked(self) -> bool:
         return True
 
-    async def spool_groups(self) -> list[SpoolGroup]:
-        """The inventory's spools (``inventory_view``'s, ``GET /inventory/spools``,
-        archived ones left out) by filament, with what gives each a density (#6136):
-        the local presets (``GET /local-presets/``) only when a spool names one by its
-        numeric id, the AMS trays (``GET /inventory/assignments`` and each such
-        printer's ``GET /printers/{id}/status``) only for the spools that name no
-        preset (a group uses a tray's id only after its own preset ids), and the
-        filament catalogue (``GET /filament-catalog/``). The three density reads run at
-        once after the spools' read, so the slowest bounds them, not their sum (#6148
-        review). A density read Bambuddy refuses gives no density, logged; only the
-        spools' read fails the call."""
+    async def local_densities(self) -> dict[str, LocalDensity]:
+        """``GET /local-presets/``: each local filament preset with a density (#6136). A
+        read Bambuddy refuses, or answers in another shape, gives none, logged, so the
+        import goes on without them."""
         stored = await asyncio.to_thread(self.settings.load)
-        async with client_for(stored) as client:
-            spools = [s for s in await client.spools() if s.archived_at is None]
-            failed: BaseException | None = None
-            try:
-                async with asyncio.TaskGroup() as reads:
-                    presets = (
-                        reads.create_task(_density_read(client.local_presets(), "local presets"))
-                        if any((s.slicer_filament or "").strip().isdigit() for s in spools)
-                        else None
-                    )
-                    trays = reads.create_task(
-                        _density_read(_tray_presets(client, spools), "AMS trays")
-                    )
-                    catalogue = reads.create_task(
-                        _density_read(client.filament_catalog(), "filament catalogue")
-                    )
-            except ExceptionGroup as group:
-                # The first read's own error, not the group: the log and the trace show
-                # what failed, as before the reads ran at once (#6186 review). It is
-                # raised after this block, so its own cause stays; any other read that
-                # failed is logged here (#6188 review).
-                failed, *others = group.exceptions
-                for other in others:
-                    logger.warning("another density read failed too", exc_info=other)
-            if failed is not None:
-                raise failed
-            local_read = None if presets is None else presets.result()
-            local = _local_densities(local_read.filament) if local_read is not None else {}
-            return spool_groups(
-                spools,
-                local=local,
-                trays=trays.result() or {},
-                catalogue=catalogue.result() or [],
+        try:
+            async with client_for(stored) as client:
+                presets = await client.local_presets()
+        except ApiError as error:
+            logger.warning("no densities from Bambuddy's local presets: %s", error.detail)
+            return {}
+        except ValidationError as error:
+            logger.warning(
+                "no densities from Bambuddy's local presets: an answer of another shape: %s",
+                error,
             )
+            return {}
+        return _local_densities(presets.filament)
 
-    async def spool_inventory(self) -> list[ShelfSpool]:
-        """``GET /inventory/spools`` (archived ones included, so a named one is known)
-        and ``GET /inventory/assignments`` for where each is loaded: two reads, none per
-        printer, so one printer Bambuddy cannot reach refuses no print (#5269 review)."""
-        stored = await asyncio.to_thread(self.settings.load)
-        async with client_for(stored) as client:
-            spools, assignments = await asyncio.gather(
-                client.spools(include_archived=True), client.spool_assignments()
-            )
-        loaded = {a.spool_id: a.printer_id for a in assignments}
-        return [
-            ShelfSpool(
-                id=spool.id,
-                material=spool.material,
-                subtype=spool.subtype,
-                brand=spool.brand,
-                colour=_colour(spool.rgba),
-                remaining_g=spool.remaining_g,
-                archived=spool.archived_at is not None,
-                loaded_printer_id=loaded.get(spool.id),
-            )
-            for spool in spools
-        ]
+    async def spool_assignments(self) -> list[SpoolAssignment]:
+        """``GET /inventory/assignments``, as `filament/bambuddy_pull.py`
+        `read_assignments` reads it."""
+        return await read_assignments(await asyncio.to_thread(self.settings.load))
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         stored = await asyncio.to_thread(self.settings.load)
@@ -467,6 +225,26 @@ class BambuddyIntegrations:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             return maintenance_tasks(await client.printer_maintenance(printer_id))
+
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
+        """``GET /maintenance/items/{id}/history`` of each task, in turn, on one client
+        (#5774 §3.7)."""
+        stored = await asyncio.to_thread(self.settings.load)
+        logs: dict[int, list[MaintenanceDone]] = {}
+        async with client_for(stored) as client:
+            for item_id in item_ids:
+                logs[item_id] = [
+                    MaintenanceDone(
+                        history_id=row.id,
+                        at=row.performed_at,
+                        hours_at=row.hours_at_maintenance,
+                        notes=row.notes,
+                    )
+                    for row in await client.maintenance_history(item_id)
+                ]
+        return logs
 
     async def project_exists(self, project_id: int) -> bool:
         """``GET /projects/{id}``: false only on a 404, a project deleted in Bambuddy."""

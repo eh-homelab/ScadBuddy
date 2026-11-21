@@ -7,9 +7,10 @@ The agent's stores (``agent/src/sessions/forget.ts`` ``CrudSubjectKeys``,
 area, and their own SQL until then (D9).
 
 - ``POST …/forgotten-subjects/{subject}``: forgetSubject's key transaction, under the
-  subject's lock: the tombstone, a flow run's images and the key. A session with forks is
-  409 ``forks-take-ranges``: the agent copies its forks' ranges and forgets it in its own
-  transaction until its sessions move here (#5299 step 9).
+  subject's lock: the tombstone, a flow run's images and the key, a session's forks first
+  taking their ranges (``transcripts.py`` ``copy_fork_ranges``, #5299 step 9, part c). With no
+  KEK and a fork that takes transcript entries it is 409 ``forks-take-ranges``: the agent
+  copies its forks' ranges and forgets it in its own transaction.
 - ``POST …/payload-keys/{subject}/drop``: a browser call's key (``bridge-<uuid>`` only),
   deleted once its caller has the answer; no tombstone.
 - ``POST …/payload-key-sweeps``: the keys of sessions whose row is gone and of browser calls
@@ -40,7 +41,9 @@ from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from scadbuddy.agent_data import flow_blobs, forget
-from scadbuddy.agent_data.payload_keys import SUBJECT_PATTERN
+from scadbuddy.agent_data.payload_keys import SUBJECT_PATTERN, KeyNotHeldError
+from scadbuddy.agent_data.rotation import kek_at
+from scadbuddy.agent_data.workspace import Keks
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
@@ -50,7 +53,7 @@ router = crud_router("agent")
 
 T = TypeVar("T")
 
-#: A session with forks: they take their ranges of its transcript before it goes.
+#: A session whose forks take transcript entries, and no KEK to copy them with.
 FORKS_TAKE_RANGES = "forks-take-ranges"
 #: The run was forgotten: none of its images is kept.
 SUBJECT_FORGOTTEN = "subject-forgotten"
@@ -95,12 +98,22 @@ async def forget_subject(
     if subject.startswith("bridge-"):
         raise ApiError(422, "a browser call's key is dropped, not forgotten")
     try:
-        key = await _in_conn(state, lambda conn: forget.forget(conn, subject))
+        keys = Keks(
+            kek_at(state.settings.secret_key_file),
+            kek_at(state.settings.secret_key_previous_file),
+        )
+        key = await _in_conn(state, lambda conn: forget.forget(conn, subject, keys))
     except forget.ForksTakeRangesError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            f"{subject} has forks, which take their ranges of its transcript first.",
+            f"{subject} has forks, which take their ranges of its transcript first, and the API"
+            " has no SCADBUDDY_SECRET_KEY_FILE.",
             reason=FORKS_TAKE_RANGES,
+        ) from None
+    except KeyNotHeldError as err:
+        # A transcript key sealed under a KEK the API does not hold: nothing is forgotten.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(err), reason="unavailable"
         ) from None
     return Forgotten(key=key)
 

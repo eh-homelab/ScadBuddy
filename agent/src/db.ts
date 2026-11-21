@@ -1,6 +1,5 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
-import { grantBackendRoles } from './db/grants.js'
-import { type AwaitMigrationsOptions, awaitMigrations, MigrationsPendingError } from './db/schema.js'
+import { type AwaitMigrationsOptions, awaitMigrations, type LedgerReader, MigrationsPendingError, sqlLedger } from './db/schema.js'
 
 // The database is optional. With SCADBUDDY_DATABASE_URL unset the service still
 // starts and answers /healthz, but reports AI as disabled (spec §9, "No
@@ -167,6 +166,11 @@ export type ConnectOptions = {
   /** How `ready()` reads `ai_migrations` (db/schema.ts): once an attempt unless `attempts` says otherwise. */
   awaitMigrations?: AwaitMigrationsOptions
   /**
+   * Where `ready()` reads the ledger: the API's route once it lists area `migrations` (main.ts,
+   * #6501), this connection's SQL when omitted.
+   */
+  ledger?: (sql: Sql) => LedgerReader
+  /**
    * Brings the schema in place of waiting for the API's migrations. Only the tests pass
    * it, to migrate a schema of their own (test/support/migrations.ts): the agent never
    * migrates (#5299 D6).
@@ -228,12 +232,13 @@ export const IDLE_TIMEOUT_SECONDS = 60
 export const APPLICATION_NAME = 'scadbuddy-agent'
 
 /**
- * The most Postgres connections one agent process holds: the stores' pool, the lock client
- * and the LISTEN connection (events/pgListener.ts, always one); briefly more while a lock
- * client retired by an unhealthy lease still has leases out (`createLockClient`). The backend's
- * `tests/test_pg_pools.py` sums the API process's the same way; README "Running it" gives both.
+ * The most Postgres connections one agent process holds: the stores' pool and the lock client;
+ * briefly more while a lock client retired by an unhealthy lease still has leases out
+ * (`createLockClient`). It holds no LISTEN connection: its NOTIFY channels come over the API's
+ * change stream (events/changeStream.ts, #5299 D4). The backend's `tests/test_pg_pools.py` sums
+ * the API process's the same way; README "Running it" gives both.
  */
-export const AGENT_DB_CONNECTIONS = SQL_CONNECTIONS + TEST_LOCK_CONNECTIONS + 1
+export const AGENT_DB_CONNECTIONS = SQL_CONNECTIONS + TEST_LOCK_CONNECTIONS
 
 /** The postgres.js options of one of `connectDatabase`'s clients. */
 export function clientOptions(max: number, searchPath?: string, idleTimeout = IDLE_TIMEOUT_SECONDS): postgres.Options<Record<string, never>> {
@@ -268,7 +273,7 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
     waiting = false
     await (options.schema
       ? options.schema(sql)
-      : awaitMigrations(sql, undefined, {
+      : awaitMigrations(options.ledger?.(sql) ?? sqlLedger(sql), undefined, {
           attempts: 1,
           ...options.awaitMigrations,
           log: (line) => {
@@ -280,11 +285,6 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
             if (!now) said = false
           },
         }))
-    // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
-    // waits or fails its own calls, and says which.
-    await grantBackendRoles(sql).catch((error: unknown) => {
-      console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
-    })
     await options.afterMigrate?.(sql)
   }, (err) => {
     if (!(err instanceof MigrationsPendingError)) options.onMigrationError?.(err)

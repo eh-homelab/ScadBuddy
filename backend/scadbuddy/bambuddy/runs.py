@@ -54,7 +54,9 @@ from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.operations.kinds import without_bb_ids
 from scadbuddy.printers.lan_models import LanStopped
+from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +80,26 @@ _COLUMNS = (
     " (status = 'failed' AND enqueue_attempted) AS may_have_queued,"
     " workflow_id, workflow_run_id, printer::text AS printer"
 )
-#: A run that may still read its subject's files (`PrintRunStore.running_for`): one still
-#: running, or a native run with prints still to start (`print_runs_lan_waiting`'s
-#: predicate), which it starts from its sliced files later (#4541).
-_IN_USE = (
-    "(status = 'running' OR (status = 'succeeded'"
-    " AND result->'lan_waiting' <> '[]'::jsonb AND result->>'lan_stopped' IS NULL))"
-)
+
+
+def _in_use(table: str) -> str:
+    """Whether ``table``'s print run may still read its subject's files
+    (`PrintRunStore.running_for`): one still running, or a native run with prints still
+    to start (`print_runs_lan_waiting`'s predicate), which it starts from its sliced
+    files later (#4541)."""
+    return (
+        f"({table}.status = 'running' OR ({table}.status = 'succeeded'"
+        f" AND {table}.result->'lan_waiting' <> '[]'::jsonb"
+        f" AND {table}.result->>'lan_stopped' IS NULL))"
+    )
+
+
+_IN_USE = _in_use("print_runs")
+
+#: The `blob_refs` holder kind of a LAN run's sliced file (#6122); the holder id is the
+#: run's id. `hold_run_file` takes it, an ending of the run drops it
+#: (`_release_run_files`), and `reap_run_holds` drops what an ending left.
+RUN_HOLDER = "print_run"
 
 
 class PrintRunError(BaseModel):
@@ -200,7 +215,7 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     # #284: no accepted fixes is the key from before the field existed.
     if not request.accepted_fixes:
         exclude.add("accepted_fixes")
-    body = request.model_dump(mode="json", exclude=exclude or None)
+    body = without_bb_ids(request.model_dump(mode="json", exclude=exclude or None))
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
 
@@ -430,6 +445,15 @@ class PrintRunStore:
         ``LOST_UNQUEUED`` before. A run that has ended is left as it is."""
         return await asyncio.to_thread(self._fail_lost, run_id)
 
+    async def transferable(self, key: str) -> bool:
+        """Whether ``key`` is a sliced file of a run in use (#6122): a print-run hold of
+        such a run names it, or a completed `native_slices` row of its subject does while
+        the run's result marks it a LAN run (``path`` ``native``) with prints still to
+        start (#6586). The row is the fallback of a LAN run from before the hold; a
+        Bambuddy-queue run, which reads no transfer URL, grants no row. What the print
+        worker's read URL asks (`api/crud_print.py` `transfer_url`)."""
+        return await asyncio.to_thread(self._transferable, key)
+
     async def running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
         """``(run id, workflow id, workflow run id)`` of each run still ``running`` that
         was accepted more than ``older_than`` ago."""
@@ -544,6 +568,7 @@ class PrintRunStore:
                 (Jsonb(value.model_dump(mode="json")), run_id),
             ).fetchone()
             assert updated is not None  # the row is locked
+            _release_run_files(conn, run_id)
             run = PrintRun.model_validate(updated)
             self._announce(conn, run, slug, updated)
             return run
@@ -666,6 +691,7 @@ class PrintRunStore:
                 f" RETURNING {_COLUMNS}, slug",
                 (*params, run_id),
             ).fetchone()
+            _release_run_files(conn, run_id)
             if row is not None:
                 run = PrintRun.model_validate(row)
                 self._announce(conn, run, row["slug"] or "", row)
@@ -696,6 +722,7 @@ class PrintRunStore:
                 f" AND result IS DISTINCT FROM %s::jsonb RETURNING {_COLUMNS}",
                 (Jsonb(value), run_id, Jsonb(value)),
             ).fetchone()
+            _release_run_files(conn, run_id)
             if row is not None:
                 run = PrintRun.model_validate(row)
                 self._announce(conn, run, slug, row)
@@ -706,6 +733,24 @@ class PrintRunStore:
         if current is None:
             raise LookupError(f"there is no print run {run_id}")
         return PrintRun.model_validate(current)
+
+    def _transferable(self, key: str) -> bool:
+        in_use = _in_use("p")
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM blob_refs r JOIN print_runs p"
+                " ON p.id = r.holder_id WHERE r.key = %(key)s AND r.holder_kind = %(holder)s"
+                f" AND {in_use})"
+                " OR EXISTS (SELECT 1 FROM native_slices s JOIN print_runs p"
+                " ON p.output_id = s.subject WHERE s.sliced_blob_key = %(key)s"
+                f" AND s.status = 'completed' AND {in_use}"
+                # A running run has no result yet, so this keeps every running run out:
+                # a LAN run that runs holds its file instead. For a succeeded run it is
+                # defence in depth (#6588): no Bambuddy-queue run writes `lan_waiting`.
+                " AND p.result->>'path' = 'native') AS ok".encode(),
+                {"key": key, "holder": RUN_HOLDER},
+            ).fetchone()
+        return bool(row and row["ok"])
 
     def _start_enqueue(self, run_id: str) -> None:
         with self._pool.connection() as conn:
@@ -732,6 +777,7 @@ class PrintRunStore:
                 f" WHERE id = %s AND status = 'running' RETURNING {_COLUMNS}",
                 (state, Jsonb(value), unqueued, run_id),
             ).fetchone()
+            _release_run_files(conn, run_id)
             if row is not None:
                 run = PrintRun.model_validate(row)
                 self._announce(conn, run, slug, row)
@@ -742,6 +788,48 @@ class PrintRunStore:
         if current is None:
             raise LookupError(f"there is no print run {run_id}")
         return PrintRun.model_validate(current)
+
+
+def hold_run_file(pool: ConnectionPool[Connection[DictRow]], run_id: str, key: str) -> bool:
+    """Hold ``key``, a LAN run's sliced file, under (`RUN_HOLDER`, ``run_id``) while the
+    run is in use (#6122): the print worker's read URL of it then follows the run, not
+    the slice's row, which the slice sweep deletes 6 h after it finished. A hold taken
+    again gets a fresh ``created_at``. The run's row is share-locked, so an ending that
+    commits first leaves no hold, and one that commits after drops it. Whether it holds
+    (False: no such run, or it ended). ``pool`` is autocommit."""
+    with pool.connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id)"
+            f" SELECT %s, %s, p.id FROM print_runs p WHERE p.id = %s AND {_in_use('p')}"
+            " FOR SHARE"
+            " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()".encode(),
+            (key, RUN_HOLDER, run_id),
+        )
+        return cursor.rowcount > 0
+
+
+def _release_run_files(conn: Connection[DictRow], run_id: str) -> None:
+    """Drop the run's holds on its sliced files once it is no longer in use, in the
+    caller's transaction after it wrote the run's end: a success with no print left to
+    start, a failure, or a stop (#6122)."""
+    conn.execute(
+        "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s AND NOT EXISTS"
+        f" (SELECT 1 FROM print_runs p WHERE p.id = %s AND {_in_use('p')})".encode(),
+        (RUN_HOLDER, run_id, run_id),
+    )
+
+
+def reap_run_holds(refs: BlobRefs) -> int:
+    """Drop every print-run hold whose run is no longer in use, or gone (#6122): one an
+    ending left (a slice attempt that outlived its run's end), and the holds of the runs
+    the retention prune deleted. How many went."""
+    with refs.pool.connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM blob_refs r WHERE r.holder_kind = %s AND NOT EXISTS"
+            f" (SELECT 1 FROM print_runs p WHERE p.id = r.holder_id AND {_in_use('p')})".encode(),
+            (RUN_HOLDER,),
+        )
+        return cursor.rowcount
 
 
 #: The newest run of a run subject (`PrintRunStore.latest_for_output`, or one read already).

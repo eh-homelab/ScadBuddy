@@ -2,7 +2,8 @@ import { ApplicationFailure, Context } from '@temporalio/activity'
 import type { Sql } from 'postgres'
 import { type EventRows, PgEventRows } from '../sessions/eventLog.js'
 import type { ServerEvent } from '../sessions/protocol.js'
-import { sameOwner, type Owner } from '../sessions/protocol.js'
+import { sameOwner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from './toolActivities.js'
 
@@ -36,9 +37,9 @@ export type FlowSessionDeps = {
   pollMs?: number
   /** Where the sessions' logs are read (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
   events?: Pick<EventRows, 'turnEvents'>
+  /** The sessions' rows, for a session's owner (`PgSessionRows` on `sql` when omitted; gated in main.ts). */
+  sessions?: Pick<SessionRows, 'get'>
 }
-
-type Row = { owner_kind: Owner['kind']; owner_id: string }
 
 function refused(message: string): ApplicationFailure {
   return ApplicationFailure.nonRetryable(message, SESSION_REFUSED)
@@ -61,7 +62,7 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
   // A lookup that throws (the database is away) is left to the activity's retries.
   const starter = deps.flows ? await deps.flows.startedBy(flow, runId) : undefined
   if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
-  const [row] = await deps.sql<Row[]>`SELECT owner_kind, owner_id FROM ai_sessions WHERE id = ${sessionId}::uuid`
+  const row = await (deps.sessions ?? new PgSessionRows(deps.sql)).get(sessionId)
   if (!row || !sameOwner(starter, { kind: row.owner_kind, id: row.owner_id })) {
     throw refused(`no session ${sessionId} of the person who started this run`)
   }

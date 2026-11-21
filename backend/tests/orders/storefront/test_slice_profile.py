@@ -1,7 +1,9 @@
-"""The shop's slice profile (#6153 PR C): a printer and a spool per material, and the
-slice request a storefront variant is sliced with."""
+"""The shop's slice profile (#6153 PR C, #6574): a printer and a filament type per
+material, and the slice request a storefront variant is sliced with."""
 
 from __future__ import annotations
+
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +12,7 @@ from scadbuddy.api.storefront_slice import profile_errors
 from scadbuddy.bambuddy.models import NozzleChoice
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import EffectivePreset
 from scadbuddy.orders.storefront.listings import check_sliceable
 from scadbuddy.orders.storefront.slice_profile import (
     ProfileMissingMaterialError,
@@ -17,23 +20,43 @@ from scadbuddy.orders.storefront.slice_profile import (
     missing_materials,
     profile_digest,
     slice_request,
+    slot_presets,
+    slot_types,
 )
 from scadbuddy.orders.storefront.wire import ListingInput
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 
-CHOICES = PrintChoices(nozzles=[NozzleChoice(size="0.4")])
-PROFILE = StorefrontSliceProfile(printer="p-1", spools={"PLA": 11, "petg": -3})
+CHOICES = PrintChoices(nozzles=[NozzleChoice(size="0.4", flow="high_flow")])
+PLA = UUID("00000000-0000-4000-8000-0000000000a1")
+PETG = UUID("00000000-0000-4000-8000-0000000000a2")
+PROFILE = StorefrontSliceProfile(printer="p-1", materials={"PLA": PLA, "petg": PETG})
 
 
-def test_slice_request_one_spool_per_slot_by_material() -> None:
-    request = slice_request(PROFILE, ["PLA", "PETG", "PLA"], CHOICES)
-    assert [(s.slot_id, s.spool_id) for s in request.filament_plan.slots] == [
-        (1, 11),
-        (2, -3),
-        (3, 11),
-    ]
-    assert request.printer == "p-1"
+def _preset(filament: str) -> EffectivePreset:
+    return EffectivePreset(
+        printer_model="H2C",
+        nozzle_diameter="0.4",
+        slicer_filament=filament,
+        slicer_filament_name=None,
+        overridden=False,
+    )
+
+
+def test_each_slot_gets_its_materials_type_and_no_spool() -> None:
+    """#6574: a slot is sliced with its material's filament type's presets, and no spool,
+    so the slot keeps the render's own colour (each slot its own, so the slicer plans the
+    real purges)."""
+    types = slot_types(PROFILE, ["PLA", "PETG", "PLA"])
+    assert types == [PLA, PETG, PLA]
+    rows = {PLA: [_preset("GFA00")], PETG: [_preset("GFG99")]}
+    assert slot_presets(types, rows) == {1: rows[PLA], 2: rows[PETG], 3: rows[PLA]}
+    # A type with no presets gives none, which the resolver refuses.
+    assert slot_presets([PETG], {}) == {1: []}
+    request = slice_request(PROFILE, CHOICES)
+    assert request.filament_plan.slots == []
+    # The dialog's choices are kept as they are.
     assert request.choices == CHOICES
+    assert request.printer == "p-1"
     # The template's own process and support settings (#6153): the profile sets none.
     assert request.path is None
     assert request.supports is None
@@ -43,35 +66,42 @@ def test_slice_request_one_spool_per_slot_by_material() -> None:
 
 
 def test_material_is_casefolded() -> None:
-    assert PROFILE.spools == {"pla": 11, "petg": -3}
-    request = slice_request(PROFILE, ["Petg"], CHOICES)
-    assert request.filament_plan.slots[0].spool_id == -3
+    assert PROFILE.materials == {"pla": PLA, "petg": PETG}
+    assert slot_types(PROFILE, ["Petg"]) == [PETG]
 
 
 def test_missing_material_raises() -> None:
     with pytest.raises(ProfileMissingMaterialError) as raised:
-        slice_request(PROFILE, ["PLA", "TPU"], CHOICES)
+        slot_types(PROFILE, ["PLA", "TPU"])
     assert raised.value.material == "TPU"
 
 
-def test_profile_has_no_process_or_support_field() -> None:
+def test_profile_has_no_process_support_spool_or_preset_field() -> None:
     with pytest.raises(ValidationError):
         StorefrontSliceProfile.model_validate(
-            {"printer": "p-1", "spools": {}, "supports": {"enabled": True}}
+            {"printer": "p-1", "materials": {}, "supports": {"enabled": True}}
+        )
+    # #6574: the old shape, a spool per material, is not read.
+    with pytest.raises(ValidationError):
+        StorefrontSliceProfile.model_validate({"printer": "p-1", "spools": {"pla": -1}})
+    # Nor is a preset of its own: the type's presets are the one store.
+    with pytest.raises(ValidationError):
+        StorefrontSliceProfile.model_validate(
+            {"printer": "p-1", "materials": {"pla": {"source": "standard", "id": "x"}}}
         )
 
 
 def test_two_materials_that_fold_to_one_are_refused() -> None:
     with pytest.raises(ValidationError):
-        StorefrontSliceProfile(printer="p-1", spools={"PLA": 1, "pla": 2})
+        StorefrontSliceProfile(printer="p-1", materials={"PLA": PLA, "pla": PETG})
 
 
 def test_the_digest_follows_the_content_only() -> None:
-    same = StorefrontSliceProfile(printer="p-1", spools={"petg": -3, "pla": 11})
+    same = StorefrontSliceProfile(printer="p-1", materials={"petg": PETG, "pla": PLA})
     assert profile_digest(same) == profile_digest(PROFILE)
-    moved = StorefrontSliceProfile(printer="p-1", spools={"pla": 12, "petg": -3})
+    moved = StorefrontSliceProfile(printer="p-1", materials={"pla": PETG, "petg": PETG})
     assert profile_digest(moved) != profile_digest(PROFILE)
-    other = StorefrontSliceProfile(printer="p-2", spools={"pla": 11, "petg": -3})
+    other = StorefrontSliceProfile(printer="p-2", materials={"pla": PLA, "petg": PETG})
     assert profile_digest(other) != profile_digest(PROFILE)
 
 
@@ -85,40 +115,36 @@ def test_missing_materials_skip_support_and_need_no_profile() -> None:
 # -- the check at publish (#6153 PR C, Task C2) ------------------------------------------
 
 MATERIALS = {"red": "PLA", "green": "PETG", "white": "PVA", "grey": "Support for PLA"}
-PLA_ONLY = StorefrontSliceProfile(printer="p-1", spools={"pla": 7})
+PLA_ONLY = StorefrontSliceProfile(printer="p-1", materials={"pla": PLA})
 
 
 def listing(*colours: str) -> ListingInput:
     return ListingInput(slug="demo", commit="a" * 40, title="Demo", colours=list(colours))
 
 
-def test_publish_refuses_material_without_spool() -> None:
+def test_publish_refuses_material_without_a_type() -> None:
     with pytest.raises(ApiError) as refused:
         check_sliceable(PLA_ONLY, listing("red", "green", "white", "grey"), MATERIALS)
     assert refused.value.type == STOREFRONT_PROBLEMS + "listing_material_unsliceable"
     assert refused.value.status == 422
-    # Support materials need no spool: support stays the shop's (spec §4).
+    # Support materials need none: support stays the shop's (spec §4).
     assert refused.value.extensions["materials"] == ["PETG"]
 
 
-def test_publish_with_a_spool_for_each_material_is_allowed() -> None:
+def test_publish_with_a_type_for_each_material_is_allowed() -> None:
     check_sliceable(PLA_ONLY, listing("red", "white"), MATERIALS)
 
 
-def test_profile_with_unknown_spool_is_refused() -> None:
-    profile = StorefrontSliceProfile(printer="p-1", spools={"PLA": 7, "PETG": 8})
-    assert profile_errors(profile, {7, 9}) == [
-        {
-            "loc": ["body", "storefront_slice_profile", "spools", "petg"],
-            "msg": "the printer offers no spool 8 for petg",
-        }
-    ]
-    assert profile_errors(profile, {7, 8}) == []
-
-
-def test_profile_with_unknown_printer_is_refused() -> None:
-    assert profile_errors(PLA_ONLY, None) == [
+def test_profile_with_unknown_printer_or_type_is_refused() -> None:
+    assert profile_errors(PLA_ONLY, False, {PLA}) == [
         {"loc": ["body", "storefront_slice_profile", "printer"], "msg": "no printer p-1"}
+    ]
+    assert profile_errors(PLA_ONLY, True, {PLA}) == []
+    assert profile_errors(PLA_ONLY, True, set()) == [
+        {
+            "loc": ["body", "storefront_slice_profile", "materials", "pla"],
+            "msg": f"no filament type {PLA} for pla",
+        }
     ]
 
 

@@ -7,11 +7,22 @@ import { printersState } from '../../mocks/features/printers'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../../mocks/features/orders/state'
 import { selectOption } from '../../test/select'
+import { readSpec } from '../../test/spec'
 import { renderPage } from '../../test/utils'
 import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
 import { NO_SLICE_SOURCE } from './itemActions'
 import { groupName } from './printSetups'
 import type { SliceQuoteRun } from './useSliceQuotes'
+
+/** `ArchiveQuoteRequest.units`'s `maximum` in the exported spec: the backend's
+ * `ARCHIVE_UNITS_MAX`, read rather than restated (#6500). */
+function specArchiveUnitsMax(): number {
+  const { json, path } = readSpec()
+  const spec = json as { components?: { schemas?: { ArchiveQuoteRequest?: { properties?: { units?: { maximum?: unknown } } } } } }
+  const max = spec.components?.schemas?.ArchiveQuoteRequest?.properties?.units?.maximum
+  if (typeof max !== 'number') throw new Error(`ArchiveQuoteRequest.units.maximum not in the spec at ${path}`)
+  return max
+}
 
 /** Long enough for a debounced price check to be sent and its answer to land. */
 const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEBOUNCE_MS))
@@ -111,6 +122,36 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     await user.click(quote)
     await waitFor(() => expect(onChanged).toHaveBeenCalled())
     expect(quoted).toHaveBeenCalledWith(ORDER_DRAFT, added.id, { filaments: Object.fromEntries(added.colours.map((c) => [String(c.slot), c.filament_id ?? FILAMENT_PLA])) })
+  })
+
+  it('quotes one unit when the print made several (#6500)', async () => {
+    const added = await api.addOrderItem(ORDER_DRAFT, { archive_id: 9101, quantity: 1 })
+    const onChanged = vi.fn()
+    const quoted = vi.spyOn(api, 'quoteItemFromArchive')
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={added.id} currency="USD" exponent={2} quotes={[]} editable onChanged={onChanged} item={added} slice={{ start: vi.fn(), dismiss: vi.fn() }} />,
+    )
+    await user.click(screen.getByTestId('quote-from-print'))
+    const form = screen.getByRole('group', { name: 'Quote from the print' })
+    const units = within(form).getByLabelText('Units this print made')
+    expect(units).toHaveValue(1)
+    expect(units).toHaveAttribute('min', '1')
+    expect(units).toHaveAttribute('max', String(specArchiveUnitsMax()))
+    const quote = within(form).getByRole('button', { name: 'Quote' })
+    for (const slot of within(form).queryAllByRole('combobox', { name: /^Filament for slot/ })) {
+      if (quote.hasAttribute('disabled')) await selectOption(user, slot, /^Bambu PLA/)
+    }
+    // An empty count or one out of bounds sends nothing.
+    await user.clear(units)
+    expect(quote).toBeDisabled()
+    await user.type(units, '1001')
+    expect(quote).toBeDisabled()
+    await user.clear(units)
+    await user.type(units, '4')
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    await waitFor(() => expect(onChanged).toHaveBeenCalled())
+    expect(quoted).toHaveBeenCalledWith(ORDER_DRAFT, added.id, { filaments: Object.fromEntries(added.colours.map((c) => [String(c.slot), c.filament_id ?? FILAMENT_PLA])), units: 4 })
   })
 
   it('offers no quote from a print to an item from elsewhere (#4777)', () => {
@@ -386,6 +427,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
               power_per_hour: '0.03',
               wear_per_hour: '0.035',
               maintenance_per_hour: '0.12',
+              actuals: false,
             },
           },
         ]}
@@ -393,8 +435,79 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     const rate = screen.getByTestId('quote-machine-rate')
     expect(rate).toHaveTextContent('Machine rate 0.665 per hour for Garage, with the intervals last read: Bambuddy did not answer')
+    // #6665: the same tag as the job cost's.
+    expect(within(rate).getByTestId('quote-machine-tag')).toHaveTextContent('estimate')
     await user.click(within(rate).getByRole('button', { name: /Machine rate 0.665/ }))
     expect(within(rate).getByRole('list', { name: 'Machine rate parts' })).toHaveTextContent('Depreciation 0.48 per hour')
+  })
+
+  // #6665 (machine-rate actuals spec §6): a quote priced partly from actuals says so, and names the least-backed part.
+  it("tags a quote's machine line actuals with its confidence and the least-backed part", () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'quoted')
+    const wear = (name: string, have: number, confidence: number) => ({
+      name,
+      cost: '35',
+      life_hours: '1000',
+      per_hour: '0.05',
+      priced_by: 'actual' as const,
+      basis: have >= 3 ? ('actual' as const) : ('estimate' as const),
+      have,
+      need: 3,
+      confidence,
+      partly_typed: false,
+    })
+    renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        quotes={[
+          {
+            id: 'q-actuals',
+            order_item_id: ITEM_DRAFT,
+            created_at: '2026-11-18T10:00:00Z',
+            source: 'slice',
+            accepted: false,
+            sliced_sha256: null,
+            sliced_blob_key: null,
+            plates: [],
+            lines: [{ kind: 'machine_time', label: 'Machine time, 1 h at 0.7 per hour', quantity: 1, unit_minor: 70, amount_minor: 70 }],
+            unit_cost_minor: 70,
+            unit_price_minor: 70,
+            quantity: 1,
+            total_minor: 70,
+            created_by: { kind: 'browser', principal: null, session: null },
+            printer: 'p-1',
+            machine_rate_breakdown: {
+              printer: 'p-1',
+              printer_name: 'Garage',
+              source: 'profile',
+              rate_per_hour: '0.7',
+              currency: 'USD',
+              intervals: 'typed',
+              purchase_price: '2400',
+              watts: '200',
+              kwh_price: '0.15',
+              depreciation_per_hour: '0.48',
+              power_per_hour: '0.03',
+              wear_per_hour: '0.1',
+              maintenance_per_hour: '0.09',
+              actuals: true,
+              actuals_window: 3,
+              confidence: 66,
+              wear: [wear('Nozzle', 3, 100), wear('Plate', 2, 66)],
+            },
+          },
+        ]}
+      />,
+    )
+    const tag = within(screen.getByTestId('quote-machine-rate')).getByTestId('quote-machine-tag')
+    expect(tag).toHaveTextContent('actuals, 66 % confidence')
+    expect(tag).toHaveAttribute('title', 'Least backed: Plate: 2 of 3 replacements logged')
   })
 })
 

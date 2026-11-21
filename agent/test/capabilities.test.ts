@@ -125,6 +125,7 @@ describe('the capabilities tree', () => {
     expect(tree[3]!.items.map((i) => i.id)).toEqual([
       'skill:authoring',
       'skill:customize',
+      'skill:filament',
       'skill:print',
       'subagent:model-author',
       'subagent:print-analyst',

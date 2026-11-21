@@ -25,6 +25,8 @@ type SlicePreview struct {
 	print_time_seconds SlicePreview_SlicePreview_print_time_secondsable
 	// The progress property
 	progress SlicePreview_SlicePreview_progressable
+	// The slice_warnings property
+	slice_warnings []FilamentWarningable
 	// The slicer property
 	slicer *SlicePreview_slicer
 	// The slots property
@@ -700,6 +702,22 @@ func (m *SlicePreview) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		return nil
 	}
+	res["slice_warnings"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfObjectValues(CreateFilamentWarningFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]FilamentWarningable, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = v.(FilamentWarningable)
+				}
+			}
+			m.SetSliceWarnings(res)
+		}
+		return nil
+	}
 	res["slicer"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetEnumValue(ParseSlicePreview_slicer)
 		if err != nil {
@@ -797,6 +815,12 @@ func (m *SlicePreview) GetSlicer() *SlicePreview_slicer {
 	return m.slicer
 }
 
+// GetSliceWarnings gets the slice_warnings property value. The slice_warnings property
+// returns a []FilamentWarningable when successful
+func (m *SlicePreview) GetSliceWarnings() []FilamentWarningable {
+	return m.slice_warnings
+}
+
 // GetSlots gets the slots property value. The slots property
 // returns a []PreviewSlotable when successful
 func (m *SlicePreview) GetSlots() []PreviewSlotable {
@@ -862,6 +886,18 @@ func (m *SlicePreview) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 	if m.GetSlicer() != nil {
 		cast := (*m.GetSlicer()).String()
 		err := writer.WriteStringValue("slicer", &cast)
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetSliceWarnings() != nil {
+		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetSliceWarnings()))
+		for i, v := range m.GetSliceWarnings() {
+			if v != nil {
+				cast[i] = v.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable)
+			}
+		}
+		err := writer.WriteCollectionOfObjectValues("slice_warnings", cast)
 		if err != nil {
 			return err
 		}
@@ -944,6 +980,11 @@ func (m *SlicePreview) SetSlicer(value *SlicePreview_slicer) {
 	m.slicer = value
 }
 
+// SetSliceWarnings sets the slice_warnings property value. The slice_warnings property
+func (m *SlicePreview) SetSliceWarnings(value []FilamentWarningable) {
+	m.slice_warnings = value
+}
+
 // SetSlots sets the slots property value. The slots property
 func (m *SlicePreview) SetSlots(value []PreviewSlotable) {
 	m.slots = value
@@ -970,6 +1011,7 @@ type SlicePreviewable interface {
 	GetPrintTimeSeconds() SlicePreview_SlicePreview_print_time_secondsable
 	GetProgress() SlicePreview_SlicePreview_progressable
 	GetSlicer() *SlicePreview_slicer
+	GetSliceWarnings() []FilamentWarningable
 	GetSlots() []PreviewSlotable
 	GetStatus() *string
 	GetWarnings() []string
@@ -981,6 +1023,7 @@ type SlicePreviewable interface {
 	SetPrintTimeSeconds(value SlicePreview_SlicePreview_print_time_secondsable)
 	SetProgress(value SlicePreview_SlicePreview_progressable)
 	SetSlicer(value *SlicePreview_slicer)
+	SetSliceWarnings(value []FilamentWarningable)
 	SetSlots(value []PreviewSlotable)
 	SetStatus(value *string)
 	SetWarnings(value []string)

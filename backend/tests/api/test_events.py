@@ -531,6 +531,7 @@ def test_saving_and_deleting_an_output_publish_their_events(
 
 
 @pytest.mark.requires_postgres
+@pytest.mark.usefixtures("recorded_sb_spools")
 @respx.mock
 def test_a_print_publishes_progress_and_then_settled_once(
     client: TestClient, model: str, events: list[Event]

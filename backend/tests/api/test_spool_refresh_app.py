@@ -1,11 +1,11 @@
-"""The app's ``library`` worker refreshes the spool providers on their Schedule (#3818
-tier A, plan 2026-10-18 Task 6b), and only when one is set: the api fixture turns it
-off, since its trigger at start reads Bambuddy beside a test's own reads (#4180 CI)."""
+"""The app's ``library`` worker runs the spool refresh on its Schedule (#3818 tier A, plan
+2026-10-18 Task 6b), and only when one is set: the api fixture turns it off, since its
+trigger at start reads Bambuddy beside a test's own reads (#4180 CI). Since #6262 Task 12
+a run pulls Bambuddy's spools into ScadBuddy's own (#6261); no provider is refreshed."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import respx
 from fastapi.testclient import TestClient
@@ -15,7 +15,6 @@ from temporalio.service import RPCError, RPCStatusCode
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from scadbuddy.spools.component import SPOOLS
 from scadbuddy.workflows.spool_refresh import spool_schedule_id_for
 from tests.bambuddy.conftest import recording
 
@@ -27,14 +26,21 @@ def _state(client: TestClient) -> AppState:
     return state
 
 
-async def _refreshed(state: AppState) -> Any:
-    spools = state.components.get(SPOOLS)
+async def _pulled(state: AppState, want: int) -> list[int]:
+    """The Bambuddy spool ids the pull linked, once it linked ``want`` of them."""
+
+    def linked() -> list[int]:
+        with state.settings_store.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT bb_spool_id FROM filament_bb_links ORDER BY bb_spool_id"
+            ).fetchall()
+        return [row["bb_spool_id"] for row in rows]
+
     for _ in range(600):
-        found = {r.provider: r for r in await spools.store.refreshes()}
-        if "bambuddy" in found and found["bambuddy"].refreshed_at is not None:
-            return found["bambuddy"]
+        if len(found := await asyncio.to_thread(linked)) >= want:
+            return found
         await asyncio.sleep(0.05)
-    raise AssertionError("the spool refresh never ran")
+    raise AssertionError("the spool refresh never pulled")
 
 
 async def _schedule_status(client: Client, schedule_id: str) -> RPCStatusCode | None:
@@ -64,9 +70,9 @@ def test_the_api_fixture_runs_no_spool_refresh(settings: Settings) -> None:
     assert not inventory.called
 
 
-def test_a_schedule_refreshes_bambuddys_records(settings: Settings) -> None:
-    """With an interval, the Schedule's run at start reads Bambuddy's inventory and
-    records it."""
+def test_a_schedule_pulls_bambuddys_spools(settings: Settings) -> None:
+    """With an interval, the Schedule's run at start reads Bambuddy's inventory and pulls
+    each spool into an SB spool linked to it."""
     configured = settings.model_copy(
         update={
             "bambuddy_url": BAMBUDDY,
@@ -74,11 +80,18 @@ def test_a_schedule_refreshes_bambuddys_records(settings: Settings) -> None:
             "spool_overlay_refresh_seconds": 300,
         }
     )
+    # The recording's tag keys are scrubbed to one placeholder on six spools. Real tags
+    # differ per spool, and since #6264 a second spool on a held tag is not pulled.
+    spools = [
+        {**spool, "tag_uid": f"{spool['id']:016X}", "tray_uuid": None}
+        if spool.get("tag_uid")
+        else spool
+        for spool in recording("inventory-spools.json")
+    ]
     with respx.mock(assert_all_called=False) as bambuddy:
-        bambuddy.get(f"{BAMBUDDY}/api/v1/inventory/spools").respond(
-            json=recording("inventory-spools.json")
-        )
+        bambuddy.get(f"{BAMBUDDY}/api/v1/inventory/spools").respond(json=spools)
         bambuddy.get(f"{BAMBUDDY}/api/v1/inventory/assignments").respond(json=[])
+        bambuddy.get(f"{BAMBUDDY}/api/v1/inventory/catalog").respond(json=[])
         bambuddy.route(host="testserver").pass_through()
         with TestClient(create_app(configured)) as client:
             state = _state(client)
@@ -87,7 +100,7 @@ def test_a_schedule_refreshes_bambuddys_records(settings: Settings) -> None:
                 spool_schedule_id_for(configured.temporal_task_queue_library)
             )
             try:
-                refresh = client.portal.call(_refreshed, state)  # type: ignore[union-attr]
+                pulled = client.portal.call(_pulled, state, len(spools))  # type: ignore[union-attr]
             finally:
                 client.portal.call(handle.delete)  # type: ignore[union-attr]
-    assert refresh.failure is None
+    assert pulled == sorted(spool["id"] for spool in spools)

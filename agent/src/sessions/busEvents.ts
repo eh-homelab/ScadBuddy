@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
-import { type BusEvent, type EventSource, PG_CHANNEL } from '../events/bus.js'
+import type { BusEvent, EventSource } from '../events/bus.js'
 import type { EventLog } from './eventLog.js'
 import type { ServerEvent, SessionStatus } from './protocol.js'
+import type { Publisher } from './publish.js'
 
 // `session.*` on the event bus (#300; spec §7: "from the agent side
 // `session.*`"). Every batch a session appends to its event log
@@ -24,8 +24,9 @@ import type { ServerEvent, SessionStatus } from './protocol.js'
 // (sessions_get, `scadbuddy://sessions/{id}`, the chat socket).
 //
 // CONSUMERS. Postgres delivers a NOTIFY to every listening session
-// (https://www.postgresql.org/docs/current/sql-notify.html), and the backend
-// and the agent each LISTEN on the channel independently (spec §7):
+// (https://www.postgresql.org/docs/current/sql-notify.html): every API replica's
+// one LISTEN connection hears it, and hands it to its own subscribers and to the
+// agent's change streams it serves (events/changeStream.ts, #5299 D4):
 //   - every agent replica's `followSessionEvents` wakes that replica's event-log
 //     followers (eventLog.ts `wake`), so a watcher attached on replica B sees a
 //     turn running on replica A without waiting for the poll;
@@ -38,7 +39,7 @@ import type { ServerEvent, SessionStatus } from './protocol.js'
 // NOT IN THE BACKEND'S `events` LOG. That log is the backend's (its advisory
 // lock, its pruning by row count, backend/scadbuddy/core/pg_events.py), and a
 // streaming turn would flood it. So a `session.*` NOTIFY sent while a
-// listener's connection is down is not replayed; the listener reports the
+// replica's change stream is down is not replayed; the stream reports the
 // reconnect (events/bus.ts `onReconnect`) and the consumers above re-read
 // everything session-shaped instead. The event log itself is durable and
 // polled (`pollMs`), so a lost NOTIFY only costs latency.
@@ -92,7 +93,7 @@ export type AppendHook = (sessionId: string, events: readonly ServerEvent[], las
 export class SessionEventPublisher {
   /** This process, in every payload it sends. */
   readonly replica: string
-  readonly #sql: Sql
+  readonly #publish: Pick<Publisher, 'sessionEvent'>
   readonly #throttleMs: number
   readonly #onError: (err: unknown) => void
   /** Per session: when the last `session.message` went, and a trailing one waiting. */
@@ -104,8 +105,9 @@ export class SessionEventPublisher {
   /** Payloads sent (tests, metrics). */
   sent = 0
 
-  constructor(sql: Sql, options: { replica?: string; throttleMs?: number; onError?: (err: unknown) => void } = {}) {
-    this.#sql = sql
+  /** `publish`: over SQL or the API's route, `gated` in main.ts (sessions/publish.ts). */
+  constructor(publish: Pick<Publisher, 'sessionEvent'>, options: { replica?: string; throttleMs?: number; onError?: (err: unknown) => void } = {}) {
+    this.#publish = publish
     this.replica = options.replica ?? randomUUID()
     this.#throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS
     this.#onError = options.onError ?? ((err) => console.error('session events: NOTIFY failed:', (err as Error).message))
@@ -165,7 +167,7 @@ export class SessionEventPublisher {
       replica: this.replica,
     }
     this.sent += 1
-    this.#sql`SELECT pg_notify(${PG_CHANNEL}, ${JSON.stringify(event)})`.then(
+    this.#publish.sessionEvent(event).then(
       () => {},
       (err: unknown) => this.#onError(err),
     )
@@ -178,7 +180,7 @@ export function sessionIdOf(event: BusEvent): string | undefined {
 }
 
 /**
- * The LISTEN consumer that wakes this replica's event-log followers
+ * The change-stream consumer that wakes this replica's event-log followers
  * (eventLog.ts `wake`, the seam #264 left for it) for sessions that another
  * replica wrote. Its own writes woke them already, in `append`. After a
  * resync or a reconnect every follower is woken, since a `session.*` NOTIFY

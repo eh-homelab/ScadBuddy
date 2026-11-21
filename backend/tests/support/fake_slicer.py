@@ -45,6 +45,8 @@ class FakeSlicer:
         self._app = app
         #: Refuse every call as Bambu Studio's validation exit (192), never retried.
         self.refuse_plate = False
+        #: What a refused call's stderr says.
+        self.refusal = "plate 99 is empty"
         #: Fail this many calls first with a retryable `SlicerError` (a crash).
         self.crash_times = 0
         #: Fail this many calls first with a `SlicerWorkerError` carrying a message.
@@ -95,7 +97,7 @@ class FakeSlicer:
         if self.refuse_plate:
             raise ApplicationError(
                 "validation failed",
-                {"exit_code": VALIDATION_EXIT, "stderr_tail": "plate 99 is empty"},
+                {"exit_code": VALIDATION_EXIT, "stderr_tail": self.refusal},
                 type=SLICER_ERROR,
                 non_retryable=True,
             )

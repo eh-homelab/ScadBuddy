@@ -48,7 +48,7 @@ def test_status_maps_trays_and_progress(report_h2c: LanReport) -> None:
     assert status.ams_exists is True
     assert [unit.id for unit in status.ams] == [0, 128]
     first = status.ams[0]
-    assert (first.humidity, first.temp) == (4, 22.7)
+    assert (first.humidity, first.temp) == (29, 22.7)
     assert [tray.id for tray in first.tray] == [0, 1]
     tray = first.tray[1]
     assert (tray.tray_color, tray.tray_type, tray.tray_info_idx) == ("000000FF", "PLA", "GFA00")

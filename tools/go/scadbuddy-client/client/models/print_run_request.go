@@ -19,7 +19,7 @@ type PrintRunRequest struct {
 	choices PrintChoicesable
 	// The copies property
 	copies PrintRunRequest_PrintRunRequest_copiesable
-	// What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
+	// What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“. “ids“ says what a positive “spool_id“ names (#6262 F14): “"sb"“ an SB spool's number, what every picker offers since Task 7 and every client sends; “"bb"“ (the default, so a plan from before it reads as it was meant: an in-flight run's input, an older client) a Bambuddy spool id, mapped to its linked SB spool's number where it is read (:func:`sb_plan`). A negative id is a tray chosen for itself either way.
 	filament_plan FilamentPlanable
 	// The filament_profiles property
 	filament_profiles []string
@@ -1383,7 +1383,7 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 	return res
 }
 
-// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
+// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“. “ids“ says what a positive “spool_id“ names (#6262 F14): “"sb"“ an SB spool's number, what every picker offers since Task 7 and every client sends; “"bb"“ (the default, so a plan from before it reads as it was meant: an in-flight run's input, an older client) a Bambuddy spool id, mapped to its linked SB spool's number where it is read (:func:`sb_plan`). A negative id is a tray chosen for itself either way.
 // returns a FilamentPlanable when successful
 func (m *PrintRunRequest) GetFilamentPlan() FilamentPlanable {
 	return m.filament_plan
@@ -1659,7 +1659,7 @@ func (m *PrintRunRequest) SetCopies(value PrintRunRequest_PrintRunRequest_copies
 	m.copies = value
 }
 
-// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
+// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“. “ids“ says what a positive “spool_id“ names (#6262 F14): “"sb"“ an SB spool's number, what every picker offers since Task 7 and every client sends; “"bb"“ (the default, so a plan from before it reads as it was meant: an in-flight run's input, an older client) a Bambuddy spool id, mapped to its linked SB spool's number where it is read (:func:`sb_plan`). A negative id is a tray chosen for itself either way.
 func (m *PrintRunRequest) SetFilamentPlan(value FilamentPlanable) {
 	m.filament_plan = value
 }

@@ -1,6 +1,7 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
+import type { SessionPresence } from '../sessions/presence.js'
 import { toolOffReason } from '../access/items.js'
 import { BUILTIN_SOURCES, packageServerSource } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
@@ -62,15 +63,13 @@ export async function removeTurnDir(root: string, subject: string): Promise<void
  * before #2374 wrote: each replica keeps its own (the server is pinned), so each sweeps
  * its own, whichever pod the session was forgotten on.
  */
-export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): Promise<string[]> {
+export async function sweepTurnDirs(root: string, presence: SessionPresence, now = Date.now()): Promise<string[]> {
   const names = await readdir(root).catch((err: NodeJS.ErrnoException) => {
     if (err.code === 'ENOENT') return [] as string[]
     throw err
   })
   const sessions = names.filter((n) => UUID.test(n))
-  const live = new Set(
-    sessions.length ? (await sql<{ id: string }[]>`SELECT id::text FROM ai_sessions WHERE id = ANY(${sessions}::uuid[])`).map((r) => r.id) : [],
-  )
+  const live = await presence.live(sessions)
   const removed: string[] = []
   for (const name of names) {
     const dir = path.join(root, name)

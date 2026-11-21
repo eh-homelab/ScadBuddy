@@ -1,0 +1,57 @@
+# The profile-fetch browser service's AppArmor profile (eh-homelab/ScadBuddy#6779,
+# #6780). Its Chromium loads untrusted web pages, and Chromium's own sandbox stays
+# on. The worker runs no browser and keeps the runtime's default.
+# apparmor-loader.yaml loads it on every amd64 node. The source is ScadBuddy
+# deploy/security/apparmor/scadbuddy-profile-fetch (the same bytes).
+#
+# It is containerd's default AppArmor profile (cri-containerd.apparmor.d, the
+# template in containerd v2.2.7 contrib/apparmor/template.go:
+# https://github.com/containerd/containerd/blob/v2.2.7/contrib/apparmor/template.go)
+# on ABI 4.0, plus one rule, `userns,`. Chromium's sandbox creates user
+# namespaces, and the nodes run kernel.apparmor_restrict_unprivileged_userns=1
+# (https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction).
+# Measured on a GitHub-hosted ubuntu-24.04 runner with that sysctl at 1
+# (ScadBuddy docs/security/trust-boundaries.md, "Browser and parser pod
+# profiles"): Chromium is adequately sandboxed under this profile and the
+# seccomp file profile-fetch.json, and this profile alone refuses a mount in
+# a new user namespace (EACCES).
+abi <abi/4.0>,
+
+#include <tunables/global>
+
+profile scadbuddy-profile-fetch flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+  signal (receive) peer=unconfined,
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+  signal (send,receive) peer=scadbuddy-profile-fetch,
+
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/mem rwklx,
+  deny @{PROC}/kmem rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  deny mount,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  ptrace (trace,tracedby,read,readby) peer=scadbuddy-profile-fetch,
+
+  userns,
+}

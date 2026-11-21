@@ -83,6 +83,8 @@ Sources 1 (model → output), 3 (library file, #5544) and 5 (custom, #4954) are 
     of the run has no archive.
   - Grams per slot are the slicer's estimates from each archive (`filament_slots`);
     seconds are the actual print time when the archive succeeded, else the estimate.
+  - The body's `units` (default 1) is the number of units of the item the run made
+    (#6336). The run's grams and seconds are divided by it, so the quote prices one unit.
   - A failed or cancelled archive is not a quote source (`archive_not_succeeded`); slice
     and manual quotes stay available.
   - Job cost (§4.1 of its spec) treats an `archive` quote's grams as the quote's, so the

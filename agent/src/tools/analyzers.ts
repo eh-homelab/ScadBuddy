@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { outputId, params, slug } from './common.js'
-import { nozzles, presetRef, printOptions, slotChoice, tier } from './print.js'
+import { nozzles, presetRef, primeTowerChoice, printOptions, sbPlanIds, slotChoice, tier } from './print.js'
 import { page, PAGED, pageInput } from './pagination.js'
 import { defineTool, json, type Tool } from './registry.js'
 
@@ -36,7 +36,9 @@ const request = {
   all_plates: z.boolean().optional(),
   plate_ids: z.array(z.number().int().min(1)).min(1).optional(),
   copies: z.number().int().min(1).max(1000).optional(),
-  filament_plan: z.object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) }).optional(),
+  filament_plan: z
+    .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true), ids: sbPlanIds })
+    .optional(),
   choices: z
     .object({
       nozzles,
@@ -48,6 +50,11 @@ const request = {
     .optional()
     .describe("The print's choices; omitted is what the print dialog reopens with for this model"),
   options: printOptions,
+  prime_tower: primeTowerChoice.describe(
+    "The print's prime tower (#6721), as print_output takes it. Plate fit (SB4001) keeps room for a tower on a " +
+      'file that states the tower off (an arrange with `prime_tower: {enabled: false}`) only when this turns it ' +
+      'on, as the send does. Omit to leave the tower to the file.',
+  ),
 }
 
 const scopeKind = z.enum(['global', 'material', 'printer', 'template', 'template_version', 'configuration', 'print'])

@@ -363,6 +363,27 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Linked'))
   })
 
+  it('shows the design picker on a new listing, and another design can be chosen', async () => {
+    const { user } = renderStorefront()
+    const design = await screen.findByRole('combobox', { name: 'Design' })
+    await waitFor(() => expect(design).toHaveTextContent('Name Keychain'))
+    expect(screen.queryByRole('button', { name: 'Change' })).toBeNull()
+    await user.click(design)
+    await user.click(await screen.findByRole('option', { name: /Coaster/ }))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent(/Coaster/))
+    expect(screen.getByRole('combobox', { name: 'Version' })).toBeInTheDocument()
+  })
+
+  it('folds the design picker to one line once a new listing is saved (#6711 review)', async () => {
+    const { user } = renderStorefront()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent('Name Keychain'))
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Design' })).toBeNull()
+  })
+
   it('keeps a title typed before the templates answer (#6290)', async () => {
     const release = hold('get', '/api/v1/models')
     const { user } = renderStorefront()
@@ -370,7 +391,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.type(title, 'Mine')
     release()
     // The first template is chosen once the list answers; the typed title stays.
-    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent('Name Keychain'))
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
     expect(screen.getByLabelText('Title')).toHaveValue('Mine')
   })
@@ -382,7 +403,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.type(title, 'x')
     await user.clear(title)
     release()
-    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent('Name Keychain'))
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
     expect(screen.getByLabelText('Title')).toHaveValue('')
   })
@@ -445,10 +466,9 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     it('while a design change waits for its settings', async () => {
       await emptyBook()
       const { user } = renderStorefront()
-      expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+      await waitFor(() => expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent('Name Keychain'))
       await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
       release = hold('get', SCHEMA)
-      await user.click(screen.getByRole('button', { name: 'Change' }))
       await user.click(screen.getByRole('combobox', { name: 'Design' }))
       await user.click(await screen.findByRole('option', { name: /Coaster/ }))
       // The new design's defaults wait on its settings, which are held.
@@ -475,7 +495,6 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.click(within(group()).getByRole('button', { name: /^Show all/ }))
     // Only PLA Sunflower Yellow ticked, by hand.
     await user.click(within(group()).getByRole('checkbox', { name: 'PETG Black' }))
-    await user.click(screen.getByRole('button', { name: 'Change' }))
     await user.click(screen.getByRole('combobox', { name: 'Design' }))
     await user.click(await screen.findByRole('option', { name: /Coaster/ }))
     await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
@@ -578,7 +597,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       expect(await screen.findByRole('note')).toHaveTextContent('took 150 s to render')
       expect(screen.getByLabelText('Title')).toHaveValue('Name Keychain')
       // The design and the version the render read.
-      expect(await screen.findByTestId('listing-design')).toHaveTextContent(`Name Keychainversion ${versionIds.edited.slice(0, 7)}Change`)
+      expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent('Name Keychain')
+      await waitFor(() => expect(screen.getByRole('combobox', { name: 'Version' })).toHaveTextContent(versionIds.edited.slice(0, 7)))
       // Both colours are offered; the plate's yellow is a PLA, so the PLA filaments are on offer.
       // No filament on offer has either template default, so each starts at one that is (#6144):
       // the plate at the yellow the render used, the text at the first on offer.
@@ -627,7 +647,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       renderStorefront('/storefront/listings/new?sell=output:o1')
       // The blank new listing shows first; the fill-in replaces it.
       await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Name tag'))
-      expect(await screen.findByTestId('listing-design')).toHaveTextContent(`version ${versionIds.raised.slice(0, 7)} (current)`)
+      await waitFor(() => expect(screen.getByRole('combobox', { name: 'Version' })).toHaveTextContent(`${versionIds.raised.slice(0, 7)}`))
+      expect(screen.getByRole('combobox', { name: 'Version' })).toHaveTextContent('(current)')
       expect(screen.getAllByRole('note')[0]).toHaveTextContent('not in the design')
     })
 

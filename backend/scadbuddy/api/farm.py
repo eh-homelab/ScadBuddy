@@ -1,6 +1,7 @@
 """``/api/v1/farm/…`` — the farm's context from Bambuddy (#1912): the queue, every
-archive with its outcome, aggregate stats and the spool inventory, and (#3742) the
-pictures of the queue's items and the printers' jobs.
+archive with its outcome and aggregate stats, and (#3742) the pictures of the queue's
+items and the printers' jobs. The spool inventory is ScadBuddy's own
+(``GET /filament/inventory``, #6262 Task 9).
 
 Read only: nothing here writes to Bambuddy, and every call needs only the ``Read
 Status`` scope, which a 401/403 names (``bambuddy/errors.py``). Each archive says whether
@@ -19,13 +20,7 @@ from fastapi.responses import StreamingResponse
 from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.farm import (
-    ArchiveOutcome,
-    InventoryView,
-    SpoolSummary,
-    inventory_view,
-    spool_summary,
-)
+from scadbuddy.bambuddy.farm import ArchiveOutcome
 from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
 from scadbuddy.bambuddy.pictures import queue_item_picture
 from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
@@ -277,42 +272,3 @@ async def get_archives(
         )
         for row in rows
     ]
-
-
-@router.get("/inventory", response_model=InventoryView, summary="Spools and loaded slots")
-async def get_inventory(
-    store: SettingsStoreDep,
-    include_archived: bool = False,
-    printer_id: Annotated[
-        int | None,
-        Query(description="Only this printer's loaded slots; every spool keeps its placement"),
-    ] = None,
-) -> InventoryView:
-    """Every spool in Bambuddy's inventory, with where it is loaded, and every loaded
-    slot of each active printer with its remaining grams."""
-    async with client_for(store.load()) as client:
-        return await inventory_view(
-            client, include_archived=include_archived, printer_id=printer_id
-        )
-
-
-@router.get(
-    "/spools/{spool_id}/summary",
-    response_model=SpoolSummary,
-    summary="One spool's stock and price, and its filament's",
-)
-async def get_spool_summary(
-    spool_id: int,
-    store: SettingsStoreDep,
-    grams: Annotated[
-        float | None,
-        Query(ge=0, description="Grams to price at this spool's cost, e.g. a plate's use"),
-    ] = None,
-) -> SpoolSummary:
-    """What a filament hover card shows (#785): the spool's remaining grams, where it is
-    loaded and its price per kg, and every unarchived spool of the same filament
-    (material, subtype, brand and colour) with their total remaining grams and where
-    they are loaded. Prices are Bambuddy's own ``cost_per_kg``; with none, every price
-    and cost is ``null``."""
-    async with client_for(store.load()) as client:
-        return await spool_summary(client, spool_id, grams=grams)

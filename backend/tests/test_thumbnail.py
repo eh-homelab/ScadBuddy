@@ -519,6 +519,93 @@ def test_a_plate_drawn_in_small_chunks_is_the_same_image(monkeypatch: pytest.Mon
     assert render_plate_thumbnails(_two_colour_parts()) == whole
 
 
+def _box_fragments(triangle: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray]:
+    """One triangle's covered pixels and depths by testing every pixel of its
+    bounding box, row by row: the plain form of what `_fragments` must give."""
+    x0 = int(np.clip(np.floor(triangle[:, 0].min()), 0, size))
+    x1 = int(np.clip(np.ceil(triangle[:, 0].max()) + 1, 0, size))
+    y0 = int(np.clip(np.floor(triangle[:, 1].min()), 0, size))
+    y1 = int(np.clip(np.ceil(triangle[:, 1].max()) + 1, 0, size))
+    y, x = np.mgrid[y0:y1, x0:x1]
+    px, py = x + 0.5, y + 0.5
+    (ax, ay, az), (bx, by, bz), (cx, cy, cz) = triangle
+    area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if area == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0)
+    wc = ((bx - ax) * (py - ay) - (by - ay) * (px - ax)) / area
+    wb = ((px - ax) * (cy - ay) - (py - ay) * (cx - ax)) / area
+    inside = (wc >= 0) & (wb >= 0) & (wc + wb <= 1)
+    depth = az + wb * (bz - az) + wc * (cz - az)
+    return (y * size + x)[inside], depth[inside]
+
+
+def _awkward_triangles(size: int) -> np.ndarray:
+    """Triangles of every shape a mesh hands the rasteriser: slivers corner to corner,
+    small and large, both windings, edges flat on a row, vertices on pixel centres
+    (where the inside test is an equality), partly or wholly off the image, and
+    degenerate ones."""
+    rng = np.random.default_rng(3789)
+    big = rng.uniform(-0.2 * size, 1.2 * size, (150, 3, 3))
+    small = rng.uniform(0, size, (150, 1, 3)) + rng.uniform(-3, 3, (150, 3, 3))
+    on_centres = np.floor(rng.uniform(0, size, (100, 3, 3))) + 0.5
+    slivers = np.array(
+        [
+            [[0.2, 0.1, 1.0], [size - 0.3, size - 0.2, 2.0], [size - 0.3, size - 1.4, 1.5]],
+            [[size - 0.3, size - 1.4, 1.5], [size - 0.3, size - 0.2, 2.0], [0.2, 0.1, 1.0]],
+            [[1.5, 2.5, 0.0], [size - 1.5, 2.5, 0.0], [size / 2, 3.1, 0.0]],
+            [[1.0, 1.0, 0.0], [5.0, 5.0, 0.0], [9.0, 9.0, 0.0]],
+        ]
+    )
+    flat = big[:50].copy()
+    flat[:, 1, 1] = flat[:, 0, 1]
+    return np.concatenate((big, small, on_centres, slivers, flat))
+
+
+@pytest.mark.parametrize("batch_pixels", [1 << 22, 1 << 9])
+def test_the_scanline_covers_exactly_the_pixels_a_box_test_does(
+    monkeypatch: pytest.MonkeyPatch, batch_pixels: int
+) -> None:
+    """#3789: `_fragments` tests only the pixels near each row's span, not the whole
+    bounding box, yet must pass exactly the pixels the box test passes, at bit-equal
+    depths, each triangle's row by row: anything else changes the covers."""
+    monkeypatch.setattr(thumbnail, "BATCH_PIXELS", batch_pixels)
+    size = 96
+    triangles = _awkward_triangles(size)
+    batches = list(thumbnail._fragments(triangles, size))
+    pixels = np.concatenate([batch[0] for batch in batches])
+    depth = np.concatenate([batch[1] for batch in batches])
+    owner = np.concatenate([batch[2] for batch in batches])
+    drawn = list(dict.fromkeys(owner.tolist()))
+
+    expected = [_box_fragments(triangles[index], size) for index in drawn]
+
+    assert pixels.tolist() == np.concatenate([e[0] for e in expected]).tolist()
+    assert depth.tobytes() == np.concatenate([e[1] for e in expected]).tobytes()
+    assert owner.tolist() == [i for i, e in zip(drawn, expected, strict=True) for _ in e[0]]
+    skipped = set(range(len(triangles))) - set(drawn)
+    assert all(len(_box_fragments(triangles[index], size)[0]) == 0 for index in skipped)
+
+
+def test_a_thin_triangle_costs_its_pixels_not_its_bounding_box() -> None:
+    """#3789: an OpenSCAD mesh is mostly long thin triangles, and testing each one's
+    whole bounding box was most of a cover's time. A sliver corner to corner of a
+    1024-pixel image covers a few thousand pixels; its box is a million. The memory a
+    draw takes follows what is tested, so it stays well under the box's."""
+    size = 1024
+    sliver = np.array(
+        [[[0.2, 0.1, 1.0], [size - 0.3, size - 0.2, 2.0], [size - 0.3, size - 3.4, 1.5]]]
+    )
+    tracemalloc.start()
+    try:
+        covered = sum(len(batch[0]) for batch in thumbnail._fragments(sliver, size))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert 0 < covered < 4 * size
+    # One float64 per pixel of the box alone would be 8 MiB.
+    assert peak < 2 * 2**20, f"a sliver's draw peaked at {peak / 2**20:.1f} MiB"
+
+
 def test_a_painted_part_shows_its_paint_and_picks_as_one_part() -> None:
     """#3956: a blue box painted pink on top looks pink from above, and the pick map
     still has it as one part."""

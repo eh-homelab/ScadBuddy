@@ -81,7 +81,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          # Full history (#6570): `gh pr diff` answers HTTP 406 for a PR over 300
+          # files or 20,000 lines, so the reviewer reads such a PR with
+          # `git diff origin/<base>...HEAD`, which needs the merge base.
+          fetch-depth: 0
 
       # NOTE: no Hindsight MCP server here, unlike eh-homelab/clusters' copy of
       # this workflow. This repo has no `.github/claude.mcp.json` yet; if one is
@@ -280,7 +283,7 @@ jobs:
         # merge-gate steps below. continue-on-error keeps the job going so the gate runs
         # and becomes the single source of pass/fail.
         continue-on-error: true
-        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1
+        uses: anthropics/claude-code-action@4d75e5f390ee76b2e09c1980ecc99ff3a2e088c8 # v1
         env:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:
@@ -336,6 +339,23 @@ jobs:
             PR NUMBER: ${{ github.event.inputs.pr_number }}
 
             ## Review Process
+
+            **Reading the change.** `gh pr diff` answers HTTP 406 ("the diff
+            exceeded the maximum number of files (300)", or too many lines) for
+            a large PR (#6570). Then do not stop: list the files with
+            `gh pr view <number> --json files,baseRefName`, and read each part
+            with `git diff origin/<baseRefName>...HEAD -- <paths>` (the checkout
+            has full history). Review the whole change that way.
+
+            **Commands you may run.** Bash runs only a single `git`, `gh`,
+            `jq`, `yq` or `shellcheck` command (a pipe into `jq` is fine). A
+            `for` loop, `cd`, `cat`, `sed`, `awk`, `head` or a pipe into
+            them is denied. Read a file with the Read tool, search with Grep
+            and Glob, and page a long diff with `git diff ... -- <paths>` per
+            group of files. A denied command ends nothing: rewrite it as an
+            allowed one and go on, then post the summary (on PR #6550 three
+            denials of `for`/`sed` commands ended the review with no summary,
+            #6570).
 
             Review this pull request for ScadBuddy — a self-hosted OpenSCAD
             customizer that reproduces MakerWorld's Parametric Model Maker
@@ -641,6 +661,14 @@ jobs:
           turns="$(printf '%s' "$result" | jq -r '.num_turns // 0')"
           cost="$(printf '%s' "$result" | jq -r '.total_cost_usd // 0')"
           echo "subtype=$subtype is_error=$is_error num_turns=$turns total_cost_usd=$cost"
+          # The review's last words (#6570): a run that ends with no summary usually
+          # ends on a text-only turn, and without this the job log never shows it.
+          # PR content can steer that text, so no line of it may run as a workflow
+          # command: control characters go, and commands are off while it prints.
+          stop="$(openssl rand -hex 16)"
+          echo "::stop-commands::$stop"
+          printf '%s' "$result" | jq -r '(.result // "") | .[0:2000] | gsub("[\r\u0000-\u0008\u000b-\u001f\u007f]"; " ")' | sed 's/^/last message: /'
+          echo "::$stop::"
           # A refused tool call can stop the review posting its summary while the
           # run still ends "success" (#918). Name each one, with the start of its input.
           printf '%s' "$result" | jq -r '(.permission_denials // [])[]
@@ -722,7 +750,7 @@ jobs:
         if: always() && steps.summary_probe.outputs.found == 'false'
         # The assertion below is what fails the run; this step only tries.
         continue-on-error: true
-        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1
+        uses: anthropics/claude-code-action@4d75e5f390ee76b2e09c1980ecc99ff3a2e088c8 # v1
         env:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:
@@ -825,7 +853,7 @@ jobs:
       - name: Merge-gate classification
         id: gate
         if: always()
-        uses: anthropics/claude-code-action@9eb012b6d0900c2b9eede65ee1758cec4d2973e9 # v1
+        uses: anthropics/claude-code-action@4d75e5f390ee76b2e09c1980ecc99ff3a2e088c8 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Empty when the install step failed: the action then installs itself.

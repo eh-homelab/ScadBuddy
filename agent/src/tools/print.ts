@@ -264,20 +264,78 @@ export function followed(run: PrintRun) {
 }
 
 /** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
-function runOutcome(run: PrintRun, ctx: ToolContext) {
+function runOutcome(run: PrintRun, ctx: ToolContext, tower?: TowerAnswer) {
+  const extra = tower === undefined ? {} : { prime_tower: tower }
   if (run.status === 'failed') {
     const error = run.error
-    const failed = `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}`
+    // #6758: a slice the prime tower failed names the way to move it first.
+    const conflict = tower === undefined && conflictWarned(error)
+    const failed =
+      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}` +
+      (conflict ? '. Call print_output again with move_prime_tower: true to move the prime tower to a free spot first.' : '')
     if (!run.may_have_queued) throw new ToolError(failed)
     // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
     // another print_output call is a new print (its own request_id), so check first. The
     // answer is the run itself, so the session records it (#1017, sessions/touched.ts).
     const note = "The print may still have been queued: check Bambuddy's queue before printing again."
     ctx.report?.({ detail: `${failed}. ${note}` })
-    return { ...json({ ...run, note }), isError: true }
+    return { ...json({ ...run, ...extra, note }), isError: true }
   }
-  if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
-  return json(followed(run))
+  if (run.status === 'running') return json({ ...run, ...extra, note: 'still slicing; poll get_print_run with this id' })
+  return json({ ...followed(run), ...extra })
+}
+
+/** Whether a failed run's error carries the slicer's `object-conflict` warning (#6734). */
+function conflictWarned(error: PrintRun['error']): boolean {
+  const warnings = (error as { extensions?: { warnings?: { kind?: string }[] } } | null | undefined)?.extensions?.warnings
+  return (warnings ?? []).some((warning) => warning.kind === 'object-conflict')
+}
+
+/** #6758: what print_output's `move_prime_tower` found, and whether it moved the tower. */
+interface TowerAnswer {
+  conflicts: unknown[]
+  moved: boolean
+  /** Why the tower stays where it conflicts: no free spot fits it. */
+  note?: string
+}
+
+/** #6758: the answer's note when a tower conflicts and no free spot fits it. */
+const NO_FREE_SPOT_NOTE =
+  'No free spot on the plate fits the prime tower, so the tower stays where the slicer will likely refuse it ' +
+  '("Object conflicts were detected"). Re-arrange the output with room for the tower (arrange with this ' +
+  'prime_tower), turn off "No sparse layers", or move the objects, then print again.'
+
+/**
+ * #6758: the print dialog's check before the slice (`POST …/check`) for `body`, and, when a
+ * prime tower conflicts and the check finds a free spot, its fix written into
+ * `body.process_overrides` (`wipe_tower_x`/`_y`, over the caller's), as the dialog's "Move the
+ * prime tower" writes it. The run then takes it.
+ */
+async function moveTower(
+  ctx: ToolContext,
+  source: ReturnType<typeof sourceOf>,
+  body: { process_overrides?: Record<string, unknown> } & Record<string, unknown>,
+): Promise<TowerAnswer> {
+  const verdict = await ok(
+    source.kind === 'library'
+      ? ctx.backend.POST('/api/v1/print/library/{file_id}/check', {
+          params: { path: { file_id: source.id } },
+          signal: ctx.signal,
+          body: body as never,
+        })
+      : ctx.backend.POST('/api/v1/print/outputs/{output_id}/check', {
+          params: { path: { output_id: source.id } },
+          signal: ctx.signal,
+          body: body as never,
+        }),
+    'check the prime tower',
+  )
+  const check = verdict.prime_tower
+  const fix = check?.fix ?? null
+  if (fix !== null) body.process_overrides = { ...(body.process_overrides ?? {}), ...fix }
+  const conflicts = check?.conflicts ?? []
+  if (fix === null && conflicts.length > 0) return { conflicts, moved: false, note: NO_FREE_SPOT_NOTE }
+  return { conflicts, moved: fix !== null }
 }
 const calibration = z.enum(['off', 'on', 'auto'])
 
@@ -405,6 +463,11 @@ export function partSettingsPhrase(settings: Record<string, Record<string, unkno
 }
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
+/** A plan's `ids` (#6262 Task 7): its positive spool ids are ScadBuddy spool numbers, as get_print_filaments lists them. */
+export const sbPlanIds = z
+  .literal('sb')
+  .default('sb')
+  .describe('What the spool ids name: ScadBuddy spool numbers (get_print_filaments), always "sb"')
 export const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
   id: z.string().min(1),
@@ -540,6 +603,17 @@ const PRINT_OUTPUT_INPUT = withSource({
   prime_tower: primeTowerChoice,
   part_settings: partSettings,
   process_overrides: processOverrides,
+  move_prime_tower: z
+    .boolean()
+    .optional()
+    .describe(
+      '#6758: check the prime tower before the slice, as the print dialog does, and move a tower the slicer ' +
+        'would refuse ("Object conflicts were detected": on the objects, inside the "No sparse layers" keep-out, ' +
+        "or out of an extruder's reach) to the free spot the check finds. The move is sent as `process_overrides` " +
+        "`wipe_tower_x`/`wipe_tower_y` (one value per plate), over any you set. The answer's `prime_tower` says " +
+        'what the check found and whether the tower moved, with a `note` when no free spot fits the tower. ' +
+        'Omit to print the tower where the file puts it.',
+    ),
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))
     .max(32)
@@ -633,6 +707,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${towerPhrase(args.prime_tower)}` +
     `${partSettingsPhrase(args.part_settings)}` +
     `${processOverridesPhrase(args.process_overrides)}` +
+    `${args.move_prime_tower ? ', moving the prime tower to a free spot when the slicer would refuse it' : ''}` +
     `${args.accepted_fixes?.length ? `, applying ${args.accepted_fixes.length} accepted analyzer fix${args.accepted_fixes.length === 1 ? '' : 'es'} (${args.accepted_fixes.join(', ')})` : ''}` +
     `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
   )
@@ -737,7 +812,8 @@ export const printTools: Tool[] = [
     name: 'get_print_filaments',
     label: "Read the print dialog's filaments",
     description:
-      "Bambuddy's spool inventory joined to where each spool is loaded and, with `printer_id`, the " +
+      "ScadBuddy's spools, each by its number (`spool_id`, what `filament_plan` names), joined to the tray it " +
+      "is loaded in (a printer's report, else Bambuddy's assignment of its linked spool) and, with `printer_id`, the " +
       'remaining grams per slot and the mounted nozzles — plus what this output\'s (or library file\'s) plate ' +
       '(or, with `all_plates`, every plate) needs and a suggested spool per slot.',
     input: withSource({
@@ -746,7 +822,7 @@ export const printTools: Tool[] = [
         .optional()
         .describe(
           "A registry printer's `id` (list_printers): on a printer a run reaches over the LAN the spools are " +
-            "its loaded trays, each a negative `spool_id`, with the spool providers' records over them.",
+            "its loaded trays, each a negative `spool_id`, with the ScadBuddy spool it holds (`sb_spool_id`, `sb_number`).",
         ),
       plate_id: z.number().int().min(1).optional(),
       all_plates: z.boolean().optional(),
@@ -1635,6 +1711,8 @@ export const printTools: Tool[] = [
     routes: [
       'POST /api/v1/print/outputs/{output_id}/run',
       'POST /api/v1/print/library/{file_id}/run',
+      'POST /api/v1/print/outputs/{output_id}/check',
+      'POST /api/v1/print/library/{file_id}/check',
       'GET /api/v1/print/runs/{run_id}',
       'GET /api/v1/printers/{printer_id}',
     ],
@@ -1762,7 +1840,7 @@ export const printTools: Tool[] = [
         copies: args.copies ?? null,
         plate_id: args.plate_id,
         all_plates: args.all_plates,
-        filament_plan: { slots, force_colour_match: forceColourMatch ?? true },
+        filament_plan: { slots, force_colour_match: forceColourMatch ?? true, ids: 'sb' as const },
         choices: {
           nozzles: chosenNozzles,
           tier: chosenTier ?? null,
@@ -1806,6 +1884,8 @@ export const printTools: Tool[] = [
         ...(args.accepted_fixes?.length ? { accepted_fixes: args.accepted_fixes } : {}),
         request_id: requestId,
       }
+      // #6758: the dialog's check before the slice, and its fix for the prime tower.
+      const tower = args.move_prime_tower ? await moveTower(ctx, source, body) : undefined
       // A run no worker has picked up yet is a 202 followed to the run, not a 503
       // re-sent (#2795): each re-send of a print is a chance to print twice.
       const started = await reattachFollowing(
@@ -1832,7 +1912,7 @@ export const printTools: Tool[] = [
           "shows the print once it starts; check it and Bambuddy's queue before printing again, as calling " +
           'print_output again would be a second print.',
       )
-      return runOutcome(await waitForRun(ctx, started), ctx)
+      return runOutcome(await waitForRun(ctx, started), ctx, tower)
     },
   }),
 

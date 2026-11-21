@@ -16,8 +16,8 @@ import { expect, test, type APIRequestContext } from '@playwright/test'
  *   E2E_PRINTER_URL    the fake printer's control port (`GET /__received`)
  *   E2E_RECORDER_URL   the recorder (`GET /__recorded`), in recorder mode
  *
- * With a URL set the native dialog's analyzers read the registry, the report and the
- * overlay, and the Prints page reads Bambuddy's queue and history only after its "Show
+ * With a URL set the native dialog's analyzers read the registry, the report and
+ * ScadBuddy's own spools (#6262), and the Prints page reads Bambuddy's queue and history only after its "Show
  * Bambuddy's queue and print history" button (#4629, #3745), so the recorder pass sees
  * no call at all.
  *
@@ -80,24 +80,28 @@ test.describe('native hot path (real stack)', () => {
     })
 
     // The trays are the fake printer's report. Slot 2 (#FF1493) is matched to the pink
-    // tray; slot 1 (#0047BB) matches none, so it is chosen by hand.
+    // tray. Slot 1 (#0047BB) matches none; since #6885 the suggestion takes the free
+    // loaded tray, the white, rather than leaving the slot empty. The tile names a tray
+    // by the SB spool's colour name ("Hot Pink") or the colour word ("pink"), so the
+    // labels are matched without case.
     const first = dialog.getByTestId('filament-slot-1')
     const second = dialog.getByTestId('filament-slot-2')
-    await expect(second.getByRole('radio', { name: new RegExp(PINK.label) })).toBeChecked({ timeout: 60_000 })
-    // The native slicer worker's progress bar: watched from before the choice that
-    // starts the slice, so a quick slice cannot finish before it is looked for.
+    // The native slicer worker's progress bar: watched before the dialog's choices are
+    // in, so a quick slice cannot finish before it is looked for.
     const progress = page.getByTestId('slice-progress').waitFor({ timeout: 300_000 })
-    await first.getByRole('radio', { name: new RegExp(WHITE.label) }).click()
+    await expect(second.getByRole('radio', { name: new RegExp(PINK.label, 'i') })).toBeChecked({ timeout: 60_000 })
+    await expect(first.getByRole('radio', { name: new RegExp(WHITE.label, 'i') })).toBeChecked()
     await progress
     await expect(dialog.getByTestId('slice-time')).toHaveText(/\d/, { timeout: 300_000 })
 
-    // The tagged tray holds the recorder's spool 2, linked by RFID from the refresh the
-    // seed ran: Bambuddy's record over it, read from Postgres, not from Bambuddy. With no
-    // Bambuddy there is no record.
+    // The tagged tray holds the SB spool the seed's refresh pulled from the recorder's
+    // spool 2 and bound to its RFID tag (#6262): its `#N` and name, read from Postgres,
+    // not from Bambuddy. With no Bambuddy nothing was pulled, so the tray holds none.
     if (mode === 'recorder') {
-      await expect(second).toContainText('Bambuddy: Bambu Lab Hot Pink')
+      await expect(second.getByTestId(/^sb-spool-/)).toHaveText(/^#\d+$/)
+      await expect(second).toContainText('Hot Pink')
     } else {
-      await expect(second).not.toContainText('Bambuddy:')
+      await expect(second.getByTestId(/^sb-spool-/)).toHaveCount(0)
     }
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()

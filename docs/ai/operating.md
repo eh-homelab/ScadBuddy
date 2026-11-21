@@ -369,7 +369,7 @@ as unset (`present()`).
 
 | Variable | Default | Read by | Meaning |
 |---|---|---|---|
-| `SCADBUDDY_DATABASE_URL` | unset → AI disabled | `loadConfig()` | Postgres URL, shared with the backend (#241). It must be `postgres://` or `postgresql://`; anything else is a `ConfigError` at start. The URL is not echoed in the error because it normally carries the password. With it unset the service still runs, and `/healthz` reports `"ai": "disabled (no database)"`. Each replica opens up to 4 connections in its shared pool, about 4 more of its own for plugin connection-test locks (briefly more while a failed lock connection is replaced) (`TEST_LOCK_CONNECTIONS` in [`agent/src/db.ts`](../../agent/src/db.ts), #4994) and one `LISTEN` connection: `AGENT_DB_CONNECTIONS`, 9, is what to count when sizing Postgres `max_connections`. Once the API lists the agent's CRUD area `access` (#5299 step 5), a connection test holds a lease row of the API's `agent_leases` (key `tool-listing:<source>`, through `…/crud/agent/leases/{key}`, #5299 D3) in place of the lock connection. The pool and the lock connections close after 60 s idle (`IDLE_TIMEOUT_SECONDS`, #5226), and show in `pg_stat_activity` as `scadbuddy-agent` (the listener as `scadbuddy-agent-listener`). |
+| `SCADBUDDY_DATABASE_URL` | unset → AI disabled | `loadConfig()` | Postgres URL, shared with the backend (#241). It must be `postgres://` or `postgresql://`; anything else is a `ConfigError` at start. The URL is not echoed in the error because it normally carries the password. With it unset the service still runs, and `/healthz` reports `"ai": "disabled (no database)"`. Each replica opens up to 4 connections in its shared pool, about 4 more of its own for plugin connection-test locks (briefly more while a failed lock connection is replaced) (`TEST_LOCK_CONNECTIONS` in [`agent/src/db.ts`](../../agent/src/db.ts), #4994), and no `LISTEN` connection (its NOTIFY channels come over the API's change stream, #5299 D4): `AGENT_DB_CONNECTIONS`, 8, is what to count when sizing Postgres `max_connections`. Once the API lists the agent's CRUD area `access` (#5299 step 5), a connection test holds a lease row of the API's `agent_leases` (key `tool-listing:<source>`, through `…/crud/agent/leases/{key}`, #5299 D3) in place of the lock connection. The pool and the lock connections close after 60 s idle (`IDLE_TIMEOUT_SECONDS`, #5226), and show in `pg_stat_activity` as `scadbuddy-agent`. |
 | `SCADBUDDY_BACKEND_URL` | `http://127.0.0.1:8080` | `loadConfig()` | Where the backend listens. Must be `http(s)`. Trailing slashes are stripped. `/healthz` probes `GET {url}/healthz` with a 2 s timeout (`backendReachable()`, [`agent/src/api/backend.ts`](../../agent/src/api/backend.ts)). |
 | `SCADBUDDY_SECRET_KEY_FILE` | unset → credentials cannot be saved | `loadKek()` in [`agent/src/secrets.ts`](../../agent/src/secrets.ts) | Path of the key-encryption key (KEK) file. See §3. |
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
@@ -708,6 +708,7 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   |---|---|
   | `disabled (no database)` | `SCADBUDDY_DATABASE_URL` unset |
   | `unavailable (database unreachable)` | Ping failed, or the credential read threw |
+  | `unavailable (the API does not answer the agent's CRUD areas)` | Once the API lists every area the agent wants: the Postgres ping held, but `GET …/crud/agent/areas` did not answer (`agent/src/api/dataHealth.ts`, #6501) |
   | `unavailable (database migrations failed)` | `ready()` returned false |
   | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
@@ -978,14 +979,11 @@ API, under the grant row's share lock, in the grant route's transaction
 holds no backend table: the API takes back `flow_grants` and `flow_grant_uses` at every
 start too, and `agent/test/retiredTables.test.ts` names them.
 
-Rollout order when the API and the agent connect as different roles: the API's role gets
-its `ai_*` grants from the agent (`agent/src/db/grants.ts` `API_AI_GRANTS`, granted by
-`grantBackendRoles` at each agent start), so a new API whose CRUD routes need a privilege the
-old agent never granted fails those writes until a new agent has started. Since #6413 every
-image write on `…/crud/agent/session-blobs` sets `created_at` on an image already there
-(`ON CONFLICT … DO UPDATE`), and `…/session-blobs/deletes` deletes: both need `UPDATE` and
-`DELETE` on `ai_session_blobs`. Roll the agent sidecar first, or with the API in one rollout.
-Production connects both as one role, so it needs no order.
+When the API and the agent connect as different roles, the API's role must own the `ai_*`
+tables: the agent grants nothing since #6501 (it granted `API_AI_GRANTS` at each start
+before), and the API's CRUD routes read and write those tables. The files the API applies
+(#5299 D6) are its role's already; transfer the older ones with `ALTER TABLE … OWNER TO`.
+Production connects both as one role, so it needs nothing.
 
 ## 8. Per-query limits
 

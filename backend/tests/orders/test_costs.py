@@ -18,13 +18,20 @@ from scadbuddy.orders.costs import (
     order_margins,
 )
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError
-from scadbuddy.orders.lifecycle import QUOTE_HOLDER, FulfilmentInput, OrderEdit, ShipmentInput
+from scadbuddy.orders.lifecycle import (
+    QUOTE_HOLDER,
+    FirmLine,
+    FulfilmentInput,
+    OrderEdit,
+    ShipmentInput,
+)
 from scadbuddy.orders.models import (
     ChargeInput,
     ColourSlot,
     CostEntryInput,
     FilamentInput,
     Fulfilment,
+    MachineRateBreakdown,
     Order,
     OrderItem,
     PricingPolicy,
@@ -184,7 +191,11 @@ def _set_attempt(pool: PgPool, attempt_id: str, copies: int, sliced_sha256: str)
 
 
 def priced_order(
-    shop: Shop, policy: PricingPolicy, quantity: int = 1, sha: str = "b" * 64
+    shop: Shop,
+    policy: PricingPolicy,
+    quantity: int = 1,
+    sha: str = "b" * 64,
+    breakdown: MachineRateBreakdown | None = None,
 ) -> tuple[Order, OrderItem]:
     """An accepted order whose item's accepted slice quote was priced under ``policy``:
     per unit 600 s and 10 g of a 20-per-kg filament in colour slot 0."""
@@ -216,6 +227,7 @@ def priced_order(
         by=BY,
         revision_id=shop.get_item(item).current_revision_id or "",
         quote_id=quote_id,
+        machine_rate_breakdown=breakdown,
     )
     shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
     return shop.lifecycle.accept_order(order.id, BY), shop.get_item(item)
@@ -681,6 +693,196 @@ async def test_an_attempt_on_a_merged_away_printer_is_costed_at_the_kept_printer
 
     assert costs is not None
     assert costs.items[0].attempts[0].machine_minor == 1000
+
+
+# -- #5774: which machine rate priced an attempt (machine-rate actuals spec §6) ------------
+
+
+def _breakdown(actuals: bool, confidence: int | None) -> MachineRateBreakdown:
+    return MachineRateBreakdown(
+        source="profile",
+        rate_per_hour="6",
+        currency="USD",
+        actuals=actuals,
+        actuals_window=3,
+        confidence=confidence,
+    )
+
+
+@pytest.mark.parametrize(
+    ("actuals", "confidence", "basis"),
+    [(True, 100, "quote_actuals"), (False, 33, "quote_estimate"), (False, None, "quote_estimate")],
+)
+async def test_an_attempt_at_its_quotes_machine_line_takes_the_quotes_basis(
+    shop: Shop, actuals: bool, confidence: int | None, basis: str
+) -> None:
+    breakdown = _breakdown(actuals, confidence)
+    order, item = priced_order(shop, PricingPolicy(machine_rate_per_hour="6"), breakdown=breakdown)
+    attempt(shop, order, item, "succeeded", 1, 12.0, 90)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # The figure is the quote's, as before: 500 s at 100 per 600 s.
+    assert at.machine_minor == 83
+    assert (at.machine_rate_basis, at.machine_rate_confidence) == (basis, confidence)
+    assert costs.machine_rate_bases == [basis]
+
+
+async def test_a_quote_recorded_with_no_breakdown_reads_as_an_estimate(shop: Shop) -> None:
+    """A slice quote priced at the book's rate (no printer) records no breakdown: its
+    machine line is still the quote's, and nothing in it came from actuals."""
+    order, item = priced_order(shop, PricingPolicy(machine_rate_per_hour="6"))
+    attempt(shop, order, item, "succeeded", 1, 12.0, 90)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    assert (at.machine_rate_basis, at.machine_rate_confidence) == ("quote_estimate", None)
+
+
+async def test_a_storefront_quote_takes_the_basis_of_the_rate_its_variant_was_priced_at(
+    shop: Shop,
+) -> None:
+    """A storefront line's firm price carries the rate its variant was sliced and priced
+    at (``FirmLine.machine_rate_breakdown``), so its quote reads the printer's basis and
+    confidence, not an estimate it cannot tell."""
+    order = shop.order()
+    item = shop.item(order)
+    filament = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#00aa00", cost_per_kg="20")
+    )
+    plates = [
+        Plate(index=1, print_seconds=600, filaments=[PlateFilament(slot=0, used_g=Decimal("10"))])
+    ]
+    priced = price(
+        plates, {0: filament}, PricingPolicy(machine_rate_per_hour="6"), currency="USD", quantity=1
+    )
+    line = FirmLine(
+        lines=tuple(priced.lines),
+        unit_cost_minor=priced.unit_cost_minor,
+        unit_price_minor=priced.unit_price_minor,
+        currency="USD",
+        printer="p-1",
+        plates=tuple(plate.model_dump(mode="json") for plate in plates),
+        machine_rate_breakdown=_breakdown(True, 66),
+    )
+    with shop.rows.transaction() as conn:
+        _, [(_, quote)] = shop.lifecycle._firm_quotes(conn, order, BY, {item.id: line})  # type: ignore[misc]
+    assert quote.source == "storefront"
+    assert quote.machine_rate_breakdown == _breakdown(True, 66)
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    attempt(shop, order, shop.get_item(item), "succeeded", 1, 12.0, 90)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    assert (at.machine_rate_basis, at.machine_rate_confidence) == ("quote_actuals", 66)
+
+
+async def test_an_attempt_at_todays_rate_takes_its_printers_basis(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Stand", quantity=1, unit_price_minor=500, requires_printing=True
+    )
+    order = shop.lifecycle.accept_order(order.id, BY)
+    placed = {
+        "p-act": (None, attempt(shop, order, item, "succeeded", 1, 12.0, 91)),
+        "p-est": (None, attempt(shop, order, item, "failed", 0, 1.0, 92)),
+        "p-book": (None, attempt(shop, order, item, "failed", 0, 1.0, 93)),
+        "p-gone": ("S-ACT", attempt(shop, order, item, "failed", 0, 1.0, 94)),
+    }
+    unplaced = attempt(shop, order, item, "failed", 0, 1.0, 95)
+    with pool.connection() as conn:
+        for printer, (serial, at) in placed.items():
+            conn.execute(
+                "UPDATE order_item_fulfilments SET printer = %s, printer_serial = %s WHERE id = %s",
+                (printer, serial, at.id),
+            )
+    rates = USD.model_copy(
+        update={
+            "machine_rate_per_hour": "36",
+            "printer_rates": {"p-act": "72", "p-est": "72", "p-book": "36"},
+            "serial_rates": {"S-ACT": "72"},
+            # A printer with no profile is in the rate maps (at the book's rate) but not
+            # in the actuals maps.
+            "printer_actuals": {"p-act": True, "p-est": False},
+            "serial_actuals": {"S-ACT": True},
+            "printer_confidence": {"p-act": 100, "p-est": 33},
+            "serial_confidence": {"S-ACT": 66},
+        }
+    )
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    by_id = {a.fulfilment_id: a for a in costs.items[0].attempts}
+    got = {
+        printer: (by_id[at.id].machine_rate_basis, by_id[at.id].machine_rate_confidence)
+        for printer, (_, at) in placed.items()
+    }
+    assert got == {
+        "p-act": ("printer_actuals", 100),
+        "p-est": ("printer_estimate", 33),
+        "p-book": ("price_book", None),
+        "p-gone": ("printer_actuals", 66),
+    }
+    left = by_id[unplaced.id]
+    assert (left.machine_rate_basis, left.machine_rate_confidence) == ("price_book", None)
+    # The figures are as before: 500 s at 72, 72, 36 and 72 an hour.
+    assert [by_id[at.id].machine_minor for _, at in placed.values()] == [1000, 1000, 500, 1000]
+    assert costs.machine_rate_bases == ["price_book", "printer_actuals", "printer_estimate"]
+
+
+async def test_an_attempt_naming_no_printer_takes_the_default_printers_basis(
+    shop: Shop,
+) -> None:
+    order = shop.order()
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Stand", quantity=1, unit_price_minor=500, requires_printing=True
+    )
+    order = shop.lifecycle.accept_order(order.id, BY)
+    attempt(shop, order, item, "succeeded", 1, 12.0, 91)
+    rates = USD.model_copy(
+        update={
+            "machine_rate_per_hour": "72",
+            "default_printer": "p-def",
+            "printer_rates": {"p-def": "72"},
+            "printer_actuals": {"p-def": False},
+            "printer_confidence": {"p-def": 66},
+        }
+    )
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    assert (at.machine_minor, at.machine_rate_basis, at.machine_rate_confidence) == (
+        1000,
+        "printer_estimate",
+        66,
+    )
+
+
+async def test_an_attempt_with_no_machine_figure_has_no_basis(shop: Shop) -> None:
+    order = shop.lifecycle.create_order(shop.customer.id, BY, currency="EUR")
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Stand", quantity=1, unit_price_minor=500, requires_printing=True
+    )
+    order = shop.lifecycle.accept_order(order.id, BY)
+    attempt(shop, order, item, "succeeded", 1, 12.0, 91)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    assert at.machine_minor is None
+    assert (at.machine_rate_basis, at.machine_rate_confidence) == (None, None)
+    assert costs.machine_rate_bases == []
 
 
 async def test_a_cancelled_item_with_no_cost_has_no_margin_state(shop: Shop) -> None:

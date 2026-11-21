@@ -4,10 +4,11 @@ Heuristic, not a solver. Copies are grouped by filament signature (their spools 
 plan, else their colours), placed first-fit-decreasing into MaxRects free space with a
 quarter turn when that fits better, and a plate only takes a copy if `render/plate.py`'s
 `fit_problem` still passes for the plate's block with the prime tower that plate needs
-(more than one colour). That is the same check `write_plates_3mf` makes, so what is
-packed is always writable. Plates are then ordered so each needs the fewest filaments
-the previous did not. A goal is two functions: which plates a copy may join, and
-whether plates are reordered.
+(more than one colour, unless the print turns the tower off: `tower`, #3770), sized by
+its colours and kept clear by the "No sparse layers" keep-out when asked (#6735). That is
+the same check `write_plates_3mf` makes, so what is packed is always writable. Plates
+are then ordered so each needs the fewest filaments the previous did not. A goal is two
+functions: which plates a copy may join, and whether plates are reordered.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from scadbuddy.render.job_models import ManifestObject
-from scadbuddy.render.plate import PlateGeometry, fit_problem, plate_for
+from scadbuddy.render.plate import PlateGeometry, TowerSettings, fit_problem, plate_for
 from scadbuddy.template import Part
 from scadbuddy.workflows.models import Layout, LayoutPlate, PackItem, Placed, PlateSize, SlotPlan
 from scadbuddy.workflows.packing import GAP_MM, PackError
@@ -145,8 +146,13 @@ class _Sheet:
         ]
 
 
-def _try(sheet: _Sheet, copy: _Copy, geometry: PlateGeometry) -> bool:
-    """Place ``copy`` on ``sheet`` if a turn of it fits and the plate stays writable."""
+def _try(
+    sheet: _Sheet, copy: _Copy, geometry: PlateGeometry, *, tower: bool, no_sparse: bool
+) -> bool:
+    """Place ``copy`` on ``sheet`` if a turn of it fits and the plate stays writable.
+    ``tower`` false: the plate needs no prime tower, whatever its colours (#3770). The
+    tower grows with the plate's colours, and ``no_sparse`` keeps the slicer's
+    "No sparse layers" keep-out round it (#6735)."""
     w, d = copy.size
     key = ((w, d), copy.colours, copy.part.bbox.size[2])
     if key in sheet.refused:
@@ -170,7 +176,12 @@ def _try(sheet: _Sheet, copy: _Copy, geometry: PlateGeometry) -> bool:
     height = max(sheet.height, copy.part.bbox.size[2])
     for spot, tw, td, rot in options:
         extent = (max(sheet.extent[0], spot.x + tw), max(sheet.extent[1], spot.y + td))
-        if fit_problem((extent[0], extent[1], height), geometry, tower=len(colours) > 1):
+        if fit_problem(
+            (extent[0], extent[1], height),
+            geometry,
+            tower=tower and len(colours) > 1,
+            settings=TowerSettings(filaments=len(colours), no_sparse_layers=no_sparse),
+        ):
             continue
         sheet.occupy(_Free(spot.x, spot.y, tw + GAP_MM, td + GAP_MM))
         sheet.placed.append((copy, spot.x, spot.y, rot))
@@ -217,7 +228,12 @@ def arrange(
     plan: SlotPlan | None = None,
     colours: Sequence[str] = (),
     allow_own: bool = True,
+    tower: bool = True,
+    no_sparse_layers: bool = False,
 ) -> Layout:
+    """``tower`` false (the print's prime tower off, #3770) reserves no tower on any
+    plate; true reserves one on each plate with more than one colour, sized by them, and
+    ``no_sparse_layers`` keeps the slicer's keep-out round it (#6735)."""
     if goal not in GOALS:
         raise PackError(f"pack goal {goal!r} is not one of {', '.join(GOALS)}")
     if not items:
@@ -254,13 +270,23 @@ def arrange(
     joins = _joins(goal)
     sheets: list[_Sheet] = []
     for copy in copies:
-        if any(joins(s, copy) and _try(s, copy, geometry) for s in sheets):
+        if any(
+            joins(s, copy) and _try(s, copy, geometry, tower=tower, no_sparse=no_sparse_layers)
+            for s in sheets
+        ):
             continue
         sheet = _Sheet(geometry.usable.width, geometry.usable.depth, copy.group, copy.signature)
-        if not _try(sheet, copy, geometry):
+        if not _try(sheet, copy, geometry, tower=tower, no_sparse=no_sparse_layers):
             w, d = copy.size
             why = (
-                fit_problem((w, d, copy.part.bbox.size[2]), geometry, tower=len(copy.colours) > 1)
+                fit_problem(
+                    (w, d, copy.part.bbox.size[2]),
+                    geometry,
+                    tower=tower and len(copy.colours) > 1,
+                    settings=TowerSettings(
+                        filaments=len(copy.colours), no_sparse_layers=no_sparse_layers
+                    ),
+                )
                 or "no turn of it fits"
             )
             raise PackError(

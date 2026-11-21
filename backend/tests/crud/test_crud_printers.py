@@ -16,6 +16,7 @@ import logging
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ import httpx
 import pytest
 from psycopg.types.json import Jsonb
 
+from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.api.crud_print import REPORT_ROUTE
 from scadbuddy.auth.service_auth import ServiceAuth
@@ -45,6 +47,7 @@ from scadbuddy.crud.print import (
 from scadbuddy.crud.wire import CRUD_HEADERS, NOT_CONFIGURED
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.machine_rate import CostProfile, MachineRateInputs, MachineRateStore
+from scadbuddy.printers import run_hours
 from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate
 from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore
 from scadbuddy.printers.store import (
@@ -65,11 +68,12 @@ UNKNOWN = "00000000-0000-4000-8000-0000000000ff"
 
 
 def _public(cls: type) -> set[str]:
-    """Its methods, but the ``_in`` ones, which run on a connection the worker has none of."""
+    """Its methods, but the ``_in`` and ``_on`` ones, which run on a connection the worker
+    has none of."""
     return {
         name
         for name, _ in inspect.getmembers(cls, inspect.isfunction)
-        if not name.startswith("_") and not name.endswith("_in")
+        if not name.startswith("_") and not name.endswith(("_in", "_on"))
     }
 
 
@@ -80,15 +84,23 @@ def test_the_areas_are_served_and_awaited() -> None:
     for area in ("printer-ensure", "printers"):
         assert area in CRUD_AREAS["print"]
         assert area in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's; Task 30's ``rack``
-    # and Task 31's ``spools`` came after it.
-    assert CRUD_AREAS["print"][-5:] == [
-        "printers",
-        "rack",
-        "spools",
-        "transfer-urls",
-        "access-codes",
+    # Appended, so an older API's list is a prefix of a newer one's: each came after the one before.
+    # Check the order, not the list's tail, which every new area extends.
+    areas = CRUD_AREAS["print"]
+    positions = [
+        areas.index(area)
+        for area in [
+            "printers",
+            "rack",
+            "spools",
+            "transfer-urls",
+            "access-codes",
+            "filament",
+            "filament-sync",
+            "filament-pull",
+        ]
     ]
+    assert positions == sorted(positions)
 
 
 def test_every_printer_method_is_remote_refused_or_named() -> None:
@@ -288,7 +300,9 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
     (the worker's role holds none of those tables)."""
     rates = MachineRateStore(store.pool)
     gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
-    inputs = MachineRateInputs(profile=CostProfile(watts="300"))
+    inputs = MachineRateInputs(
+        profile=CostProfile(watts="300", actuals_window=3, lan_hours_offset="0")
+    )
     rates.replace(gone.id, inputs)
     with store.pool.connection() as conn:
         conn.execute(
@@ -541,3 +555,51 @@ def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
                 client.request(method, path, json={})
             assert refused.value.status == 403, path
             assert refused.value.problem["reason"] == "wrong_caller", path
+
+
+# -- the hour counter (#5774, spec 2026-11-17-machine-rate-actuals §3.6, §10) ------------
+
+
+def _counter(store: SettingsStore, printer_id: str) -> run_hours.RunHours | None:
+    with store.pool.connection() as conn:
+        return run_hours.read(conn, printer_id)
+
+
+@pytest.mark.requires_postgres
+def test_the_report_routes_move_the_counter_and_answer_as_before(
+    crud: CrudSyncClient, printers: PrinterStore, store: SettingsStore
+) -> None:
+    pid = _lan_printer(printers)
+    start = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    url = f"{BASE}/reports/{pid}"
+
+    def put(report: dict[str, Any], seconds: int) -> httpx.Response:
+        body = {"report": report, "seen_at": (start + timedelta(seconds=seconds)).isoformat()}
+        return crud.request("PUT", url, json=body, idempotency_key=uuid.uuid4().hex)
+
+    first = put(_report("RUNNING"), 0)
+    assert first.status_code == 200
+    assert first.json() == {"ended": None, "started": "plate_1"}
+    assert put(_report("RUNNING"), 10).json() == {"ended": None, "started": None}
+
+    touched = crud.request(
+        "POST", f"{url}/touch", json={"seen_at": (start + timedelta(seconds=20)).isoformat()}
+    )
+    assert touched.status_code == 204 and touched.content == b""
+
+    ended = put(_report("FINISH"), 25)
+    assert ended.json() == {"ended": {"subtask_name": "plate_1", "timed": True}, "started": None}
+    counter = _counter(store, pid)
+    assert counter is not None
+    assert counter.run_seconds == Decimal(25)
+    assert (counter.state, counter.counted_to) == ("FINISH", start + timedelta(seconds=25))
+
+
+def test_the_workers_reports_are_unchanged_by_the_counter() -> None:
+    """The counter moves inside the API's report writes: the print worker sends the same
+    two calls, holds no pool, and no worker route names it."""
+    assert "run_hours" not in inspect.getsource(RemoteReports)
+    paths = [str(getattr(route, "path", "")) for route in crud_print.router.routes]
+    assert paths and not [path for path in paths if "hour" in path]
+    with pytest.raises(ApiOnlyError):
+        _ = RemoteReports(None).pool  # type: ignore[arg-type]

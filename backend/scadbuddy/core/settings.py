@@ -5,12 +5,20 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, get_args
 from urllib.parse import urlsplit
 
-from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from scadbuddy.bambuddy.models import NozzleSize
 from scadbuddy.core.config import (
     DEFAULT_ASSET_MAX_COUNT,
     DEFAULT_ASSET_MAX_TOTAL_BYTES,
@@ -90,6 +98,49 @@ def check_approval_timeout(value: int, name: str) -> int:
 DEFAULT_CRUD_PORT = 8082
 #: A mail address as the storefront's sender takes it: one ``@``, no space or angle bracket.
 _ADDRESS = re.compile(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+")
+
+
+#: Which way one kind of filament data moves (#6265 Decision 3): ``off`` not at all,
+#: ``sb_to_bb`` ScadBuddy to Bambuddy, ``bb_to_sb`` Bambuddy to ScadBuddy, ``two_way`` both.
+SyncDirection = Literal["off", "sb_to_bb", "bb_to_sb", "two_way"]
+
+
+def pulls(direction: SyncDirection) -> bool:
+    """True when ``direction`` moves Bambuddy's data into ScadBuddy."""
+    return direction in ("bb_to_sb", "two_way")
+
+
+def pushes(direction: SyncDirection) -> bool:
+    """True when ``direction`` moves ScadBuddy's data into Bambuddy."""
+    return direction in ("sb_to_bb", "two_way")
+
+
+class FilamentSync(BaseModel, extra="forbid"):
+    """Which way each kind of filament data moves between ScadBuddy and Bambuddy (spec
+    2026-11-14 §8, #6265): a `SyncDirection` per data type, read through `pulls` and
+    `pushes`. The defaults keep what the pull did before #6265 (Decision 3): ``spools``,
+    ``weights``, ``tags`` and ``presets`` pull, ``suppliers`` and ``locations`` are off.
+
+    ``spools``: the pull of a spool's own fields, of new BB spools (made or linked) and of
+    the spool catalog (insert types). ``weights``: BB's ``bb`` weight readings, scale
+    weighings, dryings and weight lock on a spool ScadBuddy already tracks (a new spool
+    always keeps its first reading, as it needs a starting weight, #6268). BB's usage rows
+    book while ``spools`` or ``weights`` pulls, on linked spools only. ``tags``: the pull
+    binds a linked spool to a tag BB names (a new BB spool takes its tags whatever this
+    says: they are what it is); the push drains the tags a binding change queued (#6264).
+    It does not gate the override mode or the AMS slot configure, which write Bambuddy
+    whatever it says.
+    ``presets``: the pull of BB's ``slicer_filament`` into a spool's ``migrated`` presets.
+    ``suppliers`` and ``locations`` move their own rows. Child data types act only on
+    spools linked already (Decision 16). A data type switched to pull later takes what BB
+    changed while it did not pull."""
+
+    spools: SyncDirection = "bb_to_sb"
+    weights: SyncDirection = "bb_to_sb"
+    tags: SyncDirection = "bb_to_sb"
+    presets: SyncDirection = "bb_to_sb"
+    suppliers: SyncDirection = "off"
+    locations: SyncDirection = "off"
 
 
 class Settings(BaseSettings):
@@ -588,6 +639,16 @@ class Settings(BaseSettings):
     # (`python -m scadbuddy.intake_worker`, #6133) checks a customer's staged files; the
     # API starts `CustomerFileCheck` on it.
     temporal_task_queue_customer_files: str = "customer-files"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_PROFILE_FETCH: where the profile-fetch worker
+    # (`python -m scadbuddy.profile_fetch`, #6625) exports a type's slicer profiles from
+    # 3dfilamentprofiles.com, through its browser service (#6780); the API starts
+    # `ProfileFetch` on it.
+    temporal_task_queue_profile_fetch: str = "profile-fetch"
+    # The nozzle diameters one profile fetch exports for each printer model (#6625), each
+    # one of the resolver's sizes. A JSON list: SCADBUDDY_PROFILE_FETCH_NOZZLES='["0.4"]'.
+    profile_fetch_nozzles: list[NozzleSize] = Field(
+        default_factory=lambda: list(get_args(NozzleSize)), min_length=1
+    )
     # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
     # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
     # it off.
@@ -673,6 +734,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_agent_tools",
         "temporal_task_queue_slicer",
         "temporal_task_queue_customer_files",
+        "temporal_task_queue_profile_fetch",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -704,10 +766,27 @@ class Settings(BaseSettings):
     # may set its own, and a run may override both.
     flow_approval_timeout_seconds: int = 0
     # SCADBUDDY_SPOOL_OVERLAY_REFRESH_SECONDS (#3818 tier A, plan 2026-10-18 Task 6b): how
-    # often the spool providers' records, and the kept copy of Bambuddy's local presets
-    # (#4645), are refreshed into Postgres, on their own Schedule
-    # (`workflows/spool_refresh.py`); 0 turns the refresh off.
+    # often the kept copy of Bambuddy's local presets (#4645) is refreshed and Bambuddy's
+    # spools are pulled into ScadBuddy's own (#6261), on their own Schedule
+    # (`workflows/spool_refresh.py`), which also runs the filament capture backstop (#6263);
+    # 0 turns all three off. The name is older than the spool overlay's removal (#6262
+    # Task 12) and stays, so no stored setting moves.
     spool_overlay_refresh_seconds: int = Field(default=300, ge=0)
+    # SCADBUDDY_FILAMENT_SYNC (JSON), _FILAMENT_LOW_STOCK_PCT and
+    # _FILAMENT_DEFAULT_COST_PER_KG (#6262 Task 13): the Filament section's settings.
+    # `filament_sync` sets a direction per data type (`FilamentSync`); a spool that sets
+    # no low-stock percentage is low under `filament_low_stock_pct` of its label weight;
+    # `filament_default_cost_per_kg`, in the shop's `orders_currency`, values a spool with
+    # no cost in the inventory summary (`filament/spools.py` `summary`).
+    filament_sync: FilamentSync = Field(default_factory=FilamentSync)
+    filament_low_stock_pct: int = Field(default=20, ge=0, le=100)
+    filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    # #6269: `filament_burn_window_days` is the span of print history the burn rate and the
+    # forecast read; a type that sets no `lead_time_days` or `safety_margin_days` takes the two
+    # defaults.
+    filament_burn_window_days: int = Field(default=30, ge=1, le=365)
+    filament_lead_time_days: int = Field(default=7, ge=0, le=365)
+    filament_safety_margin_days: int = Field(default=3, ge=0, le=365)
 
     @field_validator("flow_approval_timeout_seconds")
     @classmethod
@@ -942,6 +1021,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Paired with the Temporal address: the API starts flow runs on it, and the"
             " worker that serves it must name the same queue."
         ),
+        "temporal_task_queue_profile_fetch": (
+            "Paired with the Temporal address: the API starts profile fetches on it, and the"
+            " profile-fetch worker must name the same queue."
+        ),
         "temporal_task_queue_agent_tools": (
             "Paired with the agent service's worker, which serves its tools on that queue."
         ),
@@ -1052,8 +1135,15 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "preview_renders": "restart",
         # Decides at start whether the periodic sweep runs at all.
         "asset_sweep_interval": "restart",
-        # The spool providers' Schedule is set up at start, as the sweeps' is.
+        # The spool refresh's Schedule is set up at start, as the sweeps' is.
         "spool_overlay_refresh_seconds": "restart",
+        # Read from the store by each spool read, and by each pull of the Schedule.
+        "filament_sync": "live",
+        "filament_low_stock_pct": "live",
+        "filament_default_cost_per_kg": "live",
+        "filament_burn_window_days": "live",
+        "filament_lead_time_days": "live",
+        "filament_safety_margin_days": "live",
         # Attributes of the stores that read them on every use.
         "library_max_bytes": "live",
         "asset_max_total_bytes": "live",
@@ -1095,6 +1185,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_materials": "live",
         # Read from the store by each prepare of a listing's colours (#6237).
         "storefront_prepare_cap": "live",
+        # Read from the store by each start of a profile fetch (#6625).
+        "profile_fetch_nozzles": "live",
         # Read from the store by each send of the storefront's mail (#5283).
         "storefront_mail_host": "live",
         "storefront_mail_port": "live",

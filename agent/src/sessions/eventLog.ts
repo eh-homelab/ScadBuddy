@@ -18,9 +18,9 @@ import type { ServerEvent } from './protocol.js'
 // Going live: a write on THIS replica wakes local followers at once. A write
 // on another replica is announced on the event bus (spec §7, #300): `onAppend`
 // publishes it as `session.*` (busEvents.ts `SessionEventPublisher`), and every
-// replica's LISTEN consumer calls `wake()` (busEvents.ts
+// replica's change-stream consumer calls `wake()` (busEvents.ts
 // `followSessionEvents`). Polling every `pollMs` stays as the fallback for a
-// NOTIFY that never arrives (a dropped LISTEN connection, no listener).
+// NOTIFY that never arrives (a dropped change stream, none at all; #5299 D4).
 
 // A fork is copy-on-write for its log (#4212): its `ai_sessions` row names the session it was
 // forked from (`fork_parent_id`) and the seq of the last event of that session's log, as that
@@ -144,9 +144,17 @@ export class ForkParentGone extends Error {}
  * API's CRUD routes (`crudEvents.ts` `CrudEventRows`, area `session-events`), each method one
  * statement or one transaction. An append with a caller's own transaction stays `appendEventsIn`.
  */
+/** A part of an append that has committed: its events and their seqs. */
+export type Committed = (events: readonly ServerEvent[], seqs: readonly number[]) => void
+
 export interface EventRows {
-  /** The events appended, their seqs; with `fence` only while the row names that placement (undefined otherwise). */
-  append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence): Promise<number[] | undefined>
+  /**
+   * The events appended, their seqs; with `fence` only while the row names that placement
+   * (undefined otherwise). `committed` hears each part as its transaction commits: all of them at
+   * once over SQL, a batch at a time over the API, so a refusal after some batches still tells the
+   * followers of those.
+   */
+  append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence, committed?: Committed): Promise<number[] | undefined>
   read(sessionId: string, afterSeq: number, limit: number): Promise<LoggedEvent[]>
   userTurnText(sessionId: string, turnId: string): Promise<string | undefined>
   lastSeq(sessionId: string): Promise<number>
@@ -166,13 +174,16 @@ export class PgEventRows implements EventRows {
     this.#sql = sql
   }
 
-  async append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence): Promise<number[] | undefined> {
-    if (!fence) return appendEventsIn(this.#sql, sessionId, events)
-    return this.#sql.begin(async (tx) => {
-      const [held] = await tx`
-        SELECT 1 FROM ai_sessions WHERE id = ${sessionId} AND turn_attempt = ${fence.attempt} AND durable_turn_id = ${fence.turnId} FOR UPDATE`
-      return held ? appendEventsIn(tx, sessionId, events) : undefined
-    })
+  async append(sessionId: string, events: readonly ServerEvent[], fence?: TurnFence, committed?: Committed): Promise<number[] | undefined> {
+    const seqs = !fence
+      ? await appendEventsIn(this.#sql, sessionId, events)
+      : await this.#sql.begin(async (tx) => {
+          const [held] = await tx`
+            SELECT 1 FROM ai_sessions WHERE id = ${sessionId} AND turn_attempt = ${fence.attempt} AND durable_turn_id = ${fence.turnId} FOR UPDATE`
+          return held ? appendEventsIn(tx, sessionId, events) : undefined
+        })
+    if (seqs && seqs.length > 0) committed?.(events, seqs)
+    return seqs
   }
 
   read(sessionId: string, afterSeq: number, limit: number): Promise<LoggedEvent[]> {
@@ -264,13 +275,14 @@ export class EventLog {
   /**
    * Appends events to a session's log; returns their seqs. The session row must exist.
    * With `tx`, the events are written in that transaction, so they commit with the
-   * change they report; the caller then calls `committed` once it has committed.
+   * change they report; the caller then calls `committed` once it has committed. Only the
+   * gate's and the approvals' SQL paths pass one, until the API lists their areas; an edit and a
+   * turn's claim and end write theirs in edits.ts's and turnRows.ts's transactions (#6449).
    */
   async append(sessionId: string, events: readonly ServerEvent[], tx?: TransactionSql): Promise<number[]> {
     if (tx) return appendEventsIn(tx, sessionId, events)
-    const seqs = events.length === 0 ? [] : ((await this.rows.append(sessionId, events)) ?? [])
-    if (seqs.length > 0) this.committed(sessionId, events, seqs)
-    return seqs
+    if (events.length === 0) return []
+    return (await this.rows.append(sessionId, events, undefined, (part, seqs) => this.committed(sessionId, part, seqs))) ?? []
   }
 
   /**
@@ -279,8 +291,7 @@ export class EventLog {
    */
   async appendFenced(sessionId: string, events: readonly ServerEvent[], fence: TurnFence): Promise<boolean> {
     if (events.length === 0) return true
-    const seqs = await this.rows.append(sessionId, events, fence)
-    if (seqs) this.committed(sessionId, events, seqs)
+    const seqs = await this.rows.append(sessionId, events, fence, (part, written) => this.committed(sessionId, part, written))
     return seqs !== undefined
   }
 
@@ -377,7 +388,7 @@ export class EventLog {
 
   /**
    * Wakes this replica's followers of a session: after a local append, and
-   * from the LISTEN consumer for `session.*` from other replicas
+   * from the change-stream consumer for `session.*` from other replicas
    * (busEvents.ts `followSessionEvents`); the poll then only backs it up.
    */
   wake(sessionId: string): void {

@@ -22,6 +22,7 @@ from scadbuddy.bambuddy.preview import (
     PreviewSlot,
     SlicePreview,
     cached_toolpath,
+    failure_warnings,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing import slice_info
@@ -140,6 +141,7 @@ async def read_native_preview(slicing: Slicing, slice_id: int, subject: str) -> 
     answer = SlicePreview(job_id=row.id, status=row.status, slicer="native")
     if row.status != "completed":
         answer.failure = row.failure
+        answer.slice_warnings = failure_warnings(row.failure, row.plate_id)
         return answer
     read = await _summary(slicing, row)
     answer.print_time_seconds = read.print_time_seconds

@@ -40,7 +40,7 @@ describe('Orders (#4249)', () => {
 })
 
 describe('Orders, the price book (#4250)', () => {
-  it('shows the pricing policy and the filaments in the Orders section', async () => {
+  it('shows the pricing policy in the Orders section', async () => {
     renderSettingsSection(<Orders />, { route: '/settings/printing' })
     await seeded()
     const orders = region('Orders')
@@ -49,8 +49,17 @@ describe('Orders, the price book (#4250)', () => {
     expect(within(orders).getByLabelText('Labour per item')).toHaveValue('0')
     expect(within(orders).getByLabelText('Markup, percent')).toHaveValue('0')
     expect(within(orders).getByRole('combobox', { name: 'Round the unit price' })).toHaveTextContent('Each line to the cent')
-    const filaments = await within(orders).findByRole('table', { name: 'Filaments' })
-    expect(await within(filaments).findByText(/Sunflower Yellow/)).toBeInTheDocument()
+  })
+
+  // #6262 Task 16 (Decision 8, F23): the price book has one UI, the Filament section's Types tab.
+  it('no longer renders the price book: it lives on the Filament Types tab', async () => {
+    renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const orders = region('Orders')
+    expect(within(orders).getByLabelText('Machine rate per hour')).toBeInTheDocument()
+    expect(within(orders).queryByRole('table', { name: 'Filaments' })).toBeNull()
+    expect(within(orders).queryByRole('region', { name: 'Filaments' })).toBeNull()
+    expect(within(orders).queryByRole('button', { name: 'Import from spools' })).toBeNull()
   })
 
   it('saves the policy, and shows the server refusing a negative rate', async () => {

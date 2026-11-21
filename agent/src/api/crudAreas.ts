@@ -59,7 +59,42 @@ export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals', 'quest
  * api/crud_agent_transcripts.py, api/crud_agent_events.py; sessions/crudTranscripts.ts,
  * sessions/crudEvents.ts).
  */
-export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events'] as const
+export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'] as const
+
+/**
+ * The area of the /mcp session relay's directory and messages (#5299 step 11; backend
+ * api/crud_agent_mcp.py; mcp/relayRows.ts).
+ */
+export const RELAY_AREAS = ['mcp-relay'] as const
+
+/**
+ * The NOTIFYs sent outside a store's write (a `session.*` bus event, a warm eviction) and a
+ * session's last event reads (its open calls, a child's reasoning) (#6501; backend
+ * api/crud_agent_publish.py; sessions/publish.ts, sessions/sessionReads.ts).
+ */
+export const REST_AREAS = ['publish', 'session-reads'] as const
+
+/**
+ * The areas of a durable turn's writes of its session's row, each with its events in one
+ * transaction and its fence checked there (`session-turns`), and of an edit of a session with its
+ * events (`session-edits`) (#6449; backend api/crud_agent_turns.py, api/crud_agent_edits.py;
+ * sessions/turnRows.ts, sessions/edits.ts).
+ */
+export const TURN_AREAS = ['session-turns', 'session-edits'] as const
+
+/**
+ * What the agent read at its start and per request (#6501; backend api/crud_agent_start.py):
+ * the ledger of its migrations (db/schema.ts `crudLedger`) and a signed-in person's session
+ * (auth/browserSession.ts `CrudSessionLookup`).
+ */
+export const START_AREAS = ['migrations', 'auth-sessions'] as const
+
+/**
+ * Which sessions still have a row, for the pod's directory sweeps, and a forget's last rows
+ * (#6501; backend api/crud_agent_sweeps.py; sessions/presence.ts, sessions/forget.ts
+ * `CrudForgetRows`).
+ */
+export const SWEEP_AREAS = ['session-sweeps', 'forget-rows'] as const
 
 export type CrudAreasOptions = {
   fetch?: typeof fetch
@@ -80,6 +115,7 @@ export class CrudAreas {
   readonly #firstMs: number
   readonly #maxMs: number
   readonly #listed = new Set<string>()
+  #answering: Promise<boolean> | undefined
   #timer: NodeJS.Timeout | undefined
   #started = false
   #stopped = false
@@ -103,6 +139,23 @@ export class CrudAreas {
   /** Whether every wanted area is served. */
   get complete(): boolean {
     return this.#wanted.every((a) => this.#listed.has(a))
+  }
+
+  /**
+   * Whether the API answers the agent's areas within `timeoutMs`: what health requires besides
+   * the Postgres ping once every area is listed (#6501). One read at a time, shared by every
+   * caller; never throws.
+   */
+  answers(timeoutMs = 2_000): Promise<boolean> {
+    this.#answering ??= crudRead<unknown>(this.#fetch, this.#base, 'its areas', '/areas', { timeoutMs })
+      .then(
+        () => true,
+        () => false,
+      )
+      .finally(() => {
+        this.#answering = undefined
+      })
+    return this.#answering
   }
 
   /** Reads the areas until every wanted one is listed, in the background; never throws. */

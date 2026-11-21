@@ -97,7 +97,7 @@ const noSql = new Proxy(() => {}, {
 
 describe('the sessions areas', () => {
   it('are among the areas the agent waits for', async () => {
-    expect(SESSION_AREAS).toEqual(['sessions', 'session-resources', 'transcripts', 'session-events'])
+    expect(SESSION_AREAS).toEqual(['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'])
     const api = new FakeApi().answer('GET /areas', { areas: ['settings', 'sessions'] })
     const areas = new CrudAreas(BASE, { fetch: api.fetch, wanted: SESSION_AREAS, log: () => {} })
     expect(await areas.refresh()).toBe(false)

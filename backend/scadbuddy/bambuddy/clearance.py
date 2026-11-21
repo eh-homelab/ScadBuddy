@@ -11,6 +11,10 @@ https://github.com/bambulab/BambuStudio/blob/79df7ae309be398ed30c9f397c13c9911c2
 This says so before the print, as warnings, and never refuses: Bambuddy's slicer still
 has the last word (``docs/superpowers/specs/2026-10-13-declared-objects-design.md`` §4).
 
+A plate that is one object of several colours (a template's own render, one part per
+colour) gets a warning of its own (#6781): by object has no effect there, and the slicer
+changes filament on every layer.
+
 An object's footprint here is its bounding box on the bed, which holds Bambu's convex
 hull: the check may warn where Bambu Studio would not, never the other way round.
 """
@@ -29,6 +33,7 @@ import numpy as np
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
+    MAX_HINT_PAINT_DIGITS,
     MAX_SETTINGS_BYTES,
     MAX_UNCOMPRESSED_BYTES,
     MODEL_SETTINGS_NAME,
@@ -41,6 +46,7 @@ from scadbuddy.render.bambu3mf import (
     parse_model,
     plate_settings,
 )
+from scadbuddy.render.paint import DistinctCodes, PaintDigitsSpentError
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.plate_profiles import CLEARANCES
 from scadbuddy.render.read_budget import ReadBudget
@@ -73,6 +79,13 @@ class PlacedObject:
     name: str
     low: tuple[float, float, float]
     high: tuple[float, float, float]
+    #: The filaments its printed parts use, as ``model_settings.config`` states them
+    #: (a part's own ``extruder``, else its object's, #6781), and the filaments its
+    #: printed parts' ``paint_color`` codes paint with (#6797) beside each painted
+    #: part's own (filament 1 where none is stated, #6823); empty when the file states
+    #: none and paints none. Past :data:`MAX_HINT_PAINT_DIGITS` the painting is left
+    #: out of the object whose codes passed it and of every object read after it.
+    extruders: frozenset[int] = frozenset()
 
     @property
     def height(self) -> float:
@@ -113,6 +126,13 @@ class _Bounds:
         self.archive = archive
         self.models: dict[str, ParsedModel] = {}
         self.boxes: dict[tuple[str, str], np.ndarray | None] = {}
+        #: Each object's painted filaments (#6797), its components' included, read from
+        #: the meshes :meth:`box` already parsed: no second read of the file.
+        self.painted: dict[tuple[str, str], frozenset[int]] = {}
+        #: Every distinct code decoded once, the digits held to one total (#6823). A
+        #: code that does not parse adds none: the warning is advice, and the slicer
+        #: judges the file.
+        self.codes = DistinctCodes(MAX_HINT_PAINT_DIGITS, skip_unreadable=True)
         self.visits = budget.max_visits
         self.triangles = budget.limit("max_triangles")
         self.bytes = budget.model_bytes()
@@ -143,6 +163,54 @@ class _Bounds:
             self.models[path] = model
         return self.models[path]
 
+    def object(self, path: str, object_id: str) -> ET.Element | None:
+        """Object ``object_id`` of model file ``path``, parsed once, against the budget."""
+        return next(
+            (
+                o
+                for o in self.model(path).root.iter(f"{{{CORE_NS}}}object")
+                if o.get("id") == object_id
+            ),
+            None,
+        )
+
+    def paint(self, path: str, object_id: str) -> frozenset[int]:
+        """The filaments object ``object_id`` of ``path`` is painted with, its
+        components' included, each read once. Only an object :meth:`box` read is
+        asked for, so this walk reaches only objects that walk held to the budget's
+        visits. It has no depth limit of its own: `box` may meet an object first at a
+        shallow depth, through a part this walk skips, that this walk meets deeper
+        (claude-review on #6837). So it walks with a stack, not recursion. A cycle
+        reads as unpainted. Raises :class:`PaintDigitsSpentError` past the codes'
+        digit budget."""
+        start = (path, object_id)
+        stack: list[tuple[tuple[str, str], bool]] = [(start, False)]
+        while stack:
+            key, children_done = stack.pop()
+            if not children_done and key in self.painted:
+                continue  # read already, or in progress: skip before the lookup's scan
+            found = self.object(*key)
+            if not children_done:
+                self.painted[key] = frozenset()  # a cycle reads as unpainted
+                stack.append((key, True))
+                if found is not None:
+                    for component in found.iter(f"{{{CORE_NS}}}component"):
+                        child = _component_target(component, key[0])
+                        if child not in self.painted:
+                            stack.append((child, False))
+                continue
+            if found is None:
+                continue
+            painted: set[int] = set()
+            mesh = found.find(f"{{{CORE_NS}}}mesh")
+            model = self.model(key[0])
+            if mesh is not None and mesh in model.meshes:
+                painted |= self.codes.states(model.meshes[mesh].paint or ())
+            for component in found.iter(f"{{{CORE_NS}}}component"):
+                painted |= self.painted.get(_component_target(component, key[0]), frozenset())
+            self.painted[key] = frozenset(painted)
+        return self.painted[start]
+
     def box(self, path: str, object_id: str, depth: int = 0) -> np.ndarray | None:
         """The 8 corners of object ``object_id`` of ``path``'s box, in its own frame;
         ``None`` when it holds no vertex or the budget ran out."""
@@ -154,10 +222,7 @@ class _Bounds:
         if depth > _MAX_DEPTH or self.visits < 0:
             raise _OverBudgetError
         model = self.model(path)
-        found = next(
-            (o for o in model.root.iter(f"{{{CORE_NS}}}object") if o.get("id") == object_id),
-            None,
-        )
+        found = self.object(path, object_id)
         if found is None:
             return None
         points: list[np.ndarray] = []
@@ -167,8 +232,7 @@ class _Bounds:
             if vertices.size:
                 points.append(vertices.reshape(-1, 3))
         for component in found.iter(f"{{{CORE_NS}}}component"):
-            target = (component.get(f"{{{PRODUCTION_NS}}}path") or f"/{path}").lstrip("/")
-            inner = self.box(target, component.get("objectid", ""), depth + 1)
+            inner = self.box(*_component_target(component, path), depth + 1)
             if inner is not None:
                 points.append(_moved(inner, _transform(component.get("transform"))))
         if not points:
@@ -185,6 +249,12 @@ class _Bounds:
         )
         self.boxes[key] = corners
         return corners
+
+
+def _component_target(component: ET.Element, path: str) -> tuple[str, str]:
+    """The model file and object id ``component`` of model file ``path`` names."""
+    target = (component.get(f"{{{PRODUCTION_NS}}}path") or f"/{path}").lstrip("/")
+    return target, component.get("objectid", "")
 
 
 #: How deep components may nest; a slicer writes two levels.
@@ -234,6 +304,7 @@ def _placed_by_plate(
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
         object_names: dict[str, str] = {}
+        object_settings: dict[str, ET.Element] = {}
         #: Each plate's object ids; ``None`` for a file with no plate list.
         on_plate: dict[int, set[str]] | None = None
         if MODEL_SETTINGS_NAME in names:
@@ -243,13 +314,14 @@ def _placed_by_plate(
                 for entry in obj.findall("metadata"):
                     if entry.get("key") == "name" and obj.get("id"):
                         object_names[obj.get("id", "")] = entry.get("value") or ""
+                object_settings[obj.get("id", "")] = obj
             listed = plate_settings(config)
             if listed:
                 on_plate = {}
                 for each in listed:
                     on_plate.setdefault(each.index, set()).update(each.object_ids)
         bounds = _Bounds(archive, budget)
-        placed: dict[int, list[PlacedObject]] = {plate: [] for plate in plates}
+        found: list[tuple[str, str, np.ndarray, list[int]]] = []
         root = bounds.model(ROOT_MODEL_NAME)
         # Each item is an object the pairwise check compares with every other, so the
         # file is held to the budget's object count (#3251).
@@ -274,34 +346,147 @@ def _placed_by_plate(
             if corners is None:
                 continue
             where = _moved(corners, _transform(item.get("transform")))
-            low, high = where.min(axis=0), where.max(axis=0)
-            found = PlacedObject(
-                object_names.get(object_id) or f"object {number}",
-                (float(low[0]), float(low[1]), float(low[2])),
-                (float(high[0]), float(high[1]), float(high[2])),
+            found.append(
+                (object_names.get(object_id) or f"object {number}", object_id, where, wanted)
             )
-            for plate in wanted:
-                placed[plate].append(found)
+        stated = {
+            object_id: _stated_extruders(object_settings[object_id])
+            if object_id in object_settings
+            else frozenset()
+            for _, object_id, _, _ in found
+        }
+        # Past the digit budget, the object that crossed it and every one after count
+        # their stated filaments only; those decoded before keep their painting (#6823,
+        # #6835).
+        used: dict[str, frozenset[int]] = {}
+        spent = False
+        for object_id, own in stated.items():
+            if not spent:
+                try:
+                    own = own | _painted(bounds, object_id, object_settings.get(object_id))
+                except PaintDigitsSpentError:
+                    spent = True
+            used[object_id] = own
+    placed: dict[int, list[PlacedObject]] = {plate: [] for plate in plates}
+    for name, object_id, where, wanted in found:
+        low, high = where.min(axis=0), where.max(axis=0)
+        placed_object = PlacedObject(
+            name,
+            (float(low[0]), float(low[1]), float(low[2])),
+            (float(high[0]), float(high[1]), float(high[2])),
+            used[object_id],
+        )
+        for plate in wanted:
+            placed[plate].append(placed_object)
     return placed
+
+
+def _painted(bounds: _Bounds, object_id: str, settings: ET.Element | None) -> frozenset[int]:
+    """The filaments root object ``object_id``'s printed parts print with because of
+    their painting: what the codes paint with, and each painted part's own filament
+    (its ``extruder``, else its object's, else 1, Bambu Studio's default, #6823). A
+    part is a component, named in ``settings`` by the component's ``objectid``; one
+    that prints nothing (a modifier, a negative part, a support blocker or enforcer)
+    is left out, as :func:`_stated_extruders` leaves it out (#6823). Raises
+    :class:`PaintDigitsSpentError` past the digit budget."""
+    found = bounds.object(ROOT_MODEL_NAME, object_id)
+    if found is None:
+        return frozenset()
+    own = _extruder(settings) if settings is not None else None
+    parts = {} if settings is None else {p.get("id", ""): p for p in settings.findall("part")}
+    used: set[int] = set()
+    mesh = found.find(f"{{{CORE_NS}}}mesh")
+    model = bounds.model(ROOT_MODEL_NAME)
+    if (
+        mesh is not None
+        and mesh in model.meshes
+        and (own_paint := bounds.codes.states(model.meshes[mesh].paint or ()))
+    ):
+        used |= own_paint | {own or 1}
+    for component in found.iter(f"{{{CORE_NS}}}component"):
+        target, inner_id = _component_target(component, ROOT_MODEL_NAME)
+        part = parts.get(inner_id)
+        if part is not None and part.get("subtype", "normal_part") != "normal_part":
+            continue
+        if codes := bounds.paint(target, inner_id):
+            stated = _extruder(part) if part is not None else None
+            used |= codes | {stated or own or 1}
+    return frozenset(used)
+
+
+def _extruder(element: ET.Element) -> int | None:
+    """``element``'s stated ``extruder``, or ``None``. A value below 1 means "default"
+    in Bambu Studio, the object's own, as `objects3mf._extruder` reads it."""
+    for entry in element.findall("metadata"):
+        if entry.get("key") == "extruder":
+            value = entry.get("value") or ""
+            slot = int(value) if value.isascii() and value.isdigit() else 0
+            return slot if slot >= 1 else None
+    return None
+
+
+def _stated_extruders(obj: ET.Element) -> frozenset[int]:
+    """The filaments ``obj``'s printed parts use (a part with no subtype, or
+    ``normal_part``): each part's own ``extruder``, else the object's (#6781)."""
+    own = _extruder(obj)
+    parts = obj.findall("part")
+    if not parts:
+        return frozenset() if own is None else frozenset({own})
+    stated = (
+        e if (e := _extruder(part)) is not None else own
+        for part in parts
+        if part.get("subtype", "normal_part") == "normal_part"
+    )
+    return frozenset(slot for slot in stated if slot is not None)
+
+
+def one_object_warnings(objects: Sequence[PlacedObject], plate: int) -> list[FilamentWarning]:
+    """#6781: a by-object print of a plate that is one object of several colours. A
+    template's own multi-plate render writes each plate so, one part per colour; a
+    single part painted in several filaments counts the same (#6797). By
+    object then has no effect: the slicer prints the plate layer by layer and changes
+    filament on every layer. A warning, never a refusal."""
+    if len(objects) != 1 or len(objects[0].extruders) < 2:
+        return []
+    obj = objects[0]
+    return [
+        FilamentWarning(
+            kind="by-object-one-object",
+            plate_id=plate,
+            message=(
+                f"Plate {plate}: printing by object has no effect here. {obj.name} is one "
+                f"object with {len(obj.extruders)} colours, so the slicer prints it layer "
+                "by layer and changes filament on every layer. To print the pieces one "
+                "at a time, render each piece alone and Arrange them on a plate. Or print "
+                "by layer."
+            ),
+        )
+    ]
 
 
 def check_plates(
     payload: bytes, plates: Sequence[int], clearance: Clearance | None
 ) -> tuple[dict[int, list[PlacedObject]], list[FilamentWarning]]:
-    """Each of ``plates``' placed objects and, with a ``clearance``, what a by-object
-    print of each would hit, naming the plate when there are several. The file is read
-    and its pairs compared in one call, made off the event loop (#3251): the pairs are
-    quadratic in a plate's objects. Raises as :func:`placed_objects_by_plate`."""
+    """Each of ``plates``' placed objects, each plate that is one object of several
+    colours (:func:`one_object_warnings`, #6781) and, with a ``clearance``, what a
+    by-object print of each would hit, naming the plate when there are several. The file
+    is read and its pairs compared in one call, made off the event loop (#3251): the pairs
+    are quadratic in a plate's objects. Raises as :func:`placed_objects_by_plate`."""
     by_plate = placed_objects_by_plate(payload, plates)
-    if clearance is None:
-        return by_plate, []
     several = len(plates) > 1
     warnings = [
         warning
         for plate in plates
-        for warning in clearance_warnings(
-            by_plate[plate], clearance, plate=plate if several else None
-        )
+        for warning in [
+            *one_object_warnings(by_plate[plate], plate),
+            *(
+                []
+                if clearance is None
+                else clearance_warnings(
+                    by_plate[plate], clearance, plate=plate if several else None
+                )
+            ),
+        ]
     ]
     return by_plate, warnings
 

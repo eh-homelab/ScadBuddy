@@ -19,12 +19,14 @@ logger = logging.getLogger(__name__)
 Pool = ConnectionPool[Connection[DictRow]]
 _COLUMNS = "key, sha256, kind, backend, backend_id, size, slug, meta, touched_at"
 #: A write that points a row at another object drops its migrated copy, now stale, and
-#: the error of a copy that failed (spec 2026-10-16 §4.3); one that names the same object
-#: keeps both. Its parameters are `_kept_copy`'s.
+#: the error of a copy that failed (spec 2026-10-16 §4.3), and the API's check of its
+#: bytes (`verified_at`, #6233); one that names the same object keeps them. Its
+#: parameters are `_kept_copy`'s.
 _MIGRATED = ("migrated_backend", "migrated_backend_id", "migrated_error", "migrated_error_at")
+_KEPT_WITH_OBJECT = (*_MIGRATED, "verified_at")
 _KEEP_COPY = ", ".join(
     f"{column} = CASE WHEN (sha256, backend, backend_id) = (%s, %s, %s) THEN {column} END"
-    for column in _MIGRATED
+    for column in _KEPT_WITH_OBJECT
 )
 #: Attempts at an index write that Postgres picks as a deadlock's victim (`retrying`).
 _DEADLOCK_ATTEMPTS = 3
@@ -37,7 +39,7 @@ COPIED_REFS_SQL = (
 
 
 def _kept_copy(ref: BlobRef) -> tuple[str, ...]:
-    return (ref.sha256, ref.backend, ref.backend_id) * len(_MIGRATED)
+    return (ref.sha256, ref.backend, ref.backend_id) * len(_KEPT_WITH_OBJECT)
 
 
 def _stat(row: DictRow) -> BlobStat:
@@ -420,6 +422,30 @@ class BlobIndex:
             ).fetchone()
         return bool(row and row["recorded"])
 
+    def vouched(self, ref: BlobRef) -> tuple[bool, bool]:
+        """Of the rows that name ``ref``'s object: whether one the API verified names it as
+        it is (the same kind, SHA-256 and size, `verified_at` set, #6233), and whether one
+        names it as another kind."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT coalesce(bool_or(kind = %s AND sha256 = %s AND size = %s"
+                " AND verified_at IS NOT NULL), false) AS verified,"
+                " coalesce(bool_or(kind <> %s), false) AS foreign"
+                " FROM store_blobs WHERE backend = %s AND backend_id = %s",
+                (ref.kind, ref.sha256, ref.size, ref.kind, ref.backend, ref.backend_id),
+            ).fetchone()
+        return (bool(row and row["verified"]), bool(row and row["foreign"]))
+
+    @staticmethod
+    def mark_verified_in(conn: Connection[DictRow], key: str, ref: BlobRef) -> None:
+        """On ``conn``: note that the API read ``ref``'s object and found its SHA-256 and
+        size, when ``key``'s row names it (`vouched`)."""
+        conn.execute(
+            "UPDATE store_blobs SET verified_at = now() WHERE key = %s AND sha256 = %s"
+            " AND kind = %s AND backend = %s AND backend_id = %s AND size = %s",
+            (key, ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size),
+        )
+
     def stats(
         self,
         kinds: Sequence[str] | None,
@@ -533,8 +559,8 @@ class BlobIndex:
             cursor = conn.execute(
                 "UPDATE store_blobs SET backend = migrated_backend,"
                 " backend_id = migrated_backend_id, migrated_backend = NULL,"
-                " migrated_backend_id = NULL, migrated_error = NULL, migrated_error_at = NULL"
-                " WHERE migrated_backend = %s",
+                " migrated_backend_id = NULL, migrated_error = NULL, migrated_error_at = NULL,"
+                " verified_at = NULL WHERE migrated_backend = %s",
                 (backend,),
             )
         return cursor.rowcount

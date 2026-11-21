@@ -36,6 +36,17 @@ describe('buildGlb', () => {
     expect(json.meshes[0].primitives[1].material).toBe(1)
   })
 
+  it('writes a translucent colour as a mesh of its own with scadbuddy_alpha (#6349)', () => {
+    const { json } = readChunks(keychainGlb(['#1B6CA8', '#E8532F80'], { x: 60, y: 20, z: 6 }))
+
+    expect(json.meshes).toHaveLength(2)
+    expect(json.meshes[0].primitives).toHaveLength(1)
+    expect(json.meshes[0].extras).toBeUndefined()
+    expect(json.meshes[1].primitives).toHaveLength(1)
+    expect(json.meshes[1].extras).toEqual({ scadbuddy_alpha: 128 })
+    expect(json.scenes[0].nodes).toEqual([0, 1])
+  })
+
   it('records the bounding box on the position accessors', () => {
     const glb = keychainGlb(['#1B6CA8', '#E8532F'], { x: 95.7, y: 34.6, z: 6.8 })
     const { json } = readChunks(glb)

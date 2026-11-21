@@ -82,6 +82,7 @@ def _decisions(events: list[Event], *, expect: int = 0) -> list[dict[str, Any]]:
 
 
 @respx.mock
+@pytest.mark.usefixtures("recorded_sb_spools")
 def test_a_fix_whose_target_is_unverified_previews_but_cannot_be_applied(
     client: TestClient, model: str, events: list[Event]
 ) -> None:

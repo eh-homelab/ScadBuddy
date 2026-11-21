@@ -278,13 +278,24 @@ export type ToolImage = z.infer<typeof ToolImageSchema>
  * An image the user sent, as a `user.turn` names it (#2479): the full image and its
  * preview, each stored with the session (agent `src/sessions/blobs.ts` `sentImageBlobs`)
  * and served by `blobUrl`. Never the bytes: a turn that carries them does not parse. A turn
- * logged before #2479 whose full image could not be stored names its preview only.
+ * logged before #2479 whose full image could not be stored names its preview only. An invoice
+ * PDF (#6267), or an image a server built the turn from, names the file only: no preview.
  */
-export const SentImageSchema = z.strictObject({
-  name: ToolImageSchema.shape.name.optional(),
-  mediaType: z.enum(IMAGE_MEDIA_TYPES).optional(),
-  preview: z.strictObject({ name: ToolImageSchema.shape.name, mediaType: z.enum(PREVIEW_MEDIA_TYPES) }),
+const SentBlobSchema = z.strictObject({
+  name: z.string().regex(/^[0-9a-f]{64}\.(png|jpg|gif|webp|pdf)$/),
+  mediaType: z.enum([...IMAGE_MEDIA_TYPES, 'application/pdf']),
+  // An invoice PDF's own file name, for its chip (the blob's name is a hash).
+  fileName: z.string().optional(),
 })
+export const SentImageSchema = z.union([
+  z.strictObject({
+    name: ToolImageSchema.shape.name.optional(),
+    mediaType: z.enum(IMAGE_MEDIA_TYPES).optional(),
+    preview: z.strictObject({ name: ToolImageSchema.shape.name, mediaType: z.enum(PREVIEW_MEDIA_TYPES) }),
+  }),
+  // #6267: an invoice PDF, or an image a server built the turn from, has no preview.
+  SentBlobSchema,
+])
 export type SentImage = z.infer<typeof SentImageSchema>
 
 /**

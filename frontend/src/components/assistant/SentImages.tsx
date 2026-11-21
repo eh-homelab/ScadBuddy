@@ -1,3 +1,4 @@
+import { FileTextIcon } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -27,11 +28,15 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
   const [load, setLoad] = useState<Load>('loading')
   /** The thumbnail that opened the lightbox: focus goes back to it when it closes. */
   const opener = useRef<HTMLElement | null>(null)
-  const count = images.length
-  const name = (index: number) => `Image ${index + 1} of ${count}`
+  // A PDF chip is not an image: the labels count and number the images only.
+  const isImage = (sent: SentImage) => sent.mediaType !== 'application/pdf'
+  const count = images.filter(isImage).length
+  const place = (index: number) => images.slice(0, index + 1).filter(isImage).length
+  const name = (index: number) => `Image ${place(index)} of ${count}`
   const image = shown === null ? undefined : images[shown]
   const fullUrl = image?.name && sessionId ? blobUrl(sessionId, image.name) : undefined
-  const previewUrl = (sent: SentImage) => blobUrl(sessionId, sent.preview.name)
+  // A server-built image (#6267) has no preview: its full image stands in for it.
+  const previewUrl = (sent: SentImage) => blobUrl(sessionId, 'preview' in sent ? sent.preview.name : (sent.name ?? ''))
   const full = fullUrl !== undefined && load !== 'failed'
   const open = (index: number) => {
     setLoad('loading')
@@ -44,22 +49,39 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
       <ul aria-label="Images sent" className="mb-1 flex flex-wrap gap-1.5">
         {images.map((sent, index) => (
           <li key={index}>
-            <Button
-              variant="ghost"
-              aria-label={`View image ${index + 1} of ${count} larger`}
-              aria-haspopup="dialog"
-              onClick={(event) => {
-                opener.current = event.currentTarget
-                open(index)
-              }}
-              className="h-auto min-h-6 min-w-6 cursor-zoom-in p-0 hover:bg-transparent"
-            >
-              <img
-                src={previewUrl(sent)}
-                alt={name(index)}
-                className="max-h-24 max-w-[8rem] rounded-md border border-border object-contain"
-              />
-            </Button>
+            {sent.mediaType === 'application/pdf' ? (
+              // #6267: an invoice PDF. The blob route serves it as an attachment, so it
+              // downloads (in a new tab, which also escapes Bambuddy's sandboxed frame).
+              <a
+                href={sent.name ? blobUrl(sessionId, sent.name) : undefined}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-6 max-w-[12rem] items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-foreground hover:bg-muted"
+              >
+                <FileTextIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                <span className="truncate" title={'fileName' in sent && sent.fileName ? sent.fileName : sent.name}>
+                  {'fileName' in sent && sent.fileName ? sent.fileName : 'Invoice PDF'}
+                </span>
+                <span className="shrink-0 rounded bg-muted px-1 font-medium text-muted-foreground">PDF</span>
+              </a>
+            ) : (
+              <Button
+                variant="ghost"
+                aria-label={`View image ${place(index)} of ${count} larger`}
+                aria-haspopup="dialog"
+                onClick={(event) => {
+                  opener.current = event.currentTarget
+                  open(index)
+                }}
+                className="h-auto min-h-6 min-w-6 cursor-zoom-in p-0 hover:bg-transparent"
+              >
+                <img
+                  src={previewUrl(sent)}
+                  alt={name(index)}
+                  className="max-h-24 max-w-[8rem] rounded-md border border-border object-contain"
+                />
+              </Button>
+            )}
           </li>
         ))}
       </ul>
@@ -83,16 +105,18 @@ export function SentImages({ images, sessionId = '' }: { images: SentImage[]; se
               <DialogTitle>{name(shown)}</DialogTitle>
               {!full && (
                 <DialogDescription>
-                  {fullUrl
+                  {fullUrl && !('preview' in image)
+                    ? 'The image could not be loaded. The assistant was given it.'
+                    : fullUrl
                     ? 'The full image could not be loaded, so this is its preview. The assistant was given the full image.'
                     : 'Only a preview of this image is kept. The assistant was given the full image.'}
                 </DialogDescription>
               )}
             </DialogHeader>
-            {load !== 'loaded' && (
+            {load !== 'loaded' && ('preview' in image || load !== 'failed') && (
               <img
                 src={previewUrl(image)}
-                alt={`${name(shown)}, preview`}
+                alt={'preview' in image ? `${name(shown)}, preview` : name(shown)}
                 className="mx-auto max-h-[calc(100dvh-12rem)] w-full max-w-3xl object-contain"
               />
             )}

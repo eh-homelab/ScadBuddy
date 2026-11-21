@@ -313,6 +313,28 @@ def test_no_kek_is_unavailable(tables: PgPool, tmp_path: Path) -> None:
         assert refused.status_code == 503 and refused.json()["reason"] == "unavailable"
 
 
+def test_a_key_sealed_under_a_kek_the_api_lacks_is_unavailable(
+    agent: Agent, tables: PgPool
+) -> None:
+    sid = _session(tables)
+    agent.append(sid, _entries(1, "a"))
+    _sql(
+        tables,
+        "UPDATE ai_payload_keys SET kek_id = 'another' WHERE subject = %s",
+        (f"session-{sid}",),
+    )
+    for method, path, body in (
+        ("GET", f"/sessions/{sid}/transcript", None),
+        (
+            "POST",
+            f"/sessions/{sid}/entries",
+            {"project_key": "p", "subpath": "", "entries": ["{}"]},
+        ),
+    ):
+        refused = agent.status(method, path, body)
+        assert (refused.status_code, refused.json()["reason"]) == (503, "unavailable"), path
+
+
 def test_a_fork_reads_its_parents_transcript_through_the_cut(agent: Agent, tables: PgPool) -> None:
     parent = _session(tables)
     agent.append(parent, _entries(5, "p"))

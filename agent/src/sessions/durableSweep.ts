@@ -3,6 +3,7 @@ import type { Sql } from 'postgres'
 import { sessionWorkflowId } from '../gate/durable.js'
 import type { EventLog } from './eventLog.js'
 import { event, type ServerEvent } from './protocol.js'
+import { PgTurnRows, type TurnRows } from './turnRows.js'
 
 // The sweep of sessions left `running` (#2001, plan 5c Ruling 16). A turn takes no lease
 // (plan Step 6.3: every session is an AgentSession); its end is finish_turn's, run by
@@ -67,7 +68,7 @@ export type RunningRow = { id: string; event_seq: string }
  * and Stop's on a session whose workflow is gone (#4018).
  */
 export async function endLostTurn(
-  sql: Sql,
+  turns: Pick<TurnRows, 'endLost'>,
   events: EventLog,
   row: RunningRow,
   state: Exclude<SessionRunState, 'open'>,
@@ -76,21 +77,16 @@ export async function endLostTurn(
     event({ type: 'error', sessionId: row.id, code: 'turn_failed', message: LOST[state] }),
     event({ type: 'session.status', sessionId: row.id, status: 'idle' }),
   ]
-  const done = await sql.begin(async (tx) => {
-    const [claimed] = await tx`
-      UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
-      WHERE id = ${row.id} AND status IN ${tx(TURN_STATUSES)}
-        AND event_seq = ${row.event_seq}
-      RETURNING id`
-    return claimed ? await events.append(row.id, tail, tx) : undefined
-  })
+  const done = await turns.endLost(row.id, row.event_seq, tail)
   if (!done) return false
-  events.committed(row.id, tail, done)
+  events.committed(row.id, done.events, done.seqs)
   return true
 }
 
 export type DurableRunningSweepDeps = {
   sql: Sql
+  /** The rows' reads and writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
+  turns?: TurnRows
   events: EventLog
   describe: DescribeSession
   /** A row written to within this long is not described (default RUNNING_GRACE_MS). */
@@ -106,6 +102,7 @@ export class DurableRunningSweep {
   readonly #graceMs: number
   readonly #batch: number
   readonly #describeTimeoutMs: number
+  readonly #turns: TurnRows
   /**
    * The last id a pass described: the next pass reads the page after it, and starts over
    * past the end. Rows that stay unresolved (a long live turn, a describe that keeps
@@ -119,16 +116,13 @@ export class DurableRunningSweep {
     this.#graceMs = deps.graceMs ?? RUNNING_GRACE_MS
     this.#batch = deps.batch ?? BATCH
     this.#describeTimeoutMs = deps.describeTimeoutMs ?? DESCRIBE_DEADLINE_MS + 1_000
+    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
   }
 
   /** One pass; returns the sessions reset. */
   async sweep(): Promise<string[]> {
-    const { sql, events } = this.#deps
-    const page = (after: string) => sql<RunningRow[]>`
-      SELECT id, event_seq FROM ai_sessions
-      WHERE status IN ${sql(TURN_STATUSES)} AND id::text > ${after}
-        AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
-      ORDER BY id::text LIMIT ${this.#batch}`
+    const { events } = this.#deps
+    const page = (after: string) => this.#turns.stale(after, this.#graceMs, this.#batch)
     let rows = await page(this.#after)
     // Past the end: start over in this pass rather than spend it on nothing.
     if (rows.length === 0 && this.#after) rows = await page('')
@@ -144,7 +138,7 @@ export class DurableRunningSweep {
         continue
       }
       if (state === 'open') continue
-      if (await endLostTurn(sql, events, row, state)) reset.push(row.id)
+      if (await endLostTurn(this.#turns, events, row, state)) reset.push(row.id)
     }
     // Once per pass and payload-free, so a describe that always fails (codec, permission) shows.
     if (undescribed) console.warn(`durable running sweep: ${undescribed} of ${rows.length} sessions' workflows could not be described`)

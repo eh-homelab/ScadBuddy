@@ -870,7 +870,7 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
       expect(v.review?.name).toBe(b.name)
     }
     const own = vetPackage(BUILT_INS[0]!.dir, BUILT_INS[0]!.name).review!
-    expect(own.skills).toEqual(['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'])
+    expect(own.skills).toEqual(['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:filament', 'scadbuddy:print'])
     expect(own.agents).toEqual(['scadbuddy:model-author', 'scadbuddy:print-analyst'])
   })
 

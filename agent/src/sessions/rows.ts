@@ -12,9 +12,9 @@ import { POOL_BUDGET, POOL_COST } from './turnShared.js'
 // interface (#5299 step 9, part a): `PgSessionRows`, the SQL the manager ran itself, and
 // `CrudSessionRows`, the same over the API's CRUD routes (backend api/crud_agent_sessions.py,
 // area `sessions`), each method one route and one transaction (#5299 D2). main.ts picks one per
-// call with `gated` once the API lists the area, the SQL until then (D9). The turn's writes of
-// the row that go with its event log (a send's claim, a turn's end, an edit) are not here: they
-// move with the event log.
+// call with `gated` once the API lists the area, the SQL until then (D9). A durable turn's writes
+// of the row with its events (a send's claim, a placement's, its spend, the turn's end) are
+// turnRows.ts's (#6449); an edit's are sessions/edits.ts's.
 
 /** The row as `SessionRecord` is built from it (manager.ts `record`). */
 export type SessionRow = {

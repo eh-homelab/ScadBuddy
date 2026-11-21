@@ -1027,6 +1027,7 @@ class TemplatePipeline:
                     filament_plan=inputs.filament_plan,
                     colours=inputs.colours,
                     allow_own=False,
+                    prime_tower=inputs.prime_tower,
                 )
             )
             steps[0].done = 1
@@ -1045,6 +1046,7 @@ class TemplatePipeline:
                 plate_model=inputs.plate_model,
                 colours=inputs.colours,
                 provenance=inputs.provenance,
+                prime_tower=inputs.prime_tower,
                 record=OutputRecord(
                     revision=None,
                     ui_api=None,

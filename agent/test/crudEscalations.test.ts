@@ -5,6 +5,7 @@ import { CrudEscalations } from '../src/flows/crudEscalations.js'
 import { Escalations, EscalationError } from '../src/flows/escalations.js'
 import { FlowQueue } from '../src/flows/queue.js'
 import { SessionError } from '../src/sessions/manager.js'
+import type { TurnRow } from '../src/sessions/rows.js'
 
 // A flow run's calls at the starting session's hop through the API's CRUD routes (#5299 step 10,
 // area `escalations`), against a fake API that answers as backend api/crud_agent_escalations.py
@@ -45,12 +46,9 @@ class FakeApi {
   }
 }
 
-/** SQL for what stays the sessions' (step 9): the parent's owner. Anything else on these tables is a test failure. */
-const sessionsOnly = ((strings: TemplateStringsArray) => {
-  const text = strings.join('?')
-  if (text.includes('FROM ai_sessions')) return Promise.resolve([{ owner_kind: 'browser', owner_id: 'browser', owner_label: 'You' }])
-  if (text.includes('ai_session_events')) return Promise.resolve([])
-  throw new Error(`ran SQL: ${text}`)
+/** No SQL runs on these tables: the parent's owner and a child's reasoning come through the session rows and reads (#6501). */
+const noSql = ((strings: TemplateStringsArray) => {
+  throw new Error(`ran SQL: ${strings.join('?')}`)
 }) as unknown as Sql
 
 const reads = {
@@ -67,9 +65,12 @@ function escalations(send?: () => Promise<void>, denied = true) {
   const responded: unknown[] = []
   const routes = { crud: new CrudEscalations({ baseUrl: BASE, fetch: api.fetch }), use: () => true }
   const service = new Escalations({
-    sql: sessionsOnly,
+    sql: noSql,
     reads,
     routes,
+    // The parent's owner and a child's reasoning, from the session rows and reads (#6501).
+    sessions: { get: () => Promise.resolve({ owner_kind: 'browser', owner_id: 'browser', owner_label: 'You', archived_at: null } as unknown as TurnRow) },
+    sessionReads: { reasoningDeltas: () => Promise.resolve(undefined) },
     durable: () => ({ respond: (_s, args) => (responded.push(args), Promise.resolve({ outcome: denied ? 'denied' : 'not_found' }) as never) }),
     ...(send ? { send } : {}),
     currentTiers: () => Promise.resolve(undefined),
@@ -192,6 +193,30 @@ describe('a delivery through the CRUD routes', () => {
     expect(logged.some((l) => l.includes('did not start (busy)') && l.includes('not handed back'))).toBe(true)
   })
 
+  it('logs why the session cannot be asked when the skip fails too', async () => {
+    const { api, service } = delivering(() => Promise.reject(new SessionError('budget_exhausted', 'no')))
+    api.routes.set('POST /escalations/skip', () => ({ status: 500, body: {} }))
+    const logged: string[] = []
+    const error = console.error
+    console.error = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    try {
+      await expect(service.deliver()).rejects.toThrow()
+    } finally {
+      console.error = error
+    }
+    expect(logged.some((l) => l.includes('cannot be asked (budget_exhausted)'))).toBe(true)
+  })
+
+  it("skips a call whose session changed hands to the person, through the API, naming the parent", async () => {
+    let sent = 0
+    const { api, service } = delivering(async () => void sent++)
+    api.routes.set('POST /escalations/waiting', () => ({ body: { calls: [{ ...WAITING, parent_principal: 'mcp:someone-else' }] } }))
+    expect(await service.deliver()).toBe(0)
+    expect(sent).toBe(0)
+    expect(api.seen.find((s) => s.path === '/escalations/skip')!.body).toEqual(CALLS)
+    expect(api.paths()).not.toContain('POST /escalations/claim')
+  })
+
   it('sends at most IDS_MAX ids a list, and hands back the earlier batches when a later claim fails', async () => {
     const { api, routes } = escalations()
     const own = Array.from({ length: 1001 }, (_, i) => `durable:${PARENT}:run-1:toolu_${i}`)
@@ -248,7 +273,7 @@ describe("a run's queue through the CRUD routes", () => {
       expiring: false,
     }
     api.routes.set('GET /escalations/run-entries', () => ({ body: { entries: [row, { ...row, request_id: `${RID}2`, hop_until: HOP_UNTIL }] } }))
-    const queue = await new FlowQueue(sessionsOnly, reads, routes).forRun('flow-1')
+    const queue = await new FlowQueue(noSql, reads, routes, { reasoningDeltas: () => Promise.resolve(undefined) }).forRun('flow-1')
     const children = queue!.entries.filter((e) => e.source === 'child')
     expect(children.map((e) => (e as { hop_until: string | null }).hop_until)).toEqual([null, new Date(HOP_UNTIL).toISOString()])
     expect(api.seen[0]!.path).toBe('/escalations/run-entries?flow_run_id=flow-1')

@@ -14,10 +14,12 @@ from pydantic import ValidationError
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import (
     Material,
+    MaterialPatch,
     SpoolCreate,
     SpoolEventAdd,
     SpoolPatch,
     SpoolTypeCreate,
+    SpoolTypePatch,
 )
 from scadbuddy.filament.spools import (
     FilamentSpoolStore,
@@ -71,7 +73,7 @@ def test_a_spool_is_made_with_a_created_event_and_its_effective_values(pg_pool: 
 
 
 def test_a_backwards_effective_range_is_refused(pg_pool: PgPool) -> None:
-    store = FilamentSpoolStore(pg_pool)
+    store = FilamentSpoolStore(pg_pool, now=lambda: datetime(2026, 11, 18, tzinfo=UTC))
     kind = SpoolTypeStore(pg_pool).create(
         SpoolTypeCreate(
             code="PLA-BLU",
@@ -109,6 +111,31 @@ def test_an_edit_records_each_change(pg_pool: PgPool) -> None:
     assert edits[0].data == {"changes": {"note": ["old", "new"], "rgba": [None, "#00FF00FF"]}}
     store.update(spool, SpoolPatch(note="new"), actor="bob")
     assert _kinds(store, spool).count("edited") == 1
+
+
+def test_clearing_a_spools_colour_returns_it_to_its_types(pg_pool: PgPool) -> None:
+    """Review focus 5: `rgba: null` removes the spool's own colour, so the type's shows
+    through, `overridden` loses `rgba`, and the edit is one event."""
+    store = FilamentSpoolStore(pg_pool)
+    kind = SpoolTypeStore(pg_pool).create(
+        SpoolTypeCreate(
+            code="PLA-RED", material_id=_material(pg_pool), rgba="#FF0000", label_weight_g=1000
+        )
+    )
+    spool = store.create(SpoolCreate(type_id=kind.id), actor="ann").id
+    own = store.update(spool, SpoolPatch(rgba="#00FF00"), actor="ann")
+    assert own is not None
+    assert own.effective.rgba == "#00FF00FF"
+    assert "rgba" in own.overridden
+
+    reset = store.update(spool, SpoolPatch.model_validate({"rgba": None}), actor="bob")
+
+    assert reset is not None
+    assert reset.effective.rgba == "#FF0000FF"
+    assert "rgba" not in reset.overridden
+    edits = [e for e in store.events(spool) if e.kind == "edited"]
+    assert len(edits) == 2
+    assert edits[-1].data == {"changes": {"rgba": ["#00FF00FF", None]}}
 
 
 def test_rebinding_a_tag_moves_it(pg_pool: PgPool) -> None:
@@ -181,6 +208,102 @@ def test_a_weighing_and_a_drying_update_the_derived_values(pg_pool: PgPool) -> N
     assert _kinds(store, spool)[-1] == "restored"
 
 
+def test_a_drying_takes_the_type_drying_values_for_the_fields_it_does_not_send(
+    pg_pool: PgPool,
+) -> None:
+    """#6720, R-6714-10: a spool's drying defaults are its type's drying values, else its
+    subtype's, else its material's, field by field; a drying that leaves a field out
+    takes its default, and one that sends ``null`` records none."""
+    store = FilamentSpoolStore(pg_pool)
+    catalog = CatalogStore(pg_pool)
+    material = _material(pg_pool)
+    catalog.update(
+        "materials", material, MaterialPatch(drying_temp_c=50, drying_hours=Decimal("6"))
+    )
+    kind = SpoolTypeStore(pg_pool).create(
+        SpoolTypeCreate(
+            code="PLA-DRY",
+            material_id=material,
+            rgba="#FF0000",
+            label_weight_g=1000,
+            drying_temp_c=55,
+        )
+    )
+    spool = store.create(SpoolCreate(type_id=kind.id), actor="ann").id
+    detail = store.detail(spool)
+    assert detail is not None
+    assert detail.drying_defaults.model_dump() == {
+        "temp_c": 55,
+        "hours": Decimal("6"),
+        "temp_from": "type",
+        "hours_from": "material",
+    }
+
+    store.add_event(spool, SpoolEventAdd(kind="dried"), actor="ann")
+    now = store.get(spool)
+    assert now is not None
+    assert (now.last_dried_temp_c, now.last_dried_hours) == (55, Decimal("6"))
+
+    store.add_event(spool, SpoolEventAdd(kind="dried", temp_c=60, hours=None), actor="ann")
+    now = store.get(spool)
+    assert now is not None
+    assert (now.last_dried_temp_c, now.last_dried_hours) == (60, None)
+
+    bare = _spool(store, pg_pool)
+    found = store.detail(bare)
+    assert found is not None
+    assert (found.drying_defaults.temp_c, found.drying_defaults.temp_from) == (50, "material")
+
+
+def test_a_spool_overrides_its_type_drying_values_and_a_reset_takes_the_type_again(
+    pg_pool: PgPool,
+) -> None:
+    """#6856 (R-6714-18, overturning R-6714-11): a spool sets its own drying temperature
+    and hours, as any value of its type; its drying defaults take them first (spool, type,
+    subtype, material), and ``null`` gives the type's back. A type edit of a value the
+    spool overrides writes it no ``edited`` event; one it inherits does."""
+    store = FilamentSpoolStore(pg_pool)
+    types = SpoolTypeStore(pg_pool)
+    kind = types.create(
+        SpoolTypeCreate(
+            code="PETG-DRY",
+            material_id=_material(pg_pool),
+            rgba="#00FF00",
+            label_weight_g=1000,
+            drying_temp_c=65,
+            drying_hours=Decimal("8"),
+        )
+    )
+    spool = store.create(SpoolCreate(type_id=kind.id, drying_temp_c=55), actor="ann").id
+    detail = store.detail(spool)
+    assert detail is not None
+    assert detail.drying_defaults.model_dump() == {
+        "temp_c": 55,
+        "hours": Decimal("8"),
+        "temp_from": "spool",
+        "hours_from": "type",
+    }
+    assert (detail.effective.drying_temp_c, detail.effective.drying_hours) == (55, Decimal("8"))
+    assert "drying_temp_c" in detail.overridden
+
+    store.add_event(spool, SpoolEventAdd(kind="dried"), actor="ann")
+    now = store.get(spool)
+    assert now is not None
+    assert (now.last_dried_temp_c, now.last_dried_hours) == (55, Decimal("8"))
+
+    before = len(store.events(spool))
+    types.update(kind.id, SpoolTypePatch(drying_temp_c=70), actor="ann")
+    assert len(store.events(spool)) == before
+    types.update(kind.id, SpoolTypePatch(drying_hours=Decimal("6")), actor="ann")
+    assert _kinds(store, spool)[-1] == "edited"
+
+    store.update(spool, SpoolPatch(drying_temp_c=None), actor="ann")
+    reset = store.detail(spool)
+    assert reset is not None
+    assert (reset.drying_defaults.temp_c, reset.drying_defaults.temp_from) == (70, "type")
+    assert "drying_temp_c" not in reset.overridden
+
+
 def test_a_reading_from_the_future_is_refused() -> None:
     soon = datetime.now(UTC) + timedelta(minutes=1)
     assert SpoolEventAdd(kind="weighed", grams=1, at=soon).at == soon
@@ -243,4 +366,38 @@ def test_archiving_a_spool_takes_its_tag_off_and_restoring_binds_nothing(
     assert store.open_binding(spool) is None
     # The tag is free for another spool.
     other = _spool(store, pg_pool)
-    assert store.bind_tag(other, tag_uid="A1B2C3D4", kind="bambu_mifare", actor="ann")
+    taken = store.bind_tag(other, tag_uid="A1B2C3D4", kind="bambu_mifare", actor="ann")
+    assert taken is not None
+    # Restoring the first spool takes nothing from the one that holds the tag now.
+    before = _kinds(store, spool)
+    store.archive(spool, False, actor="ann")
+    held = store.open_binding(other)
+    assert held is not None and held.tag_id == taken.tag_id
+    assert store.open_binding(spool) is None
+    assert [k for k in _kinds(store, spool) if k.startswith("tag_")] == [
+        k for k in before if k.startswith("tag_")
+    ]
+
+
+def test_a_retried_event_with_the_same_ref_is_idempotent(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    ref = UUID(int=9)
+    with store.transaction() as conn:
+        spool_id = store.create_on(
+            conn,
+            SpoolCreate(material_id=_material(pg_pool), grams_left=500),
+            actor="a",
+            ref_kind="invoice_line",
+            ref_id=ref,
+        )
+        for cost in ("12", "13"):
+            # The retry changes the spool again, but its event is the one already booked.
+            patch = SpoolPatch(cost_per_kg=Decimal(cost))
+            assert store.update_on(
+                conn, spool_id, patch, actor="a", ref_kind="invoice_line", ref_id=ref
+            )
+    events = [(e.kind, e.ref_kind, e.ref_id) for e in store.events(spool_id)]
+    assert events == [
+        ("created", "invoice_line", str(ref)),
+        ("edited", "invoice_line", str(ref)),
+    ]

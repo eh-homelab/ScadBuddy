@@ -9,8 +9,8 @@ The print worker's LAN print reads a native slice's sliced 3MF by a GET URL the 
 for it (`POST /api/v1/internal/crud/print/transfer-urls`, #5298 Task 32): always the
 internal route's (`internal_get`, good for `READ_TTL`), never a presigned one, so the print
 pod reaches the API only, and only for a key the content index holds live as a slicer's
-output: a `SLICE_KIND` blob with `SLICED_OUTPUT_META` (the route's module docstring says
-why, and what it costs)."""
+output: a `SLICE_KIND` blob with `SLICED_OUTPUT_META`, that is a sliced file of a run in
+use (#6122; the route's module docstring says why)."""
 
 from __future__ import annotations
 

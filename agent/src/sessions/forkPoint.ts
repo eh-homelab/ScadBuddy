@@ -80,7 +80,7 @@ export function blobNames(events: readonly ServerEvent[]): string[] {
     if (e.type === 'user.turn') {
       for (const image of e.images ?? []) {
         if (image.name !== undefined) names.add(image.name)
-        names.add(image.preview.name)
+        if ('preview' in image) names.add(image.preview.name)
       }
     }
   }

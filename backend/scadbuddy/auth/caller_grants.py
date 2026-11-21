@@ -15,10 +15,11 @@ A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
 its list.
 
-The `ai_*` tables are the agent's: its role created them, so it owns them, and the agent
-grants what the API's role reads of them (`agent/src/db/grants.ts`). Since #5299 D6 the API
-applies the agent's migrations (`render/agent_migrations.py`), so a table a later file
-makes is the API's role's. The lists here hold the backend's relations only.
+The older `ai_*` tables were made by the agent's role, which owns them; since #5299 D6 the API
+applies the agent's migrations (`render/agent_migrations.py`), so a table a later file makes
+is the API's role's. The agent grants nothing since #6501: where the API and the agent connect
+as different roles, the API's role must own the `ai_*` tables. The lists here hold the
+backend's relations only.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ GRANTS: Mapping[ServiceCaller, Grants] = {"agent": AGENT_GRANTS}
 
 #: `pg_advisory_xact_lock` key for `grant_role` and `auth/revoke.py` ("SCADRNDR" in ASCII,
 #: from when the render worker's role was the only one), so two API replicas starting
-#: together, or the API and the agent (`agent/src/db/grants.ts` `GRANT_LOCK`), never race.
+#: together never race. (The agent took it too until it stopped granting, #6501.)
 GRANT_LOCK = 0x5343_4144_524E_4452
 
 

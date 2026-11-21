@@ -33,7 +33,7 @@ from tests.api.test_send import _uploaded_3mf, upload_route
 from tests.api.test_versions import SLUG
 from tests.support.operations import press
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 
 def declare(

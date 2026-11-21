@@ -9,6 +9,7 @@ from fastapi.routing import APIRoute, APIWebSocketRoute
 from starlette.routing import Match, compile_path
 
 import scadbuddy.api
+from scadbuddy.api import crud_print
 from scadbuddy.main import API_PREFIX, ROOT_ROUTE_MODULES, _api_router
 
 #: Stand-ins for a path parameter, including literal segments some routes use, so
@@ -48,6 +49,20 @@ def test_every_route_module_is_mounted() -> None:
             concrete = API_PREFIX + re.sub(r"\{[^}]+\}", "x", route.path)
             for method in methods:
                 assert _matches(app, kind, concrete, method), (name, method, route.path)
+
+
+def test_the_native_spool_routes_are_gone() -> None:
+    """#6262 Task 11: the shelf's routes went with the SB inventory's own; no module
+    serves a ``/native-spools`` path, and no CRUD area does either."""
+    routers = [*_route_modules().values(), crud_print.router]
+    paths = [
+        route.path
+        for router in routers
+        for route in router.routes
+        if isinstance(route, APIRoute | APIWebSocketRoute)
+    ]
+    assert paths
+    assert [path for path in paths if "native-spools" in path] == []
 
 
 def test_no_two_modules_match_the_same_request() -> None:

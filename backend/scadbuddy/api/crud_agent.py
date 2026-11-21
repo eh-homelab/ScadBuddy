@@ -32,7 +32,9 @@ SQL before, read only:
 
 - area ``events``: ``GET …/events/head``, the event log's last ``seq`` and the database
   clock, and ``GET …/events``, the logged events after a ``seq``, newest first, for the
-  agent's LISTEN gap replay (``agent/src/events/pgListener.ts``);
+  LISTEN gap replay of an agent older than the change stream (#5299 step 11, which moved the
+  replay into ``…/agent/changes``, `api/crud_agent_changes.py`). They stay while such an agent
+  pod may still run during a roll; #5299 step 12 removes them;
 - area ``flows`` (`flows/agent_reads.py`): ``GET …/flow-runs/{id}/starter`` (who started a
   run, under the row's share lock), ``GET …/flow-decisions`` (whether a call's approval
   holds), ``GET …/flow-grants/in-force``, ``GET …/flow-runs/{id}/queue``,
@@ -256,7 +258,7 @@ def _event_log_head(pool: agent_reads.Pool) -> EventLogHead:
 
 def _event_log_gap(pool: agent_reads.Pool, after: int, limit: int) -> EventLogGap:
     # One transaction: `now()` is its start, before the rows are read, as the agent's SQL
-    # read of the gap had it (`pgListener.ts` GUARD).
+    # read of the gap had it (the GUARD of the older agent's `events/pgListener.ts`).
     with pool.connection() as conn, conn.transaction():
         rows = conn.execute(
             "SELECT seq, event_id, payload, logged_at FROM events"

@@ -511,6 +511,7 @@ export function StorefrontListingPage() {
               {open.published && open.id !== null && open.updatedAt !== null && <PrepareColours listingId={open.id} version={open.updatedAt} />}
               <ListingEditor
                 key={open.key.description}
+                isNew={open.id === null}
                 draft={draft}
                 onChange={changed}
                 models={models.data ?? []}

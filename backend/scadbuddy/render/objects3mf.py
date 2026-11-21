@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -852,6 +853,91 @@ def _plate_boxes(archive: _Archive) -> PlateBoxes:
         for stacked in (np.vstack(points),)
     }
     return PlateBoxes(boxes, len(plates) or 1)
+
+
+_ITEM_TAG = re.compile(r"<item\b[^>]*>")
+_TRANSFORM = re.compile(r"""\btransform=(["'])(.*?)\1""")
+
+
+def plates_moved(
+    payload: bytes,
+    moves: Mapping[int, tuple[float, float]],
+    budget: ReadBudget | None = None,
+) -> tuple[str, bytes]:
+    """The root model's name, and its bytes with each build item of plate ``index``
+    translated by ``moves[index]`` (x and y in millimetres), every other byte kept
+    (#6820). Items are matched to plates as :func:`plate_boxes` matches them, so a move
+    of a plate's box is a move of exactly the items that box was read from. Only the
+    transform's translation changes: never a rotation or a scale. Refused as
+    :func:`plate_boxes` refuses, within ``budget``, and when the model's ``<item>`` tags
+    cannot be matched one to one to its build items."""
+    return _opened(payload, budget or ReadBudget(), lambda archive: _plates_moved(archive, moves))
+
+
+def _moved_number(text: str, by: float) -> str:
+    value = float(text) + by
+    written = f"{value:.6f}".rstrip("0").rstrip(".")
+    return "0" if written in ("", "-0") else written
+
+
+def _plates_moved(archive: _Archive, moves: Mapping[int, tuple[float, float]]) -> tuple[str, bytes]:
+    model = _root_model_name(archive)
+    root, _, scale = archive.model(model)
+    build = root.find(f"{_CORE}build")
+    items = [item for item in (build if build is not None else []) if item.tag == f"{_CORE}item"]
+    plates = _plates(_model_settings(archive))
+    text = archive.archive.read(model).decode("utf-8")
+    tags = list(_ITEM_TAG.finditer(text))
+    if len(tags) != len(items) or any(
+        _tag_object_id(tag.group(0)) != item.get("objectid", "")
+        for tag, item in zip(tags, items, strict=True)
+    ):
+        raise UnreadableObjectsError("the 3MF's build items could not be matched to its text")
+    instances: dict[str, int] = {}
+    replaced: list[tuple[re.Match[str], str]] = []
+    for tag, item in zip(tags, items, strict=True):
+        if item.get("printable", "1") == "0":
+            continue  # counted as `_build_items` counts them: printable items only
+        object_id = item.get("objectid", "")
+        instance = instances.get(object_id, 0)
+        instances[object_id] = instance + 1
+        on = [index for index, pairs in plates.items() if (object_id, instance) in pairs]
+        if not plates:
+            on = [1]
+        shift = next((moves[index] for index in on if index in moves), None)
+        if shift is None:
+            continue
+        # The transform's translation is in the model's unit; the boxes are millimetres.
+        dx, dy = shift[0] / scale, shift[1] / scale
+        old = tag.group(0)
+        found = _TRANSFORM.search(old)
+        if found is None:
+            new = old.replace("<item", f'<item transform="1 0 0 0 1 0 0 0 1 {dx:g} {dy:g} 0"', 1)
+        else:
+            _matrix(found.group(2))  # twelve finite numbers, or refused
+            values = found.group(2).split()
+            values[9] = _moved_number(values[9], dx)
+            values[10] = _moved_number(values[10], dy)
+            quote = found.group(1)
+            new = (
+                old[: found.start()]
+                + f"transform={quote}{' '.join(values)}{quote}"
+                + old[found.end() :]
+            )
+        replaced.append((tag, new))
+    out: list[str] = []
+    at = 0
+    for tag, new in replaced:
+        out += [text[at : tag.start()], new]
+        at = tag.end()
+    out.append(text[at:])
+    return model, "".join(out).encode("utf-8")
+
+
+def _tag_object_id(tag: str) -> str:
+    """An ``<item>`` tag's ``objectid``, read from its text."""
+    found = re.search(r"""\bobjectid=(["'])(.*?)\1""", tag)
+    return found.group(2) if found else ""
 
 
 def _object_corners(

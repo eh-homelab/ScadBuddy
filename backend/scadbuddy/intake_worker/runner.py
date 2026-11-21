@@ -97,7 +97,7 @@ MAX_FILENAME: Final = 255
 #: The largest preview side: the check renders 512 (`check.PREVIEW_SIZE`).
 MAX_PREVIEW_SIDE: Final = 4096
 #: The variables the child gets: none of the worker's (its proof's path among them).
-_ENV_KEEP: Final = ("PATH", "LANG", "LC_ALL", "TMPDIR")
+_ENV_KEEP: Final = ("PATH", "LANG", "LC_ALL")
 #: A check's box on the sandbox's spool (mode 0700), and where the confined child sees it.
 BOX: Final = "box"
 BOX_MODE: Final = 0o700
@@ -179,9 +179,13 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
 
 
 def child_env(scratch: Path) -> dict[str, str]:
-    """The child's environment: `_ENV_KEEP` of the worker's, nothing else."""
+    """The child's environment: `_ENV_KEEP` of the worker's, and ``scratch`` (its box, where
+    the child sees it) as its ``TMPDIR`` and ``MPLCONFIGDIR``. Never the worker's
+    ``TMPDIR``: in the sandbox that is the spool, which the child sees covered (#6523)."""
     env = {name: os.environ[name] for name in _ENV_KEEP if name in os.environ}
-    env.update({"PYTHONDONTWRITEBYTECODE": "1", "MPLCONFIGDIR": str(scratch)})
+    env.update(
+        {"PYTHONDONTWRITEBYTECODE": "1", "MPLCONFIGDIR": str(scratch), "TMPDIR": str(scratch)}
+    )
     return env
 
 

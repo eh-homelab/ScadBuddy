@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Filament, SlotNeed } from '../../api/types'
+import { AppLink } from '../AppLink'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -38,7 +39,11 @@ export function QuoteFilaments({
       <legend className="text-sm font-medium">Priced with</legend>
       {filaments.length === 0 && (
         <p className="text-xs text-warn">
-          The price book has no filaments yet: add them in Settings, Orders.
+          The price book has no filaments yet: add them in{' '}
+          <AppLink href="/filament/types" className="underline">
+            Filament → Types
+          </AppLink>
+          .
         </p>
       )}
       {slots.map((slot) => {

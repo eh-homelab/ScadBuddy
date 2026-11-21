@@ -25,6 +25,8 @@ type UnknownTray struct {
 	label *string
 	// The material property
 	material *string
+	// The rgba property
+	rgba UnknownTray_UnknownTray_rgbaable
 	// The spool_id property
 	spool_id *int32
 	// The tray_id property
@@ -203,6 +205,92 @@ func (m *UnknownTray_UnknownTray_colour_word) SetUnknownTrayColourWordMember1(va
 	m.unknownTray_colour_wordMember1 = value
 }
 
+// UnknownTray_UnknownTray_rgba composed type wrapper for classes string, UnknownTray_rgbaMember1able
+type UnknownTray_UnknownTray_rgba struct {
+	// Composed type representation for type string
+	string *string
+	// Composed type representation for type UnknownTray_rgbaMember1able
+	unknownTray_rgbaMember1 UnknownTray_rgbaMember1able
+}
+
+// NewUnknownTray_UnknownTray_rgba instantiates a new UnknownTray_UnknownTray_rgba and sets the default values.
+func NewUnknownTray_UnknownTray_rgba() *UnknownTray_UnknownTray_rgba {
+	m := &UnknownTray_UnknownTray_rgba{}
+	return m
+}
+
+// CreateUnknownTray_UnknownTray_rgbaFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateUnknownTray_UnknownTray_rgbaFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewUnknownTray_UnknownTray_rgba()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateUnknownTray_rgbaMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(UnknownTray_rgbaMember1able); ok {
+				result.SetUnknownTrayRgbaMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *UnknownTray_UnknownTray_rgba) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *UnknownTray_UnknownTray_rgba) GetIsComposedType() bool {
+	return true
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *UnknownTray_UnknownTray_rgba) GetString() *string {
+	return m.string
+}
+
+// GetUnknownTrayRgbaMember1 gets the UnknownTray_rgbaMember1 property value. Composed type representation for type UnknownTray_rgbaMember1able
+// returns a UnknownTray_rgbaMember1able when successful
+func (m *UnknownTray_UnknownTray_rgba) GetUnknownTrayRgbaMember1() UnknownTray_rgbaMember1able {
+	return m.unknownTray_rgbaMember1
+}
+
+// Serialize serializes information the current object
+func (m *UnknownTray_UnknownTray_rgba) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetUnknownTrayRgbaMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetUnknownTrayRgbaMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *UnknownTray_UnknownTray_rgba) SetString(value *string) {
+	m.string = value
+}
+
+// SetUnknownTrayRgbaMember1 sets the UnknownTray_rgbaMember1 property value. Composed type representation for type UnknownTray_rgbaMember1able
+func (m *UnknownTray_UnknownTray_rgba) SetUnknownTrayRgbaMember1(value UnknownTray_rgbaMember1able) {
+	m.unknownTray_rgbaMember1 = value
+}
+
 type UnknownTray_UnknownTray_colour_wordable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetString() *string
@@ -217,6 +305,14 @@ type UnknownTray_UnknownTray_colourable interface {
 	GetUnknownTrayColourMember1() UnknownTray_colourMember1able
 	SetString(value *string)
 	SetUnknownTrayColourMember1(value UnknownTray_colourMember1able)
+}
+
+type UnknownTray_UnknownTray_rgbaable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetString() *string
+	GetUnknownTrayRgbaMember1() UnknownTray_rgbaMember1able
+	SetString(value *string)
+	SetUnknownTrayRgbaMember1(value UnknownTray_rgbaMember1able)
 }
 
 // NewUnknownTray instantiates a new UnknownTray and sets the default values.
@@ -342,6 +438,16 @@ func (m *UnknownTray) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		return nil
 	}
+	res["rgba"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateUnknownTray_UnknownTray_rgbaFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetRgba(val.(UnknownTray_UnknownTray_rgbaable))
+		}
+		return nil
+	}
 	res["spool_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetInt32Value()
 		if err != nil {
@@ -381,6 +487,12 @@ func (m *UnknownTray) GetLabel() *string {
 // returns a *string when successful
 func (m *UnknownTray) GetMaterial() *string {
 	return m.material
+}
+
+// GetRgba gets the rgba property value. The rgba property
+// returns a UnknownTray_UnknownTray_rgbaable when successful
+func (m *UnknownTray) GetRgba() UnknownTray_UnknownTray_rgbaable {
+	return m.rgba
 }
 
 // GetSpoolId gets the spool_id property value. The spool_id property
@@ -435,6 +547,12 @@ func (m *UnknownTray) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 	}
 	{
 		err := writer.WriteStringValue("material", m.GetMaterial())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("rgba", m.GetRgba())
 		if err != nil {
 			return err
 		}
@@ -500,6 +618,11 @@ func (m *UnknownTray) SetMaterial(value *string) {
 	m.material = value
 }
 
+// SetRgba sets the rgba property value. The rgba property
+func (m *UnknownTray) SetRgba(value UnknownTray_UnknownTray_rgbaable) {
+	m.rgba = value
+}
+
 // SetSpoolId sets the spool_id property value. The spool_id property
 func (m *UnknownTray) SetSpoolId(value *int32) {
 	m.spool_id = value
@@ -520,6 +643,7 @@ type UnknownTrayable interface {
 	GetFingerprint() *string
 	GetLabel() *string
 	GetMaterial() *string
+	GetRgba() UnknownTray_UnknownTray_rgbaable
 	GetSpoolId() *int32
 	GetTrayId() *int32
 	SetAmsId(value *int32)
@@ -529,6 +653,7 @@ type UnknownTrayable interface {
 	SetFingerprint(value *string)
 	SetLabel(value *string)
 	SetMaterial(value *string)
+	SetRgba(value UnknownTray_UnknownTray_rgbaable)
 	SetSpoolId(value *int32)
 	SetTrayId(value *int32)
 }

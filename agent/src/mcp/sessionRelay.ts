@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
 import { z } from 'zod'
 import { type Principal, TIERS } from '../auth/principal.js'
+import { MCP_CHANNEL, RelayBodyTooLargeError, type RelayRows } from './relayRows.js'
 
 // /mcp sessions across agent replicas (#2086). A session is its transport, its
 // McpServer, its resource subscriptions and its replay log: live objects in
 // the process that opened it (mcp/http.ts), which no other replica can rebuild.
 // So a request that reaches another replica is relayed to the owner, the way
-// browser calls were until #4780 (#1916; they go through Temporal now, bridge/relay.ts):
+// browser calls were until #4780 (#1916; they go through Temporal now, bridge/relay.ts). The
+// directory and the messages are kept by `RelayRows` (relayRows.ts): over the agent's SQL, or
+// over the backend's CRUD routes once the API lists area `mcp-relay` (#5299 step 11):
 //
 //   any replica (got the request)            owner (holds the session)
 //   look the session up in ai_mcp_sessions
@@ -48,13 +50,14 @@ import { type Principal, TIERS } from '../auth/principal.js'
 // 404. A stall fires an interval once however long it lasted, so it costs one
 // silent tick, not the SILENT_AFTER_BEATS that make a peer gone.
 //
-// The channel is `scadbuddy_mcp`, LISTENed on the event listener's own
-// connection (events/pgListener.ts `listenAlso`), as the bridge's is.
+// The channel is `scadbuddy_mcp`, heard on the API's change stream
+// (events/changeStream.ts `listenAlso`, #5299 D4), in the order Postgres
+// delivered it to the API's LISTEN connection.
 //
 // Session ids are credentials (mcp/http.ts): the directory and every relay
 // message carry the id's SHA-256, never the id.
 
-export const MCP_CHANNEL = 'scadbuddy_mcp'
+export { MCP_CHANNEL }
 /** How long a relayed request waits for its owner to say it has it. */
 export const ACK_TIMEOUT_MS = 3_000
 /** How often an owner says it is still working on a relayed request. */
@@ -67,8 +70,26 @@ const SILENT_AFTER_BEATS = 3
  * text: JSON escapes the text again, and an SSE chunk of JSON is mostly quotes.
  */
 const INLINE_MAX_BYTES = 7_500
-/** Relay rows older than this are nobody's any more. */
-const STALE_MESSAGES = '10 minutes'
+/**
+ * The most UTF-16 units of an answer one row carries. JSON writes a unit as at most six bytes
+ * (a control character's `\u0000`), so a row stays under 6 MiB, inside the API's 8 MiB JSON
+ * gate (`relayRows.ts` `RELAY_SEND_MAX_BYTES`); a larger chunk goes as several rows, in order.
+ */
+export const ROW_TEXT_MAX = 1 << 20
+
+/** `text` in pieces of at most `max` units, never cutting a surrogate pair. */
+export function rowPieces(text: string, max = ROW_TEXT_MAX): string[] {
+  const pieces: string[] = []
+  let at = 0
+  while (at < text.length) {
+    let end = Math.min(at + max, text.length)
+    const last = text.charCodeAt(end - 1)
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end -= 1
+    pieces.push(text.slice(at, end))
+    at = end
+  }
+  return pieces
+}
 const SWEEP_EVERY_MS = 60_000
 /** Headers of an answer that describe its own hop's framing, not the answer. */
 const FRAMING_HEADERS: ReadonlySet<string> = new Set(['content-length', 'transfer-encoding', 'connection', 'keep-alive'])
@@ -167,16 +188,16 @@ type Waiting = {
   shutdown: () => void
 }
 
-export type PgMcpSessionRelayOptions = {
-  /** LISTEN on MCP_CHANNEL (events/pgListener.ts `listenAlso`). */
+export type SharedMcpSessionRelayOptions = {
+  /** Hears MCP_CHANNEL (events/changeStream.ts `listenAlso`). */
   listen: (channel: string, onNotify: (payload: string) => void) => void
   ackTimeoutMs?: number
   beatMs?: number
   log?: (message: string) => void
 }
 
-export class PgMcpSessionRelay implements McpSessionRelay {
-  readonly #sql: Sql
+export class SharedMcpSessionRelay implements McpSessionRelay {
+  readonly #rows: RelayRows
   /** This replica's id: the directory names it, and answers are addressed to it. */
   readonly replica = randomUUID()
   readonly #ackTimeoutMs: number
@@ -190,8 +211,8 @@ export class PgMcpSessionRelay implements McpSessionRelay {
   #lastSweep = 0
   #closed = false
 
-  constructor(sql: Sql, options: PgMcpSessionRelayOptions) {
-    this.#sql = sql
+  constructor(rows: RelayRows, options: SharedMcpSessionRelayOptions) {
+    this.#rows = rows
     this.#ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_MS
     this.#beatMs = options.beatMs ?? BEAT_MS
     this.#log = options.log ?? ((m) => console.error(m))
@@ -203,10 +224,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
   }
 
   async register(hash: string, callerKey: string): Promise<void> {
-    await this.#sql`
-      INSERT INTO ai_mcp_sessions (id_hash, replica, caller_key)
-      VALUES (${hash}, ${this.replica}, ${callerKey})
-      ON CONFLICT (id_hash) DO UPDATE SET replica = EXCLUDED.replica, caller_key = EXCLUDED.caller_key, last_seen = now()`
+    await this.#rows.register(hash, this.replica, callerKey)
     this.#touched.set(hash, Date.now())
   }
 
@@ -214,22 +232,17 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     const last = this.#touched.get(hash) ?? 0
     if (Date.now() - last < TOUCH_EVERY_MS) return
     this.#touched.set(hash, Date.now())
-    await this.#sql`UPDATE ai_mcp_sessions SET last_seen = now() WHERE id_hash = ${hash}`.catch((err: unknown) =>
-      this.#failed(err),
-    )
+    await this.#rows.touch(hash).catch((err: unknown) => this.#failed(err))
   }
 
   async remove(hash: string): Promise<void> {
     this.#touched.delete(hash)
-    await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash}`.catch((err: unknown) => this.#failed(err))
+    await this.#rows.remove(hash).catch((err: unknown) => this.#failed(err))
   }
 
   async counts(callerKey: string, idleMs: number): Promise<{ total: number; caller: number }> {
     await this.#sweep(idleMs)
-    const [row] = await this.#sql<{ total: number; caller: number }[]>`
-      SELECT count(*)::int AS total, (count(*) FILTER (WHERE caller_key = ${callerKey}))::int AS caller
-      FROM ai_mcp_sessions WHERE last_seen > now() - make_interval(secs => ${directoryIdleMs(idleMs) / 1000})`
-    return row ?? { total: 0, caller: 0 }
+    return await this.#rows.counts(callerKey, directoryIdleMs(idleMs) / 1000)
   }
 
   async forward(
@@ -238,9 +251,8 @@ export class PgMcpSessionRelay implements McpSessionRelay {
     request: RelayedRequest,
     signal: AbortSignal,
   ): Promise<Response | undefined> {
-    const [found] = await this.#sql<{ replica: string }[]>`SELECT replica FROM ai_mcp_sessions WHERE id_hash = ${hash}`
-    if (!found) return undefined
-    const owner = found.replica
+    const owner = await this.#rows.owner(hash)
+    if (owner === undefined) return undefined
     if (owner === this.replica) {
       // Ours by the directory but not in memory: left by a session this
       // process lost (it cannot be another process's: the id is per process).
@@ -290,9 +302,7 @@ export class PgMcpSessionRelay implements McpSessionRelay {
       const ownerGone = async () => {
         done()
         // Forgotten first, so the client's reconnect meets the 404.
-        await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner}`.catch((err: unknown) =>
-          this.#failed(err),
-        )
+        await this.#rows.remove(hash, owner).catch((err: unknown) => this.#failed(err))
         if (!settled) {
           settle(
             Response.json(
@@ -306,14 +316,12 @@ export class PgMcpSessionRelay implements McpSessionRelay {
         try {
           // Withdrawn only if still there: an owner that took it is running it,
           // and its ack was lost or is late. Then keep waiting, on its beats.
-          const withdrawn = await this.#sql`DELETE FROM ai_mcp_relay_messages WHERE id = ${row} RETURNING id`
-          if (withdrawn.length === 0) return this.#waiting.get(req)?.acked()
+          if (!(await this.#rows.withdraw(row))) return this.#waiting.get(req)?.acked()
           // Nobody took it: nobody holds the session. Or its owner is too slow
           // to take a request under load, and the session it still holds is now
           // unreachable from other replicas: said, so that shows if it happens (#2213).
           done()
-          const dropped = await this.#sql`DELETE FROM ai_mcp_sessions WHERE id_hash = ${hash} AND replica = ${owner} RETURNING id_hash`
-          if (dropped.length > 0) {
+          if (await this.#rows.remove(hash, owner)) {
             this.#log(
               `mcp relay: replica ${owner} took no request within ${this.#ackTimeoutMs} ms; dropped its session ${hash.slice(0, 12)} from the directory`,
             )
@@ -381,10 +389,14 @@ export class PgMcpSessionRelay implements McpSessionRelay {
         },
         (err: unknown) => {
           done()
-          if (!settled) {
-            settled = true
-            reject(err)
+          if (settled) return
+          if (err instanceof RelayBodyTooLargeError) {
+            // Too large to relay through the API, whatever the MCP SDK takes: said, not a 500.
+            settle(Response.json({ jsonrpc: '2.0', error: { code: -32000, message: 'Request body too large to relay' }, id: null }, { status: 413 }))
+            return
           }
+          settled = true
+          reject(err)
         },
       )
     })
@@ -400,25 +412,18 @@ export class PgMcpSessionRelay implements McpSessionRelay {
 
   /** Inserts `body` (when given) as row `row` and NOTIFYs `header`, in one transaction. */
   async #send(header: Header, body?: { row: string; value: unknown }): Promise<void> {
-    await this.#sql.begin(async (tx) => {
-      if (body) await tx`INSERT INTO ai_mcp_relay_messages (id, body) VALUES (${body.row}, ${tx.json(body.value as never)})`
-      await tx`SELECT pg_notify(${MCP_CHANNEL}, ${JSON.stringify(header)})`
-    })
+    await this.#rows.send(header, body)
   }
 
   async #sweep(idleMs: number): Promise<void> {
     if (Date.now() - this.#lastSweep < SWEEP_EVERY_MS) return
     this.#lastSweep = Date.now()
-    await Promise.all([
-      this.#sql`DELETE FROM ai_mcp_relay_messages WHERE created_at < now() - ${STALE_MESSAGES}::interval`,
-      // A dead replica's sessions: idle by now, since nothing could use them.
-      this.#sql`DELETE FROM ai_mcp_sessions WHERE last_seen < now() - make_interval(secs => ${directoryIdleMs(idleMs) / 1000})`,
-    ]).catch((err: unknown) => this.#failed(err))
+    // A dead replica's sessions: idle by now, since nothing could use them.
+    await this.#rows.sweep(directoryIdleMs(idleMs) / 1000).catch((err: unknown) => this.#failed(err))
   }
 
   async #take(row: string): Promise<unknown> {
-    const [taken] = await this.#sql<{ body: unknown }[]>`DELETE FROM ai_mcp_relay_messages WHERE id = ${row} RETURNING body`
-    return taken?.body
+    return await this.#rows.take(row)
   }
 
   async #heard(payload: string): Promise<void> {
@@ -541,8 +546,11 @@ export class PgMcpSessionRelay implements McpSessionRelay {
               const inline: Header = { t: 'chunk', req, to, text }
               if (Buffer.byteLength(JSON.stringify(inline), 'utf8') <= INLINE_MAX_BYTES) await send(inline)
               else {
-                const row = randomUUID()
-                await send({ t: 'chunk', req, to, row }, { row, value: { text } })
+                for (const piece of rowPieces(text)) {
+                  if (controller.signal.aborted) break
+                  const row = randomUUID()
+                  await send({ t: 'chunk', req, to, row }, { row, value: { text: piece } })
+                }
               }
             }
             if (done || controller.signal.aborted) break

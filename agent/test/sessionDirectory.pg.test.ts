@@ -10,6 +10,7 @@ import { BG_MONITOR_COMMAND, backgroundActivities } from '../src/background/acti
 import { ensureSessionDir } from '../src/harness/stateDirs.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { PgSessionPresence } from '../src/sessions/presence.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { SessionDirectory } from '../src/workspace/directory.js'
@@ -154,7 +155,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(() => dirs.dirOf('../etc')).toThrow(/not a session id/)
     // Busy: a turn is placed in it.
     expect(await dirs.evict(id)).toBe(false)
-    expect(await dirs.sweep(db.sql, 0)).toEqual([])
+    expect(await dirs.sweep(new PgSessionPresence(db.sql), 0)).toEqual([])
     dirs.done(turn)
     expect(await dirs.evict(id)).toBe(true)
     expect(existsSync(turn.dir)).toBe(false)
@@ -172,7 +173,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     // A Monitor command started in the turn runs on in the directory (background/activities.ts).
     const release = dirs.hold(id)
     expect(await dirs.evict(id)).toBe(false)
-    expect(await dirs.sweep(db.sql, 0)).toEqual([])
+    expect(await dirs.sweep(new PgSessionPresence(db.sql), 0)).toEqual([])
     await writeFile(path.join(turn.dir, 'build.log'), 'written by the monitor')
     // The next turn here: the monitor's output is written back, not removed as unrecorded.
     const next = await dirs.place(id)
@@ -203,7 +204,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     dirs.done(turn)
     // Still down: neither an eviction, nor the idle sweep, nor a placement removes the only copy.
     expect(await dirs.evict(id)).toBe(false)
-    expect(await dirs.sweep(db.sql, 0)).toEqual([])
+    expect(await dirs.sweep(new PgSessionPresence(db.sql), 0)).toEqual([])
     const meanwhile = await dirs.place(id)
     expect(await readFile(path.join(meanwhile.dir, 'result.txt'), 'utf8')).toBe('keep me')
     dirs.done(meanwhile)
@@ -286,7 +287,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(existsSync(dirs.dirOf(forgotten))).toBe(false)
 
     await db.sql`DELETE FROM ai_sessions WHERE id = ${deleted}`
-    expect(await dirs.sweep(db.sql)).toEqual([deleted])
+    expect(await dirs.sweep(new PgSessionPresence(db.sql))).toEqual([deleted])
     expect(existsSync(dirs.dirOf(deleted))).toBe(false)
     expect(existsSync(dirs.dirOf(live))).toBe(true)
   })
@@ -390,7 +391,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
 
   it('an eviction asked while a turn is placed runs once the turn is done, unless a placement comes first', async () => {
     const id = await session()
-    const dirs = new SessionDirectory(files, await root(), { sql: db.sql })
+    const dirs = new SessionDirectory(files, await root(), { presence: new PgSessionPresence(db.sql) })
     const turn = await dirs.place(id)
     await writeFile(path.join(turn.dir, 'released.txt'), 'kept in the record')
     // The process closed while the turn still unwinds (a cut placement, a released park).
@@ -411,7 +412,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
 
   it("a deleted session's copy is evicted without a write-back", async () => {
     const id = await session()
-    const dirs = new SessionDirectory(files, await root(), { sql: db.sql })
+    const dirs = new SessionDirectory(files, await root(), { presence: new PgSessionPresence(db.sql) })
     const turn = await dirs.place(id)
     await writeFile(path.join(turn.dir, 'orphan.txt'), 'no record to go to')
     dirs.done(turn)
@@ -549,7 +550,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const dirs = new SessionDirectory(files, await root(), { warm: () => true })
     const turn = await dirs.place(id)
     dirs.done(turn)
-    expect(await dirs.sweep(db.sql, 1_000, Date.now() + 48 * 3600_000)).toEqual([])
+    expect(await dirs.sweep(new PgSessionPresence(db.sql), 1_000, Date.now() + 48 * 3600_000)).toEqual([])
     expect(existsSync(turn.dir)).toBe(true)
   })
 

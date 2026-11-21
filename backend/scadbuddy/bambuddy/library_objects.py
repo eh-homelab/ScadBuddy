@@ -123,6 +123,20 @@ def _digest(payload: BinaryIO) -> str:
     return digest.hexdigest()
 
 
+def object_colours(obj: ReadObject) -> list[str]:
+    """The colours ``obj`` prints in, once each: each printed part's own and its
+    painting's. Arrange sizes a plate's prime tower from them, so they count every
+    filament the writer counts (`PlateParts.filaments`, #6757)."""
+    return list(
+        dict.fromkeys(
+            colour
+            for part in obj.parts
+            if not part.negative
+            for colour in [part.colour, *(part.paint.used() if part.paint is not None else [])]
+        )
+    )
+
+
 def piece_key(digest: str, index: int) -> str:
     return f"{LIBRARY_PIECE_PREFIX}-{digest[:48]}-{index}"
 
@@ -233,17 +247,7 @@ async def read_library_objects(
                 revision=None,
                 bbox=box,
                 footprint=(box.size[0], box.size[1]),
-                colours=list(
-                    dict.fromkeys(
-                        colour
-                        for part in obj.parts
-                        if not part.negative
-                        for colour in [
-                            part.colour,
-                            *(part.paint.used() if part.paint is not None else []),
-                        ]
-                    )
-                ),
+                colours=object_colours(obj),
                 materials=dict(obj.materials),
                 count=obj.count,
                 library_file_id=file_id,
