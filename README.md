@@ -43,7 +43,8 @@ multi-colour rules, connecting Bambuddy and each feature.
 - **Library**: print any file already in Bambuddy's library through the same print
   picker, printed as an output is: a copy laid out for the nozzle side, flow and
   spools chosen, filed in the project's folder; an author's plates and placement are
-  kept. Advanced also lists STLs, which print as one plate, and sliced
+  kept, except that a plate's objects that not every nozzle reaches move, as one group,
+  to where every nozzle reaches (#6820). Advanced also lists STLs, which print as one plate, and sliced
   `.gcode.3mf` files, which print from Bambuddy directly.
 - **Orders**: customers with their contact points and addresses, and orders of line
   items, each pinning one template commit with its inputs, priced by hand or priced from

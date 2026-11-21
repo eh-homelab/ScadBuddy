@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from scadbuddy.bambuddy.send import _tower_on, towers_within_reach
+from scadbuddy.bambuddy.send import _tower_on, objects_within_reach, towers_within_reach
 from scadbuddy.render.bambu3mf import (
     MAX_SETTINGS_BYTES,
     MODEL_SETTINGS_NAME,
@@ -389,3 +389,98 @@ def test_a_file_that_states_no_tower_width_is_judged_at_the_default(tmp_path: Pa
     for width in (["0"], "-5", "nan", "inf"):
         stated = _stated(payload, prime_tower_rib_wall=["0"], prime_tower_width=width)
         assert _towers(towers_within_reach(stated, H2C)) == default, width
+
+
+def _plate_one_at(payload: bytes, x: float) -> bytes:
+    """``payload`` with plate 1's build item moved so that its objects start at ``x``
+    (the item is centred on its 30 mm box), as an A1 mini author puts a part at its
+    bed's left edge."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        model = archive.read(ROOT_MODEL_NAME).decode()
+    moved = model.replace(
+        'objectid="5" transform="1 0 0 0 1 0 0 0 1 90 90 10"',
+        f'objectid="5" transform="1 0 0 0 1 0 0 0 1 {x + 15:g} 90 10"',
+    )
+    assert moved != model
+    return rezipped(payload, {ROOT_MODEL_NAME: moved.encode()})
+
+
+def _relative(payload: bytes, index: int, count: int = 2) -> Rect:
+    """Plate ``index``'s objects' box, less its origin on the A1 mini's bed."""
+    low, high = plate_boxes(payload).boxes[index]
+    ox, oy = plate_origin(index, count, A1_MINI)
+    return Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
+
+
+def test_objects_every_extruder_reaches_keep_their_place(tmp_path: Path) -> None:
+    payload = _laid_out_on_an_a1_mini(tmp_path)
+    assert objects_within_reach(payload, H2C) is payload
+
+
+def test_objects_only_one_extruder_reaches_move_where_both_reach(tmp_path: Path) -> None:
+    """#6820: library copy 1000001621's spool lay at x 0..180, where its author put it
+    on an A1 mini, and the H2C's right nozzle reaches only x 25..330: "Found G-code in
+    unprintable area", T65535. The same file with the plate's objects at x 75..255
+    sliced on the right extruder (measured 2026-11-20, BambuStudio 02.08.02.61). The
+    group moves the least that brings it inside x 25..325; plate 2 stays."""
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    assert _relative(payload, 1) == Rect(0, 75, 30, 105)
+
+    moved = objects_within_reach(payload, H2C)
+
+    assert _relative(moved, 1) == Rect(25, 75, 55, 105)
+    assert _relative(moved, 2) == _relative(payload, 2)
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(moved)) as after,
+    ):
+        assert after.namelist() == before.namelist()
+        for name in before.namelist():
+            if name != ROOT_MODEL_NAME:
+                assert after.read(name) == before.read(name), name
+        model = after.read(ROOT_MODEL_NAME).decode()
+    assert 'objectid="5" transform="1 0 0 0 1 0 0 0 1 40 90 10"' in model
+    assert 'objectid="6" transform="1 0 0 0 1 0 0 0 1 306 90 10"' in model
+
+
+def test_objects_past_the_far_side_move_back_inside(tmp_path: Path) -> None:
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 310)
+    assert _relative(objects_within_reach(payload, H2C), 1) == Rect(295, 75, 325, 105)
+
+
+def test_the_tower_is_placed_beside_the_moved_objects(tmp_path: Path) -> None:
+    """The tower is judged where the objects now stand, not where they stood."""
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    moved = towers_within_reach(objects_within_reach(payload, H2C), H2C)
+    assert _clear_of_its_objects(moved, _towers(moved)[0], 20.0, TowerSettings())
+
+
+def test_objects_wider_than_the_reach_keep_their_place(tmp_path: Path) -> None:
+    """A group wider than x 25..325 fits nowhere that both nozzles reach: it stays, and
+    the slicer's failure says why (#6820)."""
+    slab = trimesh.creation.box(extents=(310, 30, 5))
+    out = tmp_path / "slab.3mf"
+    write_plates_3mf(
+        [PlateParts((ColourPart(1, "Slab", "#D3CFB5", slab),), (1,))],
+        ["#D3CFB5"],
+        out,
+        thumbnails=None,
+    )
+    payload = _stated(out.read_bytes(), printable_area=["0x0", "180x0", "180x180", "0x180"])
+    assert objects_within_reach(payload, H2C) is payload
+
+
+def test_no_printer_chosen_moves_no_objects(tmp_path: Path) -> None:
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    assert objects_within_reach(payload, DEFAULT_PLATE) is payload
+
+
+def test_a_file_whose_objects_do_not_read_keeps_their_place(tmp_path: Path) -> None:
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    damaged = _without_settings(payload, b"<config><plate>")
+    assert objects_within_reach(damaged, H2C) is damaged
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings["padding"] = "x" * MAX_SETTINGS_BYTES
+    padded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+    assert objects_within_reach(padded, H2C) is padded

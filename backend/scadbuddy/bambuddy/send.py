@@ -57,6 +57,7 @@ from scadbuddy.render.bambu3mf import (
 from scadbuddy.render.objects3mf import (
     UnreadableObjectsError,
     plate_boxes,
+    plates_moved,
     read_plates_parts,
 )
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
@@ -450,7 +451,10 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     written at render time, when no printer was chosen, so the plate it carries is the
     fallback. Moving it now is what puts the object — and the prime tower a
     multi-colour print needs — where every extruder can reach them. An author's file
-    keeps its placement and every plate it lays out; only the nozzles and colours are
+    keeps every plate it lays out and its scale. Its placement stays too, except that a
+    plate's objects that not every extruder reaches move as one group to where every
+    extruder does, when they fit there (:func:`objects_within_reach`, #6820), and its
+    towers then move as :func:`towers_within_reach` says. The nozzles and colours are
     stated (:func:`state_nozzles`), and its covers redrawn in those colours
     (:func:`_recoloured_covers`, #6170). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
@@ -470,15 +474,18 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
         try:
             laid = hint_painted_slots(
                 towers_within_reach(
-                    _recoloured_covers(
-                        state_nozzles(
-                            payload,
-                            nozzle_stats=target.nozzle_stats,
-                            nozzle_volume_type=target.nozzle_volume_type,
-                            filament_colour=colours,
-                            filament_map=target.filament_map,
+                    objects_within_reach(
+                        _recoloured_covers(
+                            state_nozzles(
+                                payload,
+                                nozzle_stats=target.nozzle_stats,
+                                nozzle_volume_type=target.nozzle_volume_type,
+                                filament_colour=colours,
+                                filament_map=target.filament_map,
+                            ),
+                            colours,
                         ),
-                        colours,
+                        target.plate,
                     ),
                     target.plate,
                 )
@@ -608,6 +615,81 @@ def file_tower(settings: dict[str, object]) -> TowerSettings:
         rib_wall=stated_value(settings, "prime_tower_rib_wall") != "0",
         width=width,
     )
+
+
+def _inside(low: float, high: float, start: float, end: float) -> float | None:
+    """The least shift that brings ``low``..``high`` inside ``start``..``end``, or
+    ``None`` when it is wider."""
+    if high - low > end - start:
+        return None
+    if low < start:
+        return start - low
+    if high > end:
+        return end - high
+    return 0.0
+
+
+def objects_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
+    """``payload`` with each plate's objects moved, as one group, into the area every
+    extruder of ``plate`` reaches (``PlateGeometry.usable``), when their box lies
+    outside it but fits inside it; else unchanged (#6820). The move is the least
+    translation that does it: no rotation, no scale, and the objects keep their places
+    relative to each other. Only that plate's build items move
+    (:func:`~scadbuddy.render.objects3mf.plates_moved`), and every other entry keeps its
+    bytes.
+
+    An author lays a file out for their own printer. Library copy 1000001621 put its
+    spool at x 0..180 on an A1 mini, and an H2C's right nozzle reaches only x 25..330, so
+    the slicer moved the filament to the left nozzle, which had none: "Found G-code in
+    unprintable area", T65535. The same file with the plate's objects at x 75..255
+    sliced on the right nozzle (measured 2026-11-20 with the prod slicer pod's
+    BambuStudio 02.08.02.61). The ``<assemble_item>`` transforms in
+    ``model_settings.config`` are not changed: they place the objects in Bambu Studio's
+    assembly view, not on a plate. A plate whose objects do not fit keeps its place, and
+    the slicer says why; so does a file that cannot be read within the read budget, or
+    one sent with no printer chosen. The objects are read as :func:`towers_within_reach`
+    reads them, less their plate's origin on the file's own bed."""
+    if plate.model is None:
+        return payload  # no printer chosen: nothing to judge the objects against
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            settings = read_project_settings(archive)
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return payload  # unreadable or past the cap (#6792): the slicer says why
+    if not isinstance(settings, dict):
+        return payload
+    bed = _source_bed(settings)
+    if bed is None:
+        return payload
+    try:
+        read = plate_boxes(payload)
+    except UnreadableObjectsError:
+        return payload
+    source = PlateGeometry(
+        model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
+    )
+    usable = plate.usable
+    moves: dict[int, tuple[float, float]] = {}
+    for index, (low, high) in read.boxes.items():
+        if index > read.count:
+            continue
+        ox, oy = plate_origin(index, read.count, source)
+        dx = _inside(float(low[0] - ox), float(high[0] - ox), usable.min_x, usable.max_x)
+        dy = _inside(float(low[1] - oy), float(high[1] - oy), usable.min_y, usable.max_y)
+        if dx is None or dy is None or (dx == 0 and dy == 0):
+            continue
+        moves[index] = (dx, dy)
+    if not moves:
+        return payload
+    try:
+        name, model = plates_moved(payload, moves)
+    except UnreadableObjectsError:
+        return payload
+    logger.info(
+        "moved the file's objects where every extruder reaches",
+        extra={"printer_model": plate.model, "plates": sorted(moves)},
+    )
+    return rezipped(payload, {name: model})
 
 
 def towers_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
