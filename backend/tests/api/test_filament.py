@@ -604,7 +604,8 @@ def test_an_import_that_did_not_finish_keeps_its_actor_and_says_it_may_run_on(
     """Decision 183: the route did not see the read end (the run timed out, Temporal out of
     reach, the read failed or timed out), so the worker may still be sending its bodies.
     The person stays kept under the run's id, for the bodies still to come to name them;
-    the `ACTOR_KEPT` sweep drops the row. The 503 says the import may still be running."""
+    a later `remember_actor` drops the row once it is `ACTOR_KEPT` old. The 503 says the
+    import may still be running."""
     configure(client)
 
     async def unfinished(*args: object) -> PullOutcome:

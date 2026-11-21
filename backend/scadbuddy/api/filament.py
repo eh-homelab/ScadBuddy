@@ -1706,7 +1706,8 @@ async def import_bambuddy(
         outcome = await execute_pull(nudger.client_getter(), nudger.task_queue, start)
     except Exception as error:
         # The run did not answer (timed out, Temporal out of reach): its read may still be
-        # sending bodies, so the person stays kept for them; `ACTOR_KEPT` drops the row.
+        # sending bodies, so the person stays kept for them; a later `remember_actor` drops the
+        # row once it is `ACTOR_KEPT` old.
         logger.warning("the Bambuddy import did not finish", extra={"error": type(error).__name__})
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED) from error
     if outcome.outcome == "failed" and outcome.error is None:
@@ -1716,7 +1717,7 @@ async def import_bambuddy(
     try:
         await asyncio.to_thread(forget_actor, filament, start.pull_id)
     except Exception as error:
-        # A row left is deleted by a later import (`ACTOR_KEPT`).
+        # A row left is deleted by a later import once it is `ACTOR_KEPT` old.
         logger.warning(
             "could not drop an import's kept actor", extra={"error": type(error).__name__}
         )

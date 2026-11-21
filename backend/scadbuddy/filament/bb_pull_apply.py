@@ -157,8 +157,8 @@ class LocalBbPull:
         return await asyncio.to_thread(run)
 
 
-#: How long a kept actor may stay once its run should have ended (an API that died
-#: mid-import never deleted it); a later `remember_actor` deletes the older ones.
+#: How long a kept actor may stay: a row left behind, because the read did not answer in
+#: time or the API died mid-run, is deleted by a later `remember_actor` once it is this old.
 ACTOR_KEPT = timedelta(hours=1)
 
 
@@ -180,7 +180,7 @@ def remember_actor(store: Filament, pull_id: str, actor: str) -> None:
 
 
 def forget_actor(store: Filament, pull_id: str) -> None:
-    """Drop the run's kept actor once it ended."""
+    """Drop the run's kept actor once its read answered."""
     with store.spools.transaction() as conn:
         conn.execute("DELETE FROM filament_pull_actors WHERE pull_id = %s", (pull_id,))
 

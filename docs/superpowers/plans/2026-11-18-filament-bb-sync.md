@@ -1887,8 +1887,9 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     run (`remember_actor`, table `filament_pull_actors`, migration
     `20261121T0911Z_filament_pull_actors.sql`) and deletes the row once the read answered
     (`forget_actor`; Decision 183); the routes read the actor there (`LocalBbPull._actor`), and an id
-    with no row (the Schedule's pull) books as `bambuddy`. A row an API that died mid-run
-    left is deleted by the next `remember_actor` once it is an hour old (`ACTOR_KEPT`).
+    with no row (the Schedule's pull) books as `bambuddy`. A row left behind, because the
+    read did not answer in time or the API died mid-run, is deleted by a later
+    `remember_actor` once it is an hour old (`ACTOR_KEPT`).
     Tests: `test_crud_filament_pull.py` refuses a body with `actor` on the pull and usage
     routes, and `test_the_events_name_the_actor_the_api_kept_never_the_workers` checks the
     events name the kept person.
