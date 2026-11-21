@@ -719,6 +719,47 @@ async def test_a_filament_probe_gets_the_entry() -> None:
 
 
 @respx.mock
+async def test_a_filament_404_is_confirmed_by_the_listing() -> None:
+    """R-6688-8: a 404 of ``GET /filament-catalog/{id}`` may be a Bambuddy build that
+    lacks the route, which says nothing of the entry. The probe reads the listing again:
+    an entry the listing holds keeps its link (the listing's row is the answer); only a
+    listing read whole without it is the row's 404."""
+    routes = _listings()
+    held = shaped("FilamentResponse", id=8, name="PLA-R", type="PLA")
+    routes["filaments"].mock(return_value=httpx.Response(200, json=[held]))
+    missing_route = httpx.Response(404, json={"detail": "Not Found"})
+    respx.get(f"{API}/filament-catalog/8").mock(return_value=missing_route)
+    respx.get(f"{API}/filament-catalog/9").mock(return_value=missing_route)
+    kept = _write("probe", 8, {}, kind="filament")
+    gone = _write("probe", 9, {}, kind="filament")
+    sync = FakeSync([_plan([kept, gone])])
+
+    result = await _run(sync)
+
+    [(_, _, [ok, missing], _)] = sync.sent
+    assert (ok.ok, ok.bb_id, (ok.answer or {}).get("id")) == (True, 8, 8)
+    assert (missing.ok, missing.status, missing.error) == (False, 404, "not_found")
+    # The snapshot's read, then one more read per 404.
+    assert routes["filaments"].call_count == 3
+    assert (result.written, result.failed) == (0, 0)
+
+
+@respx.mock
+async def test_a_filament_404_whose_listing_fails_is_no_404() -> None:
+    """R-6688-8: a 404 the listing cannot confirm keeps the link."""
+    routes = _listings()
+    routes["filaments"].mock(side_effect=[httpx.Response(200, json=[]), httpx.Response(503)])
+    respx.get(f"{API}/filament-catalog/8").mock(return_value=httpx.Response(404))
+    sync = FakeSync([_plan([_write("probe", 8, {}, kind="filament")])])
+
+    result = await _run(sync)
+
+    [(_, _, [failed], _)] = sync.sent
+    assert failed.ok is False and failed.status != 404
+    assert result.failed == 1
+
+
+@respx.mock
 @pytest.mark.parametrize(
     "answer",
     [

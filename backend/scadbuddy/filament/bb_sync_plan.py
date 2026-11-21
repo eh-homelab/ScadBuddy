@@ -1032,8 +1032,10 @@ class _Planner:
         when one names a row whose create is in flight (the spool waits; ``deferred``
         when this pass read that row's listing, so a later round can clear it, else
         ``blocked``, R-T4-1; ``blocked`` too when that row is archived, as no round plans
-        it, R-T4-19, and when that row's probe failed in this pass, R-6688-5); else the
-        fields naming a row Bambuddy will not have this pass are left out (Decision 35)."""
+        it, R-T4-19, and when that row's probe failed in this pass, R-6688-5; an archived
+        row whose probe this round plans is ``deferred``, as its answer settles the spool
+        in a later round, R-6688-7); else the fields naming a row Bambuddy will not have
+        this pass are left out (Decision 35)."""
         desired, unmapped = desired_and_unmapped(self.conn, sb_id, self.refs, self.sync)
         self.unmapped_k += unmapped
         out = {}
@@ -1042,9 +1044,12 @@ class _Planner:
             waiting = [r for r in refs if self.in_flight(r)]
             if waiting:
                 read = all(
-                    self.read(r.kind)
-                    and (r.kind, r.sb_id) not in self.archived
-                    and (r.kind, r.sb_id) not in self.unsure
+                    (r.kind, r.sb_id) in self.probing
+                    or (
+                        self.read(r.kind)
+                        and (r.kind, r.sb_id) not in self.archived
+                        and (r.kind, r.sb_id) not in self.unsure
+                    )
                     for r in waiting
                 )
                 (self.deferred if read else self.blocked).add(("spool", sb_id))

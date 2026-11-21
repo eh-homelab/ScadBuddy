@@ -1977,8 +1977,8 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     kind's listing again and looks for the id. Why: an empty `PATCH` would answer by id but
     is a write, and the catalog's `PUT` needs a name and a weight SB does not know Bambuddy
     holds. Cost: a probe reads a whole listing.
-189. R-6688-3: only a definite "not found" for that row's id drops the link: the `GET` by
-    id's 404, or a listing that answered 200 and parsed whole without the id (the worker
+189. (changed by 201) R-6688-3: only a definite "not found" for that row's id drops the
+    link: a filament entry's `GET` by id 404 that its listing confirms (201), or a listing that answered 200 and parsed whole without the id (the worker
     reports that as `status` 404, `error` `not_found`). Any other answer keeps the link and
     upserts the item's error row, counted `failed`: a 5xx, a timeout, a 401 or 403, a
     listing that does not parse, and a 404 of the listing route itself (the worker sends
@@ -1991,7 +1991,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     or an adoption of an unlinked Bambuddy row of its name (Decision 10, 41). An archived
     row stays unlinked. No direction rule is new. Why: the issue's "recreate under the
     direction rules". Cost: none known.
-191. R-6688-5: a spool that names a supplier, location or insert type that is missing from
+191. (changed by 200) R-6688-5: a spool that names a supplier, location or insert type that is missing from
     its complete listing, and that `results` has not written in this pass, waits: the plan
     takes those rows out of `BbRefs` (`BbRefs.without`), so the spool names them as a
     `Pending`. It counts `deferred` while the row's probe (then its create) is planned in
@@ -2017,6 +2017,25 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_bb_sync_results.py` (`test_a_row_probe_404_drops_the_link`,
     `test_a_row_probe_that_finds_the_row_keeps_the_link`,
     `test_a_spool_names_its_deleted_location_only_once_it_is_made_again`).
+200. R-6688-7 (PR #6870 review; changes 191): a spool that names an archived row whose
+    probe this round plans counts `deferred`, not `blocked`, as it does for an unarchived
+    row. The probe's answer settles it in a later round of this pass: a 404 drops the link,
+    the archived row is not made again (190), and the spool goes without the field
+    (Decision 35); a row the probe finds keeps its id. `blocked` stays for an archived row
+    with no probe (R-T4-19) and for a row whose probe failed in this pass. Why: `blocked`
+    says no round of this pass can clear the spool, which was false here, and it set no
+    `more`. Cost: none known. Test: `test_bb_sync_results.py`
+    `test_a_spool_naming_an_archived_deleted_location_goes_without_it`.
+201. R-6688-8 (PR #6870 review; changes 189): a 404 of `GET /filament-catalog/{id}` is
+    confirmed by the filament listing before it drops a link, as the other kinds' probes
+    are: a Bambuddy build without that route answers 404 for every id, which says nothing
+    of the entry. The listing's row, when it holds the id, is the answer; a listing read
+    whole without it is the row's 404 (`not_found`); a listing that fails or does not parse
+    is a failure with no status (189). Any other answer of the `GET` by id stands as it
+    is. Why: R-6688-3 never unlinks on a 404 that may not be the row's. Cost: one more
+    listing read per filament entry Bambuddy deleted. Tests: `test_bb_sync_run.py`
+    `test_a_filament_404_is_confirmed_by_the_listing`,
+    `test_a_filament_404_whose_listing_fails_is_no_404`.
 
 ## Self-review
 

@@ -42,8 +42,8 @@ BbLinked = Literal["found", "linked", "made"]
 
 #: What one write does. ``probe`` asks, with ``GET`` only and an empty body, whether
 #: Bambuddy still holds a linked row a complete listing lacks: a spool's ``spool_row(bb_id)``
-#: (Decision 13), a filament entry's ``GET`` by id, any other row's listing read again
-#: (#6688, decisions 187-192).
+#: (Decision 13), a filament entry's ``GET`` by id (a 404 there confirmed by its listing),
+#: any other row's listing read again (#6688, decisions 187-192, 200 and 201).
 Op = Literal[
     "create", "update", "archive", "restore", "k_profiles", "presets", "suppliers", "probe"
 ]

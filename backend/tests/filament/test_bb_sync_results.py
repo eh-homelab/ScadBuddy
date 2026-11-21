@@ -362,6 +362,36 @@ def test_a_spool_names_its_deleted_location_only_once_it_is_made_again(
     assert third.deferred == 0
 
 
+def test_a_spool_naming_an_archived_deleted_location_goes_without_it(pg_pool: PgPool) -> None:
+    """R-6688-7: the probe of an archived location is planned in this round, so a later
+    round of this pass can settle the spool that names it: it counts ``deferred``, not
+    ``blocked``. The 404 drops the link, the archived row is not made again, and the next
+    round sends the spool without ``location_id``."""
+    f = _filament(pg_pool)
+    sync = SPOOLS.model_copy(update={"locations": "sb_to_bb"})
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (shelf, spool))
+        conn.execute("UPDATE filament_locations SET archived_at = now() WHERE id = %s", (shelf,))
+    row = _matching(pg_pool, spool, 50, sync) | {"location_id": None, "color_name": "Other"}
+    _link(pg_pool, spool, 50)
+    snap = _snap([row], locations=[], read_at=datetime.now(UTC) - timedelta(seconds=1))
+
+    first = _plan(f, snap, sync)
+    probe = _only(first.writes, "probe")
+    assert [w.kind for w in first.writes] == ["location"]
+    assert (first.deferred, first.blocked) == (1, 0)
+    assert _apply(f, first.writes, [_refused(probe, 404)]).unlinked == 1
+
+    second = _plan(f, snap, sync)
+    update = _only(second.writes, "update")
+    assert (update.kind, update.sb_id) == ("spool", spool)
+    assert "location_id" not in _body(update) and "color_name" in _body(update)
+    assert [w for w in second.writes if w.kind == "location"] == []
+    assert (second.deferred, second.blocked) == (0, 0)
+
+
 def test_a_spool_whose_link_was_dropped_can_be_deleted(pg_pool: PgPool) -> None:
     """Regression (Decision 13): ``delete`` refuses only while a link exists."""
     f = _filament(pg_pool)

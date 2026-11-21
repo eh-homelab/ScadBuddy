@@ -300,24 +300,31 @@ class _ListingFailedError(Exception):
         self.label = label
 
 
-#: The listing a probe reads again, for each kind Bambuddy has no ``GET`` of one row for
+#: The listing a probe reads again: for each kind Bambuddy has no ``GET`` of one row for
 #: (Bambuddy v1.3.1: ``/inventory/suppliers/{id}`` and ``/inventory/locations/{id}`` take
-#: ``PATCH`` and ``DELETE`` only, ``/inventory/catalog/{id}`` ``PUT`` and ``DELETE``).
+#: ``PATCH`` and ``DELETE`` only, ``/inventory/catalog/{id}`` ``PUT`` and ``DELETE``), and
+#: for a filament entry whose ``GET`` by id answered 404 (R-6688-8).
 _LISTINGS: dict[str, Callable[[BambuddyClient], Awaitable[Sequence[BaseModel]]]] = {
     "supplier": lambda client: client.suppliers(),
     "location": lambda client: client.locations(),
     "insert_type": lambda client: client.spool_catalog(),
+    "filament": lambda client: client.filament_catalog(),
 }
 
 
 async def _probe(client: BambuddyClient, kind: str, bb_id: int) -> dict[str, Any]:
     """#6688 (R-6688-2, R-6688-3): whether Bambuddy still holds a linked row, by ``GET``
-    only. A filament entry is read by its id, so its 404 is Bambuddy's own. Any other
-    kind's listing is read again: the row there is the answer, and a listing read whole
-    without it is `_NotListedError`; a listing that fails or does not parse is
+    only. A filament entry is read by its id first. A 404 there may be a Bambuddy build
+    without the route, which says nothing of the entry, so it is confirmed by the listing
+    (R-6688-8), as every other kind's probe is: the row there is the answer, and a listing
+    read whole without it is `_NotListedError`; a listing that fails or does not parse is
     `_ListingFailedError`, which is never a 404."""
     if kind == "filament":
-        return _row(await client.filament(bb_id))
+        try:
+            return _row(await client.filament(bb_id))
+        except ApiError as exc:
+            if exc.extensions.get("bambuddy_status") != 404:
+                raise
     try:
         rows = await _LISTINGS[kind](client)
     except ApiError as exc:
