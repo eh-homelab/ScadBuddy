@@ -102,7 +102,7 @@ export function InvoicePhoto({ src, alt }: { src: string; alt: string }) {
       const after = pinchOf()
       if (!after || before.distance === 0) return
       pinch.current = after
-      const at = fromCentre(after.mid)
+      const at = fromCentre(before.mid)
       setView((current) => {
         const zoomed = zoomAt(current, current.scale * (after.distance / before.distance), at)
         return bounded({ ...zoomed, x: zoomed.x + after.mid.x - before.mid.x, y: zoomed.y + after.mid.y - before.mid.y })

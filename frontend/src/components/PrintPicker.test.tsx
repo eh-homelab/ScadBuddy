@@ -214,7 +214,7 @@ describe('PrintPicker · 3D preview (#1723)', () => {
   })
 })
 
-/** #768 — nozzles, quality, plate type, options, project and copies are Advanced steps. */
+/** #768 — the options, project and copies are Advanced steps; #6885 — Advanced groups the nozzle, quality and plate steps into sections. */
 async function showAdvanced() {
   fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
   await screen.findByRole('group', { name: /nozzles/i })
@@ -1229,7 +1229,7 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('print-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
-  it('shows the mounted High Flow warning in Simple and Advanced, and never holds Print on it (#797)', async () => {
+  it('shows the mounted High Flow and not-installed warnings in Simple and Advanced, and never holds Print on them (#797, #6885)', async () => {
     const highFlow =
       'The left nozzle is High Flow and this print is sliced for Standard flow, so if it ' +
       'prints on the left, the printer pauses at the first layer.'
@@ -1246,11 +1246,11 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     )
     renderPicker()
     await loaded()
-    // Simple mode: the mounted High Flow warning, and no nozzle-step note.
+    // Simple mode: both, since Simple has the nozzle step too (#6885).
     const simple = await screen.findAllByTestId('print-verdict-warning')
-    expect(simple).toHaveLength(1)
+    expect(simple).toHaveLength(2)
     expect(simple[0]).toHaveTextContent('The left nozzle is High Flow')
-    expect(screen.queryByText(/No 0.6 mm nozzle is installed/)).toBeNull()
+    expect(simple[1]).toHaveTextContent('No 0.6 mm nozzle is installed')
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
 
     await showAdvanced()
@@ -1302,11 +1302,11 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     const toggle = screen.getByRole('switch', { name: /advanced/i })
     const nozzles = screen.getByRole('group', { name: /nozzles/i })
     expect(toggle.compareDocumentPosition(nozzles) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(toggle).toHaveAccessibleDescription(/nozzle, process/i)
+    expect(toggle).toHaveAccessibleDescription(/sides, supports, prime tower/i)
   })
 
-  // #2166 — Simple shows one flow for both sides, so leaving Advanced keeps the first
-  // side's, on screen; the process and slot presets it cannot show are reset.
+  // #2166 — leaving Advanced puts the first side's flow on both sides, shown in the
+  // summary row (#6885); the process and slot presets are reset.
   it('leaving Advanced keeps one flow, shown in Simple, and resets the process and slot presets', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
@@ -1318,7 +1318,7 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await pick(user, screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
     await pick(user, screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
-    expect(screen.getByTestId('flow-high_flow')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByTestId('print-summary-nozzle')).toHaveTextContent('0.4 mm High Flow')
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
@@ -4476,12 +4476,12 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await loaded()
     await showAdvanced()
     fireEvent.click(await screen.findByTestId('rack-position-2'))
-    expect(await screen.findByText(/Rack position 2 holds/)).toBeInTheDocument()
+    expect(await screen.findByTestId('print-verdict-error')).toHaveTextContent(/Rack position 2 holds/)
     expect(screen.getByLabelText('Rack nozzle position')).toBeInTheDocument()
     expect(screen.getByTestId('run-print')).toBeDisabled()
 
     fireEvent.click(screen.getByTestId('rack-position-auto'))
-    await waitFor(() => expect(screen.queryByText(/Rack position 2 holds/)).toBeNull())
+    await waitFor(() => expect(screen.queryByTestId('print-verdict-error')).toBeNull())
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
 
@@ -5336,7 +5336,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     const analyses = watch('POST', '/run', '/api/v1/analyzers/')
     const { user } = renderPicker()
     await loaded()
-    await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Choose the trays, and the nozzle, bed plate and quality in the summary row. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
     expect(within(screen.getByTestId('filament-slot-1')).getByRole('radio', { name: /PLA Blue in AMS-A slot 1/ })).toBeInTheDocument()
     expect(screen.getByText('Filed under:')).toHaveTextContent('the template’s folder')
     expect(screen.queryByText(NO_BAMBUDDY)).not.toBeInTheDocument()
@@ -5355,7 +5355,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     setHotPath(true)
     renderPicker()
     await loaded()
-    await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Choose the trays, and the nozzle, bed plate and quality in the summary row. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
     expect(screen.queryByRole('switch', { name: /wait for the right colour/i })).toBeNull()
   })
 
@@ -5381,7 +5381,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     await user.click(await screen.findByRole('button', { name: 'Print on H2C over the LAN' }))
     await loaded()
     expect(
-      screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.'),
+      screen.getByText('Choose the trays, and the nozzle, bed plate and quality in the summary row. ScadBuddy slices it and sends it to the printer over the LAN.'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Print on H2C over the LAN' })).toBeNull()
   })
