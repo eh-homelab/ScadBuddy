@@ -72,7 +72,7 @@
 - [ ] **Step 6: Run the focused suites.**
   Run: `cd backend && uvx uv@0.13.6 run pytest tests/auth tests/crud/test_guard.py tests/api/test_internal_outputs.py tests/test_print_worker_nodb.py tests/print_library -q` (each run with its own Postgres, per `backend/CLAUDE.md`)
   Expected: all pass. `ruff check`, `ruff format --check` and `mypy` are clean as `backend/CLAUDE.md` runs them.
-- [ ] **Step 7: Docs.** README rollout step 4, trust page gap 5 ("`/api/v1/internal/*` refuses a request without a service credential in every mode since #5297 part 1; the agent's 8081 routes do not yet"), and its order-of-work line for #5297. Cite this PR.
+- [ ] **Step 7: Docs.** README rollout step 4, the trust page's `/api/v1/internal/*` zone row (it says the routes take a service credential "in `enforce` only"; make it every mode), its gap 5 ("`/api/v1/internal/*` refuses a request without a service credential in every mode since #5297 part 1; the agent's 8081 routes do not yet"), and its order-of-work line for #5297. Cite this PR.
 - [ ] **Step 8: Commit, open the PR** with `Part of #5297` (not `Fixes`: the agent's 8081 half remains), and auto-merge. Only after Task 1 Step 5 shows zero `internal.*`.
 
 ### Task 3: Prod check after the guard deploys
