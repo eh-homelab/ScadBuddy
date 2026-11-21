@@ -235,13 +235,18 @@ Children:
   name, `cali_idx`, `setting_id`. BB parity with `SpoolKProfile`.
 
   As built in #6714 and #6720 (plan `docs/superpowers/plans/2026-11-20-filament-type-from-profile.md`,
-  R-6714-9 to R-6714-17): a type also has `drying_temp_c` and `drying_hours`, the default of
-  a spool's drying (else the subtype's, else the material's; a spool does not override them,
-  each drying may change them). The slicer profile fill writes a type's empty print and
-  drying values (the AMS HT's idle drying pair) and imports K values: its linked Bambuddy
-  spools' while it has none, then each linked printer's K calibrations whose `filament_id` is
-  a preset's `slicer_filament` (`GET /printers/{id}/kprofiles/`), into keys with no row only,
-  so a K value a person set is never overwritten.
+  R-6714-9 to R-6714-21): a type also has `drying_temp_c` and `drying_hours`, and a spool may
+  override both, as any value of its type. A spool's drying defaults are its own, else its
+  type's, else its subtype's, else its material's; each drying may still change them. The
+  slicer profile fill writes a type's empty print and drying values (the AMS HT's idle drying
+  pair, which can be above an AMS 2 Pro's 65 °C), except a drying value the type's subtype or
+  material already sets (only a refresh offers that one). It imports K values: its linked
+  Bambuddy spools' while it has none, then each linked printer's K calibrations whose
+  `filament_id` is a preset's `slicer_filament` (`GET /printers/{id}/kprofiles/`). Each K row
+  says who set it (`source`: `person`, `profile`, `printer_calibration`, `profile_fetch`;
+  rows from before are `person`). A calibration fills a key with no row, or replaces a
+  `printer_calibration` row of its key that differs; it never replaces a person's, the
+  fill's or the fetch's. A person's save tags each row it adds or changes `person`.
 - `supplier_products`: supplier, SKU or article number, product URL, pack size
   (spools per order line), note.
 - `price_points`: supplier product, price, currency, price per kg, date, source

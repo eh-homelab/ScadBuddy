@@ -169,6 +169,9 @@ async def test_a_fill_writes_edited_on_spools_that_inherit_the_fields(
         "bed_temp_min",
         "bed_temp_max",
         "density_g_cm3",
+        # A spool may override the drying values too (R-6714-18).
+        "drying_temp_c",
+        "drying_hours",
     }
     [mine] = [e for e in spools.events(own)[before[own] :] if e.kind == "edited"]
     assert "nozzle_temp_min" not in mine.data["changes"]
@@ -531,7 +534,8 @@ async def test_a_type_without_k_values_takes_its_linked_bambuddy_spools(
     # K values that differ from what Bambuddy now gives are refused, as a field is
     # (R-6714-g), and nothing is written.
     shown = [
-        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id"})) for r in preview.k_values
+        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id", "source"}))
+        for r in preview.k_values
     ]
     changed = [shown[0].model_copy(update={"k_value": Decimal("0.021")}), shown[1]]
     with pytest.raises(ProfileChangedError, match="K values"):
@@ -793,6 +797,64 @@ async def test_a_printer_calibration_never_overwrites_a_k_value_a_person_set(
     # Filled once, the next fill has nothing to add.
     (again,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
     assert (again.k_values, again.written) == ([], False)
+    assert [r.source for r in types.k_values(type_id)] == ["person", "printer_calibration"]
+
+
+@respx.mock
+async def test_a_newer_calibration_replaces_an_imported_one_never_a_person_row(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """#6856 (R-6714-19): each K row says who set it. A printer calibration replaces a
+    ``printer_calibration`` row of its key when the printer's value changed; a row a
+    person set, or edited, stands. A person's save keeps the source of a row it leaves as
+    it was."""
+    _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    table = respx.get(f"{API}/printers/1/kprofiles/")
+    table.mock(return_value=_k_table(_cal(0, "GFA05", "0.020"), _cal(1, "GFA05", "0.030")))
+    await filler.fill(LINKED, [type_id], actor=ACTOR)
+    first = types.k_values(type_id)
+    assert [(r.extruder, r.k_value, r.source) for r in first] == [
+        (0, Decimal("0.020"), "printer_calibration"),
+        (1, Decimal("0.030"), "printer_calibration"),
+    ]
+
+    # A person edits extruder 1 and leaves extruder 0 as it was.
+    rows = [
+        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id", "source"})) for r in first
+    ]
+    rows[1] = rows[1].model_copy(update={"k_value": Decimal("0.05")})
+    types.set_k_values(type_id, _rows(type_id, rows), actor="ann")
+    assert [r.source for r in types.k_values(type_id)] == ["printer_calibration", "person"]
+
+    # The printer recalibrated both: the imported row moves, the person's stands.
+    table.mock(return_value=_k_table(_cal(0, "GFA05", "0.022"), _cal(1, "GFA05", "0.033")))
+    (preview,) = await filler.fill(LINKED, [type_id], actor=ACTOR, refresh=True)
+    assert [(r.extruder, r.k_value) for r in preview.k_values] == [(0, Decimal("0.022"))]
+    (done,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
+    assert [(r.extruder, r.k_value) for r in done.k_values] == [(0, Decimal("0.022"))]
+    assert [(r.extruder, r.k_value, r.source) for r in types.k_values(type_id)] == [
+        (0, Decimal("0.022"), "printer_calibration"),
+        (1, Decimal("0.05"), "person"),
+    ]
+
+
+def test_a_profile_fetch_merge_tags_its_rows(types: SpoolTypeStore, pg_pool: PgPool) -> None:
+    """#6856 (R-6714-19): the 3DFP fetch's rows say ``profile_fetch``; it still replaces
+    the rows of its keys, whoever set them (#6857 decides that)."""
+    printer = _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    own = TypeKValueCreate(
+        printer_id=printer, extruder=0, nozzle_diameter="0.4", k_value=Decimal("0.05")
+    )
+    types.set_k_values(type_id, _rows(type_id, [own]), actor="ann")
+    fetched = _rows(type_id, [own.model_copy(update={"k_value": Decimal("0.02")})])
+    with pg_pool.connection() as conn:
+        SpoolTypeStore.merge_k_values(conn, type_id, fetched)
+    assert [(r.k_value, r.source) for r in types.k_values(type_id)] == [
+        (Decimal("0.02"), "profile_fetch")
+    ]
 
 
 def test_add_k_values_skips_every_key_the_type_has(types: SpoolTypeStore, pg_pool: PgPool) -> None:
@@ -935,14 +997,15 @@ async def test_a_spool_k_value_wins_over_a_calibration_of_the_same_key(
     ]
 
     shown = [
-        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id"})) for r in preview.k_values
+        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id", "source"}))
+        for r in preview.k_values
     ]
     done = await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=shown)
     assert done is not None
     assert done.written
-    assert [(r.extruder, r.k_value) for r in types.k_values(type_id)] == [
-        (0, Decimal("0.03")),
-        (1, Decimal("0.025")),
+    assert [(r.extruder, r.k_value, r.source) for r in types.k_values(type_id)] == [
+        (0, Decimal("0.03"), "profile"),
+        (1, Decimal("0.025"), "printer_calibration"),
     ]
 
     # The calibration changed since the refresh: refused, as a spool's is (R-6714-g).

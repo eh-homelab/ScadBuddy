@@ -19,7 +19,7 @@ import {
 } from '../../api/filament'
 import { addShopping } from '../../api/filamentPurchasing'
 import { KValueTable } from '../../components/filament/KValueTable'
-import { kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
+import { keyOf, kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
 import { ProfileFetchPanel } from '../../components/filament/ProfileFetchPanel'
 import { ProfileFillDialog } from '../../components/filament/ProfileFillDialog'
@@ -131,7 +131,8 @@ function draftOf(type: SpoolTypeDetail): Draft {
     tdfp_id: str(type.tdfp_id),
     note: str(type.note),
     presets: type.presets.map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name })),
-    k_values: type.k_values.map(({ type_id: _type, ...row }) => row),
+    // `source` is the server's to set (R-6714-19): a save never sends it.
+    k_values: type.k_values.map(({ type_id: _type, source: _source, ...row }) => row),
   }
 }
 
@@ -638,7 +639,7 @@ export function TypePage() {
       <section aria-label="Pressure advance" className="mt-6 flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">K values</h2>
         <p className="text-[12px] text-muted-foreground">Pressure advance, by printer, extruder and nozzle.</p>
-        <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} />
+        <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} sources={new Map((saved?.k_values ?? []).map((row) => [keyOf(row), row.source]))} />
       </section>
 
       {!creating && (

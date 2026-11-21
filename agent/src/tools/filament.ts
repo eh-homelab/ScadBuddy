@@ -521,10 +521,12 @@ export const filamentTools: Tool[] = [
       'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
       'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
       'empty fields (nozzle and bed temperature ranges from the H2C plates, density, drying temperature and hours ' +
-      "from the AMS HT's idle drying values; the diameter is never empty), never the cost (`cost_hint` is only a " +
+      "from the AMS HT's idle drying values, above an AMS 2 Pro's 65 °C for some; a drying value the type's subtype or " +
+      "material already sets is left empty, and only a refresh offers it; the diameter is never empty), never the cost (`cost_hint` is only a " +
       'hint). A type with no K values takes those of its linked Bambuddy spools; then each Bambuddy-linked printer of a ' +
       "preset's model gives its K calibrations for the preset's nozzle, and one whose `filament_id` is the preset's " +
-      '`slicer_filament` fills that printer, extruder and nozzle when the type has no K value there (one a person set ' +
+      '`slicer_filament` fills that printer, extruder and nozzle when the type has no K value there, or replaces an ' +
+      'earlier printer calibration there that differs (a K value a person, the fill or the 3DFP fetch set, its `source`, ' +
       'is never overwritten; `k_reason` says what was not imported). Each result names the fields `filled`, the ' +
       '`source` preset, and a `reason` when the profile could not be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
       'and writes nothing. With `type_id`, `apply` writes the fields a refresh showed over the type (only after the ' +
@@ -555,7 +557,7 @@ export const filamentTools: Tool[] = [
           }),
         )
         .optional()
-        .describe("With `k_values: true`: the refresh's `k_values`, each without `type_id`; `[]` when it showed none"),
+        .describe("With `k_values: true`: the refresh's `k_values`, each without `type_id` and `source`; `[]` when it showed none"),
     }).refine((o) => o.k_values !== true || o.shown_k_values !== undefined, {
       message: "k_values needs shown_k_values: the refresh's K values ([] for none)",
     }),
@@ -622,8 +624,11 @@ export const filamentTools: Tool[] = [
       '`held_by` (the number of the spool that holds that tag now), its effective `presets` and `k_values`, the ' +
       '`basis` of `grams_left` (the anchor reading and the deltas taken off it), and `in_use` (it has printed, so ' +
       'it can be archived but not deleted), the `invoice` it was bought on (number, date, supplier, line and ' +
-      '`unit_cost`; `null` if none), and `type_suppliers` (the unarchived products of its type from unarchived suppliers, each with its ' +
-      'newest price and price per kg).',
+      '`unit_cost`; `null` if none), `type_suppliers` (the unarchived products of its type from unarchived suppliers, each with its ' +
+      'newest price and price per kg), and `drying_defaults`: the `temp_c` and `hours` a drying records when it leaves them out ' +
+      "(filament_spool_add_event), each from the spool's own `drying_temp_c`/`drying_hours`, else its type's, else its " +
+      "subtype's, else its material's, with `temp_from` and `hours_from` naming the level (`spool`, `type`, `subtype`, " +
+      '`material`; `null` when none sets it).',
     input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
     risk: 'read',
     source: SOURCE,
@@ -642,7 +647,8 @@ export const filamentTools: Tool[] = [
     label: 'Add or edit a spool',
     description:
       'Add a spool (no `spool_id`), or edit one: only the `fields` given change, and `null` on an override ' +
-      "clears it so the spool takes its type's value again. A new spool needs a `type_id` (filament_type_list) " +
+      "clears it so the spool takes its type's value again. `drying_temp_c` (whole °C) and `drying_hours` (a decimal " +
+      "string) override its type's drying values, which a drying that leaves them out records. A new spool needs a `type_id` (filament_type_list) " +
       'or, while it needs a type, a `material_id`; `grams_left` is its first reading. Each edit is one `edited` ' +
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
@@ -1291,8 +1297,8 @@ export const filamentTools: Tool[] = [
     description:
       'Record on a spool a weighing (`kind: weighed`, `grams` = the filament left, without the empty spool; ' +
       '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). A drying that leaves ' +
-      "out `temp_c` or `hours` records the spool's `drying_defaults` (filament_spool_get: its type's drying values, " +
-      "else its subtype's, else its material's); `null` records none. Only what the user says. Writes ScadBuddy only.",
+      "out `temp_c` or `hours` records the spool's `drying_defaults` (filament_spool_get: its own drying values, else its " +
+      "type's, else its subtype's, else its material's); `null` records none. Only what the user says. Writes ScadBuddy only.",
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried']),

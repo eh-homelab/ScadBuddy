@@ -779,14 +779,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   name lookup goes through `find_by_key` or `resolve_or_add`, the type match
   `SpoolTypeStore.match` included, #6706), `types.py`
   (`effective()`: spool → type → subtype → material, the one resolver; a type links its
-  price-book row by identity, alpha included, and never rewrites a found row; a type's
-  `drying_temp_c` and `drying_hours` are no spool override: a spool's `drying_defaults` and a
-  `dried` event that leaves them out take the type's, else the subtype's, else the
-  material's, #6720), `profile_fill.py` (#6714, #6720, plan
+  price-book row by identity, alpha included, and never rewrites a found row; a spool
+  overrides a type's `drying_temp_c` and `drying_hours` as any other value: a spool's
+  `drying_defaults` and a `dried` event that leaves them out take the spool's, else the
+  type's, else the subtype's, else the material's, #6720, R-6714-18; each type K row has a
+  `source`, `person`, `profile`, `printer_calibration` or `profile_fetch`, R-6714-19),
+  `profile_fill.py` (#6714, #6720, plan
   `docs/superpowers/plans/2026-11-20-filament-type-from-profile.md`: a type's empty print and
-  drying values from its slicer profile, its linked Bambuddy spools' K values while it has
-  none, then each linked printer's K calibrations of a preset's `filament_id`, read with GET,
-  into keys with no row only, `SpoolTypeStore.add_k_values`, so a person's K value stands),
+  drying values from its slicer profile, but not a drying value its subtype or material sets
+  (a refresh offers it, R-6714-20); its linked Bambuddy spools' K values while it has none,
+  then each linked printer's K calibrations of a preset's `filament_id`, read with GET row by
+  row, into a key with no row or over an older `printer_calibration` row only,
+  `SpoolTypeStore.add_k_values`, so a person's K value stands),
   `spools.py`
   (instances and tag bindings; every writer locks the tag before the spool; archive closes
   the open binding; `detail()` is the spool page's read: tags, last tag and its holder, the

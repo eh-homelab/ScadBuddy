@@ -184,7 +184,7 @@ Decisions:
   `hours` records that default; one that sends `null` records none. The spool page fills its
   drying form with them and says where they came from; a person changes them for one
   drying, and the form shows the defaults again after it records.
-- R-6714-11: a spool does not override the drying values: the drying action is the
+- R-6714-11 (overturned by R-6714-18): a spool does not override the drying values: the drying action is the
   per-spool choice (the owner's "every setting a remembered choice": the type remembers it,
   each drying may change it). So the drying fields are not `OVERRIDABLE`, a type's drying
   edit writes no `edited` event on its spools, and the spool page has no "Reset to type" for
@@ -200,7 +200,8 @@ Decisions:
   preset shares it (unlike the profile fetch, which skips `GF…` because it replaces rows,
   #6625). A local preset's numeric id never matches a `filament_id`, so such a type takes
   none. A K table that cannot be read is said in `k_reason`; the rest of the fill goes on.
-- R-6714-13: never a person's K value: a calibration fills only a key (printer, extruder,
+- R-6714-13 (its "every existing row counts as a person's" overturned by R-6714-19): never a
+  person's K value: a calibration fills only a key (printer, extruder,
   nozzle, `0.40` being `0.4`) the type has no row for, checked under the type's row lock in
   the write (`SpoolTypeStore.add_k_values`). Since no row says who set it, every existing row
   counts as a person's; a person who wants the printer's value deletes the row and fills
@@ -220,6 +221,43 @@ Decisions:
   leaves out `temp_c` and `hours` for the defaults (`null` records none). The type page has a
   Drying section; the fill dialog lists the drying rows and says its K values come from the
   spools and printers.
+
+Decisions of the PR #6856 review (2026-11-21; the controller's rulings A and B, and the review's
+findings):
+
+- R-6714-18 (ruling A, overturns R-6714-11; the owner's rule: every value can be overridden on
+  the instance): a spool has its own nullable `drying_temp_c` and `drying_hours` (the same
+  unmerged migration, `20261121T0840Z_filament_type_drying.sql`). They are `OVERRIDABLE`
+  (`EffectiveValues`, `_INHERITED`): the effective value is the spool's, else the type's, else
+  the subtype's, else the material's, and `drying_defaults` names the level (`temp_from` and
+  `hours_from` take `spool` too). So a type's drying edit writes an `edited` event on each spool
+  that does not override it, the spool page has "Default drying temperature (°C)" and "Default
+  drying hours" with "Reset to type" in Storage, beside the drying form, and the agent's
+  `filament_spool_upsert` and `filament_spool_get` say so. The CSV import keeps its columns.
+- R-6714-19 (ruling B, overturns R-6714-13's "every existing row counts as a person's"): each
+  type K row has a `source`: `person`, `profile` (the fill's import from the linked Bambuddy
+  spools), `printer_calibration` or `profile_fetch` (the 3DFP fetch's `merge_k_values`, #6625).
+  Rows made before the column are `person`. A printer calibration fills a key with no row, or
+  replaces the `printer_calibration` row of its printer, extruder and nozzle when it differs (K,
+  nozzle type, name, slot or setting); it never replaces a `person`, `profile` or
+  `profile_fetch` row (`add_k_values`, under the type's row lock). The fetch's overwrite of any
+  row of its keys is unchanged (#6857 decides it). A person's save (`PUT …/k-values`) tags each
+  row it adds or changes `person` and keeps the source of a row sent as it was, so saving other
+  rows does not turn a calibration into a person's. A write never takes `source` from a body:
+  `TypeKValueCreate` has none, so `shown_k_values` and a PUT send rows without it. The type
+  page shows it beside a row's name ("Printer calibration", "From linked Bambuddy spools",
+  "From 3DFP"; nothing for a person's).
+- R-6714-20 (finding 4): the type comes first in a spool's drying defaults, so a fill that
+  wrote a type's empty drying field would hide a value the type's subtype or material sets. An
+  empty-field fill (the bulk fill, a type's fill, the fill after its first presets) leaves such
+  a field empty and says why in `skipped`; a per-type refresh still offers it, and an apply
+  writes it.
+- R-6714-21 (findings 1 to 3): the K table is read with `BambuddyClient.k_profile_rows`: a
+  body that is not JSON, or has no list of profiles, is a 502 `BAD_BODY_PROBLEM` (never a
+  `JSONDecodeError` that answers 500; `k_profiles`, the fetch's read, goes through it too), and
+  the fill validates the rows one by one, a row of another shape skipped and counted in
+  `k_reason`. The spool page's drying line says a slicer profile gives the AMS HT's values and
+  to lower them in an AMS 2 Pro (65 °C at most), since `DRYING_AT` stays the AMS HT's pair.
 
 ## Tasks
 

@@ -26,6 +26,16 @@ function Harness({ start, inherited, typeKeys, spy }: { start: TypeKValueInput[]
 }
 
 describe('KValueTable', () => {
+  it('says who set a saved row, and nothing for a person (#6856)', () => {
+    const sources = new Map([
+      ['p1|0|0.4', 'printer_calibration' as const],
+      ['p1|1|0.4', 'person' as const],
+    ])
+    render(<KValueTable rows={[ROW, { ...ROW, extruder: 1 }]} printers={PRINTERS} sources={sources} onChange={() => {}} />)
+    expect(within(screen.getByRole('row', { name: 'K value 1' })).getByText('Printer calibration')).toBeInTheDocument()
+    expect(within(screen.getByRole('row', { name: 'K value 2' })).queryByText(/calibration|From/)).toBeNull()
+  })
+
   it('adds a row for the first printer', async () => {
     const user = userEvent.setup()
     const spy = vi.fn()
