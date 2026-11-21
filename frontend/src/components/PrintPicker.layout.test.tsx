@@ -163,6 +163,21 @@ describe('PrintPicker · Advanced sections (#6885)', () => {
     expect(tower).toHaveTextContent('Print sequence by object')
   })
 
+  it('keeps the plate swap reminder in sight while "Quality and plate" is closed', async () => {
+    window.localStorage.setItem(SECTIONS_KEY, JSON.stringify({ quality: false }))
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByTestId('print-summary-plate-open'))
+    await choose(user, screen.getByLabelText('Plate'), 'Engineering Plate')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    expect(screen.getByTestId('print-summary-plate-note')).toHaveTextContent('Swap to Engineering Plate before this starts.')
+
+    // Open, the step says it, and the row does not say it twice.
+    await user.click(screen.getByRole('button', { name: 'Quality and plate' }))
+    expect(screen.queryByTestId('print-summary-plate-note')).toBeNull()
+    expect(screen.getAllByText(/Swap to Engineering Plate before this starts\./)).toHaveLength(1)
+  })
+
   it('keeps every section open when the storage cannot be read', async () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('blocked')

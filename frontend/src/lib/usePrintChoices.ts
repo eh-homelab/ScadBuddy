@@ -297,12 +297,6 @@ export function usePrintChoices(
     })
   }, [])
 
-  /** #2166 — Simple's one choice: High Flow or Standard, on both sides. */
-  function changeFlow(flow: NozzleChoice['flow']) {
-    defaulted.current = false
-    setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow })))
-  }
-
   /** #2166, Advanced — print a slot on a side chosen by hand, or `null` to plan it. */
   function setSide(slotId: number, side: Side | null) {
     setSides((current) => {
@@ -383,7 +377,6 @@ export function usePrintChoices(
     size,
     advanced,
     changeNozzles,
-    changeFlow,
     setSide,
     changeQuality,
     setBedType,

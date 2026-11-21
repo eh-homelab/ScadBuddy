@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
@@ -947,6 +947,13 @@ export function PrintPicker({
   }, [scrollTo])
   /** #6885 review — the merged options Advanced's options disclosure reports, while it is mounted. */
   const [optionsShown, setOptionsShown] = useState<PrintOptions | null>(null)
+  // The disclosure reports a new object on each render while Copies is set; an equal one
+  // keeps the state as it is, so it does not render the dialog again without end.
+  const reportOptions = useCallback(
+    (next: PrintOptions) =>
+      setOptionsShown((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next)),
+    [],
+  )
   useEffect(() => {
     if (!open || !picker.advanced) setOptionsShown(null)
   }, [open, picker.advanced])
@@ -1848,16 +1855,15 @@ export function PrintPicker({
                       id: 'plate' as const,
                       label: 'Bed plate',
                       value: bedLabel,
-                      ...(picker.advanced
-                        ? { onSelect: () => goToSection('quality') }
-                        : {
-                            panel: plateStep,
-                            // The step's own reminder, said under the row while the step is shut.
-                            note:
-                              lastBedType !== null && lastBedType !== bedType
-                                ? `The ${printer?.name ?? 'printer'}'s last print used ${lastBedType}. Swap to ${bedType} before this starts.`
-                                : undefined,
-                          }),
+                      // The step's own reminder, said under the row while the step is not on
+                      // screen: Simple's cell is shut, or Advanced's section is closed.
+                      note:
+                        lastBedType !== null &&
+                        lastBedType !== bedType &&
+                        (!picker.advanced || !sections.isOpen('quality'))
+                          ? `The ${printer?.name ?? 'printer'}'s last print used ${lastBedType}. Swap to ${bedType} before this starts.`
+                          : undefined,
+                      ...(picker.advanced ? { onSelect: () => goToSection('quality') } : { panel: plateStep }),
                     },
                   ]),
               {
@@ -1894,6 +1900,14 @@ export function PrintPicker({
     printSequence === null ? null : `Print sequence ${printSequence}`,
     supports === null ? null : supports.enabled ? `Supports ${supports.type ?? 'on'}` : 'No supports',
     primeTower === null ? null : primeTower.enabled ? 'Prime tower on' : 'Prime tower off',
+  ]
+    .filter(Boolean)
+    .join(', ')
+  const handSides = Object.keys(selection.sides).length
+  const nozzleSummary = [
+    nozzleValue,
+    handSides === 0 ? null : `${handSides} ${handSides === 1 ? 'filament' : 'filaments'} on a side by hand`,
+    rackPosition === null ? null : `rack position ${rackPosition}`,
   ]
     .filter(Boolean)
     .join(', ')
@@ -2472,7 +2486,7 @@ export function PrintPicker({
                             id="nozzles"
                             open={sections.isOpen('nozzles')}
                             onToggle={(next) => sections.set('nozzles', next)}
-                            summary={nozzleValue}
+                            summary={nozzleSummary}
                           >
                           {nozzleStep}
                           <NozzlePlanStep
@@ -2553,7 +2567,7 @@ export function PrintPicker({
                               setCopies(quantity ?? null)
                               editOptions(rest)
                             }}
-                            onEffective={setOptionsShown}
+                            onEffective={reportOptions}
                           />
 
                           {projectPicker}
