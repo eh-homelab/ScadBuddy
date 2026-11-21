@@ -415,6 +415,36 @@ def test_painting_past_the_digit_budget_is_left_out(
     assert [obj.extruders for obj in by_plate[1]] == [frozenset({1})]
 
 
+def test_painting_decoded_before_the_budget_ran_out_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claude-review on #6832: the object whose codes pass the budget, and every object
+    after it, count their stated filaments only; an object decoded before keeps its
+    painting. Plate 1's object is painted with filament 2 (code "8", one digit); plate
+    2's with filament 3 (code "0C", two more), past a budget of one digit."""
+    first = _painted_part(True)
+    second = _part(1)
+    faces = len(second.mesh.faces)
+    codes = tuple(single_code(3) if face < 4 else "" for face in range(faces))
+    colours = ("#FF6AC1", "#00AEEF", "#FFD700")
+    second = replace(second, paint=Paint(codes, colours))
+    out = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts((first,), (1,)), PlateParts((second,), (1,))],
+        list(colours),
+        out,
+        thumbnails=None,
+        model_name="menorah",
+    )
+    payload = out.read_bytes()
+    monkeypatch.setattr(clearance, "MAX_HINT_PAINT_DIGITS", len(single_code(2)))
+
+    by_plate, _ = check_plates(payload, [1, 2], None)
+
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})]
+    assert [obj.extruders for obj in by_plate[2]] == [frozenset({1})]
+
+
 def test_a_painted_object_stating_no_extruder_prints_its_own_in_filament_1(
     tmp_path: Path,
 ) -> None:
@@ -480,6 +510,55 @@ def test_painting_in_a_component_s_own_model_file_counts() -> None:
     assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})]
     [warning] = warnings
     assert warning.kind == "by-object-one-object"
+
+
+def test_painting_reached_deeper_than_the_box_walk_met_it_counts() -> None:
+    """claude-review on #6837: `box` may meet an object first through a modifier, at
+    depth 1, while the painted walk skips modifiers and meets it at the end of a
+    normal part's chain of eight components, at depth 9. Its painting still counts.
+    A chain of 2,000 components, each one also a modifier of the root so `box` meets
+    it at depth 1, is walked without running out of Python's stack."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+
+    def file(chain: int) -> bytes:
+        mesh = (
+            '<mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>'
+            '<vertex x="0" y="10" z="5"/></vertices><triangles>'
+            f'<triangle v1="0" v2="1" v3="2" paint_color="{single_code(2)}"/>'
+            "</triangles></mesh>"
+        )
+        objects = [f'<object id="9000" type="model">{mesh}</object>']
+        for n in range(1, chain + 1):
+            target = 9000 if n == chain else n + 1
+            objects.append(
+                f'<object id="{n}" type="model"><components>'
+                f'<component objectid="{target}"/></components></object>'
+            )
+        # Deepest first, so `box` meets each one at depth 1 before the chain does.
+        modifiers = ["9000", *(str(n) for n in range(chain, 1, -1))]
+        components = "".join(f'<component objectid="{m}"/>' for m in modifiers)
+        objects.append(
+            f'<object id="9999" type="model"><components>{components}'
+            '<component objectid="1"/></components></object>'
+        )
+        root = (
+            f'<model xmlns="{core}" unit="millimeter"><resources>{"".join(objects)}'
+            '</resources><build><item objectid="9999"/></build></model>'
+        )
+        parts = "".join(f'<part id="{m}" subtype="modifier_part"/>' for m in modifiers)
+        settings = (
+            f'<config><object id="9999">{parts}<part id="1" subtype="normal_part"/>'
+            "</object></config>"
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("3D/3dmodel.model", root)
+            archive.writestr(bambu3mf.MODEL_SETTINGS_NAME, settings)
+        return buffer.getvalue()
+
+    for chain in (8, 2000):
+        by_plate, _ = check_plates(file(chain), [1], None)
+        assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})], chain
 
 
 async def test_only_a_by_object_print_gets_the_one_object_warning(tmp_path: Path) -> None:
