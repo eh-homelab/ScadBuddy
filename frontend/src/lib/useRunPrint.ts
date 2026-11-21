@@ -19,7 +19,7 @@ import type {
 } from '../api/types'
 import { type PlateChoice, plateFields, plateKey } from './plateChoice'
 import { apiParts, samePartSettings } from './partSettings'
-import { sameOverrides } from './processOverrides'
+import { rememberedOverrides, sameOverrides } from './processOverrides'
 import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
@@ -264,12 +264,15 @@ export function useRunPrint({
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
    * tier and process, the print sequence (#4970), the settings per slot (#5627), whether
-   * the queue waits for each slot's colour (#6218), the process settings (#2998), and the
-   * spools where they differ from the suggestion (re-sending the suggestion is not a
-   * choice). Best effort, and only once the print has started.
+   * the queue waits for each slot's colour (#6218), the process settings (#2998) but the
+   * tower place (#6796), and the spools where they differ from the suggestion
+   * (re-sending the suggestion is not a choice). Best effort, and only once the print has
+   * started.
    */
   function rememberChoices() {
     const last = choices?.model_choices
+    // #6796: the tower place fits this file only; the next print starts from its own.
+    const remembered = rememberedOverrides(processOverrides)
     const next = {
       printer_id: printerId,
       // #5167 — the server keeps the registry printer only; with none named it keeps the
@@ -297,12 +300,12 @@ export function useRunPrint({
     if (
       JSON.stringify(next) === JSON.stringify(before) &&
       samePartSettings(partSettings, last?.part_settings) &&
-      sameOverrides(processOverrides, last?.process_overrides)
+      sameOverrides(remembered, last?.process_overrides)
     )
       return
     if (source)
       void sourceApi(source)
-        .remember({ ...next, part_settings: apiParts(partSettings), process_overrides: processOverrides })
+        .remember({ ...next, part_settings: apiParts(partSettings), process_overrides: remembered })
         .catch(() => undefined)
   }
 

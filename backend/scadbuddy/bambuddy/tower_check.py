@@ -19,9 +19,12 @@ so those two keys replace the file's tower places.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import math
+import threading
 import zipfile
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
@@ -59,6 +62,53 @@ ConflictReason = Literal["on-objects", "keep-out", "unreachable"]
 
 #: The process keys the fix writes. Bambu Studio's per-plate ``coFloats``.
 TOWER_PLACE_KEYS: tuple[str, str] = ("wipe_tower_x", "wipe_tower_y")
+
+
+#: The files laid out for a check, kept by the payload's sha256, the printer's plate
+#: (``plate_for`` its model) and ``tower_on``. The dialog checks on every setting change,
+#: and a layout (a replate or an author's layout, then a rezip) is the same for the same
+#: three (#6796). At most ``LAID_OUT_KEPT`` files and ``LAID_OUT_BYTES`` in all, the least
+#: recently used first out. The checks run in threads (``asyncio.to_thread``), so a lock
+#: guards it.
+_LaidOutKey = tuple[str, PlateGeometry, bool]
+_LAID_OUT: OrderedDict[_LaidOutKey, bytes] = OrderedDict()
+_LAID_OUT_LOCK = threading.Lock()
+LAID_OUT_KEPT = 8
+LAID_OUT_BYTES = 64 * 1024 * 1024
+
+
+def _keep_laid_out(key: _LaidOutKey, laid: bytes) -> None:
+    """Keep ``laid`` under ``key``, dropping the least recently used past the bounds. A
+    file larger than ``LAID_OUT_BYTES`` alone is not kept."""
+    if len(laid) > LAID_OUT_BYTES:
+        return
+    with _LAID_OUT_LOCK:
+        _LAID_OUT[key] = laid
+        _LAID_OUT.move_to_end(key)
+        total = sum(len(kept) for kept in _LAID_OUT.values())
+        while len(_LAID_OUT) > LAID_OUT_KEPT or total > LAID_OUT_BYTES:
+            _, dropped = _LAID_OUT.popitem(last=False)
+            total -= len(dropped)
+
+
+def forget_laid_out() -> None:
+    """Drop every kept laid-out file."""
+    with _LAID_OUT_LOCK:
+        _LAID_OUT.clear()
+
+
+def _laid_out(payload: bytes, plate: PlateGeometry, tower_on: bool) -> bytes:
+    """``send._laid_out_for`` for the check, kept by :data:`_LAID_OUT`. The check sets
+    only ``plate`` and ``tower_on`` of the target."""
+    key = (hashlib.sha256(payload).hexdigest(), plate, tower_on)
+    with _LAID_OUT_LOCK:
+        kept = _LAID_OUT.get(key)
+        if kept is not None:
+            _LAID_OUT.move_to_end(key)
+            return kept
+    laid = _laid_out_for(payload, Target(plate, tower_on=tower_on))
+    _keep_laid_out(key, laid)
+    return laid
 
 
 class TowerConflict(BaseModel):
@@ -132,26 +182,31 @@ def chosen_tower(
 
 
 def _places(
-    settings: Mapping[str, object], overrides: Mapping[str, object]
+    settings: Mapping[str, object],
+    overrides: Mapping[str, object],
+    template: Mapping[str, object],
 ) -> list[tuple[float, float]] | None:
-    """Each plate's ``wipe_tower_x``/``_y``: the file's, with the overrides' over them. An
-    override shorter than the file reads past its end as its first value, as Bambu
-    Studio's ``get_at`` does. ``None`` when the file states no tower place."""
+    """Each plate's ``wipe_tower_x``/``_y``: the file's, with the template's
+    ``print_settings`` over them, then the overrides', as :func:`chosen_tower` layers the
+    other tower keys (#6796). A layer shorter than the file reads past its end as its
+    first value, as Bambu Studio's ``get_at`` does. ``None`` when the file states no
+    tower place."""
     xs, ys = settings.get("wipe_tower_x"), settings.get("wipe_tower_y")
     if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) != len(ys) or not xs:
         return None
     try:
         places = [(float(x), float(y)) for x, y in zip(xs, ys, strict=True)]
-        for axis, key in enumerate(TOWER_PLACE_KEYS):
-            given = overrides.get(key)
-            if given is None:
-                continue
-            values = [float(str(v)) for v in (given if isinstance(given, list) else [given])]
-            if not values:
-                continue
-            for index, place in enumerate(places):
-                value = values[index] if index < len(values) else values[0]
-                places[index] = (value, place[1]) if axis == 0 else (place[0], value)
+        for layer in (template, overrides):
+            for axis, key in enumerate(TOWER_PLACE_KEYS):
+                given = layer.get(key)
+                if given is None:
+                    continue
+                values = [float(str(v)) for v in (given if isinstance(given, list) else [given])]
+                if not values:
+                    continue
+                for index, place in enumerate(places):
+                    value = values[index] if index < len(values) else values[0]
+                    places[index] = (value, place[1]) if axis == 0 else (place[0], value)
     except (TypeError, ValueError):
         return None
     return places
@@ -181,13 +236,14 @@ def judge_towers(
     asked: TowerSettings | None,
     overrides: Mapping[str, object],
     plates: Sequence[int] | None,
+    template: Mapping[str, object] | None = None,
 ) -> TowerCheck:
     """Each tower of ``laid_out`` (a file as the send lays it out for ``plate``), judged
     as :func:`~scadbuddy.bambuddy.send.towers_within_reach` judges one, but at the size
     and keep-out ``asked`` gives (``None``: the file's own, ``send.file_tower``) and at
-    the place ``overrides`` give. Only ``plates`` (``None``: all) are judged. A file whose
-    objects, project settings or tower places cannot be read has no conflicts: the
-    slicer then says why."""
+    the place ``overrides`` give over the ``template``'s ``print_settings``. Only
+    ``plates`` (``None``: all) are judged. A file whose objects, project settings or tower
+    places cannot be read has no conflicts: the slicer then says why."""
     try:
         with zipfile.ZipFile(io.BytesIO(laid_out)) as archive:
             settings = read_project_settings(archive)
@@ -195,7 +251,7 @@ def judge_towers(
         return TowerCheck()
     if not isinstance(settings, dict):
         return TowerCheck()
-    places = _places(settings, overrides)
+    places = _places(settings, overrides, template or {})
     bed = _source_bed(settings)
     if places is None or bed is None:
         return TowerCheck()
@@ -281,11 +337,21 @@ def tower_check(
     if asked is False or (asked is None and stated_off):
         return None
     try:
-        laid = _laid_out_for(payload, Target(plate, tower_on=stated_off and asked is True))
+        laid = _laid_out(payload, plate, stated_off and asked is True)
     except ApiError:
         return None  # it does not fit: the plate-fit check and the run say why
-    with zipfile.ZipFile(io.BytesIO(laid)) as archive:
-        stated = file_tower(read_project_settings(archive))
+    try:
+        with zipfile.ZipFile(io.BytesIO(laid)) as archive:
+            settings = read_project_settings(archive)
+    except (KeyError, ValueError):
+        return None  # as judge_towers: the slicer says why it refuses the file (#6813)
+    if not isinstance(settings, dict):
+        return None
     return judge_towers(
-        laid, plate, chosen_tower(stated, choice, overrides, template), overrides, plates
+        laid,
+        plate,
+        chosen_tower(file_tower(settings), choice, overrides, template),
+        overrides,
+        plates,
+        template,
     )

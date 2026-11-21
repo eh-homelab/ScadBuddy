@@ -8,8 +8,11 @@ import zipfile
 from pathlib import Path
 from typing import cast
 
+import pytest
 import trimesh
 
+from scadbuddy.bambuddy import send
+from scadbuddy.bambuddy import tower_check as tower_check_module
 from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice
 from scadbuddy.bambuddy.print_run import PrintRunRequest, check_tower
 from scadbuddy.bambuddy.print_source import PrintSource
@@ -82,6 +85,22 @@ def test_a_tower_on_the_objects_is_said_to_stand_on_them(tmp_path: Path) -> None
     assert conflict.reason == "on-objects" and (conflict.x, conflict.y) == (165.0, 150.0)
 
 
+def test_the_templates_tower_place_is_judged_under_the_overrides(tmp_path: Path) -> None:
+    """#6796: a template's `print_settings` that place the tower are what the slice
+    uses, so the check judges the tower there. The request's overrides win over them."""
+    payload = _author_file(tmp_path, ("200", "150"))
+    on = {"wipe_tower_x": "165", "wipe_tower_y": "150"}
+
+    check = tower_check(payload, H2C, choice=None, overrides={}, template=on, plates=None)
+
+    assert check is not None
+    [conflict] = check.conflicts
+    assert conflict.reason == "on-objects" and (conflict.x, conflict.y) == (165.0, 150.0)
+    away = {"wipe_tower_x": "200", "wipe_tower_y": "150"}
+    moved = tower_check(payload, H2C, choice=None, overrides=away, template=on, plates=None)
+    assert moved is not None and moved.conflicts == []
+
+
 def test_only_the_plates_printed_are_judged(tmp_path: Path) -> None:
     payload = _author_file(tmp_path, ("200", "150"))
     check = tower_check(payload, H2C, choice=NO_SPARSE, overrides={}, template={}, plates=[2])
@@ -145,6 +164,64 @@ def test_a_file_whose_settings_cannot_be_read_has_no_conflicts(tmp_path: Path) -
     for laid_out in unreadable:
         check = judge_towers(laid_out, H2C, None, {}, None)
         assert check.conflicts == [] and check.fix is None
+
+
+def test_unreadable_settings_in_the_laid_out_file_have_nothing_to_judge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6813: settings the laid-out file holds that cannot be read (not JSON, not an
+    object, or gone) leave the check silent, as `judge_towers` is, not failing the dialog."""
+    payload = _author_file(tmp_path, ("200", "150"))
+    for laid in (
+        rezipped(payload, {PROJECT_SETTINGS_NAME: b"not json"}),
+        rezipped(payload, {PROJECT_SETTINGS_NAME: b"[1, 2]"}),
+        _without_settings(payload),
+    ):
+        monkeypatch.setattr(tower_check_module, "_laid_out_for", lambda _p, _t, b=laid: b)
+        tower_check_module.forget_laid_out()
+        check = tower_check(payload, H2C, choice=NO_SPARSE, overrides={}, template={}, plates=None)
+        assert check is None
+
+
+def test_a_second_check_of_the_same_file_and_printer_does_not_lay_it_out_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6796: the dialog checks on every setting change. The laid-out file is kept by
+    the payload's digest and the printer, so only a new file or printer lays it out."""
+    payload = _author_file(tmp_path, ("200", "150"))
+    real = send._laid_out_for  # tower_check calls it by the name it imports
+    calls: list[str | None] = []
+
+    def counted(given: bytes, target: object) -> bytes:
+        calls.append(target.plate.model)  # type: ignore[attr-defined]
+        return real(given, target)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(tower_check_module, "_laid_out_for", counted)
+    tower_check_module.forget_laid_out()
+
+    first = tower_check(payload, H2C, choice=NO_SPARSE, overrides={}, template={}, plates=None)
+    again = tower_check(payload, H2C, choice=NO_SPARSE, overrides={}, template={}, plates=None)
+    assert first == again and len(calls) == 1
+    tower_check(payload, plate_for("H2D"), choice=NO_SPARSE, overrides={}, template={}, plates=None)
+    assert calls == [H2C.model, plate_for("H2D").model]
+    other = _author_file(tmp_path, ("190", "150"))
+    tower_check(other, H2C, choice=NO_SPARSE, overrides={}, template={}, plates=None)
+    assert len(calls) == 3
+
+
+def test_the_laid_out_files_kept_are_bounded(tmp_path: Path) -> None:
+    """The cache keeps at most `LAID_OUT_KEPT` files and `LAID_OUT_BYTES` in all."""
+    tower_check_module.forget_laid_out()
+    for n in range(tower_check_module.LAID_OUT_KEPT + 3):
+        tower_check_module._keep_laid_out((str(n), H2C, False), b"x")
+    assert len(tower_check_module._LAID_OUT) == tower_check_module.LAID_OUT_KEPT
+    big = b"x" * (tower_check_module.LAID_OUT_BYTES // 2 + 1)
+    tower_check_module._keep_laid_out(("a", H2C, False), big)
+    tower_check_module._keep_laid_out(("b", H2C, False), big)
+    assert list(tower_check_module._LAID_OUT) == [("b", H2C, False)]
+    tower_check_module._keep_laid_out(("c", H2C, False), big + big)
+    assert ("c", H2C, False) not in tower_check_module._LAID_OUT
+    tower_check_module.forget_laid_out()
 
 
 def test_an_explicit_override_wins_over_the_choice_and_the_template() -> None:
