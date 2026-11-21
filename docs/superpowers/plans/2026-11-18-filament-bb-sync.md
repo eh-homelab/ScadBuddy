@@ -1722,6 +1722,27 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     /filament/bambuddy/import`, a pull) and `scan_rfid_tag` (`POST /filament/rfid/scan`,
     writes nothing): neither has anything to push. Test:
     `test_the_bambuddy_import_and_the_rfid_scan_do_not_nudge`.
+164. Issue #6778 (narrows 150, R-T9-3): `_write_seen` seeds a link's `bb_seen.location_id`
+    only when BB's `location_id` maps to an SB location (open, in no printer's place), or is
+    null. While the place is unmapped, the seen location stays out. The pull that maps the
+    place then seeds it by the first-seen rule, and a later BB move moves the spool. Tests:
+    `test_an_unmapped_bb_place_is_not_seeded`, `test_a_place_that_maps_later_is_seeded_then`,
+    `test_a_bb_move_after_a_late_mapped_seed_moves_the_spool`. Why: a seed of an unmapped
+    place made the move to it, once mapped, wait for BB's next change of place.
+171. PR #6842 review, revised after the round-2 review (repairs 164 for links seeded since
+    #6265): a link whose `bb_seen.location_id` names a BB place that SB has never mapped
+    (no `filament_locations` row has that `bb_location_id`, in any state, archived and
+    printer places included) holds no seed. `_follow_location` treats it as absent (no
+    move), and `_write_seen` removes it from `bb_seen` before it seeds, so the first pull
+    where BB's place maps seeds it fresh. A seed of a place SB mapped once stays a real
+    seen value after that SB location is archived or becomes a printer's place, so a later
+    BB move still moves the spool (the first version discarded it, and that move was lost).
+    "Maps now" (open, in no printer's place) is one helper, `_mapped_place`, for the seed
+    and the move target. Chosen over a migration: no file, and it acts only when the pull
+    reads the link. Tests: `test_an_old_unmapped_seed_is_replaced_once_it_maps`,
+    `test_a_place_mapping_only_to_an_archived_location_is_not_seeded`,
+    `test_a_place_mapping_only_to_a_printers_place_is_not_seeded`,
+    `test_a_seed_of_a_place_archived_since_still_counts`.
 
 ## Self-review
 
