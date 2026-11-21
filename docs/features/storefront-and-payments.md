@@ -42,10 +42,10 @@ sequenceDiagram
 - Edge: `backend/scadbuddy/storefront/__main__.py:24-48`, `app.py`, `routes.py:83`
   (visitor routes `:117-760`), `settings.py:18-26` (what it refuses).
 - CRUD side: `backend/scadbuddy/api/crud_storefront.py:208`, `backend/scadbuddy/orders/storefront/`
-  (`listings.py:230`, `renders.py`, `drafts.py`, `submit.py:118`, `accounts.py`,
+  (`listings.py:230`, `renders.py`, `drafts.py`, `submit.py:138`, `accounts.py`,
   `mail.py`, `turnstile.py`, `prepare.py`, `intake.py`).
 - Back office: `backend/scadbuddy/api/storefront.py:51`, `frontend/src/pages/StorefrontPage.tsx`,
-  `frontend/src/components/storefront/ListingEditor.tsx:488`.
+  `frontend/src/components/storefront/ListingEditor.tsx:826`.
 - Public UI: `frontend/src/storefront/` (router `App.tsx:86-97`, client
   `api/client.ts:67`); its OpenAPI is exported by
   `backend/scadbuddy/tools/export_openapi.py` `--storefront`.
@@ -60,7 +60,7 @@ sequenceDiagram
   `storefront_order_links`, `payment_credentials`, `payment_requests`, `payment_events`.
 - Blob keys: `listing-media-<sha256>`, `customer-preview-<sha256>`,
   `customer-file-<sha256>`.
-- Settings: `storefront_*` (`backend/scadbuddy/core/settings.py:228-310`); provider
+- Settings: `storefront_*` (`backend/scadbuddy/core/settings.py:279-361`); provider
   credentials are sealed rows, entered in Settings.
 
 ## Tests

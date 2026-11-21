@@ -20,16 +20,16 @@ worker and follows it from the event bus. The sequence is in
 
 | Step | Route | Core |
 |---|---|---|
-| Create order | `POST /api/v1/orders` (`backend/scadbuddy/api/orders.py:810`) | `Lifecycle.create_order` (`backend/scadbuddy/orders/lifecycle.py:839`) |
-| Add item | `api/orders.py:1744` | `add_item` (`lifecycle.py:3541`) |
-| Rough estimate | `GET /orders/estimate` (`api/orders.py:1058`) | `backend/scadbuddy/orders/estimate.py:142` |
-| Slice quote | `POST /orders/{id}/items/{item}/quote` (`api/orders.py:2646`) | `quote_run` (`backend/scadbuddy/orders/quote.py:843`) |
-| Accept quote, order | `api/orders.py:2802`, `:1431` | `accept_quote` (`lifecycle.py:4460`), `accept_order` (`:2826`) |
+| Create order | `POST /api/v1/orders` (`backend/scadbuddy/api/orders.py:815`) | `Lifecycle.create_order` (`backend/scadbuddy/orders/lifecycle.py:859`) |
+| Add item | `api/orders.py:1761` | `add_item` (`lifecycle.py:3616`) |
+| Rough estimate | `GET /orders/estimate` (`api/orders.py:1075`) | `backend/scadbuddy/orders/estimate.py:150` |
+| Slice quote | `POST /orders/{id}/items/{item}/quote` (`api/orders.py:2665`) | `quote_run` (`backend/scadbuddy/orders/quote.py:967`) |
+| Accept quote, order | `api/orders.py:2821`, `:1431` | `accept_quote` (`lifecycle.py:4535`), `accept_order` (`:2826`) |
 | Payment | `backend/scadbuddy/api/order_payments.py:68`, webhook `backend/scadbuddy/api/payment_webhooks.py:58` | `Payments.handle_webhook` (`backend/scadbuddy/payments/service.py:584`) |
-| Print item | `POST /orders/{id}/items/{item}/print` (`api/orders.py:2863`) | `print_item` (`backend/scadbuddy/orders/printing.py:696`) |
-| Fulfil, ship | `api/orders.py:3236`, `:3286` | `fulfil_items` (`lifecycle.py:4935`), `add_shipment` (`:5830`) |
+| Print item | `POST /orders/{id}/items/{item}/print` (`api/orders.py:2882`) | `print_item` (`backend/scadbuddy/orders/printing.py:696`) |
+| Fulfil, ship | `api/orders.py:3225`, `:3286` | `fulfil_items` (`lifecycle.py:5013`), `add_shipment` (`:5830`) |
 
-Pricing (`backend/scadbuddy/orders/pricing.py:103-171`): one filament line per slot
+Pricing (`backend/scadbuddy/orders/pricing.py:104-172`): one filament line per slot
 (grams × cost per kg), machine time at the printer's rate, setup per plate, labour per
 item, markup, optional rounding, × quantity. The machine rate formula is in
 `backend/scadbuddy/orders/machine_rate.py:1-21`. A built-in `order-fulfilment` flow can
@@ -42,8 +42,8 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
 - Routes: `backend/scadbuddy/api/orders.py:187`, `order_payments.py`, `order_attachments.py`,
   `order_messages.py`, `order_purchases.py`, `order_sources.py`, `order_bank_deposits.py`,
   `customers.py`, `parts.py`, `machine_rates.py`.
-- Core: `backend/scadbuddy/orders/` (`lifecycle.py:607`, `quote.py`, `pricing.py`,
-  `costs.py:662`, `operations.py:1049-1123`, `integrations.py` — the only seam to Bambuddy).
+- Core: `backend/scadbuddy/orders/` (`lifecycle.py:627`, `quote.py`, `pricing.py`,
+  `costs.py:731`, `operations.py:1140-1214`, `integrations.py` — the only seam to Bambuddy).
 - Agent tools: `agent/src/tools/orders.ts` (65 tools); customer messages through a bound
   plugin, `agent/src/orders/messaging.ts`.
 
@@ -56,7 +56,7 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
   `printer_cost_profiles`, `payment_*`, `bank_*`.
 - Blob keys: `quote-<sha256>`, `attachment-<sha256>`.
 - Settings: `orders_currency`, `pricing_*`, `orders_tax_percent`, `rough_estimate_factor`,
-  `orders_deposit_policy` (`backend/scadbuddy/core/settings.py:184-273`).
+  `orders_deposit_policy` (`backend/scadbuddy/core/settings.py:235-324`).
 
 ## Tests
 
@@ -72,7 +72,7 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
 - The built-in fulfilment flow ignores a remembered `force_colour_match`
   ([#6304](https://github.com/eh-homelab/ScadBuddy/issues/6304)).
 - Item spools are filled only from Bambuddy's inventory, not ScadBuddy's own spools
-  (`backend/scadbuddy/orders/spools.py:162-165`).
+  (`backend/scadbuddy/orders/spools.py:226-229`).
 - Machine-rate actuals from logged maintenance:
   [#5774](https://github.com/eh-homelab/ScadBuddy/issues/5774). Deposit tests that cross
   midnight UTC fail: [#6305](https://github.com/eh-homelab/ScadBuddy/issues/6305).

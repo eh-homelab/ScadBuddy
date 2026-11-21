@@ -18,11 +18,11 @@ keep-out) see the repo skill `.claude/skills/h2c-plate-layout`.
 
 - UI: `frontend/src/components/ArrangeDialog.tsx:166`, `ArrangedPlates.tsx`,
   `ArrangeSourcePicker.tsx`, `frontend/src/lib/arrange.ts`; page `/edit/:outputId`
-  (`frontend/src/App.tsx:108`).
-- Route: `POST /api/v1/outputs/arrange` (`backend/scadbuddy/api/outputs.py:728`) →
+  (`frontend/src/App.tsx:115`).
+- Route: `POST /api/v1/outputs/arrange` (`backend/scadbuddy/api/outputs.py:737`) →
   `RenderService.arrange` (`backend/scadbuddy/render/submit.py:460-485`).
-- Packing: `backend/scadbuddy/workflows/arrange.py:212`, `packing.py:16` (`GAP_MM`).
-- Plates: `backend/scadbuddy/api/plates.py:18`, `backend/scadbuddy/render/plate_profiles.py`.
+- Packing: `backend/scadbuddy/workflows/arrange.py:223`, `packing.py:16` (`GAP_MM`).
+- Plates: `backend/scadbuddy/api/plates.py:25`, `backend/scadbuddy/render/plate_profiles.py`.
 
 ## Data
 

@@ -24,10 +24,10 @@ printing is the print dialog's job.
   Send `:671`, Print `:675-689`), `frontend/src/components/Preview.tsx:192` (three.js),
   `frontend/src/components/SendDialog.tsx:33`.
 - Routes: `POST /api/v1/models/{slug}/render` (`backend/scadbuddy/api/jobs.py:401`),
-  `GET /api/v1/jobs/{id}`, `backend/scadbuddy/api/outputs.py:139`.
+  `GET /api/v1/jobs/{id}`, `backend/scadbuddy/api/outputs.py:141`.
 - Render: `backend/scadbuddy/render/runner.py:653`, `backend/scadbuddy/render/split.py:172`,
   `backend/scadbuddy/render/solids.py:92`, `backend/scadbuddy/render/jobs.py`,
-  `backend/scadbuddy/render/bambu3mf.py:815`, `backend/scadbuddy/render/glb.py`,
+  `backend/scadbuddy/render/bambu3mf.py:862`, `backend/scadbuddy/render/glb.py`,
   `backend/scadbuddy/render/thumbnail.py`.
 - Workflows: `backend/scadbuddy/workflows/pipelines.py:386` (`RenderPiece`), `:524`
   (`TemplatePipeline`).

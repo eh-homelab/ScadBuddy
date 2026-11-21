@@ -95,33 +95,33 @@ document's claim and the code. These specs and docs were not changed in this PR.
 **Design spec** (`docs/superpowers/specs/2026-09-22-scadbuddy-design.md`)
 
 - `:262` "No database"; one container / the code needs Postgres and Temporal at start
-  (`backend/scadbuddy/main.py:2032-2034`) and runs separate workers
-  (`backend/scadbuddy/worker.py:1719-1729`).
+  (`backend/scadbuddy/main.py:2161-2163`) and runs separate workers
+  (`backend/scadbuddy/worker.py:1737-1747`).
 - `:302` job state in `jobs/<job-id>.json` / jobs are the `render_jobs` table
   (`backend/scadbuddy/migrations/20260927T2243Z_render_jobs.sql`).
 - `:888` one `<object>` per colour part / one assembly object per declared object with a
-  component per colour (`backend/scadbuddy/render/bambu3mf.py:317-382`).
-- `:1299` one replica, `Recreate` / RollingUpdate with `maxSurge` ≥ 1 (`Dockerfile:983-985`).
+  component per colour (`backend/scadbuddy/render/bambu3mf.py:326-391`).
+- `:1299` one replica, `Recreate` / RollingUpdate with `maxSurge` ≥ 1 (`Dockerfile:1127-1129`).
 
 **Template-pipelines spec** (`…/2026-09-27-template-pipelines-design.md`)
 
-- `:94` two task queues / seven queue settings (`backend/scadbuddy/core/settings.py:570-590`).
+- `:94` two task queues / seven queue settings (`backend/scadbuddy/core/settings.py:621-641`).
 - `:178` an `Arrange` workflow / Arrange is `TemplatePipeline` with `kind == "arrange"`
   (`backend/scadbuddy/workflows/pipelines.py:858-860`).
 - `:147-153`, `:132` insert the row, then start `render-<job_id>` / update-with-start of
   `render-<render_key>`, the row inserted by the workflow
   (`backend/scadbuddy/render/submit.py:539-552`, `backend/scadbuddy/workflows/pipelines.py:790`).
 - `:379` UI files at `?version=<revision>` / the version is a path segment
-  (`frontend/src/api/client.ts:1815-1819`, `backend/scadbuddy/api/template_ui.py:117-118`).
+  (`frontend/src/api/client.ts:1822-1826`, `backend/scadbuddy/api/template_ui.py:117-118`).
 - `:494` custom elements as `react-dom/client` roots / `createPortal`
   (`frontend/src/template-ui/TemplateUi.tsx:164-175`).
 - `:794` render workers hold Postgres / no database; `SCADBUDDY_DATABASE_URL` ignored
-  (`backend/scadbuddy/worker.py:1093-1096`).
+  (`backend/scadbuddy/worker.py:1097-1100`).
 - `:676-681` the store chosen by `SCADBUDDY_STORE_BACKEND`, `local` with one render
-  worker / a stored setting (`backend/scadbuddy/core/settings.py:177`), and a separate
-  render worker refuses `local` (`backend/scadbuddy/worker.py:218-253`).
+  worker / a stored setting (`backend/scadbuddy/core/settings.py:228`), and a separate
+  render worker refuses `local` (`backend/scadbuddy/worker.py:222-257`).
 - `:673-674` `SCADBUDDY_WORKER_CACHE_DIR` / no such setting; only `worker_cache_max_bytes`
-  (`backend/scadbuddy/core/settings.py:298`).
+  (`backend/scadbuddy/core/settings.py:349`).
 - `:700` pieces as `piece-….3mf` / `piece-{key}.zip` (`backend/scadbuddy/store/cache.py:202`).
 
 **Print flow and spool-first specs** (`…/2026-09-24-print-flow-design.md`,
@@ -129,9 +129,9 @@ document's claim and the code. These specs and docs were not changed in this PR.
 
 - print-flow `:215` and spool-first `:23` "ScadBuddy sends no `ams_mapping`" / the native
   LAN path computes and sends `ams_mapping` and `nozzle_mapping`
-  (`backend/scadbuddy/printers/print_activities.py:546-572`,
+  (`backend/scadbuddy/printers/print_activities.py:537-563`,
   `backend/scadbuddy/printers/ams_mapping.py:92`).
-- print-flow `:636` progress from `route="pipeline"` `GET /pipeline-runs/{id}` / no
+- print-flow `:655` progress from `route="pipeline"` `GET /pipeline-runs/{id}` / no
   pipeline route; following is the `FollowPrint` workflow
   (`backend/scadbuddy/workflows/follow.py:70`).
 - print-flow `:7-12` ScadBuddy keeps no spool or printer state of its own / its own spools,
@@ -143,27 +143,27 @@ document's claim and the code. These specs and docs were not changed in this PR.
 - `:64` choices in `library_print_choices` / the table is dropped
   (`backend/scadbuddy/migrations/20261011T0001Z_drop_library_print_choices.sql`).
 - `:20-23` a sliced `.gcode.3mf` is not printable / it is queued as it is
-  (`backend/scadbuddy/workflows/printing.py:834-836`).
+  (`backend/scadbuddy/workflows/printing.py:855-857`).
 - `:40`, `:84-85` library prints not recorded, no progress panel / recorded and followed
-  (`backend/scadbuddy/workflows/print_activities.py:592`,
-  `backend/scadbuddy/api/library_print.py:1473`).
+  (`backend/scadbuddy/workflows/print_activities.py:596`,
+  `backend/scadbuddy/api/library_print.py:1481`).
 
 **Durable printing, agents and flows spec** (`…/2026-10-01-durable-printing-agents-flows-design.md`)
 
 - `:361` the `agent` queue served by agent-durable / agent-durable runs no worker
   (`agent-durable/src/scadbuddy_durable/worker.py:21-24`).
 - `:755` the library worker holds no Bambuddy key / `slice_run` and `makerworld_import`
-  open Bambuddy clients (`backend/scadbuddy/workflows/slicing_activities.py:420-424`,
+  open Bambuddy clients (`backend/scadbuddy/workflows/slicing_activities.py:424-428`,
   `backend/scadbuddy/makerworld/operations.py:96`).
 - `:1340-1342` flow `render`, `print`, `arrange` are child workflows / HTTP calls to the
   API through `flow_route_send`, and the function is `queue_print`
-  (`backend/scadbuddy/workflows/flow_tools.py:368`, `:471-474`, `:583`, `:1373-1391`).
+  (`backend/scadbuddy/workflows/flow_tools.py:379`, `:471-474`, `:583`, `:1373-1391`).
 
 **Rack nozzle selection spec** (`…/2026-10-01-rack-nozzle-selection-design.md`)
 
 - `:3-5` status "not yet approved" / implemented (`backend/scadbuddy/rack/rank.py`).
-- `:334-345` the seam is `slice_and_queue` / the pick is in `queue_plate`
-  (`backend/scadbuddy/bambuddy/print_run.py:3095`); `slice_and_queue` has only test callers.
+- `:337-348` the seam is `slice_and_queue` / the pick is in `queue_plate`
+  (`backend/scadbuddy/bambuddy/print_run.py:3569`); `slice_and_queue` has only test callers.
 
 **Flow grants and git spec** (`…/2026-10-11-flow-grants-and-git-design.md`)
 
@@ -182,7 +182,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
 **Async command accept spec** (`…/2026-10-13-async-command-accept-design.md`)
 
 - `:116-117` the route always makes an update id / a print run answers 202 only with a
-  followable `request_id`, otherwise 503 (`backend/scadbuddy/api/printing.py:1066-1077`).
+  followable `request_id`, otherwise 503 (`backend/scadbuddy/api/printing.py:1140-1151`).
 
 **bambuddy-fs spec** (`…/2026-10-13-bambuddy-fs-design.md`)
 
@@ -192,11 +192,11 @@ document's claim and the code. These specs and docs were not changed in this PR.
 - `:318-319` an unbounded cache / per-host, bounded by `--cache-max`
   (`tools/go/bambuddy-fs/main.go:127-134`).
 - `:324` a failed upload fails `close()` / a queued upload counts as success
-  (`tools/go/bambuddy-fs/internal/fsys/writer.go:300-306`).
+  (`tools/go/bambuddy-fs/internal/fsys/writer.go:301-307`).
 
 **Unified agent runtime spec** (`…/2026-10-13-unified-agent-runtime-design.md`)
 
-- `:1194` the session directory on the NAS share / `SCADBUDDY_SESSION_DIR`, a volume of
+- `:1199` the session directory on the NAS share / `SCADBUDDY_SESSION_DIR`, a volume of
   the worker's own (`agent/src/config.ts:61-66`).
 
 **Own store, slicer and Rust workers spec** (`…/2026-10-16-own-store-slicer-rust-workers-design.md`)
@@ -211,54 +211,53 @@ document's claim and the code. These specs and docs were not changed in this PR.
 - `:608` `sb-temporal` does versioning / the slicer is unversioned
   (`workers/rust/bins/scadbuddy-slicer/src/lib.rs:1-2`).
 - `:439-443` sliced files go to Bambuddy's library even on `native` / into the native
-  library (`backend/scadbuddy/workflows/slicing_activities.py:480-486`).
+  library (`backend/scadbuddy/workflows/slicing_activities.py:484-490`).
 
 **Orders, storefront and forks specs**
 
-- orders `:257-258` quote `source` is `slice` or `manual` / also `archive`
-  (`backend/scadbuddy/orders/models.py:73`).
+- orders `:257-258` quote `source` is `slice` or `manual` / also `archive` and
+  `storefront` (`backend/scadbuddy/orders/models.py:75`).
 - orders `:675-677` the native path has no spool inventory / unchanged in orders, which
-  fill spools only from Bambuddy (`backend/scadbuddy/orders/spools.py:162-165`), though
+  fill spools only from Bambuddy (`backend/scadbuddy/orders/spools.py:226-229`), though
   ScadBuddy's own spools now exist.
 - storefront `:274` listing `colours` / listings also carry `materials`
   (`backend/scadbuddy/migrations/20261114T2313Z_storefront_materials.sql`).
-- storefront `:302-306` request uploads go through `order_attachment_add` / added directly
-  in the cart's transaction (`backend/scadbuddy/orders/storefront/drafts.py:598-620`).
+- storefront `:306-310` request uploads go through `order_attachment_add` / added directly
+  in the cart's transaction (`backend/scadbuddy/orders/storefront/drafts.py:625-647`).
 - storefront `:296` `estimate_grams` at `pricing.py:160` / at
-  `backend/scadbuddy/orders/pricing.py:174-182`.
-- customer-models `:697-772` the staged-model import flow / not built; the watcher "waits
+  `backend/scadbuddy/orders/pricing.py:175-183`.
+- customer-models `:712-787` the staged-model import flow / not built; the watcher "waits
   for the import (a later PR)" (`backend/scadbuddy/workflows/staged_file.py:17`).
-- storefront-customize-ux `:142` "about $X for one" with grams and time / only "about
+- storefront-customize-ux `:153` "about $X for one" with grams and time / only "about
   {price}" (`frontend/src/storefront/components/Estimate.tsx:9`, `:24`).
 - template-forks `:149-151` Detach as a UI action / also a route
   (`backend/scadbuddy/api/upstream.py:228`).
 
 **Filament management spec** (`…/2026-11-14-filament-management-design.md`)
 
-- `:314-315` AMS units are locations made automatically / `ensure_ams` exists but has no
-  caller outside tests (`backend/scadbuddy/filament/locations.py:151`).
-- `:611` SB→BB push is #6265 / the code cites #6263 (`backend/scadbuddy/filament/bambuddy_pull.py:2`).
+- `:420-421` AMS units are locations made automatically / `ensure_ams` exists but has no
+  caller outside tests (`backend/scadbuddy/filament/locations.py:163`).
 
 **Auth and service-credential specs** (`…/2026-11-01-backend-auth-design.md`,
 `…/2026-11-05-service-credentials-without-db-design.md`)
 
 - auth `:354` callers `agent`, `print`, `projects`, all sealed tokens / six callers
-  (`backend/scadbuddy/auth/service_auth.py:25`), only `agent` sealed
+  (`backend/scadbuddy/auth/service_auth.py:25-27`), only `agent` sealed
   (`backend/scadbuddy/auth/service_credentials.py:84`, `:99-106`).
 - auth `:481-485` route classes / also `exchange`, `crud.*`, `flow.host`
   (`backend/scadbuddy/auth/routes.py:22-40`).
 - service-credentials `:326-336` no `intake` caller / `crud.intake`
   (`backend/scadbuddy/api/crud_intake.py:34`).
 - service-credentials `:470-471` a worker without a proof is still served / the workers
-  refuse to start (`backend/scadbuddy/auth/service_auth.py:240-249`).
+  refuse to start (`backend/scadbuddy/auth/service_auth.py:242-251`).
 
 **AI and settings specs, and `docs/ai/`**
 
 - ai-integration `:46`, `:524` a headless Chromium in the agent (`harness/headlessBrowser.ts`) /
-  removed; the image has tini, git and ca-certificates (`Dockerfile:240-242`), and leftover
-  folders are deleted at start (`agent/src/main.ts:182-185`).
+  removed; the image has tini, git and ca-certificates (`Dockerfile:244-246`), and leftover
+  folders are deleted at start (`agent/src/main.ts:212-215`).
 - ai-integration `:348-356` one sidecar container / roles `api`, `worker`, `all` and a
-  `sandbox` image (`agent/src/runtime/role.ts:27-35`, `Dockerfile:307`).
+  `sandbox` image (`agent/src/runtime/role.ts:27-35`, `Dockerfile:311`).
 - settings-and-tool-access `:70` cites `routes/subagentMcp.ts` / no such file in
   `agent/src/routes/`.
 - settings-and-tool-access `:264-274` access sources / also `builtin:claude-code`
@@ -272,19 +271,19 @@ document's claim and the code. These specs and docs were not changed in this PR.
   (`agent/src/harness/options.ts:61`, `agent/src/harness/run.ts:515-521`).
 - `docs/ai/security.md:540`, `:967` the credential reaches Claude Code through `env` /
   Claude Code gets only a leased gateway token (`agent/src/gateway/server.ts:21-29`).
-- `agent/CLAUDE.md`: SQL on two backend tables / also the views `auth_sessions_agent` and
-  `service_credentials_agent` and a LISTEN on `scadbuddy_events`
-  (`agent/src/auth/browserSession.ts:93`, `agent/src/api/serviceCredential.ts:71`,
-  `agent/src/events/bus.ts:21`).
+- `agent/CLAUDE.md:9` "run no SQL on a backend table" / the agent still reads two backend
+  views over SQL as fallbacks: `auth_sessions_agent` until the API lists area
+  `auth-sessions`, and `service_credentials_agent` with no proof file
+  (`agent/src/auth/browserSession.ts:58`, `agent/src/api/serviceCredential.ts:71`). The
+  same file describes both fallbacks further down.
 
 **`docs/security/trust-boundaries.md`**
 
-- `:94` cites `core/settings.py:248` for the `off` default / now
-  `backend/scadbuddy/core/settings.py:335`.
-- `:202` the storefront "not built yet" / it exists (`backend/scadbuddy/storefront/__main__.py`,
+- `:95` cites `core/settings.py:248` for the `off` default / now
+  `backend/scadbuddy/core/settings.py:386`.
+- `:320` the storefront "not built yet" / it exists (`backend/scadbuddy/storefront/__main__.py`,
   `backend/scadbuddy/api/crud_storefront.py:208`); its tables do not list the storefront
   edge or the intake worker.
-- `:169` "8 `ai_*` tables" / its own table says 20 (`:60`).
 
 **`docs/user-guide.md`**
 
@@ -303,16 +302,16 @@ document's claim and the code. These specs and docs were not changed in this PR.
 **README, `CLAUDE.md` and the Dockerfile**
 
 - `Dockerfile:3`, `:15-16` "ONE image", the agent the one exception; root `CLAUDE.md`
-  "all three images" / `build-image.yml` publishes five
-  (`.github/workflows/build-image.yml:53`, `:216`, `:328`, `:432`, `:543`).
-- `README.md:2466-2471` four manifests pinned / up to ten files and five images
-  (`.github/workflows/deploy.reusable.yml:108-150`); the README never names the
+  "all three images" / `build-image.yml` publishes six
+  (`.github/workflows/build-image.yml:54`, `:217`, `:329`, `:433`, `:544`, `:657`).
+- `README.md:2693-2698` four manifests pinned / up to eleven files and six images
+  (`.github/workflows/deploy.reusable.yml:116-158`); the README never names the
   `scadbuddy-sandbox` image.
-- `.github/workflows/build-image.yml:214-215` "drop `continue-on-error` once pinned" / the
-  agent pin is required (`.github/workflows/deploy.reusable.yml:785`) but the job keeps it
-  (`.github/workflows/build-image.yml:220`).
-- `README.md:2553-2556` one dashboard / six (`deploy/grafana/kustomization.yaml:29-77`).
-- `README.md:2491` the API, render worker and agent export traces / the slicer does too
+- `.github/workflows/build-image.yml:215-216` "drop `continue-on-error` once pinned" / the
+  agent pin is required (`.github/workflows/deploy.reusable.yml:925`) but the job keeps it
+  (`.github/workflows/build-image.yml:221`).
+- `README.md:2781-2784` one dashboard / six (`deploy/grafana/kustomization.yaml:32-80`).
+- `README.md:2718` the API, render worker and agent export traces / the slicer does too
   (`workers/rust/crates/sb-temporal/src/telemetry.rs`).
-- `.github/workflows/build-image.yml:316-319` agent-durable as a third container in the
-  pod / its own Deployment (`Dockerfile:369`).
+- `.github/workflows/build-image.yml:317-320` agent-durable as a third container in the
+  pod / its own Deployment (`Dockerfile:373`).

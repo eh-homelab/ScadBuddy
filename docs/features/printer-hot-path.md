@@ -21,18 +21,18 @@ route. `PrinterWatch` keeps one MQTT connection per printer and writes its repor
 ## Code
 
 - Decision: `backend/scadbuddy/printers/hot_path.py:22-34`,
-  `backend/scadbuddy/bambuddy/print_run.py:2159-2170` (`run_path`), `:2315` (`run_route`).
+  `backend/scadbuddy/bambuddy/print_run.py:2607-2618` (`run_path`), `:2763` (`run_route`).
 - LAN client: `backend/scadbuddy/printers/lan.py` (ports `:65-67`, `project_file_command`
   `:174`), `ams_mapping.py:92-139`, `nozzle_mapping.py`.
-- Activities: `backend/scadbuddy/printers/print_activities.py` (`lan_upload` `:264`,
-  `lan_print` `:307`, `lan_wait` `:432`).
-- Workflows: `backend/scadbuddy/workflows/printing.py:584` (`PrintRun`), `:1136`
+- Activities: `backend/scadbuddy/printers/print_activities.py` (`lan_upload` `:259`,
+  `lan_print` `:302`, `lan_wait` `:423`).
+- Workflows: `backend/scadbuddy/workflows/printing.py:592` (`PrintRun`), `:1157`
   (`PrintLanSequence`), `printer_watch.py:79`, `follow.py:70`.
 - Registry routes: `backend/scadbuddy/api/printers.py:62` (LAN link `:469`, Bambuddy sync
   `:173`, virtual printers `:214-348`); UI `frontend/src/components/settings/Printers.tsx:40`,
   `VirtualPrinters.tsx:121`, `frontend/src/components/print/LanRunControls.tsx:26`.
 - Rack (H2C hotend rack): `backend/scadbuddy/rack/rank.py`, `rack/usage.py`;
-  `PUT /print/printers/{id}/rack-algorithm` (`backend/scadbuddy/api/printing.py:528`).
+  `PUT /print/printers/{id}/rack-algorithm` (`backend/scadbuddy/api/printing.py:534`).
 
 ## Data
 

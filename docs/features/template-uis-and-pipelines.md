@@ -24,7 +24,7 @@ the [template-pipelines spec](../superpowers/specs/2026-09-27-template-pipelines
 - UI files: `GET /api/v1/models/{slug}/ui/{path}` and the versioned
   `/models/{slug}/versions/{version}/ui/{path}` (`backend/scadbuddy/api/template_ui.py:98-118`).
 - Pipeline: `backend/scadbuddy/workflows/pipelines.py:524`, `ctx.py`,
-  `pipeline_activities.py:270`, `template_process.py:106-130`; the import surface for
+  `pipeline_activities.py:273`, `template_process.py:106-130`; the import surface for
   templates `backend/scadbuddy/template.py`.
 - Input migration: `POST /api/v1/models/{slug}/inputs/migrate` (`backend/scadbuddy/api/jobs.py:900`).
 

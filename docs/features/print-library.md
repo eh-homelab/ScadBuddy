@@ -21,13 +21,13 @@ Copies between libraries run as the `LibraryCopy` workflow on `library`.
 
 - UI: `frontend/src/pages/LibraryPage.tsx`, `frontend/src/components/library/`,
   `frontend/src/components/BatchPrintDialog.tsx:65`.
-- Routes: `backend/scadbuddy/api/library_print.py:194` (`/print/library`: search `:369`,
-  run `:1346`, progress `:1473`, upload `:677`), `backend/scadbuddy/api/library_copy.py`,
+- Routes: `backend/scadbuddy/api/library_print.py:196` (`/print/library`: search `:371`,
+  run `:1354`, progress `:1481`, upload `:679`), `backend/scadbuddy/api/library_copy.py`,
   `backend/scadbuddy/api/print_batches.py:52`.
 - Native library: `backend/scadbuddy/print_library/native.py`, `store.py`, `copies.py:145`,
   `sweep.py`; workers read it through `print_library/remote.py`.
 - Search: `backend/scadbuddy/library_search/index.py:51` (an in-memory snapshot of
-  Bambuddy's library, fresh for 30 s), `backend/scadbuddy/bambuddy/library_listing.py:183`.
+  Bambuddy's library, fresh for 30 s), `backend/scadbuddy/bambuddy/library_listing.py:187`.
 - Copies: `backend/scadbuddy/print_library/copy.py`, `backend/scadbuddy/workflows/library_copy.py:68`.
 - Desktop mount: `tools/go/bambuddy-fs` ([README](../../tools/go/bambuddy-fs/README.md)).
 

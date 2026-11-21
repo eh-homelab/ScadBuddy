@@ -17,7 +17,7 @@ Settings are rows in `settings`, seeded from `SCADBUDDY_*` environment variables
 secrets (API keys, S3 keys, the OIDC client secret) are sealed under the KEK. The auth
 mode `off | observe | enforce` decides whether a route without a valid caller is refused
 (`backend/scadbuddy/auth/check.py:67-93`); the default is `off`
-(`backend/scadbuddy/core/settings.py:335`). Design: the
+(`backend/scadbuddy/core/settings.py:386`). Design: the
 [backend auth spec](../superpowers/specs/2026-11-01-backend-auth-design.md) and the
 [service credentials spec](../superpowers/specs/2026-11-05-service-credentials-without-db-design.md).
 
@@ -25,7 +25,7 @@ mode `off | observe | enforce` decides whether a route without a valid caller is
 
 - UI: `frontend/src/pages/SettingsPage.tsx`, areas `frontend/src/pages/settings/areas.ts:17-26`,
   sections `frontend/src/pages/settings/sections/*.tsx`.
-- Routes: `backend/scadbuddy/api/settings.py:87`, `backend/scadbuddy/api/auth.py:50`,
+- Routes: `backend/scadbuddy/api/settings.py:90`, `backend/scadbuddy/api/auth.py:50`,
   `access_tokens.py:25`, `service_credentials.py:27`, `service_token.py:38`,
   `git_remote.py:13`, `store.py:31`.
 - Auth: `backend/scadbuddy/auth/` (`gate.py`, `check.py`, `routes.py:22-40`, `oidc.py`,

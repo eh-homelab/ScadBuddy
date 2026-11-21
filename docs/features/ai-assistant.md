@@ -22,11 +22,11 @@ whose activities call the API. The full map, with a sequence diagram, is in
 
 ## Code
 
-- UI: `frontend/src/components/assistant/AssistantPanel.tsx:22`, `AssistantChat.tsx:154`,
+- UI: `frontend/src/components/assistant/AssistantPanel.tsx:22`, `AssistantChat.tsx:155`,
   `SessionSwitcher.tsx:69`; chat transport `frontend/src/agent/chat/socketTransport.ts:37`;
   bridge `frontend/src/agent/link.ts:32`.
-- Agent: `agent/src/routes/chat.ts:76`, `agent/src/sessions/durable.ts:403-412`,
-  `agent/src/temporal/session/workflow.ts:214`, `agent/src/harness/run.ts:636`,
+- Agent: `agent/src/routes/chat.ts:76`, `agent/src/sessions/durable.ts:560-569`,
+  `agent/src/temporal/session/workflow.ts:321`, `agent/src/harness/run.ts:636`,
   `agent/src/harness/permissions.ts:145-161`, `agent/src/tools/index.ts:46-84`.
 
 ## Data

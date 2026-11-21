@@ -15,7 +15,7 @@ socket.
 ## Code
 
 - Route: `backend/scadbuddy/api/activity.py:46`; core `backend/scadbuddy/activity/`.
-- UI: `frontend/src/pages/ActivityPage.tsx`, `frontend/src/components/activity/ActivityBell.tsx:57`,
+- UI: `frontend/src/pages/ActivityPage.tsx`, `frontend/src/components/activity/ActivityBell.tsx:61`,
   `ActivityDrawer.tsx:125`.
 - Attribution header: `backend/scadbuddy/core/authorship.py` (the `AgentAuthorship`
   middleware), `agent/src/tools/authorship.ts`.

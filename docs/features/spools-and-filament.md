@@ -22,10 +22,10 @@ For adding purchased spools see the repo skill `.claude/skills/filament-intake`.
 - Routes: `backend/scadbuddy/api/filament.py:45` (`/filament`), `backend/scadbuddy/api/native_spools.py:30`,
   `backend/scadbuddy/api/tray_spools.py:34`, `backend/scadbuddy/api/filament_profiles.py:26`.
 - Overlay: `backend/scadbuddy/spools/` (`overlay.py`, `providers.py`, `native.py`,
-  `activities.py:80-107`); `backend/scadbuddy/workflows/spool_refresh.py:69`.
+  `activities.py:44-71`); `backend/scadbuddy/workflows/spool_refresh.py:103`.
 - Filament: `backend/scadbuddy/filament/` (`catalog.py`, `types.py`, `spools.py`,
   `ledger.py`, `locations.py`, `bambuddy_pull.py`).
-- UI: `frontend/src/components/FilamentPicker.tsx:240`,
+- UI: `frontend/src/components/FilamentPicker.tsx:358`,
   `frontend/src/components/settings/NativeSpools.tsx:84`,
   `frontend/src/pages/settings/SpoolInventoryPanel.tsx:43`.
 - Agent tools: `agent/src/tools/filament.ts`, `nativeSpools.ts`, `traySpools.ts`.

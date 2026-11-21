@@ -22,15 +22,15 @@ key goes through the one generic `process_overrides`, never a per-key field (roo
 
 ## Code
 
-- UI: `frontend/src/components/PrintPicker.tsx:329` (design notes `:140-162`), steps in
-  `frontend/src/components/print/`, `frontend/src/components/FilamentPicker.tsx:240`,
-  `frontend/src/components/print/PreviewPane.tsx:203`, `ToolpathScene.tsx`,
+- UI: `frontend/src/components/PrintPicker.tsx:370` (design notes `:141-163`), steps in
+  `frontend/src/components/print/`, `frontend/src/components/FilamentPicker.tsx:358`,
+  `frontend/src/components/print/PreviewPane.tsx:209`, `ToolpathScene.tsx`,
   `AnalyzerPanel.tsx:310`.
-- Routes: `backend/scadbuddy/api/printing.py:263` (`/print`: run `:928`, check `:1410`,
-  preview slice `:1491`, choices `:1697`), `backend/scadbuddy/api/process_values.py:29`,
-  `backend/scadbuddy/api/filament_profiles.py:26`, `backend/scadbuddy/api/analyzers.py:102`.
-- Planning: `backend/scadbuddy/bambuddy/print_run.py` (`PrintRunRequest.overrides` `:481`,
-  `plan_run` `:3172`, overrides merged `:3403-3415`).
+- Routes: `backend/scadbuddy/api/printing.py:269` (`/print`: run `:1002`, check `:1435`,
+  preview slice `:1484`, choices `:1719`), `backend/scadbuddy/api/process_values.py:29`,
+  `backend/scadbuddy/api/filament_profiles.py:26`, `backend/scadbuddy/api/analyzers.py:103`.
+- Planning: `backend/scadbuddy/bambuddy/print_run.py` (`PrintRunRequest.overrides` `:493`,
+  `plan_run` `:3646`, overrides merged `:3926-3938`).
 - Slicing: `backend/scadbuddy/workflows/slicing.py:182`,
   `backend/scadbuddy/slicing/presets.py:324`, `workers/rust/crates/sb-slicer/src/runner.rs:103-135`;
   Bambuddy's slicer through `backend/scadbuddy/bambuddy/dispatch.py`.

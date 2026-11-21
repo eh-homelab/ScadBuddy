@@ -13,29 +13,30 @@ Paths under `backend/scadbuddy/` are shortened to `scadbuddy/`. Line numbers are
 
 ## Task queues
 
-Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/settings.py:574-590`).
+Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/settings.py:625-646`).
 
 | Queue | Served by | Workflows |
 |---|---|---|
-| `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1077`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:140`) |
-| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1503`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport` (`scadbuddy/workflows/client.py:194-206`) |
-| `bambuddy-follow` | print worker | activities only: `follow_print`, `printer_watch` (`scadbuddy/workflows/client.py:215-236`) |
-| `library` | the API process (`scadbuddy/main.py:1798-1888`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing` (`scadbuddy/main.py:1731-1741`) |
-| `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1589`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
+| `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1081`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
+| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1521`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass` (`scadbuddy/workflows/client.py:199-217`) |
+| `bambuddy-follow` | print worker | activities only: `follow_print`, `printer_watch` (`scadbuddy/workflows/client.py:229-250`) |
+| `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing` (`scadbuddy/main.py:1832-1842`) |
+| `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1607`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
 | `slicer` | the Rust slicer (`workers/rust/bins/scadbuddy-slicer/src/main.rs:103-107`) | activity `slice_plate` only (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`) |
+| `profile-fetch` | profile-fetch worker, `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/worker.py:103`) | `ProfileFetch`, started by the API per run (`scadbuddy/profile_fetch/workflow.py:117`) |
 | `customer-files` | intake worker, `python -m scadbuddy.intake_worker` (`scadbuddy/intake_worker/worker.py:96`) | `CustomerFileCheck` (`scadbuddy/intake_worker/workflow.py:40`) |
 | `agent-sessions`, `agent-tools` and per-replica `.<identity>` queues | the agent ([agent.md](agent.md#temporal)) | `AgentSession`, `ToolCall`, `BridgeCall`, `AgentOperation`, `BackgroundTask` |
 
 In development (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), the API also serves `render`,
-`bambuddy` and `projects` itself (`scadbuddy/main.py:1557-1559`, `:1710-1712`;
+`bambuddy` and `projects` itself (`scadbuddy/main.py:1641-1643`, `:1811-1813`;
 `scadbuddy/flows/component.py:120`). The real-stack e2e runs that way
 (`e2e-stack/compose.yaml:83-95`).
 
 Versioned deployments: `scadbuddy-library`, `scadbuddy-render`, `scadbuddy-projects`
-(`scadbuddy/workflows/client.py:60-65`), `scadbuddy-print` for the print worker given a
-build id (`scadbuddy/workflows/client.py:242-251`, `scadbuddy/worker.py:1539-1563`) and the
+(`scadbuddy/workflows/client.py:63-68`), `scadbuddy-print` for the print worker given a
+build id (`scadbuddy/workflows/client.py:256-265`, `scadbuddy/worker.py:1557-1581`) and the
 agent's `scadbuddy-agent`. Unversioned: the API's in-process print worker in development
-(`scadbuddy/main.py:1619-1707`) and the slicer
+(`scadbuddy/main.py:1703-1791`) and the slicer
 (`workers/rust/bins/scadbuddy-slicer/src/lib.rs:1-2`).
 
 ## Operations: one shape for writes
@@ -46,10 +47,10 @@ edits, order quotes and prints, flow answers) are operation kinds run by
 `op.<kind>.check`, then `op.<kind>.run`, then `op_finish`
 (`scadbuddy/workflows/operation_activities.py:65-183`). The API starts them with
 update-with-start and answers 202 with an operation id the browser follows at
-`GET /api/v1/operations/{id}` (`scadbuddy/api/operations.py:322`;
+`GET /api/v1/operations/{id}` (`scadbuddy/api/operations.py:327`;
 `scadbuddy/workflows/commands.py:338-375`). The kinds live beside their features, for
 example `scadbuddy/makerworld/operations.py:33`, `scadbuddy/meshmodel/operations.py:405-407`,
-`scadbuddy/orders/operations.py:1049-1123`.
+`scadbuddy/orders/operations.py:1140-1214`.
 
 ## Render, split by colour, 3MF
 
@@ -91,7 +92,7 @@ sequenceDiagram
    local activity `render_accept` (`:790-796`) and loads the template's pipeline or the
    built-in default (`scadbuddy/library/pipelines.py:16-20`). The pipeline calls
    `ctx.render`, which starts or joins a child `RenderPiece` with id `piece-<key>`
-   (`scadbuddy/workflows/pipelines.py:1090-1162`).
+   (`scadbuddy/workflows/pipelines.py:1092-1164`).
 4. `RenderPiece` (`scadbuddy/workflows/pipelines.py:386`) runs `cached_piece`, `prepare`,
    optionally `reuse_geometry`, then:
    - `render_main`: openscad with `--backend=Manifold` (`scadbuddy/render/runner.py:653`);
@@ -100,10 +101,10 @@ sequenceDiagram
      colour through the `color` wrapper (`scadbuddy/render/solids.py:40-55`, `:92`), and
      falls back to the split mesh for a colour that fails (`:146-151`);
    - `finish_piece`: plate covers in numpy, then `write_plates_3mf`
-     (`scadbuddy/render/bambu3mf.py:815`), which writes one assembly object per declared
+     (`scadbuddy/render/bambu3mf.py:862`), which writes one assembly object per declared
      object with a component per colour, `model_settings.config` and
-     `project_settings.config` (`scadbuddy/render/bambu3mf.py:577-633`).
-5. Back in the pipeline, `pack` lays parts out on plates (`scadbuddy/workflows/arrange.py:212`)
+     `project_settings.config` (`scadbuddy/render/bambu3mf.py:586-642`).
+5. Back in the pipeline, `pack` lays parts out on plates (`scadbuddy/workflows/arrange.py:223`)
    and `write_output` writes the output under `output-<job>-<i>`
    (`scadbuddy/workflows/outputs.py:44-45`).
 
@@ -120,7 +121,7 @@ The slicer is chosen by the stored setting `slicer_backend`: `native` (ScadBuddy
 Rust worker running the Bambu Studio CLI) or Bambuddy's slicer. `process_overrides` from
 the print dialog are merged into the plan with the profile values, the template's
 `print_settings` and the shorthands (supports, prime tower)
-(`scadbuddy/bambuddy/print_run.py:481-483`, `:3403-3415`); the rule against per-key fields
+(`scadbuddy/bambuddy/print_run.py:493-495`, `:3926-3938`); the rule against per-key fields
 is in the root [`CLAUDE.md` "PR conventions"](../../CLAUDE.md#pr-conventions).
 
 ```mermaid
@@ -153,7 +154,7 @@ sequenceDiagram
   reaches bytes only through the URLs in its input
   (`workers/rust/crates/sb-transfer/src/lib.rs:1-4`).
 - On Bambuddy's slicer instead, `print_slice_start` and `print_slice_wait` call
-  Bambuddy's slice API (`scadbuddy/workflows/print_activities.py:497`, `:533`).
+  Bambuddy's slice API (`scadbuddy/workflows/print_activities.py:501`, `:537`).
 
 ## Print to the H2C
 
@@ -185,31 +186,31 @@ sequenceDiagram
 ```
 
 1. `POST /api/v1/print/outputs/{id}/run` or `/print/library/{file_id}/run`
-   (`scadbuddy/api/printing.py:928`, `scadbuddy/api/library_print.py:1346`) calls
-   `accept_run` (`scadbuddy/api/printing.py:1011`), which does update-with-start of
+   (`scadbuddy/api/printing.py:1002`, `scadbuddy/api/library_print.py:1354`) calls
+   `accept_run` (`scadbuddy/api/printing.py:1085`), which does update-with-start of
    `PrintRun` with id `print-<key>` and waits for the `accepted` update
-   (`scadbuddy/api/printing.py:1089-1104`).
-2. `print_check` picks the route (`scadbuddy/workflows/print_activities.py:289`):
+   (`scadbuddy/api/printing.py:1163-1178`).
+2. `print_check` picks the route (`scadbuddy/workflows/print_activities.py:288`):
    `hot_path_native` (`scadbuddy/printers/hot_path.py:32`) is true when the slicer and
    library are native, the store is not local, and the printer has a LAN link with a
-   fresh report (`scadbuddy/bambuddy/print_run.py:2159-2170`).
+   fresh report (`scadbuddy/bambuddy/print_run.py:2607-2618`).
 3. `print_insert` and `print_plan` record the run and plan plates, spools and presets
-   (`scadbuddy/workflows/print_activities.py:419`, `:440`; `scadbuddy/bambuddy/print_run.py:3172`).
+   (`scadbuddy/workflows/print_activities.py:418`, `:439`; `scadbuddy/bambuddy/print_run.py:3646`).
 4. Each plate is sliced (above), or used as is when it is already sliced
-   (`scadbuddy/workflows/printing.py:834-836`).
+   (`scadbuddy/workflows/printing.py:855-857`).
 5. Hand-off:
    - **Bambuddy:** `print_enqueue` → `queue_plate` → `POST /queue/`
-     (`scadbuddy/bambuddy/print_run.py:3095`, `scadbuddy/bambuddy/dispatch.py:304-337`).
+     (`scadbuddy/bambuddy/print_run.py:3569`, `scadbuddy/bambuddy/dispatch.py:304-337`).
    - **Native LAN:** `lan_upload` streams the sliced file over FTPS and `lan_print` sends
      `project_file` over MQTT with `ams_mapping` from the plan's trays and the rack's
      `nozzle_mapping`, then waits up to 30 s for the printer to start
-     (`scadbuddy/printers/print_activities.py:264`, `:307`, `:546-592`;
+     (`scadbuddy/printers/print_activities.py:259`, `:302`, `:537-583`;
      `scadbuddy/printers/lan.py:174`).
 6. `FollowPrint` (`scadbuddy/workflows/follow.py:70`) follows progress; `PrinterWatch`
    (`scadbuddy/workflows/printer_watch.py:79`) holds each printer's MQTT connection and
    writes `printer_reports`. More copies or plates on the LAN go to `PrintLanSequence`
-   (`scadbuddy/workflows/printing.py:1136`), which can wait for a `plate_cleared` signal
-   (`scadbuddy/api/printing.py:1381-1406`).
+   (`scadbuddy/workflows/printing.py:1157`), which can wait for a `plate_cleared` signal
+   (`scadbuddy/api/printing.py:1435-1460`).
 
 The H2C's plate and tray details are in the repo skills
 `.claude/skills/h2c-print-from-scadbuddy` and `.claude/skills/h2c-plate-layout`; what a run
@@ -242,13 +243,13 @@ sequenceDiagram
 The steps and their code are in [features/orders-and-quotes.md](../features/orders-and-quotes.md).
 The order operation kinds are `order_item_quote`, `order_item_render`,
 `order_item_print`, `order_attachment_add` and `order_attempt_copy`
-(`scadbuddy/orders/operations.py:1049-1123`), all on `library`.
+(`scadbuddy/orders/operations.py:1140-1214`), all on `library`.
 
 ## Flows
 
 A flow is a user's script run as `ProjectWorkflow` (`scadbuddy/workflows/project.py:126`)
 on `projects`, id `flow-<run_id>` (`scadbuddy/flows/launch.py:54-94`). Its host functions
-(`scadbuddy/workflows/flow_tools.py:1373-1391`) call the API's own routes through the
+(`scadbuddy/workflows/flow_tools.py:1426-1444`) call the API's own routes through the
 `flow_route_send` activity (`scadbuddy/workflows/flow_routes.py:192`): render, save
 output, queue a print, arrange. `tool(...)` and `agent_session(...)` go to the agent's
 `agent-tools` queue. Triggers start `FlowTriggerFire` (`scadbuddy/workflows/flow_triggers.py:55`)
@@ -257,8 +258,8 @@ See [features/flows.md](../features/flows.md).
 
 ## Housekeeping
 
-`Housekeeping` (`scadbuddy/workflows/housekeeping.py:437`) runs on Schedules the API
-creates (`_set_up_housekeeping`, `scadbuddy/main.py:1915`) and calls the sweeps: printer watches, native
+`Housekeeping` (`scadbuddy/workflows/housekeeping.py:469`) runs on Schedules the API
+creates (`_set_up_housekeeping`, `scadbuddy/main.py:2038`) and calls the sweeps: printer watches, native
 copies, print auto-import, quote holds, payment closes and captures, bank deposits,
 storefront drafts and mail, git remote pushes, blob sweeps (the sweep names start at `scadbuddy/workflows/housekeeping.py:142`).
 

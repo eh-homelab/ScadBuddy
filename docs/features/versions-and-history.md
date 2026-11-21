@@ -19,7 +19,7 @@ one commit.
   `frontend/src/pages/VersionsPage.tsx` (compare `:231`, customize `:362`, restore
   `:273-291`).
 - Routes: `backend/scadbuddy/api/versions.py:54` (`/models/{slug}/versions`, source,
-  schema, diff, restore `:158-298`), `backend/scadbuddy/api/outputs.py:139`.
+  schema, diff, restore `:158-298`), `backend/scadbuddy/api/outputs.py:141`.
 - Git: `backend/scadbuddy/library/history.py` (`restore` `:208`, `diff` `:462`),
   `backend/scadbuddy/core/gitrepo.py`.
 - Off-box history: an optional push to a git remote, `backend/scadbuddy/git_remote/push.py:181`.

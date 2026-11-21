@@ -23,6 +23,7 @@ backend is listed by `python -m scadbuddy.tools.settings_reference`. Paths under
 | [Projects worker](#projects-worker) | `scadbuddy` (`runtime`) | `python -m scadbuddy.worker --queue projects` | 9090 | no |
 | [Storefront edge](#storefront-edge) | `scadbuddy` (`runtime`) | `python -m scadbuddy.storefront` | 8083 | no |
 | [Intake worker and sandbox](#intake-worker-and-sandbox) | `scadbuddy` (`runtime`) | `python -m scadbuddy.intake_worker`, `python -m scadbuddy.intake_worker.sandbox` | 9090, 8090 | no |
+| [Profile-fetch worker and browser](#profile-fetch-worker-and-browser) | `scadbuddy-profile-fetch` (`profile-fetch`) | `python -m scadbuddy.profile_fetch`, `python -m scadbuddy.profile_fetch.browser` | 9090, 8091 | no |
 | [Agent sidecar](#agent-sidecar-and-agent-worker) | `scadbuddy-agent` (`agent`) | `node dist/main.js`, role `api` | 8081 | yes (today's code) |
 | [Agent worker](#agent-sidecar-and-agent-worker) | `scadbuddy-agent` (`agent`) | `node dist/main.js`, role `worker` | 8081 (health) | yes (today's code) |
 | [Session sandbox and egress proxy](#session-sandbox-and-egress-proxy) | `scadbuddy-sandbox` (`sandbox`) | `node dist/sandbox/main.js` | 8090, 3128 | no |
@@ -46,6 +47,8 @@ flowchart LR
     PJ[projects worker] -->|crud.projects| API
     IW[intake worker] -->|crud.intake| API
     IW --> ISB[intake sandbox]
+    PF[profile-fetch worker] -->|crud.profile-fetch| API
+    PF --> PFB[profile-fetch browser] --> TDFP[3dfilamentprofiles.com]
     AW[agent worker] -->|crud.agent, api| API
     AS -->|crud.agent, api| API
     AW --> SBX[session sandbox pods] --> EG[egress proxy]
@@ -53,7 +56,7 @@ flowchart LR
     API --> PG[(Postgres)]
     AS --> PG
     AW --> PG
-    API & RW & PW & PJ & IW & AW & AS & SL --> T[Temporal]
+    API & RW & PW & PJ & IW & PF & AW & AS & SL --> T[Temporal]
     API & RW --> S3[(Blob store)]
     API & PW --> BB[Bambuddy]
     RW -->|render key| BB
@@ -63,55 +66,57 @@ flowchart LR
 
 ## API
 
-- **Runs.** `create_app` (`scadbuddy/main.py:2255`); `lifespan` (`scadbuddy/main.py:2030`)
+- **Runs.** `create_app` (`scadbuddy/main.py:2386`); `lifespan` (`scadbuddy/main.py:2159`)
   applies both migration ledgers, grants and revokes retired roles, opens the blob store,
   starts the in-process `library` worker (always), the print upkeep, and on its own port
-  the CRUD listener (`scadbuddy/main.py:2034-2210`). Routers under `api/` are mounted
-  automatically under `/api/v1` (`scadbuddy/main.py:259-277`); the built frontend is
-  mounted last at `/` (`scadbuddy/main.py:2387`).
+  the CRUD listener (`scadbuddy/main.py:2163-2339`). Routers under `api/` are mounted
+  automatically under `/api/v1` (`scadbuddy/main.py:279-297`); the built frontend is
+  mounted last at `/` (`scadbuddy/main.py:2532`).
 - **Also runs untrusted code today:** openscad renders for the editor's checks and
   `openscad-lsp`, the latter under a no-network seccomp filter (`scadbuddy/editor/nonet.py:3-6`);
   #5296 moves them out.
 - **Reads.** `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` (and `_PREVIOUS_FILE`),
   `SCADBUDDY_TEMPORAL_ADDRESS`, the Bambuddy URL and keys and the S3 store settings (also
   stored settings), `SCADBUDDY_AUTH_MODE` and the OIDC settings, `SCADBUDDY_AGENT_INTERNAL_URL`
-  (`scadbuddy/core/settings.py:145-624`).
+  (`scadbuddy/core/settings.py:196-675`).
 - **Talks to.** Postgres, Temporal, the blob store, Bambuddy, the Kubernetes API for
-  token reviews (`scadbuddy/auth/exchange.py:127-128`), the OIDC issuer, Google Fonts and
+  token reviews (`scadbuddy/auth/exchange.py:128-129`), the OIDC issuer, Google Fonts and
   the optional git remote.
 - **Zone.** The CRUD service: the only process meant to hold SQL access
   ([`CLAUDE.md` "Database access"](../../CLAUDE.md#database-access-5295)).
 
 ## Render worker
 
-- **Runs.** `run_worker` (`scadbuddy/worker.py:1077`) on queue `render`: renders and
+- **Runs.** `run_worker` (`scadbuddy/worker.py:1081`) on queue `render`: renders and
   template pipelines ([workflows.md](workflows.md#render-split-by-colour-3mf)).
 - **Reads.** `SCADBUDDY_API_INTERNAL_URL` and a service proof,
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; without one it
-  refuses to start (`scadbuddy/auth/service_auth.py:233-254`). It ignores
-  `SCADBUDDY_DATABASE_URL` (`scadbuddy/worker.py:1093-1096`) and refuses the `local` store
-  (`scadbuddy/worker.py:218-253`). The S3 keys and the Bambuddy render key come from its
-  CRUD settings route (`scadbuddy/api/crud_render.py:192-206`).
+  refuses to start (`scadbuddy/auth/service_auth.py:235-256`). It ignores
+  `SCADBUDDY_DATABASE_URL` (`scadbuddy/worker.py:1097-1100`) and refuses the `local` store
+  (`scadbuddy/worker.py:222-257`). The S3 keys and the Bambuddy render key come from its
+  CRUD settings route (`scadbuddy/api/crud_render.py:215-229`).
 - **Zone.** Runs template Python and openscad; holds a 15-minute `crud.render` credential
   and the store keys. See trust-boundaries, "Where untrusted code runs".
 
 ## Print worker
 
-- **Runs.** `run_print_worker` (`scadbuddy/worker.py:1503`) on `bambuddy` and
+- **Runs.** `run_print_worker` (`scadbuddy/worker.py:1521`) on `bambuddy` and
   `bambuddy-follow`: print runs, LAN upload and start, follow, printer watches
-  ([workflows.md](workflows.md#print-to-the-h2c)).
+  ([workflows.md](workflows.md#print-to-the-h2c)), and the filament sync with Bambuddy,
+  the Bambuddy pull and the location-sensor alerts (`FilamentBbSync`, `FilamentBbPull`,
+  `SensorNotifyPass`, `scadbuddy/workflows/client.py:211-217`).
 - **Reads.** The API URL and a service proof as above. Its Bambuddy key comes from the
   CRUD settings route; a printer's access code is opened by the API and handed over a
-  CRUD route (`scadbuddy/api/crud_print.py:1924`).
+  CRUD route (`scadbuddy/api/crud_print.py:2242`).
 - **Talks to.** The API, Temporal, Bambuddy, printers over MQTT and FTPS
   (`scadbuddy/printers/lan.py:65-67`).
 
 ## Projects worker
 
-- **Runs.** `run_projects_worker` (`scadbuddy/worker.py:1589`) on `projects`: flow runs
+- **Runs.** `run_projects_worker` (`scadbuddy/worker.py:1607`) on `projects`: flow runs
   ([workflows.md](workflows.md#flows)).
 - **Reads.** The API URL, a service proof, and the KEK (`SCADBUDDY_SECRET_KEY_FILE`,
-  `scadbuddy/worker.py:1609-1614`) for flow payload keys.
+  `scadbuddy/worker.py:1627-1632`) for flow payload keys.
 
 ## Storefront edge
 
@@ -134,6 +139,24 @@ flowchart LR
 - **Reads.** The API URL and a service proof; it refuses a database URL, a Postgres
   password and the KEK (`scadbuddy/intake_worker/settings.py:19-24`).
 
+## Profile-fetch worker and browser
+
+Fetches a new spool type's slicer presets per printer model and nozzle from
+3dfilamentprofiles.com (#6625, #6780). See README
+["Profile-fetch worker"](../../README.md#profile-fetch-worker-6625).
+
+- **Worker.** `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/__main__.py:32`)
+  polls `profile-fetch` with the `ProfileFetch` workflow (`scadbuddy/profile_fetch/worker.py:103-104`).
+  It reads the API URL, a service proof and Temporal's address, reaches the API only as
+  CRUD caller `profile-fetch` (area `runs`, `scadbuddy/api/crud_areas.py:250`), and calls the
+  browser service over HTTP. It refuses a database secret, the KEK and the site login
+  (`scadbuddy/profile_fetch/settings.py:80-93`).
+- **Browser service.** `python -m scadbuddy.profile_fetch.browser`
+  (`scadbuddy/profile_fetch/browser.py:336`) runs Chromium on the site and holds only the
+  site login (`SCADBUDDY_TDFP_EMAIL`, `SCADBUDDY_TDFP_PASSWORD`). It refuses a service proof
+  and a Temporal or API address (`scadbuddy/profile_fetch/settings.py:38`, `:96-102`).
+- **Image.** `scadbuddy-profile-fetch`, Dockerfile stage `profile-fetch` (`Dockerfile:654`).
+
 ## Agent sidecar and agent worker
 
 One image, two roles ([agent.md](agent.md#processes-and-roles)). The sidecar serves
@@ -143,7 +166,8 @@ One image, two roles ([agent.md](agent.md#processes-and-roles)). The sidecar ser
   `SCADBUDDY_DATABASE_URL` and the KEK, plus Temporal, a service proof and the sandbox
   settings.
 - **Zone.** Today's code still breaks the database rule: both roles connect to Postgres
-  (#5299). Claude Code and plugin code run in the worker.
+  (#5299), though the agent's data now goes through CRUD routes and SQL remains only as a
+  fallback while the API does not list an area ([agent.md](agent.md#trust-zone)). Claude Code and plugin code run in the worker.
 
 ## Session sandbox and egress proxy
 

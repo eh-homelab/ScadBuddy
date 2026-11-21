@@ -19,12 +19,12 @@ skills are copied into the agent image for the in-app assistant. See
 
 ## Code
 
-- Endpoint: `agent/src/mcp/http.ts:446`, tools `agent/src/tools/projections.ts:195-210`,
+- Endpoint: `agent/src/mcp/http.ts:451`, tools `agent/src/tools/projections.ts:195-210`,
   auth `agent/src/auth/authenticate.ts:22`, tokens `agent/src/routes/mcpTokens.ts:116`,
-  approvals `agent/src/approvals/service.ts:79-96`.
+  approvals `agent/src/approvals/service.ts:80-97`.
 - Plugin: `plugins/scadbuddy/` (`.claude-plugin/plugin.json`, `skills/`, `agents/`,
   `.mcp.json`); [`plugins/CLAUDE.md`](../../plugins/CLAUDE.md). The agent image copies it at
-  `Dockerfile:205-221`.
+  `Dockerfile:214-215`.
 - UI: Settings → MCP (`frontend/src/pages/settings/sections/`, the `mcp-*` sections).
 
 ## Data
