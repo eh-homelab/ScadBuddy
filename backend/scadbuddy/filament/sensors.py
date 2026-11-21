@@ -372,6 +372,8 @@ def claim_on(conn: Conn, limit: int) -> list[m.ClaimedNotification]:
         " WHERE n.state = 'queued' AND s.id = n.sensor_id"
         " AND (NOT s.notify OR s.archived_at IS NOT NULL OR l.archived_at IS NOT NULL)"
     )
+    # Decision 46: a queued ``started`` behind a queued ``stopped`` is dropped on purpose.
+    # After a long outage the owner gets the newest notice only, never a start that is over.
     conn.execute(
         "UPDATE filament_sensor_notifications n SET state = 'failed', error = 'superseded',"
         " sent_at = now() WHERE n.state = 'queued' AND EXISTS (SELECT 1"

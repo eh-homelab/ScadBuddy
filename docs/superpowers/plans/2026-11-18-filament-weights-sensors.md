@@ -538,7 +538,9 @@ Load `frontend-design` first.
     row of a sensor whose `notify` is off, or that or its place is archived
     (`cancelled`), and every queued row of a sensor but its newest (`superseded`). Turning
     `notify` off stops what was queued, and a backlog sends one row per sensor, the
-    newest, rather than a "started" long after the alert ended.
+    newest, rather than a "started" long after the alert ended. So after a long outage a
+    queued `started` with a `stopped` behind it is dropped on purpose: the owner gets
+    "back within its limits" and no start.
 47. **A band edit judges an open alert by the last stored reading.** Editing
     `alert_above` or `alert_below` on a sensor whose alert is open reads its last stored
     value against the new band (`SensorStore.update`). Inside it, the clear hold starts at

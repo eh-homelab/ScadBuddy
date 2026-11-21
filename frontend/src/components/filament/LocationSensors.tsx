@@ -1,6 +1,7 @@
 import { ArchiveIcon, BellIcon, BellOffIcon, ChartSplineIcon, PencilIcon, PlusIcon } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
-import { ApiError } from '../../api/client'
+import { api, ApiError } from '../../api/client'
+import { useAsync } from '../../lib/useAsync'
 import {
   archiveSensor,
   createSensor,
@@ -89,7 +90,7 @@ const NOTIFY_FAILURE: Record<NonNullable<SensorNotification['error']>, string> =
 }
 
 /** The sensor's newest notification: sent, waiting to go, or failed and why. */
-function LastNotification({ notification }: { notification: SensorNotification }) {
+function LastNotification({ notification, connected }: { notification: SensorNotification; connected: boolean | undefined }) {
   const what = notification.kind === 'started' ? 'alert started' : 'alert ended'
   if (notification.state === 'failed')
     return (
@@ -117,7 +118,8 @@ function LastNotification({ notification }: { notification: SensorNotification }
       <span>
         {notification.state === 'sending' ? 'Notification sent to Bambuddy, no answer yet' : 'Notification waiting'} ({what},{' '}
         <time dateTime={notification.read_at}>{shortTime(notification.read_at)}</time>).
-        {notification.state === 'queued' && ' It goes out through Bambuddy within about a minute.'}
+        {notification.state === 'queued' && connected === true && ' It goes out through Bambuddy within about a minute.'}
+        {notification.state === 'queued' && connected === false && ' It goes out once Bambuddy is connected in Settings.'}
       </span>
     </p>
   )
@@ -371,6 +373,9 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [archiving, setArchiving] = useState<string | null>(null)
+  // A queued notice goes out only through a connected Bambuddy; until the read lands, it promises nothing.
+  const settings = useAsync(() => api.getSettings(), [])
+  const connected = settings.data === undefined ? undefined : Boolean(settings.data.bambuddy_url)
 
   async function archive(sensor: Sensor) {
     if (archiving) return
@@ -439,7 +444,7 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
                     )}
                   </span>
                 </div>
-                {sensor.last_notification && <LastNotification notification={sensor.last_notification} />}
+                {sensor.last_notification && <LastNotification notification={sensor.last_notification} connected={connected} />}
                 {open && <History sensor={sensor} />}
                 {editing === sensor.id && (
                   <EditSensor

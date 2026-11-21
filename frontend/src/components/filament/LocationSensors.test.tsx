@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { listSensors } from '../../api/filament'
+import { mockSettings } from '../../mocks/handlers'
 import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -61,11 +62,24 @@ describe('the sensors of a place', () => {
     expect(within(row).getByText(/Notification not sent \(alert ended/)).toHaveTextContent(/Give the key the Send notifications permission in Bambuddy\./)
   })
 
-  it('says a notification is waiting to go', async () => {
+  async function waiting() {
     const [shelf] = await listSensors(L.SHELF_A)
-    const waiting = { ...shelf!, last_notification: { ...shelf!.last_notification!, kind: 'stopped' as const, state: 'queued' as const, sent_at: null, channels: null } }
-    renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[waiting]} canAdd={false} onChanged={vi.fn()} />)
-    expect(screen.getByText(/Notification waiting \(alert ended/)).toHaveTextContent(/goes out through Bambuddy within about a minute/)
+    const queued = { ...shelf!, last_notification: { ...shelf!.last_notification!, kind: 'stopped' as const, state: 'queued' as const, sent_at: null, channels: null } }
+    renderPage(<LocationSensors locationId={L.SHELF_A} locationName="Place" sensors={[queued]} canAdd={false} onChanged={vi.fn()} />)
+    return screen.findByText(/Notification waiting \(alert ended/)
+  }
+
+  it('promises a queued notice within a minute when Bambuddy is connected', async () => {
+    const notice = await waiting()
+    await waitFor(() => expect(notice).toHaveTextContent(/goes out through Bambuddy within about a minute/))
+  })
+
+  it('says a queued notice waits for Bambuddy when none is connected', async () => {
+    const settings = { ...mockSettings(), bambuddy_url: '' }
+    server.use(http.get('/api/v1/settings', () => HttpResponse.json(settings)))
+    const notice = await waiting()
+    await waitFor(() => expect(notice).toHaveTextContent(/goes out once Bambuddy is connected in Settings/))
+    expect(notice).not.toHaveTextContent(/within about a minute/)
   })
 
   it.each([
