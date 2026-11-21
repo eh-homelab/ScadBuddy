@@ -48,6 +48,7 @@ def _library_state(revision: str, nudges: _Nudges | None = None) -> SimpleNamesp
     return SimpleNamespace(
         settings=SimpleNamespace(
             temporal_task_queue_library="library",
+            temporal_task_queue_bambuddy="bambuddy",
             revision=revision,
             spool_overlay_refresh_seconds=0,
         ),
@@ -136,6 +137,10 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     async def no_preview_schedule(*args: Any) -> None:
         pass
 
+    async def notify_schedule(client: object, queue: str) -> None:
+        # The sensor notifications' pass runs on the print worker's queue (#6646).
+        order.append(f"sensor-notify:{queue}")
+
     async def no_triggers() -> None:
         pass
 
@@ -144,6 +149,7 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "ensure_spool_schedule", no_preview_schedule)
+    monkeypatch.setattr(main, "ensure_sensor_notify_schedule", notify_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     stop = asyncio.Event()
@@ -155,7 +161,7 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     await asyncio.wait_for(set_up.wait(), 5)
     stop.set()
     await asyncio.wait_for(task, 5)
-    assert order == ["routed", "schedules"]
+    assert order == ["routed", "schedules", "sensor-notify:bambuddy"]
 
 
 async def test_a_restarted_worker_does_not_make_its_build_current_again(
