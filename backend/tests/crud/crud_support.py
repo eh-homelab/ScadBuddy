@@ -109,6 +109,7 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobRef, BlobStat
 from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
@@ -769,26 +770,9 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = [
-        "settings",
-        "runs",
-        "operations",
-        "events",
-        "printer-ensure",
-        "reprints",
-        "uploads",
-        "previews",
-        "copy-leases",
-        "links",
-        "lan-imports",
-        "printers",
-        "rack",
-        "spools",
-        "transfer-urls",
-        "access-codes",
-        "filament",
-        "filament-sync",
-    ]
+    # Every area the worker waits for (#6772: a list of its own here missed
+    # ``filament-pull``, and the worker never got past its wait for the API).
+    areas = sorted(PRINT_CRUD_AREAS)
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):
