@@ -35,6 +35,9 @@ const seedErrors = (): S['SyncError'][] => [
 const READS_TO_LAND = 2
 
 let lastPassAt = FIRST_PASS
+let lastPassStartedAt = FIRST_PASS
+/** The server's time of the run that is waiting for its pass (`requested_at`). */
+let requestedAt: string | null = null
 let errors = seedErrors()
 /** Status reads left before the pass asked for lands; null when none is running. */
 let running: number | null = null
@@ -48,6 +51,8 @@ const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, fi
 
 export function reset() {
   lastPassAt = FIRST_PASS
+  lastPassStartedAt = FIRST_PASS
+  requestedAt = null
   errors = seedErrors()
   running = null
   otherInstance = null
@@ -78,6 +83,8 @@ function land() {
   lastPassAt = new Date().toISOString()
   // A pass after a reset links the configured Bambuddy.
   unlinked = false
+  // The pass the run asked for starts at or after the request.
+  lastPassStartedAt = requestedAt ?? lastPassAt
   // A held-back row is never sent, so only the refused one is tried again.
   errors = errors.map((error) => (error.error === 'name_taken' ? error : { ...error, attempts: error.attempts + 1, at: lastPassAt }))
 }
@@ -98,6 +105,7 @@ function status(): S['SyncStatus'] {
     instance,
     instance_changed: instance !== null && configured() !== null && instance !== configured(),
     last_pass_at: lastPassAt,
+    last_pass_started_at: lastPassStartedAt,
     last_ok_at: lastPassAt,
     last_error: null,
     counts: { written: 4, failed: errors.length, deferred: 0, conflicts: 0, unmapped_k: 0 },
@@ -126,7 +134,8 @@ export const handlers = [
     if (reason === 'no_bambuddy') return conflict('no Bambuddy is configured', reason)
     if (reason === 'nothing_pushes') return conflict('no data type the sync pushes is set to push to Bambuddy (filament_sync; tags go with the refresh)', reason)
     running ??= READS_TO_LAND
-    return HttpResponse.json({ started: true } satisfies S['SyncRun'], { status: 202 })
+    requestedAt = new Date().toISOString()
+    return HttpResponse.json({ started: true, requested_at: requestedAt } satisfies S['SyncRun'], { status: 202 })
   }),
   http.get(`${BASE}/reset-links`, () =>
     HttpResponse.json({ instance: linksInstance(), configured_instance: configured(), counts: resetCounts() } satisfies S['LinksResetPreview']),

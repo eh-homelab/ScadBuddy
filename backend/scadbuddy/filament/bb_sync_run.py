@@ -70,6 +70,7 @@ async def run_pass(
     ``conflicts`` and ``unmapped_k`` the largest of the rounds', since every round plans
     from the one snapshot (R-T4-33). ``interval_s`` is the plans' (the stored setting),
     else the given one."""
+    started_at = datetime.now(UTC)
     settings = await load()
     empty = SyncPassResult(
         written=0,
@@ -78,6 +79,7 @@ async def run_pass(
         more=False,
         instance_changed=False,
         interval_s=interval_s,
+        started_at=started_at,
     )
     if not settings.bambuddy_url:
         result = empty.model_copy(update={"skipped": "no_bambuddy"})
@@ -189,6 +191,7 @@ async def _rounds(
         unmapped_k=unmapped_k,
         instance_changed=instance_changed,
         interval_s=interval_s,
+        started_at=empty.started_at,
     )
 
 

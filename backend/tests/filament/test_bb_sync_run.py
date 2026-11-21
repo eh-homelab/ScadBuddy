@@ -8,6 +8,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -218,6 +219,27 @@ async def test_one_pushing_type_reads_bambuddy(direction: str) -> None:
 
     assert result.skipped is None
     assert routes["spools"].called
+
+
+@respx.mock
+async def test_a_pass_records_when_it_started() -> None:
+    """#6836: the start is taken before the settings load, and every recorded pass (a
+    skip, a failed read, a worked one) carries it."""
+    sync = FakeSync(directions=FilamentSync(locations="two_way"))
+    _listings()
+    before = datetime.now(UTC)
+
+    worked = await _run(sync)
+
+    assert worked.started_at is not None
+    assert before <= worked.started_at <= datetime.now(UTC)
+    assert sync.recorded == [worked]
+
+    async def bare() -> StoredSettings:
+        return StoredSettings()
+
+    skipped = await _run(sync, load=bare)
+    assert skipped.started_at is not None and skipped.started_at >= worked.started_at
 
 
 def test_the_instance_ignores_case_and_a_trailing_slash() -> None:

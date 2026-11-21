@@ -1703,12 +1703,21 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     goes after it, so the pass it runs reads the new URL. No such workflow is nothing.
     Tests: `test_a_save_of_the_bambuddy_url_signals_the_old_instance`,
     `test_signal_running_with_a_url_signals_that_instance`.
-162. PR #6805 review (changes 137): after "Sync now" the page reads the status until
-    `last_pass_at` is later than the time the run's 202 arrived (an ISO string, compared
-    as a `Date`), not until it moves: a timer pass or an earlier nudge's pass that lands
-    first does not end the reads. The mock's pass lands at its read's time. Test:
-    `keeps reading the status when a pass from before the request lands first`. Cost: a
-    browser clock ahead of the server's by more than the pass takes reads to the limit.
+162. PR #6805 review (changes 137; reworked by #6836): after "Sync now" the page reads the
+    status until a pass has started at or after the run's `requested_at`, not until
+    `last_pass_at` moves: a timer pass or an earlier nudge's pass that started before the
+    request does not end the reads, even if it records its end after the 202. `POST
+    /filament/sync/run` answers the API's time as `requested_at` (taken before it nudges), each
+    pass sets `started_at` (the worker's clock, taken before its first read) in the
+    `SyncPassResult` that `POST /filament/sync/pass` records as `last_pass_started_at` (a new
+    column, `20261120T0715Z_filament_sync_pass_started.sql`; a result with no `started_at`,
+    from a build before it, records the record's time), and the status returns it. The browser's
+    clock is never compared: a browser ahead of the server still ends the read. Cost: the API's
+    and the print worker's clocks must agree within the pass's setup time. The mock's pass starts
+    at the request's time. Tests: `keeps reading the status when a pass from before the request
+    lands first`, `ends the read on a pass that started after the request even when the browser
+    clock is ahead`, `test_a_pass_records_when_it_started`,
+    `test_the_pass_records_when_it_started_and_the_status_returns_it`, `test_run_nudges_full`.
 163. PR #6805 review (widens 126): `NOT_NUDGED` also holds `import_bambuddy` (`POST
     /filament/bambuddy/import`, a pull) and `scan_rfid_tag` (`POST /filament/rfid/scan`,
     writes nothing): neither has anything to push. Test:
