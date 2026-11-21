@@ -51,6 +51,7 @@ from scadbuddy.bambuddy.errors import (
     upstream_detail,
 )
 from scadbuddy.bambuddy.models import (
+    AppMessageResult,
     Archive,
     ArchiveDetail,
     ArchivePhotoUpload,
@@ -278,6 +279,7 @@ Operation = Literal[
     "suppliers.list",
     "suppliers.update",
     "ha.entities",
+    "notifications.app_message",
     "spoolbuddy.cancel_write",
     "spoolbuddy.devices",
     "spoolbuddy.scan",
@@ -1059,6 +1061,26 @@ class BambuddyClient:
             except ValidationError:
                 logger.warning("a Bambuddy Home Assistant entity is not an entity; skipped")
         return entities
+
+    async def send_app_message(
+        self, *, title: str, message: str, timeout: float | None = None
+    ) -> int:
+        """``POST /api/v1/notifications/app-message`` (#6646): ``title`` and ``message``
+        through every enabled Bambuddy channel that takes "Messages from connected apps".
+        Answers how many channels took it (0: none does). Scope "Send notifications";
+        Bambuddy allows 20 a minute per key and answers 429 past that
+        (``routes/notifications.py`` ``APP_MESSAGE_LIMIT``, maziggy/bambuddy v1.3.1).
+        ``timeout`` bounds each phase of the call (connect, write, read), in seconds."""
+        response = await self._send(
+            "POST",
+            "/notifications/app-message",
+            scope=Scope.SEND_NOTIFICATIONS,
+            operation="notifications.app_message",
+            what="send a notification",
+            json={"title": title, "message": message},
+            timeout=timeout,
+        )
+        return AppMessageResult.model_validate(response.json()).channels
 
     async def spool_usage(self, *, limit: int = 200) -> list[SpoolUsage]:
         """``GET /api/v1/inventory/usage`` (#6263): BB's usage rows, one per spool per

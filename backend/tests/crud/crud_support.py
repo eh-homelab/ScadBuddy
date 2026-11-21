@@ -770,8 +770,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    # Every area the worker waits for (#6772: a list of its own here missed
-    # ``filament-pull``, and the worker never got past its wait for the API).
+    # Every area the print worker waits for, so a new one never leaves it waiting (#6855).
     areas = sorted(PRINT_CRUD_AREAS)
 
     def answer(request: httpx.Request) -> httpx.Response:
