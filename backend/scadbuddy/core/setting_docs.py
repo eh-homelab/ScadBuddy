@@ -416,6 +416,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "What a kilogram of filament costs when its spool and type name no cost, in the"
             " shop's currency, such as 24.50. Empty sets none.",
         ),
+        "filament_shopping_auto_add_empty": SettingDoc(
+            "Add empty spools to the shopping list",
+            "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
+            " shopping list, with a note that names the spool. Nothing is added while an item"
+            " for that type is still to buy. It orders nothing.",
+        ),
         "filament_burn_window_days": SettingDoc(
             "Burn window, days",
             "Days of print history the burn rate and the forecast look at. 1 to 365.",

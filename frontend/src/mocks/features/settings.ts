@@ -228,7 +228,9 @@ function putSettings(body: Record<string, unknown>) {
           ? (value ?? 'mm')
           : name === 'asset_fetch_domains'
             ? (value ?? [...fixtures.DEFAULT_ASSET_FETCH_DOMAINS])
-            : value
+            : name === 'filament_shopping_auto_add_empty'
+              ? (value ?? true)
+              : value
       continue
     }
     if (value === null && !NULLABLE.has(name)) {
