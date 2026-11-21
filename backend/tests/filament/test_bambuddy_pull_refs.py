@@ -305,6 +305,63 @@ def test_a_place_that_maps_later_is_seeded_then(pg_pool: PgPool) -> None:
     assert _link_seen(pg_pool, made)["location_id"] == 6
 
 
+def _map_place(pg_pool: PgPool, place: UUID, bb_id: int, *, archived: bool = False) -> None:
+    with pool_conn(pg_pool) as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_location_id = %s,"
+            " archived_at = CASE WHEN %s THEN now() END WHERE id = %s",
+            (bb_id, archived, place),
+        )
+
+
+def pool_conn(pg_pool: PgPool) -> Any:
+    return pg_pool.connection()
+
+
+def test_a_place_mapping_only_to_an_archived_location_is_not_seeded(pg_pool: PgPool) -> None:
+    """R-T9-3 (decision 164): an archived SB location is no mapping, so no seed."""
+    f = _filament(pg_pool)
+    made, _ = _unseen_place(pg_pool, f)
+    _map_place(pg_pool, _place(pg_pool, f, "Old shelf"), 5, archived=True)
+    report = pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    assert report.moved == 0
+    assert "location_id" not in _link_seen(pg_pool, made)
+
+
+def test_a_place_mapping_only_to_a_printers_place_is_not_seeded(pg_pool: PgPool) -> None:
+    """R-T9-3 (decision 164): a printer's place is no mapping, so no seed."""
+    f = _filament(pg_pool)
+    made, _ = _unseen_place(pg_pool, f)
+    tray = _place(pg_pool, f, "Tray", printer=_printer(pg_pool), ams=0, tray=0)
+    _map_place(pg_pool, tray, 5)
+    report = pull(f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS)
+    assert report.moved == 0
+    assert "location_id" not in _link_seen(pg_pool, made)
+
+
+def test_an_old_unmapped_seed_is_replaced_once_it_maps(pg_pool: PgPool) -> None:
+    """Decision 171: a link seeded (#6265) with a place that does not map holds no seed. BB's
+    move to a mapped place seeds it fresh and moves nothing; the next move moves the spool."""
+    f = _filament(pg_pool)
+    made, shelf = _unseen_place(pg_pool, f)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_bb_links SET bb_seen = bb_seen || '{\"location_id\": 5}'"
+            " WHERE spool_id = %s",
+            (made,),
+        )
+    places = _locations([{"id": 6, "name": "Attic"}, {"id": 7, "name": "Cellar"}])
+    first = pull(
+        f, [bb(location_id=6, updated_at=_bb_time(1))], now=NOW, pulls=ROWS, locations=places
+    )
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id == shelf
+    assert first.moved == 0
+    assert _link_seen(pg_pool, made)["location_id"] == 6
+    report = pull(f, [bb(location_id=7, updated_at=_bb_time(2))], now=NOW, pulls=ROWS)
+    assert report.moved == 1
+
+
 def test_a_bb_move_after_a_late_mapped_seed_moves_the_spool(pg_pool: PgPool) -> None:
     """R-T9-3 (decision 164): after the late seed, Bambuddy's next move moves the spool."""
     f = _filament(pg_pool)

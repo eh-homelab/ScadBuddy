@@ -1473,6 +1473,18 @@ def _sb_newer(conn: Conn, spool_id: UUID, field: str, bb_at: datetime) -> bool:
     return row is None or at != row["created_at"]
 
 
+def _place_mapped(conn: Conn, bb_location_id: int) -> bool:
+    """BB's place maps to an open SB location that is in no printer's place."""
+    return (
+        conn.execute(
+            "SELECT 1 FROM filament_locations WHERE bb_location_id = %s"
+            " AND archived_at IS NULL AND printer_id IS NULL",
+            (bb_location_id,),
+        ).fetchone()
+        is not None
+    )
+
+
 def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[str]) -> None:
     """R-T4-28 (decision 75): merge ``seen_row(bb)`` into the link's ``bb_seen``, at
     ``run.now``. A field goes in when the pull took it (``taken``) or Bambuddy's value is
@@ -1503,15 +1515,18 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
         for n, on in (("location_id", run.pulls.locations), ("archived_at", run.pulls.spools))
         if on
     }
-    if "location_id" in seeds and seen["location_id"] is not None:
-        # Decision 164: an unmapped place is no seed, so the pull that maps it seeds it.
-        mapped = conn.execute(
-            "SELECT 1 FROM filament_locations WHERE bb_location_id = %s"
-            " AND archived_at IS NULL AND printer_id IS NULL",
-            (seen["location_id"],),
-        ).fetchone()
-        if mapped is None:
+    if "location_id" in seeds:
+        if seen["location_id"] is not None and not _place_mapped(conn, seen["location_id"]):
             del seeds["location_id"]
+        held = _link_seen(conn, spool_id).get("location_id")
+        if held is not None and not _place_mapped(conn, held):
+            # Decision 171: a seed of a place that does not map is no seed. The link's
+            # seen value goes, so the first pull where BB's place maps seeds it fresh.
+            conn.execute(
+                "UPDATE filament_bb_links SET bb_seen = bb_seen - 'location_id'"
+                " WHERE spool_id = %s",
+                (spool_id,),
+            )
     # The seeds go first, so a seen value the link holds already wins over them.
     conn.execute(
         "UPDATE filament_bb_links SET bb_seen = n.seen, bb_seen_at = CASE WHEN"
@@ -1603,7 +1618,12 @@ def _follow_location(
         return False
     if not new:
         seen = _link_seen(conn, spool_id)
-        if "location_id" not in seen or seen["location_id"] == bb.location_id:
+        held = seen.get("location_id")
+        if held is None and "location_id" not in seen:
+            return False
+        if held is not None and not _place_mapped(conn, held):
+            return False  # Decision 171: an unmapped seed is absent; `_write_seen` repairs it.
+        if held == bb.location_id:
             return False
     at = as_utc(bb.updated_at) or run.now
     if _sb_newer(conn, spool_id, "location_id", at):
