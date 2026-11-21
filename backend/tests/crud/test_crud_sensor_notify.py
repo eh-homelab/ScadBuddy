@@ -145,6 +145,17 @@ async def test_the_worker_claims_and_ends_a_row(store: SettingsStore, crud: Crud
 
 
 @pg
+async def test_the_worker_hands_an_untried_row_back(store: SettingsStore, crud: CrudClient) -> None:
+    _alerting(store)
+    remote = RemoteSensorNotifications(crud)
+    (claimed,) = await remote.claim(10)
+    await remote.end(claimed.id, NotificationEnd(requeue=True))
+    assert _state(store) == ("queued", None, None)
+    (again,) = await remote.claim(10)
+    assert again.id == claimed.id
+
+
+@pg
 async def test_a_claim_sent_again_answers_the_same_rows(
     store: SettingsStore, crud: CrudClient
 ) -> None:
@@ -161,5 +172,5 @@ async def test_the_bodies_are_bounded(crud: CrudClient) -> None:
         await crud.request("POST", CLAIM, json={"limit": 1000}, idempotency_key="k2")
     assert big.value.status == 422
     with pytest.raises(CrudRefusedError) as only_the_claim:
-        await crud.request("POST", _end(uuid4()), json={"error": "interrupted"})
+        await crud.request("POST", _end(uuid4()), json={"error": "cancelled"})
     assert only_the_claim.value.status == 422

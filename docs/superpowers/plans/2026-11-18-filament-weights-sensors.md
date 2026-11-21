@@ -487,7 +487,8 @@ Load `frontend-design` first.
     is stored when it closes the alert, so a settled value closes it at its first reading
     past the hold, before `SAME_VALUE_EVERY`. The AMS stores each changed `humidity_raw`,
     so 20, 21, 20, 21 around a limit of 20 queued a row each time before; now it queues
-    one "started" (`test_a_flapping_reading_sends_at_most_one_start`).
+    one "started" (`test_a_flapping_reading_sends_at_most_one_start`). Editing the band
+    judges an open alert by the last stored reading too (Decision 47).
 40. **The print worker sends; the CRUD service makes no Bambuddy call for it.** The
     controller's ruling for #6855, for the reason #6772 moves the pull's reads: the CRUD
     service holds the database and calls no outside service for work that can run
@@ -538,3 +539,21 @@ Load `frontend-design` first.
     (`cancelled`), and every queued row of a sensor but its newest (`superseded`). Turning
     `notify` off stops what was queued, and a backlog sends one row per sensor, the
     newest, rather than a "started" long after the alert ended.
+47. **A band edit judges an open alert by the last stored reading.** Editing
+    `alert_above` or `alert_below` on a sensor whose alert is open reads its last stored
+    value against the new band (`SensorStore.update`). Inside it, the clear hold starts at
+    that reading's time (`alert_clear_since`, kept if it was already set), so the next
+    reading at least 10 minutes later closes the alert and queues "stopped" without
+    another 10-minute wait; outside it, the hold starts over. The edit itself queues
+    nothing and never opens an alert: both stay a stored reading's (Decision 39; test
+    `test_a_band_edit_starts_the_clear_hold_of_an_open_alert`).
+48. **A pass never leaves a claimed row to be ended `interrupted` unsent.** The pass
+    sends each row with a 5-second timeout per phase (`SEND_PHASE_TIMEOUT`, at most 15 s a
+    send), and starts no send after 75 s (`PASS_BUDGET`); the activity's 2-minute timeout
+    holds that, one send and the ends. Rows it did not reach are ended with
+    `requeue` (`NotificationEnd.requeue`, `end_on`): `queued` again, to be claimed by the
+    next pass. A row it did try stays at most once: a read or write timeout, after which
+    the request may have been delivered, is ended `interrupted` ("may have gone out", never
+    sent again), a connect timeout `unavailable` (nothing was sent). Tests
+    `test_a_slow_bambuddy_hands_the_unsent_rows_back` and
+    `test_a_timeout_after_the_request_went_is_interrupted`.

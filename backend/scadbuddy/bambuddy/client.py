@@ -1037,12 +1037,15 @@ class BambuddyClient:
                 logger.warning("a Bambuddy Home Assistant entity is not an entity; skipped")
         return entities
 
-    async def send_app_message(self, *, title: str, message: str) -> int:
+    async def send_app_message(
+        self, *, title: str, message: str, timeout: float | None = None
+    ) -> int:
         """``POST /api/v1/notifications/app-message`` (#6646): ``title`` and ``message``
         through every enabled Bambuddy channel that takes "Messages from connected apps".
         Answers how many channels took it (0: none does). Scope "Send notifications";
         Bambuddy allows 20 a minute per key and answers 429 past that
-        (``routes/notifications.py`` ``APP_MESSAGE_LIMIT``, maziggy/bambuddy v1.3.1)."""
+        (``routes/notifications.py`` ``APP_MESSAGE_LIMIT``, maziggy/bambuddy v1.3.1).
+        ``timeout`` bounds each phase of the call (connect, write, read), in seconds."""
         response = await self._send(
             "POST",
             "/notifications/app-message",
@@ -1050,6 +1053,7 @@ class BambuddyClient:
             operation="notifications.app_message",
             what="send a notification",
             json={"title": title, "message": message},
+            timeout=timeout,
         )
         return AppMessageResult.model_validate(response.json()).channels
 

@@ -156,6 +156,34 @@ def test_a_changed_band_is_judged_at_the_next_stored_reading(pg_pool: PgPool) ->
     assert _kinds(pg_pool, sensor) == ["started"]
 
 
+def test_a_band_edit_starts_the_clear_hold_of_an_open_alert(pg_pool: PgPool) -> None:
+    sensor = _sensor(pg_pool, alert_above=50, notify=True)
+    store = SensorStore(pg_pool)
+    _record(pg_pool, sensor, 60.0, T0)
+    store.update(sensor, SensorPatch(alert_above=70), actor="ann")
+    assert _kinds(pg_pool, sensor) == ["started"]
+    _record(pg_pool, sensor, 65.0, T0 + CLEAR)
+    assert _kinds(pg_pool, sensor) == ["started", "stopped"]
+
+
+def test_a_band_edit_that_leaves_the_alert_outside_keeps_it_open(pg_pool: PgPool) -> None:
+    sensor = _sensor(pg_pool, alert_above=50, notify=True)
+    store = SensorStore(pg_pool)
+    _record(pg_pool, sensor, 60.0, T0)
+    store.update(sensor, SensorPatch(alert_above=55), actor="ann")
+    _record(pg_pool, sensor, 40.0, T0 + CLEAR)
+    assert _kinds(pg_pool, sensor) == ["started"]
+
+
+def test_a_handed_back_row_is_queued_again(pg_pool: PgPool) -> None:
+    sensor = _sensor(pg_pool, alert_above=50, notify=True)
+    _record(pg_pool, sensor, 60.0, T0)
+    (row,) = _claim(pg_pool)
+    _end(pg_pool, row.id, NotificationEnd(requeue=True))
+    assert [r["state"] for r in _rows(pg_pool, sensor)] == ["queued"]
+    assert [r.id for r in _claim(pg_pool)] == [row.id]
+
+
 def test_the_sensor_shows_its_last_notification(pg_pool: PgPool) -> None:
     sensor = _sensor(pg_pool, alert_above=50, notify=True)
     store = SensorStore(pg_pool)

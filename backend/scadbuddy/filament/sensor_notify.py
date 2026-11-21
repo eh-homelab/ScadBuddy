@@ -1,5 +1,5 @@
 """A location sensor's alert notifications, sent by the print worker (#6646; plan
-`docs/superpowers/plans/2026-11-18-filament-weights-sensors.md` Decisions 29-46).
+`docs/superpowers/plans/2026-11-18-filament-weights-sensors.md` Decisions 29-48).
 
 `sensors.SensorStore.record_on` queues a row of `filament_sensor_notifications`, with its
 title and message, when a stored reading opens or closes the alert of a sensor with
@@ -20,11 +20,13 @@ so it is sent at most once: a failed send is recorded with a fixed code
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+import httpx
 from temporalio import activity
 
 from scadbuddy.bambuddy.client import client_for
@@ -46,6 +48,16 @@ SENSOR_NOTIFY_ACTIVITY = "sensor_notify_send"
 #: (`BambuddyClient.send_app_message`), and a pass runs every minute.
 PASS_LIMIT = 10
 
+#: Each phase (connect, write, read) of one send, in seconds: one send takes at most three
+#: of them, so 15 s, not the client's 30 s per phase.
+SEND_PHASE_TIMEOUT = 5.0
+
+#: The pass starts no send after this many seconds. The workflow's `SEND_TIMEOUT` (120 s)
+#: must outlast it plus one send (at most 3 x `SEND_PHASE_TIMEOUT`) and the ends, so the
+#: activity is never cancelled while a row is ``sending``: a row it did not reach goes
+#: back to ``queued`` instead of being ended ``interrupted`` 10 minutes later.
+PASS_BUDGET = 75.0
+
 
 class SensorNotificationsApi(Protocol):
     """SB's side of the send: claim queued rows, end a claimed one."""
@@ -64,9 +76,13 @@ class DeliveryReport:
 def failure_of(error: Exception) -> SendError:
     """The fixed code a failed send records; never Bambuddy's text. A 401 is the key
     refused (``unauthorized``), a 403 the key's missing permission (``scope``), a 404 a
-    Bambuddy older than 1.3.1 (``not_found``)."""
+    Bambuddy older than 1.3.1 (``not_found``). A read or write timeout is ``interrupted``
+    (it may have gone out, and is never sent again); a connect timeout is ``unavailable``."""
     if not isinstance(error, ApiError):
         return "internal"
+    if isinstance(error.__cause__, (httpx.ReadTimeout, httpx.WriteTimeout)):
+        # The request was (at least in part) sent: the message may have gone out.
+        return "interrupted"
     status = error.extensions.get("bambuddy_status")
     if error.type == SCOPE_PROBLEM:
         return "unauthorized" if status == 401 else "scope"
@@ -86,11 +102,14 @@ async def deliver_pending(
     load: Callable[[], Awaitable[StoredSettings]],
     *,
     limit: int = PASS_LIMIT,
+    budget: float = PASS_BUDGET,
+    phase_timeout: float = SEND_PHASE_TIMEOUT,
 ) -> DeliveryReport:
     """Send up to ``limit`` queued notifications through Bambuddy. With no Bambuddy URL
     nothing is claimed: the rows wait for one. A row whose send fails is ended ``failed``
     with its code; the others are still sent. A failed end (SB out of reach) raises: the
-    rows claimed and not ended are ended ``interrupted`` by a later claim."""
+    rows claimed and not ended are ended ``interrupted`` by a later claim. The pass starts no
+    send after ``budget`` seconds; the rows it did not try go back to ``queued``."""
     settings = await load()
     if not settings.bambuddy_url:
         return DeliveryReport(sent=0, failed=0)
@@ -98,10 +117,16 @@ async def deliver_pending(
     if not rows:
         return DeliveryReport(sent=0, failed=0)
     sent = failed = 0
+    deadline = time.monotonic() + budget
     async with client_for(settings) as client:
         for row in rows:
+            if time.monotonic() >= deadline:
+                await api.end(row.id, NotificationEnd(requeue=True))
+                continue
             try:
-                channels = await client.send_app_message(title=row.title, message=row.message)
+                channels = await client.send_app_message(
+                    title=row.title, message=row.message, timeout=phase_timeout
+                )
                 end = (
                     NotificationEnd(channels=channels)
                     if channels > 0

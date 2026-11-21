@@ -125,7 +125,8 @@ class SensorStore:
                 if patch.location_id is not None:
                     self._live_place(conn, patch.location_id)
                 stored = conn.execute(
-                    "SELECT alert_below, alert_above FROM filament_location_sensors"
+                    "SELECT alert_below, alert_above, alert_open, alert_clear_since, last_value,"
+                    " last_at FROM filament_location_sensors"
                     " WHERE id = %s AND archived_at IS NULL FOR UPDATE",
                     (sensor_id,),
                 ).fetchone()
@@ -135,6 +136,18 @@ class SensorStore:
                 below, above = merged["alert_below"], merged["alert_above"]
                 if below is not None and above is not None and below >= above:
                     raise SensorBandError()
+                if (
+                    stored["alert_open"]
+                    and stored["last_value"] is not None
+                    and ("alert_below" in sent or "alert_above" in sent)
+                ):
+                    # A band edit judges an open alert by the last stored reading (Decision
+                    # 47): inside the new band, its clear hold starts at that reading;
+                    # outside, the hold starts over. The close is the next reading's.
+                    inside = not outside_band(stored["last_value"], below, above)
+                    since = (stored["alert_clear_since"] or stored["last_at"]) if inside else None
+                    sets += ", alert_clear_since = %s"
+                    values.append(since)
                 row = conn.execute(
                     f"UPDATE filament_location_sensors SET {sets}"
                     f" WHERE id = %s AND archived_at IS NULL RETURNING {_COLUMNS}",
@@ -357,8 +370,16 @@ def claim_on(conn: Conn, limit: int) -> list[m.ClaimedNotification]:
 
 
 def end_on(conn: Conn, row_id: UUID, end: m.NotificationEnd) -> None:
-    """A claimed row ended ``sent`` or ``failed``; natural: a row no longer ``sending`` (an
+    """A claimed row ended ``sent`` or ``failed``, or handed back (``requeue``: the pass
+    never tried it, so it is ``queued`` again); natural: a row no longer ``sending`` (an
     end sent again, or one a later claim ended ``interrupted``) is left as it is."""
+    if end.requeue:
+        conn.execute(
+            "UPDATE filament_sensor_notifications SET state = 'queued', claimed_at = NULL"
+            " WHERE id = %s AND state = 'sending'",
+            (row_id,),
+        )
+        return
     conn.execute(
         "UPDATE filament_sensor_notifications SET state = %s, channels = %s, error = %s,"
         " sent_at = now() WHERE id = %s AND state = 'sending'",

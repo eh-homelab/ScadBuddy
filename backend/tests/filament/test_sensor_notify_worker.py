@@ -6,7 +6,9 @@ in-process print worker runs it; the CRUD routes are `tests/crud/test_crud_senso
 
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -15,6 +17,9 @@ import pytest
 import respx
 
 from scadbuddy.filament import sensor_notify
+from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.models import LocationCreate, LocationKind, SensorIn
 from scadbuddy.filament.sensors import PoolSensorNotifications, SensorStore
 from scadbuddy.library.settings_store import StoredSettings
 from tests.conftest import PgPool
@@ -131,3 +136,72 @@ async def test_the_pull_no_longer_sends(pg_pool: PgPool) -> None:
         assert await scheduled_pull(f, lambda: SETTINGS, lambda: nothing) == "skipped"
     assert send.call_count == 0
     assert _rows(pg_pool, sensor)[0]["state"] == "queued"
+
+
+def _sensor_at(pool: PgPool, place_name: str) -> UUID:
+    kinds = CatalogStore(pool).list("location-kinds")
+    kind = next(r.id for r in kinds if isinstance(r, LocationKind) and r.name == "Shelf")
+    place = LocationStore(pool).create(LocationCreate(name=place_name, kind_id=kind)).id
+    body = SensorIn.model_validate(
+        {
+            "location_id": place,
+            "source": "home_assistant",
+            "kind": "humidity",
+            "entity_id": f"sensor.{place_name.replace(' ', '_')}",
+            "name": place_name,
+            "unit": "%",
+            "alert_above": 50,
+            "notify": True,
+        }
+    )
+    return SensorStore(pool).create(body, actor="ann").id
+
+
+async def test_a_slow_bambuddy_hands_the_unsent_rows_back(pg_pool: PgPool) -> None:
+    """The pass starts no send past its budget: the rows it never tried are ``queued``
+    again, not left ``sending`` for a later claim to end ``interrupted``."""
+    api = PoolSensorNotifications(pg_pool)
+    sensors = []
+    for n in range(4):
+        sensor = _sensor_at(pg_pool, f"Box {n}")
+        _record(pg_pool, sensor, 60.0, T0 + timedelta(minutes=n))
+        sensors.append(sensor)
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.3)
+        return httpx.Response(200, json={"channels": 1})
+
+    with respx.mock() as router:
+        send = router.post(SEND).mock(side_effect=slow)
+        report = await sensor_notify.deliver_pending(api, _settings, budget=0.5)
+    assert (report.sent, report.failed) == (2, 0)
+    assert send.call_count == 2
+    states = [_rows(pg_pool, s)[0] for s in sensors]
+    assert [r["state"] for r in states] == ["sent", "sent", "queued", "queued"]
+    assert all(r["error"] is None for r in states)
+    with respx.mock() as router:
+        router.post(SEND).respond(json={"channels": 1})
+        again = await sensor_notify.deliver_pending(api, _settings)
+    assert (again.sent, again.failed) == (2, 0)
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (httpx.ReadTimeout("slow"), "interrupted"),
+        (httpx.WriteTimeout("slow"), "interrupted"),
+        (httpx.ConnectTimeout("slow"), "unavailable"),
+    ],
+)
+async def test_a_timeout_after_the_request_went_is_interrupted(
+    pg_pool: PgPool, error: httpx.TimeoutException, code: str
+) -> None:
+    sensor = _sensor(pg_pool, alert_above=50, notify=True)
+    _record(pg_pool, sensor, 60.0, T0)
+    with respx.mock() as router:
+        send = router.post(SEND).mock(side_effect=error)
+        report = await sensor_notify.deliver_pending(PoolSensorNotifications(pg_pool), _settings)
+    assert (report.sent, report.failed) == (0, 1)
+    assert send.call_count == 1
+    (row,) = _rows(pg_pool, sensor)
+    assert (row["state"], row["error"]) == ("failed", code)

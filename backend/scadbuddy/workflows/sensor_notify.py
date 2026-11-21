@@ -37,9 +37,11 @@ SENSOR_NOTIFY_WORKFLOW = "SensorNotifyPass"
 SENSOR_NOTIFY_SCHEDULE = "scadbuddy-sensor-notify"
 #: How often a pass runs: Bambuddy takes 20 app messages a minute, a pass sends 10.
 INTERVAL = timedelta(minutes=1)
-#: One pass: a claim, up to 10 Bambuddy calls (each bounded by the client's timeout) and
-#: their ends. Under `sensors.INTERRUPTED_AFTER`, so a live send is never ended
-#: ``interrupted``.
+#: One pass: a claim, then sends. The pass starts none after `sensor_notify.PASS_BUDGET`
+#: (75 s), and one send takes at most 3 x `sensor_notify.SEND_PHASE_TIMEOUT` (15 s), so the
+#: sends end by 90 s and the rest of the 2 minutes is for the ends; the rows it did not
+#: try go back to ``queued``. Under `sensors.INTERRUPTED_AFTER`, so a live send is never
+#: ended ``interrupted``.
 SEND_TIMEOUT = timedelta(minutes=2)
 #: A run that cannot finish (an old build that lacks the type) still ends, and the
 #: Schedule's overlap SKIP stops holding the later ticks back.

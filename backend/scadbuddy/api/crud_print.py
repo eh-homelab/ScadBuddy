@@ -1986,8 +1986,9 @@ async def claim_sensor_notifications(
     status_code=status.HTTP_204_NO_CONTENT,
     description=(
         "A claimed notification ended `sent` (`channels`, how many Bambuddy channels took"
-        " it) or `failed` (`error`, a fixed code of the send). A row no longer `sending` is"
-        " left as it is."
+        " it), `failed` (`error`, a fixed code of the send) or handed back (`requeue`: the"
+        " pass never tried it, so it is `queued` again). A row no longer `sending` is left"
+        " as it is."
     ),
 )
 async def end_sensor_notification(

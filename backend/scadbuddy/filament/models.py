@@ -470,6 +470,7 @@ SendError = Literal[
     "no_channel",
     "not_configured",
     "internal",
+    "interrupted",
 ]
 
 #: Why a notification was not delivered: a send's `SendError`, or what a claim decided
@@ -516,9 +517,15 @@ class NotificationEnd(_In):
 
     channels: int | None = Field(default=None, ge=0)
     error: SendError | None = None
+    #: Hand a claimed row back to ``queued``: the pass ran out of time before it tried it.
+    requeue: Literal[True] | None = None
 
     @model_validator(mode="after")
     def _one(self) -> NotificationEnd:
+        if self.requeue:
+            if self.error is not None or self.channels is not None:
+                raise ValueError("a row handed back has neither channels nor error")
+            return self
         if self.error is None and not self.channels:
             raise ValueError("a sent message needs channels above 0; else give error")
         if self.error not in (None, "no_channel") and self.channels is not None:
