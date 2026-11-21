@@ -289,7 +289,10 @@ same way, `vite.config.ts`).
   `instance_changed` it offers "Reset Bambuddy links" (#6773, `ResetLinks`: a dry run's
   counts in a confirm dialog, then `resetSyncLinks` with the dry run's `instance`; the mock's
   `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the
-  Bambuddy links?" and the reset deletes nothing, #6845, `linkOtherBambuddy(id, { same: true })`). It also has the "RFID override mode" switch with "Apply now", #6264;
+  Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
+  `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
+  says why, `loseSameBambuddy`; a dry run that cannot read Bambuddy notes it and offers the
+  delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264;
   the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:

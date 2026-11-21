@@ -188,19 +188,25 @@ export type LinksResetDone = Schemas['LinksResetDone']
 
 /**
  * #6773 — what a reset of the Bambuddy links would delete, and the instance they belong to.
- * #6845 — `same_bambuddy`: the Bambuddy set up now is the links' own, so a reset keeps them.
+ * #6845 — `same_bambuddy`: the Bambuddy set up now is the links' own, so a reset with `expectKept`
+ * keeps them. `bambuddy_unreadable`: that Bambuddy could not be read, so only the delete is offered.
  * Reads ScadBuddy and the configured Bambuddy's spools.
  */
 export const getResetPreview = () => request<LinksResetPreview>(`${BASE}/sync/reset-links`)
 
 /**
  * #6773 — deletes the Bambuddy links of `confirmInstance` (the preview's `instance`), then a full pass
- * links the configured Bambuddy afresh. #6845 — when that Bambuddy is the links' own (`kept`), it
- * deletes nothing and the links now belong to it. 409 with `code` `confirm_mismatch`, `same_instance` or
- * `nothing_to_reset` when it deletes nothing.
+ * links the configured Bambuddy afresh. #6845 — `expectKept` is the preview's `same_bambuddy`: true
+ * reads that Bambuddy again and, while it is still the links' own, deletes nothing (`kept`); false is
+ * the confirmed delete, which reads no Bambuddy. 409 with `code` `confirm_mismatch`, `same_instance`,
+ * `nothing_to_reset` or `proof_changed` (the Bambuddy could not be read or changed since the preview)
+ * when it deletes nothing.
  */
-export const resetSyncLinks = (confirmInstance: string) =>
-  request<LinksResetDone>(`${BASE}/sync/reset-links`, json('POST', { confirm_instance: confirmInstance }))
+export const resetSyncLinks = (confirmInstance: string, expectKept: boolean) =>
+  request<LinksResetDone>(
+    `${BASE}/sync/reset-links`,
+    json('POST', { confirm_instance: confirmInstance, expect_kept: expectKept }),
+  )
 
 /**
  * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with

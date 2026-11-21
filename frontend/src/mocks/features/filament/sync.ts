@@ -22,7 +22,10 @@ type S = components['schemas']
  * change of the Bambuddy URL. The reset checks `confirm_instance` as the server does, deletes the
  * links, the intents and the error rows, and asks for a pass that lands as "Sync now"'s does.
  * #6845 — with `{ same: true }` the configured Bambuddy is the links' own at a new address
- * (`same_bambuddy`): the reset deletes nothing and the links belong to the configured one.
+ * (`same_bambuddy`): a reset with `expect_kept` deletes nothing and the links belong to the
+ * configured one; `loseSameBambuddy` makes it another before the reset (409 `proof_changed`), and
+ * `{ unreadable: true }` a Bambuddy the dry run cannot read (`bambuddy_unreadable`). A reset
+ * without `expect_kept` deletes, as the server's does.
  */
 
 const BASE = '/api/v1/filament/sync'
@@ -49,6 +52,8 @@ let otherInstance: string | null = null
 let unlinked = false
 /** #6845 — the configured Bambuddy holds the linked spools: a reset keeps the links. */
 let sameBambuddy = false
+/** #6845 — the configured Bambuddy cannot be read. */
+let unreadable = false
 
 /** What the seed's links number when they belong to another Bambuddy. */
 const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, intents: 1, ignored: 0 }
@@ -62,16 +67,27 @@ export function reset() {
   otherInstance = null
   unlinked = false
   sameBambuddy = false
+  unreadable = false
 }
 
 /**
  * #6773 — the links now belong to `instance`, not the configured Bambuddy, so the sync is stopped.
- * #6845 — `same`: the configured Bambuddy is that one at a new address, so a reset keeps the links.
+ * #6845 — `same`: the configured Bambuddy is that one at a new address, so a reset keeps the links;
+ * `unreadable`: the configured Bambuddy cannot be read.
  */
-export function linkOtherBambuddy(instance = '0ld0ld0ld0ld', { same = false }: { same?: boolean } = {}) {
+export function linkOtherBambuddy(
+  instance = '0ld0ld0ld0ld',
+  { same = false, unreadable: down = false }: { same?: boolean; unreadable?: boolean } = {},
+) {
   otherInstance = instance
   unlinked = false
-  sameBambuddy = same
+  sameBambuddy = same && !down
+  unreadable = down
+}
+
+/** #6845 — the configured Bambuddy changed after the dry run: it no longer proves the links' own. */
+export function loseSameBambuddy() {
+  sameBambuddy = false
 }
 
 /** The configured Bambuddy's instance, as `instance_for` would name it (the mock uses the URL). */
@@ -152,6 +168,7 @@ export const handlers = [
       configured_instance: configured(),
       counts: resetCounts(),
       same_bambuddy: sameBambuddy && otherInstance !== null,
+      bambuddy_unreadable: unreadable,
     } satisfies S['LinksResetPreview']),
   ),
   http.post(`${BASE}/reset-links`, async ({ request }) => {
@@ -160,7 +177,13 @@ export const handlers = [
     if (instance === null) return conflict('no Bambuddy instance is recorded, so no link belongs to one', 'nothing_to_reset')
     if (instance === configured()) return conflict('the links belong to the configured Bambuddy; nothing to reset', 'same_instance')
     if (body.confirm_instance !== instance) return conflict('confirm_instance is not the instance the links belong to', 'confirm_mismatch')
-    if (sameBambuddy) {
+    if (body.expect_kept) {
+      if (!sameBambuddy) {
+        return conflict(
+          'the configured Bambuddy could not be read, or is no longer proven the one the links were made against; nothing was changed, so read the dry run again',
+          'proof_changed',
+        )
+      }
       otherInstance = null
       sameBambuddy = false
       running ??= READS_TO_LAND

@@ -267,6 +267,8 @@ function resetProblem(cause: unknown): string {
       return 'The links already belong to the Bambuddy that is set up now. Nothing was deleted.'
     case 'nothing_to_reset':
       return 'There are no Bambuddy links to reset.'
+    case 'proof_changed':
+      return 'The Bambuddy set up now is no longer proven to be the same one. Nothing was deleted. Read what a reset now deletes before you reset.'
     default:
       return cause.detail
   }
@@ -279,7 +281,10 @@ function resetProblem(cause: unknown): string {
  * that dry run read, so a stale page cannot reset another Bambuddy's links. No ScadBuddy row is
  * deleted. Then a full pass links the new Bambuddy afresh.
  * #6845 — when the dry run says `same_bambuddy` (the Bambuddy set up now holds the linked spools as
- * ScadBuddy last saw them), the reset deletes nothing and keeps every link, and the dialog says so.
+ * ScadBuddy last saw them), the reset sends `expect_kept`, deletes nothing and keeps every link, and the
+ * dialog says so. When the server can no longer prove it (`proof_changed`, R-6845-6), nothing is deleted:
+ * the dialog reads the dry run again and says why. A Bambuddy the dry run could not read
+ * (`bambuddy_unreadable`) gets the delete, with a note.
  */
 function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
   const [opening, setOpening] = useState(false)
@@ -304,11 +309,18 @@ function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
     setResetting(true)
     setProblem(null)
     try {
-      const done = await resetSyncLinks(preview.instance)
+      const done = await resetSyncLinks(preview.instance, preview.same_bambuddy)
       setPreview(null)
       onReset(done)
     } catch (cause) {
       setProblem(resetProblem(cause))
+      if (cause instanceof ApiError && cause.status === 409 && cause.problem.code === 'proof_changed') {
+        try {
+          setPreview(await getResetPreview())
+        } catch {
+          // The message already says nothing was deleted; the old counts stay shown.
+        }
+      }
     } finally {
       setResetting(false)
     }
@@ -348,6 +360,12 @@ function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
           </AlertDialogHeader>
           {preview && !same && (
             <div className="flex flex-col gap-2 text-sm">
+              {preview.bambuddy_unreadable && (
+                <p className="text-warn">
+                  The Bambuddy set up now could not be read, so ScadBuddy cannot tell whether it is the same one at a new
+                  address. Reset only if it is another Bambuddy, or close this and try again later.
+                </p>
+              )}
               {rows.length > 0 ? (
                 <>
                   <p>This deletes:</p>

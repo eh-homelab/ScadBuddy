@@ -30,6 +30,7 @@ import dataclasses
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import Annotated, Any, cast
 from uuid import UUID
 
@@ -1880,15 +1881,24 @@ def _configured(url: str | None) -> str | None:
     return instance_for(url) if url else None
 
 
-async def _listing(settings: StoredSettings) -> Listing:
+async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
     """The configured Bambuddy's spools, archived ones too, parsed one by one, for the
-    proof that it is the links' own Bambuddy (#6845 R-6845-4); ``None`` with no Bambuddy
-    configured. Bambuddy's errors are its client's: the reset writes nothing then."""
+    proof that it is the links' own Bambuddy (#6845 R-6845-4), and whether it could not
+    be read. ``None`` with no Bambuddy configured, or when the read failed: then the
+    preview offers the delete only and a reset that expects the links kept is refused
+    (Decision 198)."""
     if not settings.bambuddy_url:
-        return None
-    async with client_for(settings) as client:
-        rows = await client.spool_rows(include_archived=True)
-    return parse_rows(rows)
+        return None, False
+    try:
+        async with client_for(settings) as client:
+            rows = await client.spool_rows(include_archived=True)
+    except ApiError as failed:
+        logger.warning(
+            "the configured Bambuddy's spools could not be read for the links' proof",
+            extra={"status": failed.status},
+        )
+        return None, True
+    return parse_rows(rows), False
 
 
 @router.get(
@@ -1905,12 +1915,14 @@ async def _listing(settings: StoredSettings) -> Listing:
         "hashes and seen copy), the open create `intents`, the `errors` rows and the "
         "Bambuddy spools the pull `ignored`. `same_bambuddy` (#6845) is true when the "
         "configured Bambuddy is the one the links were made against: it holds every linked "
-        "spool, none older than ScadBuddy last saw it and at least one exactly as then. A "
-        "reset then deletes nothing and keeps every link; when it is false a reset deletes "
-        "the counts, and the next passes link again only what the pull matches (a spool by "
-        "its RFID tag, a supplier, location or insert type by its name), so every untagged "
+        "spool, none older than ScadBuddy last saw it, at least one exactly as then, and at "
+        "least half the links have a time on both sides. A reset with `expect_kept` true "
+        "then deletes nothing and keeps every link; when it is false a reset deletes the "
+        "counts, and the next passes link again only what the pull matches (a spool by its "
+        "RFID tag, a supplier, location or insert type by its name), so every untagged "
         "spool is made again on the side its direction sends it to. Reads ScadBuddy and "
-        "the configured Bambuddy's spools (`GET`); Bambuddy's errors as they come. The "
+        "the configured Bambuddy's spools (`GET`). When Bambuddy cannot be read the answer "
+        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. The "
         "counts are approximate: they are read without a lock, so a pass that runs "
         "meanwhile can change them. The answer of the `POST` gives the counts it deleted."
     ),
@@ -1919,9 +1931,15 @@ async def preview_filament_sync_reset(
     filament: FilamentDep, store: SettingsStoreDep
 ) -> LinksResetPreview:
     settings = await asyncio.to_thread(store.load)
-    listing = await _listing(settings)
+    listing, unreadable = await _listing(settings)
     return await asyncio.to_thread(
-        reset_preview, filament, _configured(settings.bambuddy_url), listing
+        partial(
+            reset_preview,
+            filament,
+            _configured(settings.bambuddy_url),
+            listing,
+            unreadable=unreadable,
+        )
     )
 
 
@@ -1930,11 +1948,14 @@ async def preview_filament_sync_reset(
     response_model=LinksResetDone,
     summary="Reset the Bambuddy links after the Bambuddy URL changed",
     description=(
-        "First reads the configured Bambuddy's spools (`GET`; Bambuddy's errors as they "
-        "come, and nothing is written). When that Bambuddy is the one the links were made "
-        "against (the dry run's `same_bambuddy`, #6845), it deletes nothing: the links, "
-        "intents and error rows stay, they now belong to the configured Bambuddy, and the "
-        "answer has `kept` true and zero counts. Else it deletes, in one transaction, what "
+        "`expect_kept` is the dry run's `same_bambuddy` (#6845). When it is true, it first "
+        "reads the configured Bambuddy's spools (`GET`) and checks again that it is the "
+        "one the links were made against; then it deletes nothing: the links, intents and "
+        "error rows stay, they now belong to the configured Bambuddy, and the answer has "
+        "`kept` true and zero counts. When that read fails or no longer proves it, the "
+        "answer is 409 `proof_changed` and nothing is written: read the dry run again. "
+        "When `expect_kept` is false (the default), the person confirmed the delete: it "
+        "reads no Bambuddy and deletes, in one transaction, what "
         "the sync keeps of the Bambuddy the links belong to (#6773): every spool link, the "
         "supplier, location, insert type and spool type links (their Bambuddy ids, hashes "
         "and seen copies), the open create intents, the error rows, the Bambuddy spools "
@@ -1948,27 +1969,35 @@ async def preview_filament_sync_reset(
         "/filament/sync/reset-links` `instance`), so a stale page cannot reset another "
         "Bambuddy's links. 409 with `code` `confirm_mismatch` when it is not, "
         "`same_instance` when the links belong to the configured Bambuddy (nothing to "
-        "reset), and `nothing_to_reset` when no instance is recorded."
+        "reset), `nothing_to_reset` when no instance is recorded, and `proof_changed` as "
+        "above."
     ),
 )
 async def reset_filament_sync_links(
     filament: FilamentDep, store: SettingsStoreDep, state: StateDep, body: LinksResetRequest
 ) -> LinksResetDone:
     settings = await asyncio.to_thread(store.load)
-    listing = await _listing(settings)
+    listing = (await _listing(settings))[0] if body.expect_kept else None
     try:
         done = await asyncio.to_thread(
-            reset_links,
-            filament,
-            body.confirm_instance,
-            _configured(settings.bambuddy_url),
-            listing,
+            partial(
+                reset_links,
+                filament,
+                body.confirm_instance,
+                _configured(settings.bambuddy_url),
+                listing,
+                expect_kept=body.expect_kept,
+            )
         )
     except ResetRefusedError as refused:
         detail = {
             "nothing_to_reset": "no Bambuddy instance is recorded, so no link belongs to one",
             "same_instance": "the links belong to the configured Bambuddy; nothing to reset",
             "confirm_mismatch": "confirm_instance is not the instance the links belong to",
+            "proof_changed": (
+                "the configured Bambuddy could not be read, or is no longer proven the one"
+                " the links were made against; nothing was changed, so read the dry run again"
+            ),
         }[refused.code]
         raise ApiError(status.HTTP_409_CONFLICT, detail, code=refused.code) from None
     state.filament_sync.nudge_soon(full=True)

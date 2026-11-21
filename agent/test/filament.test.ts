@@ -890,8 +890,26 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     expect(() => t.parse({})).toThrow()
     const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld' }), ctx('outward'))
     expect(result.isError).toBeFalsy()
-    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld' })
+    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld', expect_kept: false })
     expect(firstText(result)).toEqual({ instance: '0ld0ld0ld0ld', kept: false, deleted })
+  })
+
+  it('sends expect_kept, and says a 409 proof_changed deleted nothing (#6845 R-6845-6)', async () => {
+    let body: unknown
+    const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+    server.use(
+      http.post(`${SYNC}/reset-links`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ instance: '0ld0ld0ld0ld', kept: true, deleted: none })
+      }),
+    )
+    const t = tool('filament_sync_reset_links')
+    const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld', expect_kept: true }), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld', expect_kept: true })
+    const description = t.description
+    expect(description).toContain('`expect_kept: true`')
+    expect(description).toContain('`proof_changed`')
   })
 
   it('says the links are kept when the Bambuddy is the same one at a new address (#6845)', () => {

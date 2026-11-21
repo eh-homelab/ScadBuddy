@@ -822,13 +822,17 @@ below are the plan's):
   deletes, a spool is linked again only by its RFID tag (the pull, step 2): Decision 10's
   adoption needs an intent, which the reset deletes, so an untagged spool is created again
   on the side its direction sends it to.
-- Reset to the same Bambuddy (#6845, Decisions 193-197). Bambuddy has no instance id, so a
-  new URL to the same Bambuddy is another instance. The reset and its dry run first read
-  the configured Bambuddy's spools; when it holds every linked BB spool id, none older than
-  its link's `bb_updated_at` and at least one exactly that (`same_bambuddy`), the reset
-  deletes nothing, records the configured instance and answers `kept: true`, so no spool
-  is made twice. A failed read deletes nothing. The pull (the Schedule's and the import)
-  does nothing while the links belong to another instance.
+- Reset to the same Bambuddy (#6845, Decisions 193-199). Bambuddy has no instance id, so a
+  new URL to the same Bambuddy is another instance. The dry run reads the configured
+  Bambuddy's spools; when it holds every linked BB spool id, none older than its link's
+  `bb_updated_at`, at least one exactly that, and at least half the links timed on both
+  sides (`same_bambuddy`), the reset with `expect_kept: true` reads them again and, while
+  that still holds, deletes nothing, records the configured instance and answers
+  `kept: true`, so no spool is made twice. When it no longer holds, or the read fails, it
+  is 409 `proof_changed` and deletes nothing. A dry run that cannot read Bambuddy answers
+  `bambuddy_unreadable: true` and offers the delete; the delete (`expect_kept: false`)
+  reads no Bambuddy. The pull (the Schedule's and the import) does nothing while the links
+  belong to another instance.
 - Lifecycle (Decision 13). A spool is created in Bambuddy only when it is unarchived and
   `pushes(spools)`. Archive and restore are pushed. A 404 on a linked spool, or on the
   probe of one a complete listing lacks, deletes the link; a partial listing never does.

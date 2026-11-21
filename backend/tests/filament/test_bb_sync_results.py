@@ -925,8 +925,13 @@ def _held(bb_id: int, at: datetime | None = SEEN) -> BbSpool:
     [
         # Every linked spool is there, one as last seen, one changed since.
         ({11: SEEN, 12: SEEN}, [_held(11), _held(12, SEEN + timedelta(hours=1))], [], True),
-        # A link with no time (a pre-#6265 link) only needs its row there.
+        # A link with no time (a pre-#6265 link) only needs its row there, while at
+        # least half the links have a time on both sides (Decision 199).
         ({11: SEEN, 12: None}, [_held(11), _held(12, None)], [], True),
+        # Most links have no time: one exact match is too little to prove it.
+        ({11: SEEN, 12: None, 13: None}, [_held(11), _held(12), _held(13)], [], False),
+        # Most of Bambuddy's rows have no time: the same.
+        ({11: SEEN, 12: SEEN, 13: SEEN}, [_held(11), _held(12, None), _held(13, None)], [], False),
         # A linked spool this Bambuddy does not hold.
         ({11: SEEN, 12: SEEN}, [_held(11)], [], False),
         # A row older than ScadBuddy saw it: an older copy, or another Bambuddy.
@@ -943,5 +948,6 @@ def test_the_proof_of_the_same_bambuddy(
     links: dict[int, datetime | None], rows: list[BbSpool], bad: list[int | None], same: bool
 ) -> None:
     """#6845 R-6845-2: the configured Bambuddy is the links' Bambuddy only when it holds
-    every linked spool, none older than its link's `bb_updated_at`, one exactly that."""
+    every linked spool, none older than its link's `bb_updated_at`, one exactly that,
+    and at least half the links have a time on both sides (Decision 199)."""
     assert same_bambuddy(links, rows, bad) is same

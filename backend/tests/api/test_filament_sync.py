@@ -379,6 +379,7 @@ def test_the_dry_run_counts_what_a_reset_deletes(client: TestClient, pg_conninfo
         "configured_instance": instance_for(BASE),
         "counts": ALL_ONE,
         "same_bambuddy": False,
+        "bambuddy_unreadable": False,
     }
 
 
@@ -389,10 +390,11 @@ def test_a_reset_deletes_the_links_and_no_sb_row(
     """#6773: one transaction deletes every link, hash, seen copy, intent, error row,
     ignored BB spool and the recorded instance; every SB row stays as it was; then a full
     pass is nudged, and no plain nudge after it. The configured Bambuddy does not hold
-    the linked spool, so it is another Bambuddy (#6845)."""
+    the linked spool, so it is another Bambuddy (#6845); the confirmed delete
+    (`expect_kept` false) does not read it (Decision 198)."""
     configure(client, filament_sync={"spools": "two_way"})
     _linked(client, pg_conninfo)
-    _listing(_bb_spool(12, SEEN_AT))
+    spools = _listing(_bb_spool(12, SEEN_AT))
     with psycopg.connect(pg_conninfo) as conn:
         before = _sb_rows(conn)
     filament_nudges.clear()
@@ -401,6 +403,7 @@ def test_a_reset_deletes_the_links_and_no_sb_row(
 
     assert reset.status_code == 200, reset.text
     assert reset.json() == {"instance": OLD, "kept": False, "deleted": ALL_ONE}
+    assert not spools.called
     with psycopg.connect(pg_conninfo) as conn:
         left = _left(conn)
         assert left == dict.fromkeys(left, 0)
@@ -416,7 +419,6 @@ def test_a_reset_with_a_wrong_instance_is_409(
     """A stale page names another instance than the links': nothing is deleted."""
     configure(client)
     _linked(client, pg_conninfo)
-    _listing()
     filament_nudges.clear()
 
     reset = client.post(RESET, json={"confirm_instance": "abcabcabcabc"})
@@ -436,7 +438,6 @@ def test_a_reset_with_nothing_to_reset_is_409(
     """No recorded instance (no links), or links of the configured Bambuddy: 409, and
     nothing is deleted or nudged."""
     configure(client)
-    _listing()
     filament_nudges.clear()
 
     none = client.post(RESET, json={"confirm_instance": OLD})
@@ -463,7 +464,6 @@ def test_a_reset_waits_for_an_old_instances_result_and_deletes_what_it_wrote(
     the reset blocks on the lock until it commits, then deletes that link too."""
     configure(client)
     _linked(client, pg_conninfo)
-    _listing()
     answer: dict[str, Any] = {}
 
     def reset() -> None:
@@ -524,7 +524,7 @@ def test_a_reset_to_the_same_bambuddy_keeps_the_links(
     assert preview.json()["counts"] == ALL_ONE
     filament_nudges.clear()
 
-    reset = client.post(RESET, json={"confirm_instance": OLD})
+    reset = client.post(RESET, json={"confirm_instance": OLD, "expect_kept": True})
 
     assert reset.status_code == 200, reset.text
     assert reset.json() == {"instance": OLD, "kept": True, "deleted": dict.fromkeys(ALL_ONE, 0)}
@@ -539,23 +539,83 @@ def test_a_reset_to_the_same_bambuddy_keeps_the_links(
 
 
 @respx.mock
-def test_a_reset_that_cannot_read_bambuddy_deletes_nothing(
+def test_a_kept_reset_whose_proof_changed_is_409(
     client: TestClient, pg_conninfo: str, filament_nudges: list[bool]
 ) -> None:
-    """#6845 R-6845-4: the reset reads Bambuddy before it writes; a failed read is
-    Bambuddy's error, and nothing is deleted or nudged."""
+    """#6845 R-6845-6 (Decision 198): the preview proved the same Bambuddy, then its
+    listing changed before the POST (linked spool 11 is gone). The POST that expects the
+    links kept reads it again, answers 409 `proof_changed`, and deletes nothing."""
+    configure(client)
+    _linked(client, pg_conninfo)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("UPDATE filament_bb_links SET bb_updated_at = %s", (SEEN_AT,))
+    route = _listing(_bb_spool(11, SEEN_AT))
+    assert client.get(RESET).json()["same_bambuddy"] is True
+    route.mock(return_value=httpx.Response(200, json=[_bb_spool(12, SEEN_AT)]))
+    filament_nudges.clear()
+
+    reset = client.post(RESET, json={"confirm_instance": OLD, "expect_kept": True})
+
+    assert reset.status_code == 409, reset.text
+    assert reset.json()["code"] == "proof_changed"
+    with psycopg.connect(pg_conninfo) as conn:
+        left = _left(conn)
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
+    assert left == dict.fromkeys(left, 1)
+    assert state == (OLD,)
+    assert filament_nudges == []
+
+
+@respx.mock
+def test_a_kept_reset_that_cannot_read_bambuddy_is_409(
+    client: TestClient, pg_conninfo: str, filament_nudges: list[bool]
+) -> None:
+    """#6845 R-6845-6: a POST that expects the links kept reads Bambuddy before it
+    writes; a failed read is 409 `proof_changed`, and nothing is deleted or nudged."""
     configure(client)
     _linked(client, pg_conninfo)
     respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(503))
     filament_nudges.clear()
 
-    reset = client.post(RESET, json={"confirm_instance": OLD})
+    reset = client.post(RESET, json={"confirm_instance": OLD, "expect_kept": True})
 
-    assert reset.status_code >= 500, reset.text
+    assert reset.status_code == 409, reset.text
+    assert reset.json()["code"] == "proof_changed"
     with psycopg.connect(pg_conninfo) as conn:
         left = _left(conn)
     assert left == dict.fromkeys(left, 1)
     assert filament_nudges == []
+
+
+@respx.mock
+def test_the_preview_of_an_unreadable_bambuddy_offers_the_delete(
+    client: TestClient, pg_conninfo: str, filament_nudges: list[bool]
+) -> None:
+    """#6845 R-6845-6: the preview answers 200 when Bambuddy cannot be read, with
+    `same_bambuddy` false and `bambuddy_unreadable` true; the confirmed delete then
+    deletes without reading Bambuddy."""
+    configure(client)
+    _linked(client, pg_conninfo)
+    spools = respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(503))
+
+    preview = client.get(RESET)
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["same_bambuddy"] is False
+    assert preview.json()["bambuddy_unreadable"] is True
+    assert preview.json()["counts"] == ALL_ONE
+    spools.reset()
+    filament_nudges.clear()
+
+    reset = client.post(RESET, json={"confirm_instance": OLD, "expect_kept": False})
+
+    assert reset.status_code == 200, reset.text
+    assert reset.json() == {"instance": OLD, "kept": False, "deleted": ALL_ONE}
+    assert not spools.called
+    with psycopg.connect(pg_conninfo) as conn:
+        left = _left(conn)
+    assert left == dict.fromkeys(left, 0)
+    assert filament_nudges == [True]
 
 
 @respx.mock
