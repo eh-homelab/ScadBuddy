@@ -150,11 +150,10 @@ import { Link } from 'react-router'
  *   combination (an unpicked slot, no process, no preset for a spool at this size); its
  *   `detail` is shown above Print and the dialog stays open.
  * - Simple mode shows only what the user has to choose (#768): the printer, when there is
- *   more than one, the spools, which plate of a multi-plate file, and Print, with the
- *   Checks. The nozzles, quality, plate type, print options, project and copies are
+ *   more than one, the spools, which plate of a multi-plate file, the plate type (#6884),
+ *   and Print, with the Checks. The nozzles, quality, print options, project and copies are
  *   Advanced steps, and Simple sends what they open on: the size and tier this model
- *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
- *   remembered copies and the page's project, else the last one printed to; that project is
+ *   last printed with (else 0.4 mm, Standard), the remembered copies and the page's project, else the last one printed to; that project is
  *   named in a "Filed under" line (#1660). Advanced also adds the full process list,
  *   per-side flow and a per-slot filament preset override.
  *
@@ -968,6 +967,24 @@ export function PrintPicker({
       native={native}
     />
   )
+
+  /**
+   * #6884 — the bed plate step. Simple and Advanced both show it, in their own places. The
+   * plate is a fact about the printer: a wrong one sends the wrong bed temperature.
+   */
+  const plateStep =
+    choices && !sliced && bedType !== null ? (
+      <PlateStep
+        bedTypes={
+          (choices.bed_types ?? []).includes(bedType) ? (choices.bed_types ?? []) : [bedType, ...(choices.bed_types ?? [])]
+        }
+        labels={choices.bed_type_labels ?? {}}
+        value={bedType}
+        lastBedType={choices.last_bed_type ?? null}
+        printerName={printer?.name ?? null}
+        onChange={picker.setBedType}
+      />
+    ) : null
 
   // #717 — profiles the chosen spools match, each on unless switched off.
   const filamentProfiles = useFilamentProfiles({
@@ -2298,6 +2315,8 @@ export function PrintPicker({
                       onChange={editOptions}
                     />
                   )}
+                  {/* #6884 — Simple mode shows the plate too. Advanced shows it below, among its steps. */}
+                  {!picker.advanced && plateStep}
                   {/* #768 — Simple mode sends these steps' defaults without showing them. */}
                   {picker.advanced && (
                     <>
@@ -2333,20 +2352,7 @@ export function PrintPicker({
                             processName={processName}
                             onChange={picker.changeQuality}
                           />
-                          {bedType !== null && (
-                            <PlateStep
-                              bedTypes={
-                                (choices.bed_types ?? []).includes(bedType)
-                                  ? (choices.bed_types ?? [])
-                                  : [bedType, ...(choices.bed_types ?? [])]
-                              }
-                              labels={choices.bed_type_labels ?? {}}
-                              value={bedType}
-                              lastBedType={choices.last_bed_type ?? null}
-                              printerName={printer?.name ?? null}
-                              onChange={picker.setBedType}
-                            />
-                          )}
+                          {plateStep}
 
                           <PrintSequenceStep
                             value={printSequence}

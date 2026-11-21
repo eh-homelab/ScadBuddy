@@ -66,11 +66,12 @@ One dialog, in the place the current one lives. Every step follows one pattern:
 let Advanced override.**
 
 **Simple mode shows only what the user has to choose (#768):** the printer, when there
-is more than one; the spools; which plate, for a multi-plate file; and Print, beside the
-Checks. Nozzles, quality, plate type, print options, project and copies are Advanced
-steps. In Simple mode they still send their defaults: the nozzle size and tier this
-model last printed with, else 0.4 mm and Standard; the plate type from the printer's
-last print, else the remembered or default one (§4.4); the remembered copies; and the
+is more than one; the spools; which plate, for a multi-plate file; the plate type,
+preselected from the printer's last print, else the remembered or default one (§4.4,
+#6884); and Print, beside the Checks. Nozzles, quality, print options, project and
+copies are Advanced steps. In Simple mode they still send their defaults: the nozzle
+size and tier this model last printed with, else 0.4 mm and Standard; the remembered
+copies; and the
 project the page passed in (the Customize page's own project choice), else the last
 project printed to (`last_project_id`), as the Library page's prints use.
 
@@ -80,7 +81,7 @@ project printed to (`last_project_id`), as the Library page's prints use.
 | 2. Spools | Any active spool from inventory. Loaded spools are marked with printer + AMS slot (and the side they feed) and listed first. An unloaded spool is allowed and warned: "Jade White PLA isn't loaded — load it before this prints." | Override the filament preset per slot, from the presets compatible with the chosen nozzle size. |
 | 3. Nozzles | Not shown: the remembered size, else 0.4 mm. | One nozzle size for the job, both sides — a single radio group, not a per-side choice (§5 test 3 withdrew the per-side size). All four sizes (0.2 / 0.4 / 0.6 / 0.8) are offered; the ones installed in the rack are marked; picking one that isn't installed warns "No 0.6 mm nozzle is installed. Install one before this prints." Standard or High Flow per side. Bambuddy has no High Flow presets (§5 test 1), so choosing High Flow slices as Standard and the step says so: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (bambuddy#3176). |
 | 4. Quality | Not shown: the remembered tier, else Standard. | Fine / Standard / Draft (§4.2), or Bambu's full H2C process list for the chosen size. |
-| 5. Plate | Not shown: preselected from the printer's last print (§4.4). | Every H2C plate type. |
+| 5. Plate | Every H2C plate type, preselected from the printer's last print (§4.4) (#6884). | — |
 | 6. Print options, project, copies | Not shown: Bambuddy's defaults, the page's project (else the last one printed to), the remembered copies. | Bambuddy's queue-item options with Bambuddy's defaults, exactly as `PrintOptionsDisclosure` shows them today (#88); the project; copies. Queue behavior — manual start, waiting for filament — is Bambuddy's. |
 | 7. Print | Slice through Bambuddy, then queue. | — |
 
