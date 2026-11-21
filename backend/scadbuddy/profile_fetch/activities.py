@@ -32,7 +32,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, activity_key
 from scadbuddy.crud.wire import PREFIX
-from scadbuddy.profile_fetch.site import Kind, Site, SiteError, SiteHolder
+from scadbuddy.profile_fetch.steps import Kind, Site, SiteError, SiteHolder
 from scadbuddy.profile_fetch.wire import (
     EXPORT_ACTIVITY,
     FAILED_ACTIVITY,

@@ -43,7 +43,7 @@ EXPORT_HEARTBEAT: Final = timedelta(minutes=2)
 #: that is not there is found sooner by the API, from the queue's pollers (build Decision
 #: 62).
 EXPORT_SCHEDULE_TO_START = timedelta(hours=6)
-#: The activity marks `site.SiteError`'s kinds that are not worth another try as
+#: The activity marks `steps.SiteError`'s kinds that are not worth another try as
 #: non-retryable (`activities.RETRYABLE_KINDS`).
 EXPORT_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(minutes=1), backoff_coefficient=2.0, maximum_attempts=3

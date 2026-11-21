@@ -17,6 +17,7 @@ from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.crud.client import CrudClient
+from scadbuddy.profile_fetch import remote
 from scadbuddy.profile_fetch.activities import ProfileFetchActivities, SiteHolder
 from scadbuddy.profile_fetch.browser import BrowserService
 from scadbuddy.profile_fetch.remote import RemoteSite
@@ -188,6 +189,23 @@ async def test_the_worker_sends_its_token_and_the_ask() -> None:
         "printer_model": "H2C",
         "nozzle": "0.4",
     }
+
+
+async def test_a_step_that_trickles_past_its_limit_is_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`STEP_REQUEST_TIMEOUT` bounds the whole step, not each read (claude-review on
+    #6808): a service that sends a byte at a time, each well inside the read timeout,
+    still fails the step once the limit passes."""
+    monkeypatch.setattr(remote, "STEP_REQUEST_TIMEOUT", 0.3)
+
+    async def trickle() -> AsyncIterator[bytes]:
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            yield b"x"
+
+    error = await _export_from(lambda r: httpx.Response(200, content=trickle()))
+    assert error.kind == "timeout"
 
 
 async def test_an_answer_over_the_cap_is_file_too_large() -> None:

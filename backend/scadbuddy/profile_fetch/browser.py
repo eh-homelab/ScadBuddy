@@ -17,7 +17,7 @@ The worker (`worker.py`, `remote.RemoteSite`) drives it over HTTP on
 `remote`'s docstring. ``GET /healthz`` answers 200 while it serves, with no token. Every other
 call must carry the token (``Authorization: Bearer <token>``, compared with
 `hmac.compare_digest`): without it the answer is 401 before any byte of the body is read. One
-step runs at a time (a lock), on one signed-in browser (`site.SiteHolder`). When the worker
+step runs at a time (a lock), on one signed-in browser (`steps.SiteHolder`). When the worker
 goes away during a step (its activity was cancelled or timed out), the service cancels the
 step and closes the browser, since the page may be wedged mid-export.
 
@@ -69,7 +69,8 @@ from scadbuddy.profile_fetch.settings import (
     check_browser_environment,
     forget_login,
 )
-from scadbuddy.profile_fetch.site import SITE, Site, SiteError, SiteHolder, ThreeDfpSite
+from scadbuddy.profile_fetch.site import SITE, ThreeDfpSite
+from scadbuddy.profile_fetch.steps import Site, SiteError, SiteHolder
 from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES
 
 logger = logging.getLogger(__name__)
@@ -314,7 +315,7 @@ async def serve(
         settings.profile_fetch_browser_port if port is None else port,
         limit=MAX_HEAD_BYTES,
     )
-    logger.info("profile-fetch browser service serving on %s", settings.profile_fetch_browser_port)
+    logger.info("profile-fetch browser service serving on %s", server.sockets[0].getsockname()[1])
     try:
         async with service.lock:
             await sign_in_at_start(sites)

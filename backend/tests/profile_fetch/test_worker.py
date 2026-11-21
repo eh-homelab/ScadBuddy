@@ -20,7 +20,7 @@ from scadbuddy.profile_fetch import __main__ as entry
 from scadbuddy.profile_fetch import worker
 from scadbuddy.profile_fetch.remote import RemoteSite
 from scadbuddy.profile_fetch.settings import ProfileFetchSettings
-from scadbuddy.profile_fetch.site import SiteHolder
+from scadbuddy.profile_fetch.steps import SiteHolder
 from scadbuddy.profile_fetch.worker import _healthz, run
 from tests.crud.test_client import Source
 
@@ -30,6 +30,8 @@ TOKEN = "r" * 40
 
 
 def test_worker_imports_no_database_code() -> None:
+    """Nor the browser driver: the worker holds the CRUD credential and runs no browser
+    (claude-review on #6808)."""
     out = subprocess.run(
         [
             sys.executable,
@@ -38,7 +40,7 @@ def test_worker_imports_no_database_code() -> None:
             "import scadbuddy.profile_fetch.__main__, scadbuddy.profile_fetch.worker, sys;"
             " forbidden = {'psycopg', 'psycopg_pool', 'scadbuddy.orders', 'scadbuddy.render',"
             " 'scadbuddy.store', 'scadbuddy.library', 'scadbuddy.main', 'scadbuddy.filament',"
-            " 'scadbuddy.bambuddy'};"
+            " 'scadbuddy.bambuddy', 'playwright'};"
             " print(sorted({'.'.join(m.split('.')[:2]) for m in sys.modules} & forbidden))",
         ],
         capture_output=True,

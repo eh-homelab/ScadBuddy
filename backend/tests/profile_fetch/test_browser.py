@@ -8,12 +8,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import resource
 import subprocess
 import sys
 from pathlib import Path
 from typing import Self
 
+import httpx
 import pytest
 from playwright.async_api import Error as PlaywrightError
 from pydantic import SecretStr
@@ -21,7 +23,7 @@ from pydantic import SecretStr
 from scadbuddy.profile_fetch import browser
 from scadbuddy.profile_fetch.browser import StartRefusedError, serve, sign_in_at_start
 from scadbuddy.profile_fetch.settings import BrowserSettings
-from scadbuddy.profile_fetch.site import Kind, SiteError, SiteHolder
+from scadbuddy.profile_fetch.steps import Kind, SiteError, SiteHolder
 from tests.profile_fetch.test_activities import FakeSite
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -106,7 +108,10 @@ async def test_a_browser_that_does_not_launch_refuses_the_start(
     assert PASSWORD not in caplog.text
 
 
-async def test_serve_signs_in_once_and_answers_healthz(tmp_path: Path) -> None:
+async def test_serve_signs_in_once_and_answers_healthz(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
     site = FakeSite()
     stop = asyncio.Event()
     serving = asyncio.create_task(
@@ -117,6 +122,11 @@ async def test_serve_signs_in_once_and_answers_healthz(tmp_path: Path) -> None:
             break
         await asyncio.sleep(0.02)
     assert (site.opened, site.logins) == (1, 1)
+    # The port bound, not the setting's (claude-review on #6808): ``port=0`` picks one.
+    [bound] = re.findall(r"serving on (\d+)", caplog.text)
+    assert int(bound) not in (0, _settings(tmp_path).profile_fetch_browser_port)
+    async with httpx.AsyncClient() as client:
+        assert (await client.get(f"http://127.0.0.1:{bound}/healthz")).status_code == 200
     stop.set()
     await asyncio.wait_for(serving, 5)
     assert site.closed == 1
