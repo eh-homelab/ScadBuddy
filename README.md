@@ -960,7 +960,10 @@ the zones: [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md
    it may not.
 5. `SCADBUDDY_AUTH_MODE=enforce` on the API and the agent sidecar. The API refuses to
    start without a usable login, so a broken login fails the new pod's readiness and the
-   rollout keeps the old pods.
+   rollout keeps the old pods. The maintainers' own prod never takes this step, on purpose
+   (the owner's decision of 2026-11-17: its front door already gates people). It runs
+   `off`, or `observe` while a measurement runs (`observe` for #5297 on 2026-11-21, read
+   with `kubectl -n bambuddy get deploy scadbuddy`), so its manifest is not an unfinished rollout.
 
 The way back is `SCADBUDDY_AUTH_MODE=observe` and a rollout; with the issuer down, a
 person signs in with the break-glass link
