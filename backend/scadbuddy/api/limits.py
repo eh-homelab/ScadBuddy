@@ -102,7 +102,11 @@ class _BodyTooLargeError(Exception):
 
 
 class BodySizeGate:
-    """Refuse a gated body larger than its content type's limit with a 413 problem.
+    """Refuse a gated body larger than its limit with a 413 problem.
+
+    A route with a `RouteLimit` gets that limit, whatever its content type. Any other
+    body gets its content type's limit from ``limits``; a body with no type, or a type
+    ``limits`` does not list, gets ``default`` (`MAX_TEXT_BODY_BYTES`).
 
     A declared length is judged on the headers alone. An undeclared one is counted
     chunk by chunk, and reading stops at the first chunk that crosses the limit.
@@ -114,9 +118,11 @@ class BodySizeGate:
         *,
         limits: Mapping[str, int],
         routes: Sequence[RouteLimit] = (),
+        default: int = MAX_TEXT_BODY_BYTES,
     ) -> None:
         self.app = app
         self.limits = limits
+        self.default = default
         self.routes = routes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -136,7 +142,7 @@ class BodySizeGate:
             declared_too_large = too_large
         else:
             kind = headers.get("content-type", "").split(";")[0].strip().lower()
-            limit = self.limits.get(kind, MAX_TEXT_BODY_BYTES)
+            limit = self.limits.get(kind, self.default)
             too_large = f"the body passed {limit} bytes, which is the most this API reads"
             declared_too_large = ""
         declared = headers.get("content-length", "")
