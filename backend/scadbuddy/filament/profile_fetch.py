@@ -1189,11 +1189,11 @@ def _merge_k_values(conn: Conn, type_id: UUID, ending: _Ending) -> None:
     """Write ``ending.k_values`` over the type's K rows that a fetch set
     (`SpoolTypeStore.merge_k_values`, #6857, Decision 127), and keep in ``ending.k_values``
     only the rows written, so the run counts those. A row a person, the fill or a printer
-    calibration set stands, named in ``ending.notes``. On ``conn``, in the end's
-    transaction."""
+    calibration set stands, named in ``ending.notes`` when its value differs from the fetched
+    one. On ``conn``, in the end's transaction."""
     written, kept = SpoolTypeStore.merge_k_values(conn, type_id, ending.k_values)
     for row, old in kept:
-        if Decimal(old["k_value"]).normalize() == row.k_value.normalize():
+        if Decimal(old["k_value"]) == row.k_value:
             continue
         label = ending.k_scope.get((row.printer_id, row.nozzle_diameter), "a printer")
         ending.notes.append(
