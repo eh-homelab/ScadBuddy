@@ -90,6 +90,8 @@ class RemoteSite:
         self._client = httpx.AsyncClient(
             base_url=self._base,
             headers={"Authorization": f"Bearer {self._token}"},
+            # `_call`'s `asyncio.timeout` bounds each whole step; this keeps httpx's own
+            # connect limit and a read limit no step can outlast (#6829).
             timeout=httpx.Timeout(STEP_REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT),
             transport=self._transport,
             follow_redirects=False,
