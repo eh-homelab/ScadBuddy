@@ -21,7 +21,7 @@ from scadbuddy.profile_fetch import remote
 from scadbuddy.profile_fetch.activities import ProfileFetchActivities, SiteHolder
 from scadbuddy.profile_fetch.browser import BrowserService
 from scadbuddy.profile_fetch.remote import RemoteSite
-from scadbuddy.profile_fetch.site import SiteError
+from scadbuddy.profile_fetch.steps import SiteError
 from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES
 from tests.crud.test_client import Source
 from tests.profile_fetch.test_activities import ASK, FakeCrud, FakeSite, preset
