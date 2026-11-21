@@ -1478,8 +1478,9 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
     ``run.now``. A field goes in when the pull took it (``taken``) or Bambuddy's value is
     SB's compare value; any other keeps its old seen value, or stays out when unseen.
     R-T9-3 and R-T9-5 make two exceptions: a link with no seen location (under
-    ``pulls.locations``) or no seen archive state (under ``pulls.spools``) takes
-    Bambuddy's value as seen, so only a later Bambuddy change moves or archives it.
+    ``pulls.locations``; BB's place must map to an SB location, decision 164) or no seen
+    archive state (under ``pulls.spools``) takes Bambuddy's value as seen,
+    so only a later Bambuddy change moves or archives it.
     ``bb_seen_at`` moves only when ``bb_seen`` changes (review M2): a running pass takes a
     newer one as `results` writing it after its snapshot (F11)."""
     from scadbuddy.filament import bb_sync_plan as plan
@@ -1502,6 +1503,15 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
         for n, on in (("location_id", run.pulls.locations), ("archived_at", run.pulls.spools))
         if on
     }
+    if "location_id" in seeds and seen["location_id"] is not None:
+        # Decision 164: an unmapped place is no seed, so the pull that maps it seeds it.
+        mapped = conn.execute(
+            "SELECT 1 FROM filament_locations WHERE bb_location_id = %s"
+            " AND archived_at IS NULL AND printer_id IS NULL",
+            (seen["location_id"],),
+        ).fetchone()
+        if mapped is None:
+            del seeds["location_id"]
     # The seeds go first, so a seen value the link holds already wins over them.
     conn.execute(
         "UPDATE filament_bb_links SET bb_seen = n.seen, bb_seen_at = CASE WHEN"
