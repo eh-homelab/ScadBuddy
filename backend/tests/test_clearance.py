@@ -391,6 +391,97 @@ def test_a_part_stating_extruder_zero_prints_in_its_objects_filament(tmp_path: P
     assert warnings == []
 
 
+def _settings_edited(payload: bytes, old: str, new: str) -> bytes:
+    """``payload`` with every ``old`` in its ``model_settings.config`` made ``new``."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = archive.read(bambu3mf.MODEL_SETTINGS_NAME).decode()
+    edited = settings.replace(old, new)
+    assert edited != settings
+    return bambu3mf.rezipped(payload, {bambu3mf.MODEL_SETTINGS_NAME: edited.encode()})
+
+
+def test_painting_past_the_digit_budget_is_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6823: decoding a paint code costs a pure-Python step per bit, so the distinct
+    codes' digits are capped as the slot hints cap them. Past the cap the painting is
+    left out, and only the stated filaments count."""
+    payload = _plate_3mf(tmp_path / "painted.3mf", [PlateParts((_painted_part(True),), (1,))])
+    monkeypatch.setattr(clearance, "MAX_HINT_PAINT_DIGITS", 0)
+
+    by_plate, warnings = check_plates(payload, [1], None)
+
+    assert warnings == []
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1})]
+
+
+def test_a_painted_object_stating_no_extruder_prints_its_own_in_filament_1(
+    tmp_path: Path,
+) -> None:
+    """#6823: with no ``extruder`` stated, Bambu Studio prints a part in filament 1. A
+    part painted with filament 2 then prints in 1 and 2: two colours, not one."""
+    payload = _plate_3mf(tmp_path / "painted.3mf", [PlateParts((_painted_part(True),), (1,))])
+    unstated = _settings_edited(payload, '<metadata key="extruder" value="1"/>', "")
+
+    _, warnings = check_plates(unstated, [1], None)
+
+    [warning] = warnings
+    assert warning.kind == "by-object-one-object"
+    assert "2 colours" in warning.message
+
+
+@pytest.mark.parametrize("subtype", ["modifier_part", "negative_part", "support_blocker"])
+def test_the_painting_of_a_part_that_prints_nothing_is_not_counted(
+    tmp_path: Path, subtype: str
+) -> None:
+    """#6823: only printed parts (no subtype, or ``normal_part``) count, as their
+    ``extruder`` does. A modifier's or a negative part's painting is never printed
+    (`objects3mf.py` drops it too)."""
+    plate = PlateParts((_part(1), _painted_part(True)), (1, 1))
+    payload = _plate_3mf(tmp_path / "modifier.3mf", [plate])
+    assert len(check_plates(payload, [1], None)[1]) == 1
+    unprinted = _settings_edited(
+        payload, '<part id="2" subtype="normal_part">', f'<part id="2" subtype="{subtype}">'
+    )
+
+    by_plate, warnings = check_plates(unprinted, [1], None)
+
+    assert warnings == []
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1})]
+
+
+def test_painting_in_a_component_s_own_model_file_counts() -> None:
+    """#6823: Bambu Studio writes each part's mesh in ``3D/Objects/*.model``, so the
+    painting reaches the build item's object only through a component naming that
+    file. With no ``model_settings.config`` the part prints in filament 1."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    production = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    root = (
+        f'<model xmlns="{core}" xmlns:p="{production}" unit="millimeter"><resources>'
+        '<object id="2" type="model"><components>'
+        '<component p:path="/3D/Objects/object_1.model" objectid="1"/>'
+        '</components></object></resources><build><item objectid="2"/></build></model>'
+    )
+    part = (
+        f'<model xmlns="{core}" unit="millimeter"><resources>'
+        '<object id="1" type="model"><mesh><vertices>'
+        '<vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="5"/>'
+        "</vertices><triangles>"
+        f'<triangle v1="0" v2="1" v3="2" paint_color="{single_code(2)}"/>'
+        "</triangles></mesh></object></resources><build/></model>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("3D/3dmodel.model", root)
+        archive.writestr("3D/Objects/object_1.model", part)
+
+    by_plate, warnings = check_plates(buffer.getvalue(), [1], None)
+
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})]
+    [warning] = warnings
+    assert warning.kind == "by-object-one-object"
+
+
 async def test_only_a_by_object_print_gets_the_one_object_warning(tmp_path: Path) -> None:
     """#6781: by object through the generic process overrides warns; by layer does not."""
     payload = one_object_two_colours_3mf(tmp_path / "menorah.3mf")
