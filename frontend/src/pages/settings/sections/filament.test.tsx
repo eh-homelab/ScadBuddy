@@ -407,6 +407,26 @@ describe('Filament (#6262)', () => {
       await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
       expect(await within(dialog).findByRole('alert')).toHaveTextContent('The links changed since this dialog opened. Nothing was deleted.')
     })
+
+    it('does not show the dialog\'s error under the button once the dialog is closed', async () => {
+      linkOtherBambuddy()
+      server.use(
+        http.post('*/api/v1/filament/sync/reset-links', () =>
+          HttpResponse.json(
+            { type: 'about:blank', title: 'Conflict', status: 409, detail: 'confirm_instance is not the instance the links belong to', code: 'confirm_mismatch' },
+            { status: 409 },
+          ),
+        ),
+      )
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
+      await within(dialog).findByRole('alert')
+      await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+      expect(within(filament).queryByText(/Nothing was deleted/)).toBeNull()
+    })
   })
 
   it('switches the RFID override mode on and says Bambuddy no longer adds unknown spools', async () => {

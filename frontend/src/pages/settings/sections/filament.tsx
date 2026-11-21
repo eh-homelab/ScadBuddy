@@ -328,7 +328,11 @@ function ResetLinks({ onReset }: { onReset: (deleted: number) => void }) {
           {problem}
         </p>
       )}
-      <AlertDialog open={preview !== null} onOpenChange={(next) => !next && !resetting && setPreview(null)}>
+      <AlertDialog open={preview !== null} onOpenChange={(next) => {
+          if (next || resetting) return
+          setPreview(null)
+          setProblem(null)
+        }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Reset the Bambuddy links?</AlertDialogTitle>
@@ -436,7 +440,7 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
     setProblem(null)
     setNote(`${plural(deleted, 'link', 'links')} reset. A full pass now links the new Bambuddy.`)
     if (data) setData({ ...data, instance: null, instance_changed: false, errors: [] }, { supersede: true })
-    setWaiting({ since: new Date().toISOString() })
+    setWaiting({ requestedAt: new Date().toISOString() })
   }
 
   async function syncNow() {

@@ -4,6 +4,8 @@ the Bambuddy links after the Bambuddy URL changes (#6773)."""
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -415,3 +417,47 @@ def test_a_reset_with_nothing_to_reset_is_409(
     with psycopg.connect(pg_conninfo) as conn:
         assert _left(conn)["spools"] == 1
     assert filament_nudges == []
+
+
+def test_a_reset_waits_for_an_old_instances_result_and_deletes_what_it_wrote(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#6773 (Decision 165): `apply_results` and the reset both take the state row's
+    `FOR UPDATE` lock, so a result of the old Bambuddy's pass in flight cannot land after
+    the reset. One connection holds that lock and writes a link, as `apply_results` does;
+    the reset blocks on the lock until it commits, then deletes that link too."""
+    configure(client)
+    _linked(client, pg_conninfo)
+    answer: dict[str, Any] = {}
+
+    def reset() -> None:
+        answer["response"] = client.post(RESET, json={"confirm_instance": OLD})
+
+    with psycopg.connect(pg_conninfo) as holder:
+        holder.execute("SELECT instance FROM filament_bb_sync_state FOR UPDATE")
+        holder.execute(
+            "INSERT INTO filament_bb_ignored (bb_spool_id, reason) VALUES (42, 'rfid_duplicate')"
+        )
+        thread = threading.Thread(target=reset, name="reset waits for the state row")
+        thread.start()
+        try:
+            with psycopg.connect(pg_conninfo, autocommit=True) as watcher:
+                deadline = time.monotonic() + 20
+                while not watcher.execute(
+                    "SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+                    " AND query LIKE '%filament_bb_sync_state%FOR UPDATE%'"
+                    " AND pid <> pg_backend_pid()"
+                ).fetchone():
+                    assert time.monotonic() < deadline, "the reset never waited for the lock"
+                    time.sleep(0.05)
+            assert "response" not in answer
+        finally:
+            holder.commit()
+            thread.join(timeout=20)
+    assert not thread.is_alive()
+    response = answer["response"]
+    assert response.status_code == 200, response.text
+    assert response.json() == {"instance": OLD, "deleted": {**ALL_ONE, "ignored": 2}}
+    with psycopg.connect(pg_conninfo) as conn:
+        left = _left(conn)
+    assert left == dict.fromkeys(left, 0)
