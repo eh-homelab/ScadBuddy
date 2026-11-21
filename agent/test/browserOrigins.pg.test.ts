@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
 import { DEFAULT_LISTS } from '../src/browser/origins.js'
 import { BrowserOrigins } from '../src/browser/store.js'
-import { SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { BROWSER_ORIGINS_PATH, registerBrowserOriginsRoutes } from '../src/routes/browserOrigins.js'
 import { SessionError, type SessionRecord } from '../src/sessions/manager.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // #982: the headless browser's allow and deny lists (ai_settings) and each session's
@@ -43,7 +43,7 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
         return Promise.resolve()
       },
     }
-    store = new BrowserOrigins(db.sql, new SettingsStore(db.sql, audit as never))
+    store = new BrowserOrigins(db.sql, sqlSettings(db.sql, audit as never))
     app = new Hono()
     // The session's owner and archive mark, as SessionManager.get answers for the user.
     const sessions = {

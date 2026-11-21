@@ -7,13 +7,14 @@ import { type AuditFilter, AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT
 import { TurnAuditor } from '../src/audit/turn.js'
 import { auditedTokenStore, UI_ACTOR } from '../src/audit/writes.js'
 import { PostgresTokenStore } from '../src/auth/tokens.js'
-import { SettingsStore } from '../src/credentials.js'
+import { type SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import { MemoryEventSource } from '../src/events/bus.js'
 import type { ApprovalVerdict } from '../src/harness/permissions.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event } from '../src/sessions/protocol.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser } from './support/sessions.js'
@@ -41,7 +42,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     expect(await db.ready()).toBe(true)
     failures.length = 0
     audit = new AuditLog({ sql: db.sql, settings: () => settings, hashKey: HASH_KEY, onError: (err) => failures.push(err) })
-    settings = new SettingsStore(db.sql, audit)
+    settings = sqlSettings(db.sql, audit)
   })
   afterEach(async () => {
     expect(failures).toEqual([])

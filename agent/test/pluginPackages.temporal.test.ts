@@ -9,6 +9,7 @@ import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { AgentCommands } from '../src/operations/run.js'
 import { OperationStore } from '../src/operations/store.js'
+import { SqlOperations } from './support/sql/operations.js'
 import { PackageInstaller } from '../src/plugins/packages/install.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
 import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
@@ -63,7 +64,7 @@ describe.skipIf(skip)(`plugin package install on Temporal${TEMPORAL_SKIP}`, () =
     const packages = new PackageStore(db.sql)
     const installer = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver() })
     const kinds = packageKinds({ packages, installer })
-    const store = new OperationStore(db.sql)
+    const store = new OperationStore(new SqlOperations(db.sql))
     agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',

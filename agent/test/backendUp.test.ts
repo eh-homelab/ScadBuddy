@@ -3,9 +3,9 @@ import type { AddressInfo } from 'node:net'
 import type { Sql } from 'postgres'
 import { afterEach, describe, expect, it } from 'vitest'
 import { backendNotUp, NOT_UP, transportKind, untilBackendAnswers, WAIT_FIRST_MS, WAIT_MAX_MS } from '../src/api/backendUp.js'
-import { BackendWorkspaceBlobs, WorkspaceBlobError } from '../src/workspace/blobs.js'
-import type { WorkspaceSealing } from '../src/workspace/sealing.js'
-import { SessionFiles } from '../src/workspace/store.js'
+import { BackendWorkspaceBlobs, WorkspaceBlobError } from './support/sql/workspaceBlobs.js'
+import type { WorkspaceSealing } from './support/sql/workspaceSealing.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 
 // #5868: the API pod's agent starts before the backend container answers on 127.0.0.1:8080.
 // These run against a real port nothing listens on yet, then a backend started on it later.

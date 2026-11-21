@@ -5,8 +5,10 @@ import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
+import { sessionImage } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -190,7 +192,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
 
     // Through forgetSubject, which copies the transcript the fork reads into it first (plan Step 6.5).
-    await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
+    await forgetSubject(sqlForget(db.sql, { keys: testPayloadKeys(db.sql) }), `session-${id}`)
     expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${id}`).toHaveLength(0)
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })
@@ -204,7 +206,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     const [made] = await blobs.putMade(child.id, [sessionImage('image/png', Buffer.from(PNG, 'base64'))])
     expect(made?.names).toEqual([NAME])
     // Forgetting the parent copies the image the fork's events name: a write, so it gets a later time.
-    await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
+    await forgetSubject(sqlForget(db.sql, { keys: testPayloadKeys(db.sql) }), `session-${id}`)
     // The queued message is dropped: the image stays, as the copied events name it.
     expect(await blobs.delete(child.id, made!)).toEqual([])
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
@@ -218,7 +220,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     const copy = files.copy.bind(files)
     files.copy = async (from, to) => {
       await copy(from, to)
-      await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
+      await forgetSubject(sqlForget(db.sql, { keys: testPayloadKeys(db.sql) }), `session-${id}`)
     }
     await expect(m.fork(id, browser)).rejects.toMatchObject({ code: 'not_found' })
     expect(await db.sql`SELECT 1 FROM ai_sessions WHERE parent_id = ${id}`).toHaveLength(0)

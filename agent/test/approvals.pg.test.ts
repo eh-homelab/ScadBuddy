@@ -14,7 +14,6 @@ import {
   sweepErrorText,
 } from '../src/approvals/service.js'
 import { AuditLog } from '../src/audit/log.js'
-import { SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { kekFromBase64 } from '../src/secrets.js'
@@ -28,6 +27,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 import { respond } from '../src/routes/pendingInput.js'
+import { sqlSettings } from './support/sql/settings.js'
 
 // The approval store and its rules without the SDK (#258): ai_approvals in
 // Postgres, expiry, visibility, the orphan paths, and the HTTP routes. Since plan
@@ -151,7 +151,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('reads the expiry window from ai_settings, within bounds', async () => {
     expect(await m.approvals.expirySeconds()).toBe(DEFAULT_APPROVAL_EXPIRY_SECONDS)
-    const settings = new SettingsStore(db.sql)
+    const settings = sqlSettings(db.sql)
     const service = new ApprovalService({ sql: db.sql, events: m.events, settings })
     await settings.set(SETTING_APPROVAL_EXPIRY_SECONDS, 120)
     expect(await service.expirySeconds()).toBe(120)

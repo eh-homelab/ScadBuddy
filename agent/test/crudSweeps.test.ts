@@ -113,12 +113,11 @@ describe("a forget's last rows over the CRUD route", () => {
     expect(api.seen).toEqual([])
   })
 
-  it('forgets a session with no SQL once every step has its route', async () => {
+  it("forgets a session through every step's route", async () => {
     const api = new FakeApi()
     const finished: string[] = []
     const done = await forgetSubject(
       {
-        sql: noSql,
         crud: { forget: () => Promise.resolve(true) },
         tasks: {
           list: () => Promise.resolve([{ id: 'task-1' }] as never),
@@ -141,9 +140,9 @@ describe("a forget's last rows over the CRUD route", () => {
     await expect(
       forgetSubject(
         {
-          sql: noSql,
           crud: { forget: () => Promise.resolve('forks') },
           tasks: { list: () => Promise.resolve([]), finish: () => Promise.resolve(false) },
+          reads: { openCalls: () => Promise.resolve([]) },
           rows: new CrudForgetRows(target(api)),
         },
         `session-${SESSION}`,
@@ -152,26 +151,13 @@ describe("a forget's last rows over the CRUD route", () => {
     expect(api.seen).toEqual([])
   })
 
-  it("the operator's forget takes step 3's rows from the API only with step 1 there", () => {
-    const routesWith = (...listed: string[]) => forgetRoutes({ has: (area: string) => listed.includes(area) }, target(new FakeApi()), noSql)
-    const none = routesWith()
-    expect([none.crud, none.reads, none.rows]).toEqual([undefined, undefined, undefined])
-    // forget-rows alone: the key transaction stays on SQL, so the rows do too.
-    expect(routesWith('forget-rows').rows).toBeUndefined()
-    const all = routesWith('forget', 'session-reads', 'forget-rows')
-    expect(all.crud).toBeInstanceOf(CrudSubjectKeys)
-    expect(all.reads).toBeInstanceOf(CrudSessionReads)
-    expect(all.rows).toBeInstanceOf(CrudForgetRows)
-    expect(routesWith('forget').rows).toBeUndefined()
-  })
-
-  it("the operator's forget lists a session's background tasks through the API once it lists them, over SQL until then", async () => {
-    let listed: string[] = []
+  it("the operator's forget takes every step from the API", async () => {
     const api = new FakeApi()
-    const { tasks } = forgetRoutes({ has: (area: string) => listed.includes(area) }, target(api), noSql)
-    await expect(tasks!.list(SESSION)).rejects.toThrow('ran SQL')
-    listed = ['background-tasks']
-    expect(await tasks!.list(SESSION)).toEqual([])
+    const routes = forgetRoutes(target(api))
+    expect(routes.crud).toBeInstanceOf(CrudSubjectKeys)
+    expect(routes.reads).toBeInstanceOf(CrudSessionReads)
+    expect(routes.rows).toBeInstanceOf(CrudForgetRows)
+    expect(await routes.tasks.list(SESSION)).toEqual([])
     expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /background-tasks'])
   })
 })

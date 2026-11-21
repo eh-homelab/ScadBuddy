@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -30,7 +30,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the budget 
 
   it('every spawn gets budget less the row’s spend; a warm process elsewhere is recycled; costs are per turn', async () => {
     const paths = await tempPaths()
-    const settings = new SettingsStore(db.sql)
+    const settings = sqlSettings(db.sql)
     await settings.set(SETTING_SESSION_BUDGET_USD, 0.1)
     // Each spawn serves one turn here. The real CLI reports total_cost_usd as the
     // transcript's last cost-state plus its own spend (spec §2.2); the totals are

@@ -1,9 +1,9 @@
 import type { CredentialRepo } from '../credentials.js'
-import { type Kek, SECRET_MIN_CHARS } from '../secrets.js'
+import { SECRET_MIN_CHARS } from '../secrets.js'
 import type { PluginOAuth } from './oauthStore.js'
 import type { PackageInstaller } from './packages/install.js'
 import type { PackageRepo } from './packages/store.js'
-import { headerSecretVariants, type PluginStore } from './registry.js'
+import { headerSecretVariants, type PluginStoreLike } from './registry.js'
 
 /** Where the enabled packages' header secrets are read from: their pins, and the installer's verified copies. */
 export type PackageSecretSource = {
@@ -16,12 +16,12 @@ export type PackageSecretSource = {
  * files (fetched again from the pin when no verified copy is cached): no address check, no
  * forwarder route, no plugin or token endpoint contacted.
  *
- * - each enabled remote plugin's header value (`ai_plugins`, opened under the KEK);
+ * - each enabled remote plugin's header value (`ai_plugins`, opened by the API);
  * - each enabled package's http server header values: literals in its pinned files, read from
  *   the copy that hashes to its pin (`ai_plugin_packages`, install.ts `headerSecrets`), never
  *   from what a turn loaded, so a package that fails to load keeps them in the list (#5485);
  * - every OAuth sign-in's access and refresh tokens and client secret (`ai_plugin_oauth`,
- *   opened under the KEK).
+ *   opened by the API).
  *
  * Every tool redacts and refuses uploads of these in every mode, an in-process turn, a
  * ToolCall, /mcp and a background task alike (main.ts `toolServices.secrets`, #5480), and a
@@ -34,17 +34,16 @@ export type PackageSecretSource = {
  * (its fetch fails and no verified copy is cached) fails the read: the list fails closed.
  */
 export async function readPluginSecrets(deps: {
-  kek: Kek | undefined
-  plugins?: Pick<PluginStore, 'enabled'> | undefined
+  plugins?: Pick<PluginStoreLike, 'enabled'> | undefined
   oauth?: Pick<PluginOAuth, 'storedSecrets'> | undefined
   packages?: PackageSecretSource | undefined
 }): Promise<string[]> {
   const out: string[] = []
   if (deps.plugins) {
-    const { plugins: enabled } = await deps.plugins.enabled(deps.kek)
+    const { plugins: enabled } = await deps.plugins.enabled()
     for (const plugin of enabled) if (plugin.header) out.push(...headerSecretVariants(plugin.header.value))
   }
-  if (deps.oauth) out.push(...(await deps.oauth.storedSecrets(deps.kek)))
+  if (deps.oauth) out.push(...(await deps.oauth.storedSecrets()))
   if (deps.packages) {
     const { store, installer } = deps.packages
     for (const values of await Promise.all((await store.enabledPins()).map((pin) => installer.headerSecrets(pin)))) out.push(...values)
@@ -71,18 +70,15 @@ export const SAVED_SECRETS_CACHE_MS = 10_000
  * this too, so a regression in the wiring fails them (#5483).
  */
 export function toolSecrets(deps: {
-  kek: Kek | undefined
-  credentials?: Pick<CredentialRepo, 'revealAll' | 'opener'> | undefined
-  plugins?: Pick<PluginStore, 'enabled'> | undefined
+  credentials?: Pick<CredentialRepo, 'revealAll'> | undefined
+  plugins?: Pick<PluginStoreLike, 'enabled'> | undefined
   oauth?: Pick<PluginOAuth, 'storedSecrets'> | undefined
   packages?: PackageSecretSource | undefined
 }): { secrets: () => Promise<string[]>; fresh: () => Promise<string[]> } {
-  const { kek, credentials } = deps
-  // None without a key that opens them: this process's KEK, or the API's (#5299 D5, the store's `opener`).
+  const { credentials } = deps
+  // The API opens them (#5299 D5).
   const reveal = async (): Promise<string[]> =>
-    credentials && (kek || credentials.opener)
-      ? (await credentials.revealAll(kek, 'redact')).flatMap((row) => (row.credential ? [row.credential.secret] : []))
-      : []
+    credentials ? (await credentials.revealAll('redact')).flatMap((row) => (row.credential ? [row.credential.secret] : [])) : []
   // One reveal serves every call for SAVED_SECRETS_CACHE_MS: through the API's routes each is
   // every credential's plaintext over HTTP (#5299 D5). A failed one is not kept.
   let savedCache: { at: number; read: Promise<string[]> } | undefined

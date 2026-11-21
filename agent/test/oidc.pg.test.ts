@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../src/auth/authenticate.js'
 import { defaultOidcConfig, OIDC_SETTINGS_KEY, OidcProvider, SettingsOidcConfigRepo } from '../src/auth/oidc.js'
 import { PostgresTokenStore } from '../src/auth/tokens.js'
-import { SettingsStore } from '../src/credentials.js'
+import { sqlSettings } from './support/sql/settings.js'
 import type { Database } from './support/database.js'
 import { appFetch, connect, INGRESS, MCP_URL, testApp } from './helpers/mcp.js'
 import { type FakeIdp, startFakeIdp } from './support/fakeIdp.js'
@@ -36,7 +36,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     it('round-trips the configuration as JSON in ai_settings, and reads a broken row as off', async () => {
       const problems: string[] = []
-      const repo = new SettingsOidcConfigRepo(new SettingsStore(db.sql), (d) => problems.push(d))
+      const repo = new SettingsOidcConfigRepo(sqlSettings(db.sql), (d) => problems.push(d))
       expect(await repo.get()).toBeUndefined()
       const config = { ...defaultOidcConfig(idp.issuer), enabled: true, tier_claim: 'groups', audience: 'scadbuddy' }
       await repo.put(config, { actor: { kind: 'system', id: 'test', label: 'test' }, surface: 'system' as const })
@@ -50,7 +50,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     it('Settings enables OIDC in Postgres, and /mcp then takes both JWTs and Postgres bearer tokens', async () => {
-      const settings = new SettingsStore(db.sql)
+      const settings = sqlSettings(db.sql)
       const repo = new SettingsOidcConfigRepo(settings)
       const tokens = new PostgresTokenStore(db.sql)
       const provider = new OidcProvider()

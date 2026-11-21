@@ -13,7 +13,7 @@ import { forwardForRun, PluginForwarder, type PluginsForRun } from '../src/plugi
 import type { PackagesForRun } from '../src/plugins/packages/install.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { respond } from '../src/routes/pendingInput.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { toolCallStarter } from '../src/tools/activityProjection.js'
 import { harnessTools } from '../src/tools/harness.js'
