@@ -38,8 +38,8 @@ Under the rule the API becomes the CRUD service: the only process with SQL acces
 nothing untrusted in its pod. Each worker is now an HTTP client of it, with a service
 credential, and has lost its database secret, role and grant list (#5298, done: prod has
 no worker role or worker database secret since 2026-11-14). The `ai_*` reads
-become routes (#5299). Every `/api/v1/internal/*` route requires a service credential, and
-the API moves to `enforce` (#5297). Template Python and openscad move to a pod without a
+become routes (#5299). Every `/api/v1/internal/*` route gets a guard that refuses a request
+without a service credential in every mode (#5297 part 1); prod never runs `enforce` (the owner's decision of 2026-11-17). Template Python and openscad move to a pod without a
 database secret (#5296). Never add a worker table grant, a cross-service table read or a
 new database client; add a CRUD route that requires a service credential instead.
 
