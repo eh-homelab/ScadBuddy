@@ -131,10 +131,10 @@ test.describe('print dialog', () => {
   // #3628 — a multi-colour print with the prime tower on and "No sparse layers".
   test('turns the prime tower on with No sparse layers in Advanced, and prints with them', async ({ page }) => {
     const dialog = await openDialog(page)
-    await expect(dialog.getByLabel('Prime tower')).toHaveCount(0)
+    await expect(dialog.getByLabel('Prime tower', { exact: true })).toHaveCount(0)
 
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
-    const tower = dialog.getByLabel('Prime tower')
+    const tower = dialog.getByLabel('Prime tower', { exact: true })
     await choose(page, tower, 'Off')
     await expect(dialog.getByRole('checkbox', { name: /No sparse layers/ })).toHaveCount(0)
     await expect(dialog.getByText(/Without a tower/)).toBeVisible()
