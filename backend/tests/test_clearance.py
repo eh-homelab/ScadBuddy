@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -24,8 +25,9 @@ from scadbuddy.bambuddy.print_run import PreparedRun, PrintRunRequest, _sequence
 from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.render import bambu3mf
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.paint import single_code
 from scadbuddy.render.read_budget import ReadBudget
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, Paint
 
 H2C = clearance_for("H2C")
 
@@ -337,6 +339,54 @@ def test_one_colour_objects_and_plates_of_several_objects_say_nothing_of_it(
     payload = _plate_3mf(tmp_path / "mixed.3mf", [single_colour, two_objects])
 
     _, warnings = check_plates(payload, [1, 2], None)
+
+    assert warnings == []
+
+
+def _painted_part(painted: bool) -> ColourPart:
+    """One part of filament 1 whose first faces are painted with filament 2, or left
+    unpainted (#6797)."""
+    part = _part(1)
+    faces = len(part.mesh.faces)
+    codes = tuple(single_code(2) if painted and face < 4 else "" for face in range(faces))
+    return replace(part, paint=Paint(codes, ("#FF6AC1", "#00AEEF")))
+
+
+def test_a_one_part_object_painted_in_a_second_colour_warns(tmp_path: Path) -> None:
+    """#6797: a single part whose second colour comes from painting prints layer by
+    layer just as two colour parts do, so by object has no effect on it either."""
+    payload = _plate_3mf(tmp_path / "painted.3mf", [PlateParts((_painted_part(True),), (1,))])
+
+    _, warnings = check_plates(payload, [1], None)
+
+    [warning] = warnings
+    assert warning.kind == "by-object-one-object"
+    assert "2 colours" in warning.message
+
+
+def test_an_unpainted_one_colour_object_says_nothing_of_it(tmp_path: Path) -> None:
+    """#6797: a part with paint codes that name no other filament stays one colour."""
+    payload = _plate_3mf(tmp_path / "plain.3mf", [PlateParts((_painted_part(False),), (1,))])
+
+    _, warnings = check_plates(payload, [1], None)
+
+    assert warnings == []
+
+
+def test_a_part_stating_extruder_zero_prints_in_its_objects_filament(tmp_path: Path) -> None:
+    """claude-review on #6803: in Bambu Studio a part's ``extruder`` 0 means the
+    object's own, as `objects3mf._extruder` reads it. An object of filament 1 whose
+    parts state "1" and "0" is one colour, so it gets no by-object warning."""
+    payload = one_object_two_colours_3mf(tmp_path / "menorah.3mf")
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = archive.read(bambu3mf.MODEL_SETTINGS_NAME).decode()
+    stated = settings.replace(
+        '<metadata key="extruder" value="2"/>', '<metadata key="extruder" value="0"/>'
+    )
+    assert stated != settings
+    zeroed = bambu3mf.rezipped(payload, {bambu3mf.MODEL_SETTINGS_NAME: stated.encode()})
+
+    _, warnings = check_plates(zeroed, [1], None)
 
     assert warnings == []
 
