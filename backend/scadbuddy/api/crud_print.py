@@ -158,6 +158,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
@@ -180,6 +181,7 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, RouteLimit
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.bambuddy.copy_leases import (
@@ -224,6 +226,7 @@ from scadbuddy.crud.idempotency import (
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.crud.print import (
     ACCESS_CODE_UNREADABLE,
+    BASE,
     NO_ACCESS_CODE,
     NO_SUCH_PRINTER,
     SERIAL_TAKEN,
@@ -289,6 +292,17 @@ from scadbuddy.spools.models import SeenTray
 from scadbuddy.store.content_models import content_index_key
 
 logger = logging.getLogger(__name__)
+
+#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's four routes, whatever the
+#: content type. The gate counts only a type in its table, and FastAPI reads a body with
+#: no Content-Type as JSON, so without this a header left out would skip the cap.
+PULL_ROUTE_LIMIT = RouteLimit(
+    "POST",
+    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays)?$"),
+    MAX_TEXT_BODY_BYTES,
+    "a Bambuddy pull",
+    "fixed, api/limits.py MAX_TEXT_BODY_BYTES",
+)
 
 router = crud_router("print")
 # The `Operation` records of the Bambuddy kinds the worker runs (Q9).

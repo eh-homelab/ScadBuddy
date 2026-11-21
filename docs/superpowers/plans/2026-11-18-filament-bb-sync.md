@@ -1856,8 +1856,8 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     usage row is booked once (its `bb_usage` event names it), a Home Assistant reading of
     the same value within 15 minutes is not stored again, and a tray already set right is
     left alone. A body is at most 8 MiB: the app's `BodySizeGate` refuses a larger
-    `application/json` body with 413 on its headers (Decision 182; the routes have no cap of
-    their own). Each model forbids extra keys, caps each listing at 20,000 rows (archives at 2,000), checks the instance's form
+    body with 413 on its headers, whatever its content type, because the four routes carry
+    their own `RouteLimit` (Decision 182, #6861; the routes check nothing in a dependency). Each model forbids extra keys, caps each listing at 20,000 rows (archives at 2,000), checks the instance's form
     and the run's id (`filament-bb-pull-<32 hex>`). No body names an actor (Decision 181).
 179. #6772: `FilamentBbPull` runs its activity once (start-to-close and, since Decision 183,
     schedule-to-close 4 min, no retry): the
@@ -1898,11 +1898,14 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     (`api/limits.py`, `main.py`) refuses an `application/json` body past
     `MAX_TEXT_BODY_BYTES` (8 MiB) on its headers first, and counts a chunked one as it
     arrives; and FastAPI reads the body before it runs a route's dependencies. Ruling: the
-    gate's 8 MiB is the cap. `_pull_bounded` and `PULL_BODY_BYTES_MAX` are gone, and so is
+    gate's 8 MiB is the cap. The gate counts only a content type in its table, and FastAPI reads
+    a body with no Content-Type as JSON, so a header left out skipped the cap (#6861): the four
+    routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`, installed in
+    `main.py`) at `MAX_TEXT_BODY_BYTES`, applied whatever the content type. `_pull_bounded` and `PULL_BODY_BYTES_MAX` are gone, and so is
     the 411 (a chunked body is counted by the gate, not refused).
     `test_a_body_past_the_gate_is_413_on_its_headers` sends a 9 MiB body to each route
     through `create_app`'s CRUD listener with a real print credential and gets the gate's
-    413. A body past it is never silent: the worker's `CrudRefusedError` 413 is logged
+    413, with and without a Content-Type (`test_a_body_with_no_content_type_is_413_too`). A body past it is never silent: the worker's `CrudRefusedError` 413 is logged
     ("could not pull Bambuddy's spools", with the detail) on the Schedule's pull, and an
     import answers 502 naming it (Decision 184). Estimate (JSON as sent,
     `model_dump(mode="json")`): a Bambuddy spool row is about 0.93 KiB (mean of the 12 rows

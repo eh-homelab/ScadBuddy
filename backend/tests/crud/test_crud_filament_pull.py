@@ -140,10 +140,10 @@ async def test_the_routes_need_the_print_credential(store: SettingsStore) -> Non
 
 @pg
 def test_a_body_past_the_gate_is_413_on_its_headers(settings: Settings) -> None:
-    """Decision 178, revised by Decision 182: the routes have no cap of their own. The CRUD
-    listener serves the same app, whose `BodySizeGate` refuses an ``application/json`` body
-    past `MAX_TEXT_BODY_BYTES` (8 MiB) on its Content-Length, before any route reads it.
-    Through the real app, with the print worker's real credential."""
+    """Decision 178, revised by Decision 182: the routes have no cap in a dependency. The
+    CRUD listener serves the same app, whose `BodySizeGate` refuses an ``application/json``
+    body past the routes' `RouteLimit`, `MAX_TEXT_BODY_BYTES` (8 MiB), on its Content-Length,
+    before any route reads it. Through the real app, with the print worker's real credential."""
     app = create_app(settings.model_copy(update={"crud_port": 0}))
     over = b"[" + b" " * MAX_TEXT_BODY_BYTES + b"]"
     with TestClient(app):
@@ -156,10 +156,32 @@ def test_a_body_past_the_gate_is_413_on_its_headers(settings: Settings) -> None:
             for path in PATHS:
                 refused = crud.post(path, content=over)
                 assert refused.status_code == 413, (path, refused.text)
-                assert refused.json()["detail"] == (
-                    f"the body declares {len(over)} bytes and this API reads at most"
-                    f" {MAX_TEXT_BODY_BYTES}"
-                ), path
+                assert "a Bambuddy pull is at most 8 MB" in refused.json()["detail"], path
+        assert filament_on(store.pool).spools.list() == []
+
+
+@pg
+def test_a_body_with_no_content_type_is_413_too(settings: Settings) -> None:
+    """#6861: the gate counts only a type in its table and FastAPI reads a body with no
+    Content-Type as JSON, so the four routes carry their own `RouteLimit` (Decision 182):
+    9 MiB with the header left out is 413 on each, on its Content-Length."""
+    app = create_app(settings.model_copy(update={"crud_port": 0}))
+    over = b"[" + b" " * MAX_TEXT_BODY_BYTES + b"]"
+    with TestClient(app):
+        store = getattr(app.state, STATE_ATTR).settings_store
+        issued = ServiceCredentialStore(store.pool).issue("print", "bootstrap", rate_limited=False)
+        assert issued.token is not None
+        port = crud_listener_port(app)
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{port}",
+            headers={"Authorization": f"Bearer {issued.token}"},
+        ) as crud:
+            for path in PATHS:
+                # Raw bytes: httpx sets no Content-Type of its own.
+                refused = crud.post(path, content=over)
+                assert "content-type" not in refused.request.headers
+                assert refused.status_code == 413, (path, refused.text)
+                assert "a Bambuddy pull is at most 8 MB" in refused.json()["detail"], path
         assert filament_on(store.pool).spools.list() == []
 
 

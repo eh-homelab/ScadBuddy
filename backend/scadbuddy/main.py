@@ -31,6 +31,7 @@ from scadbuddy.activity.index import (
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
+    crud_print,
     health,
     internal_blobs,
     internal_library,
@@ -2450,6 +2451,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             internal_blobs.PUT_ROUTE_LIMIT,
             # A native run's per-print copy from the print worker (#3818 tier A Task 4).
             internal_library.PUT_ROUTE_LIMIT,
+            # The Bambuddy pull's bodies from the print worker (#6772, #6861).
+            crud_print.PULL_ROUTE_LIMIT,
         ],
     )
     # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).
