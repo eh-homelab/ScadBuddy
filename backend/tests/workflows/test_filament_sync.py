@@ -213,7 +213,7 @@ async def test_a_signal_during_a_skipped_pass_runs_one_more(client: Client) -> N
     assert [call.run_id for call in passes.calls] == [passes.calls[0].run_id] * 2
 
 
-async def test_sync_now_during_a_pass_runs_a_pass_that_starts_after_it(client: Client) -> None:
+async def test_sync_now_during_a_pass_runs_one_more_full_pass(client: Client) -> None:
     """#6836: "Sync now" while a pass runs sets ``pending``, so a second pass runs, and it
     is a full one. The ``full`` sequence ``[False, True]`` is what carries that behaviour.
     (``started_at`` is stamped inside the real activity, so the workflow stub cannot check
