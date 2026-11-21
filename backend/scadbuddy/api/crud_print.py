@@ -107,6 +107,12 @@ id an older plan names; reads, Task 7), and ``…/filament/print-uses`` and
 spools' row locks). Each write runs whole in one transaction with its ledger row, once
 per ``Idempotency-Key``: each answers what it booked, which a resend would not repeat.
 
+The sensors' alert notifications (area ``sensor-notify``, #6646) are
+``…/filament/sensor-notifications/claim`` (the queued rows marked ``sending``, once per
+``Idempotency-Key``, after the rows no claim sends are ended) and ``…/{id}/end`` (natural),
+`filament/sensors.py` `claim_on` and `end_on`: the print worker sends them to Bambuddy,
+so the API makes no Bambuddy call for them.
+
 A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
 ``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
 `RemoteBlobs`: the worker holds no key to sign one. Only a key the content index holds,
@@ -234,7 +240,8 @@ from scadbuddy.crud.print import (
     SLICE_SUBJECT,
 )
 from scadbuddy.crud.wire import NOT_CONFIGURED
-from scadbuddy.filament import print_uses
+from scadbuddy.filament import models as m
+from scadbuddy.filament import print_uses, sensors
 from scadbuddy.filament.bb_pull_apply import LocalBbPull
 from scadbuddy.filament.bb_pull_models import (
     INSTANCE_CHANGED,
@@ -2051,6 +2058,69 @@ async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
 async def filament_pull_trays(body: TraysBody, sync: PullDep) -> TraysReconciled:
     """Natural: a tray already set right is left alone."""
     return TraysReconciled(moved=await _for_configured(sync.reconcile_trays(body)))
+
+
+# -- a sensor's alert notifications (area ``sensor-notify``, #6646) ----------------------
+
+CLAIM_NOTIFICATIONS_ROUTE = "POST /filament/sensor-notifications/claim"
+
+
+@router.post(
+    "/filament/sensor-notifications/claim",
+    name="crud_print_sensor_notifications_claim",
+    summary="Claim the sensor notifications to send",
+    description=(
+        "Up to `limit` (at most 20) queued sensor notifications marked `sending`, oldest"
+        " reading first, each with its title and message (#6646). First it ends the rows"
+        " no claim sends: `sending` for over 10 minutes (`interrupted`), a sensor's whose"
+        " `notify` is off or that or its place is archived (`cancelled`), and each but the"
+        " newest of a sensor (`superseded`). Once per `Idempotency-Key`: a claim sent again"
+        " answers the rows it claimed."
+    ),
+)
+async def claim_sensor_notifications(
+    body: m.NotificationClaim,
+    settings: SettingsStoreDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> list[m.ClaimedNotification]:
+    key = required_key(idempotency_key)
+
+    def write(conn: Connection[DictRow]) -> list[dict[str, Any]]:
+        return [row.model_dump(mode="json") for row in sensors.claim_on(conn, body.limit)]
+
+    answer = await asyncio.to_thread(
+        _once_on,
+        settings.pool,
+        key,
+        CLAIM_NOTIFICATIONS_ROUTE,
+        body.model_dump(mode="json"),
+        write,
+    )
+    return [m.ClaimedNotification.model_validate(row) for row in answer]
+
+
+@router.post(
+    "/filament/sensor-notifications/{notification_id}/end",
+    name="crud_print_sensor_notification_end",
+    summary="Record how a sensor notification's send ended",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "A claimed notification ended `sent` (`channels`, how many Bambuddy channels took"
+        " it), `failed` (`error`, a fixed code of the send) or handed back (`requeue`: the"
+        " pass never tried it, so it is `queued` again). A row no longer `sending` is left"
+        " as it is."
+    ),
+)
+async def end_sensor_notification(
+    notification_id: UUID, body: m.NotificationEnd, settings: SettingsStoreDep
+) -> None:
+    """Natural: an end sent again finds the row ended and changes nothing."""
+
+    def write() -> None:
+        with settings.pool.connection() as conn, conn.transaction():
+            sensors.end_on(conn, notification_id, body)
+
+    await asyncio.to_thread(write)
 
 
 @router.get("/held-presets", name="crud_print_held_presets")

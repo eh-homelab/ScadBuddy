@@ -17,7 +17,7 @@
 - Refusals match `require_crud`'s in shape. No live credential, or a person, a personal token or anonymous: 401, type `…/auth/signed-out`, `WWW-Authenticate: Bearer realm="scadbuddy"`, reason `no_credential`. A live service credential without the class: 403, type `…/auth/forbidden`, reason `out_of_scope`. Never 401 for that case, or the client would exchange again and loop (#5514).
 - Scopes stay as they are (`auth/service_credentials.py` `SCOPES`): print `{internal.outputs, internal.library, crud.print}`, agent `{api, internal.workspace, crud.agent}`.
 - No change under `agent/`: #5299's live session owns it (PRs #6497, #6510).
-- `SCADBUDDY_AUTH_MODE=enforce` is OUT of scope. Prod has no login configured: no `SCADBUDDY_AUTH_OIDC_*` env and no stored auth settings (checked 2026-11-17). README rollout step 1 is the owner's (pick the issuer, register the redirect URI, save the client secret). The agent's 8081 guard and approvals half waits for #5299. Both come in part 2.
+- `SCADBUDDY_AUTH_MODE=enforce` is not used on prod. The owner decided this on 2026-11-17: the front door already gates people. Prod has no login configured (no `SCADBUDDY_AUTH_OIDC_*` env and no stored auth settings, checked 2026-11-17), and that stays so. This plan's guard refuses only service-only routes, in every mode, and never touches a person's request to a public route. The agent's 8081 guard and approvals half waits for #5299 and comes in part 2.
 
 ## Review Focus
 
@@ -72,11 +72,12 @@
 - [ ] **Step 6: Run the focused suites.**
   Run: `cd backend && uvx uv@0.13.6 run pytest tests/auth tests/crud/test_guard.py tests/api/test_internal_outputs.py tests/test_print_worker_nodb.py tests/print_library -q` (each run with its own Postgres, per `backend/CLAUDE.md`)
   Expected: all pass. `ruff check`, `ruff format --check` and `mypy` are clean as `backend/CLAUDE.md` runs them.
-- [ ] **Step 7: Docs.** README rollout step 4, trust page gap 5 ("`/api/v1/internal/*` refuses a request without a service credential in every mode since #5297 part 1; the agent's 8081 routes do not yet"), and its order-of-work line for #5297. Cite this PR.
-- [ ] **Step 8: Commit, open the PR** with `Part of #5297` (not `Fixes`: part 2 remains), and auto-merge. Only after Task 1 Step 5 shows zero `internal.*`.
+- [ ] **Step 7: Docs.** README rollout step 4, the trust page's `/api/v1/internal/*` zone row (it says the routes take a service credential "in `enforce` only"; make it every mode), its gap 5 ("`/api/v1/internal/*` refuses a request without a service credential in every mode since #5297 part 1; the agent's 8081 routes do not yet"), and its order-of-work line for #5297. Cite this PR.
+- [ ] **Step 8: Commit, open the PR** with `Part of #5297` (not `Fixes`: the agent's 8081 half remains), and auto-merge. Only after Task 1 Step 5 shows zero `internal.*`.
 
 ### Task 3: Prod check after the guard deploys
 
 - [ ] **Step 1:** After the deploy PR for Task 2's image has synced, check that the print worker still sends: its log has no `401` or `403` from `/api/v1/internal/` (`kubectl logs deploy/scadbuddy-print --since=1h | grep -E "internal/(outputs|library)" | grep -E " 40[13]"`). Expected: nothing.
 - [ ] **Step 2:** Check that anonymous access is refused, from inside the cluster: `kubectl exec deploy/scadbuddy-print -- python -c "import urllib.request as u; u.urlopen('http://scadbuddy.bambuddy.svc.cluster.local:8080/api/v1/internal/library')"` raises `HTTP Error 401`.
-- [ ] **Step 3:** Post both on #5297. Leave #5297 open for part 2 (`enforce`, the agent's 8081 half).
+- [ ] **Step 3:** Post both on #5297. Leave #5297 open for part 2 (the agent's 8081 half).
+- [ ] **Step 4:** Take the API back to the default `off`: remove `SCADBUDDY_AUTH_MODE` from `applications/scadbuddy/scadbuddy.yaml` in eh-homelab/clusters. `observe` was only the measurement, and its once-a-minute `signed_out` logs are noise without a login. The guard refuses in every mode, so it does not need `observe`.

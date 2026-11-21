@@ -86,7 +86,8 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   uploads: ['asset_fetch_domains'],
   // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools and weights in, tags out.
   // #6625 — and the nozzles a 3DFP preset fetch exports.
-  filament: ['filament_sync', 'profile_fetch_nozzles'],
+  // #6868 — and whether an empty spool adds its type to the shopping list (stored only).
+  filament: ['filament_sync', 'profile_fetch_nozzles', 'filament_shopping_auto_add_empty'],
 }
 
 /** #6265 — the six data types `filament_sync` gives a direction, in the form's order. */
@@ -200,6 +201,8 @@ export function registryIdsValue(ids: readonly string[]): string {
 export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'filament_sync') return syncValue(settings.filament_sync)
   if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
+  // #6868 — on until the settings say otherwise, as the backend's default.
+  if (name === 'filament_shopping_auto_add_empty') return settings.filament_shopping_auto_add_empty === false ? 'false' : 'true'
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
@@ -234,7 +237,7 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     name === 'slicer_backend'
   )
     return raw
-  if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
+  if (name === 'store_s3_path_style' || name === 'print_auto_import' || name === 'filament_shopping_auto_add_empty') return raw === 'true'
   // #6265 — one direction per data type: the form's six-part string, split.
   if (name === 'filament_sync') return syncParts(raw)
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.

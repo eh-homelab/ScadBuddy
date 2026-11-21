@@ -473,7 +473,9 @@ export const filamentPurchasingTools: Tool[] = [
     description:
       'The spools the user means to buy: pending items first, then the newest. Each has its `material`, ' +
       '`subtype`, `brand`, `colour_name`, `quantity_spools`, `note` and `status` (`pending` or `purchased`). ' +
-      'Only one `status` when given.',
+      'ScadBuddy adds an item itself when a spool reaches 0 g or is archived, unless that type already has a ' +
+      'pending item or Settings → Filament turns it off; such an item has `empty_spool_id` (the spool) and a ' +
+      'note naming the spool and when. Nothing is ordered. Only one `status` when given.',
     input: z.object({ status: z.enum(['pending', 'purchased']).optional() }),
     risk: 'read',
     source: SOURCE,

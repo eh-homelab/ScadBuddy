@@ -1099,6 +1099,22 @@ def test_filament_settings_round_trip(client: TestClient) -> None:
         assert client.put("/api/v1/settings", json={"filament_sync": bad}).status_code == 422
 
 
+def test_the_shopping_auto_add_switch_round_trips(client: TestClient) -> None:
+    """#6868: stored only, on by default, and a null puts the default back."""
+    name = "filament_shopping_auto_add_empty"
+    body = client.get("/api/v1/settings").json()
+    assert body[name] is True
+    assert name not in body["sources"]
+    assert client.put("/api/v1/settings", json={name: False}).status_code == 200
+    assert client.get("/api/v1/settings").json()[name] is False
+    with _state(client).settings_store.pool.connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE name = %s", (name,)).fetchone()
+    # `shopping.add_for_empty_on` reads this row as JSON `false` in the write's transaction.
+    assert row == {"value": False}
+    assert client.put("/api/v1/settings", json={name: None}).status_code == 200
+    assert client.get("/api/v1/settings").json()[name] is True
+
+
 def test_a_saved_sync_reads_back_as_a_filament_sync(client: TestClient) -> None:
     """The path the spool refresh Schedule's pull takes (`main.py`)."""
     assert (

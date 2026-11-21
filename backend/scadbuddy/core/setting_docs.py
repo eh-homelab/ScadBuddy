@@ -408,7 +408,10 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Pull from Bambuddy every",
             "How often Bambuddy's spools are pulled and its local presets kept, on a schedule"
             " of their own so a print never waits on Bambuddy. The same run reconciles each"
-            " printer's report with the filament ledger (the capture backstop). It is also"
+            " printer's report with the filament ledger (the capture backstop) and reads the"
+            " Home Assistant sensors. A sensor's alert notification does not wait for it:"
+            " it goes out within about a minute of the reading that starts or stops the"
+            " alert, whatever this says. It is also"
             " how often the Bambuddy sync runs a full pass of what ScadBuddy sends to"
             " Bambuddy. 0 turns the pull, the presets and the backstop off, and stops the"
             " sync's timer: the sync then runs only after a filament change or Sync now."
@@ -424,6 +427,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Default cost per kg",
             "What a kilogram of filament costs when its spool and type name no cost, in the"
             " shop's currency, such as 24.50. Empty sets none.",
+        ),
+        "filament_shopping_auto_add_empty": SettingDoc(
+            "Add empty spools to the shopping list",
+            "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
+            " shopping list, with a note that names the spool. Nothing is added while an item"
+            " for that type is still to buy. It orders nothing.",
         ),
         "filament_burn_window_days": SettingDoc(
             "Burn window, days",

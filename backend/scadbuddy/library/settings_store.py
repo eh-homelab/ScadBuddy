@@ -500,6 +500,10 @@ class StoredSettings(BambuddyIds):
     #: The LAN-only printers (registry ids, #4699 phase 4) whose prints the watcher leaves
     #: alone: a printer with no Bambuddy link has no Bambuddy id to name.
     print_auto_import_skip_lan_printers: list[str] | None = None
+    #: #6868: an empty spool adds its type to the shopping list. On by default. Stored
+    #: only (no row is on), because `filament/shopping.py` `add_for_empty_on` reads it in
+    #: the emptying write's own transaction, where no environment value reaches.
+    filament_shopping_auto_add_empty: bool = True
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -819,6 +823,9 @@ class SettingsPatch(BaseModel):
     print_auto_import_skip_lan_printers: (
         list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
     ) = Field(default=None, max_length=200)
+    #: #6868: whether an empty spool adds its type to the shopping list; ``null`` puts
+    #: back the default (on).
+    filament_shopping_auto_add_empty: bool | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.

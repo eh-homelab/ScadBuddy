@@ -89,7 +89,8 @@ ACTOR = "system:bambuddy-sync"
 #: really gone is missing from the next complete listing, and its probe drops it.
 _GONE_ON_404 = frozenset({"update", "archive", "restore", "probe"})
 #: The writes Bambuddy answers with the spool's whole row (``SpoolResponse`` in
-#: `sync-routes.json`; a probe is ``GET spool_row``). A list ``PUT`` answers its list.
+#: `sync-routes.json`; a spool's probe is ``GET spool_row``, another row's probe answers
+#: that row, #6688). A list ``PUT`` answers its list.
 _FULL_ROW = frozenset({"create", "update", "archive", "restore", "probe"})
 #: The spool writes that change Bambuddy's row, and so book Decision 9's event and move
 #: the link's ``bb_updated_at``.

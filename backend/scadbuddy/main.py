@@ -105,6 +105,8 @@ from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_load
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.print_uses import PoolPrintUses
+from scadbuddy.filament.sensor_notify import SensorNotifyActivities
+from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -247,6 +249,7 @@ from scadbuddy.workflows.previews import (
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.printer_watch import ensure_watches
+from scadbuddy.workflows.sensor_notify import ensure_sensor_notify_schedule
 from scadbuddy.workflows.slicing import VersionedSliceWorkflow
 from scadbuddy.workflows.slicing_activities import slice_activities
 from scadbuddy.workflows.spool_refresh import VersionedSpoolRefresh, ensure_spool_schedule
@@ -1046,6 +1049,16 @@ async def _sweep_activity_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not prune activity")
         failed = True
+    # #6646 Decision 49: the sensors' old notification rows, in this activity so the
+    # workflow's history is unchanged.
+    try:
+        pruned = await asyncio.to_thread(state.components.get(FILAMENT).sensors.prune_notifications)
+    except Exception:
+        logger.exception("could not prune the sensor notifications")
+        failed = True
+    else:
+        if pruned:
+            logger.info("pruned sensor notifications", extra={"count": pruned})
     if failed:
         raise RuntimeError("the activity sweep failed")
 
@@ -1770,6 +1783,12 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             LocalBbPull(state.components.get(FILAMENT), state.settings_store.load),
             settings_loader(state.settings_store.load),
         ).pull_read,
+        # The sensors' alert notifications (#6646) on this process's own pool, as the
+        # CRUD routes claim and end them for the print worker.
+        SensorNotifyActivities(
+            PoolSensorNotifications(state.settings_store.pool),
+            settings_loader(state.settings_store.load),
+        ).deliver,
     ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
@@ -1914,6 +1933,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.previews.timeout if state.previews is not None else None,
             stop,
             spool_refresh=settings.spool_overlay_refresh_seconds,
+            print_queue=settings.temporal_task_queue_bambuddy,
         )
         if paused and state.store.content is not None:
             # Its sweep would backfill the uploads (review #1095 2); paused, the start does.
@@ -2025,19 +2045,24 @@ async def _set_up_housekeeping(
     stop: asyncio.Event,
     *,
     spool_refresh: float,
+    print_queue: str | None = None,
 ) -> bool:
     """The housekeeping Schedules, the spool refresh (Bambuddy's kept presets and its
     spools pulled and the filament capture backstop, every ``spool_refresh`` seconds; 0:
-    none, #3818, #6262, #6263) and the
+    none, #3818, #6262, #6263), the sensor notifications' pass on ``print_queue`` (the
+    ``bambuddy`` queue, every minute, #6646) and the
     preview backfill's (``previews``: the scheduler's render bound; None, previews off:
     none), retried until Temporal takes them: a frontend can answer the connect before
     it can create one. Each set-up triggers its Schedule, so the preview one comes last:
     a retry after the housekeeping ones failed does not run the backfill twice (a refresh
-    run twice is only a refresh). True when the sweeps' one is paused."""
+    or a notification pass run twice is only a pass). True when the sweeps' one is
+    paused."""
     while not stop.is_set():
         try:
             paused = await ensure_schedules(client, queue, interval)
             await ensure_spool_schedule(client, queue, spool_refresh)
+            if print_queue is not None:
+                await ensure_sensor_notify_schedule(client, print_queue)
             await ensure_preview_schedule(client, queue, previews)
             return paused
         except Exception:

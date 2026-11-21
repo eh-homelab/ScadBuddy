@@ -42,8 +42,11 @@ Row = Mapping[str, Any]
 _Types = list[m.SpoolType]
 _Presets = list[m.TypePreset]
 _KValues = list[m.TypeKValue]
+#: A K row's key: printer, extruder and nozzle (`k_value_key`).
+_KKey = tuple[str, int, Decimal | str]
+_Kept = tuple[m.TypeKValue, dict[str, Any]]
 #: The K rows a fetch did not write, each with the row that kept its key (`merge_k_values`).
-_KeptK = list[tuple[m.TypeKValue, dict[str, Any]]]
+_KeptK = list[_Kept]
 _Ids = list[int]
 
 #: The fields whose change rewrites a type's price book row.
@@ -95,7 +98,7 @@ class LinkedPrinter:
     bambuddy_printer_id: int
 
 
-def k_value_key(row: Mapping[str, Any]) -> tuple[str, int, Decimal | str]:
+def k_value_key(row: Mapping[str, Any]) -> _KKey:
     """A K value row's key, its nozzle as a number when it is one (``0.40`` is ``0.4``)."""
     nozzle = str(row["nozzle_diameter"]).strip()
     try:
@@ -548,7 +551,8 @@ class SpoolTypeStore:
         Decision 127). The type's other rows stay. Checked and written under the type's
         row lock, on ``conn``, in the caller's transaction. Answers the rows written (one per
         key, the last of a batch's duplicates), each tagged ``profile_fetch`` (R-6714-19),
-        and each row not written with the row that kept its key."""
+        and each key not written (one per key, the last of a batch's duplicates) with the
+        row that kept it."""
         conn.execute("SELECT 1 FROM filament_spool_types WHERE id = %s FOR UPDATE", (type_id,))
         held = {
             k_value_key(row): row
@@ -557,13 +561,13 @@ class SpoolTypeStore:
                 (type_id,),
             ).fetchall()
         }
-        written: dict[tuple[str, int, Decimal | str], m.TypeKValue] = {}
-        kept: _KeptK = []
+        written: dict[_KKey, m.TypeKValue] = {}
+        kept: dict[_KKey, _Kept] = {}
         for row in rows:
             key = k_value_key(row.model_dump())
             old = held.get(key)
             if old is not None and old["source"] != "profile_fetch":
-                kept.append((row, old))
+                kept[key] = (row, old)
                 continue
             if old is not None:
                 conn.execute(
@@ -574,7 +578,7 @@ class SpoolTypeStore:
             _insert_k(conn, type_id, row, "profile_fetch")
             held[key] = {**row.model_dump(), "source": "profile_fetch"}
             written[key] = row.model_copy(update={"type_id": type_id, "source": "profile_fetch"})
-        return list(written.values()), kept
+        return list(written.values()), list(kept.values())
 
     def match(
         self,

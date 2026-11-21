@@ -67,6 +67,7 @@ from pydantic_core import to_jsonable_python
 
 from scadbuddy.filament import models as m
 from scadbuddy.filament.provenance import current_by
+from scadbuddy.filament.shopping import add_for_empty_on
 
 Conn = Connection[DictRow]
 
@@ -169,7 +170,35 @@ def record(
         return None
     event = m.SpoolEvent.model_validate(row)
     refresh_derived(conn, spool_id, event)
+    _check_empty(conn, spool_id, event)
     return event
+
+
+def _check_empty(conn: Conn, spool_id: UUID, event: m.SpoolEvent) -> None:
+    """#6868: the move into empty adds the spool's type to the shopping list, in this
+    write's transaction (`shopping.add_for_empty_on`). Every spool event is booked here, so
+    every path that empties a spool is checked: a print's grams, a weighing, an AMS
+    reading, a person's edit, the Bambuddy pull. The move is an unarchived spool whose
+    ``grams_left`` goes from above 0 (``grams_before``) to 0, or an ``archived`` event on a
+    spool not already empty. Unknown grams that become 0 are no move (an import or the
+    first reading of an old reel), nor is the pull's archived import of a spool Bambuddy
+    had archived (``data.bb_archived_at``). Later writes on an empty spool add nothing."""
+    before = event.grams_before
+    was_empty = before is not None and before <= 0
+    if event.kind == "archived":
+        if was_empty or "bb_archived_at" in event.data:
+            return
+        add_for_empty_on(conn, spool_id, cause="archived", at=event.at)
+        return
+    if before is None or was_empty:
+        return
+    now = conn.execute(
+        "SELECT grams_left, archived_at FROM filament_spools WHERE id = %s", (spool_id,)
+    ).fetchone()
+    if now is None or now["archived_at"] is not None:
+        return
+    if now["grams_left"] is not None and now["grams_left"] <= 0:
+        add_for_empty_on(conn, spool_id, cause="ran_out", at=event.at)
 
 
 def reading(event: m.SpoolEvent, label_weight_g: int | None) -> float | None:

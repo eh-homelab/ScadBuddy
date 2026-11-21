@@ -934,6 +934,8 @@ export const handlers = [
       note: text(body.note) || null,
       status: 'pending',
       purchased_at: null,
+      // #6868: a person's item; only an empty spool's move into empty names one.
+      empty_spool_id: null,
       created_at: now(),
       updated_at: now(),
     }

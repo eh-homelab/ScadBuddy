@@ -255,6 +255,8 @@ class SettingsView(BaseModel):
     print_auto_import_skip_printers: list[int] = Field(default_factory=list)
     #: The LAN-only printers it leaves alone, by registry id (#4699 phase 4).
     print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
+    #: #6868: whether an empty spool adds its type to the shopping list.
+    filament_shopping_auto_add_empty: bool = True
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -528,6 +530,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_auto_import_sources=list(stored.auto_import_sources()),
         print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
         print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
+        filament_shopping_auto_add_empty=stored.filament_shopping_auto_add_empty,
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,

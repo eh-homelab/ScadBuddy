@@ -1,6 +1,7 @@
-import { ArchiveIcon, ChartSplineIcon, PencilIcon, PlusIcon } from 'lucide-react'
+import { ArchiveIcon, BellIcon, BellOffIcon, ChartSplineIcon, PencilIcon, PlusIcon } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
-import { ApiError } from '../../api/client'
+import { api, ApiError } from '../../api/client'
+import { useAsync } from '../../lib/useAsync'
 import {
   archiveSensor,
   createSensor,
@@ -9,10 +10,12 @@ import {
   patchSensor,
   type HaEntity,
   type Sensor,
+  type SensorNotification,
   type SensorPatch,
   type SensorReading,
 } from '../../api/filament'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
@@ -57,6 +60,7 @@ interface Draft {
   unit: string
   above: string
   below: string
+  notify: boolean
 }
 
 const draftOf = (sensor?: Sensor): Draft => ({
@@ -64,7 +68,62 @@ const draftOf = (sensor?: Sensor): Draft => ({
   unit: sensor?.unit ?? '',
   above: sensor?.alert_above == null ? '' : String(sensor.alert_above),
   below: sensor?.alert_below == null ? '' : String(sensor.alert_below),
+  notify: sensor?.notify ?? false,
 })
+
+const shortTime = (at: string) => new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+
+/** #6646 — what a failed notification's `error` code means, and what fixes it. */
+const NOTIFY_FAILURE: Record<NonNullable<SensorNotification['error']>, string> = {
+  unauthorized: "Bambuddy refused ScadBuddy's API key. Check the key in Settings.",
+  scope: "ScadBuddy's API key lacks a permission. Give the key the Send notifications permission in Bambuddy.",
+  not_found: 'Bambuddy has no route for messages from connected apps. Bambuddy must be 1.3.1 or later.',
+  no_channel: 'No Bambuddy channel takes messages from connected apps. Turn that on for a channel in Bambuddy.',
+  rate_limited: 'Bambuddy refused it for sending too many messages in a minute.',
+  unavailable: 'Bambuddy could not be reached.',
+  rejected: 'Bambuddy refused the message.',
+  not_configured: 'Bambuddy is not connected. Connect it in Settings.',
+  internal: 'ScadBuddy could not send it.',
+  cancelled: 'Notify was turned off, or the sensor or its place was archived, before it went out.',
+  superseded: 'A newer change of the sensor went out instead.',
+  interrupted: 'The send stopped before Bambuddy answered, so it may have gone out. It is not sent again.',
+}
+
+/** The sensor's newest notification: sent, waiting to go, or failed and why. */
+function LastNotification({ notification, connected }: { notification: SensorNotification; connected: boolean | undefined }) {
+  const what = notification.kind === 'started' ? 'alert started' : 'alert ended'
+  if (notification.state === 'failed')
+    return (
+      <p className="flex items-start gap-1.5 text-warn">
+        <BellOffIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+        <span>
+          {notification.error === 'interrupted' ? 'Notification may not have been sent' : 'Notification not sent'} ({what}, <time dateTime={notification.read_at}>{shortTime(notification.read_at)}</time>).{' '}
+          {notification.error ? NOTIFY_FAILURE[notification.error] : null}
+        </span>
+      </p>
+    )
+  if (notification.state === 'sent' && notification.sent_at)
+    return (
+      <p className="flex items-start gap-1.5 text-muted-foreground">
+        <BellIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+        <span>
+          Notified through Bambuddy ({what}) <time dateTime={notification.sent_at}>{shortTime(notification.sent_at)}</time>
+          {notification.channels != null && `, to ${notification.channels} ${notification.channels === 1 ? 'channel' : 'channels'}`}.
+        </span>
+      </p>
+    )
+  return (
+    <p className="flex items-start gap-1.5 text-muted-foreground">
+      <BellIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
+      <span>
+        {notification.state === 'sending' ? 'Notification sent to Bambuddy, no answer yet' : 'Notification waiting'} ({what},{' '}
+        <time dateTime={notification.read_at}>{shortTime(notification.read_at)}</time>).
+        {notification.state === 'queued' && connected === true && ' It goes out through Bambuddy within about a minute.'}
+        {notification.state === 'queued' && connected === false && ' It goes out once Bambuddy is connected in Settings.'}
+      </span>
+    </p>
+  )
+}
 
 function LimitFields({ draft, set }: { draft: Draft; set: (next: Draft) => void }) {
   return (
@@ -84,6 +143,10 @@ function LimitFields({ draft, set }: { draft: Draft; set: (next: Draft) => void 
       <label className="flex flex-col gap-1">
         Alert below
         <Input inputMode="decimal" value={draft.below} onChange={(event) => set({ ...draft, below: event.target.value })} />
+      </label>
+      <label className="flex items-center gap-2 sm:col-span-2">
+        <Checkbox checked={draft.notify} onCheckedChange={(checked) => set({ ...draft, notify: checked === true })} />
+        Notify me through Bambuddy when it starts and stops alerting
       </label>
     </>
   )
@@ -127,7 +190,7 @@ function EditSensor({ sensor, onDone }: { sensor: Sensor; onDone: (saved: boolea
     const above = limit(draft.above)
     const below = limit(draft.below)
     if (above === undefined || below === undefined) return setError('Enter each limit as a number, or leave it empty.')
-    const body: SensorPatch = { name: draft.name.trim(), unit: draft.unit.trim() || null, alert_above: above, alert_below: below }
+    const body: SensorPatch = { name: draft.name.trim(), unit: draft.unit.trim() || null, alert_above: above, alert_below: below, notify: draft.notify }
     setSaving(true)
     setError(null)
     try {
@@ -218,7 +281,7 @@ function AddSensor({ locationId, locationName, onDone }: { locationId: string; l
         unit: draft.unit.trim() || null,
         alert_above: above,
         alert_below: below,
-        notify: false,
+        notify: draft.notify,
       })
       onDone(true)
     } catch (cause) {
@@ -301,7 +364,8 @@ function AddSensor({ locationId, locationName, onDone }: { locationId: string; l
 /**
  * #6268 — a place's humidity and temperature sensors: the value and its unit, whether it is
  * over a limit or cannot be reached, a day's history on request, and for a Home Assistant
- * sensor a form to add, change and archive it. An alert is shown here, not sent anywhere.
+ * sensor a form to add, change and archive it. With `notify` on, ScadBuddy sends a notification
+ * through Bambuddy when the sensor starts and stops alerting (#6646); the newest one shows here.
  */
 export function LocationSensors({ locationId, locationName, sensors, canAdd, onChanged }: Props) {
   const [history, setHistory] = useState<string | null>(null)
@@ -309,6 +373,9 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [archiving, setArchiving] = useState<string | null>(null)
+  // A queued notice goes out only through a connected Bambuddy; until the read lands, it promises nothing.
+  const settings = useAsync(() => api.getSettings(), [])
+  const connected = settings.data === undefined ? undefined : Boolean(settings.data.bambuddy_url)
 
   async function archive(sensor: Sensor) {
     if (archiving) return
@@ -349,10 +416,11 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
                   {sensor.alerting && <span className="font-medium text-warn">{overLimit(sensor) ? 'Above the limit' : 'Below the limit'}</span>}
                   {!sensor.reachable && <span className="text-warn">Not reachable</span>}
                   {limits && <span className="text-muted-foreground">{limits}</span>}
+                  {sensor.notify && <span className="text-muted-foreground">Notifies through Bambuddy</span>}
                   {sensor.source === 'ams' && <span className="text-muted-foreground">Made by ScadBuddy from the printer</span>}
                   {sensor.last_at && (
                     <time dateTime={sensor.last_at} className="text-muted-foreground">
-                      Read {new Date(sensor.last_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                      Read {shortTime(sensor.last_at)}
                     </time>
                   )}
                   <span className="ml-auto flex gap-1">
@@ -376,6 +444,7 @@ export function LocationSensors({ locationId, locationName, sensors, canAdd, onC
                     )}
                   </span>
                 </div>
+                {sensor.last_notification && <LastNotification notification={sensor.last_notification} connected={connected} />}
                 {open && <History sensor={sensor} />}
                 {editing === sensor.id && (
                   <EditSensor
