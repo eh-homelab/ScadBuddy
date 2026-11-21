@@ -539,6 +539,13 @@ holds each decision and what it costs if wrong.
   nothing.
 - **Shopping list statuses.** An item is `pending` or `purchased`; a repeat keeps the first
   `purchased_at`. The list shows newest first, pending above purchased.
+- **An empty spool adds its type (#6868).** A spool whose grams move from above 0 to 0, by
+  any ledger write, or that is archived, adds a `pending` item for its type in the same
+  transaction, unless one is already pending for that type; a spool with no type adds a text
+  item. The item names the spool (`empty_spool_id`) and its note says when. The stored
+  setting `filament_shopping_auto_add_empty` (Settings → Filament, on by default) turns it
+  off. It orders nothing, so "stock reorder automation" above stays out of scope. The
+  rulings are in `docs/superpowers/plans/2026-11-17-filament-suppliers.md`.
 - **Draft bounds and archived suppliers.** A line's quantity is at most 1,000; a line may
   not fill more spools than its quantity, and its total must fit `numeric(12,4)`; each is a
   422. A draft for an archived supplier is a 422, and confirming an invoice whose supplier
