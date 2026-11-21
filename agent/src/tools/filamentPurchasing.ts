@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ok } from './call.js'
+import { linkingTools } from './filamentLinks.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
 
 // Filament purchasing (#6266, epic #6260): suppliers, their products, price points and invoice drafts.
@@ -9,7 +10,7 @@ import { defineTool, json, ToolError, type Tool } from './registry.js'
 
 const SOURCE = "ScadBuddy's filament purchasing records"
 
-export const filamentPurchasingTools: Tool[] = [
+const tools: Tool[] = [
   defineTool({
     name: 'filament_supplier_list',
     label: 'List filament suppliers',
@@ -573,3 +574,20 @@ export const filamentPurchasingTools: Tool[] = [
     },
   }),
 ]
+
+/** #6869: each answer's entities carry their `ui_path` (`filamentLinks.ts`); these tools answer one kind of entity, or a list of it. */
+export const filamentPurchasingTools: Tool[] = linkingTools(tools, {
+  filament_supplier_list: 'supplier',
+  filament_supplier_upsert: 'supplier',
+  filament_product_list: 'product',
+  filament_product_upsert: 'product',
+  filament_price_sheet: 'price_sheet_row',
+  filament_invoice_list: 'invoice',
+  filament_invoice_get: 'invoice',
+  filament_invoice_upsert: 'invoice',
+  filament_invoice_confirm: 'invoice',
+  filament_invoice_candidates: 'line_candidates',
+  filament_shopping_list: 'shopping_item',
+  filament_shopping_add: 'shopping_item',
+  filament_shopping_update: 'shopping_item',
+})

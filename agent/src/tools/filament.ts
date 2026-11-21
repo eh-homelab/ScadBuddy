@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
+import { linkingTools, type LinkKind } from './filamentLinks.js'
 import { defineTool, idempotencyKey, json, ToolError, type Tool } from './registry.js'
 
 // ScadBuddy's own filament inventory (#6261, epic #6260): the catalogs a spool type or a
@@ -102,7 +103,7 @@ const csvRows = z
   .max(5000)
   .describe('One object per CSV row, column name to cell text')
 
-export const filamentTools: Tool[] = [
+const tools: Tool[] = [
   defineTool({
     name: 'filament_catalog_list',
     label: 'List a filament catalog',
@@ -1630,3 +1631,23 @@ export const filamentTools: Tool[] = [
       ),
   }),
 ]
+
+const catalogRow = (args: Record<string, unknown>): LinkKind => `catalog:${String(args.kind)}`
+
+/** #6869: each answer's entities carry their `ui_path` (`filamentLinks.ts`); these tools answer one kind of entity, or a list of it. */
+export const filamentTools: Tool[] = linkingTools(tools, {
+  filament_catalog_list: catalogRow,
+  filament_catalog_upsert: catalogRow,
+  filament_catalog_resolve: catalogRow,
+  filament_catalog_set_aliases: catalogRow,
+  filament_type_list: 'type',
+  filament_type_get: 'type',
+  filament_type_upsert: 'type',
+  filament_spool_list: 'spool',
+  filament_spool_get: 'spool',
+  filament_spool_upsert: 'spool',
+  filament_spool_archive: 'spool',
+  filament_spool_move: 'spool',
+  filament_location_list: 'location',
+  filament_location_upsert: 'location',
+})
