@@ -512,6 +512,55 @@ def test_painting_in_a_component_s_own_model_file_counts() -> None:
     assert warning.kind == "by-object-one-object"
 
 
+def test_painting_reached_deeper_than_the_box_walk_met_it_counts() -> None:
+    """claude-review on #6837: `box` may meet an object first through a modifier, at
+    depth 1, while the painted walk skips modifiers and meets it at the end of a
+    normal part's chain of eight components, at depth 9. Its painting still counts.
+    A chain of 2,000 components, each one also a modifier of the root so `box` meets
+    it at depth 1, is walked without running out of Python's stack."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+
+    def file(chain: int) -> bytes:
+        mesh = (
+            '<mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>'
+            '<vertex x="0" y="10" z="5"/></vertices><triangles>'
+            f'<triangle v1="0" v2="1" v3="2" paint_color="{single_code(2)}"/>'
+            "</triangles></mesh>"
+        )
+        objects = [f'<object id="9000" type="model">{mesh}</object>']
+        for n in range(1, chain + 1):
+            target = 9000 if n == chain else n + 1
+            objects.append(
+                f'<object id="{n}" type="model"><components>'
+                f'<component objectid="{target}"/></components></object>'
+            )
+        # Deepest first, so `box` meets each one at depth 1 before the chain does.
+        modifiers = ["9000", *(str(n) for n in range(chain, 1, -1))]
+        components = "".join(f'<component objectid="{m}"/>' for m in modifiers)
+        objects.append(
+            f'<object id="9999" type="model"><components>{components}'
+            '<component objectid="1"/></components></object>'
+        )
+        root = (
+            f'<model xmlns="{core}" unit="millimeter"><resources>{"".join(objects)}'
+            '</resources><build><item objectid="9999"/></build></model>'
+        )
+        parts = "".join(f'<part id="{m}" subtype="modifier_part"/>' for m in modifiers)
+        settings = (
+            f'<config><object id="9999">{parts}<part id="1" subtype="normal_part"/>'
+            "</object></config>"
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("3D/3dmodel.model", root)
+            archive.writestr(bambu3mf.MODEL_SETTINGS_NAME, settings)
+        return buffer.getvalue()
+
+    for chain in (8, 2000):
+        by_plate, _ = check_plates(file(chain), [1], None)
+        assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})], chain
+
+
 async def test_only_a_by_object_print_gets_the_one_object_warning(tmp_path: Path) -> None:
     """#6781: by object through the generic process overrides warns; by layer does not."""
     payload = one_object_two_colours_3mf(tmp_path / "menorah.3mf")

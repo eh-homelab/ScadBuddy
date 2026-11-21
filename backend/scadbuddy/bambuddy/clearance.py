@@ -174,30 +174,42 @@ class _Bounds:
             None,
         )
 
-    def paint(self, path: str, object_id: str, depth: int = 0) -> frozenset[int]:
+    def paint(self, path: str, object_id: str) -> frozenset[int]:
         """The filaments object ``object_id`` of ``path`` is painted with, its
         components' included, each read once. Only an object :meth:`box` read is
-        asked for, so this walks what that walk held to the budget. Raises
-        :class:`PaintDigitsSpentError` past the codes' digit budget."""
-        key = (path, object_id)
-        if key in self.painted:
-            return self.painted[key]
-        self.painted[key] = frozenset()  # a cycle reads as unpainted
-        found = self.object(path, object_id)
-        # Never reached past `_MAX_DEPTH` today: `box` refuses that depth first, and
-        # only an object `box` read is asked for. If that changes, the empty set cached
-        # above would be wrong for the object (#6835).
-        if found is None or depth > _MAX_DEPTH:
-            return frozenset()
-        painted: set[int] = set()
-        mesh = found.find(f"{{{CORE_NS}}}mesh")
-        model = self.model(path)
-        if mesh is not None and mesh in model.meshes:
-            painted |= self.codes.states(model.meshes[mesh].paint or ())
-        for component in found.iter(f"{{{CORE_NS}}}component"):
-            painted |= self.paint(*_component_target(component, path), depth + 1)
-        self.painted[key] = frozenset(painted)
-        return self.painted[key]
+        asked for, so this walk reaches only objects that walk held to the budget's
+        visits. It has no depth limit of its own: `box` may meet an object first at a
+        shallow depth, through a part this walk skips, that this walk meets deeper
+        (claude-review on #6837). So it walks with a stack, not recursion. A cycle
+        reads as unpainted. Raises :class:`PaintDigitsSpentError` past the codes'
+        digit budget."""
+        start = (path, object_id)
+        stack: list[tuple[tuple[str, str], bool]] = [(start, False)]
+        while stack:
+            key, children_done = stack.pop()
+            found = self.object(*key)
+            if not children_done:
+                if key in self.painted:
+                    continue
+                self.painted[key] = frozenset()  # a cycle reads as unpainted
+                stack.append((key, True))
+                if found is not None:
+                    for component in found.iter(f"{{{CORE_NS}}}component"):
+                        child = _component_target(component, key[0])
+                        if child not in self.painted:
+                            stack.append((child, False))
+                continue
+            if found is None:
+                continue
+            painted: set[int] = set()
+            mesh = found.find(f"{{{CORE_NS}}}mesh")
+            model = self.model(key[0])
+            if mesh is not None and mesh in model.meshes:
+                painted |= self.codes.states(model.meshes[mesh].paint or ())
+            for component in found.iter(f"{{{CORE_NS}}}component"):
+                painted |= self.painted.get(_component_target(component, key[0]), frozenset())
+            self.painted[key] = frozenset(painted)
+        return self.painted[start]
 
     def box(self, path: str, object_id: str, depth: int = 0) -> np.ndarray | None:
         """The 8 corners of object ``object_id`` of ``path``'s box, in its own frame;
@@ -396,7 +408,7 @@ def _painted(bounds: _Bounds, object_id: str, settings: ET.Element | None) -> fr
         part = parts.get(inner_id)
         if part is not None and part.get("subtype", "normal_part") != "normal_part":
             continue
-        if codes := bounds.paint(target, inner_id, 1):
+        if codes := bounds.paint(target, inner_id):
             stated = _extruder(part) if part is not None else None
             used |= codes | {stated or own or 1}
     return frozenset(used)
