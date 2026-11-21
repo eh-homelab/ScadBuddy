@@ -2017,6 +2017,72 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_bb_sync_results.py` (`test_a_row_probe_404_drops_the_link`,
     `test_a_row_probe_that_finds_the_row_keeps_the_link`,
     `test_a_spool_names_its_deleted_location_only_once_it_is_made_again`).
+193. R-6845-1 (#6845, controller's ruling; changes 170's cost): a reset to the same
+    Bambuddy keeps the links. It never adopts an untagged spool by a look-alike identity
+    (type, colour, weight, created time). Why: an identity match can silently merge two
+    different physical spools; keeping links that are proven to point at the same rows
+    cannot.
+194. R-6845-2 (#6845): Bambuddy has no instance id of its own, and the recorded instance is
+    a hash of the URL (Decision 12), so a new URL to the same Bambuddy is another instance.
+    The reset proves "same Bambuddy" from the configured Bambuddy's spools
+    (`bb_sync_results.same_bambuddy`): its full listing (archived spools too, every row
+    valid) holds every linked BB spool id, none of those rows has an `updated_at` older
+    than its link's `bb_updated_at`, and at least one has exactly that `updated_at`. Why: ids
+    alone match any Bambuddy with as many spools; an equal timestamp to the microsecond on
+    the same id is a row ScadBuddy has seen; "never older" refuses an older backup of it.
+    With no spool link there is no proof. Decision 199 adds a share of timed links. Cost: a
+    link Bambuddy lost, a row older than its link, or a row that does not parse leaves only
+    the delete, as before, with the warning of 170.
+195. R-6845-3 (#6845; widens 165 and 167): when the proof holds and the request has
+    `expect_kept: true` (Decision 198), `POST /filament/sync/reset-links` deletes nothing. It keeps every link, hash, seen copy,
+    intent, error row and ignored BB spool, records the configured instance, answers
+    `kept: true` with zero counts, and nudges a full pass, so Decision 10's intents and
+    every untagged spool's link stay. The dry run reads the same listing and answers
+    `same_bambuddy`; the dialog and the agent tool say the links are kept. With
+    `expect_kept: false` the reset is 165's, and the dialog keeps 170's warning. The `confirm_instance` check
+    and the 409s are unchanged. Tests: `test_a_reset_to_the_same_bambuddy_keeps_the_links`,
+    `test_the_proof_of_the_same_bambuddy` (each way it fails).
+196. R-6845-4 (#6845; amended by 198): the dry run, and a reset that expects the links
+    kept, read the configured Bambuddy's spools
+    (`GET /inventory/spools?include_archived=true`) before any write. Decision 198 sets what
+    a failed read does: the dry run answers it, and a reset that expects the links kept is
+    refused with nothing deleted. Why: a passing fault must not turn a reset that keeps the
+    links into one that duplicates every untagged spool.
+197. R-6845-5 (#6845; widens 168 and 177 to the links' instance): the pull (the
+    Schedule's and the import) takes no spool data while the links belong to another
+    instance than the configured Bambuddy's. `pull_start` asks the worker for no spools
+    (only the Home Assistant states when a sensor is set up), so the Schedule's pull is
+    `skipped`; `POST /filament/bambuddy/import` is 409 `instance_changed` before it starts
+    a run; and `LocalBbPull` refuses a spool, usage or trays body then with 409
+    `instance_changed` (`links_elsewhere`), for a run already under way. Why: the pull read the new URL with the old links, so it wrote
+    another Bambuddy's values onto linked spools and moved their `bb_updated_at` to that
+    Bambuddy's rows, which would also make 194's proof pass for a stranger. Tests:
+    `test_a_pull_of_another_bambuddy_is_skipped`,
+    `test_the_import_of_another_bambuddy_is_409`. `links_elsewhere` is one statement on a
+    pooled connection, with no transaction block, as `LocalBbPull` runs it on every body.
+198. R-6845-6 (#6845 review; amends 196): the dry run's proof and the reset's are two reads
+    of Bambuddy, so the reset says which one it acts on. `LinksResetRequest.expect_kept`
+    (default false) is the dry run's `same_bambuddy`. With `expect_kept: true` the reset
+    reads Bambuddy again and keeps the links only while the proof still holds; a failed
+    read, no Bambuddy configured, or a proof that no longer holds is 409 `proof_changed`,
+    with nothing written and nothing nudged. The dialog then reads the dry run again and
+    says why. With `expect_kept: false` the person confirmed the delete: the reset reads no
+    Bambuddy and deletes, as 165 does. The dry run answers 200 when Bambuddy cannot be read,
+    with `same_bambuddy: false` and `bambuddy_unreadable: true`; the dialog notes it and
+    offers the delete with 170's warning. The agent tool calls with `expect_kept: true`
+    first, and with false only after the user agreed to the delete. Why: "Keep links" must
+    never delete because the listing changed between the two reads, and a Bambuddy that is
+    down must not block a person who knows it is another one. Tests:
+    `test_a_kept_reset_whose_proof_changed_is_409`,
+    `test_a_kept_reset_that_cannot_read_bambuddy_is_409`,
+    `test_the_preview_of_an_unreadable_bambuddy_offers_the_delete`.
+199. R-6845-7 (#6845 review; widens 194): a link with no time on either side (no
+    `bb_updated_at`, a pre-#6265 link, or a row Bambuddy sent with no `updated_at`) is
+    only checked to be there. So the proof also needs at least half the links timed on
+    both sides (`timed * 2 >= links`). Why: one exact match among many unchecked links is
+    too little to call a Bambuddy the same one. Cost: a database where most links have no
+    time gets only the delete. Test: `test_the_proof_of_the_same_bambuddy` (the two cases
+    with most links or rows untimed).
 200. R-6688-7 (PR #6870 review; changes 191): a spool that names an archived row whose
     probe this round plans counts `deferred`, not `blocked`, as it does for an unarchived
     row. The probe's answer settles it in a later round of this pass: a 404 drops the link,

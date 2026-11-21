@@ -1153,32 +1153,49 @@ export const filamentTools: Tool[] = [
     label: 'Reset the Bambuddy links',
     description:
       'After the Bambuddy URL changed, the links (Bambuddy ids) belong to the old Bambuddy and the sync is stopped: ' +
-      'filament_sync_status says `instance_changed: true`. This deletes, in one transaction, every spool link, the ' +
+      'filament_sync_status says `instance_changed: true`, and the pull is stopped too. Call it first with ' +
+      "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
+      'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
+      'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
+      'not be read, or it is another Bambuddy), it answers 409 `proof_changed` and deletes nothing. Only then, ' +
+      'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
+      'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
-      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then it asks ' +
-      'for a full pass, which links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
-      'is deleted. Afterwards a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
+      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then the full ' +
+      'pass links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
+      'is deleted. After a delete (`kept: false`) a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
       'spools are created on the side the sync sends them to, so tell the user an untagged spool can end up twice. ' +
+      'Either way it asks for a full pass. ' +
       '`confirm_instance` must be the instance the links belong to: filament_sync_status `instance`. Answers the ' +
-      'instance and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
+      'instance, `kept` and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
       '`filaments`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
       "links' instance, `same_instance` when they belong to the configured Bambuddy, `nothing_to_reset` when no " +
-      'instance is recorded; each deletes nothing. Approved first.',
+      'instance is recorded, `proof_changed` as above; each deletes nothing. Approved first.',
     input: z.object({
       confirm_instance: z
         .string()
         .min(1)
         .max(64)
         .describe('The instance the links belong to, as filament_sync_status `instance` gives it'),
+      expect_kept: z
+        .boolean()
+        .default(false)
+        .describe(
+          'true: keep the links only while the configured Bambuddy is proven the same one, else 409 ' +
+            '`proof_changed` with nothing deleted; false: delete the links without reading Bambuddy',
+        ),
     }),
     risk: 'outward',
     source: SOURCE,
     routes: ['POST /api/v1/filament/sync/reset-links'],
-    summarize: ({ confirm_instance }) => `Reset the Bambuddy links of instance ${confirm_instance}`,
-    handler: async ({ confirm_instance }, { backend }) =>
+    summarize: ({ confirm_instance, expect_kept }) =>
+      expect_kept
+        ? `Keep the Bambuddy links of instance ${confirm_instance} if the configured Bambuddy is the same one`
+        : `Delete the Bambuddy links of instance ${confirm_instance}`,
+    handler: async ({ confirm_instance, expect_kept }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/filament/sync/reset-links', { body: { confirm_instance } }),
+          backend.POST('/api/v1/filament/sync/reset-links', { body: { confirm_instance, expect_kept } }),
           'reset the Bambuddy links',
         ),
       ),
