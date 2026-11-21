@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,8 @@ from typing import Any, cast
 import pytest
 
 from scadbuddy.api.orders import record_fulfilment, update_fulfilment
+from scadbuddy.bambuddy.models import SpoolAssignment
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
@@ -33,10 +35,10 @@ from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
+    LocalDensity,
+    MaintenanceDone,
     MaintenanceTask,
     MediaTooLargeError,
-    ShelfSpool,
-    SpoolGroup,
 )
 from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
 from scadbuddy.orders.models import Fulfilment, Order, OrderItem
@@ -66,13 +68,18 @@ class Archives:
         self.facts = {f.archive_id: f for f in facts}
         self.downloads: list[tuple[int, str, str | None]] = []
 
-    async def spool_inventory(self) -> list[ShelfSpool]:
+    async def local_densities(self) -> dict[str, LocalDensity]:
         raise AssertionError("not asked")
 
-    async def spool_groups(self) -> list[SpoolGroup]:
+    async def spool_assignments(self) -> list[SpoolAssignment]:
         raise AssertionError("not asked")
 
     async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+        raise AssertionError("not asked")
+
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
         raise AssertionError("not asked")
 
     async def project_exists(self, project_id: int) -> bool:
@@ -204,6 +211,21 @@ async def test_an_open_attempt_offers_its_archives_and_copies_nothing(
     after, offered = await mirror_archives(shop.lifecycle, Archives(facts(81)), attempt)
     assert [f.archive_id for f in offered] == [81]
     assert after.archive_ids == [] and after.actual_seconds is None
+
+
+async def test_an_archive_an_attempt_names_is_known_to_the_media_gate(
+    shop: Shop, pool: PgPool
+) -> None:
+    """The media proxy's gate (`PrintLinkStore.known`): an archive an attempt claims is
+    ScadBuddy's to read, with no print link; one no record names is not."""
+    order, item = shop.accepted()
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81), BY
+    )
+    links = PrintLinkStore(pool)
+    assert await links.linked(81) is None
+    assert await links.known(81)
+    assert not await links.known(82)
 
 
 async def test_an_attempt_by_hand_copies_the_archive_it_names(shop: Shop) -> None:

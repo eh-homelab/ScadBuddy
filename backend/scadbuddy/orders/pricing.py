@@ -53,7 +53,8 @@ class Plate(BaseModel):
 
 class ArchivePlate(Plate):
     """A plate of an `archive` quote (#4777): read from a past print's archive, not a
-    slice, so it names that archive and no sliced file."""
+    slice, so it names that archive and no sliced file. It holds one unit's share of the
+    plate (#6336): the archive's grams and seconds divided by the units the run made."""
 
     archive_id: int
 

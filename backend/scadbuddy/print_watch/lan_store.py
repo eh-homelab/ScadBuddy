@@ -282,7 +282,8 @@ class LanImportStore:
             rows = conn.execute(
                 # As `AutoImportStore.slugs_by_hash` reads ``print_imports``.
                 "SELECT slug FROM print_imports"
-                " WHERE content_hash = %(hash)s OR (content_hash IS NULL AND sha256 = %(hash)s)"
+                " WHERE slug IS NOT NULL AND (content_hash = %(hash)s"
+                " OR (content_hash IS NULL AND sha256 = %(hash)s))"
                 " UNION SELECT slug FROM print_lan_imports"
                 " WHERE sha256 = %(hash)s AND state = 'linked'",
                 {"hash": sha256},

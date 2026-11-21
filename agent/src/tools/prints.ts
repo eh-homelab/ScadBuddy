@@ -4,6 +4,7 @@ import { command, isRunning } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
+import { NATIVE_ID_BASE } from '../sessions/touched.js'
 import { blob, defineTool, image, json, ToolError, type Tool } from './registry.js'
 
 // Print history (issue #308): ScadBuddy's own prints, each a Bambuddy archive linked
@@ -22,7 +23,7 @@ export const printHistoryTools: Tool[] = [
       "ScadBuddy's print history, newest first: each print's status, printer, times, filament, cover image and the " +
       'parameters that differ from the template defaults; a Bambuddy library file\'s print names the file ' +
       '(`library_file_name`); a print imported onto a model (import_print, or the print watcher: list_auto_imports) ' +
-      'names that model (`slug`). A LAN-only printer\'s print the watcher recorded has no archive and is not here: ' +
+      'names that model (`slug`), and one imported onto a library file names that file. A LAN-only printer\'s print the watcher recorded has no archive and is not here: ' +
       'list_lan_auto_imports. Filter by template (`slug`) or by one library file (`library_file_id`, not both), ' +
       'Bambuddy `status` (completed, failed, printing, … or deleted_in_bambuddy), `printer_id`, start day ' +
       '(`from`/`to`, inclusive) and text `q` (output, library file or print name, parameter values). Pass ' +
@@ -133,7 +134,8 @@ export const printHistoryTools: Tool[] = [
       '`library` a Bambuddy library file with the same name (`matched_by: hash` when its bytes are the printed ' +
       'file), `printer` the printer\'s storage. A source that cannot be used says why (`reason`). `printer: true` ' +
       'also reads the printer over FTP, which reaches the printer, so that call waits for a person\'s approval. ' +
-      'Also `linked` (what the archive is a print of already) and `suggested_models` from the job\'s name. Show ' +
+      'Also `linked` (what the archive is a print of already), and from the job\'s name `suggested_models` and ' +
+      "`suggested_library_files` (files of ScadBuddy's own library, #6394). Show " +
       'the sources to the user and let them choose; then import_print.',
     input: z.object({
       archive_id: archiveId.describe("A Bambuddy archive's id, as list_print_archives returns it"),
@@ -312,16 +314,20 @@ export const printHistoryTools: Tool[] = [
 
   defineTool({
     name: 'import_print',
-    label: 'Import a print onto a model',
+    label: 'Import a print onto a model or a library file',
     description:
-      'Make a Bambuddy archive ScadBuddy did not start a ScadBuddy print of a model, so get_print, its photos, ' +
-      'timelapse, attachments, workspace_save print_image/print_timelapse and Print again work, and it shows on ' +
-      "the model's Prints tab. `source` is one get_print_sources lists as available, the one the user chose: " +
+      'Make a Bambuddy archive ScadBuddy did not start a ScadBuddy print of a model or of a library file, so ' +
+      'get_print, its photos, timelapse, attachments, workspace_save print_image/print_timelapse and Print again ' +
+      "work, and it shows on the model's Prints tab or in the library file's prints. `source` is one " +
+      'get_print_sources lists as available, the one the user chose (where the 3MF is read from): ' +
       '`{kind: archive}`, `{kind: archive_source}`, `{kind: library, library_file_id}` or `{kind: printer, path}`. ' +
-      'Link it to a model that exists (`slug`), or make a new mesh model from the 3MF (`new_model: {name}`; a ' +
-      'sliced file has no meshes, so choose an unsliced one). A `printer` source reads the file over FTP and keeps ' +
-      "it in Bambuddy's library inbox, so that call waits for a person's approval. Importing the same archive onto " +
-      'the same model again answers the first import; another model is refused, naming the owner.',
+      'Give exactly one target: a model that exists (`slug`), a new mesh model made from the 3MF ' +
+      '(`new_model: {name}`; a sliced file has no meshes, so choose an unsliced one), or a file of ScadBuddy\'s ' +
+      'own library that is not in the trash and is not a print run\'s per-print copy, which the route refuses ' +
+      '(`library_file_id`, an id of 1000000000 or more; #6394). A `printer` ' +
+      "source reads the file over FTP and keeps it in Bambuddy's library inbox, so that call waits for a person's " +
+      'approval. Importing the same archive onto the same target again answers the first import; another target ' +
+      'is refused, naming the owner.',
     input: z.object({
       archive_id: archiveId.describe("A Bambuddy archive's id, as list_print_archives returns it"),
       source: z.object({
@@ -333,15 +339,28 @@ export const printHistoryTools: Tool[] = [
       new_model: z
         .object({ name: z.string().min(1).max(200), description: z.string().max(10_000).default('') })
         .optional(),
+      library_file_id: z
+        .number()
+        .int()
+        .min(NATIVE_ID_BASE)
+        .optional()
+        .describe("A file of ScadBuddy's own library to import onto (#6394), in place of a model"),
     }),
     risk: 'write',
     // Only a `printer` source needs the last two: read over FTP, kept in the library inbox.
     bambuddyScope: ['Read Status', 'Control Printer', 'Manage Library'],
     routes: ['POST /api/v1/print-imports/{archive_id}'],
-    summarize: ({ archive_id, source, slug: model, new_model }) =>
-      `Import print ${archive_id} from its ${source.kind} file onto ${model ? `model ${model}` : `a new model "${new_model?.name ?? ''}"`}`,
+    summarize: ({ archive_id, source, slug: model, new_model, library_file_id }) =>
+      `Import print ${archive_id} from its ${source.kind} file onto ${
+        model
+          ? `model ${model}`
+          : library_file_id !== undefined
+            ? `library file ${library_file_id}`
+            : `a new model "${new_model?.name ?? ''}"`
+      }`,
     handler: async ({ archive_id, ...body }, ctx) => {
-      if ((body.slug === undefined) === (body.new_model === undefined)) throw new ToolError('give slug or new_model, not both')
+      const targets = [body.slug, body.new_model, body.library_file_id].filter((t) => t !== undefined)
+      if (targets.length !== 1) throw new ToolError('give exactly one of slug, new_model and library_file_id')
       // One key for both sends below, so the second finds the model the first made.
       const keyed = { ...ctx, callKey: ctx.callKey ?? randomUUID() }
       const send = () =>

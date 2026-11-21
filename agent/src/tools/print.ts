@@ -59,6 +59,12 @@ export const libraryFileId = z
 /** The two sources a print tool takes, exactly one of them per call. */
 export const sourceShape = { output_id: outputId.optional(), library_file_id: libraryFileId.optional() }
 
+/**
+ * #6395 — the backend's `print_library/associations.py` `RELATIONS`, which is the one list;
+ * `test/libraryAssociations.test.ts` fails when this copy differs from the API's spec.
+ */
+export const ASSOCIATION_RELATIONS = ['output_of', 'variant_of', 'source_of', 'related_to'] as const
+
 export const ONE_SOURCE = 'name one source: output_id or library_file_id'
 
 /** A print tool's input: `shape` plus its source, refused at parse time unless it names exactly one. */
@@ -258,20 +264,78 @@ export function followed(run: PrintRun) {
 }
 
 /** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
-function runOutcome(run: PrintRun, ctx: ToolContext) {
+function runOutcome(run: PrintRun, ctx: ToolContext, tower?: TowerAnswer) {
+  const extra = tower === undefined ? {} : { prime_tower: tower }
   if (run.status === 'failed') {
     const error = run.error
-    const failed = `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}`
+    // #6758: a slice the prime tower failed names the way to move it first.
+    const conflict = tower === undefined && conflictWarned(error)
+    const failed =
+      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}` +
+      (conflict ? '. Call print_output again with move_prime_tower: true to move the prime tower to a free spot first.' : '')
     if (!run.may_have_queued) throw new ToolError(failed)
     // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
     // another print_output call is a new print (its own request_id), so check first. The
     // answer is the run itself, so the session records it (#1017, sessions/touched.ts).
     const note = "The print may still have been queued: check Bambuddy's queue before printing again."
     ctx.report?.({ detail: `${failed}. ${note}` })
-    return { ...json({ ...run, note }), isError: true }
+    return { ...json({ ...run, ...extra, note }), isError: true }
   }
-  if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
-  return json(followed(run))
+  if (run.status === 'running') return json({ ...run, ...extra, note: 'still slicing; poll get_print_run with this id' })
+  return json({ ...followed(run), ...extra })
+}
+
+/** Whether a failed run's error carries the slicer's `object-conflict` warning (#6734). */
+function conflictWarned(error: PrintRun['error']): boolean {
+  const warnings = (error as { extensions?: { warnings?: { kind?: string }[] } } | null | undefined)?.extensions?.warnings
+  return (warnings ?? []).some((warning) => warning.kind === 'object-conflict')
+}
+
+/** #6758: what print_output's `move_prime_tower` found, and whether it moved the tower. */
+interface TowerAnswer {
+  conflicts: unknown[]
+  moved: boolean
+  /** Why the tower stays where it conflicts: no free spot fits it. */
+  note?: string
+}
+
+/** #6758: the answer's note when a tower conflicts and no free spot fits it. */
+const NO_FREE_SPOT_NOTE =
+  'No free spot on the plate fits the prime tower, so the tower stays where the slicer will likely refuse it ' +
+  '("Object conflicts were detected"). Re-arrange the output with room for the tower (arrange with this ' +
+  'prime_tower), turn off "No sparse layers", or move the objects, then print again.'
+
+/**
+ * #6758: the print dialog's check before the slice (`POST …/check`) for `body`, and, when a
+ * prime tower conflicts and the check finds a free spot, its fix written into
+ * `body.process_overrides` (`wipe_tower_x`/`_y`, over the caller's), as the dialog's "Move the
+ * prime tower" writes it. The run then takes it.
+ */
+async function moveTower(
+  ctx: ToolContext,
+  source: ReturnType<typeof sourceOf>,
+  body: { process_overrides?: Record<string, unknown> } & Record<string, unknown>,
+): Promise<TowerAnswer> {
+  const verdict = await ok(
+    source.kind === 'library'
+      ? ctx.backend.POST('/api/v1/print/library/{file_id}/check', {
+          params: { path: { file_id: source.id } },
+          signal: ctx.signal,
+          body: body as never,
+        })
+      : ctx.backend.POST('/api/v1/print/outputs/{output_id}/check', {
+          params: { path: { output_id: source.id } },
+          signal: ctx.signal,
+          body: body as never,
+        }),
+    'check the prime tower',
+  )
+  const check = verdict.prime_tower
+  const fix = check?.fix ?? null
+  if (fix !== null) body.process_overrides = { ...(body.process_overrides ?? {}), ...fix }
+  const conflicts = check?.conflicts ?? []
+  if (fix === null && conflicts.length > 0) return { conflicts, moved: false, note: NO_FREE_SPOT_NOTE }
+  return { conflicts, moved: fix !== null }
 }
 const calibration = z.enum(['off', 'on', 'auto'])
 
@@ -399,6 +463,11 @@ export function partSettingsPhrase(settings: Record<string, Record<string, unkno
 }
 
 export const slotChoice = z.object({ slot_id: z.number().int(), spool_id: z.number().int() })
+/** A plan's `ids` (#6262 Task 7): its positive spool ids are ScadBuddy spool numbers, as get_print_filaments lists them. */
+export const sbPlanIds = z
+  .literal('sb')
+  .default('sb')
+  .describe('What the spool ids name: ScadBuddy spool numbers (get_print_filaments), always "sb"')
 export const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
   id: z.string().min(1),
@@ -534,6 +603,17 @@ const PRINT_OUTPUT_INPUT = withSource({
   prime_tower: primeTowerChoice,
   part_settings: partSettings,
   process_overrides: processOverrides,
+  move_prime_tower: z
+    .boolean()
+    .optional()
+    .describe(
+      '#6758: check the prime tower before the slice, as the print dialog does, and move a tower the slicer ' +
+        'would refuse ("Object conflicts were detected": on the objects, inside the "No sparse layers" keep-out, ' +
+        "or out of an extruder's reach) to the free spot the check finds. The move is sent as `process_overrides` " +
+        "`wipe_tower_x`/`wipe_tower_y` (one value per plate), over any you set. The answer's `prime_tower` says " +
+        'what the check found and whether the tower moved, with a `note` when no free spot fits the tower. ' +
+        'Omit to print the tower where the file puts it.',
+    ),
   accepted_fixes: z
     .array(z.string().regex(/^[0-9a-f]{32}$/))
     .max(32)
@@ -627,6 +707,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${towerPhrase(args.prime_tower)}` +
     `${partSettingsPhrase(args.part_settings)}` +
     `${processOverridesPhrase(args.process_overrides)}` +
+    `${args.move_prime_tower ? ', moving the prime tower to a free spot when the slicer would refuse it' : ''}` +
     `${args.accepted_fixes?.length ? `, applying ${args.accepted_fixes.length} accepted analyzer fix${args.accepted_fixes.length === 1 ? '' : 'es'} (${args.accepted_fixes.join(', ')})` : ''}` +
     `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
   )
@@ -731,7 +812,8 @@ export const printTools: Tool[] = [
     name: 'get_print_filaments',
     label: "Read the print dialog's filaments",
     description:
-      "Bambuddy's spool inventory joined to where each spool is loaded and, with `printer_id`, the " +
+      "ScadBuddy's spools, each by its number (`spool_id`, what `filament_plan` names), joined to the tray it " +
+      "is loaded in (a printer's report, else Bambuddy's assignment of its linked spool) and, with `printer_id`, the " +
       'remaining grams per slot and the mounted nozzles — plus what this output\'s (or library file\'s) plate ' +
       '(or, with `all_plates`, every plate) needs and a suggested spool per slot.',
     input: withSource({
@@ -740,7 +822,7 @@ export const printTools: Tool[] = [
         .optional()
         .describe(
           "A registry printer's `id` (list_printers): on a printer a run reaches over the LAN the spools are " +
-            "its loaded trays, each a negative `spool_id`, with the spool providers' records over them.",
+            "its loaded trays, each a negative `spool_id`, with the ScadBuddy spool it holds (`sb_spool_id`, `sb_number`).",
         ),
       plate_id: z.number().int().min(1).optional(),
       all_plates: z.boolean().optional(),
@@ -1307,6 +1389,111 @@ export const printTools: Tool[] = [
       ),
   }),
 
+  // #6395 — a native library file's associations with a model or another file. ScadBuddy's
+  // own records, re-settable: `write`, as remember_model_print_choices is.
+  defineTool({
+    name: 'associate_library_file',
+    label: 'Associate a library file',
+    description:
+      "Record how a file in ScadBuddy's own library relates to a model or to another library file, said from the " +
+      "file's side: the file is an `output_of` the target (a fixed or scaled copy of a model's print), a `variant_of` " +
+      'it (a PETG-supports copy of another file), the `source_of` it, or `related_to` it (instructions for a model). ' +
+      '`target` is `model:<slug>` (the model must exist) or `library:<file id>` (a live file of the native library). ' +
+      'The same file, target and relation again keeps the association and replaces its note. To associate any other ' +
+      '3MF, upload it with upload_library_file first. Only on library_backend=native.',
+    input: z.object({
+      file_id: libraryFileId.describe("A native library file's `id` (list_library)"),
+      target: z
+        .string()
+        .regex(/^(model:(builtin:)?[a-z0-9][a-z0-9-]*|library:[1-9][0-9]*)$/, 'must be model:<slug> or library:<file id>')
+        .max(200)
+        .describe('`model:<slug>` or `library:<file id>`'),
+      relation: z.enum(ASSOCIATION_RELATIONS),
+      note: z.string().max(500).optional(),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/print/library/{file_id}/associations'],
+    summarize: ({ file_id, target, relation }) => `Associate library file ${file_id}: ${relation} ${target}`,
+    handler: async ({ file_id, target, relation, note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/print/library/{file_id}/associations', {
+            params: { path: { file_id } },
+            body: { target, relation, note: note ?? '' },
+          }),
+          `associate library file ${file_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'list_associations',
+    label: 'List associations',
+    description:
+      "What a native library file (`file_id`) or a model (`slug`) is associated with. A file's list has its own " +
+      'associations and those of other files naming it as their target; a model\'s has the files naming it. Each ' +
+      "`relation` is said from `library_file_id`'s side (that file is an `output_of` the `target`). An implied one " +
+      "(`id` null, `implied_by` set) is read live and cannot be removed: a model made from the file (its mesh source) " +
+      "lists the file as `source_of` it, and a copy of a model's output as `output_of` it. Empty on Bambuddy's library." +
+      PAGED,
+    input: z
+      .object({
+        file_id: libraryFileId.optional().describe("A native library file's `id` (list_library)"),
+        slug: slug.optional(),
+        ...pageInput,
+      })
+      .refine((o) => (o.file_id === undefined) !== (o.slug === undefined), { message: 'name one: file_id or slug' }),
+    risk: 'read',
+    source: 'library file names, model names and notes that anyone with access to ScadBuddy can write',
+    routes: ['GET /api/v1/print/library/{file_id}/associations', 'GET /api/v1/models/{slug}/associations'],
+    handler: async (args, { backend }) => {
+      const { file_id, slug: model } = args
+      let found
+      if (file_id !== undefined) {
+        found = await ok(
+          backend.GET('/api/v1/print/library/{file_id}/associations', { params: { path: { file_id } } }),
+          `list library file ${file_id}'s associations`,
+        )
+      } else if (model !== undefined) {
+        found = await ok(
+          backend.GET('/api/v1/models/{slug}/associations', { params: { path: { slug: model } } }),
+          `list model ${model}'s associations`,
+        )
+      } else {
+        throw new ToolError('name one: file_id or slug')
+      }
+      // An implied one has no id: what it is read from, its file and its target name it.
+      const { items, ...rest } = page(
+        found.associations,
+        args,
+        (a) => a.id ?? `${a.implied_by}:${a.library_file_id}:${a.target}:${a.relation}`,
+        'list_associations',
+      )
+      return json({ associations: items, ...rest })
+    },
+  }),
+
+  defineTool({
+    name: 'remove_association',
+    label: 'Remove an association',
+    description:
+      "Remove a stored association of a native library file, by the `id` list_associations gives it. An implied one " +
+      '(`id` null) cannot be removed. associate_library_file adds it again.',
+    input: z.object({ association_id: z.string().uuid().describe('An association `id` from list_associations') }),
+    risk: 'write',
+    routes: ['DELETE /api/v1/print/library/associations/{association_id}'],
+    summarize: ({ association_id }) => `Remove association ${association_id}`,
+    handler: async ({ association_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/print/library/associations/{association_id}', {
+          params: { path: { association_id } },
+        }),
+        `remove association ${association_id}`,
+      )
+      return json({ removed: association_id })
+    },
+  }),
+
   // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
   defineTool({
     name: 'remember_model_print_choices',
@@ -1524,6 +1711,8 @@ export const printTools: Tool[] = [
     routes: [
       'POST /api/v1/print/outputs/{output_id}/run',
       'POST /api/v1/print/library/{file_id}/run',
+      'POST /api/v1/print/outputs/{output_id}/check',
+      'POST /api/v1/print/library/{file_id}/check',
       'GET /api/v1/print/runs/{run_id}',
       'GET /api/v1/printers/{printer_id}',
     ],
@@ -1651,7 +1840,7 @@ export const printTools: Tool[] = [
         copies: args.copies ?? null,
         plate_id: args.plate_id,
         all_plates: args.all_plates,
-        filament_plan: { slots, force_colour_match: forceColourMatch ?? true },
+        filament_plan: { slots, force_colour_match: forceColourMatch ?? true, ids: 'sb' as const },
         choices: {
           nozzles: chosenNozzles,
           tier: chosenTier ?? null,
@@ -1695,6 +1884,8 @@ export const printTools: Tool[] = [
         ...(args.accepted_fixes?.length ? { accepted_fixes: args.accepted_fixes } : {}),
         request_id: requestId,
       }
+      // #6758: the dialog's check before the slice, and its fix for the prime tower.
+      const tower = args.move_prime_tower ? await moveTower(ctx, source, body) : undefined
       // A run no worker has picked up yet is a 202 followed to the run, not a 503
       // re-sent (#2795): each re-send of a print is a chance to print twice.
       const started = await reattachFollowing(
@@ -1721,7 +1912,7 @@ export const printTools: Tool[] = [
           "shows the print once it starts; check it and Bambuddy's queue before printing again, as calling " +
           'print_output again would be a second print.',
       )
-      return runOutcome(await waitForRun(ctx, started), ctx)
+      return runOutcome(await waitForRun(ctx, started), ctx, tower)
     },
   }),
 

@@ -17,8 +17,10 @@ import type { QuestionGate } from '../harness/questions.js'
 import { redact } from '../secrets.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { WaitForTab } from '../tools/registry.js'
-import type { SessionBlobs, SessionImage } from './blobs.js'
+import type { SessionImages, SessionImage } from './blobs.js'
 import type { EventLog } from './eventLog.js'
+import type { SessionRows } from './rows.js'
+import type { PostgresSessionStore } from './store.js'
 import type { ClaimedSession, TurnOutcome, TurnPrincipal } from './manager.js'
 import { event, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
@@ -89,10 +91,14 @@ export function withNote(prompt: string | AsyncIterable<SDKUserMessage>, note: s
 
 /** What a turn's process needs besides the session: the manager's, shared by every turn on this replica. */
 export type TurnCoreDeps = {
+  /** The sessions' rows (rows.ts): a turn's claim as its placement reads it (turnHost.ts). */
+  rows: Pick<SessionRows, 'get'>
+  /** The transcript store (store.ts): whether a user entry landed after a placement's mark (turnHost.ts). */
+  transcripts: Pick<PostgresSessionStore, 'userLanded'>
   runner: Pick<TurnRunner, 'assemble'>
   warm: WarmSessions
-  events: Pick<EventLog, 'append' | 'committed'>
-  blobs: Pick<SessionBlobs, 'put'>
+  events: Pick<EventLog, 'append' | 'committed' | 'appendFenced'>
+  blobs: Pick<SessionImages, 'put'>
   credentials: CredentialSource
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   titleOf?: TitleResolver

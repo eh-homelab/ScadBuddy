@@ -7,7 +7,9 @@ import { isLoopbackPeer } from '../http/origins.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { RISK_TIERS, type RiskTier, type TierResolver } from '../harness/permissions.js'
-import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
+import { CrudReadError } from '../api/crudRead.js'
+import { type CrudTarget, crudOf, segment } from '../api/crudStores.js'
+import { type Envelope, type Kek, last4, openSecret, SealError, sealSecret } from '../secrets.js'
 import { OAuthError } from './oauth.js'
 import { GrantError, type PluginOAuth, type TokenSource } from './oauthStore.js'
 
@@ -59,7 +61,11 @@ import { GrantError, type PluginOAuth, type TokenSource } from './oauthStore.js'
 // AAD binds it to the plugin's name, URL and header name, so a row whose URL
 // was edited in the database fails to open instead of sending the token to a
 // new host; for the same reason a route that changes the URL or the header
-// name must be given the secret again. No route returns it (spec §8.6).
+// name must be given the secret again. No route returns it (spec §8.6). Once the
+// API lists area `plugins` (#5299 step 5), `CrudPluginStore` keeps the plugins
+// through its CRUD routes, and the API seals and opens the value with its KEK
+// under the same AAD (backend api/crud_agent_plugins.py), so no KEK is needed
+// here; `PluginStore` is the SQL until then. The API re-wraps both at a rotation.
 //
 // OAUTH (#780). Instead of a header, a plugin may be signed in from Settings (OAuth 2.1 per
 // the MCP authorization spec; plugins/oauth.ts, oauthStore.ts, table `ai_plugin_oauth`).
@@ -192,6 +198,11 @@ export type PluginSummary = {
   updated_at: string
   /** Which KEK sealed the secret; null when there is none. Never put in a route body. */
   kekId: string | null
+  /**
+   * Whether the key that opens the secret is at hand: set by `CrudPluginStore` (the API's
+   * key); undefined from `PluginStore`, whose caller compares `kekId` with its own key.
+   */
+  opens?: boolean
   /** The OAuth sign-in (#780), or null when the plugin has none. */
   oauth: OAuthStatus | null
 }
@@ -265,6 +276,12 @@ export type PluginRepo = {
   delete(name: string): Promise<boolean>
   /** Opens one plugin's secret. Throws SealError on a wrong key or an altered row. */
   reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined>
+}
+
+/** What `PluginStore` and `CrudPluginStore` both give: the repo, the enabled plugins and the sign-ins. */
+export type PluginStoreLike = PluginRepo & {
+  readonly oauth: PluginOAuth | undefined
+  enabled(kek: Kek | undefined): Promise<{ plugins: RemotePlugin[]; problems: string[] }>
 }
 
 // ---------------------------------------------------------------- validation
@@ -587,31 +604,17 @@ export async function loadEnabledPlugins(
   return { plugins: allowed, problems }
 }
 
-export type RewrapResult = { rewrapped: number; failed: number }
-
 export type PluginStoreOptions = {
   /** Signs plugins in and gives their tokens (#780); without it a signed-in plugin is not loaded. */
   oauth?: PluginOAuth
 }
 
-export class PluginStore implements PluginRepo {
+export class PluginStore implements PluginStoreLike {
   private readonly sql: Sql
   readonly oauth: PluginOAuth | undefined
   constructor(sql: Sql, options: PluginStoreOptions = {}) {
     this.sql = sql
     this.oauth = options.oauth
-  }
-
-  /**
-   * Gives an opened plugin its sign-in (#780): the token source, and the header as it is now.
-   * Throws GrantError (sign in again) or OAuthError (the token endpoint is unreachable).
-   */
-  private async signIn(row: Row, plugin: RemotePlugin, kek: Kek | undefined): Promise<RemotePlugin> {
-    if (!row.oauth || plugin.header) return plugin
-    if (row.oauth.status === 'error') throw new GrantError(row.oauth.last_error ?? 'its sign-in failed')
-    if (!this.oauth) throw new GrantError('OAuth sign-in is not available in this process')
-    const source = this.oauth.source(row.name, row.url, row.oauth.grant_id, kek)
-    return { ...plugin, oauth: source, header: await source.header() }
   }
 
   async list(): Promise<PluginSummary[]> {
@@ -815,71 +818,214 @@ export class PluginStore implements PluginRepo {
   /** Throws SealError, and for a signed-in plugin GrantError or OAuthError (`signIn`). */
   async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {
     const [row] = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins WHERE name = $1`, [name])
-    return row ? this.signIn(row, openPlugin(row, kek), kek) : undefined
+    return row ? signIn(this.oauth, row, openPlugin(row, kek), kek) : undefined
   }
 
   /** Every plugin ai_access turns on, opened; one that cannot be opened is reported in `problems`, not loaded. */
   async enabled(kek: Kek | undefined): Promise<{ plugins: RemotePlugin[]; problems: string[] }> {
     const rows = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins ORDER BY name`)
-    const plugins: RemotePlugin[] = []
-    const problems: string[] = []
-    // Together: each signed-in plugin may wait on its token endpoint.
-    const opened = await Promise.all(
-      rows
-        .filter((r) => access(r).enabled)
-        .map(async (row) => {
-          try {
-            return { row, plugin: await this.signIn(row, openPlugin(row, kek), kek), err: undefined }
-          } catch (err) {
-            return { row, plugin: undefined, err: err as unknown }
-          }
-        }),
+    return openEnabled(
+      rows.filter((r) => access(r).enabled),
+      (row) => signIn(this.oauth, row, openPlugin(row, kek), kek),
     )
-    for (const one of opened) {
-      const { row } = one
-      if (one.plugin) {
-        plugins.push(one.plugin)
-        continue
+  }
+}
+
+/**
+ * Gives an opened plugin its sign-in (#780): the token source, and the header as it is now.
+ * Throws GrantError (sign in again) or OAuthError (the token endpoint is unreachable).
+ */
+async function signIn(
+  oauth: PluginOAuth | undefined,
+  row: Pick<Row, 'name' | 'url' | 'oauth'>,
+  plugin: RemotePlugin,
+  kek: Kek | undefined,
+): Promise<RemotePlugin> {
+  if (!row.oauth || plugin.header) return plugin
+  if (row.oauth.status === 'error') throw new GrantError(row.oauth.last_error ?? 'its sign-in failed')
+  if (!oauth) throw new GrantError('OAuth sign-in is not available in this process')
+  const source = oauth.source(row.name, row.url, row.oauth.grant_id, kek)
+  return { ...plugin, oauth: source, header: await source.header() }
+}
+
+/** `enabled`'s answer: each row opened (together: each signed-in plugin may wait on its token endpoint); one that fails is a problem. */
+async function openEnabled<R extends { name: string }>(
+  rows: readonly R[],
+  open: (row: R) => Promise<RemotePlugin>,
+): Promise<{ plugins: RemotePlugin[]; problems: string[] }> {
+  const plugins: RemotePlugin[] = []
+  const problems: string[] = []
+  const opened = await Promise.all(
+    rows.map(async (row) => {
+      try {
+        return { row, plugin: await open(row), err: undefined }
+      } catch (err) {
+        return { row, plugin: undefined, err: err as unknown }
       }
-      const { err } = one
-      if (err instanceof SealError) {
-        problems.push(`plugin ${row.name} was not loaded: its secret cannot be opened (${err.message})`)
-      } else if (err instanceof GrantError) {
-        problems.push(`plugin ${row.name} was not loaded: it needs signing in again in Settings (${err.message})`)
-      } else if (err instanceof OAuthError) {
-        problems.push(`plugin ${row.name} was not loaded: its access token could not be renewed (${err.message})`)
-      } else throw err
+    }),
+  )
+  for (const one of opened) {
+    const { row } = one
+    if (one.plugin) {
+      plugins.push(one.plugin)
+      continue
     }
-    return { plugins, problems }
+    const { err } = one
+    if (err instanceof SealError) {
+      problems.push(`plugin ${row.name} was not loaded: its secret cannot be opened (${err.message})`)
+    } else if (err instanceof GrantError) {
+      problems.push(`plugin ${row.name} was not loaded: it needs signing in again in Settings (${err.message})`)
+    } else if (err instanceof OAuthError) {
+      problems.push(`plugin ${row.name} was not loaded: its access token could not be renewed (${err.message})`)
+    } else throw err
+  }
+  return { plugins, problems }
+}
+
+// ------------------------------------------------------------- the CRUD routes
+
+/** A plugin as the API's routes answer it (backend api/crud_agent_plugins.py `PluginRow`). */
+type WireRow = {
+  name: string
+  kind: PluginKind
+  url: string
+  auth_header: string | null
+  kek_id: string | null
+  last4: string | null
+  created_at: string
+  updated_at: string
+  access_rows: AccessRow[]
+  oauth: OAuthRow | null
+  /** No secret, or one the API's key opens. */
+  opens: boolean
+}
+
+/** `WireRow` with its header opened: `seal_error` when it cannot be, as `SealError`. */
+type WireOpened = WireRow & { header: { name: string; value: string } | null; seal_error: string | null }
+
+function rowOf(wire: WireRow): Omit<Row, 'secret_sealed' | 'dek_sealed'> {
+  return { ...wire, created_at: new Date(wire.created_at), updated_at: new Date(wire.updated_at) }
+}
+
+function summaryOf(wire: WireRow): PluginSummary {
+  return { ...summary(rowOf(wire)), opens: wire.opens }
+}
+
+/** `openPlugin` of a row the API opened: its `seal_error` is the SealError the SQL store throws. */
+function openedOf(wire: WireOpened): RemotePlugin {
+  if (wire.seal_error !== null) throw new SealError(wire.seal_error)
+  const { toolTiers, disabledTools } = access(wire)
+  return { name: wire.name, url: wire.url, toolTiers, disabledTools, ...(wire.header ? { header: wire.header } : {}) }
+}
+
+/** The route's reasons for a refusal the registry makes, and for no KEK on the API. */
+const PLUGIN_REFUSED = 'plugin-refused'
+const KEK_MISSING = 'kek-missing'
+
+/**
+ * The registry through the API's CRUD routes, area `plugins` (#5299 step 5; backend
+ * api/crud_agent_plugins.py): one route per method, each its SQL transaction on the API,
+ * with the warm eviction in it. The checks that need no row (the name, the URL's form,
+ * the header name, the secret, the tiers) run here first, as `PluginStore` runs them; the
+ * API seals the secret with its KEK, so `kek` is not used. A refusal of the API's is the
+ * PluginError the SQL store throws.
+ */
+export class CrudPluginStore implements PluginStoreLike {
+  readonly #call: ReturnType<typeof crudOf>
+  readonly oauth: PluginOAuth | undefined
+
+  constructor(target: CrudTarget, options: PluginStoreOptions = {}) {
+    this.#call = crudOf(target)
+    this.oauth = options.oauth
   }
 
-  /** Key rotation, as CredentialStore.rewrapFrom does for the Claude credential. */
-  async rewrapFrom(previous: Kek, current: Kek): Promise<RewrapResult> {
-    const result: RewrapResult = { rewrapped: 0, failed: 0 }
-    if (previous.id === current.id) return result
-    const rows = await this.sql<Row[]>`SELECT * FROM ai_plugins WHERE kek_id = ${previous.id}`
-    for (const row of rows) {
-      if (!row.secret_sealed || !row.dek_sealed || !row.kek_id || !row.auth_header) continue
-      let next: Envelope
-      try {
-        next = rewrap(
-          previous,
-          current,
-          { secretSealed: row.secret_sealed, dekSealed: row.dek_sealed, kekId: row.kek_id },
-          pluginAad(row.name, row.url, row.auth_header),
-        )
-      } catch (err) {
-        if (err instanceof SealError) {
-          result.failed++
-          continue
+  async #refusing<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call()
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute) {
+        if (err.reason === PLUGIN_REFUSED && (err.status === 400 || err.status === 404 || err.status === 409)) {
+          throw new PluginError(err.detail, err.status)
         }
-        throw err
+        if (err.reason === KEK_MISSING) {
+          throw new PluginError('a plugin secret cannot be saved: no key-encryption key is configured on the API (SCADBUDDY_SECRET_KEY_FILE, spec §9)', 503)
+        }
       }
-      const updated = await this.sql`
-        UPDATE ai_plugins SET dek_sealed = ${next.dekSealed}, kek_id = ${next.kekId}
-        WHERE name = ${row.name} AND kek_id = ${previous.id}`
-      result.rewrapped += updated.count
+      throw err
     }
-    return result
+  }
+
+  async list(): Promise<PluginSummary[]> {
+    return (await this.#call<{ plugins: WireRow[] }>('the plugins', '/plugins')).plugins.map(summaryOf)
+  }
+
+  async get(name: string): Promise<PluginSummary | undefined> {
+    if (!PLUGIN_NAME_RE.test(name)) return undefined
+    const { plugin } = await this.#call<{ plugin: WireRow | null }>('a plugin', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}`)
+    return plugin ? summaryOf(plugin) : undefined
+  }
+
+  async create(input: PluginCreate, _kek: Kek | undefined): Promise<PluginSummary> {
+    const name = validatePluginName(input.name)
+    const url = normalisePluginUrl(input.url)
+    const tiers = validateToolTiers(input.tool_tiers ?? {})
+    const disabled = validateDisabledTools(input.disabled_tools ?? [])
+    if (input.enabled) {
+      throw new PluginError(
+        'a plugin is registered disabled: run its connection test, review its tools, then enable it (issue #297)',
+        400,
+      )
+    }
+    let secret: { auth_header: string; secret: string } | undefined
+    if (input.secret !== undefined) {
+      secret = { auth_header: validateHeaderName(input.auth_header ?? DEFAULT_AUTH_HEADER), secret: validateSecret(input.secret) }
+    } else if (input.auth_header) {
+      throw new PluginError('auth_header needs a secret', 400)
+    }
+    const body = { name, url, ...secret, tools: toolRows(tiers, disabled), by: updatedBy() }
+    return summaryOf(await this.#refusing(() => this.#call<WireRow>('a plugin registered', '/plugins', { body })))
+  }
+
+  async update(name: string, patch: PluginPatch, _kek: Kek | undefined, context?: AuditContext): Promise<PluginSummary> {
+    if (!PLUGIN_NAME_RE.test(name)) throw new PluginError(`no plugin named "${name}"`, 404)
+    const body: Record<string, unknown> = { by: updatedBy(context) }
+    if (patch.url !== undefined) body.url = normalisePluginUrl(patch.url)
+    if (patch.tool_tiers !== undefined) body.tool_tiers = validateToolTiers(patch.tool_tiers)
+    if (patch.disabled_tools !== undefined) body.disabled_tools = validateDisabledTools(patch.disabled_tools)
+    if (patch.enabled !== undefined) body.enabled = patch.enabled
+    if (patch.auth_header !== undefined) body.auth_header = patch.auth_header === null ? null : validateHeaderName(patch.auth_header)
+    if (patch.secret !== undefined) body.secret = patch.secret === null ? null : validateSecret(patch.secret)
+    return summaryOf(
+      await this.#refusing(() => this.#call<WireRow>('a plugin changed', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/update`, { body })),
+    )
+  }
+
+  async setToolAccess(name: string, tool: string, value: ToolAccess | null, context?: AuditContext): Promise<PluginSummary> {
+    if (!PLUGIN_NAME_RE.test(name)) throw new PluginError(`no plugin named "${name}"`, 404)
+    // The one entry this write adds, checked as the SQL store's validators check it.
+    if (value === 'off') validateDisabledTools([tool])
+    else if (value !== null) validateToolTiers({ [tool]: value })
+    const body = { tool, access: value, by: updatedBy(context) }
+    return summaryOf(
+      await this.#refusing(() => this.#call<WireRow>("a plugin tool's access", `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/tool-access`, { body })),
+    )
+  }
+
+  async delete(name: string): Promise<boolean> {
+    if (!PLUGIN_NAME_RE.test(name)) return false
+    return (await this.#call<{ done: boolean }>('a plugin deleted', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/delete`, { method: 'POST' })).done
+  }
+
+  /** Throws SealError (the API cannot open the secret), and for a signed-in plugin GrantError or OAuthError. */
+  async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {
+    if (!PLUGIN_NAME_RE.test(name)) return undefined
+    const { plugin } = await this.#call<{ plugin: WireOpened | null }>('a plugin opened', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/reveal`, { method: 'POST' })
+    return plugin ? signIn(this.oauth, plugin, openedOf(plugin), kek) : undefined
+  }
+
+  /** As `PluginStore.enabled`: the API opens each plugin `ai_access` turns on. */
+  async enabled(kek: Kek | undefined): Promise<{ plugins: RemotePlugin[]; problems: string[] }> {
+    const { plugins } = await this.#call<{ plugins: WireOpened[] }>('the enabled plugins', '/plugins/open-enabled', { method: 'POST' })
+    return openEnabled(plugins, async (row) => signIn(this.oauth, row, openedOf(row), kek))
   }
 }

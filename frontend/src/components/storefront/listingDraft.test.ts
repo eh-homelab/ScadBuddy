@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, MediaView } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
-import { colourProblems, defaultsFor, emptyDraft, fixColour, isSupport, listingInput, nearestFilaments, previewListing, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, defaultFits, defaultsFor, emptyDraft, fittedDefault, fixColour, isSupport, listingInput, listingRefusal, nearestFilaments, previewListing, savedKey, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -99,14 +99,79 @@ describe('defaultsFor (#6131): the smart defaults', () => {
   })
 })
 
+describe('the value an offered parameter starts at (#6144)', () => {
+  const param = (name: string) => keychainSchema.parameters!.find((p) => p.name === name)!
+
+  it('starts a colour whose template default no colour on offer has at the first colour on offer', () => {
+    const { params } = defaultsFor(keychainSchema, [YELLOW, BLUE])
+    expect(params['body_color']).toEqual({ kind: 'choice', choices: [] })
+    expect(params['text_color']).toEqual({ kind: 'choice', choices: [], default: '#1b6ca8' })
+  })
+
+  it('starts it at the colour the person was looking at, when one on offer has it', () => {
+    const { params } = defaultsFor(keychainSchema, [YELLOW, BLUE], { text_color: '#ffc20e' })
+    expect(params['text_color']).toEqual({ kind: 'choice', choices: [], default: '#ffc20e' })
+    // The template's default on offer stays the start: no listing default.
+    expect(defaultsFor(keychainSchema, [YELLOW, BLUE, CORAL], { text_color: '#ffc20e' }).params['text_color']).toEqual({ kind: 'choice', choices: [] })
+  })
+
+  it('moves a number to the nearest value on the step when the range leaves the template’s out', () => {
+    const size = param('text_size') // 6 to 28, step 0.5, starts at 14
+    expect(fittedDefault(size, { kind: 'number', min: 16.5, max: 28, step: 1 }, [])).toEqual({ kind: 'number', min: 16.5, max: 28, step: 1, default: 16.5 })
+    expect(fittedDefault(size, { kind: 'number', min: 6, max: 12, step: 0.5 }, [])).toEqual({ kind: 'number', min: 6, max: 12, step: 0.5, default: 12 })
+    // 14 is on a step of 4 from 6, not on one of 5: the nearest step below it, or the value given when on one.
+    expect(fittedDefault(size, { kind: 'number', min: 6, max: 28, step: 4 }, [])).toEqual({ kind: 'number', min: 6, max: 28, step: 4 })
+    expect(fittedDefault(size, { kind: 'number', min: 6, max: 28, step: 5 }, [])).toEqual({ kind: 'number', min: 6, max: 28, step: 5, default: 11 })
+    expect(fittedDefault(size, { kind: 'number', min: 6, max: 28, step: 5 }, [], 16)).toEqual({ kind: 'number', min: 6, max: 28, step: 5, default: 16 })
+  })
+
+  it('keeps the listing’s own default while it fits, and drops one that no longer does for the template’s', () => {
+    const size = param('text_size')
+    expect(fittedDefault(size, { kind: 'number', min: 10, max: 20, step: 0.5, default: 18 }, [])).toEqual({ kind: 'number', min: 10, max: 20, step: 0.5, default: 18 })
+    expect(fittedDefault(size, { kind: 'number', min: 10, max: 16, step: 0.5, default: 18 }, [])).toEqual({ kind: 'number', min: 10, max: 16, step: 0.5 })
+  })
+
+  it('takes the locked value when it fits and the template’s does not', () => {
+    const side = param('hole_side')
+    const choices = (side.options ?? []).map((option) => option.value).filter((value) => value !== side.initial)
+    expect(fittedDefault(side, { kind: 'choice', choices }, [], choices[1])).toEqual({ kind: 'choice', choices, default: choices[1] })
+    expect(fittedDefault(side, { kind: 'choice', choices }, [], side.initial)).toEqual({ kind: 'choice', choices, default: choices[0] })
+  })
+
+  it('checks a default as publish does', () => {
+    const size = param('text_size')
+    expect(defaultFits(size, { kind: 'number', min: 6, max: 28, step: 0.5 }, 14.5, [])).toBe(true)
+    expect(defaultFits(size, { kind: 'number', min: 6, max: 28, step: 0.5 }, 14.25, [])).toBe(false)
+    expect(defaultFits(param('name'), { kind: 'text', max_length: 3 }, 'Reagan', [])).toBe(false)
+    expect(defaultFits(param('body_color'), { kind: 'choice', choices: [] }, '#1B6CA8', ['#1b6ca8'])).toBe(true)
+  })
+})
+
+describe('listingRefusal (#6144, #6152): a refusal about one parameter', () => {
+  const type = (slug: string) => `https://scadbuddy.dev/problems/storefront/${slug}`
+
+  it('names the parameter of a default, colour or support refusal', () => {
+    expect(listingRefusal({ type: type('listing_default_invalid'), title: 't', detail: 'd', name: 'text_size' })).toEqual({ kind: 'param', code: 'default_invalid', name: 'text_size', detail: 'd' })
+    expect(listingRefusal({ type: type('listing_colour_unknown'), title: 't', name: 'body_color' })).toEqual({ kind: 'param', code: 'colour_unknown', name: 'body_color', detail: 't' })
+    expect(listingRefusal({ type: type('listing_support_offered'), title: 't', detail: 'd', name: 'support_colour' })).toMatchObject({ kind: 'param', code: 'support_offered' })
+  })
+
+  it('reads a colour refusal that names no parameter as a filament gone from the price book', () => {
+    expect(listingRefusal({ type: type('listing_colour_unknown'), title: 't', detail: 'd' })).toEqual({ kind: 'filament_unknown', detail: 'd' })
+  })
+})
+
 describe('colourProblems (#6131)', () => {
   function draft(over: Partial<ListingDraft>): ListingDraft {
     return { ...emptyDraft('name-keychain', 'c'.repeat(40)), title: 'Tag', ...over }
   }
 
   it('names each colour that is not a listing filament’s, offered or locked', () => {
-    const problems = colourProblems(draft({ ...defaultsFor(keychainSchema, [CORAL]) }), keychainSchema, [CORAL])
+    // The smart defaults start an offered colour at one on offer (#6144); a person who unticks it makes it a problem again.
+    expect(colourProblems(draft({ ...defaultsFor(keychainSchema, [CORAL]) }), keychainSchema, [CORAL])).toEqual([])
+    const problems = colourProblems(draft({ params: { body_color: { kind: 'choice', choices: [] } }, fixed: { text_color: '#E8532F' }, colours: ['coral'] }), keychainSchema, [CORAL])
     expect(problems).toEqual([{ name: 'body_color', label: 'Plate', colour: '#1B6CA8' }])
+    expect(colourProblems(draft({ fixed: { body_color: '#1B6CA8', text_color: '#E8532F' }, colours: ['coral'] }), keychainSchema, [CORAL])).toEqual([{ name: 'body_color', label: 'Plate', colour: '#1B6CA8' }])
   })
 
   it('names an offered colour whose default is not a listing filament’s', () => {
@@ -260,5 +325,20 @@ describe('sellMedia (#6131)', () => {
   it('takes the images a customer can see, never a video, a missing file or another type', () => {
     const items = [media('a', 'image', 'image/png'), media('b', 'video', 'video/mp4'), media('c', 'image', 'image/png', true), media('d', 'image', 'application/octet-stream')]
     expect(sellMedia(items)).toEqual(['a'])
+  })
+})
+
+describe('savedKey (#6290): a null field is an absent one, and nothing else is', () => {
+  const body = (params: Record<string, unknown>, fixed: Record<string, unknown> = {}) =>
+    savedKey({ slug: 'name-keychain', commit: 'c'.repeat(40), title: 'Tag', params, fixed } as Parameters<typeof savedKey>[0])
+
+  it('reads a bound’s unset label, default and step as null or absent alike', () => {
+    expect(body({ size: { kind: 'number', min: 6, max: 28, label: null, default: null, step: null } })).toBe(body({ size: { kind: 'number', min: 6, max: 28 } }))
+  })
+
+  it('still sees a default that went from a value to unset, and a fixed value taken away', () => {
+    expect(body({ size: { kind: 'number', min: 6, max: 28, default: 14 } })).not.toBe(body({ size: { kind: 'number', min: 6, max: 28, default: null } }))
+    expect(body({}, { thickness: 5.2 })).not.toBe(body({}, {}))
+    expect(body({}, { thickness: 0 })).not.toBe(body({}, {}))
   })
 })

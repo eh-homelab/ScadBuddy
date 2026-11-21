@@ -5,7 +5,7 @@ import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import { acceptList, accepts, type PickerSession } from '../src/routes/workspacePicker.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { SessionResources } from '../src/sessions/touched.js'
+import { PgResourceRows, SessionResources } from '../src/sessions/touched.js'
 import { grantAad, PluginOAuth } from '../src/plugins/oauthStore.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
@@ -56,7 +56,7 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    touched = new SessionResources(db.sql, (err) => failures.push(err))
+    touched = new SessionResources(new PgResourceRows(db.sql), (err) => failures.push(err))
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     files = new SessionFiles(db.sql)
     oauth = new PluginOAuth(db.sql)

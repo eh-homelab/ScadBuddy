@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BrowserSessions,
   browserUser,
+  PgSessionLookup,
   CACHE_MS,
   personSessions,
   SESSION_COOKIE,
@@ -40,7 +41,7 @@ const withCookie = { headers: { cookie: `${SESSION_COOKIE}=${TOKEN}` } }
 describe('BrowserSessions', () => {
   it('looks the cookie up by its SHA-256, never the cookie', async () => {
     const { sql, params } = fakeSql(() => [{ principal: PERSON, name: 'Alice', kind: 'login' }])
-    expect(await new BrowserSessions(sql).resolve(TOKEN)).toEqual({ principal: PERSON, name: 'Alice', kind: 'login' })
+    expect(await new BrowserSessions(new PgSessionLookup(sql)).resolve(TOKEN)).toEqual({ principal: PERSON, name: 'Alice', kind: 'login' })
     expect(params[0]).toEqual([Buffer.from(sessionIdHash(TOKEN), 'hex')])
     expect(JSON.stringify(params)).not.toContain(TOKEN)
   })
@@ -48,7 +49,7 @@ describe('BrowserSessions', () => {
   it('caches an answer a few seconds and drops it on revocation', async () => {
     let now = 0
     const { sql, reads } = fakeSql(() => [{ principal: PERSON, name: null, kind: 'login' }])
-    const sessions = new BrowserSessions(sql, () => now)
+    const sessions = new BrowserSessions(new PgSessionLookup(sql), () => now)
     let listener: EventListener | undefined
     sessions.follow({ follow: (l) => ((listener = l), () => {}) })
     await sessions.resolve(TOKEN)
@@ -69,31 +70,31 @@ describe('BrowserSessions', () => {
 
   it('reads a failed lookup as no session', async () => {
     const sql = (() => Promise.reject(new Error('down'))) as unknown as Sql
-    expect(await new BrowserSessions(sql).resolve(TOKEN)).toBeUndefined()
+    expect(await new BrowserSessions(new PgSessionLookup(sql)).resolve(TOKEN)).toBeUndefined()
   })
 })
 
 describe('personSessions', () => {
   it('makes the signed-in person the browser user', async () => {
     const { sql } = fakeSql(() => [{ principal: PERSON, name: 'Alice', kind: 'login' }])
-    const response = await app(new BrowserSessions(sql)).request('/api/v1/ai/who', withCookie)
+    const response = await app(new BrowserSessions(new PgSessionLookup(sql))).request('/api/v1/ai/who', withCookie)
     expect(await response.json()).toEqual({ kind: 'browser', id: PERSON, label: 'You' })
   })
 
   it('is the anonymous browser user without a session, a lookup or a delegation', async () => {
     const { sql, reads } = fakeSql(() => [])
-    const sessions = new BrowserSessions(sql)
+    const sessions = new BrowserSessions(new PgSessionLookup(sql))
     expect(await (await app(sessions).request('/api/v1/ai/who')).json()).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
     expect(reads()).toBe(0)
     expect(((await (await app(sessions).request('/api/v1/ai/who', withCookie)).json()) as { id: string }).id).toBe('browser')
     const delegated = fakeSql(() => [{ principal: PERSON, name: null, kind: 'delegated' }])
-    const answer = await app(new BrowserSessions(delegated.sql)).request('/api/v1/ai/who', withCookie)
+    const answer = await app(new BrowserSessions(new PgSessionLookup(delegated.sql))).request('/api/v1/ai/who', withCookie)
     expect(((await answer.json()) as { id: string }).id).toBe('browser')
   })
 
   it('logs, once a minute, what enforce would refuse in observe', async () => {
     const lines: string[] = []
-    const served = app(new BrowserSessions(fakeSql(() => []).sql), 'observe', (m) => lines.push(m))
+    const served = app(new BrowserSessions(new PgSessionLookup(fakeSql(() => []).sql)), 'observe', (m) => lines.push(m))
     expect((await served.request('/api/v1/ai/who')).status).toBe(200)
     await served.request('/api/v1/ai/who')
     expect(lines).toHaveLength(1)
@@ -106,7 +107,7 @@ describe('personSessions', () => {
 describe('personSessions in enforce (#4975 phase 8)', () => {
   it("refuses a request with no live session with the backend's 401 problem", async () => {
     const lines: string[] = []
-    const refused = await app(new BrowserSessions(fakeSql(() => []).sql), 'enforce', (m) => lines.push(m)).request(
+    const refused = await app(new BrowserSessions(new PgSessionLookup(fakeSql(() => []).sql)), 'enforce', (m) => lines.push(m)).request(
       '/api/v1/ai/who',
       withCookie,
     )
@@ -119,10 +120,10 @@ describe('personSessions in enforce (#4975 phase 8)', () => {
 
   it('serves a signed-in person and a delegated session', async () => {
     const person = fakeSql(() => [{ principal: PERSON, name: 'Alice', kind: 'login' }])
-    const served = await app(new BrowserSessions(person.sql), 'enforce').request('/api/v1/ai/who', withCookie)
+    const served = await app(new BrowserSessions(new PgSessionLookup(person.sql)), 'enforce').request('/api/v1/ai/who', withCookie)
     expect(((await served.json()) as { id: string }).id).toBe(PERSON)
     const delegated = fakeSql(() => [{ principal: PERSON, name: null, kind: 'delegated' }])
-    expect((await app(new BrowserSessions(delegated.sql), 'enforce').request('/api/v1/ai/who', withCookie)).status).toBe(200)
+    expect((await app(new BrowserSessions(new PgSessionLookup(delegated.sql)), 'enforce').request('/api/v1/ai/who', withCookie)).status).toBe(200)
   })
 
   it('serves the plugin OAuth callback, a cross-site redirect with no session cookie', async () => {

@@ -1,6 +1,7 @@
 """Issues #307 and #306 — the archive media proxy. The browser gets Bambuddy's bytes,
 never its key or address, and a seek is a ``Range`` request that reaches Bambuddy and
-comes back as a 206. Only an archive one of ScadBuddy's outputs printed is served."""
+comes back as a 206. Only an archive a ScadBuddy record names is served: a print link,
+or an order attempt that claims it."""
 
 from __future__ import annotations
 
@@ -16,7 +17,10 @@ from PIL import Image
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.orders.lifecycle import FulfilmentInput
+from scadbuddy.orders.store import OrderStore
 from tests.api.test_send import API, BASE, configure
+from tests.orders.test_lifecycle import BY, Shop
 
 # The gate reads the links, which live in Postgres (#306).
 pytestmark = pytest.mark.requires_postgres
@@ -210,6 +214,65 @@ def test_an_archive_no_output_printed_is_a_404_and_bambuddy_is_not_asked(
     response = client.get("/api/v1/prints/36/timelapse")
 
     assert response.status_code == 404
+    assert not route.called
+
+
+def _claimed_by_an_order(client: TestClient, archive_id: int) -> None:
+    """An order attempt names ``archive_id`` (#4251): a print queued in Bambuddy by hand,
+    which no print link names."""
+    pool = getattr(client.app.state, STATE_ATTR).settings_store.pool  # type: ignore[attr-defined]
+    shop = Shop(OrderStore(pool))
+    order, item = shop.accepted()
+    shop.lifecycle.record_fulfilment(
+        order.id,
+        item.id,
+        FulfilmentInput(quantity=1, outcome="succeeded", archive_id=archive_id),
+        BY,
+    )
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("path", "upstream"),
+    [
+        ("photos/finish_1.jpg", "photos/finish_1.jpg"),
+        ("thumbnail", "thumbnail"),
+        ("plates/1/thumbnail", "plate-thumbnail/1"),
+        ("timelapse", "timelapse"),
+    ],
+)
+def test_an_archive_an_order_attempt_claims_is_served(
+    client: TestClient, path: str, upstream: str
+) -> None:
+    """A print the owner queued in Bambuddy by hand and named on an order item: the
+    order copies its photo, so the proxy (and the agent's `workspace_save print_image`)
+    serves it too, though no print link names it."""
+    configure(client)
+    _claimed_by_an_order(client, 264)
+    assert asyncio.run(print_links(client).linked(264)) is None
+    route = respx.get(f"{API}/archives/264/{upstream}").mock(
+        return_value=httpx.Response(200, content=b"img", headers={"Content-Type": "image/jpeg"})
+    )
+
+    response = client.get(f"/api/v1/prints/264/{path}")
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"img"
+    assert route.called
+
+
+@respx.mock
+def test_another_archive_stays_refused_when_an_order_claims_one(client: TestClient) -> None:
+    """The claim opens only the archive it names: the rest of Bambuddy's history, the
+    print watcher's inbox included, stays a 404."""
+    configure(client)
+    _claimed_by_an_order(client, 264)
+    route = respx.get(f"{API}/archives/265/thumbnail").mock(return_value=httpx.Response(200))
+
+    response = client.get("/api/v1/prints/265/thumbnail")
+
+    assert response.status_code == 404
+    assert "archive 265 is not a print of any ScadBuddy output" in response.text
     assert not route.called
 
 

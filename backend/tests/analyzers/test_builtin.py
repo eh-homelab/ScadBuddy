@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
+import trimesh
 
 from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.builtin import (
@@ -22,8 +24,10 @@ from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic
 from scadbuddy.analyzers.runner import run_checks
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
 from scadbuddy.bambuddy.models import SlotChoice
-from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
+from scadbuddy.render.bambu3mf import PlateParts, layout_of, single_plate, write_plates_3mf
 from scadbuddy.render.plate import plate_for
+from scadbuddy.render.split import ColourPart
 from tests.analyzers.conftest import (
     basic_slot,
     choices,
@@ -37,6 +41,7 @@ from tests.analyzers.conftest import (
     tee,
     touching_cubes,
 )
+from tests.test_bambu3mf import _restated
 
 
 def _run(analyzer: Analyzer, **fields: object) -> list[AnalyzerDiagnostic]:
@@ -266,6 +271,96 @@ def test_a_multi_plate_output_is_checked_plate_by_plate(tmp_path: Path) -> None:
     assert any(e.label == "placement" for e in found.evidence)
 
 
+def _crowded() -> list[ColourPart]:
+    """Two colours over nearly all of the H2C's reachable area: no room for a tower."""
+    return [part(cube_of(290, 300, 4)), part(cube_of(2, 2, 2), "#00FF00", 2)]
+
+
+def cube_of(x: float, y: float, z: float) -> trimesh.Trimesh:
+    box: trimesh.Trimesh = trimesh.creation.box(extents=(x, y, z))
+    box.apply_translation(np.array([x, y, z]) / 2)
+    return box
+
+
+TOWER_ON = AnalysisRequest(prime_tower=PrimeTowerChoice(enabled=True))
+CROWDED = output(size=(290, 300, 4), colours=["#FF0000", "#00FF00"])
+
+
+def test_a_one_plate_file_with_the_tower_off_keeps_no_room_for_one(tmp_path: Path) -> None:
+    """#3770: an Arrange packed with the tower off fits without one, as the send judges."""
+    off = tmp_path / "off.3mf"
+    write_plates_3mf(
+        [single_plate(_crowded())],
+        ["#FF0000", "#00FF00"],
+        off,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    assert _run(PLATE_FIT, output=CROWDED, model_3mf=off) == []
+    # The file is what says so: without it, the colours keep room for a tower.
+    [found] = _run(PLATE_FIT, output=CROWDED)
+    assert any(e.label == "placement" for e in found.evidence)
+    # A print that turns the tower on gets room for it, so the plate does not fit.
+    [found] = _run(PLATE_FIT, output=CROWDED, model_3mf=off, request=TOWER_ON)
+    assert any(e.label == "placement" for e in found.evidence)
+
+
+def test_a_multi_plate_file_with_the_tower_off_gets_room_when_the_print_turns_it_on(
+    tmp_path: Path,
+) -> None:
+    off = tmp_path / "off.3mf"
+    write_plates_3mf(
+        [PlateParts((part(cube()),), (1,)), PlateParts(tuple(_crowded()), (1, 2))],
+        ["#FF0000", "#00FF00"],
+        off,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+        prime_tower=False,
+    )
+    assert _run(PLATE_FIT, output=CROWDED, model_3mf=off) == []
+    [found] = _run(PLATE_FIT, output=CROWDED, model_3mf=off, request=TOWER_ON)
+    assert {e.label: e.value for e in found.evidence}["plates"] == 2
+    assert "prime tower" in found.message
+
+
+def _four_filaments(path: Path) -> Path:
+    """A ScadBuddy-laid-out H2C file that lists four filaments for a 300 x 265 mm plate
+    of two colours. 300 x 265 mm leaves room for a two-filament tower, not for a
+    four-filament one."""
+    write_plates_3mf(
+        [single_plate([part(cube_of(300, 265, 4)), part(cube_of(2, 2, 2), "#00FF00", 2)])],
+        ["#FF0000", "#00FF00", "#0000FF", "#FFFF00"],
+        path,
+        thumbnails=None,
+        plate=plate_for("H2C"),
+    )
+    return path
+
+
+TWO_COLOURS = output(size=(300, 265, 4), colours=["#FF0000", "#00FF00"])
+
+
+def test_an_author_file_sizes_the_tower_from_every_filament_it_lists(tmp_path: Path) -> None:
+    """#6770: the send sizes an author's tower from every `filament_colour` the file
+    lists (`send.file_tower`), so plate fit does too."""
+    written = _four_filaments(tmp_path / "four.3mf")
+    author = tmp_path / "author.3mf"
+    author.write_bytes(_restated(written.read_bytes(), print_settings_id=["0.20mm Standard"]))
+    assert layout_of(author.read_bytes()) == "author"
+    assert _run(PLATE_FIT, output=TWO_COLOURS) == []
+    [found] = _run(PLATE_FIT, output=TWO_COLOURS, model_3mf=author)
+    assert any(e.label == "placement" for e in found.evidence)
+
+
+def test_a_scadbuddy_file_sizes_the_tower_from_its_colours(tmp_path: Path) -> None:
+    """#6770: a file that ScadBuddy laid out goes through `replate_3mf`, which sizes the
+    tower from the plate's own parts, not from every filament the file lists."""
+    written = _four_filaments(tmp_path / "four.3mf")
+    assert layout_of(written.read_bytes()) == "scadbuddy"
+    assert _run(PLATE_FIT, output=TWO_COLOURS, model_3mf=written) == []
+
+
 # --- the runner ---------------------------------------------------------------------
 
 
@@ -302,3 +397,13 @@ def test_a_crashing_analyzer_is_itself_a_diagnostic() -> None:
 def test_every_bundled_analyzer_has_a_unique_id() -> None:
     ids = [analyzer.id for analyzer in builtin.BUILTIN]
     assert len(ids) == len(set(ids))
+
+
+def test_the_tower_is_sized_by_the_outputs_colours() -> None:
+    """#6735: an eight-colour tower on the H2C is 65 mm square, past the 60 mm square
+    reserved before, so a 300 x 245 mm plate that fits two colours does not fit eight."""
+    size = (300, 245, 10)
+    assert _run(PLATE_FIT, output=output(size=size, colours=["#FF0000", "#00FF00"])) == []
+    eight = [f"#0000{n:02X}" for n in range(8)]
+    [found] = _run(PLATE_FIT, output=output(size=size, colours=eight))
+    assert any(e.label == "placement" for e in found.evidence)

@@ -408,8 +408,9 @@ async def render_preview(
 async def render_estimate_route(
     job_id: str, state: StateDep, visitor: Visitor, _client: StoreClient
 ) -> StoreEstimate:
-    """The rough price of the visitor's done render: "about $X, confirmed after we check
-    it", never a quote."""
+    """The price of the visitor's done render (#6153): the firm price from a slice
+    through the quote path (`source` `slice`), `pending` while the slice runs, or `none`
+    (the shop prices it by hand)."""
     return await render_estimate(state, visitor, job_id)
 
 

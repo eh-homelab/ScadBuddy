@@ -18,7 +18,15 @@ copy() {
     backend/tests/fixtures/payload-vectors.json \
     backend/tests/fixtures/subject-vectors.json \
     agent/test/fixtures/secret-vectors.json \
-    backend/tests/fixtures/secret-vectors.json; do
+    backend/tests/fixtures/secret-vectors.json \
+    agent/test/fixtures/pending-input-vectors.json \
+    backend/tests/fixtures/pending-input-vectors.json \
+    agent/test/fixtures/response-hash-vectors.json \
+    backend/tests/fixtures/response-hash-vectors.json \
+    agent-durable/src/scadbuddy_durable/gate/validate.py \
+    backend/scadbuddy/agent_data/gate_validate.py \
+    agent-durable/src/scadbuddy_durable/gate/canonical.py \
+    backend/scadbuddy/agent_data/gate_canonical.py; do
     mkdir -p "$work/r/$(dirname "$f")"
     cp "$root/$f" "$work/r/$f"
   done
@@ -28,6 +36,12 @@ copy
 echo " " >>"$work/r/backend/tests/fixtures/payload-vectors.json"
 if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "payload-vectors.json is not a copy" <<<"$out"; then
   echo "FAIL: a stale vectors copy passed: $out"; exit 1
+fi
+
+copy
+sed -i 's/"self",/"own",/' "$work/r/backend/scadbuddy/agent_data/gate_validate.py"
+if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "gate_validate.py is not a copy" <<<"$out"; then
+  echo "FAIL: a drifted gate validator passed: $out"; exit 1
 fi
 
 copy

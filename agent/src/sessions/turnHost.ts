@@ -2,13 +2,14 @@ import { randomUUID } from 'node:crypto'
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
-import type { Sql, TransactionSql } from 'postgres'
+import type { Sql } from 'postgres'
 import type { GateTrace } from '../approvals/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
 import { redact, WAIT_FOR_USER } from '../gate/entry.js'
 import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
+import type { AppendFence } from './store.js'
 import { type AttentionSpec, answeredText, BACK_REPLIES, DEFAULT_REPLIES, RECONNECTED_TEXT, timedOutText } from '../harness/attention.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { FinishedCall } from '../tools/activityProjection.js'
@@ -17,15 +18,17 @@ import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } fro
 import type { QuestionService } from '../gate/questions.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
-import { NO_CAPACITY, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
+import { NO_CAPACITY, PLACEMENT_MOVED, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
 import { attentionGate, type HeldRow, replyOf, TAB_WAIT_CALL } from './attentionGate.js'
-import type { SessionBlobs } from './blobs.js'
+import type { SessionImages } from './blobs.js'
+import type { TurnFence, TurnRoutes } from '../gate/crudPending.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, waitForTab } from './manager.js'
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
 import { type Placement, type SessionDirectory, watchCaps } from '../workspace/directory.js'
+import { PgTurnRows, type TurnRows } from './turnRows.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -49,7 +52,9 @@ import { type Placement, type SessionDirectory, watchCaps } from '../workspace/d
 // appends checks, in its own transaction, that the row is still this placement's
 // (`turn_attempt`), so none lands once another has claimed the turn. Every FENCE_MS it also reads
 // the row, and once another placement holds it, or the turn is no longer the row's, it is cut
-// off: its process closed. Its spend is always written: its requests are its own, never the
+// off: its process closed. One cut off because another placement holds the row fails the
+// retryable PlacementMoved, which the workflow, waiting on it, answers by placing the turn again
+// (#6387); the row names the other placement in the log. Its spend is always written: its requests are its own, never the
 // next placement's, so the budget counts every replica that ran the turn, once. A new placement
 // here for the same session cuts an older one first, so the warm process is free.
 //
@@ -178,16 +183,23 @@ export type TurnHostDeps = {
   /** The replica's turn machinery (SessionManager.turnCore): its warm processes, events, audit. */
   core: TurnCoreDeps
   sql: Sql
+  /** The row's turn writes (turnRows.ts): `PgTurnRows` on `sql` when omitted; gated in main.ts (#6449). */
+  turns?: TurnRows
   /** The message's images, by the names DurableTurns.send stored them under; and a tool result's, stored under the fence. */
-  images: Pick<SessionBlobs, 'get' | 'putIf'>
+  images: Pick<SessionImages, 'get' | 'putIf'>
   /** This replica's session host queue (`agent-sessions.<identity>`), what each result names. */
   hostQueue: string
   /** Tests only: the fence's period (FENCE_MS). */
   fenceMs?: number
-  /** LISTEN on a channel (events/pgListener.ts `listenAlso`): a held call wakes on `scadbuddy_input`. Without it, the poll alone. */
+  /** Hears a channel (events/changeStream.ts `listenAlso`): a held call wakes on `scadbuddy_input`. Without it, the poll alone. */
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
+  /**
+   * The API's `pending-input` routes (gate/crudPending.ts, #5299 step 10), used while `use()` holds:
+   * a held call's response read, and its span mark, fenced there by this placement. SQL otherwise.
+   */
+  pendingRoutes?: { crud: TurnRoutes; use: () => boolean } | undefined
   /** The calls in flight at a restart whose ToolCall finished, and whether each succeeded (activityProjection.ts `finishedToolCalls`); absent, none. */
   finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
@@ -266,32 +278,9 @@ const PARK_HOLD_S = 300
 /** A tab wait's quick reply that ends the turn's tab waits (sessions/manager.ts waitForTab's CARRY_ON). */
 const CARRY_ON = 'Carry on without the tab'
 
-/**
- * Whether a user entry landed in `id`'s main transcript after row `mark`. A sealed row says so in
- * its plaintext `entry_type`; a row from before sealing has none, so its own top-level `type` is
- * read (a substring match would take an assistant entry that quotes one). An unparseable legacy
- * row is no user entry. A row copied in from a forgotten parent (store.ts `inherited`) is none of
- * this session's turns, whatever its id.
- */
-export async function userEntryLanded(sql: Sql, id: string, mark: number): Promise<boolean> {
-  const rows = await sql<{ typed: boolean; entry: string | null }[]>`
-    SELECT entry_type = 'user' AS typed, entry FROM ai_session_entries
-    WHERE session_id = ${id} AND subpath = '' AND id > ${mark} AND NOT inherited
-      AND (entry_type = 'user' OR (entry_type IS NULL AND entry LIKE '%"user"%'))
-    ORDER BY id`
-  return rows.some((row) => {
-    if (row.typed) return true
-    try {
-      const parsed: unknown = JSON.parse(row.entry ?? '')
-      return typeof parsed === 'object' && parsed !== null && (parsed as { type?: unknown }).type === 'user'
-    } catch {
-      return false
-    }
-  })
-}
-
 export class TurnHost {
   readonly #deps: TurnHostDeps
+  readonly #turns: TurnRows
   #stopping = false
   /** The placement running here for each session. */
   readonly #running = new Map<string, Running>()
@@ -307,7 +296,8 @@ export class TurnHost {
 
   constructor(deps: TurnHostDeps) {
     this.#deps = deps
-    // The only listener of this channel on the connection: listenAlso keeps one per channel, so a second would replace this one.
+    this.#turns = deps.turns ?? new PgTurnRows(deps.sql)
+    // The only listener of this channel on the stream: listenAlso keeps one per channel, so a second would replace this one.
     deps.listen?.(INPUT_CHANNEL, (requestId) => {
       for (const wake of this.#waiters.get(requestId) ?? []) wake()
     })
@@ -420,11 +410,10 @@ export class TurnHost {
     parks: Holds,
   ): Promise<SessionTurnResult> {
     const { sessionId: id, turnId } = input
-    const sql = this.#deps.sql
     const parked = input.continuation?.kind === 'parked' ? input.continuation.calls : undefined
     // A parked continuation marks the transcript for itself: its outcome message goes in once.
     const mark = await this.#claim(id, turnId, attempt, parked?.length ? `${turnId}/${parked[0]!.requestId}` : turnId)
-    const claim = mark === undefined ? undefined : await runningDurableTurn(sql, id, turnId)
+    const claim = mark === undefined ? undefined : await runningDurableTurn(this.#deps.core.rows, id, turnId)
     if (mark === undefined || !claim) throw ApplicationFailure.nonRetryable(`session ${id} is not running turn ${turnId}`, SESSION_GONE)
     const { session, principal } = claim
     // §5.5: resumed with the restart message only once the turn's prompt is in the transcript;
@@ -462,7 +451,7 @@ export class TurnHost {
       const why = cutBy()
       return why !== undefined && why !== 'shutdown'
     }
-    const spend = new Spend(sql, id)
+    const spend = new Spend(this.#turns, id, `${attempt}:${turnId}:end`)
     /** The session's working directory as placed for this turn (set just before it runs). */
     let placed: Placement | undefined
     /**
@@ -476,22 +465,10 @@ export class TurnHost {
       return undefined
     }
     /**
-     * This placement still holds its turn: checked, row locked, in each write's own transaction.
-     * The turn as well as the attempt: an attempt id is the run's and the cycle's, so the next
-     * turn's first placement in the same run carries this one's, and the turn ended leaves it.
+     * The transcript's fence (store.ts `AppendFence`): this placement holds the row, or is the
+     * session's last placement and no turn runs, checked FOR SHARE in each append's transaction.
      */
-    const holds = async (tx: TransactionSql, lock: 'share' | 'update') => {
-      const rows = lock === 'share'
-        ? await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR SHARE`
-        : await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR UPDATE`
-      return rows.length > 0
-    }
-    const holdsOrLast = async (tx: TransactionSql) => {
-      const rows = await tx`
-        SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt}
-          AND (durable_turn_id = ${turnId} OR durable_turn_id IS NULL) FOR SHARE`
-      return rows.length > 0
-    }
+    const holdsOrLast: AppendFence = { attempt, turnId }
     // A process of the session's left here by an earlier placement writes under this one now.
     // `durable_turn_id IS NULL` lets it write between turns: what keeps a stale placement from
     // writing after a later turn on another replica has ended is that each placement's
@@ -512,6 +489,7 @@ export class TurnHost {
         this.#gates({
           session,
           turnId,
+          attempt,
           control,
           stop: controller.signal,
           holds: parks,
@@ -532,7 +510,7 @@ export class TurnHost {
         // last placement and no turn runs: what Claude Code writes as it exits between turns
         // (`last-prompt`, `cost-state`, warm.ts DRAIN_MS) lands as a classic process's does,
         // and never once another turn has the session.
-        this.#deps.core.warm.fence(entry, (tx) => holdsOrLast(tx))
+        this.#deps.core.warm.fence(entry, holdsOrLast)
         if (fenced()) void this.#deps.core.warm.cut(entry, 'the placement was cut off')
         control.heartbeat({ pushed: true })
       },
@@ -541,19 +519,22 @@ export class TurnHost {
       },
       mayWrite: () => !fenced(),
       // A tool result's images, and its events, only while this placement holds the turn, checked with the write.
-      storeImages: (images) => this.#deps.images.putIf(id, images, (tx) => holds(tx, 'share')),
-      appendEvents: async (batch) => {
-        const written = await sql.begin(async (tx) => ((await holds(tx, 'update')) ? await events.append(id, batch, tx) : undefined))
-        if (written) events.committed(id, batch, written)
-        return written !== undefined
-      },
+      // `holds(tx, 'share')`'s check, run on whichever side stores the images.
+      storeImages: (images) => this.#deps.images.putIf(id, images, { attempt, turnId }),
+      // This placement still holds its turn: checked, row locked, in the append's own transaction, on
+      // whichever side keeps the log (eventLog.ts `appendFenced`). The turn as well as the attempt: an
+      // attempt id is the run's and the cycle's, so the next turn's first placement in the same run
+      // carries this one's, and the turn ended leaves it.
+      appendEvents: (batch) => events.appendFenced(id, batch, { attempt, turnId }),
     }))
     // The fence: still the row's placement and turn, and what it has spent so far written. A
     // Stop's flag (DurableTurns.interrupt) ends the turn here, on this tick: the workflow's
     // Signal is the backstop.
     const fence = setInterval(() => {
       void this.#holds(id, turnId, attempt).then(
-        (holds) => {
+        ({ holds, holder }) => {
+          // Which placement took the row, for the log: a stray one is otherwise named nowhere (#6387).
+          if (holds === 'moved' && cutBy() === undefined) console.warn(`session ${id}: placement ${attempt} of turn ${turnId} is cut off: the row names placement ${holder ?? 'none'}`)
           if (holds === 'interrupted') {
             if (!controller.signal.aborted) controller.abort(new Error('the turn was interrupted'))
             spend.flush(core.runningUsd())
@@ -643,6 +624,11 @@ export class TurnHost {
         return { status: 'released', hostQueue: this.#deps.hostQueue, parked: parks.taken }
       }
       if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
+      // Another placement took the row (#6387): the workflow owns placement, and places the turn
+      // again, whose claim fences that one out. Only an ended turn is over.
+      if (why === 'moved' || why === 'replaced') {
+        throw ApplicationFailure.retryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, PLACEMENT_MOVED)
+      }
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
       // A process the turn let go (it failed, or was recycled) lands its last appends before the
       // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
@@ -711,6 +697,8 @@ export class TurnHost {
   #gates(turn: {
     session: ClaimedSession
     turnId: string
+    /** This placement of the turn: a trace mark lands only while it holds the session. */
+    attempt: string
     control: TurnControl
     stop: AbortSignal
     holds: Holds
@@ -722,7 +710,7 @@ export class TurnHost {
     sync: (when: SyncPoint) => Promise<unknown>
     endTurn: (why: string) => void
   }): TurnGates {
-    const { session, turnId, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
+    const { session, turnId, attempt, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
     const open = control.openInput
     if (!open) {
       return {
@@ -790,7 +778,7 @@ export class TurnHost {
             // Ended at once, as classic's park is (approvals/service.ts): a decision that lands
             // before the write below returns then finds the spans ended, never the resume's (#5045).
             traced.parked(rid)
-            void this.#traceEntry(rid, traced.traceparent)
+            void this.#traceEntry(rid, traced.traceparent, { sessionId: session.id, attempt, turnId })
           },
         })
       } catch (err) {
@@ -834,7 +822,7 @@ export class TurnHost {
       if (attention.reason !== 'done') return waits(request, attention)
       const classic = this.#deps.questions
       if (!classic) return Promise.resolve({ answered: false, message: NO_PARKS })
-      return classic.gate({ sessionId: session.id, turnId, secrets, signal: stop, turnStartedAt: session.claimedAt })(request)
+      return classic.gate({ sessionId: session.id, turnId, attempt, secrets, signal: stop, turnStartedAt: session.claimedAt })(request)
     }
     const questionGate: QuestionGate = async (request): Promise<QuestionVerdict> => {
       // Only the user is asked, and only by the turn that holds the session: a handoff since the
@@ -879,9 +867,8 @@ export class TurnHost {
 
   /** Whether the session is still the browser user's and turn `turnId` still holds it. */
   async #stillAsks(sessionId: string, turnId: string): Promise<boolean> {
-    const [row] = await this.#deps.sql<{ owner_kind: string }[]>`
-      SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND durable_turn_id = ${turnId}`
-    return row?.owner_kind === 'browser'
+    const row = await this.#turns.state(sessionId)
+    return row?.durable_turn_id === turnId.toLowerCase() && row.owner_kind === 'browser'
   }
 
   /**
@@ -902,6 +889,8 @@ export class TurnHost {
   }
 
   async #row(requestId: string): Promise<Response | undefined> {
+    const routes = this.#deps.pendingRoutes
+    if (routes?.use()) return await routes.crud.response(requestId)
     const [row] = await this.#deps.sql<Response[]>`
       SELECT outcome, response, reason, responder, decision_traceparent FROM ai_input_responses WHERE request_id = ${requestId}`
     return row
@@ -912,8 +901,16 @@ export class TurnHost {
    * links to `ai_approvals.traceparent`. Best effort: an entry the write misses, or one decided
    * before it lands, is decided all the same, its decision a root.
    */
-  async #traceEntry(requestId: string, traceparent: string | undefined): Promise<void> {
+  async #traceEntry(requestId: string, traceparent: string | undefined, fence: TurnFence): Promise<void> {
     if (!traceparent) return
+    const routes = this.#deps.pendingRoutes
+    // On the API, only while this placement still holds the session (the turn fence, #5299 step 10).
+    if (routes?.use()) {
+      await routes.crud.markPark(requestId, traceparent, fence).catch((err: unknown) => {
+        this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
+      })
+      return
+    }
     await this.#deps.sql`UPDATE ai_pending_input SET traceparent = ${traceparent} WHERE request_id = ${requestId}`.catch((err: unknown) => {
       this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
     })
@@ -942,16 +939,7 @@ export class TurnHost {
    * continuation of it) is set once. The mark, or undefined when the row does not run this turn.
    */
   async #claim(id: string, turnId: string, attempt: string, markKey: string): Promise<number | undefined> {
-    const [row] = await this.#deps.sql<{ turn_mark: string }[]>`
-      UPDATE ai_sessions SET
-        turn_attempt = ${attempt},
-        turn_mark = CASE WHEN turn_mark_turn = ${markKey} THEN turn_mark ELSE (
-          SELECT coalesce(max(e.id), 0) FROM ai_session_entries e WHERE e.session_id = ai_sessions.id::text AND e.subpath = ''
-        ) END,
-        turn_mark_turn = ${markKey}
-      WHERE id = ${id} AND durable_turn_id = ${turnId} AND status IN ('running', 'waiting_approval', 'waiting_input')
-      RETURNING turn_mark::text`
-    return row ? Number(row.turn_mark) : undefined
+    return this.#turns.placement(id, turnId, attempt, markKey)
   }
 
   /**
@@ -1032,20 +1020,21 @@ export class TurnHost {
 
   /** Whether a user entry (the turn's prompt, or a tool result after it) landed in the main transcript after the mark. */
   async #landed(id: string, mark: number): Promise<boolean> {
-    return userEntryLanded(this.#deps.sql, id, mark)
+    return this.#deps.core.transcripts.userLanded(id, mark)
   }
 
   /**
    * Whether the row still runs this turn on this placement: `moved` when another placement holds
-   * it, `ended` when the turn is over, `interrupted` when a Stop has asked it to end (§5.6).
+   * it, `ended` when the turn is over, `interrupted` when a Stop has asked it to end (§5.6); and
+   * the placement the row names.
    */
-  async #holds(id: string, turnId: string, attempt: string): Promise<'yes' | 'moved' | 'ended' | 'interrupted'> {
-    const [row] = await this.#deps.sql<{ turn_attempt: string | null; durable_turn_id: string | null; interrupt_requested: boolean }[]>`
-      SELECT turn_attempt, durable_turn_id, interrupt_requested FROM ai_sessions WHERE id = ${id}`
-    if (!row) return 'ended'
-    if (row.turn_attempt !== attempt) return 'moved'
-    if (row.durable_turn_id !== turnId) return 'ended'
-    return row.interrupt_requested ? 'interrupted' : 'yes'
+  async #holds(id: string, turnId: string, attempt: string): Promise<{ holds: 'yes' | 'moved' | 'ended' | 'interrupted'; holder: string | null }> {
+    const row = await this.#turns.state(id)
+    if (!row) return { holds: 'ended', holder: null }
+    const holder = row.turn_attempt
+    if (holder !== attempt) return { holds: 'moved', holder }
+    if (row.durable_turn_id !== turnId.toLowerCase()) return { holds: 'ended', holder }
+    return { holds: row.interrupt_requested ? 'interrupted' : 'yes', holder }
   }
 
   async #images(id: string, refs: readonly { name: string }[]) {
@@ -1069,12 +1058,12 @@ export class TurnHost {
     const spent = end.result ? tally.costUsd - session.ownCostUsd : Math.max(tally.costUsd - session.ownCostUsd, runningUsd)
     const estimated = end.result ? end.cutUsd : spent
     const wrote = await spend.settled()
-    const [written] = await this.#deps.sql<{ id: string }[]>`
-      UPDATE ai_sessions
-      SET cost_usd = cost_usd + ${spent - wrote}, turns = turns + ${tally.turns - session.turns},
-          unpriced_cost_usd = unpriced_cost_usd + ${estimated - wrote}, updated_at = now()
-      WHERE id = ${session.id}
-      RETURNING id`
+    const written = await this.#turns.spend(session.id, {
+      key: spend.endKey,
+      costUsd: spent - wrote,
+      unpricedUsd: estimated - wrote,
+      turns: tally.turns - session.turns,
+    })
     if (!written) return
     // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
     await this.#deps.core.audit?.record(
@@ -1107,36 +1096,67 @@ export class TurnHost {
  * requests cost since the last (CoreTurn.runningUsd, the table's prices), to `cost_usd` and to
  * `unpriced_cost_usd` (Claude Code has priced none of it yet), whether or not the row is still
  * this placement's. The end (`TurnHost#write`) replaces it with the turn's own reckoning.
+ *
+ * Each write as it runs has a key of its own (`#token` and a sequence number). A write whose answer
+ * never came is sent again under its key before any new one, so one that committed while its
+ * answer was lost is added once (`SpendDelta.key`). The token is this object's, never the attempt
+ * id alone, which the next turn's first placement in a run shares. The end's write is keyed
+ * `<attempt>:<turn>:end` (`endKey`), not by the token.
  */
 class Spend {
-  readonly sql: Sql
+  readonly turns: Pick<TurnRows, 'spend'>
   readonly id: string
+  readonly #token = randomUUID()
+  #seq = 0
   #written = 0
+  /** A write sent whose answer never came: sent again, under its key, before any other. */
+  #pending: { key: string; delta: number } | undefined
   #chain: Promise<void> = Promise.resolve()
   /** Set by `settled`: the end's write takes over, so a flush from a fence tick still in flight writes nothing. */
   #closed = false
 
-  constructor(sql: Sql, id: string) {
-    this.sql = sql
+  /**
+   * The end's write's key (`TurnHost#write`): `<attempt>:<turn>:end`. The attempt
+   * (`${runId}:${cycle}`, temporal/session/workflow.ts) is shared by the next turn's first placement
+   * in a run, since `cycle` starts at 0 for every turn, so the key adds the turn id. `session_turn`
+   * is never retried (`maximumAttempts: 1`), so (attempt, turn) is this placement's alone.
+   */
+  readonly endKey: string
+
+  constructor(turns: Pick<TurnRows, 'spend'>, id: string, endKey: string) {
+    this.turns = turns
     this.id = id
+    this.endKey = endKey
   }
 
   flush(runningUsd: number): void {
     this.#chain = this.#chain.then(async () => {
+      if (this.#closed) return
+      await this.#send()
       const delta = runningUsd - this.#written
-      if (this.#closed || delta <= 0) return
-      const [row] = await this.sql<{ id: string }[]>`
-        UPDATE ai_sessions SET cost_usd = cost_usd + ${delta}, unpriced_cost_usd = unpriced_cost_usd + ${delta}, updated_at = now()
-        WHERE id = ${this.id}
-        RETURNING id`
-      if (row) this.#written += delta
+      if (delta <= 0) return
+      this.#pending = { key: `${this.#token}:${this.#seq++}`, delta }
+      await this.#send()
     }).catch(() => {})
   }
 
-  /** What was written, once the writes in flight have landed; no flush writes after it. */
+  async #send(): Promise<void> {
+    const pending = this.#pending
+    if (!pending) return
+    const written = await this.turns.spend(this.id, { key: pending.key, costUsd: pending.delta, unpricedUsd: pending.delta, turns: 0 })
+    this.#pending = undefined
+    if (written) this.#written += pending.delta
+  }
+
+  /**
+   * What was written, once the writes in flight have landed and a write whose answer was lost was
+   * sent again; no flush writes after it. Throws when that write's answer is lost again: the end
+   * cannot know what was written.
+   */
   async settled(): Promise<number> {
     await this.#chain
     this.#closed = true
+    await this.#send()
     return this.#written
   }
 }

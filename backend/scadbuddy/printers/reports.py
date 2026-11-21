@@ -8,6 +8,16 @@ write that shows that print ended returns the end (`advance_print`), so the watc
 settles the print's rack picks as the printer ends it (#5138, #5142), whether or not a
 follow still reads its run.
 
+The end is also booked on the plate's SB spools, at that report's time
+(`filament/prints.py` `plate_ended`, #6263): in a savepoint, so a failure never fails the
+write. An end no report timed (the printer moved on, or went ``IDLE``) is left to the
+run's settle.
+
+The write that shows a timed plate end or a tray change books the ledger events in its
+own savepoint (#6263 Tasks 5 and 6): the plate end first, then the trays
+(`filament/capture.py` `reconcile`: loaded, unloaded and AMS readings), after one lock of
+every spool both will touch. A failure is logged and dropped.
+
 The end is timed to the report that shows it. A watch that was down, or a printer off
 the network, past the print's end charges the print up to that report: the end lies
 somewhere after the row's last ``seen_at``, and an upper bound counts the wear a lower
@@ -16,10 +26,18 @@ one would miss.
 A write that shows a print running that was not running before it returns the start
 (`started_print`): the print watcher's LAN nudge (`print_watch/nudge.py`, #4699 phase 3).
 The row's ``running_subtask`` changes once per job, under the row's lock, so one job
-gives one start, also across a reconnect's ``pushall`` and a new attempt of the watch."""
+gives one start, also across a reconnect's ``pushall`` and a new attempt of the watch.
+
+A written report and a touch also move the printer's hour counter (`run_hours.py`,
+#5774) in their transaction, the report row locked first, then the counter row.
+
+A stored report reads as the printer's status through `report_status`, as the print
+dialog and the SB tray resolution (`filament/inventory.py`) read it."""
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -29,10 +47,26 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.filament import prints
+from scadbuddy.printers import run_hours
+from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.status import RUNNING as RUNNING  # re-exported (`progress`)
+from scadbuddy.printers.status import status_from_report
 from scadbuddy.printers.store import printer_uuid
 
-#: The states that show the printer running a plate (OpenBambuAPI ``mqtt.md``).
-RUNNING = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+logger = logging.getLogger(__name__)
+
+
+def report_status(
+    row: PrinterRow, report: tuple[dict[str, Any], datetime], *, now: datetime
+) -> PrinterStatus:
+    """``row``'s status from its stored report (`PrinterReportStore.get`)."""
+    data, seen_at = report
+    return status_from_report(
+        row, LanReport(serial=row.serial, received_at=seen_at, print=data), now=now
+    )
 
 
 @dataclass(frozen=True)
@@ -90,6 +124,85 @@ def started_print(before: str | None, after: str | None) -> str | None:
     """The print a write started: the one running ``after`` it, when that is not the one
     running ``before`` it."""
     return after if after is not None and after != before else None
+
+
+def _capture(
+    conn: Connection[DictRow],
+    printer_id: str,
+    ended: PrintEnd | None,
+    old_report: dict[str, Any] | None,
+    report: dict[str, Any],
+    seen_at: datetime,
+) -> None:
+    """Book what the write shows in the ledger (`filament/prints.py` `plate_ended`,
+    `filament/capture.py`): the timed end of a plate, then a change of trays (or a first
+    report). The spools both will book on are locked first, in id order. Each step runs in
+    a savepoint of its own: a failure is logged by its type and dropped, so capture never
+    fails the report's write. An end no report timed is left to the run's settle."""
+    from scadbuddy.filament import capture  # imports the inventory, which imports this module
+
+    end = ended if ended is not None and ended.timed else None
+    trays = old_report is None or capture.trays_changed(old_report, report)
+    if end is None and not trays:
+        return
+    steps: list[tuple[str, Callable[[], object]]] = [
+        (
+            "lock",
+            lambda: capture.lock(
+                conn,
+                capture.touched(
+                    conn, printer_id, report, None if end is None else end.subtask_name, seen_at
+                ),
+            ),
+        )
+    ]
+    if end is not None:
+        steps.append(
+            (
+                "plate_end",
+                lambda: prints.plate_ended(
+                    conn, printer_id, end.subtask_name, report["gcode_state"], seen_at
+                ),
+            )
+        )
+    if trays:
+        steps.append(
+            (
+                "trays",
+                lambda: capture.reconcile(
+                    conn, printer_id, report, seen_at, actor=capture.WATCH_ACTOR
+                ),
+            )
+        )
+    for what, step in steps:
+        try:
+            with conn.transaction():
+                step()
+        except Exception as error:
+            logger.warning(
+                prints.FILAMENT_CAPTURE_FAILED,
+                extra={"printer_id": printer_id, "what": what, "error": type(error).__name__},
+            )
+            if what == "lock":
+                return
+
+
+def _capture_sensors(
+    conn: Connection[DictRow], printer_id: str, report: dict[str, Any], seen_at: datetime
+) -> None:
+    """Record the AMS units' humidity and temperature (`filament/sensors.py`
+    `capture_ams_on`) on every write, in a savepoint of its own, after the tray capture.
+    A failure is logged by its type and dropped, as `_capture`'s steps are."""
+    from scadbuddy.filament import sensors
+
+    try:
+        with conn.transaction():
+            sensors.capture_ams_on(conn, printer_id, report, seen_at)
+    except Exception as error:
+        logger.warning(
+            prints.FILAMENT_CAPTURE_FAILED,
+            extra={"printer_id": printer_id, "what": "sensors", "error": type(error).__name__},
+        )
 
 
 @dataclass(frozen=True)
@@ -168,7 +281,7 @@ class PrinterReportStore:
         if printer_uuid(printer_id) is None:
             return Advance()
         old = conn.execute(
-            "SELECT running_subtask, seen_at, now() AS now FROM printer_reports"
+            "SELECT running_subtask, report, seen_at, now() AS now FROM printer_reports"
             " WHERE printer_id = %s FOR UPDATE",
             (printer_id,),
         ).fetchone()
@@ -185,19 +298,25 @@ class PrinterReportStore:
         ).rowcount
         if not written:
             return Advance()
+        run_hours.advance_in(conn, printer_id, seen_at, report)
+        _capture(conn, printer_id, ended, None if old is None else old["report"], report, seen_at)
+        _capture_sensors(conn, printer_id, report, seen_at)
         return Advance(ended=ended, started=started_print(before, running))
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         """Heard from as late as ``seen_at``, with nothing new to say; never earlier than
-        what the row already says."""
+        what the row already says. The hour counter moves in the same transaction
+        (`run_hours.advance_in`), locked after the report row, as in `advance_in`."""
         key = printer_uuid(printer_id)
         if key is None:
             return
-        with self.pool.connection() as conn:
-            conn.execute(
+        with self.pool.connection() as conn, conn.transaction():
+            touched = conn.execute(
                 "UPDATE printer_reports SET seen_at = GREATEST(seen_at, %s) WHERE printer_id = %s",
                 (seen_at, printer_id),
-            )
+            ).rowcount
+            if touched:
+                run_hours.advance_in(conn, printer_id, seen_at, None)
 
     def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
         key = printer_uuid(printer_id)

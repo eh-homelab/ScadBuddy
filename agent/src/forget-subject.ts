@@ -1,9 +1,9 @@
 import { Client, Connection } from '@temporalio/client'
 import { loadConfig } from './config.js'
 import { connectDatabase } from './db.js'
-import { CrudAreas, FORGET_AREAS } from './api/crudAreas.js'
+import { CrudAreas } from './api/crudAreas.js'
 import { type CredentialSource, ExchangeCredential, ServiceCredential, withServiceCredential } from './api/serviceCredential.js'
-import { CrudSubjectKeys, forgetSubject } from './sessions/forget.js'
+import { FORGET_CLI_AREAS, forgetRoutes, forgetSubject } from './sessions/forget.js'
 import path from 'node:path'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { loadKek } from './secrets.js'
@@ -51,16 +51,22 @@ try {
   const keys = kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previous?.ok ? previous.kek : undefined }) : undefined
   // The tombstone, the key and a flow run's images through the API's CRUD route once it lists area
   // `forget` (#5299 step 6), with the agent's service credential as main.ts gets it; over SQL otherwise.
-  const view = new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined)
   const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
   const credential: CredentialSource =
     proofFile !== undefined
-      ? new ExchangeCredential({ backendUrl: config.backendUrl, proofFile, proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap', fallback: view })
-      : view
+      ? new ExchangeCredential({ backendUrl: config.backendUrl, proofFile, proof: config.serviceTokenFile !== undefined ? 'k8s' : 'bootstrap' })
+      : new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined)
   const crudFetch = withServiceCredential(globalThis.fetch, credential, config.backendUrl)
-  const areas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: FORGET_AREAS, log: (m) => console.error(`forget-subject: ${m}`) })
-  const crud = (await areas.refresh()) ? new CrudSubjectKeys(config.backendUrl, { fetch: crudFetch }) : undefined
-  const done = await forgetSubject({ sql: database.sql, client, keys, payloads, turnDirs, sessionDirs, crud }, subject)
+  // Step 0's tasks and open calls and step 3's rows too, each once the API lists its area (#6501).
+  const areas = new CrudAreas(config.backendUrl, {
+    fetch: crudFetch,
+    wanted: [...FORGET_CLI_AREAS],
+    log: (m) => console.error(`forget-subject: ${m}`),
+  })
+  await areas.refresh()
+  // Each route once the API lists its area; step 3's rows only with step 1's (sessions/forget.ts forgetRoutes).
+  const routes = forgetRoutes(areas, { baseUrl: config.backendUrl, fetch: crudFetch }, database.sql)
+  const done = await forgetSubject({ sql: database.sql, client, keys, payloads, turnDirs, sessionDirs, ...routes }, subject)
   console.log(JSON.stringify({ subject, ...done }))
 } finally {
   await connection?.close()

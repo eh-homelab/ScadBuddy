@@ -67,6 +67,8 @@ describe('client messages', () => {
       clientMessage({ type: 'user.message', sessionId: 's1', text: 'hi', context: { route: '/models/x', modelSlug: 'x' } }),
       clientMessage({ type: 'approval.decision', sessionId: 's1', id: 'a1', approve: true }),
       clientMessage({ type: 'session.interrupt', sessionId: 's1' }),
+      clientMessage({ type: 'queue.remove', sessionId: 's1', id: 'q1' }),
+      clientMessage({ type: 'queue.edit', sessionId: 's1', id: 'q1', text: 'new words' }),
       clientMessage({ type: 'session.handoff', sessionId: 's1' }),
       clientMessage({ type: 'session.attach', sessionId: 's1' }),
     ]
@@ -80,6 +82,9 @@ describe('client messages', () => {
     expect(parseClientFrame(JSON.stringify({ v: 1, type: 'user.message', text: '', context: { route: '/' } })).ok).toBe(false)
     const huge = { v: 1, type: 'user.message', text: 'x'.repeat(MESSAGE_MAX + 1), context: { route: '/' } }
     expect(parseClientFrame(JSON.stringify(huge)).ok).toBe(false)
+    // A queued message's new words take a sent message's limits (#6386).
+    expect(parseClientFrame(JSON.stringify({ v: 1, type: 'queue.edit', sessionId: 's1', id: 'q1', text: 'x'.repeat(MESSAGE_MAX + 1) })).ok).toBe(false)
+    expect(parseClientFrame(JSON.stringify({ v: 1, type: 'queue.edit', sessionId: 's1', id: 'q1', text: '' })).ok).toBe(false)
   })
 
   it('renders the page context as labelled data, capped', () => {

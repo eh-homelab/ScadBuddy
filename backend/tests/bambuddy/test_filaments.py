@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import ClassVar, Self, cast
 
 import httpx
+import psycopg
 import pytest
 import respx
 
@@ -38,6 +39,7 @@ from scadbuddy.bambuddy.filaments import (
     gather_plate_options,
     normalise_colour,
     queue_filaments,
+    sb_plan,
     seed_plan,
 )
 from scadbuddy.bambuddy.models import (
@@ -52,8 +54,10 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.print_run import filament_options
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayPlace
 from scadbuddy.print_library.reads import LibraryReads
 from tests.bambuddy.conftest import BASE_URL, recording
+from tests.support.sb_rows import FakeSbRows, rows_of, sb_spool
 
 API = f"{BASE_URL}/api/v1"
 NATIVE_ID = 1_000_000_007
@@ -90,6 +94,14 @@ def keychain_slots() -> list[SlotNeed]:
     ]
 
 
+def _built(
+    *, spools: list[Spool], assignments: list[SpoolAssignment], **extra: object
+) -> FilamentOptions:
+    """`build_options` over Bambuddy's recorded spools as SB spools numbered by their
+    Bambuddy ids (#6262 Task 7, `tests/support/sb_rows.py`)."""
+    return build_options(rows=rows_of(spools, assignments), **extra)  # type: ignore[arg-type]
+
+
 def options(**extra: object) -> FilamentOptions:
     kwargs: dict[str, object] = {
         "library_file_id": 62,
@@ -100,7 +112,7 @@ def options(**extra: object) -> FilamentOptions:
         "slot_materials": slot_materials(),
     }
     kwargs.update(extra)
-    return build_options(**kwargs)  # type: ignore[arg-type]
+    return _built(**kwargs)  # type: ignore[arg-type]
 
 
 # --- the small pure pieces ---------------------------------------------------
@@ -223,18 +235,26 @@ def test_one_spool_is_not_pre_selected_for_two_slots_with_a_free_one() -> None:
     assert len(picked) == len(set(picked))
 
 
-def test_a_slot_that_declares_a_material_never_pre_selects_another_one() -> None:
-    """Opening with a PETG in a PLA slot is worse than opening with nothing, because it
-    looks deliberate."""
+def test_a_slot_that_declares_a_material_takes_another_only_from_the_loaded_trays() -> None:
+    """A PETG in a PLA slot comes only from the fallback (#6885): loaded in this
+    printer, after no PLA matched. The dialog says why."""
     built = options(requirements=[SlotNeed(slot_id=1, material="PLA", colour="#688197")])
     chosen = [row for row in built.spools if row.spool_id in {c.spool_id for c in built.suggested}]
-    assert all(row.material == "PLA" for row in chosen)
+    assert all(
+        row.material == "PLA" or (row.loaded is not None and row.loaded.printer_id == 1)
+        for row in chosen
+    )
 
 
-def test_a_colour_further_away_than_the_threshold_is_not_pre_selected() -> None:
+def test_a_colour_further_away_than_the_threshold_falls_back_to_a_loaded_spool() -> None:
+    """#6885: no spool is within the threshold, so the slot takes a loaded one rather than
+    opening empty. Without a printer nothing is loaded here, and it opens empty."""
     assert COLOUR_MATCH_DISTANCE < 441
     built = options(requirements=[SlotNeed(slot_id=1, colour="#00FF00")])
-    assert built.suggested == []
+    chosen = next(row for row in built.spools if row.spool_id == built.suggested[0].spool_id)
+    assert chosen.loaded is not None and chosen.loaded.printer_id == 1
+    unscoped = options(requirements=[SlotNeed(slot_id=1, colour="#00FF00")], printer=None)
+    assert unscoped.suggested == []
 
 
 # --- the two warnings that fall out of the data ------------------------------
@@ -419,9 +439,6 @@ def test_required_types_are_deduplicated_in_slot_order() -> None:
 
 @respx.mock
 async def test_gather_options_reads_every_source_once(bambuddy: BambuddyClient) -> None:
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -435,20 +452,21 @@ async def test_gather_options_reads_every_source_once(bambuddy: BambuddyClient) 
         return_value=httpx.Response(200, json=recording("inventory-remain.json"))
     )
 
-    built = await gather_options(bambuddy, library_file_id=62, printer_id=1)
+    reads = FakeSbRows(rows_of(spools(), assignments()))
+    built = await gather_options(bambuddy, library_file_id=62, printer_id=1, reads=reads)
     assert [slot.slot_id for slot in built.slots] == [1, 2]
     assert built.printer_name is not None
     assert {choice.slot_id for choice in built.suggested} == {1, 2}
+    # The SB spools are read once, with Bambuddy's assignments (#6262 Task 7).
+    assert [len(sent) for sent in reads.assignments] == [len(assignments())]
 
 
 @respx.mock
 async def test_several_plates_read_the_spools_and_printer_once(bambuddy: BambuddyClient) -> None:
-    """An all-plates read asks Bambuddy for each plate's slots, and for the spools,
-    assignments and printer once, not once per plate (#480)."""
-    spools = respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
-    assignments = respx.get(f"{API}/inventory/assignments").mock(
+    """An all-plates read asks Bambuddy for each plate's slots, and for the assignments
+    and printer once, not once per plate (#480); the SB spools are read once too."""
+    reads = FakeSbRows(rows_of(spools(), assignments()))
+    assigned = respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
     requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
@@ -462,7 +480,7 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
     )
 
     built = await gather_plate_options(
-        bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3]
+        bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3], reads=reads
     )
     assert len(built) == 3
     # The reads run concurrently, so only which plates were read is pinned, not the order.
@@ -471,7 +489,7 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
         "2",
         "3",
     ]
-    assert (spools.call_count, assignments.call_count) == (1, 1)
+    assert (len(reads.assignments), assigned.call_count) == (1, 1)
     assert (printer.call_count, remain.call_count) == (1, 1)
 
 
@@ -494,9 +512,6 @@ async def test_filament_slots_of_a_native_file_never_ask_bambuddy(
 ) -> None:
     """A native file's slots are its own (empty) requirement, so they fall back to the
     colours given and read as unknown; Bambuddy is asked for the spools only."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -524,14 +539,12 @@ async def test_filament_slots_of_a_native_file_never_ask_bambuddy(
 async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
     bambuddy: BambuddyClient,
 ) -> None:
-    """The shared reads run before the plates: a failing ``spools()`` raises, and no
-    plate's requirements nor the printer are ever asked for. The assignments are read
-    beside the spools (#2354), so the spools' error is the one raised."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(500, json={"detail": "spools-boom"})
-    )
+    """The shared reads run before the plates: a failing assignments read (where the SB
+    spools are, #6262 Task 7) raises, and no SB spool, plate's requirements nor the
+    printer are ever asked for."""
+    reads = FakeSbRows(rows_of(spools()))
     assignments = respx.get(f"{API}/inventory/assignments").mock(
-        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+        return_value=httpx.Response(500, json={"detail": "spools-boom"})
     )
     requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
         return_value=httpx.Response(200, json=recording("filament-requirements.json"))
@@ -544,10 +557,13 @@ async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
     )
 
     with pytest.raises(ApiError) as excinfo:
-        await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3])
+        await gather_plate_options(
+            bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3], reads=reads
+        )
     assert "spools-boom" in excinfo.value.detail
 
     assert assignments.called
+    assert reads.assignments == []
     assert not requirements.called
     assert not printer.called
     assert not remain.called
@@ -559,9 +575,6 @@ async def test_a_printer_failure_is_raised_after_the_plates_are_read(
 ) -> None:
     """The printer's failure is raised after the plates', as the single-plate path
     always has, though both are read together now (#2354)."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -589,9 +602,6 @@ async def test_a_plate_failure_beats_a_printer_failure(
 ) -> None:
     """With both failing, the plate's error surfaces, as it does on the single-plate
     path, which reads the plate before the printer (#525 review)."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -616,9 +626,6 @@ async def test_a_plate_failure_raises_the_lowest_indexed_failing_plates_error(
 ) -> None:
     """Two plates fail; the one earliest in ``plate_ids`` (not the lowest plate number)
     is the error that surfaces."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -647,9 +654,6 @@ async def test_the_picker_does_not_read_the_printers_live_ams_state(
 ) -> None:
     """Nothing here decodes ``ams_switch_inlet``, nozzle diameters or tray temperatures,
     so nothing here asks for them."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -678,9 +682,6 @@ async def test_a_3mf_bambuddy_cannot_read_falls_back_to_the_outputs_colours(
 ) -> None:
     """A plate whose slice info is unreadable must still open the picker; the output's
     own colour list is the same information in the same order."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(200, json=[]))
     respx.get(f"{API}/library/files/62/filament-requirements").mock(
         return_value=httpx.Response(200, json={"file_id": 62, "filaments": []})
@@ -723,13 +724,13 @@ def test_the_colour_threshold_is_the_boundary_it_says_it_is() -> None:
     assert near_distance is not None and far_distance is not None
     assert near_distance < COLOUR_MATCH_DISTANCE < far_distance
     black = [_spool(1, "000000FF")]
-    inside = build_options(
+    inside = _built(
         library_file_id=1,
         spools=black,
         assignments=[],
         requirements=[SlotNeed(slot_id=1, colour=near)],
     )
-    outside = build_options(
+    outside = _built(
         library_file_id=1,
         spools=black,
         assignments=[],
@@ -779,7 +780,7 @@ def test_a_pure_css_red_pre_selects_the_nearest_real_red_not_a_colourless_spool(
     ]
 
     def pick(material: str | None) -> list[int]:
-        built = build_options(
+        built = _built(
             library_file_id=1,
             spools=shelf,
             assignments=[],
@@ -792,7 +793,7 @@ def test_a_pure_css_red_pre_selects_the_nearest_real_red_not_a_colourless_spool(
 
 
 def test_a_coloured_slot_with_only_a_colourless_spool_is_left_unchosen() -> None:
-    built = build_options(
+    built = _built(
         library_file_id=1,
         spools=[_spool(30, None)],
         assignments=[],
@@ -807,7 +808,7 @@ def test_a_loaded_cobalt_beats_a_closer_cyan_on_the_shelf() -> None:
     loaded = SpoolAssignment.model_validate(
         {**recording("inventory-assignments.json")[0], "spool_id": 40, "spool": None}
     )
-    built = build_options(
+    built = _built(
         library_file_id=1,
         spools=[_spool(24, "0086D6FF"), _spool(40, "0056B8FF")],
         assignments=[loaded],
@@ -832,7 +833,7 @@ def _loaded(spool_id: int, tray_id: int) -> SpoolAssignment:
 def _mosaic(shelf: list[Spool], loaded: list[SpoolAssignment]) -> list[SlotChoice]:
     """#2461: pixel-art-mosaic's opening plan, two near-blacks and a green, with no
     declared material (a generated template's slots declare none)."""
-    built = build_options(
+    built = _built(
         library_file_id=1,
         spools=shelf,
         assignments=loaded,
@@ -847,7 +848,7 @@ def _mosaic(shelf: list[Spool], loaded: list[SpoolAssignment]) -> list[SlotChoic
 
 
 def _undeclared(shelf: list[Spool], loaded: list[SpoolAssignment], *colours: str) -> dict[int, int]:
-    built = build_options(
+    built = _built(
         library_file_id=1,
         spools=shelf,
         assignments=loaded,
@@ -893,7 +894,7 @@ def test_an_undeclared_slot_with_only_another_material_is_left_for_the_user() ->
 
 
 def _seed(slot: SlotNeed, shelf: list[Spool], remembered: int) -> list[SlotChoice]:
-    built = build_options(library_file_id=1, spools=shelf, assignments=[], requirements=[slot])
+    built = _built(library_file_id=1, spools=shelf, assignments=[], requirements=[slot])
     return seed_plan(built, [SlotChoice(slot_id=slot.slot_id, spool_id=remembered)]).slots
 
 
@@ -908,7 +909,7 @@ def test_a_remembered_spool_that_no_longer_fits_the_slot_gives_way_to_the_sugges
 def test_a_remembered_spool_is_kept_for_a_slot_with_no_colour() -> None:
     """#1653: with nothing to compare against, the remembered spool beats the suggestion."""
     shelf = [_spool(1, "000000FF"), _spool(4, "C12E1FFF")]
-    built = build_options(
+    built = _built(
         library_file_id=1, spools=shelf, assignments=[], requirements=[SlotNeed(slot_id=1)]
     )
     remembered = next(s.id for s in shelf if s.id != built.suggested[0].spool_id)
@@ -978,9 +979,6 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
 ) -> None:
     """#2509 review: ``choices_for`` shares one status read with the rack, so the
     filament step waiting on it must not cancel it when the step itself is cancelled."""
-    respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
-    )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -1013,13 +1011,14 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
 
 def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> None:
     """#2850: the family came from the single best match, so a PETG loaded beside the
-    PLA and closest to one slot left every other undeclared slot empty."""
+    PLA and closest to one slot left every other undeclared slot empty. The PETG slot
+    then takes the PETG from the fallback (#6885), after the PLA slots are filled."""
     shelf = [
         _spool(1, "1A1A1AFF"),  # PLA black, loaded
         _spool(3, "C02E20FF"),  # PLA red, loaded
         _spool(5, "3F8E43FF", "PETG"),  # PETG green, loaded, an exact match
     ]
-    built = build_options(
+    built = _built(
         library_file_id=1,
         spools=shelf,
         assignments=[_loaded(1, 0), _loaded(3, 1), _loaded(5, 2)],
@@ -1030,7 +1029,7 @@ def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> N
         ],
         printer=printer(),
     )
-    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {2: 1, 3: 3}
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 5, 2: 1, 3: 3}
 
 
 def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -> None:
@@ -1042,7 +1041,7 @@ def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -
         _spool(3, "3F8E43FF"),  # PLA green, on the shelf
         _spool(5, "3F8E43FF", "PETG"),  # PETG green, loaded
     ]
-    built = build_options(
+    built = _built(
         library_file_id=1,
         spools=shelf,
         assignments=[_loaded(1, 0), _loaded(5, 1)],
@@ -1115,3 +1114,152 @@ def test_on_a_slot_count_tie_the_anchor_family_has_the_best_single_match() -> No
     ]
     assert _undeclared(shelf, [], "#1A1A1A") == {1: 2}
     assert _undeclared(shelf[::-1], [], "#1A1A1A") == {1: 2}
+
+
+# --- #6262 Task 7: the Bambuddy path's rows are SB spools ---------------------
+
+
+def test_bambuddy_options_are_sb_numbers() -> None:
+    """SB #3 linked to Bambuddy spool 41: its option is #3, filled as a native tray's
+    spool is (`trays._from_spool`), never Bambuddy's id."""
+    spool = sb_spool(3, rgba="#0047BBFF", colour_name="Cobalt", brand="Bambu Lab", grams=812.0)
+    row = FilamentInventorySpool(
+        spool=spool,
+        loaded=TrayPlace(
+            printer_id=None, bambuddy_printer_id=1, printer_name="H2C", ams_id=0, tray_id=1
+        ),
+        bb_spool_id=41,
+    )
+
+    built = build_options(
+        library_file_id=62,
+        rows=[row],
+        requirements=[SlotNeed(slot_id=1, colour="#0047BB")],
+        printer=printer(),
+    )
+
+    [option] = built.spools
+    assert option.spool_id == 3
+    assert (option.sb_number, option.sb_spool_id) == (3, spool.id)
+    assert (option.rgba, option.colour, option.color_name) == ("#0047BBFF", "#0047BB", "Cobalt")
+    assert option.remaining_g == 812.0
+    assert option.loaded is not None and option.loaded.printer_id == 1
+    assert [choice.spool_id for choice in built.suggested] == [3]
+
+
+def test_an_option_names_its_spools_preset_for_the_chosen_nozzle() -> None:
+    """#6262 Task 7 review R2: an option carries the preset its SB spool names for the H2C
+    and the chosen nozzle (0.4 by default), so the analyzers and profile matching read the
+    preset by name; another nozzle's preset, or another printer's, is never taken."""
+
+    def preset(model: str, size: str, name: str) -> EffectivePreset:
+        return EffectivePreset(
+            printer_model=model,
+            nozzle_diameter=size,
+            slicer_filament=name.replace(" ", ""),
+            slicer_filament_name=name,
+            overridden=False,
+        )
+
+    row = FilamentInventorySpool(
+        spool=sb_spool(3),
+        presets=[
+            preset("H2C", "0.4", "Bambu PLA Silk"),
+            preset("H2C", "0.6", "Bambu PLA Silk 0.6"),
+            preset("X1C", "0.2", "Elsewhere"),
+        ],
+    )
+
+    def named(nozzle: str | None = None) -> tuple[str | None, str | None]:
+        built = (
+            build_options(library_file_id=62, rows=[row], requirements=[])
+            if nozzle is None
+            else build_options(library_file_id=62, rows=[row], requirements=[], nozzle=nozzle)
+        )
+        [option] = built.spools
+        return option.slicer_filament, option.slicer_filament_name
+
+    assert named() == ("BambuPLASilk", "Bambu PLA Silk")
+    assert named("0.6") == ("BambuPLASilk0.6", "Bambu PLA Silk 0.6")
+    assert named("0.2") == (None, None)
+
+
+def test_a_translucent_sb_spool_is_no_match_for_an_opaque_slot_on_bambuddys_path() -> None:
+    """``same_opacity`` holds on this path too now that its rows carry ``rgba``."""
+    clear = FilamentInventorySpool(spool=sb_spool(4, rgba="#0047BB80"))
+    built = build_options(
+        library_file_id=62, rows=[clear], requirements=[SlotNeed(slot_id=1, colour="#0047BB")]
+    )
+    assert built.suggested == []
+    assert built.slots[0].colour_matches == []
+
+
+async def test_a_bb_plan_is_mapped_at_read() -> None:
+    """F14: a plan of Bambuddy ids (``ids="bb"``, the default an in-flight input reads
+    as) names SB numbers once read: 41 is SB #3, 99 links no spool and is dropped
+    (never SB #99), a tray chosen for itself stays."""
+    reads = FakeSbRows(
+        [
+            FilamentInventorySpool(spool=sb_spool(3), bb_spool_id=41),
+            FilamentInventorySpool(spool=sb_spool(99)),
+        ]
+    )
+    old = FilamentPlan.model_validate(
+        {
+            "slots": [
+                {"slot_id": 1, "spool_id": 41},
+                {"slot_id": 2, "spool_id": 99},
+                {"slot_id": 3, "spool_id": -2},
+            ],
+            "force_colour_match": False,
+        }
+    )
+    assert old.ids == "bb"
+
+    mapped = await sb_plan(old, reads)
+
+    assert mapped.ids == "sb"
+    assert [(slot.slot_id, slot.spool_id) for slot in mapped.slots] == [(1, 3), (3, -2)]
+    assert mapped.force_colour_match is False
+    # A plan of SB numbers is read as it is.
+    assert await sb_plan(mapped, reads) is mapped
+
+
+async def test_a_plans_mapping_that_cannot_be_read_is_a_503() -> None:
+    """#6262 Task 7 re-review M-e: a failed read of the links answers 503, as a failed
+    read of the spools does (`read_inventory`), never a 500."""
+
+    class Down(FakeSbRows):
+        async def bb_to_sb(self, ids: Sequence[int]) -> dict[int, int]:
+            raise psycopg.OperationalError("the database is gone")
+
+    plan = FilamentPlan.model_validate({"slots": [{"slot_id": 1, "spool_id": 41}]})
+
+    with pytest.raises(ApiError) as raised:
+        await sb_plan(plan, Down([]))
+
+    assert raised.value.status == 503
+
+
+def test_queue_filaments_still_sends_type_and_colour() -> None:
+    """Bambuddy's queue item names no spool: an SB spool chosen by its number still
+    sends its material and colour, the pair Bambuddy's scheduler matches on."""
+    built = build_options(
+        library_file_id=62,
+        rows=[FilamentInventorySpool(spool=sb_spool(3, material="PETG", rgba="#0047BBFF"))],
+        requirements=[SlotNeed(slot_id=1, colour="#0047BB", used_grams=12.5)],
+    )
+    plan = FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=3)], ids="sb")
+
+    queued = queue_filaments(built, plan)
+
+    assert queued.filament_overrides == [
+        {
+            "slot_id": 1,
+            "type": "PETG",
+            "color": "#0047BB",
+            "used_grams": 12.5,
+            "force_color_match": True,
+        }
+    ]
+    assert queued.required_filament_types == ["PETG"]

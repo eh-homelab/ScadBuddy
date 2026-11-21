@@ -551,7 +551,7 @@ def test_a_render_and_its_estimate_are_forwarded(
 ) -> None:
     status = crud_mock.get(f"{RENDERS}/{JOB}").respond(200, json=RENDER, headers=CRUD)
     estimate = crud_mock.get(f"{RENDERS}/{JOB}/estimate").respond(
-        200, json={"estimate": True, "price_minor": 500}, headers=CRUD
+        200, json={"source": "slice", "price_minor": 500}, headers=CRUD
     )
     assert edge.get(f"/api/store/v1/renders/{JOB}").json() == RENDER
     assert edge.get(f"/api/store/v1/renders/{JOB}/estimate").json()["price_minor"] == 500
@@ -564,26 +564,28 @@ def test_the_estimate_relays_only_the_price(
     crud_mock: respx.Router,  # noqa: F811
 ) -> None:
     """Review of #5758, Blocking 2: the edge sends on only the public fields of an
-    estimate, so a CRUD answer that carries the price book's rates never reaches a visitor."""
+    estimate, so a CRUD answer that carries the price book's rates never reaches a visitor.
+    #6153: nor the slice's grams, its print time or the cache key (owner, 2026-11-14)."""
     public = {
-        "estimate": True,
+        "source": "slice",
         "price_minor": 500,
         "currency": "USD",
         "minor_exponent": 2,
-        "grams": "12.50",
-        "parts": [],
-        "unknown_parts": 0,
+        "retry_after": None,
     }
     leaky = {
         **public,
+        "price_key": "a" * 64,
+        "grams": {"0": "12.50"},
+        "print_seconds": 3600,
         "filament_minor": 40,
-        "factor": "1.1",
         "lines": [{"kind": "markup", "label": "Markup, 30 %", "amount_minor": 90}],
     }
     crud_mock.get(f"{RENDERS}/{JOB}/estimate").respond(200, json=leaky, headers=CRUD)
     r = edge.get(f"/api/store/v1/renders/{JOB}/estimate")
     assert r.status_code == 200 and r.json() == public
-    assert "per kg" not in r.text and "Markup" not in r.text and "filament_minor" not in r.text
+    for hidden in ("per kg", "Markup", "filament_minor", "grams", "print_seconds", "price_key"):
+        assert hidden not in r.text
 
 
 def test_another_visitors_render_passes_through_as_404(

@@ -24,10 +24,12 @@ from scadbuddy.orders.lifecycle import NewLibraryItem, NewModelItem
 from scadbuddy.orders.models import ColourSlot, LibraryFileRef, OrderItem
 from scadbuddy.orders.past_prints import (
     ArchiveQuoteRequest,
+    _per_unit,
     archive_colours,
     copied_file,
     quote_from_archive,
 )
+from scadbuddy.orders.pricing import ArchivePlate, PlateFilament
 from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
@@ -159,6 +161,23 @@ def test_a_run_s_link_found_after_an_import_owns_the_archive(
     out = rows.archive_origin(81)
     assert out is not None and (out.output_id, out.library_file_id) == (OUTPUT, None)
     assert rows.archive_run_plates(81) == [(1, 81), (2, 82)]
+
+
+def test_an_import_onto_a_library_file_is_not_its_origin(rows: OrderStore, pool: PgPool) -> None:
+    """#6394: ScadBuddy did not print an archive imported onto a library file, and a run's
+    link of another file found after the import owns it."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by, first_seen) VALUES"
+            " ('library:1000000042', 81, 'import', now() - interval '1 hour'),"
+            " ('library:1000000042', 82, 'import', now() - interval '1 hour')"
+        )
+    send(pool, "library:89", "run-1", 51, 1, 81)
+
+    assert rows.archive_origin(82) is None
+    lib = rows.archive_origin(81)
+    assert lib is not None and lib.library_file_id == 89
+    assert rows.archive_run_plates(81) == [(1, 81)]
 
 
 def test_an_item_keeps_the_archives_it_was_taken_from(shop: QuoteShop) -> None:
@@ -315,9 +334,47 @@ async def test_a_two_plate_print_is_priced_from_both_archives(
     for line in quote.lines:
         lines[line.kind] = lines.get(line.kind, 0) + line.amount_minor
     assert (lines["filament"], lines["machine_time"], lines["setup"]) == (28 + 15, 175, 100)
+    # With no units named, the run made one unit (#6336): the quote prices the whole run.
+    assert quote.unit_cost_minor == 28 + 15 + 175
     assert shop.get_item().status == "quoted"
     unit = _unit(quote)
     assert unit is not None and unit.grams == Decimal("19.0")
+
+
+async def test_a_run_of_two_units_prices_one_unit_at_half_the_run(
+    shop: QuoteShop, pool: PgPool
+) -> None:
+    subject = f"output:{OUTPUT}"
+    send(pool, subject, "run-1", 51, 1, 81)
+    send(pool, subject, "run-1", 52, 2, 82)
+    seam = Seam(
+        plate(81),
+        plate(82, plate_id=2, actual_seconds=None, slots=[{"slot_id": 1, "used_g": 4.0}]),
+    )
+    with shop.rows.transaction() as conn:
+        conn.execute("UPDATE order_items SET output_id = %s WHERE id = %s", (OUTPUT, shop.item.id))
+    request = archive_request(shop, 82).model_copy(update={"units": 2})
+    quote = await quote_from_archive(
+        shop.lifecycle, seam, Book(), shop.order.id, shop.item.id, request, BY
+    )
+    # Each plate records one unit's share: half its seconds and half its grams.
+    assert [(p["index"], p["print_seconds"], p["archive_id"]) for p in quote.plates] == [
+        (1, 900, 81),
+        (2, 1200, 82),
+    ]
+    assert [[(f["slot"], f["used_g"]) for f in p["filaments"]] for p in quote.plates] == [
+        [(0, "5.00"), (1, "2.50")],
+        [(0, "2.00")],
+    ]
+    # 7 g PLA at 20/kg, 2.5 g PETG at 30/kg (7.5 rounds up), 2100 s at 1.5/h (87.5
+    # rounds up). The setup fee stays one per plate.
+    lines: dict[str, int] = {}
+    for line in quote.lines:
+        lines[line.kind] = lines.get(line.kind, 0) + line.amount_minor
+    assert (lines["filament"], lines["machine_time"], lines["setup"]) == (14 + 8, 88, 100)
+    assert quote.unit_cost_minor == 14 + 8 + 88
+    unit = _unit(quote)
+    assert unit is not None and unit.grams == Decimal("9.50")
 
 
 async def test_an_item_quotes_from_the_archive_it_was_taken_from(
@@ -469,3 +526,24 @@ def test_archive_colours_take_every_used_slot() -> None:
     slots = [ArchiveSlot(slot_id=1, used_g=2.0, color="#123456"), ArchiveSlot(slot_id=3)]
     plates = [plate(1).model_copy(update={"slots": slots})]
     assert [(s.slot, s.colour) for s in archive_colours(plates, {0: "f"})] == [(0, "#123456")]
+
+
+def test_a_run_whose_units_round_every_slot_to_no_grams_is_refused() -> None:
+    # 0.004 g a unit rounds to 0.00 g in every slot: the quote would price no filament.
+    light = ArchivePlate(
+        index=1,
+        print_seconds=600,
+        archive_id=81,
+        filaments=[
+            PlateFilament(slot=0, used_g=Decimal("4")),
+            PlateFilament(slot=1, used_g=Decimal("2")),
+        ],
+    )
+    with pytest.raises(ApiError) as refused:
+        _per_unit(light, 1000)
+    assert (refused.value.status, refused.value.type) == (422, PROBLEMS + "archive_plate")
+    assert refused.value.extensions["errors"][0]["loc"] == ["body", "units"]
+    assert "1000 units" in refused.value.detail
+    # One slot that keeps a hundredth of a gram still prices.
+    kept = _per_unit(light, 800)
+    assert [f.used_g for f in kept.filaments] == [Decimal("0.01"), Decimal("0.00")]

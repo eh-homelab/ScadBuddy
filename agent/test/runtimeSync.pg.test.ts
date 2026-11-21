@@ -4,7 +4,7 @@ import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { CredentialPool } from '../src/harness/fallback.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import type { Database } from '../src/db.js'
-import { PgEventListener } from '../src/events/pgListener.js'
+import { PgEventListener } from './support/pgListener.js'
 import { userMessage } from '../src/harness/inbox.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
@@ -67,7 +67,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
     expect(await db.ready()).toBe(true)
     store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
-    warm = new WarmSessions({ sql: db.sql, store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
+    warm = new WarmSessions({ store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
     stops = []
   })
   afterEach(async () => {

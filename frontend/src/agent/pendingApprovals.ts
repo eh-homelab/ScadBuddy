@@ -13,8 +13,8 @@ export function preparedBy(a: PendingApproval): string {
   return a.by ? `${a.tool}, asked by ${a.by}` : a.tool
 }
 
-/** Where a toast's Review goes: the page that lists every approval waiting with its whole card. */
-export const APPROVALS_PAGE = '/activity'
+/** Where a toast's Review goes: Activity's "Needs you" (#6399), which lists every approval waiting with its whole text. */
+export const APPROVALS_PAGE = '/activity#needs-you'
 
 /** The longest an approval's toast stays, and how long when the agent did not say when it expires (`approval_expiry_seconds`'s default). */
 const APPROVAL_TOAST_MS = 10 * 60_000

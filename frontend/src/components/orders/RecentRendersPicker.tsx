@@ -53,7 +53,8 @@ function valueText(value: unknown): string {
 /**
  * The Add item dialog's "Recent renders" (#4777, order operations spec 2026-11-07 §3.1):
  * every model's saved outputs, newest first (`GET /outputs`), filtered by age (24 h, 7 d,
- * 30 d or a custom range), model, tag, text and whether an order has them. Each row shows
+ * 30 d or a custom range), model, tag, text and whether an order has them; the renders the
+ * storefront's slice run saved only when asked (#6371). Each row shows
  * its thumbnail, model, name, the parameters that differ from the model's defaults and its
  * age; several may be picked, each with a quantity.
  */
@@ -79,6 +80,8 @@ export function RecentRendersPicker({
   const [tag, setTag] = useState('')
   const [text, setText] = useState('')
   const [ordered, setOrdered] = useState<typeof ANY | 'yes' | 'no'>(ANY)
+  // #6371: the storefront's slice run saves an output per priced variant; hidden unless asked.
+  const [storefront, setStorefront] = useState(false)
   const [limit, setLimit] = useState(PAGE)
   const typedTag = useDebounced(tag.trim(), TYPING_MS)
   const typedText = useDebounced(text.trim(), TYPING_MS)
@@ -91,8 +94,9 @@ export function RecentRendersPicker({
       ...(typedTag ? { tag: typedTag } : {}),
       ...(typedText ? { q: typedText } : {}),
       ...(ordered !== ANY ? { ordered } : {}),
+      ...(storefront ? { include_storefront: true } : {}),
     }
-  }, [age, since, fromDay, toDay, slug, typedTag, typedText, ordered])
+  }, [age, since, fromDay, toDay, slug, typedTag, typedText, ordered, storefront])
   // Other filters start from the first page again.
   useEffect(() => setLimit(PAGE), [filters])
 
@@ -188,6 +192,12 @@ export function RecentRendersPicker({
         </Select>
         <Input aria-label="Tag" placeholder="Tag" maxLength={200} value={tag} onChange={(e) => setTag(e.target.value)} />
         <Input aria-label="Search renders" type="search" placeholder="Name or setting" maxLength={256} value={text} onChange={(e) => setText(e.target.value)} />
+      </div>
+      <div className="flex items-center gap-2">
+        <Checkbox id="recent-storefront" checked={storefront} onCheckedChange={(on) => setStorefront(on === true)} />
+        <Label htmlFor="recent-storefront" className="text-[13px] font-normal">
+          Show storefront renders
+        </Label>
       </div>
       {listed.error ? (
         <p className="text-xs text-warn">Could not list the renders: {listed.error.message}</p>

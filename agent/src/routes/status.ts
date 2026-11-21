@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import type { AppDeps } from '../app.js'
 import { aiStatus, type AiStatus } from '../aiStatus.js'
+import { checkData } from '../api/dataHealth.js'
 import type { WorkspaceBytesStatus } from '../workspace/store.js'
 import { uiReadProblem } from './guard.js'
 import type { RouteModule } from './module.js'
@@ -65,8 +66,8 @@ export function statusReason(ai: AiStatus, recoversAt?: string): string | undefi
 
 export function registerStatusRoute(app: Hono, deps: AppDeps): void {
   app.get('/api/v1/ai/status', async (c) => {
-    const dbOk = deps.database ? await deps.database.ping() : undefined
-    const { ai, recoversAt } = await aiStatus(deps, dbOk)
+    const data = await checkData(deps.database)
+    const { ai, recoversAt } = await aiStatus(deps, data?.ok, data?.apiUnanswered)
     const chat = deps.sessions !== undefined && deps.upgradeWebSocket !== undefined
     const state = ai === 'enabled' ? 'enabled' : ai.startsWith('disabled') ? 'disabled' : 'unavailable'
     const refused = uiReadProblem(c, deps.origins, deps.remoteAddress, 'The assistant')

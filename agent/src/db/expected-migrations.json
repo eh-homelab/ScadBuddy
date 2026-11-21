@@ -394,5 +394,17 @@
   {
     "id": "20261115T0736Z_audit_payload_key_kind",
     "sha256": "ac4911e12f104ae553e97f15380a60c5939257a15a2b19a6c6f719c0b3fe4688"
+  },
+  {
+    "id": "20261115T1613Z_session_queue_events",
+    "sha256": "3df9ee67d19b1cf5c9fc5b1eb619d038aab8215f9f064f1672fa90d5e9edc423"
+  },
+  {
+    "id": "20261116T0730Z_turn_spend_keys",
+    "sha256": "5f7061dc01f34c544e28bf09490e1d5621ffc46d6980f27d22dcb7396c828378"
+  },
+  {
+    "id": "20261118T0811Z_session_blobs_pdf",
+    "sha256": "441887ac5ead59fc0907a09563f6eec7c0d3e83ebbd7fde3b65646f65eb13124"
   }
 ]

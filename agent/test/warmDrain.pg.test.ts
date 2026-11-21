@@ -32,7 +32,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
     expect(await db.ready()).toBe(true)
     store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
-    warm = new WarmSessions({ sql: db.sql, store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
+    warm = new WarmSessions({ store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
   })
   afterEach(async () => {
     await warm?.close()

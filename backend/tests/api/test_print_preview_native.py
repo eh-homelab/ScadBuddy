@@ -47,15 +47,26 @@ from tests.api.test_send import API, configure, upload_route
 from tests.slicing.conftest import PROFILES
 from tests.support.fake_slicer import INTERNAL, FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.sliced3mf import sliced_3mf
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("recorded_sb_spools"),
+]
 
 #: The copy the run uploads (``upload_route``), which the native slice reads back.
 COPY = 41
 INPUT = b"PK\x03\x04 the dialog's laid-out copy"
 GCODE = b"M620 S0A\nM620 S1A\nM620 S0A\n"
 CREATED = "2026-10-18T18:00:00.000000"
+#: Bambu Studio's `result.json` reason for `CLI_OBJECT_COLLISION_IN_LAYER_PRINT` (-64),
+#: as the Rust worker reports it (`cli_result`), at v02.08.02.61 (`BambuStudio.cpp`).
+OBJECT_CONFLICT = (
+    "Object conflicts were detected. Please verify the slicing of all plates in Bambu Studio"
+    " before uploading. (return code -64)"
+)
 NATIVE_SLICES = Path(__file__).parents[1] / "fixtures" / "native_slices"
 #: The presets the recorded H2C catalogue resolves the dialog's choices to (`body()`),
 #: by their setting ids.
@@ -398,6 +409,24 @@ def test_a_refused_plate_fails_with_its_stderr(
     answer = settled(native_client, output_id, started["job_id"])
     assert answer["status"] == "failed"
     assert "plate 99 is empty" in answer["failure"]
+    assert answer["slice_warnings"] == []
+
+
+def test_an_object_conflict_is_a_structured_warning_that_names_the_plate(
+    native_client: TestClient, model: str, slicer: FakeSlicer
+) -> None:
+    """#6732: Bambu Studio's "Object conflicts were detected" refusal is also one
+    ``object-conflict`` warning for the plate, beside the slicer's own words."""
+    slicer.refuse_plate = True
+    slicer.refusal = OBJECT_CONFLICT
+    output_id = prepared(native_client, model)
+    started = start(native_client, output_id)
+    answer = settled(native_client, output_id, started["job_id"])
+    assert answer["status"] == "failed"
+    assert "Object conflicts were detected" in answer["failure"]
+    [warning] = answer["slice_warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", started["plate_id"])
+    assert f"Plate {started['plate_id']}" in warning["message"]
 
 
 def test_another_subject_reads_404(
@@ -553,6 +582,7 @@ def test_the_bambuddy_preview_is_unchanged(
     profiles = dialog_profiles(tmp_path / "profiles")
     app_settings = _settings(settings, s3, kek_file, profiles, slicer_backend="bambuddy")
     for client in _open(app_settings):
+        seed_app_sb_spools(client)
         output_id = prepared(client, model)
         started = start(client, output_id)
         assert (started["job_id"], started["slicer"]) == (9, "bambuddy")
@@ -571,6 +601,7 @@ def test_native_library_with_native_slicer(
     profiles = dialog_profiles(tmp_path / "profiles")
     app_settings = _settings(settings, s3, kek_file, profiles, library_backend="native")
     for client in _open(app_settings):
+        seed_app_sb_spools(client)
         with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as fake:
             output_id = prepared(client, model)
             started = start(client, output_id)
@@ -656,6 +687,7 @@ def test_the_library_preview_on_the_native_slicer(
     with respx.mock as router:
         router.route(host="127.0.0.1").pass_through()
         for client in _open(_settings(settings, s3, kek_file, profiles)):
+            seed_app_sb_spools(client)
             configure(client)
             one_color(89)
             flow_copy_routes()
@@ -705,6 +737,7 @@ def test_a_preset_the_image_lacks_is_422(
     vendor["machine_list"] = [e for e in vendor["machine_list"] if e["name"] != "Dialog GM042"]
     vendor_file.write_text(json.dumps(vendor))
     for client in _open(_settings(settings, s3, kek_file, profiles)):
+        seed_app_sb_spools(client)
         op = _post(client, prepared(client, model))
         assert (op["status"], op["error"]["status"]) == ("failed", 422), op
         assert "printer preset" in op["error"]["detail"]
@@ -722,6 +755,7 @@ def test_a_broken_profiles_tree_is_503(
     profiles = dialog_profiles(tmp_path / "profiles")
     (profiles / "BBL" / "process" / "Dialog GP243.json").write_text("{not json")
     for client in _open(_settings(settings, s3, kek_file, profiles)):
+        seed_app_sb_spools(client)
         op = _post(client, prepared(client, model))
         assert (op["status"], op["error"]["status"]) == ("failed", 503), op
 

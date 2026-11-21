@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { fakePendingChanges } from '../../lib/pendingChanges.fake'
-import { setFlowDetails, setFlowRunChildren } from '../../mocks/features/flows'
+import { childEntries, setFlowDetails, setFlowRunChildren } from '../../mocks/features/flows'
 import { renderPage } from '../../test/utils'
 import { SessionFlowRuns } from './SessionFlowRuns'
 
@@ -36,6 +36,17 @@ describe('SessionFlowRuns', () => {
     expect(lines[0]).toMatch(/^queue_print: with this session until .+; outside the grant: print limit reached$/)
     expect(lines[1]).toBe('arrange: with you; outside the grant: no rule admits it')
     expect(lines[2]).toBe('print_output (in a session it talks to): with you; outside the grant: printer 5 is not in the grant')
+  })
+
+  // #5299: a child's call whose deny is being sent is held at the starting session with no
+  // deadline (the agent reads its `infinity` as none): the line names no time, never "Invalid Date".
+  it('shows a child call held by a deny in flight with no deadline', async () => {
+    const [child] = childEntries('run-escalated')
+    setFlowRunChildren('run-escalated', [{ ...child!, hop: 'parent', hop_until: null, reason: null }])
+    renderPage(<SessionFlowRuns sessionId="sess-escalated" />)
+    const waiting = await screen.findByRole('list', { name: 'Waiting in runs started here' })
+    await waitFor(() => expect(waiting).toHaveTextContent('print_output (in a session it talks to): with this session'))
+    expect(waiting).not.toHaveTextContent('Invalid Date')
   })
 
   it("names a waiting run by its flow's display name (#3186)", async () => {

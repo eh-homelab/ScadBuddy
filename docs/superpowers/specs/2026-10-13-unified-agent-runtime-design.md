@@ -430,7 +430,10 @@ lack them (§2.3).
     attempt id is the run's and the cycle's, so the next turn's first placement in the same
     run carries the same one).
     It also checks the row every second and is cut off once another placement holds it or
-    the turn is no longer the row's: its process is closed. Its spend is never fenced: its
+    the turn is no longer the row's: its process is closed. A placement cut off because
+    another holds the row fails the retryable `PlacementMoved`: when the workflow still waits
+    on it, the workflow places the turn again, `restarted`, within the same cycles (not steered away from its live home), and that
+    placement's claim fences the other out (#6387). Its spend is never fenced: its
     requests are its own, so writing them cannot count anything twice, and the budget holds
     whichever replicas ran the turn. A new placement on the same replica cuts an older one
     of the session first, so the warm process is free.
@@ -442,7 +445,8 @@ lack them (§2.3).
   - **A non-retryable application failure** (`BudgetExhausted`, `CredentialRefused`,
     `SessionGone`) ends the turn with that outcome.
   - **After 3 cycles** (4 when a kept home was full) the turn ends `failed` with the last
-    reason.
+    reason, in the user's words (#6387): "the turn could not be placed on a worker: another
+    placement took the turn over (3 tries); send the message again".
 - **The cost of a dead home.** It is detected only when the next activity is scheduled.
   Between turns nothing runs on `home`, much as a Go session's heartbeat only matters
   while its activities run. The first turn after a pod death therefore pays the 5 s
@@ -721,7 +725,8 @@ never did (`questions/service.ts:34-38`).
   from it (`forget.ts:88`).
 - **Forgetting becomes crypto-shredding.** After the key row is deleted, entries in
   Postgres backups are unreadable too. A migration seals the existing rows (plan Task 3.2),
-  clearing `entry` in the same UPDATE (`agent/src/sessions/sealBackfill.ts`). A backup taken
+  clearing `entry` in the same UPDATE (`agent/src/sessions/sealBackfill.ts`, removed in #6501 once prod
+  had no plaintext row left). A backup taken
   before that backfill ran still holds those rows in plaintext, until it ages out of
   retention.
 - **Out of scope: a dropped or truncated row.** Each row's AAD names its own `uuid` or `id`,

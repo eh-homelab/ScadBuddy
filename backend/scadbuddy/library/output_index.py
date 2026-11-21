@@ -16,6 +16,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from psycopg import Connection
@@ -25,7 +26,17 @@ from pydantic import ValidationError
 
 from scadbuddy.bambuddy.project_file import cached_defaults
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import META_NAME, PARAMS_NAME, OutputMeta
+from scadbuddy.library.outputs import (
+    BACK_OFFICE,
+    INPUTS_NAME,
+    META_NAME,
+    PARAMS_NAME,
+    STOREFRONT_NAME_PREFIX,
+    OutputMeta,
+    storefront_output_id,
+)
+from scadbuddy.render.inputs import inputs_key
+from scadbuddy.render.job_models import render_key
 
 if TYPE_CHECKING:
     from scadbuddy.library.outputs import OutputStore
@@ -49,6 +60,8 @@ class OutputQuery:
     q: str | None = None
     #: Whether any order item names the output; ``None`` either.
     ordered: bool | None = None
+    #: The storefront slice run's outputs too (#6371); without, the back office's only.
+    include_storefront: bool = False
     after: str | None = None
     limit: int = DEFAULT_LIMIT
 
@@ -71,9 +84,33 @@ def params_text(params: Mapping[str, Any], defaults: Mapping[str, Any]) -> str:
     )
 
 
+def saved_by_storefront_run(meta: OutputMeta, inputs: Mapping[str, Any]) -> bool:
+    """Whether the storefront slice run saved this output (#6371), for a record from
+    before ``source``. That run names each output ``Storefront: …`` and saves it under
+    `storefront_output_id` of its render key: the inputs' key for a pipeline template,
+    else the params' key. The name alone is not enough: a person can type it."""
+    if not (meta.name or "").startswith(STOREFRONT_NAME_PREFIX):
+        return False
+    params = inputs.get("params", {})
+    keys = (
+        inputs_key(meta.slug, inputs, meta.model_version),
+        render_key(meta.slug, params if isinstance(params, dict) else {}, meta.model_version),
+    )
+    return any(storefront_output_id(key) == meta.id for key in keys)
+
+
 def _like(text: str) -> str:
     escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def _inputs(directory: Path) -> dict[str, Any]:
+    """The output's ``inputs.json``, or none when it is missing or unreadable."""
+    try:
+        loaded = json.loads((directory / INPUTS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 class OutputIndex:
@@ -100,12 +137,21 @@ class OutputIndex:
             defaults = cached_defaults(self._paths, meta.slug)
         with self._pool.connection() as conn:
             conn.execute(
-                "INSERT INTO output_index (output_id, slug, name, created_at, params_text)"
-                " VALUES (%s, %s, %s, %s, %s)"
+                "INSERT INTO output_index"
+                " (output_id, slug, name, created_at, params_text, source)"
+                " VALUES (%s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug,"
                 " name = EXCLUDED.name, created_at = EXCLUDED.created_at,"
-                " params_text = EXCLUDED.params_text, indexed_at = clock_timestamp()",
-                (meta.id, meta.slug, meta.name, meta.created_at, params_text(params, defaults)),
+                " params_text = EXCLUDED.params_text, source = EXCLUDED.source,"
+                " indexed_at = clock_timestamp()",
+                (
+                    meta.id,
+                    meta.slug,
+                    meta.name,
+                    meta.created_at,
+                    params_text(params, defaults),
+                    meta.source,
+                ),
             )
 
     def rename(self, output_id: str, name: str | None) -> None:
@@ -138,6 +184,9 @@ class OutputIndex:
         if query.q:
             where.append("(x.name ILIKE %s ESCAPE '\\' OR x.params_text ILIKE %s ESCAPE '\\')")
             args += [_like(query.q), _like(query.q)]
+        if not query.include_storefront:
+            where.append("x.source = %s")
+            args.append(BACK_OFFICE)
         if query.ordered is not None:
             exists = "EXISTS (SELECT 1 FROM order_items i WHERE i.output_id = x.output_id)"
             where.append(exists if query.ordered else f"NOT {exists}")
@@ -214,6 +263,15 @@ class OutputIndex:
                 continue  # half written or unreadable: listed once it reads
             if meta.id != output_id or not isinstance(params, dict):
                 continue
+            if meta.source == BACK_OFFICE and saved_by_storefront_run(
+                meta, _inputs(meta_path.parent)
+            ):
+                # Saved before #6371 by the storefront slice run: the migration dropped
+                # its row, so it is marked here, once, and indexed as the storefront's.
+                try:
+                    meta = store.mark_storefront(output_id)
+                except (OSError, ValueError, ValidationError):
+                    continue
             if meta.slug not in defaults:
                 defaults[meta.slug] = dict(cached_defaults(self._paths, meta.slug))
             self.record(meta, params, defaults[meta.slug])

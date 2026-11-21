@@ -18,6 +18,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.config import LibraryBackend
+from scadbuddy.print_library.associations import AssociationStore
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import NativeLibraryStore
 from scadbuddy.rows.component import ROWS
@@ -28,8 +29,9 @@ class PrintLibrary:
         self.core = core
         self._backend: LibraryBackend | None = None
         self._native: NativeLibrary | None = None
+        self._associations: AssociationStore | None = None
         #: The rows' shared pool (`rows/component.py`, #5226), which `ROWS` closes;
-        #: opened here only when `native` is first built.
+        #: opened here only when `native` or `associations` is first built.
         self._pool = pool
 
     @property
@@ -51,6 +53,15 @@ class PrintLibrary:
             self._pool.open(wait=False)
             self._native = NativeLibrary(NativeLibraryStore(self._pool), content, content.spool)
         return self._native
+
+    @property
+    def associations(self) -> AssociationStore:
+        """The native files' associations (#6395). Built on either backend, so a
+        model's delete forgets its rows whichever library serves."""
+        if self._associations is None:
+            self._pool.open(wait=False)
+            self._associations = AssociationStore(self._pool)
+        return self._associations
 
     async def serving_native(self) -> NativeLibrary | None:
         """The native library when it serves the routes, else None (``bambuddy``). The

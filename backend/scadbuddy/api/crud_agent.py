@@ -11,8 +11,10 @@ no ``Idempotency-Key``).
 The holds of the assistant's workspace files (#5299, in place of the agent's trigger on
 ``blob_refs``): each file whose sealed bytes are a blob of the content store
 (`api/internal_workspace.py`) is held ``(ai_session_file, <workspace>/<path>)`` while
-its ``ai_session_files`` row names it, so the blob sweep keeps it. The agent holds before
-it writes the row and releases once the row is gone (``agent/src/workspace/store.ts``):
+its ``ai_session_files`` row names it, so the blob sweep keeps it. An agent on SQL holds
+before it writes the row and releases once the row is gone (``agent/src/workspace/store.ts``);
+once the API lists area ``workspace`` its routes write the holds in each row's own
+transaction instead (``api/crud_agent_workspace.py``, #5299 step 7):
 
 - ``POST …/workspace-blob-refs`` holds a key for a holder (a hold sent again refreshes its
   ``created_at``);
@@ -30,7 +32,9 @@ SQL before, read only:
 
 - area ``events``: ``GET …/events/head``, the event log's last ``seq`` and the database
   clock, and ``GET …/events``, the logged events after a ``seq``, newest first, for the
-  agent's LISTEN gap replay (``agent/src/events/pgListener.ts``);
+  LISTEN gap replay of an agent older than the change stream (#5299 step 11, which moved the
+  replay into ``…/agent/changes``, `api/crud_agent_changes.py`). They stay while such an agent
+  pod may still run during a roll; #5299 step 12 removes them;
 - area ``flows`` (`flows/agent_reads.py`): ``GET …/flow-runs/{id}/starter`` (who started a
   run, under the row's share lock), ``GET …/flow-decisions`` (whether a call's approval
   holds), ``GET …/flow-grants/in-force``, ``GET …/flow-runs/{id}/queue``,
@@ -254,7 +258,7 @@ def _event_log_head(pool: agent_reads.Pool) -> EventLogHead:
 
 def _event_log_gap(pool: agent_reads.Pool, after: int, limit: int) -> EventLogGap:
     # One transaction: `now()` is its start, before the rows are read, as the agent's SQL
-    # read of the gap had it (`pgListener.ts` GUARD).
+    # read of the gap had it (the GUARD of the older agent's `events/pgListener.ts`).
     with pool.connection() as conn, conn.transaction():
         rows = conn.execute(
             "SELECT seq, event_id, payload, logged_at FROM events"

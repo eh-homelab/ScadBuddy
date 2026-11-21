@@ -4,6 +4,7 @@ import { useSettingsAgentField } from '../agentFields'
 import { api } from '../../../api/client'
 import { useAsync } from '../../../lib/useAsync'
 import { FieldRow } from '../controls'
+import { docOf } from '../fields'
 import { RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
@@ -37,7 +38,7 @@ export function Component() {
 
   return (
     <SavedSection form={form} id={id} title={title}>
-      <FieldRow id="printer" label="Printer">
+      <FieldRow id="printer" {...docOf(form.settings, 'default_printer')}>
         <ChoiceSelect
           id="printer"
           value={current}
@@ -54,8 +55,7 @@ export function Component() {
       </FieldRow>
       <FieldRow
         id="print-run-retention"
-        label="Keep finished print runs for (days)"
-        help="Empty keeps every run, the start of print history. A number deletes runs that finished longer ago."
+        {...docOf(form.settings, 'print_run_retention_seconds')}
         error={errors.print_run_retention_seconds}
       >
         <Input
@@ -73,8 +73,7 @@ export function Component() {
       {/* The operations record (#1053). */}
       <FieldRow
         id="operation-retention"
-        label="Keep finished Bambuddy operations for (days)"
-        help="Sends, reprints, project filing and the like. Empty keeps every record; a number deletes those that finished longer ago. Keep it at least as long as Temporal's namespace retention, or a retried request whose record is gone is told it may have been done instead of its outcome."
+        {...docOf(form.settings, 'operation_retention_seconds')}
         error={errors.operation_retention_seconds}
       >
         <Input

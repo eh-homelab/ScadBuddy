@@ -1,6 +1,6 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
-import { AttachmentError, type AttachmentStore } from '../attachments/store.js'
+import { AttachmentError, type Attachments } from '../attachments/store.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { IMAGE_BYTES_MAX, PREVIEW_BYTES_MAX, type UserImage, UserImageSchema } from '../sessions/images.js'
 import { browserUser } from '../auth/browserSession.js'
@@ -48,7 +48,7 @@ async function uploaded(body: Record<string, unknown>): Promise<UserImage | stri
 
 export type AttachmentRouteDeps = {
   /** Undefined without a database (spec §9); the routes then answer 503. */
-  attachments: AttachmentStore | undefined
+  attachments: Attachments | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -59,7 +59,7 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
 const WHAT = 'image uploads'
 
 export function registerAttachmentRoutes(app: Hono, deps: AttachmentRouteDeps): void {
-  async function store(): Promise<AttachmentStore | string> {
+  async function store(): Promise<Attachments | string> {
     if (!deps.attachments) return NO_DATABASE
     return (await deps.ready()) ? deps.attachments : NOT_READY
   }

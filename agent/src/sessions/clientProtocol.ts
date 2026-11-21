@@ -79,6 +79,9 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
+  // #6386: a message queued while a turn runs, removed or given new words before it starts.
+  z.object({ v, type: z.literal('queue.remove'), sessionId, id: answerId }),
+  z.object({ v, type: z.literal('queue.edit'), sessionId, id: answerId, text: z.string().min(1).max(MESSAGE_MAX) }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   z.object({ v, type: z.literal('session.attach'), sessionId }),
   // The browser bridge (#254): which tab this panel is in (frontend

@@ -12,19 +12,43 @@ import { sessionWorkflowId } from '../src/gate/durable.js'
 import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
 import type { Database } from '../src/db.js'
+import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import type { UserImage } from '../src/sessions/images.js'
 import { type SessionManager } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
-import type { FinishTurnInput, Message, OpenInputArgs, SessionStart, SessionTurnInput, SessionTurnResult } from '../src/temporal/session/models.js'
+import type {
+  BeginOutcome,
+  BeginTurnInput,
+  FinishTurnInput,
+  Message,
+  OpenInputArgs,
+  QueueAnswer,
+  QueueChangedInput,
+  QueuedMessage,
+  QueueState,
+  SessionStart,
+  SessionTurnInput,
+  SessionTurnResult,
+} from '../src/temporal/session/models.js'
+import { QUEUE_MAX } from '../src/temporal/session/models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
+  EDIT_QUEUED_UPDATE,
   NO_CAPACITY,
+  QUEUE_MESSAGE_UPDATE,
+  QUEUE_QUERY,
+  REMOVE_QUEUED_UPDATE,
+  SESSION_BEGIN_TURN_ACTIVITY,
+  SESSION_QUEUE_CHANGED_ACTIVITY,
   OPEN_INPUT_UPDATE,
   TAB_RECONNECTED_UPDATE,
   OWNER_CHANGED_SIGNAL,
+  PLACEMENT_MOVED,
   SESSION_GATE_ACTIVITIES as GATE,
+  SESSION_GONE,
   RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
@@ -54,6 +78,16 @@ const PG_SKIP = TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is
 const OWNER = { kind: 'browser', id: 'browser', label: 'You' } as const
 
 const message = (turnId: string, text = 'hello'): Message => ({ turn_id: turnId, text, author: OWNER, images: [], system_append: null })
+/** A message sent while a turn runs (#6386), as DurableTurns queues it. */
+const queued = (turnId: string, words = turnId, extra: Partial<QueuedMessage> = {}): QueuedMessage => ({
+  ...message(turnId, extra.context ? `${words}\n\n${extra.context}` : words),
+  words,
+  queued_at: '2026-11-15T00:00:00.000Z',
+  ...extra,
+})
+
+/** What a queued message's images' write made (#6413), named after it. */
+const madeBy = (tag: string) => ({ names: [`${tag}.png`], at: '2026-11-15T00:00:00.000001Z' })
 
 function held(): { promise: Promise<void>; release: () => void } {
   let release!: () => void
@@ -71,10 +105,17 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   let turns: SessionTurnInput[]
   let finished: FinishTurnInput[]
   let runTurn: (input: SessionTurnInput) => Promise<SessionTurnResult>
-  let finish: (args: FinishTurnInput) => Promise<boolean>
+  let finish: (args: FinishTurnInput) => Promise<unknown>
+  /** The queue's activities (#6386): what each was sent, and how a begin answers. */
+  let begin: (args: BeginTurnInput) => Promise<BeginOutcome>
+  let begun: string[]
+  let queueChanged: (args: QueueChangedInput) => Promise<boolean>
+  let queueWrites: QueueChangedInput[]
   let settings: () => Promise<typeof RUNTIME_DEFAULTS>
   let settingsRead: number
   let acquired: number
+  /** Each acquire_worker's `exclude`: the homes the turn was lost on. */
+  let excluded: string[][]
   let released: string[]
   /** The gate's activities (stubs): what describe_call and resolve_input wait on, and what each was sent. */
   let describeHold: Promise<void>
@@ -106,11 +147,20 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await make(
         TASK_QUEUE,
         {
-          [ACQUIRE_WORKER_ACTIVITY]: async () => {
+          [ACQUIRE_WORKER_ACTIVITY]: async (input: { exclude?: string[] }) => {
             acquired++
+            excluded.push(input.exclude ?? [])
             return { hostQueue: HOST, identity: 'agent-session-test' }
           },
           [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput) => finish(args),
+          [SESSION_BEGIN_TURN_ACTIVITY]: async (args: BeginTurnInput) => {
+            begun.push(args.next.turn_id)
+            return begin(args)
+          },
+          [SESSION_QUEUE_CHANGED_ACTIVITY]: async (args: QueueChangedInput) => {
+            queueWrites.push(args)
+            return queueChanged(args)
+          },
           // The gate's (temporal/session/gateActivities.ts), as stubs: no rows.
           [GATE.settings]: async () => ({ approvalExpiryS: 600, questionExpiryS: 3600 }),
           [GATE.describe]: async () => {
@@ -156,6 +206,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     finished = []
     settingsRead = 0
     acquired = 0
+    excluded = []
     released = []
     describeHold = Promise.resolve()
     resolveHold = Promise.resolve()
@@ -169,10 +220,15 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       return RUNTIME_DEFAULTS
     }
     runTurn = async () => ({ status: 'done', hostQueue: '' })
+    // As session.finish_turn answers: with the queue's head, whether it started (#6386).
     finish = async (args) => {
       finished.push(args)
-      return true
+      return args.next ? { written: true, next: 'started' } : true
     }
+    begun = []
+    begin = async () => 'started'
+    queueWrites = []
+    queueChanged = async () => true
   })
 
   /** Terminates every workflow of `ids` still open: a session a test left running (an idle one waiting for its next message, or one whose run continued as new) must not take the next test's activities. */
@@ -642,6 +698,48 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  it('a placement cut off because another took the turn (PlacementMoved) is placed again, restarted, at most three times; the words then say why, never "Activity task failed" (#6387)', async () => {
+    const id = randomUUID()
+    const moved = (input: SessionTurnInput) =>
+      ApplicationFailure.retryable(`session ${input.sessionId}'s placement ${input.attempt} was cut off: the turn was placed on another worker`, PLACEMENT_MOVED)
+    // t1: its first placement is cut off, the next one runs it. t2: every placement is cut off.
+    let t1Moved = false
+    runTurn = async (input) => {
+      if (input.turnId === 't1' && t1Moved) return { status: 'done', hostQueue: HOST }
+      if (input.turnId === 't1') t1Moved = true
+      throw moved(input)
+    }
+    const placed = (turnId: string) => turns.filter((t) => t.turnId === turnId).map((t) => [t.attempt?.split(':')[1], t.continuation?.kind])
+    await send(env.client, id, message('t1'))
+    const t1Run = await runIdOf(id)
+    await poll(() => finished.map((f) => f.outcome), ['done'])
+    expect(placed('t1')).toEqual([['0', undefined], ['1', 'restarted']])
+    await poll(async () => handleOf(id).query(TURN_QUERY), null)
+    await record('placement_moved', id, t1Run)
+    await send(env.client, id, message('t2'))
+    await poll(() => finished.map((f) => f.outcome), ['done', 'failed'])
+    expect(placed('t2')).toEqual([['0', undefined], ['1', 'restarted'], ['2', 'restarted']])
+    // A home cut off by another placement is alive: no acquire steers the turn away from it. Over
+    // both turns on purpose: t1's second acquire is the one that would name HOST.
+    expect(excluded.flat()).toEqual([])
+    expect(finished[1]?.message).toBe('the turn could not be placed on a worker: another placement took the turn over (3 tries); send the message again')
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
+  it('a placement whose turn ended (SessionGone) is never placed again: the turn fails with the cause, never "Activity task failed" (#6387)', async () => {
+    const id = randomUUID()
+    runTurn = async (input) => {
+      throw ApplicationFailure.nonRetryable(`session ${input.sessionId}'s placement ${input.attempt} was cut off: the turn ended without this placement`, SESSION_GONE)
+    }
+    await send(env.client, id, message('t1'))
+    await poll(() => finished.map((f) => f.outcome), ['failed'])
+    expect(turns).toHaveLength(1)
+    expect(finished[0]?.message).toBe(`session ${id}'s placement ${turns[0]!.attempt} was cut off: the turn ended without this placement`)
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
   it('refuses open_input for a turn that is not running, `stale`', async () => {
     const id = randomUUID()
     await send(env.client, id, message('t1'))
@@ -695,6 +793,288 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  describe('the queue (#6386)', () => {
+    /** queue_message, as DurableTurns sends it while a turn runs. */
+    const enqueue = (id: string, m: QueuedMessage) => handleOf(id).executeUpdate<QueueAnswer, [QueuedMessage]>(QUEUE_MESSAGE_UPDATE, { args: [m], updateId: m.turn_id })
+    const refusal = async (p: Promise<unknown>) => {
+      const err = await p.then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+      expect(err).toBeInstanceOf(WorkflowUpdateFailedError)
+      return ((err as WorkflowUpdateFailedError).cause as ApplicationFailure).type
+    }
+    const queueOf = async (id: string) => (await handleOf(id).query<QueueState>(QUEUE_QUERY)).queue.map((q) => q.id)
+    /** A turn held until released; each turn's id in the order it ran. */
+    function holdTurns(): { release: () => void } {
+      let hold = held()
+      runTurn = async () => {
+        await hold.promise
+        return { status: 'done', hostQueue: '' }
+      }
+      return {
+        release: () => {
+          hold.release()
+          hold = held()
+          hold.release()
+        },
+      }
+    }
+
+    it('queues messages sent during a turn and runs each as its own turn, in order, each in a run of its own', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      const turnRun = await runIdOf(id)
+      await poll(() => turns.length, 1)
+      expect(await enqueue(id, queued('q1', 'first', { context: '[page: /]' }))).toEqual({ id: 'q1', position: 1, version: 1 })
+      expect(await enqueue(id, queued('q2', 'second'))).toEqual({ id: 'q2', position: 2, version: 2 })
+      // The same Update again (a re-send) finds its entry; nothing is added.
+      expect(await enqueue(id, queued('q2', 'second'))).toMatchObject({ id: 'q2', position: 2 })
+      expect(await queueOf(id)).toEqual(['q1', 'q2'])
+      expect((await handleOf(id).query<QueueState>(QUEUE_QUERY)).queue[0]).toEqual({ id: 'q1', text: 'first', author: OWNER, queuedAt: '2026-11-15T00:00:00.000Z' })
+      // Each change is written, in order, the last version always.
+      await poll(() => queueWrites.at(-1)?.version, 2)
+      expect(queueWrites.at(-1)?.queue.map((q) => q.id)).toEqual(['q1', 'q2'])
+      hold.release()
+      await poll(() => finished.map((f) => f.turnId), ['t1', 'q1', 'q2'])
+      // The turn's end was given the head: the end started it in its own transaction.
+      expect(finished.map((f) => f.next?.turn_id)).toEqual(['q1', 'q2', undefined])
+      expect(begun).toEqual([])
+      expect(turns.map((t) => [t.turnId, t.message?.text])).toEqual([
+        ['t1', 'hello'],
+        ['q1', 'first\n\n[page: /]'],
+        ['q2', 'second'],
+      ])
+      // The page context and the claim columns stay out of the turn's message.
+      expect(turns[1]?.message).toEqual({ turn_id: 'q1', text: 'first\n\n[page: /]', author: OWNER, images: [], system_append: null, words: 'first' })
+      await poll(() => queueWrites.at(-1)?.queue, [])
+      expect(await queueOf(id)).toEqual([])
+      expect(await eventTypes(id, turnRun)).toContain('EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW')
+      await record('queue', id, turnRun)
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
+    it('carries the queue across continue-as-new: the turn it started runs in the next run, with the rest still queued', async () => {
+      const id = randomUUID()
+      let hold = held()
+      runTurn = async () => {
+        await hold.promise
+        return { status: 'done', hostQueue: '' }
+      }
+      await send(env.client, id, message('t1'))
+      const first = await runIdOf(id)
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1'))
+      await enqueue(id, queued('q2'))
+      const t1 = hold
+      hold = held()
+      t1.release()
+      await poll(() => turns.map((t) => t.turnId), ['t1', 'q1'])
+      // q1 runs in a new run, which holds q2 and the queue's version.
+      const second = await runIdOf(id)
+      expect(second).not.toBe(first)
+      expect(await handleOf(id).query(TURN_QUERY)).toBe('q1')
+      expect(await handleOf(id).query<QueueState>(QUEUE_QUERY)).toMatchObject({ version: 3, queue: [{ id: 'q2' }] })
+      // q1's Update sent again in this run (its id is deduped only within a run) does not queue it twice.
+      expect(await enqueue(id, queued('q1'))).toEqual({ id: 'q1', position: 0, version: 3 })
+      expect(await queueOf(id)).toEqual(['q2'])
+      // Still editable there.
+      await handleOf(id).executeUpdate(EDIT_QUEUED_UPDATE, { args: [{ id: 'q2', words: 'second, edited' }] })
+      hold.release()
+      await poll(() => finished.map((f) => f.turnId), ['t1', 'q1', 'q2'])
+      expect(turns.at(-1)?.message?.text).toBe('second, edited')
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
+    it('writes the queue change made in the activation where the last write ended: the started head leaves the written queue', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      const turnRun = await runIdOf(id)
+      await poll(() => turns.length, 1)
+      // The queue's write and the turn's end come back together, often in one workflow task (the race;
+      // the recorded history queue_publish took it, so its replay pins the patch's branch).
+      const both = held()
+      queueChanged = async () => {
+        await both.promise
+        return true
+      }
+      finish = async (args) => {
+        finished.push(args)
+        await both.promise
+        return args.next ? { written: true, next: 'started' } : true
+      }
+      await enqueue(id, queued('q1'))
+      await poll(() => queueWrites.length, 1)
+      hold.release()
+      await poll(() => finished.length, 1)
+      both.release()
+      await poll(() => turns.map((t) => t.turnId), ['t1', 'q1'])
+      // The head left the queue: that change is written, the last write is the empty queue.
+      await poll(() => queueWrites.at(-1)?.queue, [])
+      expect(queueWrites.at(-1)?.version).toBe(2)
+      // The run that took QUEUE_PUBLISH_PATCH's branch, replayed as recorded.
+      await record('queue_publish', id, turnRun)
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
+    it('a Stop ends the running turn only: the queued messages stay, and the next one starts', async () => {
+      const id = randomUUID()
+      runTurn = async (input) => {
+        if (input.turnId !== 't1') return { status: 'done', hostQueue: '' }
+        const context = Context.current()
+        const beat = setInterval(() => context.heartbeat(), 200)
+        try {
+          return await context.cancelled
+        } finally {
+          clearInterval(beat)
+        }
+      }
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1'))
+      await enqueue(id, queued('q2'))
+      await handleOf(id).signal('interrupt', { reason: 'stop' })
+      await poll(() => finished.map((f) => `${f.turnId} ${f.outcome}`), ['t1 interrupted', 'q1 done', 'q2 done'])
+      expect(turns.map((t) => t.turnId)).toEqual(['t1', 'q1', 'q2'])
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
+    it('removes and edits a message before it starts; once started it is neither', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1'))
+      await enqueue(id, queued('q2'))
+      await enqueue(id, queued('q3', 'third', { context: 'ctx' }))
+      expect((await handleOf(id).executeUpdate<QueueState, [{ id: string }]>(REMOVE_QUEUED_UPDATE, { args: [{ id: 'q2' }] })).queue.map((q) => q.id)).toEqual(['q1', 'q3'])
+      const edited = await handleOf(id).executeUpdate<QueueState, [{ id: string; words: string }]>(EDIT_QUEUED_UPDATE, { args: [{ id: 'q3', words: 'third, again' }] })
+      expect(edited.queue.map((q) => q.text)).toEqual(['q1', 'third, again'])
+      expect(await refusal(handleOf(id).executeUpdate(REMOVE_QUEUED_UPDATE, { args: [{ id: 'q2' }] }))).toBe('not_queued')
+      expect(await refusal(handleOf(id).executeUpdate(EDIT_QUEUED_UPDATE, { args: [{ id: 'q1', words: '   ' }] }))).toBe('invalid')
+      hold.release()
+      await poll(() => finished.map((f) => f.turnId), ['t1', 'q1', 'q3'])
+      // The page context stays after the new words.
+      expect(turns.map((t) => t.message?.text)).toEqual(['hello', 'q1', 'third, again\n\nctx'])
+      expect(await refusal(handleOf(id).executeUpdate(REMOVE_QUEUED_UPDATE, { args: [{ id: 'q1' }] }))).toBe('not_queued')
+      expect(await refusal(handleOf(id).executeUpdate(EDIT_QUEUED_UPDATE, { args: [{ id: 'q3', words: 'late' }] }))).toBe('not_queued')
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
+    it('refuses `queue_full` past 20 messages or its size, and `ended` once the session is marked done', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      // One message larger than the queue may hold.
+      expect(await refusal(enqueue(id, queued('big', 'x'.repeat(600 * 1024))))).toBe('queue_full')
+      // Its size is UTF-8 bytes: 300 Ki two-byte characters are 600 KiB.
+      expect(await refusal(enqueue(id, queued('wide', 'é'.repeat(300 * 1024))))).toBe('queue_full')
+      for (let i = 1; i <= 20; i++) await enqueue(id, queued(`q${i}`))
+      expect(await refusal(enqueue(id, queued('q21')))).toBe('queue_full')
+      expect(await queueOf(id)).toHaveLength(20)
+      // An edit that would pass the size is refused too.
+      expect(await refusal(handleOf(id).executeUpdate(EDIT_QUEUED_UPDATE, { args: [{ id: 'q1', words: 'y'.repeat(600 * 1024) }] }))).toBe('queue_full')
+      await handleOf(id).signal('end')
+      expect(await refusal(enqueue(id, queued('q22')))).toBe('ended')
+      hold.release()
+      await handleOf(id).result()
+      // The session ended after its turn: the queue went with it.
+      expect(turns.map((t) => t.turnId)).toEqual(['t1'])
+      expect(queueWrites.at(-1)?.queue).toEqual([])
+    })
+
+    it('starts a message queued while no turn runs with session.begin_turn, and one the row is not free for once the turn that took it ends', async () => {
+      const id = randomUUID()
+      await send(env.client, id, message('t1'))
+      await poll(() => finished.length, 1)
+      await poll(async () => handleOf(id).query(TURN_QUERY), null)
+      // No turn runs: the head is begun at once.
+      await enqueue(id, queued('q1'))
+      await poll(() => finished.map((f) => f.turnId), ['t1', 'q1'])
+      expect(begun).toEqual(['q1'])
+      // The row runs another turn (a send claimed it meanwhile): the head waits, and the send's
+      // message, taken meanwhile, runs first; the head starts at that turn's end.
+      await poll(async () => handleOf(id).query(TURN_QUERY), null)
+      begin = async () => 'busy'
+      await enqueue(id, queued('q2'))
+      await poll(() => begun, ['q1', 'q2'])
+      expect(await handleOf(id).executeUpdate(SEND_MESSAGE_UPDATE, { args: [message('t2', 'claimed first')] })).toEqual({ accepted: true, turn_id: 't2' })
+      await poll(() => finished.map((f) => f.turnId), ['t1', 'q1', 't2', 'q2'])
+      expect(finished[2]?.next?.turn_id).toBe('q2')
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
+    it('drops a head its session cannot run, and starts the next; a worker that answers a bare boolean starts nothing, so the head is begun', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      finish = async (args) => {
+        finished.push(args)
+        // t1's end comes from an older worker, which ignores `next`; q2 cannot start at q1's end (the session spent its budget, say).
+        if (args.next?.turn_id === 'q2') return { written: true, next: 'dropped' }
+        return true
+      }
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1')] }))
+      await enqueue(id, queued('q2', 'q2', { made: [madeBy('q2')] }))
+      hold.release()
+      await poll(() => finished.map((f) => f.turnId), ['t1', 'q1'])
+      expect(begun).toEqual(['q1'])
+      expect(finished.map((f) => f.next?.turn_id)).toEqual(['q1', 'q2'])
+      await poll(() => queueWrites.at(-1)?.queue, [])
+      // Only the dropped head's images go: q1 ran (#6413).
+      await poll(() => queueWrites.flatMap((w) => w.drop ?? []), [madeBy('q2')])
+      expect(turns.map((t) => t.turnId)).toEqual(['t1', 'q1'])
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+    })
+
+    it('a handoff drops the queued messages the new owner did not send', async () => {
+      const id = randomUUID()
+      const NEXT = { kind: 'bearer', id: 'token:next', label: 'Next agent' } as const
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1')] }))
+      await enqueue(id, { ...queued('q2', 'q2', { made: [madeBy('q2')] }), author: NEXT })
+      await handleOf(id).signal(OWNER_CHANGED_SIGNAL, { owner: NEXT })
+      await poll(() => queueOf(id), ['q2'])
+      // The dropped message's images go with the queue's next write (#6413); q2's stay.
+      await poll(() => queueWrites.flatMap((w) => w.drop ?? []), [madeBy('q1')])
+      hold.release()
+      await poll(() => finished.map((f) => f.turnId), ['t1', 'q2'])
+      await handleOf(id).signal('end')
+      await handleOf(id).result()
+      expect(queueWrites.flatMap((w) => w.drop ?? [])).toEqual([madeBy('q1')])
+    })
+
+    it('`end` drops the queue, and the images each waiting message made, in its one write (#6413)', async () => {
+      const id = randomUUID()
+      const hold = holdTurns()
+      await send(env.client, id, message('t1'))
+      await poll(() => turns.length, 1)
+      await enqueue(id, queued('q1', 'q1', { made: [madeBy('q1'), madeBy('q1-batch-2')] }))
+      await enqueue(id, queued('q2'))
+      await enqueue(id, queued('q3', 'q3', { made: [madeBy('q3')] }))
+      await poll(() => queueWrites.at(-1)?.version, 3)
+      expect(queueWrites.flatMap((w) => w.drop ?? [])).toEqual([])
+      await handleOf(id).signal('end')
+      hold.release()
+      await handleOf(id).result()
+      expect(turns.map((t) => t.turnId)).toEqual(['t1'])
+      expect(queueWrites.at(-1)).toMatchObject({ queue: [], drop: [madeBy('q1'), madeBy('q1-batch-2'), madeBy('q3')] })
+    })
+  })
+
   it('replays its recorded histories', async () => {
     const id = randomUUID()
     const hold = held()
@@ -718,7 +1098,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
     const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
-    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record']))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record', 'placement_moved', 'queue', 'queue_publish']))
     const fixtures = await Promise.all(
       names.map(async (name) => ({
         workflowId: `fixture-${name}`,
@@ -801,7 +1181,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
       // The turn is a stub here; that a placement resumes from the transcript is warm.ts's
-      // (`transcriptExists`), whichever run placed it, as turnHost.pg.test.ts shows.
+      // (the store's `head`), whichever run placed it, as turnHost.pg.test.ts shows.
     })
 
     it('refuses `closed` a send to a session still recorded as DurableSession, and starts no workflow (plan Step 8.1)', async () => {
@@ -907,6 +1287,96 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       runTurn = async () => ({ status: 'done', hostQueue: '' })
       const next = await m.send(session.id, browser, 'and again')
       expect(await next.done).toMatchObject({ kind: 'result' })
+    })
+
+    it('queues a send while a turn runs (#6386): its user.turn is written as it starts, done follows it, and the queue reads from the log', async () => {
+      const m = await durableManager()
+      const real = sessionFinishActivities(db.sql, m.events)
+      finish = real[SESSION_FINISH_ACTIVITY]
+      begin = real[SESSION_BEGIN_TURN_ACTIVITY]
+      queueChanged = real[SESSION_QUEUE_CHANGED_ACTIVITY]
+      let hold = held()
+      runTurn = async () => {
+        await hold.promise
+        return { status: 'done', hostQueue: '' }
+      }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await poll(() => turns.length, 1)
+      // Without `queue` (a flow run, a background task) the send is refused as before.
+      await expect(m.send(session.id, browser, 'not queued')).rejects.toMatchObject({ code: 'busy' })
+      const second = await m.send(session.id, browser, 'and a lid', { queue: true, context: '[page: /]' })
+      const third = await m.send(session.id, browser, 'and a hinge', { queue: true })
+      expect([second.queued, third.queued]).toEqual([{ position: 1 }, { position: 2 }])
+      await poll(async () => (await m.queued(session.id, browser)).queue.map((q) => q.text), ['and a lid', 'and a hinge'])
+      // Only the owner changes it.
+      const other = { kind: 'bearer', id: 'token:other', label: 'Other' } as const
+      await expect(m.removeQueued(session.id, other, third.turnId)).rejects.toMatchObject({ code: 'not_found' })
+      await m.editQueued(session.id, browser, third.turnId, 'and two hinges')
+      // Not yet in the transcript.
+      const userTurns = async () => (await m.events.read(session.id, 0, 1000)).flatMap(({ event: e }) => (e.type === 'user.turn' ? [e.text] : []))
+      expect(await userTurns()).toEqual(['make a box'])
+      const t1 = hold
+      hold = held()
+      hold.release()
+      t1.release()
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      expect(await second.done).toMatchObject({ kind: 'result' })
+      expect(await third.done).toMatchObject({ kind: 'result' })
+      expect(turns.map((t) => t.message?.text)).toEqual(['make a box', 'and a lid\n\n[page: /]', 'and two hinges'])
+      expect(await userTurns()).toEqual(['make a box', 'and a lid', 'and two hinges'])
+      await poll(async () => (await m.queued(session.id, browser)).queue, [])
+      const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
+      expect(row).toEqual({ status: 'idle', durable_turn_id: null })
+      // A removed message's `done` says it never ran.
+      hold = held()
+      const fourth = await m.send(session.id, browser, 'hold this', { queue: true })
+      expect(fourth.queued).toBeUndefined()
+      await poll(() => turns.length, 4)
+      const fifth = await m.send(session.id, browser, 'never mind', { queue: true })
+      await m.removeQueued(session.id, browser, fifth.turnId)
+      await expect(m.removeQueued(session.id, browser, fifth.turnId)).rejects.toMatchObject({ code: 'not_queued' })
+      expect(await fifth.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/left the queue before it started/) })
+      hold.release()
+      expect(await fourth.done).toMatchObject({ kind: 'result' })
+    })
+
+    it('deletes the images a queued message made once it is removed or refused, and none another message holds (#6413)', async () => {
+      const m = await durableManager()
+      const real = sessionFinishActivities(db.sql, m.events, undefined, new SessionBlobs(db.sql))
+      finish = real[SESSION_FINISH_ACTIVITY]
+      begin = real[SESSION_BEGIN_TURN_ACTIVITY]
+      queueChanged = real[SESSION_QUEUE_CHANGED_ACTIVITY]
+      const hold = held()
+      runTurn = async () => {
+        await hold.promise
+        return { status: 'done', hostQueue: '' }
+      }
+      const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+      const png = (tag: string): UserImage => {
+        const bytes = Buffer.concat([Buffer.from(pixel, 'base64'), Buffer.from(tag)])
+        return { mediaType: 'image/png', bytes, preview: { mediaType: 'image/png', bytes: Buffer.concat([bytes, Buffer.from('-small')]) } }
+      }
+      const [a, b, c] = [png('a'), png('b'), png('c')]
+      const names = (image: UserImage) => [sessionImage('image/png', image.bytes).name, sessionImage('image/png', image.preview.bytes).name]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      const stored = async () => (await db.sql<{ name: string }[]>`SELECT name FROM ai_session_blobs WHERE session_id = ${session.id}`).map((r) => r.name).sort()
+      await poll(() => turns.length, 1)
+      const kept = await m.send(session.id, browser, 'like this', { queue: true, images: [a] })
+      // Its write made only b's: a's were there already, and stay with `kept`.
+      const gone = await m.send(session.id, browser, 'or these', { queue: true, images: [a, b] })
+      expect(await stored()).toEqual([...names(a), ...names(b)].sort())
+      await m.removeQueued(session.id, browser, gone.turnId)
+      await poll(stored, names(a).sort())
+      // Refused when the queue is full: what its write made goes, before the caller hears it.
+      for (let i = 2; i < QUEUE_MAX + 1; i++) await m.send(session.id, browser, `filler ${i}`, { queue: true })
+      await expect(m.send(session.id, browser, 'one more', { queue: true, images: [c] })).rejects.toMatchObject({ code: 'queue_full' })
+      expect(await stored()).toEqual(names(a).sort())
+      hold.release()
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      expect(await kept.done).toMatchObject({ kind: 'result' })
+      expect(turns[1]?.message?.images?.map((i) => i.name)).toEqual([names(a)[0]])
+      await poll(async () => (await m.queued(session.id, browser)).queue, [])
+      expect(await stored()).toEqual(names(a).sort())
     })
 
     it('forks a unified session from its transcript; with none written it refuses as classic does (plan Step 6.3)', async () => {

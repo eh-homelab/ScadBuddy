@@ -68,6 +68,7 @@ import { trashFiledMockLibraryFiles } from './features/library'
 import { attachmentsOf } from './features/printAttachments'
 import { printersState } from './features/printers'
 import { mockRackCheck, mockRackPicks } from './features/rack'
+import { mockTowerCheck } from './towerCheck'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -80,6 +81,7 @@ import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
+import { normalisePresetText } from '../lib/presetName'
 import * as fixtures from './fixtures'
 import { UI_MODULES } from './templateUi'
 import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
@@ -1317,7 +1319,7 @@ export function cleanTags(tags: readonly string[]): string[] {
   const seen = new Set<string>()
   const cleaned: string[] = []
   for (const raw of tags) {
-    const tag = raw.trim().replace(/\s+/g, ' ')
+    const tag = normalisePresetText(raw)
     // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
     const key = tag.toUpperCase().toLowerCase()
     if (tag && !seen.has(key)) {
@@ -1989,7 +1991,7 @@ export const handlers = [
         if (preset.name.length > MAX_PRESET_NAME) {
           return shapeRefusal(`a preset name is at most ${MAX_PRESET_NAME} characters`)
         }
-        const name = preset.name.trim().replace(/\s+/g, ' ')
+        const name = normalisePresetText(preset.name)
         if (!name) return shapeRefusal('a preset needs a name')
         if (
           preset.id !== undefined &&
@@ -2566,7 +2568,7 @@ export const handlers = [
     const details = detailsRefusal(body.description, body.tags)
     if (details) return details
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
-    const name = body.name.trim().replace(/\s+/g, ' ')
+    const name = normalisePresetText(body.name)
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
     }
@@ -2596,7 +2598,7 @@ export const handlers = [
     const source = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!source) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
     const body = (await request.json()) as ParamPresetDuplicate
-    const name = body.name.trim().replace(/\s+/g, ' ')
+    const name = normalisePresetText(body.name)
     const refused = presetRefusal(slug, name, source.params, null)
     if (refused) return refused
     // Everything but the name is the original's, its description and tags too.
@@ -2624,7 +2626,7 @@ export const handlers = [
     if (id.startsWith('template-')) return templatePresetRefusal(slug, id)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Not Found', PRESET_GONE, { preset_id: id })
-    const name = body.name?.trim().replace(/\s+/g, ' ')
+    const name = body.name != null ? normalisePresetText(body.name) : undefined
     if (paramsClash(body.params, body.inputs)) {
       return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
     }
@@ -3039,6 +3041,7 @@ export const handlers = [
       created_at: new Date().toISOString(),
       has_thumbnail: false,
       sent_to_bambuddy: false,
+      source: 'back_office',
       params: job.params,
       // The inputs sent with Generate, else the job's own, as the backend records them.
       inputs: withVersion(body.inputs ?? job.inputs ?? { params: job.params }),
@@ -3627,13 +3630,15 @@ export const handlers = [
   http.post(`${base}/print/outputs/:id/check`, async ({ params, request }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
     // #836 — the mock H2C's rack preview, so the dialog's rack step can be exercised.
-    const body = (await request.json()) as { rack_position?: number | null }
+    const body = (await request.json()) as PrintRunRequest
     // #5627 — the process's own part settings, which "Settings for this colour" opens on,
     // only for a check that asks for them.
     const asked = new URL(request.url).searchParams.get('process_values') === 'true'
     return HttpResponse.json({
       ...mockRackCheck(body.rack_position ?? null),
       process_part_settings: asked ? MOCK_PROCESS_PARTS : null,
+      // #6758 — the prime tower judged before the slice.
+      prime_tower: mockTowerCheck(body),
     })
   }),
 

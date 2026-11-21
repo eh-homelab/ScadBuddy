@@ -23,8 +23,10 @@ the same file works unchanged on MakerWorld and in ScadBuddy.
 Coasters are laid out in a grid with `gap` mm between them, as many as fit the
 H2C plate (300 × 320 mm with both nozzles), in the squarest arrangement. A
 plate with more than one colour also leaves room for the prime tower:
-ScadBuddy reserves it against one edge (the 60 mm tower, its 3 mm brim each
-side, 5 mm to the parts and 2 mm to the edge), so the parts stay within
+ScadBuddy reserves it against one edge (the tower, its 3 mm brim each side,
+5 mm to the parts and 2 mm to the edge). The tower grows with the colours
+(#6735); the template keeps a 60 mm square for it, which holds up to six
+colours on the H2C, so the parts stay within
 227 × 320 or 300 × 247 mm (#1048). Six 95 mm coasters fit a plate with the
 tower, nine without it. Alternating colours count as a second colour even with
 no pattern, since every other body prints in the pattern colour. The tower is

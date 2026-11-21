@@ -2,15 +2,21 @@ import { formatMoney } from '../../lib/money'
 import type { StoreEstimate } from '../api/client'
 
 /**
- * The rough price of a render (spec §5.4): always an estimate, never a quote. It says so in
- * the one line the visitor reads. A render with a part the shop could not measure (an
- * open mesh, #6155), or no filament at all, has no honest rough price: the page then says
- * the shop prices it, never the price book's floor as if it were the design's. The grams
- * stay the shop's detail: the visitor reads only the price (owner, 2026-11-14).
+ * The price of a render (#6153, spec 2026-11-13 §5.4). A slice through the shop's own
+ * quote path gives it, so it is firm: the page shows the price and nothing else, never
+ * grams or print time (owner, 2026-11-14). While the slice runs, the page says it is
+ * working the price out. With no firm price (the slice failed, or the shop cannot slice
+ * this design), it shows no number at all: the shop prices the design by hand.
  */
 export function Estimate({ estimate }: { estimate: StoreEstimate }) {
-  const grams = Number(estimate.grams)
-  if (estimate.unknown_parts > 0 || !(grams > 0)) {
+  if (estimate.source === 'pending') {
+    return (
+      <div className="sf-estimate" role="status">
+        <p className="sf-estimate-price">Working out the price…</p>
+      </div>
+    )
+  }
+  if (estimate.source !== 'slice' || estimate.price_minor == null || !estimate.currency) {
     return (
       <div className="sf-estimate" role="status">
         <p className="sf-estimate-price">We price this design by hand</p>
@@ -18,10 +24,10 @@ export function Estimate({ estimate }: { estimate: StoreEstimate }) {
       </div>
     )
   }
-  const price = formatMoney(estimate.price_minor, estimate.currency, estimate.minor_exponent)
+  const price = formatMoney(estimate.price_minor, estimate.currency, estimate.minor_exponent ?? 2)
   return (
     <div className="sf-estimate" role="status">
-      <p className="sf-estimate-price">{`about ${price}, confirmed after we check it`}</p>
+      <p className="sf-estimate-price">{`${price} for one`}</p>
     </div>
   )
 }

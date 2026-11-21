@@ -4,7 +4,7 @@ import { checkCron, CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay
 import { checkSocketUrl, MONITOR_DEFAULT_MS, MONITOR_MAX_MS, shortDuration } from '../background/monitor.js'
 import { type BackgroundTask, MAX_ACTIVE } from '../background/store.js'
 import type { Owner } from '../sessions/protocol.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { workflowScriptPath, workspaceRelative } from '../background/activities.js'
 import { readDirFile, writeDirFile } from '../workspace/directory.js'
 import { readScript } from '../background/workflowRunner.js'
@@ -31,7 +31,7 @@ export type BackgroundContext = {
    */
   commandQueue?: string | undefined
   /** The session workspace: a Workflow's script is kept there without a working directory, and a scriptPath read from it. */
-  workspace?: Pick<SessionFiles, 'read' | 'write'> | undefined
+  workspace?: Pick<WorkspaceFiles, 'read' | 'write'> | undefined
   /**
    * The turn's working directory (workspace/directory.ts), where Claude Code's own file tools
    * work: a Workflow's script is kept there, and a scriptPath read from there first (#5162).

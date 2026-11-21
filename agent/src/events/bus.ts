@@ -5,8 +5,8 @@ import { z } from 'zod'
 // The backend publishes every state change as a small event — its `kind` plus
 // the ids of what changed, never content — into its `events` log and, in the
 // same transaction, `pg_notify('scadbuddy_events', <the event as JSON>)`
-// (backend/scadbuddy/core/events.py, pg_events.py). The agent LISTENs on the
-// same channel on a connection of its own (pgListener.ts) and hands each event
+// (backend/scadbuddy/core/events.py, pg_events.py). The agent hears the
+// channel over the API's change stream (changeStream.ts, #5299 D4) and hands each event
 // to whoever follows the bus here: the MCP resource hub
 // (src/resources/hub.ts) and the session event log's wake-ups
 // (src/sessions/busEvents.ts, which also publishes the agent's own
@@ -69,12 +69,12 @@ export type EventListener = {
   /** One event, in the order this process heard it. Must not throw or block. */
   onEvent(event: BusEvent): void
   /**
-   * Events may have been missed (the LISTEN connection dropped and the gap
-   * could not be replayed from the log): re-read everything followed.
+   * Events may have been missed (the change stream dropped and the API could
+   * not replay the gap from the log): re-read everything followed.
    */
   onResync(): void
   /**
-   * The LISTEN connection came back after a drop, and the backend's `events`
+   * The change stream came back after a drop, and the backend's `events`
    * log has been replayed. Kinds that are NOTIFY-only, with no row in that log
    * (the agent's own `session.*`, sessions/busEvents.ts), sent while it was
    * down are gone: a follower of those re-reads them here.
@@ -82,7 +82,7 @@ export type EventListener = {
   onReconnect?(): void
 }
 
-/** What the resource hub follows: the Postgres listener, or a test's in-memory source. */
+/** What the resource hub follows: the change stream, or a test's in-memory source. */
 export interface EventSource {
   /** Starts delivering to `listener`; returns the function that stops it. */
   follow(listener: EventListener): () => void

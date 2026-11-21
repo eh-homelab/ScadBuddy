@@ -13,10 +13,14 @@ Every number here comes from Bambu Studio's own profiles:
 
 * the plate polygons are generated into :mod:`scadbuddy.render.plate_profiles`
   from ``resources/profiles/BBL/machine/*.json``;
-* :data:`PRIME_TOWER_SIDE` is the largest ``prime_tower_width`` in the BBL
-  process profiles (60 mm, in 90 of the 91 of them; ``PrintConfig.cpp``'s own
-  default is 35). The tower's *depth* is computed by the slicer from the flush
-  volumes, so the reservation is square at the widest width rather than guessed;
+* the tower's size is :func:`tower_footprint`: Bambu Studio's own estimate of it
+  (``Print::wipe_tower_data``), from the filaments on the plate, the prime volume and
+  the plate's height (#6735). With the rib wall (on by default; no H2C process preset
+  turns it off) the tower is a square whose side grows with those; without it the tower is
+  ``prime_tower_width`` wide (:data:`PRIME_TOWER_SIDE`, the largest in the BBL
+  process profiles) and its depth grows with them;
+* with ``wipe_tower_no_sparse_layers`` the objects keep the slicer's keep-out from the
+  tower (:func:`tower_footprint`, ``TowerFootprint.keep_out``);
 * the brim reserved round the tower is :func:`tower_brim`: the larger of
   ``prime_tower_brim_width``'s 3 mm default (:data:`PRIME_TOWER_BRIM`) and the brim
   Bambu Studio draws when that option is ``-1`` ("Auto"), which grows with the
@@ -60,6 +64,8 @@ Two kinds of area are kept clear, and not in the same way (#122):
 
 from __future__ import annotations
 
+import itertools
+import math
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -71,11 +77,49 @@ from scadbuddy.render.plate_profiles import (
     BED_TYPES,
     EXTRA_ALIASES,
     PLATE_PROFILES,
+    TOWER_KEEP_OUTS,
 )
 
-#: Widest ``prime_tower_width`` across BBL process profiles, and the side of the
-#: square this module reserves for the tower.
+#: Widest ``prime_tower_width`` across BBL process profiles (60 mm, in 90 of the 91 of
+#: them; ``PrintConfig.cpp``'s own default is 35): the tower's width when the file
+#: states no width and the rib wall off.
 PRIME_TOWER_SIDE = 60.0
+
+# What Bambu Studio estimates the tower from, before a slice
+# (``Print::wipe_tower_data``, src/libslic3r/Print.cpp L3243-3311 at tag v02.08.02.61).
+# The process and filament presets are not known where the tower is placed, so each
+# value is the BBL presets' default or their largest (#6735).
+
+#: ``filament_prime_volume``, mm³: ``PrintConfig.cpp`` L2922-2929 and
+#: ``fdm_filament_common.json`` state 45. Every BBL ``@base`` and H2C filament preset
+#: states 30 or none, so 45 is the largest.
+PRIME_VOLUME = 45.0
+#: ``filament_change_length``, mm: ``PrintConfig.cpp`` L2826-2832 states 10. The largest
+#: BBL filament preset is 12 (``Bambu PETG HF @base.json``).
+FILAMENT_CHANGE_LENGTH = 12.0
+#: ``filament_diameter``, mm, of every BBL filament preset.
+FILAMENT_DIAMETER = 1.75
+#: ``layer_height``, mm, of ``fdm_process_common.json`` and the "0.20mm Standard"
+#: presets. A finer process makes a larger tower (the side grows as 1/sqrt of it).
+LAYER_HEIGHT = 0.2
+#: ``prime_tower_infill_gap``, 150 % (``PrintConfig.cpp`` L6294-6300); the H2C process
+#: presets state no other value.
+PRIME_TOWER_INFILL_GAP = 1.5
+#: ``prime_tower_rib_width``, mm (``PrintConfig.cpp`` L6262-6269).
+PRIME_TOWER_RIB_WIDTH = 8.0
+#: ``WipeTower::min_depth_per_height`` (src/libslic3r/GCode/WipeTower.cpp L1587-1589):
+#: (tower height, least depth), mm, interpolated between the points.
+MIN_DEPTH_PER_HEIGHT = ((5.0, 5.0), (100.0, 20.0), (250.0, 40.0), (350.0, 60.0))
+#: ``MAX_OUTER_NOZZLE_RADIUS`` (src/libslic3r/Print.hpp L45), mm: the keep-out for an
+#: object no taller than ``nozzle_height``.
+NOZZLE_CONE_RADIUS = 4.0
+#: ``GCodeWriter::slope_threshold`` (src/libslic3r/GCodeWriter.cpp L19), 3 degrees: it
+#: sets the radius of the spiral lift round the tower.
+_SLOPE_THRESHOLD = 3 * math.pi / 180
+#: The widest nozzle in the BBL machine presets, mm. Bambu Studio pads the tower by
+#: 2 x the nozzle per side before the "No sparse layers" check
+#: (``compacted_tower_footprint_padding``, ``Print.cpp`` L3335-3348).
+WIDEST_NOZZLE = 0.8
 #: ``prime_tower_brim_width``'s default (``PrintConfig.cpp``, and BBL's
 #: ``fdm_process_common.json``), extending outside the tower footprint: the least
 #: brim reserved, for a preset that states a width.
@@ -115,6 +159,132 @@ def tower_brim(height: float | None) -> float:
         return PRIME_TOWER_AUTO_BRIM
     auto = PRIME_TOWER_AUTO_BRIM * min(max(height, 0.0), AUTO_BRIM_FULL_HEIGHT)
     return max(PRIME_TOWER_BRIM, auto / AUTO_BRIM_FULL_HEIGHT)
+
+
+@dataclass(frozen=True)
+class TowerSettings:
+    """The settings the slice builds a plate's prime tower from (#6735)."""
+
+    #: Filaments the plate prints with. The tower grows with them.
+    filaments: int = 2
+    #: ``wipe_tower_no_sparse_layers``: the objects then keep the slicer's keep-out.
+    no_sparse_layers: bool = False
+    #: ``prime_tower_rib_wall``, on by default (``PrintConfig.cpp`` L6281-6286); no H2C
+    #: process preset turns it off. The tower is then a square.
+    rib_wall: bool = True
+    #: ``prime_tower_width``, which sets the width only with the rib wall off.
+    width: float = PRIME_TOWER_SIDE
+
+
+@dataclass(frozen=True)
+class TowerFootprint:
+    """A prime tower on the plate, as :func:`tower_footprint` estimates it (#6735)."""
+
+    #: The tower's own size on X and Y, mm, without the brim.
+    width: float
+    depth: float
+    #: The brim round the tower (:func:`tower_brim`).
+    brim: float
+    #: The least gap, mm, the slicer accepts between the tower with its brim and an
+    #: object: 0 (no overlap) unless "No sparse layers" sets a keep-out.
+    keep_out: float
+
+    @property
+    def size(self) -> tuple[float, float]:
+        """The tower with its brim, mm, on X and Y."""
+        return (self.width + 2 * self.brim, self.depth + 2 * self.brim)
+
+    @property
+    def clearance(self) -> float:
+        """The gap ScadBuddy keeps between the tower with its brim and the objects."""
+        return max(TOWER_CLEARANCE, self.keep_out)
+
+
+def min_tower_depth(height: float) -> float:
+    """``WipeTower::get_limit_depth_by_height`` (WipeTower.cpp L1591-1625): the least
+    depth of a tower as tall as ``height``."""
+    points = MIN_DEPTH_PER_HEIGHT
+    if height <= points[0][0]:
+        return points[0][1]
+    for (h0, d0), (h1, d1) in itertools.pairwise(points):
+        if height < h1:
+            return d0 + (height - h0) / (h1 - h0) * (d1 - d0)
+    return points[-1][1]
+
+
+def _keep_out(plate: PlateGeometry, height: float | None) -> float:
+    """The gap the "No sparse layers" check needs between the tower with its brim and
+    objects as tall as ``height`` (``None``: tall), mm; 0 for a printer with no profile.
+
+    ``Print::compacted_wipe_tower_clearance_valid`` (``Print.cpp`` L3542-3598) grows the
+    tower by the spiral lift's reach, ``2 * z_hop / (2 pi atan(slope_threshold))``
+    (``compacted_wipe_tower_zone``, L3358-3405), and pads it by its brim plus 2 x the
+    nozzle (L3335-3348). It then needs ``extruder_clearance_max_radius`` - 0.2 mm between
+    that outline and an object taller than ``nozzle_height``, else
+    ``MAX_OUTER_NOZZLE_RADIUS`` - 0.2 mm (``compacted_wipe_tower_clearance``, L3432-3433;
+    ``compacted_tower_half_clearance``, Print.hpp L1270, half on each side). Only the
+    objects' box is known here, so the gap is kept as a box, never as a circle round
+    the corners: a stricter test than the slicer's."""
+    spec = TOWER_KEEP_OUTS.get(plate.model) if plate.model is not None else None
+    if spec is None:
+        return 0.0
+    radius, nozzle_height, z_hop = spec
+    reach = 2 * z_hop / (2 * math.pi * math.atan(_SLOPE_THRESHOLD))
+    short = height is not None and height <= nozzle_height
+    clearance = NOZZLE_CONE_RADIUS if short else radius
+    return (clearance - 0.2) + reach + 2 * WIDEST_NOZZLE
+
+
+def tower_footprint(
+    plate: PlateGeometry, height: float | None, settings: TowerSettings | None = None
+) -> TowerFootprint:
+    """The prime tower the slice builds on ``plate`` for objects as tall as ``height``
+    (``None``: the plate's printable height), with ``settings`` (#6735).
+
+    Bambu Studio's own estimate before a slice (``Print::wipe_tower_data``,
+    ``Print.cpp`` L3243-3311), which its "No sparse layers" check also places
+    (``estimated_wipe_tower_footprint``, L3488-3535):
+
+    * volume = prime volume x N, where N is the filaments on a two-nozzle printer and
+      one less elsewhere (L3282-3285); a two-nozzle printer adds
+      ``filament_change_length`` x the filament's section for every two filaments
+      (L3261-3273, L3286);
+    * rib wall: depth = max(least depth for the height, sqrt(volume / layer height x
+      infill gap)) + rib width / sqrt(2) (L3288-3295), and the width is the depth
+      (L3512; ``WipeTower::plan_tower_new`` squares the real tower, WipeTower.cpp
+      L4528);
+    * no rib wall: the width is ``prime_tower_width`` and depth = max(least depth,
+      volume / (layer height x width) x infill gap) (L3297-3306).
+
+    One filament still gets a tower of one prime volume, as a smooth timelapse makes one
+    (L3284). The brim is :func:`tower_brim`'s."""
+    settings = settings or TowerSettings()
+    tall = plate.height if height is None else height
+    two_nozzles = plate.extruders == 2
+    # The clamp matters only for a smooth timelapse, which prints a tower for one
+    # filament. Every caller that places objects passes `tower=False` for one filament.
+    # Only the send's `towers_within_reach` judges such a tower, for that reason (#6757).
+    filaments = max(settings.filaments, 1)
+    counted = filaments if two_nozzles else max(filaments - 1, 1)
+    volume = PRIME_VOLUME * counted
+    if two_nozzles:
+        section = math.pi * FILAMENT_DIAMETER**2 / 4
+        volume += FILAMENT_CHANGE_LENGTH * section * (filaments // 2)
+    least = min_tower_depth(tall)
+    if settings.rib_wall:
+        depth = max(least, math.sqrt(volume / LAYER_HEIGHT * PRIME_TOWER_INFILL_GAP))
+        depth += PRIME_TOWER_RIB_WIDTH / math.sqrt(2)
+        width = depth
+    else:
+        # A width of 0 or less (or not finite) is no width: the default, not a division.
+        width = (
+            settings.width
+            if math.isfinite(settings.width) and settings.width > 0
+            else PRIME_TOWER_SIDE
+        )
+        depth = max(least, volume / (LAYER_HEIGHT * width) * PRIME_TOWER_INFILL_GAP)
+    keep_out = _keep_out(plate, height) if settings.no_sparse_layers else 0.0
+    return TowerFootprint(width, depth, tower_brim(height), keep_out)
 
 
 @dataclass(frozen=True)
@@ -318,7 +488,7 @@ def _clear_of_exclusions(
     return None
 
 
-def _tower_sides(inset: Rect, area: Rect, tower: float) -> list[tuple[str, Rect, Rect]]:
+def _tower_sides(inset: Rect, area: Rect, tower: TowerFootprint) -> list[tuple[str, Rect, Rect]]:
     """``(name, strip, remainder)`` for each edge the tower could sit against.
 
     Two rectangles, deliberately not the same one. The ``strip`` the tower takes
@@ -331,58 +501,62 @@ def _tower_sides(inset: Rect, area: Rect, tower: float) -> list[tuple[str, Rect,
     (300 mm of reachable width) was rejected with "no room for the prime tower"
     while a valid placement existed — object at (175, 195.5), tower at (145, 5).
 
-    Only the axis the tower eats into is narrowed, and by ``band``: the tower
-    plus the clearance the object has to keep from it.
+    Only the axis the tower eats into is narrowed, and by the tower's size on that
+    axis plus the clearance the object has to keep from it (``TowerFootprint.clearance``).
     """
-    band = tower + TOWER_CLEARANCE
+    tx, ty = tower.size
+    gap = tower.clearance
     return [
         (
             "front",
-            Rect(inset.min_x, inset.min_y, inset.max_x, inset.min_y + tower),
-            Rect(area.min_x, inset.min_y + band, area.max_x, area.max_y),
+            Rect(inset.min_x, inset.min_y, inset.max_x, inset.min_y + ty),
+            Rect(area.min_x, inset.min_y + ty + gap, area.max_x, area.max_y),
         ),
         (
             "back",
-            Rect(inset.min_x, inset.max_y - tower, inset.max_x, inset.max_y),
-            Rect(area.min_x, area.min_y, area.max_x, inset.max_y - band),
+            Rect(inset.min_x, inset.max_y - ty, inset.max_x, inset.max_y),
+            Rect(area.min_x, area.min_y, area.max_x, inset.max_y - ty - gap),
         ),
         (
             "left",
-            Rect(inset.min_x, inset.min_y, inset.min_x + tower, inset.max_y),
-            Rect(inset.min_x + band, area.min_y, area.max_x, area.max_y),
+            Rect(inset.min_x, inset.min_y, inset.min_x + tx, inset.max_y),
+            Rect(inset.min_x + tx + gap, area.min_y, area.max_x, area.max_y),
         ),
         (
             "right",
-            Rect(inset.max_x - tower, inset.min_y, inset.max_x, inset.max_y),
-            Rect(area.min_x, area.min_y, inset.max_x - band, area.max_y),
+            Rect(inset.max_x - tx, inset.min_y, inset.max_x, inset.max_y),
+            Rect(area.min_x, area.min_y, inset.max_x - tx - gap, area.max_y),
         ),
     ]
 
 
 def _tower_corner(
-    side: str, strip: Rect, object_rect: Rect, plate: PlateGeometry, tower: float, brim: float
+    side: str, strip: Rect, object_rect: Rect, plate: PlateGeometry, tower: TowerFootprint
 ) -> tuple[float, float] | None:
     """Centre the tower in ``strip`` on the object's cross axis, then check it.
 
-    ``object_rect`` is grown by :data:`TOWER_CLEARANCE` before the overlap test, so
-    the gap the constant promises holds on this path too and not only where a strip
-    was reserved. Without that a tower could end up flush against the object — 2 mm
-    away for a 280x180 model on an H2C — while every assertion still passed.
+    ``object_rect`` is grown by the tower's clearance (:data:`TOWER_CLEARANCE`, or the
+    "No sparse layers" keep-out) before the overlap test, so the gap holds on this path
+    too and not only where a strip was reserved. Without that a tower could end up
+    flush against the object — 2 mm away for a 280x180 model on an H2C — while every
+    assertion still passed.
     """
+    tx, ty = tower.size
     if side in ("front", "back"):
-        x = object_rect.centre[0] - tower / 2
-        x = min(max(x, strip.min_x), strip.max_x - tower)
+        x = object_rect.centre[0] - tx / 2
+        x = min(max(x, strip.min_x), strip.max_x - tx)
         y = strip.min_y
     else:
         x = strip.min_x
-        y = object_rect.centre[1] - tower / 2
-        y = min(max(y, strip.min_y), strip.max_y - tower)
-    footprint = Rect(x, y, x + tower, y + tower)
+        y = object_rect.centre[1] - ty / 2
+        y = min(max(y, strip.min_y), strip.max_y - ty)
+    footprint = Rect(x, y, x + tx, y + ty)
+    gap = tower.clearance
     keep_clear = Rect(
-        object_rect.min_x - TOWER_CLEARANCE,
-        object_rect.min_y - TOWER_CLEARANCE,
-        object_rect.max_x + TOWER_CLEARANCE,
-        object_rect.max_y + TOWER_CLEARANCE,
+        object_rect.min_x - gap,
+        object_rect.min_y - gap,
+        object_rect.max_x + gap,
+        object_rect.max_y + gap,
     )
     if footprint.overlaps(keep_clear):
         return None
@@ -391,7 +565,7 @@ def _tower_corner(
     if any(footprint.overlaps(zone) for zone in plate.wrapping_exclusions):
         return None
     # ``wipe_tower_x``/``_y`` name the tower itself; the brim sits outside it.
-    return (x + brim, y + brim)
+    return (x + tower.brim, y + tower.brim)
 
 
 Axis = Literal["X", "Y", "Z"]
@@ -415,15 +589,22 @@ def overshoots(
 
 
 def fit_problem(
-    size: tuple[float, float, float], plate: PlateGeometry, *, tower: bool
+    size: tuple[float, float, float],
+    plate: PlateGeometry,
+    *,
+    tower: bool,
+    settings: TowerSettings | None = None,
 ) -> str | None:
     """Why :func:`place_on_plate` would refuse a model of ``size``, or ``None``.
 
     The same call the send makes, so the customizer's warning covers what an axis
     comparison cannot: the prime tower's room and the filament-cutter cutout (#81).
+    ``settings`` sizes the tower (:func:`tower_footprint`, #6735).
     """
     try:
-        place_on_plate(np.array([[0.0, 0.0, 0.0], list(size)]), plate, tower=tower)
+        place_on_plate(
+            np.array([[0.0, 0.0, 0.0], list(size)]), plate, tower=tower, settings=settings
+        )
     except PlateFitError as error:
         return str(error)
     return None
@@ -461,17 +642,21 @@ def _tower_inset(plate: PlateGeometry) -> Rect:
 
 
 def tower_beside(
-    object_rect: Rect, plate: PlateGeometry, height: float | None = None
+    object_rect: Rect,
+    plate: PlateGeometry,
+    height: float | None = None,
+    settings: TowerSettings | None = None,
 ) -> tuple[float, float] | None:
     """The ``wipe_tower_x``/``_y`` of a tower against the first edge of the reachable
-    area it fits on clear of ``object_rect`` (:data:`TOWER_CLEARANCE`) and of the
+    area it fits on clear of ``object_rect`` (``TowerFootprint.clearance``) and of the
     plate's cutouts, as :func:`place_on_plate` puts one beside a centred object; None
     when no edge has room. ``height`` is the tallest object's, which sets the brim
-    (:func:`tower_brim`); ``None`` reserves the widest."""
-    brim = tower_brim(height)
-    reserved = PRIME_TOWER_SIDE + 2 * brim
-    for side, strip, _remainder in _tower_sides(_tower_inset(plate), plate.usable, reserved):
-        corner = _tower_corner(side, strip, object_rect, plate, reserved, brim)
+    (:func:`tower_brim`) and, with ``settings``, the tower's size
+    (:func:`tower_footprint`). A ``height`` of ``None`` reserves the largest brim and
+    keep-out; ``settings`` of ``None`` sizes the tower for the default two filaments."""
+    tower = tower_footprint(plate, height, settings)
+    for side, strip, _remainder in _tower_sides(_tower_inset(plate), plate.usable, tower):
+        corner = _tower_corner(side, strip, object_rect, plate, tower)
         if corner is not None:
             return corner
     return None
@@ -480,18 +665,16 @@ def tower_beside(
 def tower_reaches(
     corner: tuple[float, float],
     plate: PlateGeometry,
-    side: float = PRIME_TOWER_SIDE,
     height: float | None = None,
+    settings: TowerSettings | None = None,
 ) -> bool:
-    """Whether a tower ``side`` wide at ``wipe_tower_x``/``_y`` ``corner`` lies, brim
-    included, where every extruder reaches, clear of the plate's cutouts. ``side`` is
-    the file's own ``prime_tower_width`` where it states one: judged by the square
-    :func:`place_on_plate` reserves, an A1 mini's own tower at (15, 145) would not fit
-    the A1 mini. ``height`` sets the brim as in :func:`tower_beside`."""
-    brim = tower_brim(height)
-    reserved = side + 2 * brim
-    x, y = corner[0] - brim, corner[1] - brim
-    footprint = Rect(x, y, x + reserved, y + reserved)
+    """Whether the tower :func:`tower_footprint` gives for ``height`` and ``settings``,
+    at ``wipe_tower_x``/``_y`` ``corner``, lies, brim included, where every extruder
+    reaches, clear of the plate's cutouts. An A1 mini's own two-filament tower at
+    (15, 145) fits the A1 mini."""
+    tower = tower_footprint(plate, height, settings)
+    x, y = corner[0] - tower.brim, corner[1] - tower.brim
+    footprint = Rect(x, y, x + tower.size[0], y + tower.size[1])
     inset = _tower_inset(plate)
     if (
         footprint.min_x < inset.min_x
@@ -505,7 +688,13 @@ def tower_reaches(
     )
 
 
-def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = True) -> Placement:
+def place_on_plate(
+    bounds: np.ndarray,
+    plate: PlateGeometry,
+    *,
+    tower: bool = True,
+    settings: TowerSettings | None = None,
+) -> Placement:
     """Centre ``bounds`` on ``plate`` and pick a prime-tower corner clear of it.
 
     ``bounds`` is a ``(2, 3)`` min/max array in the mesh's own coordinates. The
@@ -517,6 +706,9 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
     shifted off centre — a strip is reserved against one edge and the object is
     centred in what is left. Only when no edge works is this a
     :class:`PlateFitError`, raised before anything is written or uploaded.
+
+    The tower is the one :func:`tower_footprint` gives for the object's height and
+    ``settings`` (#6735).
     """
     low, high = bounds[0], bounds[1]
     width, depth = float(high[0] - low[0]), float(high[1] - low[1])
@@ -558,33 +750,37 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
         return Placement(offset=_offset(centre), tower=None)
 
     height = float(high[2] - low[2])
-    brim = tower_brim(height)
-    reserved = PRIME_TOWER_SIDE + 2 * brim
+    footprint = tower_footprint(plate, height, settings)
     inset = _tower_inset(plate)
 
     # First choice: the object stays centred and the tower takes whichever edge
     # it fits against. Only if none does is the object moved.
     object_centre = _clear_of_exclusions(area.centre, width, depth, plate)
     if object_centre is not None:
-        corner = tower_beside(_rect_at(object_centre), plate, height)
+        corner = tower_beside(_rect_at(object_centre), plate, height, settings)
         if corner is not None:
             return Placement(offset=_offset(object_centre), tower=corner)
 
-    for side, strip, remainder in _tower_sides(inset, area, reserved):
+    for side, strip, remainder in _tower_sides(inset, area, footprint):
         if width > remainder.width or depth > remainder.depth:
             continue
         moved_centre = _clear_of_exclusions(remainder.centre, width, depth, plate, region=remainder)
         if moved_centre is None:
             continue
         moved = _rect_at(moved_centre)
-        corner = _tower_corner(side, strip, moved, plate, reserved, brim)
+        corner = _tower_corner(side, strip, moved, plate, footprint)
         if corner is not None:
             return Placement(offset=_offset(moved_centre), tower=corner)
 
     reach = f"reachable by all {plate.extruders} extruders" if plate.extruders > 1 else "printable"
+    keep_out = (
+        f', {footprint.keep_out:.0f} mm from the objects as "No sparse layers" needs,'
+        if footprint.keep_out > TOWER_CLEARANCE
+        else ""
+    )
     raise PlateFitError(
         f"the model is {width:.1f} x {depth:.1f} mm, which leaves no room for the "
-        f"{PRIME_TOWER_SIDE:.0f} mm prime tower a multi-colour print needs on "
-        f"{plate.model or 'the default plate'} "
+        f"{footprint.width:.0f} x {footprint.depth:.0f} mm prime tower a multi-colour "
+        f"print needs{keep_out} on {plate.model or 'the default plate'} "
         f"({area.width:.0f} x {area.depth:.0f} mm {reach})"
     )

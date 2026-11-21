@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import health
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
@@ -114,3 +118,77 @@ def test_the_environment_overrides_every_field(monkeypatch: pytest.MonkeyPatch) 
     assert Settings().bambuddy_url == "https://bambuddy.test"
     assert Settings().revision == "0123456789abcdef0123456789abcdef01234567"
     assert Settings().version == "1.2.3"
+
+
+async def test_a_stalled_data_dir_never_holds_healthz(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hard NFS mount holds `access` until the NAS answers (#6418).
+    release = threading.Event()
+    calls: list[Path] = []
+
+    def stalled_access(path: object, mode: int) -> bool:
+        calls.append(Path(str(path)))
+        release.wait(10)
+        return True
+
+    monkeypatch.setattr(health, "FIRST_CHECK_WAIT", 0.05)
+    monkeypatch.setattr(os, "access", stalled_access)
+    check = health.DataDirCheck(tmp_path, ttl=0)
+    try:
+        assert await asyncio.wait_for(check.writable(), 1) is False
+        # A second call while the first check hangs starts no second one.
+        assert await asyncio.wait_for(check.writable(), 1) is False
+        assert calls == [tmp_path]
+    finally:
+        release.set()
+    for _ in range(1000):
+        if await check.writable():
+            break
+        await asyncio.sleep(0.01)
+    assert await check.writable() is True
+
+
+async def test_a_data_dir_that_stalls_after_a_good_check_turns_not_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stalled = threading.Event()
+    release = threading.Event()
+
+    def access(path: object, mode: int) -> bool:
+        if stalled.is_set():
+            release.wait(10)
+        return True
+
+    monkeypatch.setattr(health, "STALLED_AFTER", 0.05)
+    monkeypatch.setattr(os, "access", access)
+    check = health.DataDirCheck(tmp_path, ttl=0)
+    try:
+        assert await check.writable() is True
+        stalled.set()
+        await asyncio.sleep(0.01)  # let the previous call's check finish
+        await check.writable()  # starts the check that stalls
+        await asyncio.sleep(0.1)
+        assert await check.writable() is False
+    finally:
+        release.set()
+
+
+async def test_the_data_dir_answer_is_reused_until_it_is_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def counted(path: object, mode: int) -> bool:
+        calls.append(mode)
+        return True
+
+    monkeypatch.setattr(os, "access", counted)
+    check = health.DataDirCheck(tmp_path, ttl=3600)
+    assert await check.writable() is True
+    assert await check.writable() is True
+    assert calls == [os.W_OK]
+
+
+async def test_a_missing_data_dir_is_not_writable(tmp_path: Path) -> None:
+    assert await health.DataDirCheck(tmp_path / "gone").writable() is False

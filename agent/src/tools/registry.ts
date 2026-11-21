@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { AttachmentStore } from '../attachments/store.js'
+import type { Attachments } from '../attachments/store.js'
 import type { StoredBlob } from '../sessions/blobs.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
@@ -9,7 +9,7 @@ import { hasTier, type Principal, type Tier } from '../auth/principal.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
-import { type SessionFiles, workspaceOf } from '../workspace/store.js'
+import { type WorkspaceFiles, workspaceOf } from '../workspace/store.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
@@ -38,6 +38,9 @@ export type BambuddyScope =
   | 'Control Printer'
   /** #4747: Bambuddy's `settings:update`, which no API key holds while its auth is on. */
   | 'Settings (admin only)'
+  /** #6265: Bambuddy's `FILAMENTS_CREATE`/`FILAMENTS_UPDATE`, which no API key holds while its auth is on. */
+  | 'Filament catalog (admin only)'
+  | 'Manage Inventory'
 
 type HttpMethod = 'get' | 'put' | 'post' | 'delete' | 'patch'
 type MethodsOf<P extends keyof paths> = {
@@ -105,12 +108,12 @@ export type ToolServices = {
   /** The sessions the `sessions_*` tools act on (tools/sessions.ts, #300); none without a database. */
   sessions?: SessionManager | undefined
   /** Uploaded images `sessions_send` may name (#1941, attachments/store.ts); none without a database. */
-  attachments?: AttachmentStore | undefined
+  attachments?: Attachments | undefined
   /**
    * The assistant's workspace (#2329, workspace/store.ts): the session's files, or
    * the principal's own outside a session. The workspace_* tools refuse without it.
    */
-  workspace?: SessionFiles | undefined
+  workspace?: WorkspaceFiles | undefined
   /**
    * The secrets a tool must never hand the model (#2329): every saved Claude
    * credential's and every plugin secret (main.ts, plugins/secrets.ts
@@ -304,10 +307,9 @@ export type ToolSpec<S extends z.ZodRawShape> = {
    * Every write the handler makes is one `command()` (tools/command.ts) to a route that runs
    * it as an operation keyed by the call's Idempotency-Key (backend api/operations.py:
    * workflow `op-<kind>-<key>`), so a second run of the same call, with the same `callKey`,
-   * is answered from the first's operation and does nothing twice. A flow's call whose attempt
-   * lost its heartbeat is to be asked once more on that (#6345, the backend half in #6355);
-   * until that lands, a keyed write is not retried. Only for a handler that writes nothing any
-   * other way.
+   * is answered from the first's operation and does nothing twice. A flow's call whose only
+   * attempt lost its heartbeat is asked once more on that (backend workflows/flow_tools.py
+   * FLOW_KEYED_RETRY_PATCH, #6345). Only for a handler that writes nothing any other way.
    */
   keyed?: boolean
   /** The backend operations this tool covers, for the openapi coverage check. */

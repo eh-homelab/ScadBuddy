@@ -30,6 +30,12 @@ type V1PrintLibraryWithFile_ItemRequestBuilderPatchRequestConfiguration struct {
 	Options []i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestOption
 }
 
+// Associations the associations property
+// returns a *V1PrintLibraryItemAssociationsRequestBuilder when successful
+func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Associations() *V1PrintLibraryItemAssociationsRequestBuilder {
+	return NewV1PrintLibraryItemAssociationsRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
 // Check the check property
 // returns a *V1PrintLibraryItemCheckRequestBuilder when successful
 func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Check() *V1PrintLibraryItemCheckRequestBuilder {

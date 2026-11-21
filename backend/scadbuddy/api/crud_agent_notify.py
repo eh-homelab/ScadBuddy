@@ -18,6 +18,9 @@ agent that still reads the table over SQL with the KEK, and the other way round 
   ``GET …/push/subscriptions`` lists them with their keys opened, skipping one the key does
   not open;
 - ``POST …/push/sent`` claims telling a target of a request, once across replicas;
+- ``GET …/push/waiting`` the flow grants waiting for a person, by id (#6399), which the
+  agent pushes beside its own pending input; ``POST …/push/poll-lease`` lets one agent
+  replica a window run that timed poll;
 - ``…/notify-channels``: the list (never a token), a create and an update (the token sealed
   with the channel's id, kind and URL; an update with ``keep_token`` keeps the sealed one
   only while the kind and URL are unchanged), a delete, a channel opened for a send, the
@@ -32,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -44,6 +47,7 @@ from scadbuddy.agent_data.notify import VAPID_AAD
 from scadbuddy.agent_data.notify import channel_aad as _channel_aad
 from scadbuddy.agent_data.notify import subscription_aad as _subscription_aad
 from scadbuddy.api.deps import StateDep
+from scadbuddy.api.flow_triggers import GRANT_REQUESTS_MAX
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import (
     Envelope,
@@ -54,6 +58,7 @@ from scadbuddy.core.secrets import (
     seal_secret,
 )
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.flow_triggers.component import TriggersDep
 from scadbuddy.library.settings_store import settings_kek
 
 router = crud_router("agent")
@@ -352,6 +357,89 @@ async def push_sent(body: SentClaim, state: StateDep) -> Claimed:
         return row is not None
 
     return Claimed(claimed=await _in_tx(state, run))
+
+
+#: The agent's ``notify/dispatcher.ts`` ``WAITING_PUSH_WINDOW_MS``: a request older than
+#: this is not pushed, so it is not listed.
+PUSH_WINDOW = timedelta(hours=24)
+
+
+def _epoch_s(at: datetime) -> int:
+    """Whole seconds since the epoch, floored: the page's ``Math.floor(Date.parse(at) / 1000)``."""
+    return (at - _EPOCH) // timedelta(seconds=1)
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+class PollLease(_Body):
+    #: The poll's name: one lease row each (``lease:<name>`` in ``ai_notifications_sent``).
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
+    #: How long a holder keeps it: no other caller takes it again sooner.
+    seconds: int = Field(ge=1, le=3600)
+
+
+class Held(BaseModel):
+    held: bool
+
+
+@router.post("/push/poll-lease", name="crud_agent_push_poll_lease")
+async def push_poll_lease(body: PollLease, state: StateDep) -> Held:
+    """#6399: one agent replica a window runs a timed poll (the Web Push pass over the
+    waiting grants and pairings). One row per poll name, upserted: taken when it is new or
+    its last take is at least ``seconds`` old by the database's clock, so the replicas'
+    clocks never decide it, and it is refreshed on each take, so the 2-day sweep of
+    ``ai_notifications_sent`` never reaches it while a replica polls."""
+
+    def run(conn: psycopg.Connection[Any]) -> bool:
+        row = conn.execute(
+            "INSERT INTO ai_notifications_sent (request_id, target) VALUES (%s, 'lease')"
+            " ON CONFLICT (request_id, target) DO UPDATE SET sent_at = now()"
+            " WHERE ai_notifications_sent.sent_at <= now() - make_interval(secs => %s)"
+            " RETURNING 1",
+            (f"lease:{body.name}", body.seconds),
+        ).fetchone()
+        return row is not None
+
+    return Held(held=await _in_tx(state, run))
+
+
+class WaitingRequest(BaseModel):
+    """A flow grant waiting for a person's decision, as a push names it: the id the page's
+    own notification uses as its tag (frontend `lib/needsYou.ts`), never what it asks."""
+
+    id: str
+    reason: Literal["grant"]
+    #: When it started to wait: the agent pushes it only while it is young, so a swept claim
+    #: (``SENT_KEEP_DAYS``) is never claimed again.
+    since: datetime
+
+
+class WaitingRequests(BaseModel):
+    requests: list[WaitingRequest]
+
+
+@router.get("/push/waiting", name="crud_agent_push_waiting")
+async def push_waiting(triggers: TriggersDep) -> WaitingRequests:
+    """#6399: the flow grants waiting for a person (a run's and a trigger's standing grant),
+    which the agent pushes to a closed tab beside its own pending input: those of
+    ``GET /api/v1/flow-grant-requests`` requested within ``PUSH_WINDOW``, by id only. A
+    standing grant's id carries its ``requested_at`` (epoch seconds), as the page's does, so
+    a grant an edit returned to ``requested`` is a new request with a claim of its own."""
+    # Only those the agent still pushes, so older ones never crowd a new one out of the page.
+    newer_than = datetime.now(UTC) - PUSH_WINDOW
+    runs, _ = await triggers.flows.store.requested_grants(GRANT_REQUESTS_MAX, newer_than)
+    standing = await triggers.store.requested_grant_ids(GRANT_REQUESTS_MAX, newer_than)
+    return WaitingRequests(
+        requests=[
+            WaitingRequest(id=f"run-grant:{grant.id}", reason="grant", since=grant.created_at)
+            for grant, _ in runs
+        ]
+        + [
+            WaitingRequest(id=f"trigger-grant:{gid}:{_epoch_s(asked)}", reason="grant", since=asked)
+            for gid, asked in standing
+        ]
+    )
 
 
 # -- notification channels ----------------------------------------------------------------

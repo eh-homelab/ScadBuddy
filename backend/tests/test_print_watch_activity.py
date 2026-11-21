@@ -43,3 +43,16 @@ def test_an_import_rewrites_the_row_onto_its_model() -> None:
     )
     assert row.facets == {"state": "linked", "source": "archive", "matched_by": "import"}
     assert (row.detail["filename"], row.detail["reason"]) == ("k.3mf", None)
+
+
+def test_an_import_onto_a_library_file_names_that_file() -> None:
+    """#6394: Import print onto a native library file rewrites the row onto that file."""
+    row = imported_row(
+        AutoImport(archive_id=7, print_name="demo_elan", state="inbox", reason="r"),
+        PrintImport(archive_id=7, subject="library:1000000042", source="archive", filename="k.3mf"),
+    )
+    assert (row.title, row.subject) == (
+        "Imported print demo_elan onto library file 1000000042",
+        "library:1000000042",
+    )
+    assert row.facets == {"state": "linked", "source": "archive", "matched_by": "import"}

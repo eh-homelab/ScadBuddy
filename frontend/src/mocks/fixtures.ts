@@ -24,7 +24,10 @@ import type {
   PrintProgress,
   PrintSummary,
   Settings,
+  BootstrapValue,
 } from '../api/types'
+// Node's loader (Playwright's) needs the attribute; Vite takes it too.
+import settingDocsJson from '../api/settingDocs.json' with { type: 'json' }
 
 /**
  * `group` carries a default on the wire, so the generated type makes it required —
@@ -844,6 +847,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     created_at: '2026-09-21T19:31:00Z',
     has_thumbnail: true,
     sent_to_bambuddy: true,
+    source: 'back_office',
     params: {
       name: 'Reagan',
       font: 'Liberation Sans:style=Bold',
@@ -889,6 +893,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     created_at: '2026-09-20T11:22:00Z',
     has_thumbnail: false,
     sent_to_bambuddy: false,
+    source: 'back_office',
     params: {
       name: 'Nova',
       font: 'Liberation Sans:style=Bold',
@@ -925,6 +930,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     created_at: '2026-09-18T09:03:00Z',
     has_thumbnail: false,
     sent_to_bambuddy: false,
+    source: 'back_office',
     params: {
       name: 'Workshop',
       font: 'DejaVu Sans:style=Bold',
@@ -1053,6 +1059,7 @@ export const settingsDefaults = {
   storefront_requests_enabled: false,
   storefront_materials: ['PETG', 'PLA'],
   storefront_prepare_cap: 256,
+  profile_fetch_nozzles: ['0.2', '0.4', '0.6', '0.8'],
   // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
   storefront_mail_host: null,
   storefront_mail_port: 587,
@@ -1077,6 +1084,13 @@ export const settingsDefaults = {
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
   spool_overlay_refresh_seconds: 300,
+  // #6262 Task 13 — the Filament section's settings; #6265 — `filament_sync` is the six-key default.
+  filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
+  filament_low_stock_pct: 20,
+  filament_default_cost_per_kg: null,
+  filament_burn_window_days: 30,
+  filament_lead_time_days: 7,
+  filament_safety_margin_days: 3,
   event_log_retention_rows: 100_000,
   log_level: 'INFO',
   temporal_ui_url: null,
@@ -1132,6 +1146,19 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
 /** `asset_fetch.py` `DEFAULT_ASSET_FETCH_DOMAINS`: what a stored `null` resolves to. */
 export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org', 'api.iconify.design']
 
+/** #887 — every setting's label and help, as the backend's spec has them (`pnpm gen:api`). */
+export const settingDocs: Settings['docs'] = settingDocsJson
+
+/** A bootstrap row with its title and description from the docs, as `_bootstrap` gives them. */
+export function bootstrapRow(row: Omit<BootstrapValue, 'title' | 'description'>): BootstrapValue {
+  const doc = settingDocs[row.name]
+  return { ...row, title: doc?.title ?? row.name, description: doc?.description ?? '' }
+}
+
+function bootstrapRows(rows: Omit<BootstrapValue, 'title' | 'description'>[]): BootstrapValue[] {
+  return rows.map(bootstrapRow)
+}
+
 export const settings: Settings = {
   ...settingsDefaults,
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
@@ -1159,6 +1186,8 @@ export const settings: Settings = {
   print_auto_import_sources: ['archive', 'archive_source', 'library'],
   print_auto_import_skip_printers: [],
   print_auto_import_skip_lan_printers: [],
+  // #6868: an empty spool adds its type to the shopping list; stored only, on by default.
+  filament_shopping_auto_add_empty: true,
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
@@ -1176,7 +1205,8 @@ export const settings: Settings = {
   },
   applies: settingsApplies,
   restart_required: [],
-  bootstrap: [
+  docs: settingDocs,
+  bootstrap: bootstrapRows([
     {
       name: 'data_dir',
       env_var: 'SCADBUDDY_DATA_DIR',
@@ -1230,7 +1260,7 @@ export const settings: Settings = {
       source: 'default',
       reason: 'Paired with the Temporal address; set with it by the deployment.',
     },
-  ],
+  ]),
   about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
 }
 

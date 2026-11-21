@@ -36,6 +36,7 @@ from scadbuddy.workflows.flow_tools import (
     FLOW_BEATLESS_CALL_PATCH,
     FLOW_BEATLESS_TIER_PATCH,
     FLOW_HOST_QUEUE_PATCH,
+    FLOW_KEYED_RETRY_PATCH,
     FLOW_PINNED_CALL_PATCH,
     FLOW_TOOLS,
 )
@@ -57,6 +58,11 @@ class Tools:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        #: How many of send_to_bambuddy's next attempts send no beat and outlast their
+        #: heartbeat timeout, as one Temporal never delivered, or a replica that went (#6345).
+        self.send_beatless = 0
+        #: An attempt of send_to_bambuddy after a beatless one refuses with this (#6345 review).
+        self.send_refusal: str | None = None
 
     def _record(self, name: str, args: dict[str, Any]) -> None:
         self.calls.append((name, activity.info().activity_id, args))
@@ -70,6 +76,11 @@ class Tools:
         @activity.defn(name="send_to_bambuddy")
         async def send_to_bambuddy(args: dict[str, Any]) -> str:
             self._record("send_to_bambuddy", args)
+            if self.send_beatless > 0:
+                self.send_beatless -= 1
+                await _outlast_heartbeat()
+            elif self.send_refusal is not None:
+                raise ApplicationError(self.send_refusal, non_retryable=True)
             return "sent"
 
         @activity.defn(name="make_thing")
@@ -1194,6 +1205,112 @@ async def test_a_write_that_missed_its_beats_is_not_sent_again_and_says_it_may_h
     assert served.calls == [
         ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
     ]
+
+
+_CAUGHT_SEND = (
+    "try:",
+    "    return await tool('send_to_bambuddy', {'output_id': 'o1'})",
+    "except Exception as e:",
+    "    return str(e)",
+)
+
+
+async def test_a_keyed_write_whose_attempt_missed_its_beats_is_asked_once_more(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """#6345: an approved call to a tool whose every write is keyed to the call lands on an
+    attempt that never beats. It is asked again under the same activity id (the same
+    approval and Idempotency-Key, so the backend answers it from the first's operation),
+    and the run gets its answer instead of "may have run"."""
+    served, queue = tools
+    agent.keyed.add("send_to_bambuddy")
+    served.send_beatless = 1
+    run_id = await outward.run(script(*_CAUGHT_SEND), tools_queue=queue, agent_heartbeat_s=1)
+    call_id = await outward.approval(run_id)
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'sent'"
+    sent = ("send_to_bambuddy", f"tool-{call_id}", {"output_id": "o1"})
+    assert served.calls == [sent, sent]
+
+
+async def test_a_keyed_write_is_asked_once_more_only_once(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """#6345: a keyed call whose second attempt misses its beats too fails as "may have
+    run": one more try, not a loop."""
+    served, queue = tools
+    agent.keyed.add("send_to_bambuddy")
+    served.send_beatless = 2
+    run_id = await outward.run(script(*_CAUGHT_SEND), tools_queue=queue, agent_heartbeat_s=1)
+    call_id = await outward.approval(run_id)
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    assert "send_to_bambuddy may have run" in (run.result or "")
+    assert len(served.calls) == 2
+
+
+async def test_a_keyed_write_whose_retry_is_refused_still_may_have_run(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """#6345 review: the first attempt lost its beats and may have run, so the retry's
+    refusal reaches the script as "may have run", never as a call that did not run."""
+    served, queue = tools
+    agent.keyed.add("send_to_bambuddy")
+    served.send_beatless = 1
+    served.send_refusal = "the printer is busy"
+    run_id = await outward.run(script(*_CAUGHT_SEND), tools_queue=queue, agent_heartbeat_s=1)
+    call_id = await outward.approval(run_id)
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    assert "send_to_bambuddy may have run" in (run.result or "")
+    assert "the printer is busy" in (run.result or "")
+    assert len(served.calls) == 2
+
+
+async def test_an_unkeyed_write_whose_attempt_missed_its_beats_is_not_sent_again(
+    outward: Outward, tools: tuple[Tools, str]
+) -> None:
+    """#6345: an agent that does not say `keyed` (any build before #6350, or a tool that
+    writes another way) keeps #4281's answer: not sent again, and it may have run."""
+    served, queue = tools
+    served.send_beatless = 1
+    run_id = await outward.run(script(*_CAUGHT_SEND), tools_queue=queue, agent_heartbeat_s=1)
+    call_id = await outward.approval(run_id)
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    assert "send_to_bambuddy may have run" in (run.result or "")
+    assert served.calls == [("send_to_bambuddy", f"tool-{call_id}", {"output_id": "o1"})]
+
+
+async def test_a_keyed_write_in_a_run_from_before_6345_is_not_sent_again(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that recorded a keyed write's heartbeat timeout before #6345 (no marker)
+    replays on this code: it still fails as "may have run", with no second try."""
+    served, queue = tools
+    agent.keyed.add("send_to_bambuddy")
+    served.send_beatless = 1
+    patched = workflow.patched
+
+    def before_6345(patch_id: str) -> bool:
+        return False if patch_id == FLOW_KEYED_RETRY_PATCH else patched(patch_id)
+
+    with monkeypatch.context() as m:
+        m.setattr(workflow, "patched", before_6345)
+        run_id = await outward.run(script(*_CAUGHT_SEND), tools_queue=queue, agent_heartbeat_s=1)
+        call_id = await outward.approval(run_id)
+        await _approve(outward, run_id, call_id)
+        run = await outward.finished(run_id)
+    assert "send_to_bambuddy may have run" in (run.result or "")
+    assert len(served.calls) == 1
+    history = await outward.client.get_workflow_handle(f"flow-{run_id}").fetch_history()
+    await Replayer(
+        workflows=[ProjectWorkflow],
+        plugins=harness_plugins(FLOW_TOOLS),
+        data_converter=flows_converter(Keys()),
+        workflow_runner=projects_runner(),
+    ).replay_workflow(history)
 
 
 async def test_a_beatless_read_in_a_run_from_before_4281_still_fails_and_replays(

@@ -157,6 +157,18 @@ describe('useWebPush', () => {
     expect(opened).toEqual(['s-1', 's-2'])
   })
 
+  it("opens Needs you for a grant or pairing request's click, and never a page of another origin (#6399)", async () => {
+    const worker = fakeWorker()
+    server.use(http.get(PUSH_KEY_PATH, () => HttpResponse.json({ detail: 'off' }, { status: 503 })))
+    window.history.replaceState(null, '', '/models')
+    const opened: [string | null, string | undefined][] = []
+    const { unmount } = renderHook(() => useWebPush(true, (id, href) => opened.push([id, href])))
+    worker.messages.dispatchEvent(new MessageEvent('message', { data: { type: 'scadbuddy.openSession', sessionId: null, href: '/activity#needs-you' } }))
+    worker.messages.dispatchEvent(new MessageEvent('message', { data: { type: 'scadbuddy.openSession', sessionId: null, href: '//evil.example/x' } }))
+    await waitFor(() => expect(opened).toEqual([[null, '/activity#needs-you'], [null, undefined]]))
+    unmount()
+  })
+
   it('does nothing while off (embedded, or the assistant unavailable)', () => {
     const worker = fakeWorker()
     window.history.replaceState(null, '', `/?${SESSION_PARAM}=s-1`)

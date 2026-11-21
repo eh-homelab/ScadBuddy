@@ -114,7 +114,8 @@ export type GateSession = {
   creator: Pick<Owner, 'kind' | 'id'>
 }
 
-type Row = {
+/** A row of `ai_pending_input` as the entries' read selects it (the SQL's, or the API's, its dates parsed). */
+export type PendingRow = {
   request_id: string
   kind: 'approval' | 'answer'
   session_id: string
@@ -158,7 +159,46 @@ export type RecordedInput = {
   reason: string | null
 }
 
-export class PendingProjection {
+/** An open entry's trace (#5041): its tool, when it was asked, and the parked call's span context. */
+export type ParkTrace = { tool: string; createdAt: Date; traceparent: string | null }
+
+/**
+ * The projection's reads and its one write, over SQL (`PendingProjection`) or the API's CRUD
+ * routes, area `pending-input` (gate/crudPending.ts `CrudPending`, #5299 step 10).
+ */
+export interface PendingReads {
+  entries(filter?: ProjectionFilter): Promise<PendingInputEntry[]>
+  inRunOf(requestIds: readonly string[]): Promise<Set<string>>
+  inRun(requestId: string): Promise<boolean>
+  waitsForTab(sessionId: string): Promise<boolean>
+  decidedOf(requestIds: readonly string[]): Promise<Set<string>>
+  recorded(requestId: string): Promise<RecordedInput | undefined>
+  parkTrace(requestId: string): Promise<ParkTrace | undefined>
+  markDecision(requestId: string, traceparent: string): Promise<void>
+  session(id: string): Promise<GateSession | undefined>
+}
+
+/** The entry of a row. */
+export function entryOf(r: PendingRow): PendingInputEntry {
+  return {
+    id: r.request_id,
+    kind: r.kind,
+    session_id: r.session_id,
+    tool: r.tool,
+    summary: r.summary,
+    input_hash: r.input_hash,
+    prompt: r.prompt,
+    requested_by: r.requested_by,
+    responders: r.responders,
+    created_at: r.created_at.toISOString(),
+    expires_at: r.expires_at.toISOString(),
+    ...(r.attention ? { attention: r.attention } : {}),
+    ...(r.expiring ? { expiring: true as const } : {}),
+    ...(r.flow_run_id ? { run: { id: r.flow_run_id, hop: r.hop, reason: r.outside_reason } } : {}),
+  }
+}
+
+export class PendingProjection implements PendingReads {
   readonly #sql: Sql
 
   constructor(sql: Sql) {
@@ -168,7 +208,7 @@ export class PendingProjection {
   async entries(filter: ProjectionFilter = {}): Promise<PendingInputEntry[]> {
     const sql = this.#sql
     const owner = filter.ownedBy
-    const rows = await sql<Row[]>`
+    const rows = await sql<PendingRow[]>`
       SELECT p.request_id, p.kind, p.session_id, p.tool, p.summary, p.input_hash, p.prompt, p.requested_by,
              p.responders, p.attention, p.flow_run_id, p.hop, p.outside_reason, p.created_at, p.expires_at, (p.expires_at <= now()) AS expiring
       FROM ai_pending_input p JOIN ai_sessions s ON s.id = p.session_id
@@ -181,22 +221,7 @@ export class PendingProjection {
         AND (${filter.ownAnswers !== true} OR p.kind = 'approval' OR p.flow_run_id IS NOT NULL OR s.owner_kind = 'browser')
       ORDER BY p.created_at, p.request_id
       LIMIT 500`
-    return rows.map((r) => ({
-      id: r.request_id,
-      kind: r.kind,
-      session_id: r.session_id,
-      tool: r.tool,
-      summary: r.summary,
-      input_hash: r.input_hash,
-      prompt: r.prompt,
-      requested_by: r.requested_by,
-      responders: r.responders,
-      created_at: r.created_at.toISOString(),
-      expires_at: r.expires_at.toISOString(),
-      ...(r.attention ? { attention: r.attention } : {}),
-      ...(r.expiring ? { expiring: true as const } : {}),
-      ...(r.flow_run_id ? { run: { id: r.flow_run_id, hop: r.hop, reason: r.outside_reason } } : {}),
-    }))
+    return rows.map(entryOf)
   }
 
   /** Which of `requestIds` are a flow run's (`inRun` for many, in one query, #2863). */
@@ -244,7 +269,7 @@ export class PendingProjection {
   }
 
   /** An open entry's trace (#5041): its tool, when it was asked, and the parked call's span context. */
-  async parkTrace(requestId: string): Promise<{ tool: string; createdAt: Date; traceparent: string | null } | undefined> {
+  async parkTrace(requestId: string): Promise<ParkTrace | undefined> {
     const [row] = await this.#sql<{ tool: string; created_at: Date; traceparent: string | null }[]>`
       SELECT tool, created_at, traceparent FROM ai_pending_input WHERE request_id = ${requestId}`
     return row ? { tool: row.tool, createdAt: row.created_at, traceparent: row.traceparent } : undefined

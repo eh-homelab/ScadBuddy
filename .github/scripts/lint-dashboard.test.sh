@@ -152,6 +152,41 @@ check 'a counter read without _total fails' \
   "$(run)"
 
 good
+sed -i 's/"scadbuddy_filament_stock_grams",/"scadbuddy_filament_stock_gramz",/' "$r/backend/scadbuddy/core/metrics.py"
+check 'a series renamed in the FILAMENT_SERIES table fails the dashboard that reads it (#6785)' \
+  "1:deploy/grafana/scadbuddy-filament.json: scadbuddy_filament_stock_grams is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "$(run | cut -d'|' -f1)"
+
+good
+sed -i 's/"scadbuddy_filament_stock_grams",/"scadbuddy_filament_stock_grams", "no labels",/' "$r/backend/scadbuddy/core/metrics.py"
+out="$(run | cut -d'|' -f1)"
+check 'a FILAMENT_SERIES row that is not a 3-tuple fails and is named (#6785)' \
+  "1:" "${out%%:*}:"
+msg="$("$script" "$r" 2>&1 || true)"
+check 'the malformed row message names the table' \
+  "yes" "$(grep -q 'metrics.py: FILAMENT_SERIES row at line [0-9]* is not' <<< "$msg" && echo yes || echo no)"
+
+good
+sed -i '0,/("material", "brand", "location_kind"),/s//"material",/' "$r/backend/scadbuddy/core/metrics.py"
+msg="$("$script" "$r" 2>&1 || true)"
+check 'a FILAMENT_SERIES row whose labels are not a tuple fails and is named (#6814)' \
+  "yes" "$(grep -q 'metrics.py: FILAMENT_SERIES row at line [0-9]* is not' <<< "$msg" && echo yes || echo no)"
+
+good
+sed -i '0,/("material", "brand", "location_kind"),/s//("material", brand_label, "location_kind"),/' "$r/backend/scadbuddy/core/metrics.py"
+msg="$("$script" "$r" 2>&1 || true)"
+check 'a FILAMENT_SERIES row with a label that is not a string constant fails and is named (#6814)' \
+  "yes" "$(grep -q 'metrics.py: FILAMENT_SERIES row at line [0-9]* is not' <<< "$msg" && echo yes || echo no)"
+
+good
+sed -i 's/^FILAMENT_SERIES: .* = ($/&\n    ("scadbuddy_filament_label_less", "A gauge with no labels.", ()),/' "$r/backend/scadbuddy/core/metrics.py"
+jq '(.panels[] | select(.id == 2) | .targets[0]) |= (.expr = "sum(scadbuddy_filament_label_less)" | .legendFormat = "total")' \
+  "$r/deploy/grafana/scadbuddy-filament.json" > "$r/filament.new"
+mv "$r/filament.new" "$r/deploy/grafana/scadbuddy-filament.json"
+check 'a FILAMENT_SERIES row with () labels is declared, and a query with no by() on it passes (#6814)' \
+  '0:' "$(run)"
+
+good
 edit '(.panels[] | select(.id == 6) | .targets[0].expr) |= sub("by \\(le, stage\\)"; "by (le, stages)")'
 check 'a by() label the metric does not declare fails' \
   "1:$f: panel 6 target A: by (le, stages): \"stages\" is not a label of the series the query reads" \
@@ -378,13 +413,26 @@ check 'a Temporal SDK series this lint does not list fails' \
 good
 jq '.uid = "scadbuddy-extra"' "$r/$a" > "$r/deploy/grafana/scadbuddy-extra.json"
 check 'a dashboard with no ConfigMap fails' \
-  "1:$k: must build one ConfigMap per dashboard (7), not 6 document(s)|$k: deploy/grafana/scadbuddy-extra.json must build into one ConfigMap scadbuddy-extra-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy-extra.json (got: none)" \
+  "1:$k: must build one ConfigMap per dashboard (8), not 7 document(s)|$k: deploy/grafana/scadbuddy-extra.json must build into one ConfigMap scadbuddy-extra-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy-extra.json (got: none)" \
   "$(run)"
 
 good
 yq -i '.configMapGenerator[0].files += ["scadbuddy-api.json"]' "$r/$k"
 check 'a ConfigMap holding two dashboards fails' \
   "1:$k: $f must build into one ConfigMap scadbuddy-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy.json (got: ConfigMap scadbuddy-dashboard cattle-dashboards 1 scadbuddy-api.json,scadbuddy.json)" \
+  "$(run)"
+
+# Only the names the deploy vendors into clusters (eh-homelab/clusters#3734).
+good
+printf 'notes\n' > "$r/deploy/grafana/README.md"
+check 'a file the deploy cannot vendor fails' \
+  "1:deploy/grafana/README.md: is not kustomization.yaml or a [a-z0-9-]+.json dashboard, so the deploy cannot vendor it" \
+  "$(run)"
+
+good
+mkdir "$r/deploy/grafana/panels"
+check 'a subdirectory fails' \
+  "1:deploy/grafana/panels: is not a regular file; the deploy vendors only kustomization.yaml and [a-z0-9-]+.json files" \
   "$(run)"
 
 good

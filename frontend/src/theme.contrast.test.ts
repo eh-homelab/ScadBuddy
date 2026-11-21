@@ -35,7 +35,7 @@ describe('design token contrast (#970, WCAG AA)', () => {
   for (const [theme, t] of Object.entries(themes)) {
     describe(theme, () => {
       it('has every token it is checked for', () => {
-        for (const name of ['text', 'muted', 'faint', 'accent', 'accent-ink', 'ok', 'warn', ...GROUNDS]) {
+        for (const name of ['text', 'muted', 'faint', 'accent', 'accent-ink', 'ok', 'warn', 'needs', 'needs-ink', ...GROUNDS]) {
           expect(t[name], name).toMatch(/^#[0-9a-f]{6}$/i)
         }
       })
@@ -50,6 +50,13 @@ describe('design token contrast (#970, WCAG AA)', () => {
 
       it('primary buttons: accent-ink on accent reads at AA', () => {
         expect(contrast(t['accent-ink']!, t.accent!)).toBeGreaterThanOrEqual(AA)
+      })
+
+      it('needs you (#6399): its ink reads at AA on it, and it reads at AA as text on every surface', () => {
+        expect(contrast(t['needs-ink']!, t.needs!)).toBeGreaterThanOrEqual(AA)
+        for (const ground of GROUNDS) {
+          expect(contrast(t.needs!, t[ground]!), `needs on ${ground}`).toBeGreaterThanOrEqual(AA)
+        }
       })
 
       it('keeps faint quieter than muted, so the two still read as two levels', () => {

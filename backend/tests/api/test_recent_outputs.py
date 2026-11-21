@@ -153,3 +153,33 @@ def test_a_deleted_models_outputs_leave_the_index(
     assert state.outputs.index is not None
     ids, total = state.outputs.index.query(OutputQuery())
     assert (ids, total) == ([second, first], 2)
+
+
+def test_storefront_outputs_are_listed_only_when_asked(
+    client: TestClient, three: tuple[str, str, str]
+) -> None:
+    """#6371: the storefront slice run's outputs stay out of Recent renders and a
+    model's History unless `include_storefront`; the back office's are unchanged, and a
+    read by id finds either."""
+    first, second, third = three
+    state = state_of(client)
+    assert state.outputs.index is not None
+    meta = state.outputs.mark_storefront(second)
+    state.outputs.index.record(meta, state.outputs.params(second))
+    response = client.get("/api/v1/outputs")
+    assert [row["id"] for row in response.json()] == [third, first]
+    assert response.headers["X-Total-Count"] == "2"
+    assert {row["source"] for row in response.json()} == {"back_office"}
+    shown = client.get("/api/v1/outputs", params={"include_storefront": "true"})
+    assert [row["id"] for row in shown.json()] == [third, second, first]
+    assert shown.headers["X-Total-Count"] == "3"
+    assert listed(client, slug=SLUG) == [first]
+    assert listed(client, slug=SLUG, include_storefront="true") == [second, first]
+    history = client.get(f"/api/v1/models/{SLUG}/outputs")
+    assert [row["id"] for row in history.json()] == [first]
+    assert history.headers["X-Total-Count"] == "1"
+    every = client.get(f"/api/v1/models/{SLUG}/outputs", params={"include_storefront": "true"})
+    assert [row["id"] for row in every.json()] == [second, first]
+    detail = client.get(f"/api/v1/outputs/{second}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["source"] == "storefront"

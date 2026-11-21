@@ -3,9 +3,11 @@ a render's part volumes (`orders/pricing.py` `estimate_grams`), never a quote, n
 stored as one.
 
 The back office's ``GET /orders/estimate`` prices an output's parts at one filament
-(`filament_estimate`). The storefront's estimate prices a render job's parts, each at the
-listing filament the visitor chose for its colour, through the quote's formula without
-machine time (`rough_estimate`, plan point 4): a render knows no print seconds.
+(`filament_estimate`). `rough_estimate` prices parts, each at the filament of its colour,
+through the quote's formula without machine time: a render knows no print seconds.
+
+The storefront shows no volume estimate (#6153): its price comes from a slice
+(`StoreEstimate`, `orders/storefront/slice_price.py`), or there is none.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -55,41 +58,46 @@ class OrderEstimate(BaseModel):
 
 
 class RoughEstimate(OrderEstimate):
-    """A render's estimate (spec 2026-11-02 §5.4): a price with every line of a quote's
-    formula but machine time. Its lines name the price book's rates, so a visitor gets
-    only its `StoreEstimate`."""
+    """A render's rough estimate (spec 2026-11-02 §5.4): a price with every line of a
+    quote's formula but machine time. Its lines name the price book's rates. A visitor
+    never reads it: the storefront shows only a slice price (#6153, `StoreEstimate`)."""
 
     price_minor: Money
     lines: list[QuoteLine]
 
-    def public(self) -> StoreEstimate:
-        """What a visitor may read: the price, never the cost, the markup or a rate."""
-        return StoreEstimate(
-            price_minor=self.price_minor,
-            currency=self.currency,
-            minor_exponent=self.minor_exponent,
-            grams=self.grams,
-            parts=self.parts,
-            unknown_parts=self.unknown_parts,
-        )
+
+#: Where a storefront price comes from (#6153): a done slice (firm), a slice that still
+#: works it out, or none, and then the shop prices the line by hand.
+PriceSource = Literal["slice", "pending", "none"]
 
 
 class StoreEstimate(BaseModel):
-    """The storefront's estimate of a render, as a visitor reads it. The public page
-    shows it as "about $X, confirmed after we check it", never as a quote. It carries no
-    line, no filament cost and no label that names a rate (the edge sends on only these
-    fields, `storefront/routes.py` `ESTIMATE_FIELDS`)."""
+    """The storefront's price of a render (#6153, spec 2026-11-13 §5.4). With ``slice``
+    it is the price of a done slice through the back office's quote path, and it is
+    firm. While the slice runs it is ``pending``, and the page reads it again after
+    ``retry_after`` seconds. With no firm price it is ``none``, and the shop prices the
+    line by hand. A volume estimate is never sent. The edge sends a visitor only
+    `storefront/routes.py` ``ESTIMATE_FIELDS``: never `SHOP_ONLY_FIELDS`, a line, a cost or
+    a rate."""
 
-    #: Always true: this is an estimate.
-    estimate: bool = True
-    price_minor: Money
-    currency: str
-    minor_exponent: int
-    #: Decimal string, to the hundredth of a gram.
-    grams: str
-    parts: list[EstimatedPart]
-    #: How many parts have no volume and are left out of ``grams``.
-    unknown_parts: int
+    source: PriceSource
+    #: The price of one, set only for ``slice``.
+    price_minor: Money | None = None
+    currency: str | None = None
+    minor_exponent: int | None = None
+    #: The seconds to wait before a ``pending`` price is read again.
+    retry_after: int | None = None
+    #: The cached price's key (`orders/storefront/slice_price.py` `price_key`), so the
+    #: server can look the price up. Never a visitor's.
+    price_key: str | None = None
+    #: The slice's grams of each slot (from 0) and its print time: the shop's details.
+    grams: dict[str, str] | None = None
+    print_seconds: int | None = None
+
+
+#: The fields of `StoreEstimate` that the edge never sends to a visitor (owner,
+#: 2026-11-14: the page never shows grams or print time).
+SHOP_ONLY_FIELDS = frozenset({"price_key", "grams", "print_seconds"})
 
 
 def part_volumes(model_3mf: Path, plates: int, warnings: Sequence[str]) -> list[EstimatedPart]:

@@ -93,7 +93,6 @@ mapping of a location back to ``.scad`` source lines.
 from __future__ import annotations
 
 import itertools
-import json
 import math
 import xml.etree.ElementTree as ET
 import zipfile
@@ -118,6 +117,7 @@ from scadbuddy.render.bambu3mf import (
     ROOT_MODEL_NAME,
     laid_out_plates,
     parse_model,
+    read_project_settings,
 )
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import UNCOLOURED_WARNING
@@ -422,7 +422,7 @@ def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], i
             ]
         colours: list[str] = []
         if PROJECT_SETTINGS_NAME in names:
-            settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+            settings = read_project_settings(archive)  # capped: untrusted (#6799)
             colours = [str(value) for value in settings.get("filament_colour") or []]
         # Object N is extruder N in a one-plate file; a multi-plate one numbers its
         # objects across plates (spec §6.4), so each part's extruder is read from

@@ -28,6 +28,12 @@ export const NO_CAPACITY = 'NoCapacity'
 export const SHUTTING_DOWN_FAILURE = 'ShuttingDown'
 /** `session_turn`'s failure when the session no longer runs this turn (it ended, or was forgotten). */
 export const SESSION_GONE = 'SessionGone'
+/**
+ * `session_turn`'s failure when another placement took the turn's row from this one (`moved`, or a
+ * newer placement here, `replaced`): retryable, the workflow places the turn again, and that
+ * placement's claim fences the other out (#6387).
+ */
+export const PLACEMENT_MOVED = 'PlacementMoved'
 export const OPEN_INPUT_UPDATE = 'open_input'
 /** The turn's activity no longer waits on a call it opened (its answer was lost, Claude Code dropped it): its entry is cancelled. */
 export const WITHDRAW_INPUT_UPDATE = 'withdraw_input'
@@ -36,6 +42,14 @@ export const TAB_RECONNECTED_UPDATE = 'tab_reconnected'
 export const OWNER_CHANGED_SIGNAL = 'owner_changed'
 export const SEND_MESSAGE_UPDATE = 'send_message'
 export const TURN_QUERY = 'turn'
+/** The queue (#6386): a message sent while a turn runs waits here, and may be removed or edited until it starts. */
+export const QUEUE_MESSAGE_UPDATE = 'queue_message'
+export const REMOVE_QUEUED_UPDATE = 'remove_queued'
+export const EDIT_QUEUED_UPDATE = 'edit_queued'
+export const QUEUE_QUERY = 'queue'
+/** On `agent-tools`: a queue change written as a `session.queue` event, and a queued message started while no turn runs. */
+export const SESSION_QUEUE_CHANGED_ACTIVITY = 'session.queue_changed'
+export const SESSION_BEGIN_TURN_ACTIVITY = 'session.begin_turn'
 /** A local activity on the `agent-sessions` worker: the runtime settings, read as each turn starts. */
 export const SESSION_SETTINGS_ACTIVITY = 'session_settings'
 /** The turn's end (events and status), on `agent-tools`; agent-durable's is `finish_turn`. */

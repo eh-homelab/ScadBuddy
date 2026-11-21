@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CHARM, KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { startColour, filamentFinish, filamentLabels, keepOffered, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
+import { startColour, keepOffered, paramFilaments, parseNumber, shownLabel, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -72,48 +72,6 @@ describe('colour choices (#6152)', () => {
     const pva = { id: 'f-pva', colour: '#1B6CA8', colour_name: 'Natural', material: 'PVA' }
     const param = KEYCHAIN.params.base_colour!
     expect(paramFilaments(param, [...KEYCHAIN.colours, pva]).map((f) => f.id)).toEqual([blue.id, orange.id])
-  })
-})
-
-describe('filament names and finishes (#6152)', () => {
-  const f = (id: string, colour: string, colour_name: string | null, extra: { material?: string; subtype?: string | null; brand?: string | null } = {}) => ({
-    id,
-    colour,
-    colour_name,
-    material: extra.material ?? 'PLA',
-    subtype: extra.subtype ?? null,
-    brand: extra.brand ?? null,
-  })
-
-  it('names the finish, then the brand, then the hex to tell filaments apart', () => {
-    const labels = filamentLabels([
-      f('a', '#0047BB', 'Blue', { subtype: 'Matte' }),
-      f('b', '#1B6CA8', 'Blue', { subtype: 'Silk' }),
-      f('c', '#0000FF', 'Blue', { brand: 'Inland' }),
-      f('d', '#0011FF', 'Blue', { brand: 'Bambu' }),
-      f('e', '#000000', 'Black'),
-      f('g', '#111111', 'Black'),
-      f('h', '#FFFFFF', 'Translucent Clear', { subtype: 'Translucent', material: 'PETG' }),
-    ])
-    expect([...labels.values()]).toEqual([
-      'Blue · Matte',
-      'Blue · Silk',
-      'Blue (Inland)',
-      'Blue (Bambu)',
-      'Black #000000',
-      'Black #111111',
-      'Translucent Clear',
-    ])
-  })
-
-  it('draws translucent, silk and multi-colour filaments apart from a solid one', () => {
-    expect(filamentFinish(f('a', '#FFFFFF', 'Insignia Clear', { material: 'PETG' }))).toBe('translucent')
-    expect(filamentFinish(f('b', '#C0C0C0', 'Silver', { subtype: 'Silk' }))).toBe('silk')
-    expect(filamentFinish(f('c', '#FFFFFF', 'Fluorescent Rainbow'))).toBe('multi')
-    expect(filamentFinish(f('d', '#000000', 'Velvet Eclipse', { subtype: 'Tri Color' }))).toBe('multi')
-    expect(filamentFinish(f('e', '#FFFFFF', 'Jade White'))).toBe('solid')
-    expect(swatchBackground(f('e', '#FFFFFF', 'Jade White'))).toBe('#FFFFFF')
-    expect(swatchBackground(f('c', '#FFFFFF', 'Fluorescent Rainbow'))).not.toBe('#FFFFFF')
   })
 })
 

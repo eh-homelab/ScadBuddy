@@ -31,6 +31,8 @@ import {
   type ClientMessage,
   type Origin,
   type Owner,
+  QUEUE_MAX,
+  type QueuedEntry,
   type SentImage,
   type ServerEvent,
   type SessionMode,
@@ -85,6 +87,8 @@ export interface MockAgentSessions {
   cancelOffer(sessionId: string): { cancelled: boolean } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
+  /** #6267 — a session the server started (an invoice import): running, with no scripted turn, so the panel can open it. */
+  adopt(sessionId: string, title: string): void
   /**
    * #815 — `POST /api/v1/ai/pending-input/{id}`: answers the approval or question a
    * session's script is parked on, or the error to answer with.
@@ -93,6 +97,23 @@ export interface MockAgentSessions {
 }
 
 let openAgent: MockAgentSessions | null = null
+
+/**
+ * #6267 — the sessions a server started (an invoice import) before the panel connected: the panel
+ * opens on one in the same tick as the start's answer, so its agent may not exist yet. Each is
+ * adopted when it does.
+ */
+const adoptedLater: { id: string; title: string }[] = []
+
+/** #6267 — a session the server started: the open mock agent adopts it now, a later one when it connects. */
+export function adoptMockSession(id: string, title: string): void {
+  adoptedLater.push({ id, title })
+  openAgent?.adopt(id, title)
+}
+
+export function forgetAdoptedSessions(): void {
+  adoptedLater.length = 0
+}
 
 /** The mock agent the panel is connected to now, if any. */
 export function mockAgentSessions(): MockAgentSessions | null {
@@ -120,6 +141,9 @@ interface MockSession extends SessionSummary {
   parentId?: string
   /** #1885 — when it was archived; the snapshot leaves it out, and a send is refused. */
   archivedAt?: string
+  /** #6386 — the messages sent while a turn ran, oldest first, and the queue's version. */
+  queue?: QueuedEntry[]
+  queueVersion?: number
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -180,6 +204,22 @@ export function createMockAgentTransport({
 
   const money = (usd: number) => `$${usd.toFixed(2)}`
 
+  /** #6386 — the queue after a change, as the agent's workflow writes it. */
+  const emitQueue = (s: MockSession) => {
+    s.queueVersion = (s.queueVersion ?? 0) + 1
+    emit({ type: 'session.queue', sessionId: s.sessionId, version: s.queueVersion, queue: [...(s.queue ?? [])] })
+  }
+
+  /** #6386 — once a turn ends (done, failed or stopped), the queue's head runs as the next turn. */
+  const startQueued = (s: MockSession) => {
+    const head = s.queue?.shift()
+    if (!head) return
+    emit({ type: 'user.turn', sessionId: s.sessionId, turnId: head.id, text: head.text, author: head.author, ...(head.images ? { images: head.images } : {}) })
+    setStatus(s, 'running')
+    emitQueue(s)
+    play(s, followUp(s, head.text))
+  }
+
   const finish = (s: MockSession) => {
     s.turns += 1
     s.costUsd += COST_PER_TURN
@@ -192,7 +232,15 @@ export function createMockAgentTransport({
         code: 'error_max_budget_usd',
         message: `this chat used its ${money(s.budgetUsd)} budget (${money(s.costUsd)} spent)`,
       })
+      // A queued message the spent session cannot run is dropped, and said.
+      if (s.queue?.length) {
+        s.queue.shift()
+        emit({ type: 'error', sessionId: s.sessionId, code: 'queued_message_dropped', message: 'A queued message was not sent: the session has spent its budget.' })
+        emitQueue(s)
+      }
+      return
     }
+    startQueued(s)
   }
 
   const firstTurn = (s: MockSession): Array<() => void> => {
@@ -501,10 +549,7 @@ export function createMockAgentTransport({
           emit({ type: 'error', code: 'not_found', message: 'That session no longer exists.' })
           return
         }
-        if (s && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input')) {
-          emit({ type: 'error', sessionId: s.sessionId, code: 'busy', message: 'A turn is already running in this session.' })
-          return
-        }
+        // Read-only before anything else, a busy one too, as the agent refuses it.
         if (s?.archivedAt) {
           emit({
             type: 'error',
@@ -512,6 +557,23 @@ export function createMockAgentTransport({
             code: 'archived',
             message: `session ${s.sessionId} is archived, so it is read-only; unarchive it to continue it, or fork it`,
           })
+          return
+        }
+        if (s && (s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input') && s.owner.kind === 'browser') {
+          // #6386 — sent while a turn runs: it waits in the session's queue.
+          const queue = (s.queue ??= [])
+          if (queue.length >= QUEUE_MAX) {
+            deliver({ v: PROTOCOL_VERSION, type: 'error', sessionId: s.sessionId, code: 'queue_full', message: `the session's queue is full (${QUEUE_MAX} messages); wait for one to start, or remove one` })
+            return
+          }
+          queue.push({
+            id: nextId('turn'),
+            text: msg.text,
+            author: BROWSER_USER,
+            ...(msg.images?.length ? { images: uploadedPreviews(msg.images) } : {}),
+            queuedAt: new Date().toISOString(),
+          })
+          emitQueue(s)
           return
         }
         if (s && s.owner.kind !== 'browser') {
@@ -614,6 +676,28 @@ export function createMockAgentTransport({
           s.asking = undefined
         }
         setStatus(s, 'idle')
+        // A Stop ends this turn only: the next queued message starts.
+        startQueued(s)
+        return
+      }
+      case 'queue.remove':
+      case 'queue.edit': {
+        const s = sessions.get(msg.sessionId)
+        const at = s?.queue?.findIndex((q) => q.id === msg.id) ?? -1
+        if (!s || at < 0) {
+          deliver({
+            v: PROTOCOL_VERSION,
+            type: 'error',
+            ...(s ? { sessionId: s.sessionId } : {}),
+            queuedId: msg.id,
+            code: 'not_queued',
+            message: `message ${msg.id} is not waiting in the queue: it started, or was removed`,
+          })
+          return
+        }
+        if (msg.type === 'queue.remove') s.queue!.splice(at, 1)
+        else s.queue![at] = { ...s.queue![at]!, text: msg.text }
+        emitQueue(s)
         return
       }
       case 'session.handoff': {
@@ -721,6 +805,13 @@ export function createMockAgentTransport({
     has(sessionId) {
       return sessions.has(sessionId)
     },
+    adopt(sessionId, title) {
+      if (sessions.has(sessionId)) return
+      const s: MockSession = { sessionId, title, origin: 'chat', owner: BROWSER_USER, status: 'running', log: [], timers: [], turns: 0, costUsd: 0, budgetUsd, mode: 'durable' }
+      sessions.set(sessionId, s)
+      s.log.push({ v: PROTOCOL_VERSION, type: 'session.started', sessionId, origin: 'chat', owner: BROWSER_USER, title, budgetUsd, mode: 'durable' })
+      deliver(snapshot())
+    },
     offerChat(title, to, forMs = 3_600_000) {
       const s = [...sessions.values()].find((one) => one.title === title)
       if (!s) throw new Error(`no chat titled ${title}`)
@@ -772,6 +863,7 @@ export function createMockAgentTransport({
       // In-process, so open at once (the real socket reports it when its handshake is done).
       h.onOpen?.()
       seedExternal()
+      for (const adopted of adoptedLater) controls.adopt(adopted.id, adopted.title)
       deliver(snapshot())
     },
     send(message) {

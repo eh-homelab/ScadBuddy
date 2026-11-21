@@ -5,6 +5,8 @@ description: Use when adding purchased filament to the spool inventory from rece
 
 # Filament intake
 
+For work in ScadBuddy's own inventory (import an invoice, cost a spool, look up a Bambu colour code), use the `filament` skill (`plugins/scadbuddy/skills/filament/SKILL.md`). This skill keeps the Bambuddy-era steps and scripts.
+
 Receipts become spools with tax-inclusive cost. Non-Bambu filaments get
 3dfilamentprofiles (3DFP) profiles for every nozzle size. Then ScadBuddy's
 price book takes the new prices, so quotes and job cost use them. Two scripts do
@@ -14,11 +16,15 @@ against what is already in inventory.
 - `scripts/intake.py`: `apply` turns receipt lines into spools; `link` imports profiles and wires the per-nozzle presets. Run `--help`; both take `--dry-run`.
 - `scripts/3dfp.mjs`: `login`, `search`, `add`, `export` against 3DFP. Usage is in the header.
 
-Where the spools live today: Bambuddy (BB) owns the spool inventory, and
-ScadBuddy (SB) reads it. SB's overlay refreshes every
-`spool_overlay_refresh_seconds` (300 s, `backend/scadbuddy/core/settings.py`),
-and SB's price book (`filaments`) is filled from BB spools only on request
-(step 8). So the scripts write to BB.
+Where the spools live today: Bambuddy (BB) is where the scripts add spools, and
+ScadBuddy (SB) keeps its own spools (#6262), pulled from BB's: the `SpoolRefresh`
+schedule pulls them every `spool_overlay_refresh_seconds` (300 s,
+`backend/scadbuddy/core/settings.py`; Settings → Printing → Filament, which can also
+turn the pull `off`), and `POST /api/v1/filament/bambuddy/import`
+pulls them at once (`backend/scadbuddy/filament/bambuddy_pull.py`). SB's price
+book (`filaments`) is filled only on request (step 8), from SB's spools, not BB's:
+a spool that is only in BB is not priced until a pull has made it an SB spool. So
+the scripts write to BB.
 
 BB is `https://bambuddy.internal.nullreference.io` (`BAMBUDDY` overrides it).
 Write endpoints need no API key on this instance. Printer model string is `H2C`.
@@ -44,7 +50,11 @@ Write endpoints need no API key on this instance. Printer model string is `H2C`.
    Use the 3DFP hex as `rgba` and put the id in `fp`.
    If a receipt truncates the color, look the SKU up with WebSearch; Micro Center blocks both curl and headless Chromium.
 5. `intake.py apply lines.json --dry-run`, check it, then run it for real.
-6. **Profiles:**
+6. **Profiles:** for a type in ScadBuddy (SB), the profile-fetch worker fetches them
+   (#6625; plugin `filament` skill, "Profiles"; README "Profile-fetch worker"). Set the
+   type's `tdfp_id`; an invoice confirm, the type page's "Fetch from 3DFP" button or the
+   agent tool `filament_type_fetch_profiles` starts the fetch. The steps below are for
+   spools that live only in BB:
    - `node 3dfp.mjs login` (headed, once per profile dir; needs `FP_EMAIL`)
    - `add <fp ids>`
    - `export <fp ids>` (PRINTER=H2C, all four nozzles by default)
@@ -53,15 +63,17 @@ Write endpoints need no API key on this instance. Printer model string is `H2C`.
 7. Verify in BB:
    - `GET /inventory/spools/{id}/filament-presets` shows 0.2/0.4/0.6/0.8.
    - No spool has a null `cost_per_kg` or a null `note`. A cost without a note is what makes the next intake ambiguous.
-8. **Bring the prices into ScadBuddy.** Run the price book import: the agent tool
+8. **Bring the prices into ScadBuddy.** First pull BB's spools into SB:
+   `POST /api/v1/filament/bambuddy/import`, or wait for the `SpoolRefresh`
+   schedule (at most 300 s). Then run the price book import: the agent tool
    `price_book_import_spools`, or `POST /api/v1/orders/price-book/import-spools`
-   (`backend/scadbuddy/api/orders.py`). It groups BB spools by material,
-   subtype, brand and colour and takes the newest priced spool's `cost_per_kg`
+   (`backend/scadbuddy/api/orders.py`). It groups SB spools by material,
+   subtype, brand and `#RRGGBBAA` (an opaque and a translucent spool are two
+   filaments) and takes the newest priced spool's `cost_per_kg`
    (`backend/scadbuddy/orders/spool_import.py`). Read its report: a filament
    whose spools have different prices shows the min and max, and the newest
-   one wins. A group with no `#RRGGBB` colour or no priced spool is reported
-   and skipped: fix the spool in BB and run it again. The new spools themselves appear in SB's print dialog after the
-   next overlay refresh (at most 300 s).
+   one wins. A group with no colour or no priced spool is reported
+   and skipped: fix the spool in SB (or in BB, then pull again) and run it again.
 
 ## Traps
 
@@ -78,7 +90,7 @@ Write endpoints need no API key on this instance. Printer model string is `H2C`.
 | Bambu spool duplicates when loaded in the AMS | Tag linking needs an exact material + RGBA match on an untagged spool. Take RGBA from the color-code table, never from a swatch or guess. Translucents carry alpha `80`. |
 | `GFA17` missing from `/cloud/builtin-filaments` | That list is incomplete. GFA17 (PLA Translucent) is real and has H2C profiles for all four nozzles. |
 | Multi-color silk subtype | Bambuddy's rule: SKU `A05-M*` = "Dual Color", `A05-T*` = "Tri Color", regardless of how many colors it has. |
-| A quote or job cost still uses the old price after intake | SB's price book is not refreshed from BB on its own. Run step 8. |
+| A quote or job cost still uses the old price after intake | SB's price book is not refreshed on its own, and it reads SB's spools, which a pull fills from BB. Run step 8: the pull, then the import. |
 
 ## Housekeeping decisions
 

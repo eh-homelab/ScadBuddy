@@ -7,10 +7,11 @@ Bambuddy's own OpenAPI, not a guess.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, overload
 
 from pydantic import (
     BaseModel,
@@ -33,6 +34,20 @@ PreheatOverride = Literal["inherit", "on", "off"]
 
 #: A Bambu printer serial, as the registry stores one (`printers.models.PrinterCreate`).
 _SERIAL = re.compile(r"[0-9A-Z]{8,32}")
+
+
+@overload
+def as_utc(value: datetime) -> datetime: ...
+@overload
+def as_utc(value: None) -> None: ...
+@overload
+def as_utc(value: datetime | None) -> datetime | None: ...
+def as_utc(value: datetime | None) -> datetime | None:
+    """A Bambuddy time as an aware one: a naive time reads as UTC, which is what
+    Bambuddy writes (`Spool`)."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
 
 
 class BambuddyModel(BaseModel):
@@ -154,6 +169,30 @@ class MaintenanceStatus(BambuddyModel):
     enabled: bool = True
     interval_hours: float
     interval_type: Literal["hours", "days"] = "hours"
+    #: #5774 (spec 2026-11-17-machine-rate-actuals §3.7): the task's id on the printer,
+    #: which the history route takes, and the printer's print-hour counter now
+    #: (``runtime_seconds / 3600 + print_hours_offset``, §2.2).
+    id: int | None = None
+    current_hours: float | None = None
+
+
+class MaintenanceHistoryEntry(BambuddyModel):
+    """One row of ``GET /api/v1/maintenance/items/{item_id}/history``: a task marked done,
+    with the printer's print-hour counter then (``MaintenanceHistoryResponse`` in
+    Bambuddy's ``backend/app/schemas/maintenance.py`` at maziggy/bambuddy@1aa7bce, read
+    2026-11-18; #5774 spec 2026-11-17-machine-rate-actuals §2.1). Bambuddy writes
+    ``performed_at`` with no zone, in UTC (§2.1 "Time zone"), so a naive time is read as
+    UTC."""
+
+    id: int
+    performed_at: datetime
+    hours_at_maintenance: float
+    notes: str | None = None
+
+    @field_validator("performed_at")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class PrinterMaintenanceOverview(BambuddyModel):
@@ -593,7 +632,7 @@ class AmsTray(BambuddyModel):
     #: The RFID tag's UID and the spool's UUID (#3818), all zeros for an untagged spool:
     #: OpenBambuAPI ``mqtt.md`` at ``cc383a2c``, the ``pushing.pushall`` example, and
     #: ``tests/bambuddy/recordings/printer-status-rack.json``. `spools.models` cleans them.
-    #: Read in the backend only, by the spool overlay (`trays.seen_trays`): never in a
+    #: Read in the backend only, by the SB tray resolution (`trays.seen_trays`): never in a
     #: status the API serves (#4336 review M6), so a dump of this model drops them.
     tag_uid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
     tray_uuid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
@@ -611,6 +650,17 @@ class AmsUnit(BambuddyModel):
     is_ams_ht: bool = False
     module_type: str = ""
     tray: list[AmsTray] = Field(default_factory=list)
+
+    @field_validator("humidity", mode="before")
+    @classmethod
+    def _humidity(cls, value: Any) -> Any:
+        """A unit that sends ``""`` or text has no reading; it is still a unit (#6268)."""
+        return _number(value, int)
+
+    @field_validator("temp", mode="before")
+    @classmethod
+    def _temp(cls, value: Any) -> Any:
+        return _number(value, float)
 
 
 class FilaSwitch(BambuddyModel):
@@ -872,6 +922,9 @@ class LibraryListRow(BambuddyModel):
     created_at: datetime | None = None
     #: Indexed from an external folder: a delete cannot be undone (#2167).
     is_external: bool = False
+    #: ScadBuddy's own library only (#6394): a print run's per-print copy or slice
+    #: (``library_files.print_subject``), which its sweep trashes. Never Bambuddy's.
+    per_print: bool = False
 
 
 class LibraryPlate(BambuddyModel):
@@ -1029,11 +1082,107 @@ class SliceJob(BambuddyModel):
         return "Bambuddy did not say why"
 
 
-class SpoolKProfile(BambuddyModel):
-    """A spool's K-profile, as ``GET /inventory/spools`` nests it: only the preset it
-    names (#6136)."""
+class PresetImport(BambuddyModel):
+    """``POST /api/v1/local-presets/import``'s answer (``ImportResponse``): how many
+    presets of the zip Bambuddy took (#6625)."""
 
+    success: bool
+    imported: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class KProfile(BambuddyModel):
+    """A row of a printer's K table, ``GET /api/v1/printers/{id}/kprofiles/`` (``KProfile``
+    in Bambuddy's schema): the flow-dynamics value the printer holds for one filament and
+    nozzle. ``k_value`` stays a string, as Bambuddy sends it (#6625)."""
+
+    slot_id: int
+    extruder_id: int = 0
+    nozzle_id: str
+    nozzle_diameter: str
+    filament_id: str
+    name: str
+    k_value: str
     setting_id: str | None = None
+
+
+class KProfileTable(BambuddyModel):
+    """``GET /api/v1/printers/{id}/kprofiles/``'s answer: the rows for one nozzle."""
+
+    profiles: list[KProfile] = Field(default_factory=list)
+    nozzle_diameter: str | None = None
+
+
+class SpoolKProfile(BambuddyModel):
+    """A spool's K-profile, as ``GET /inventory/spools`` nests it: the preset it names
+    (#6136), and the calibration a spool type imports (#6714). The fields are
+    ``SpoolKProfileResponse`` in the live Bambuddy's OpenAPI (read 2026-11-20;
+    ``tests/bambuddy/recordings/openapi/sync-routes.json``, v1.3.1); each is optional
+    here, so a row without them still reads."""
+
+    id: int | None = None
+    spool_id: int | None = None
+    #: Bambuddy's printer id, which a ScadBuddy printer links (``bambuddy_printer_id``).
+    printer_id: int | None = None
+    extruder: int | None = None
+    nozzle_diameter: str | None = None
+    nozzle_type: str | None = None
+    k_value: float | None = None
+    name: str | None = None
+    cali_idx: int | None = None
+    setting_id: str | None = None
+    created_at: datetime | None = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
+
+
+class SpoolSupplier(BambuddyModel):
+    """One of a spool's supplier links, as ``GET /inventory/spools`` nests it: Bambuddy's
+    ``SpoolSupplierResponse`` (``sync-routes.json``, v1.3.1). ``supplier_id`` names a
+    :class:`BbSupplier`; at most one link is the purchase source."""
+
+    id: int | None = None
+    supplier_id: int
+    supplier_name: str | None = None
+    supplier_article_number: str | None = None
+    quoted_price_per_kg: float | None = None
+    is_purchase_source: bool = False
+
+
+class BbSupplier(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/suppliers``: Bambuddy's ``SupplierResponse``
+    (``sync-routes.json``, v1.3.1). Its time is naive UTC and reads as UTC."""
+
+    id: int
+    name: str
+    website: str | None = None
+    customer_number: str | None = None
+    note: str | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("updated_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
+
+
+class BbLocation(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/locations``: Bambuddy's ``LocationResponse``
+    (``sync-routes.json``, v1.3.1). Its time is naive UTC and reads as UTC."""
+
+    id: int
+    name: str
+    identifier: str | None = None
+    updated_at: datetime | None = None
+
+    @field_validator("updated_at")
+    @classmethod
+    def _utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
 
 
 class CatalogFilament(BambuddyModel):
@@ -1083,6 +1232,7 @@ class Spool(BambuddyModel):
     category: str | None = None
     storage_location: str | None = None
     location_id: int | None = None
+    #: When Bambuddy archived the spool; naive UTC as its other times, read as UTC (#6707).
     archived_at: datetime | None = None
     #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
     #: nobody entered a price (#785).
@@ -1091,10 +1241,16 @@ class Spool(BambuddyModel):
     #: or ``None``, for a spool with no tag (``tests/bambuddy/recordings/inventory-spools.json``).
     tag_uid: str | None = None
     tray_uuid: str | None = None
-    #: Its pressure-advance calibrations, each naming the ``setting_id`` of the preset it
-    #: was made with (#6136; ``SpoolKProfileResponse`` in Bambuddy's
-    #: ``backend/app/schemas/spool.py`` at v1.3.2b1-daily.20261113).
+    #: Its pressure-advance calibrations, each with its printer, extruder, nozzle and K
+    #: value and the ``setting_id`` of the preset it was made with (#6136, #6265;
+    #: ``SpoolKProfileResponse`` in Bambuddy's ``backend/app/schemas/spool.py`` at
+    #: v1.3.2b1-daily.20261113, and in ``sync-routes.json`` at v1.3.1).
     k_profiles: list[SpoolKProfile] = Field(default_factory=list)
+    #: The free note, the low-stock threshold in percent and the supplier links
+    #: (``SpoolResponse`` in ``sync-routes.json``, v1.3.1; #6265).
+    note: str | None = None
+    low_stock_threshold_pct: int | None = None
+    suppliers: list[SpoolSupplier] = Field(default_factory=list)
     #: What ScadBuddy's import reads (#6261, spec §8.1): the product code ScadBuddy's
     #: spool type keeps as ``code`` (beside ``extra_colors`` and ``effect_type`` above),
     #: Bambuddy's spool catalog entry of the core, when the row last changed, the last
@@ -1110,18 +1266,72 @@ class Spool(BambuddyModel):
     last_weighed_at: datetime | None = None
     last_dried_at: datetime | None = None
     weight_locked: bool = False
+    #: How the tag was read and who wrote the link (#6264): ``SpoolResponse.tag_type`` and
+    #: ``data_origin`` in ``tests/bambuddy/recordings/openapi/rfid-routes.json`` (v1.3.1).
+    tag_type: str | None = None
+    data_origin: str | None = None
+    #: When Bambuddy made the row (``SpoolResponse.created_at``, ``sync-routes.json``,
+    #: v1.3.1): the pull leaves a row made after an open create intent to the push
+    #: (#6265 Decision 10).
+    created_at: datetime | None = None
 
-    @field_validator("updated_at", "last_weighed_at", "last_dried_at")
+    @field_validator("updated_at", "last_weighed_at", "last_dried_at", "archived_at", "created_at")
     @classmethod
     def _utc(cls, value: datetime | None) -> datetime | None:
-        if value is None or value.tzinfo is not None:
-            return value
-        return value.replace(tzinfo=UTC)
+        return as_utc(value)
 
     @property
     def remaining_g(self) -> float:
         """What the label says minus what has been used, floored at zero."""
         return max(0.0, float(self.label_weight) - self.weight_used)
+
+
+class SpoolUsage(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/usage`` (#6263): what one print took from one
+    spool. The shape is Bambuddy's ``SpoolUsageHistoryResponse`` (``id``, ``spool_id``,
+    ``printer_id``, ``print_name``, ``weight_used``, ``percent_used``, ``status``,
+    ``cost``, ``created_at``; Bambuddy 1.2.6b1, read from the live instance on
+    2026-11-15, plan ``docs/superpowers/plans/2026-11-15-filament-capture.md`` "What a
+    read-only probe of the live Bambuddy showed"). BB keeps one row per spool per print,
+    ScadBuddy's own LAN prints included, with SB's ``subtask_name`` as ``print_name``;
+    a failed print keeps its partial grams. ``created_at`` is naive UTC, the same
+    instant as the spool's ``updated_at`` (spec §8.2); it reads as UTC."""
+
+    id: int
+    spool_id: int
+    printer_id: int | None = None
+    print_name: str | None = None
+    weight_used: float
+    percent_used: float | None = None
+    status: str | None = None
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return as_utc(value)
+
+
+class AppMessageResult(BambuddyModel):
+    """``POST /api/v1/notifications/app-message``'s answer (#6646): how many channels the
+    message was handed to. Bambuddy 1.3.1's ``AppMessageResult``, read from its OpenAPI
+    on 2026-11-21."""
+
+    channels: int
+
+
+class HaEntity(BambuddyModel):
+    """A row of ``GET /api/v1/location-ha-sensors/entities`` (#6268): Bambuddy's
+    ``HADisplayEntity``, a Home Assistant entity and its state as text (``unavailable``,
+    ``unknown`` and the like included; ``null`` for none). Bambuddy 1.3.1, read from its
+    OpenAPI on 2026-11-18. It carries no time of change."""
+
+    entity_id: str
+    friendly_name: str | None = None
+    state: str | None = None
+    domain: str | None = None
+    device_class: str | None = None
+    unit_of_measurement: str | None = None
 
 
 class SpoolFilamentPreset(BambuddyModel):
@@ -1136,6 +1346,18 @@ class SpoolFilamentPreset(BambuddyModel):
     nozzle_diameter: str | None = None
     slicer_filament: str
     slicer_filament_name: str | None = None
+
+
+class SpoolCatalogEntry(BambuddyModel):
+    """``GET /api/v1/inventory/catalog`` — one empty-spool entry (``CatalogEntry`` in
+    Bambuddy 1.2.6b1's OpenAPI, spec 2026-11-14 §3): ``weight`` is the empty spool's grams.
+    A spool's ``core_weight_catalog_id`` names one. Recording:
+    ``tests/bambuddy/recordings/inventory-catalog.json``."""
+
+    id: int
+    name: str
+    #: Grams; the pull rounds a fractional one to whole grams.
+    weight: int | float
 
 
 class SpoolAssignment(BambuddyModel):
@@ -1410,3 +1632,61 @@ class QueueItemCreate(BambuddyModel):
     #: extruder index. Bambuddy re-checks it against the live rack at dispatch.
     nozzle_rack_choice: dict[str, int] | None = None
     cleanup_library_after_dispatch: bool = False
+
+
+class TagScan(BambuddyModel):
+    """One tag a SpoolBuddy reader read, from Bambuddy's WebSocket frame
+    ``spoolbuddy_tag_matched`` (``bb_spool_id`` is ``spool.id``) or
+    ``spoolbuddy_unknown_tag`` (``bb_spool_id`` is ``None``; it alone carries ``tag_type``).
+    The frames are in ``ws_events`` of ``tests/bambuddy/recordings/openapi/rfid-routes.json``
+    (``routes/spoolbuddy.py`` lines 667-690 and 788-797, v1.3.1)."""
+
+    device_id: str
+    tag_uid: str
+    tray_uuid: str | None = None
+    tag_type: str | None = None
+    bb_spool_id: int | None = None
+
+
+class SpoolBuddyDevice(BambuddyModel):
+    """A row of ``GET /api/v1/spoolbuddy/devices`` (``DeviceResponse`` in
+    ``tests/bambuddy/recordings/openapi/rfid-routes.json``, v1.3.1): the fields ScadBuddy
+    shows. ``device_id`` is the string the write and cancel routes take."""
+
+    id: int
+    device_id: str
+    hostname: str
+    has_nfc: bool = False
+    nfc_ok: bool = False
+    online: bool = False
+    last_seen: datetime | None = None
+    pending_command: str | None = None
+
+    @field_validator("last_seen")
+    @classmethod
+    def _seen_utc(cls, value: datetime | None) -> datetime | None:
+        return as_utc(value)
+
+
+class SlotConfigure(BaseModel):
+    """The query of ``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` (#6264;
+    the route's parameters in ``rfid-routes.json``, v1.3.1). ``tray_color`` is
+    ``RRGGBBAA`` without ``#``."""
+
+    tray_info_idx: str
+    tray_type: str
+    tray_sub_brands: str
+    tray_color: str
+    nozzle_temp_min: int
+    nozzle_temp_max: int
+    cali_idx: int | None = None
+    nozzle_diameter: str
+    setting_id: str | None = None
+    k_value: float | None = None
+
+    def query(self) -> dict[str, str | int | float]:
+        return {k: v for k, v in self.model_dump().items() if v is not None}
+
+    def digest(self) -> str:
+        body = json.dumps(self.model_dump(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(body.encode()).hexdigest()

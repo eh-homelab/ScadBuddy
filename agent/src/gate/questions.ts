@@ -7,7 +7,9 @@ import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import { event, type Owner, PROTOCOL_VERSION, type QuestionAnswerMessage, type QuestionView, type ServerEvent } from '../sessions/protocol.js'
-import { loadDoneSummary } from './doneSummary.js'
+import type { Logged } from './crudStore.js'
+import { QuestionRefused, type QuestionRoutes } from './crudQuestions.js'
+import { doneSummary, loadDoneSummary } from './doneSummary.js'
 import { WAIT_FOR_USER } from './entry.js'
 import { parseRequestId } from './ids.js'
 import { inputRequested, inputResolved, questionEntry } from './projection.js'
@@ -91,6 +93,8 @@ export type QuestionServiceDeps = {
   audit?: Pick<AuditLog, 'record' | 'hash'>
   /** Tests only: how long `attentionLimit` tries the rate lock before it refuses (default RATE_LOCK_WAIT_MS). */
   rateLockWaitMs?: number
+  /** The API's routes, once it lists area `questions` (#5299 step 10); the SQL above until then. */
+  routes?: { crud: QuestionRoutes; use: () => boolean } | undefined
 }
 
 /** What `gate()` needs to know about the turn that posts. */
@@ -109,6 +113,11 @@ export type QuestionGateContext = {
    * the millisecond and let in a touch made just before the claim (#1383).
    */
   turnStartedAt: string
+  /**
+   * The turn's placement (`turn_attempt`): through the API a post lands only while it and
+   * `turnId` still hold the session. Without it no post is made through the API.
+   */
+  attempt?: string
 }
 
 /** A row's columns the audit log needs. */
@@ -133,6 +142,15 @@ export type PendingQuestion = {
   expiresAt: string | null
 }
 
+/** What a post that was not made tells the model. */
+const NOT_ASKED = 'The question was not asked: the session is no longer the user’s, or its turn ended.'
+
+/** Runs `open`, waiting for it at most OPEN_WAIT_MS: the rate lock or lease is every session's. */
+async function openBounded(open: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([open(), new Promise<void>((resolve) => (timer = setTimeout(resolve, OPEN_WAIT_MS)))]).finally(() => clearTimeout(timer))
+}
+
 /** The questions with every string redacted of `secrets`. */
 function redactQuestions(questions: readonly UserQuestion[], secrets: readonly string[]): QuestionView[] {
   const r = (text: string) => redact(text, secrets)
@@ -153,6 +171,17 @@ export class QuestionService {
 
   constructor(deps: QuestionServiceDeps) {
     this.deps = deps
+  }
+
+  /** The API's routes once it lists area `questions`, else undefined (the SQL). */
+  private get crud(): QuestionRoutes | undefined {
+    const routes = this.deps.routes
+    return routes?.use() ? routes.crud : undefined
+  }
+
+  /** Hands the batches the API appended to the event log's followers. */
+  private committed(logged: readonly Logged[]): void {
+    for (const l of logged) this.deps.events.committed(l.session_id, l.events, l.seqs)
   }
 
   /**
@@ -181,6 +210,11 @@ export class QuestionService {
     id: string,
   ): Promise<{ sessionId: string; kind: 'question' | 'attention'; questions: QuestionView[]; pending: boolean; outcome: Outcome; reason: string | null } | undefined> {
     if (!isUuid(id)) return undefined
+    const crud = this.crud
+    if (crud) {
+      const row = await crud.entry(id)
+      return row && { sessionId: row.session_id, kind: row.kind, questions: row.questions, pending: row.outcome === null, outcome: row.outcome, reason: row.reason }
+    }
     const [row] = await this.deps.sql<{ session_id: string; kind: 'question' | 'attention'; questions: QuestionView[]; outcome: Outcome; reason: string | null }[]>`
       SELECT session_id, kind, questions, outcome, reason FROM ai_questions WHERE id = ${id}`
     return row && { sessionId: row.session_id, kind: row.kind, questions: row.questions, pending: row.outcome === null, outcome: row.outcome, reason: row.reason }
@@ -193,7 +227,26 @@ export class QuestionService {
    * every session was an AgentSession) is not listed: nobody would read its answer.
    */
   async listPending(principal: Owner): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
-    const done = await this.deps.sql<
+    const crud = this.crud
+    const done = crud ? (await crud.pending(principal)).map((r) => ({ ...r, created_at: new Date(r.created_at), expires_at: r.expires_at === null ? null : new Date(r.expires_at) })) : await this.#pendingRows(principal)
+    const questions = done.slice(0, PENDING_CAP).map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      kind: r.kind,
+      tool: r.tool,
+      toolUseId: r.tool_use_id,
+      questions: r.questions,
+      attentionReason: r.attention_reason,
+      onTimeout: r.on_timeout,
+      summary: r.summary,
+      createdAt: r.created_at.toISOString(),
+      expiresAt: r.expires_at?.toISOString() ?? null,
+    }))
+    return { questions, summariesTruncated: done.length > PENDING_CAP }
+  }
+
+  async #pendingRows(principal: Owner) {
+    return await this.deps.sql<
       {
         id: string
         session_id: string
@@ -215,20 +268,6 @@ export class QuestionService {
       WHERE s.owner_kind = ${principal.kind} AND (s.owner_id = ${principal.id} OR s.owner_kind = 'browser')
         AND q.outcome IS NULL AND ${isDoneSummary(this.deps.sql, 'q')}
       ORDER BY q.created_at DESC, q.id DESC LIMIT ${PENDING_CAP + 1}`
-    const questions = done.slice(0, PENDING_CAP).map((r) => ({
-      id: r.id,
-      sessionId: r.session_id,
-      kind: r.kind,
-      tool: r.tool,
-      toolUseId: r.tool_use_id,
-      questions: r.questions,
-      attentionReason: r.attention_reason,
-      onTimeout: r.on_timeout,
-      summary: r.summary,
-      createdAt: r.created_at.toISOString(),
-      expiresAt: r.expires_at?.toISOString() ?? null,
-    }))
-    return { questions, summariesTruncated: done.length > PENDING_CAP }
   }
 
   /**
@@ -238,9 +277,12 @@ export class QuestionService {
    */
   async auditGateAnswer(principal: Owner, requestId: string, where: { clientIp?: string | undefined } = {}): Promise<void> {
     if (!this.deps.audit) return
-    const [row] = await this.deps.sql<{ session_id: string; tool: string | null; requested_at: Date | null; response: { answers?: unknown } | null }[]>`
-      SELECT session_id, tool, requested_at, response FROM ai_input_responses
-       WHERE request_id = ${requestId} AND kind = 'answer' AND outcome = 'answered'`
+    const crud = this.crud
+    const [row] = crud
+      ? [await crud.gateAnswer(requestId)]
+      : await this.deps.sql<{ session_id: string; tool: string | null; requested_at: Date | null; response: { answers?: unknown } | null }[]>`
+          SELECT session_id, tool, requested_at, response FROM ai_input_responses
+           WHERE request_id = ${requestId} AND kind = 'answer' AND outcome = 'answered'`
     if (!row) return
     const parsed = parseRequestId(requestId)
     const tool = row.tool ?? 'question'
@@ -277,6 +319,29 @@ export class QuestionService {
     }
     const { sessionId, id, answers } = message
     if (!isUuid(id) || !isUuid(sessionId)) throw new QuestionError('not_found', `no question ${id} in this session`)
+    const crud = this.crud
+    if (crud) {
+      // The tool keys the answers' hash; the API checks the row again under its lock, and
+      // writes the dismissal, its events and its audit row in one transaction.
+      const asked = await crud.entry(id)
+      if (!asked || asked.session_id !== sessionId) throw new QuestionError('not_found', `no question ${id} in this session`)
+      try {
+        const logged = await crud.answer({
+          id,
+          sessionId,
+          answers,
+          by: principal,
+          inputHash: this.deps.audit?.hash(asked.tool, { answers }),
+          surface: where.surface ?? 'http',
+          clientIp: where.clientIp,
+        })
+        this.committed(logged)
+      } catch (err) {
+        if (err instanceof QuestionRefused) throw new QuestionError(err.code, err.message)
+        throw err
+      }
+      return
+    }
     const [asked] = await this.deps.sql<{ questions: QuestionView[]; outcome: Outcome }[]>`
       SELECT questions, outcome FROM ai_questions WHERE id = ${id} AND session_id = ${sessionId}`
     if (!asked) throw new QuestionError('not_found', `no question ${id} in this session`)
@@ -353,6 +418,41 @@ export class QuestionService {
   }
 
   /**
+   * `underRateLock` through the API: the count read while this process holds the lease
+   * `attention-rate`, which the API grants only while no SQL-path pod holds ATTENTION_RATE_LOCK,
+   * and `open` run before the lease is released. A busy lease is tried again until `rateLockWaitMs`.
+   * Undefined, a refusal, when the lease was not had in time, the API did not answer, or the
+   * lease was lost before the count: never a count it could not vouch for.
+   */
+  private async underRateLease(crud: QuestionRoutes, own: boolean, limit: number, open: () => Promise<void>): Promise<{ value: number } | undefined> {
+    const until = performance.now() + (this.deps.rateLockWaitMs ?? RATE_LOCK_WAIT_MS)
+    for (;;) {
+      // An open that fails is the caller's error, as under the SQL lock; the rest refuses.
+      const opened: { failed: boolean; err?: unknown } = { failed: false }
+      let done: { value: number } | 'busy'
+      try {
+        done = await crud.rateLeased(async (count) => {
+          const n = await count(own)
+          if (n < limit) {
+            await openBounded(open).catch((err: unknown) => {
+              opened.failed = true
+              opened.err = err
+            })
+          }
+          return n
+        })
+      } catch (err) {
+        console.error(`the attention limit was not checked: ${err instanceof Error ? err.message : String(err)}`)
+        return undefined
+      }
+      if (opened.failed) throw opened.err
+      if (done !== 'busy') return done
+      if (performance.now() >= until) return undefined
+      await new Promise((resolve) => setTimeout(resolve, Math.ceil(Math.random() * RATE_LOCK_RETRY_MS)))
+    }
+  }
+
+  /**
    * #815 §5's limits for an AgentSession turn's attention request (#5003), whose entry its
    * workflow opens (sessions/turnHost.ts): the model's own request (`own`) against
    * ATTENTION_RATE_LIMIT, a browser call's tab wait against TAB_WAIT_RATE_LIMIT, each counting
@@ -372,7 +472,8 @@ export class QuestionService {
     const { own } = context
     const tab = '%:tab:%'
     const limit = own ? ATTENTION_RATE_LIMIT : TAB_WAIT_RATE_LIMIT
-    const counted = await this.underRateLock(async (tx) => {
+    const crud = this.crud
+    const counted = crud ? await this.underRateLease(crud, own, limit, open) : await this.underRateLock(async (tx) => {
       const [row] = await tx<{ n: number }[]>`
         SELECT
           (SELECT count(*) FROM ai_pending_input
@@ -384,10 +485,7 @@ export class QuestionService {
       const n = Number(row?.n ?? 0)
       // Bounded: the lock is every session's, and a slow or absent workflow must not hold it.
       // Past OPEN_WAIT_MS the entry opens outside it, so the limit may then let one more through.
-      if (n < limit) {
-        let timer: ReturnType<typeof setTimeout> | undefined
-        await Promise.race([open(), new Promise<void>((resolve) => (timer = setTimeout(resolve, OPEN_WAIT_MS)))]).finally(() => clearTimeout(timer))
-      }
+      if (n < limit) await openBounded(open)
       return n
     })
     if (!counted) {
@@ -422,6 +520,35 @@ export class QuestionService {
   }
 
   /**
+   * `gate`'s post through the API: the turn's facts read, the summary written here with the
+   * turn's secrets redacted, then posted. The API writes it only while the turn's placement
+   * (`attempt` and `turnId`) holds the session, with the cap, the replaced summaries, the events
+   * and the audit rows in one transaction. The facts are read before that transaction, so a touch
+   * committed between the two is not in the summary; the turn's own calls are done by then.
+   */
+  private async postThroughApi(crud: QuestionRoutes, context: QuestionGateContext, request: QuestionRequest, id: string, questions: QuestionView[]): Promise<QuestionVerdict> {
+    const { sessionId, turnId, attempt } = context
+    if (attempt === undefined) return { answered: false, message: NOT_ASKED }
+    const facts = await crud.doneFacts(sessionId, turnId, context.turnStartedAt)
+    const summary = doneSummary(facts.touches, facts.windows, context.secrets())
+    const posted = await crud.done({
+      id,
+      sessionId,
+      turnId,
+      attempt,
+      tool: request.tool,
+      toolUseId: request.toolUseId,
+      questions,
+      summary,
+      unattended: facts.touches.some((t) => t.unattended),
+    })
+    this.committed(posted.logged)
+    if (posted.limited !== null) return { answered: false, message: posted.limited }
+    if (!posted.asked) return { answered: false, message: NOT_ASKED }
+    return { answered: false, posted: true, message: 'posted' }
+  }
+
+  /**
    * The turn's `done` summary post (#815 §4, harness/questions.ts QuestionGate): the call returns
    * `posted` at once. Any other request is the workflow's to park (sessions/turnHost.ts), and is
    * refused here.
@@ -441,6 +568,8 @@ export class QuestionService {
         }
       }
       const { sessionId, turnId } = context
+      const crud = this.crud
+      if (crud) return await this.postThroughApi(crud, context, request, id, questions)
       const startedAt = new Date()
       const posted = await this.atomically(sessionId, async (tx) => {
         const none = { asked: false, superseded: [] as Resolved[], limited: undefined as string | undefined }
@@ -522,7 +651,7 @@ export class QuestionService {
         ])
         return { answered: false, message: posted.limited }
       }
-      if (!posted.asked) return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
+      if (!posted.asked) return { answered: false, message: NOT_ASKED }
       return { answered: false, posted: true, message: 'posted' }
     }
   }

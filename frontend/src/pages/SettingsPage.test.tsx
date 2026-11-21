@@ -426,8 +426,17 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
   it('unfolds a deep-linked section folded on another area, and scrolls to it once laid out', async () => {
     localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['mcp-auth-mode']))
     const tops: Record<string, number> = {}
-    const { scrolls, restore } = stubLayout(tops)
     const observers = stubResizeObserver()
+    // The deep link's follow-up observer is the one made right after its first scroll
+    // (as in the #2947 review test); the section tracker's observer stays live throughout.
+    let followUp: number | undefined
+    const { scrolls, restore } = stubLayout(tops, () => {
+      followUp ??= observers.length
+    })
+    // The follow-up stops at SETTLE_MS. On the wall clock a loaded run (8 s here) passed
+    // it before the resize below, and the pane stayed at 0 (#6385). So only the test
+    // moves time, in steps well short of it (stepUntil).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       renderPage(
         <>
@@ -436,10 +445,12 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
         </>,
         { route: '/settings#assistant-mcp' },
       )
-      await seeded()
+      await stepUntil(() =>
+        expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
+      )
       // The old anchor of the one long page lands on its section in the MCP access area.
-      await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/settings/mcp#mcp-auth-mode'))
-      await waitFor(() =>
+      await stepUntil(() => expect(screen.getByTestId('where')).toHaveTextContent('/settings/mcp#mcp-auth-mode'))
+      await stepUntil(() =>
         expect(within(region('Auth mode')).getByRole('button', { name: 'Auth mode' })).toHaveAttribute(
           'aria-expanded',
           'true',
@@ -448,11 +459,15 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       // Measured while it was folded, the section had no box; laid out, it has one, and
       // the section nav's resize follow-up scrolls the pane there.
       tops['mcp-auth-mode'] = 7000
+      // The waits above may together move the fake clock past SETTLE_MS; say so here
+      // rather than as a scroll of 0 below (#6415).
+      expect(observers[followUp ?? -1]?.disconnected, 'the follow-up settled before the resize').toBe(false)
       act(() => {
         for (const observer of observers) if (!observer.disconnected) observer.fire()
       })
       expect(scrolls.at(-1)).toBe(6992)
     } finally {
+      vi.useRealTimers()
       restore()
       vi.unstubAllGlobals()
       localStorage.clear()

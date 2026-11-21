@@ -3,12 +3,14 @@ import { ok } from './call.js'
 import { defineTool, json, type Tool } from './registry.js'
 import { offsetPage, page, PAGED, pageInput } from './pagination.js'
 
-// Farm context (issue #1912, #251's read tier): the queue, aggregate stats, every
-// Bambuddy archive with its outcome, and the spool inventory with each loaded slot's
-// remaining grams, which feed the analyzers (#284). Read only: none of these writes to
-// Bambuddy. Routes: backend/scadbuddy/api/farm.py.
+// Farm context (issue #1912, #251's read tier): the queue, aggregate stats and every
+// Bambuddy archive with its outcome, which feed the analyzers (#284). Read only: none of
+// these writes to Bambuddy. Routes: backend/scadbuddy/api/farm.py. The spool inventory and
+// a spool's summary are ScadBuddy's own spools (#6262 Task 9), read from
+// backend/scadbuddy/api/filament.py.
 
 const SOURCE = "Bambuddy's records: names and notes typed by whoever uses that Bambuddy"
+const SPOOLS = "ScadBuddy's own filament inventory: names and notes typed by its users"
 
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a day, YYYY-MM-DD')
 const printerId = z.number().int().describe('A Bambuddy printer id, as get_print_targets lists them')
@@ -157,40 +159,42 @@ export const farmTools: Tool[] = [
     name: 'get_spool_inventory',
     label: 'List spools',
     description:
-      "Bambuddy's spool inventory: every spool with its material, colour, brand, label weight and what is left, " +
-      'and where it is loaded; and every loaded slot of each active printer (AMS, tray, extruder) with the ' +
-      "remaining grams Bambuddy reconciled from the AMS. `printer_id` limits the slots to one printer; every " +
-      "spool still says where it is loaded, on any printer. Archived spools only with `include_archived`.",
-    input: z.object({ include_archived: z.boolean().optional(), printer_id: printerId.optional() }),
+      "ScadBuddy's spool inventory: every spool by `id` (a uuid) and `number` (#N), with its effective material, " +
+      'brand, colour (`rgba`, `#RRGGBBAA`: an alpha below FF is a translucent spool), label weight, grams left ' +
+      "and cost per kg, its presets, and `loaded`: the registry printer and tray it is in (null on the shelf; " +
+      "while Bambuddy is linked, a spool no registry printer reports is in the tray Bambuddy assigns it). " +
+      "`trays` lists each registry printer's reported trays (label, material, `rgba`) with the spool each holds. " +
+      'Archived spools only with `include_archived`. Needs no Bambuddy: a refused assignment read places the ' +
+      'spools by the reports alone.',
+    input: z.object({ include_archived: z.boolean().optional() }),
     risk: 'read',
-    source: SOURCE,
-    bambuddyScope: ['Read Status'],
-    routes: ['GET /api/v1/farm/inventory'],
+    source: SPOOLS,
+    routes: ['GET /api/v1/filament/inventory'],
     handler: async (query, { backend }) =>
-      json(await ok(backend.GET('/api/v1/farm/inventory', { params: { query } }), 'get the spool inventory')),
+      json(await ok(backend.GET('/api/v1/filament/inventory', { params: { query } }), 'get the spool inventory')),
   }),
 
   defineTool({
     name: 'get_spool_summary',
     label: "Read one spool's stock and price",
     description:
-      "One spool's stock and price (#785): its remaining grams, where it is loaded and Bambuddy's cost per kg, " +
-      "what the filament left on it is worth, and the stock of every unarchived spool of the same filament " +
-      '(material, subtype, brand and colour): how many, their total remaining grams and where each is loaded. ' +
-      "`grams` prices that many grams at this spool's cost, e.g. a plate's use. Every price and cost is null " +
-      'when Bambuddy has no price for the spool; never estimate one.',
+      "One ScadBuddy spool's stock and price (#785): its grams left, the tray it is in and its effective cost per " +
+      'kg, what the grams left are worth (`value_left`), and the stock of every unarchived spool of the same ' +
+      'filament (material, subtype, brand and `#RRGGBBAA`, so a translucent spool is another filament): how ' +
+      "many, their numbers, their total grams left and where each is loaded. `grams` prices that many grams at " +
+      "this spool's cost, e.g. a plate's use. Every price and cost is null when the spool has no cost per kg; " +
+      'never estimate one.',
     input: z.object({
-      spool_id: z.number().int().describe('A Bambuddy spool id, as get_spool_inventory lists them'),
+      spool_id: z.string().uuid().describe("A spool's `id` (a uuid), as get_spool_inventory lists them"),
       grams: z.number().min(0).optional(),
     }),
     risk: 'read',
-    source: SOURCE,
-    bambuddyScope: ['Read Status'],
-    routes: ['GET /api/v1/farm/spools/{spool_id}/summary'],
+    source: SPOOLS,
+    routes: ['GET /api/v1/filament/spools/{spool_id}/summary'],
     handler: async ({ spool_id, grams }, { backend }) =>
       json(
         await ok(
-          backend.GET('/api/v1/farm/spools/{spool_id}/summary', {
+          backend.GET('/api/v1/filament/spools/{spool_id}/summary', {
             params: { path: { spool_id }, query: { grams } },
           }),
           `summarise spool ${spool_id}`,

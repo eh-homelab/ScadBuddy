@@ -110,12 +110,14 @@ export function SourceBadge({
  * A labelled field with its badge above and its help and error below. #2347 — the control
  * (the element with `id`) is described by both, and marked invalid while there is an
  * error; the help stays shown beside the error, since it is often what explains it.
+ * #887 — `env`, the variable that seeds the field, is shown last, small and muted.
  */
 export function FieldRow({
   id,
   label,
   badge,
   help,
+  env,
   error,
   children,
 }: {
@@ -123,6 +125,7 @@ export function FieldRow({
   label: string
   badge?: ReactNode
   help?: ReactNode
+  env?: string
   error?: string
   children: ReactNode
 }) {
@@ -147,7 +150,7 @@ export function FieldRow({
     else control.removeAttribute('aria-invalid')
   })
   return (
-    <div ref={row}>
+    <div ref={row} data-field-row={id}>
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <Label htmlFor={id} className="font-normal">
           {label}
@@ -163,6 +166,11 @@ export function FieldRow({
       {help && (
         <p id={helpId} className="mt-1.5 text-xs text-muted-foreground">
           {help}
+        </p>
+      )}
+      {env && (
+        <p className="mt-1 font-mono text-[11px] break-all text-muted-foreground" data-testid={`env-${id}`}>
+          {env}
         </p>
       )}
     </div>

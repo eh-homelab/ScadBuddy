@@ -240,7 +240,8 @@ class StorefrontCrud:
         return await self._call("GET", f"/renders/{job_id}", visitor_id=visitor_id, client=client)
 
     async def render_estimate(self, job_id: str, *, visitor_id: str, client: str) -> Any:
-        """``GET …/storefront/renders/{id}/estimate``: the render's rough price."""
+        """``GET …/storefront/renders/{id}/estimate``: the render's firm price from a
+        slice (#6153), or pending, or none."""
         return await self._call(
             "GET", f"/renders/{job_id}/estimate", visitor_id=visitor_id, client=client
         )

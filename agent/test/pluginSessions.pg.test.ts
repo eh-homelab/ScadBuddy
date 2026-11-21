@@ -47,7 +47,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it("the sweep deletes a dead replica's sessions and keeps a live one's", async () => {
       await row('memory', 'dead-1', 'replica-dead')
       await row('memory', 'live-1', 'replica-live')
-      const removed = await sweepDeadReplicas(db.sql, new Set(['replica-live']), { plugins: store, kek, graceMs: 0 })
+      const removed = await sweepDeadReplicas(new PluginSessions(db.sql), new Set(['replica-live']), { plugins: store, kek, graceMs: 0 })
       expect(removed).toBe(1)
       expect(fake.deletes.map((d) => d.sessionId)).toEqual(['dead-1'])
       expect(fake.deletes[0]?.headers.authorization).toBe('Bearer sweep-secret-1')
@@ -58,7 +58,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await store.create({ name: 'off', url: fake.url }, undefined)
       await row('nope', 'a', 'replica-dead')
       await row('off', 'b', 'replica-dead')
-      await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek, graceMs: 0 })
+      await sweepDeadReplicas(new PluginSessions(db.sql), new Set(), { plugins: store, kek, graceMs: 0 })
       expect(fake.deletes).toEqual([])
       expect(await left()).toEqual([])
     })
@@ -67,7 +67,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await store.create({ name: 'pinned', url: fake.url.replace('127.0.0.1', 'hostname.invalid'), secret: 'Bearer pin-secret' }, kek)
       await store.update('pinned', { enabled: true }, kek)
       await row('pinned', 'p-1', 'replica-dead')
-      await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek, graceMs: 0, resolve: async () => ['127.0.0.1'] })
+      await sweepDeadReplicas(new PluginSessions(db.sql), new Set(), { plugins: store, kek, graceMs: 0, resolve: async () => ['127.0.0.1'] })
       expect(fake.deletes.map((d) => d.sessionId)).toEqual(['p-1'])
       expect(await left()).toEqual([])
     })
@@ -77,7 +77,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await store.update('refused', { enabled: true }, undefined)
       await row('refused', 'm-1', 'replica-dead')
       const log: string[] = []
-      await sweepDeadReplicas(db.sql, new Set(), {
+      await sweepDeadReplicas(new PluginSessions(db.sql), new Set(), {
         plugins: store,
         kek,
         graceMs: 0,
@@ -95,7 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await row('down', 'recent', 'replica-dead')
       await row('down', 'ancient', 'replica-dead')
       await db.sql`UPDATE ai_plugin_sessions SET created_at = now() - interval '25 hours' WHERE upstream_session_id = 'ancient'`
-      await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek: undefined, graceMs: 0 })
+      await sweepDeadReplicas(new PluginSessions(db.sql), new Set(), { plugins: store, kek: undefined, graceMs: 0 })
       expect(await left()).toEqual(['down/recent'])
     })
 
@@ -106,7 +106,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await row('down', 'old-me-failing', 'me')
       await row('memory', 'other', 'other')
       const mark = await startMark(db.sql)
-      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek }, mark)).toBe(2)
+      expect(await endOwnSessions(new PluginSessions(db.sql), 'me', { plugins: store, kek }, mark)).toBe(2)
       expect(fake.deletes.map((d) => d.sessionId)).toEqual(['old-me'])
       expect(await left()).toEqual(['memory/other'])
     })
@@ -118,7 +118,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
                  VALUES ('memory', 'just-before', 'me', now() - interval '1 microsecond')`
         return startMark(tx as never)
       })
-      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek }, mark)).toBe(1)
+      expect(await endOwnSessions(new PluginSessions(db.sql), 'me', { plugins: store, kek }, mark)).toBe(1)
       expect(await left()).toEqual([])
     })
 
@@ -126,14 +126,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await row('memory', 'before', 'me')
       const mark = await startMark(db.sql)
       await new PluginSessions(db.sql, 'me').seen('memory', 'after')
-      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek }, mark)).toBe(1)
+      expect(await endOwnSessions(new PluginSessions(db.sql), 'me', { plugins: store, kek }, mark)).toBe(1)
       expect(fake.deletes.map((d) => d.sessionId)).toEqual(['before'])
       expect(await left()).toEqual(['memory/after'])
     })
 
     it("leaves a young row alone: its replica's worker may not poll yet", async () => {
       await row('memory', 'young', 'replica-new')
-      expect(await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek })).toBe(0)
+      expect(await sweepDeadReplicas(new PluginSessions(db.sql), new Set(), { plugins: store, kek })).toBe(0)
       expect(fake.deletes).toEqual([])
       expect(await left()).toEqual(['memory/young'])
     })
@@ -166,7 +166,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const [issued] = pkgFake.issued
         await expect.poll(left).toEqual([`pkg:plugin_notes_api/${issued}`])
         // A registry plugin is looked up by its own name only: this row is never sent to `memory`, or any other.
-        await sweepDeadReplicas(db.sql, new Set(), { plugins: store, kek, graceMs: 0 })
+        await sweepDeadReplicas(new PluginSessions(db.sql), new Set(), { plugins: store, kek, graceMs: 0 })
         expect(fake.deletes).toEqual([])
         expect(await left()).toEqual([])
         servers.release()
@@ -198,7 +198,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
       const run = (client: unknown, log: string[]) =>
         runPluginSessionSweep({
-          sql: db.sql,
+          ledger: new PluginSessions(db.sql),
           client: client as never,
           plugins: store,
           kek,

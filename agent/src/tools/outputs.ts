@@ -11,18 +11,36 @@ import { FROM_WORKSPACE_ONLY, uploadInit, withSent, workspaceFile, workspacePath
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
 // images, plate fit, and the 3MF. Routes: backend/scadbuddy/api/{outputs,plates}.py.
 
+/** #6371: the lists leave out the outputs the storefront slice run saved, as the backend does. */
+const includeStorefront = z
+  .boolean()
+  .optional()
+  .describe(
+    "Also list the outputs the storefront's slice run saved to price a visitor's variant (`source` `storefront`, named " +
+      '"Storefront: …"). Left out by default.',
+  )
+
+/** The query parameter, sent only when asked: omitted, the backend leaves them out. */
+function storefrontQuery(include: boolean | undefined): { include_storefront?: boolean } {
+  return include ? { include_storefront: true } : {}
+}
+
 export const outputTools: Tool[] = [
   defineTool({
     name: 'list_outputs',
     label: "List a model's outputs",
-    description: "A model's saved outputs (finished renders kept as 3MFs), newest first." + PAGED,
-    input: z.object({ slug, ...pageInput }),
+    description:
+      "A model's saved outputs (finished renders kept as 3MFs), newest first. The storefront's own outputs are left out " +
+      'unless `include_storefront`.' +
+      PAGED,
+    input: z.object({ slug, include_storefront: includeStorefront, ...pageInput }),
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/outputs'],
     // The backend pages (#843): it builds only this page's output details.
-    handler: async ({ slug, ...args }, { backend }) =>
+    handler: async ({ slug, include_storefront, ...args }, { backend }) =>
       json(
-        await backendPage({ slug, ...args }, (o: { id: string }) => o.id, 'list_outputs', async (query) => {
+        await backendPage({ slug, include_storefront, ...args }, (o: { id: string }) => o.id, 'list_outputs', async (window) => {
+          const query = { ...storefrontQuery(include_storefront), ...window }
           const pending = backend.GET('/api/v1/models/{slug}/outputs', { params: { path: { slug }, query } })
           return { items: await ok(pending, `list outputs of ${slug}`), total: totalCount((await pending).response) }
         }),
@@ -37,7 +55,8 @@ export const outputTools: Tool[] = [
       'Filters: `from` and `to` (ISO times: saved at or after `from`, before `to`), `slug` (models), `tag` (a ' +
       "model's catalogue tag; outputs have none), `q` (text in the output's name or in its parameters that differ " +
       'from the template\'s defaults, written `name=value`), and `ordered` (`yes`: only outputs an order item names; ' +
-      '`no`: only the others). Use it to find outputs to add to an order (order_item_add with `items`).' +
+      '`no`: only the others). The outputs the storefront\'s slice run saved are left out unless `include_storefront`. ' +
+      'Use it to find outputs to add to an order (order_item_add with `items`).' +
       PAGED,
     input: z.object({
       from: z.string().datetime({ offset: true }).optional().describe('Only outputs saved at or after this time'),
@@ -46,6 +65,7 @@ export const outputTools: Tool[] = [
       tag: z.string().min(1).max(200).optional(),
       q: z.string().min(1).max(256).optional(),
       ordered: z.enum(['yes', 'no']).optional(),
+      include_storefront: includeStorefront,
       ...pageInput,
     }),
     risk: 'read',
@@ -53,9 +73,9 @@ export const outputTools: Tool[] = [
     handler: async (args, { backend }) =>
       json(
         await backendPage(args, (o: { id: string }) => o.id, 'list_recent_outputs', async (window) => {
-          const { from, to, slug: slugs, tag, q, ordered } = args
+          const { from, to, slug: slugs, tag, q, ordered, include_storefront } = args
           const pending = backend.GET('/api/v1/outputs', {
-            params: { query: { from, to, slug: slugs, tag, q, ordered, ...window } },
+            params: { query: { from, to, slug: slugs, tag, q, ordered, ...storefrontQuery(include_storefront), ...window } },
           })
           return { items: await ok(pending, 'list recent outputs'), total: totalCount((await pending).response) }
         }),

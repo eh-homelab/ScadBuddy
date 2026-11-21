@@ -129,6 +129,29 @@ def test_a_sent_claim_is_won_once(client: TestClient, agent: dict[str, str], db:
     assert client.post(f"{BASE}/push/sent", json=body, headers=agent).json() == {"claimed": True}
 
 
+def test_a_poll_lease_is_held_by_one_caller_a_window(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    """#6399: one agent replica a window runs the timed Web Push poll. One row per name,
+    taken again only once its window has passed by the database's clock."""
+    body = {"name": "waiting-poll", "seconds": 25}
+    lease = f"{BASE}/push/poll-lease"
+    assert client.post(lease, json=body, headers=agent).json() == {"held": True}
+    assert client.post(lease, json=body, headers=agent).json() == {"held": False}
+    other = {**body, "name": "other"}
+    assert client.post(lease, json=other, headers=agent).json() == {"held": True}
+    db.execute(
+        "UPDATE ai_notifications_sent SET sent_at = now() - interval '26 seconds'"
+        " WHERE request_id = 'lease:waiting-poll'"
+    )
+    assert client.post(lease, json=body, headers=agent).json() == {"held": True}
+    count = db.execute("SELECT count(*) FROM ai_notifications_sent WHERE target = 'lease'")
+    assert count.fetchone() == (2,)
+    bad = {"name": "Bad Name", "seconds": 25}
+    assert client.post(lease, json=bad, headers=agent).status_code == 422
+    assert client.post(lease, json=body).status_code in (401, 403)
+
+
 def _channel(client: TestClient, agent: dict[str, str], **extra: Any) -> str:
     body = {"kind": "ntfy", "name": "Phone", "url": "https://ntfy.sh/topic", **extra}
     answer = client.post(f"{BASE}/notify-channels", json=body, headers=agent)

@@ -9,12 +9,14 @@ import psycopg
 import pytest
 
 from scadbuddy.bambuddy.print_links import (
+    ImportTargetGoneError,
     LanArchiveLink,
     PrintImport,
     PrintLink,
     PrintLinkStore,
     PrintReprint,
     PrintSend,
+    forget_library_imports,
 )
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
@@ -198,7 +200,8 @@ async def test_every_lookup_agrees_on_the_owner_when_two_links_tie(
 
 
 def test_the_owner_lookup_has_an_index_in_its_order(jobs: JobProjection, pg_conninfo: str) -> None:
-    # #609 review: the page's DISTINCT ON walks (archive_id DESC, imports last (#4698),
+    # #609 review: the page's DISTINCT ON walks (archive_id DESC, imports last (#4698,
+    # #6394: a library file's import too),
     # outputs first, first_seen, subject); an index in that order spares it a sort of the
     # whole table.
     with psycopg.connect(pg_conninfo) as conn:
@@ -210,7 +213,7 @@ def test_the_owner_lookup_has_an_index_in_its_order(jobs: JobProjection, pg_conn
             )
         ]
     owner = (
-        "(archive_id DESC, ((subject ~~ 'model:%'::text)), ((subject ~~ 'library:%'::text)),"
+        "(archive_id DESC, ((matched_by = 'import'::text)), ((subject ~~ 'library:%'::text)),"
         " first_seen, subject)"
     )
     assert any(owner in d for d in definitions), definitions
@@ -360,7 +363,9 @@ async def test_deleting_outputs_deletes_their_sends(links: PrintLinkStore) -> No
 TROPHY = PrintSubject.model("basketball-trophy")
 
 
-def imported(archive_id: int, slug: str = "basketball-trophy", **fields: object) -> PrintImport:
+def imported(
+    archive_id: int, slug: str | None = "basketball-trophy", **fields: object
+) -> PrintImport:
     return PrintImport.model_validate(
         {
             "archive_id": archive_id,
@@ -446,3 +451,139 @@ async def test_forgetting_a_model_forgets_its_imports(links: PrintLinkStore) -> 
     assert await links.import_of(193) is None
     assert 90 not in (await links.jobs(queue_items=[90])).queue_items
     assert await links.output_for(18) == OUTPUT
+
+
+# --- #6394: an import onto a native library file ----------------------------------------
+
+NATIVE_FILE = PrintSubject.library(1_000_000_042)
+
+
+def add_file(jobs: JobProjection, file_id: int, *, print_subject: str | None = None) -> None:
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO library_files (id, name, size, sha256, blob_key, media_type,"
+            " print_subject) VALUES (%s, 'cube.3mf', 1, 'ab', %s, 'model/3mf', %s)",
+            (file_id, f"library/{file_id}", print_subject),
+        )
+
+
+@pytest.fixture
+def stands(jobs: JobProjection) -> None:
+    """`NATIVE_FILE` is a live native file that no run owns."""
+    add_file(jobs, 1_000_000_042)
+
+
+def onto_file(archive_id: int, **fields: object) -> PrintImport:
+    return imported(archive_id, slug=None, subject=NATIVE_FILE.key, **fields)
+
+
+async def test_an_import_onto_a_library_file_links_it_to_that_file(
+    links: PrintLinkStore, stands: None
+) -> None:
+    owner = await links.record_import(onto_file(193), printer_id=1, plate_id=2)
+
+    assert owner is None
+    linked = await links.linked(193)
+    assert linked is not None
+    assert (linked.subject, linked.matched_by, linked.slug) == (NATIVE_FILE.key, "import", None)
+    assert linked.library_file_id == 1_000_000_042
+    record = await links.import_of(193)
+    assert record is not None
+    assert (record.subject, record.slug, record.source) == (NATIVE_FILE.key, None, "archive")
+    [row] = await links.page(limit=10, subjects=[NATIVE_FILE])
+    assert row.archive_id == 193
+
+
+def test_an_import_names_its_model_or_its_file() -> None:
+    assert imported(1).subject == TROPHY.key
+    with pytest.raises(ValueError, match="model or a library file"):
+        imported(1, slug=None)
+    with pytest.raises(ValueError, match="not the import's target"):
+        imported(1, subject=NATIVE_FILE.key)
+    with pytest.raises(ValueError, match="not the import's target"):
+        imported(1, slug=None, subject=OUT.key)
+
+
+async def test_a_run_s_link_outranks_an_import_onto_a_library_file(
+    links: PrintLinkStore, stands: None
+) -> None:
+    # An import's link is its archive's owner last, whatever its subject: a library
+    # file's import never outranks ScadBuddy's own print of another library file.
+    await links.record_import(onto_file(193))
+    await links.record(LIBRARY, link(193, queue_item_id=51))
+
+    owner = await links.linked(193)
+    assert owner is not None and owner.subject == LIBRARY.key
+    assert [row.archive_id for row in await links.page(limit=10, subjects=[NATIVE_FILE])] == []
+
+
+async def test_a_send_of_the_same_file_takes_over_the_import_s_link(
+    links: PrintLinkStore, stands: None
+) -> None:
+    # The file's own send names the archive after the import linked it: the link becomes
+    # the send's, so the send is not read again and the print is ScadBuddy's own.
+    await links.record_import(onto_file(193))
+    await links.record_sends(NATIVE_FILE, [PrintSend(queue_item_id=51, plate_id=1, printer_id=2)])
+
+    await links.link_library(51, 193, "cube.3mf")
+
+    assert await links.pending_library(10, max_age=timedelta(days=30)) == []
+    owner = await links.linked(193)
+    assert owner is not None
+    assert (owner.matched_by, owner.queue_item_id, owner.name) == ("queue_item", 51, "cube.3mf")
+    # The import is forgotten: a repeat import names the send as the owner.
+    assert await links.import_of(193) is None
+
+
+async def test_a_hash_match_of_the_same_file_takes_over_the_import_s_link(
+    links: PrintLinkStore, stands: None
+) -> None:
+    await links.record_import(onto_file(193))
+
+    await links.record(NATIVE_FILE, PrintLink(archive_id=193, matched_by="content_hash"))
+
+    owner = await links.linked(193)
+    assert owner is not None and owner.matched_by == "content_hash"
+    # The send's link names no file: the import's filename is not kept as its name.
+    assert owner.name is None
+    assert await links.import_of(193) is None
+
+
+async def test_an_import_link_is_never_a_pending_library_send(
+    links: PrintLinkStore, stands: None
+) -> None:
+    await links.record_import(onto_file(193))
+
+    assert await links.pending_library(10, max_age=timedelta(days=30)) == []
+    assert (await links.jobs(queue_items=[193])).queue_items == {}
+
+
+async def test_forgetting_a_library_file_s_imports_keeps_its_own_prints(
+    links: PrintLinkStore, jobs: JobProjection, stands: None
+) -> None:
+    await links.record_import(onto_file(193))
+    await links.record(NATIVE_FILE, link(18, queue_item_id=51))
+
+    with jobs.pool.connection() as conn, conn.transaction():
+        forget_library_imports(conn, [1_000_000_042])
+
+    assert await links.linked(193) is None
+    assert await links.import_of(193) is None
+    owner = await links.linked(18)
+    assert owner is not None and owner.subject == NATIVE_FILE.key
+
+
+async def test_an_import_onto_a_file_that_does_not_stand_writes_nothing(
+    links: PrintLinkStore, jobs: JobProjection
+) -> None:
+    """#6394 review: `import_in` checks the target again in the import's transaction."""
+    add_file(jobs, 1_000_000_043, print_subject="output:abc")
+    copy = imported(193, slug=None, subject="library:1000000043")
+
+    with pytest.raises(ImportTargetGoneError, match="per-print copy"):
+        await links.record_import(copy)
+    with pytest.raises(ImportTargetGoneError, match="stands"):
+        await links.record_import(onto_file(194))
+
+    assert await links.linked(193) is None and await links.linked(194) is None
+    assert await links.import_of(193) is None

@@ -8,6 +8,7 @@ import {
   MIN_APPROVAL_EXPIRY_SECONDS,
   SETTING_APPROVAL_EXPIRY_SECONDS,
 } from '../../approvals/service.js'
+import type { GateRoutes } from '../../gate/crudStore.js'
 import { denyInput, type GateDb, grantInput, openInput, readInput, resolveInput } from '../../gate/store.js'
 import {
   DEFAULT_QUESTION_EXPIRY_SECONDS,
@@ -63,9 +64,16 @@ async function readTimers(sql: Sql): Promise<(key: string) => unknown> {
  * The gate's GateDb as main.ts builds it: the session manager's event log, or with none (no
  * credentials) a log of its own that only publishes, so a write still reaches the bus (#3365).
  * Nothing follows that log: with no session manager there are no followers on this replica.
+ * `routes` are the API's (gate/crudStore.ts, #5299 step 10): the grant's always, every write's
+ * while `routes.use` holds.
  */
-export function gateDb(sql: Sql, events: EventLog | undefined, onAppend: AppendHook | undefined): GateDb {
-  return { sql, events: events ?? new EventLog(sql, onAppend ? { onAppend } : {}) }
+export function gateDb(
+  sql: Sql,
+  events: EventLog | undefined,
+  onAppend: AppendHook | undefined,
+  routes?: { crud: GateRoutes; use: () => boolean },
+): GateDb {
+  return { sql, events: events ?? new EventLog(sql, onAppend ? { onAppend } : {}), ...(routes ? { crud: routes.crud, useCrud: routes.use } : {}) }
 }
 
 /**
@@ -79,6 +87,6 @@ export function sessionGateActivities(db: GateDb, settings?: Pick<SettingsRepo, 
     [SESSION_GATE_ACTIVITIES.grant]: (args: Parameters<typeof grantInput>[1]) => grantInput(db, args),
     [SESSION_GATE_ACTIVITIES.deny]: (args: Parameters<typeof denyInput>[1]) => denyInput(db, args),
     [SESSION_GATE_ACTIVITIES.resolve]: (args: Parameters<typeof resolveInput>[1]) => resolveInput(db, args),
-    [SESSION_GATE_ACTIVITIES.read]: (args: Parameters<typeof readInput>[1]) => readInput(db.sql, args),
+    [SESSION_GATE_ACTIVITIES.read]: (args: Parameters<typeof readInput>[1]) => readInput(db, args),
   }
 }

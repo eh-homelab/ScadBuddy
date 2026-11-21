@@ -22,7 +22,7 @@ from temporalio.api.workflowservice.v1 import RegisterNamespaceRequest
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import FilamentSync, Settings
 from scadbuddy.library.settings_store import RECOVER_BAMBUDDY_LIBRARY_SQL, StoreNotReadyError
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
@@ -35,6 +35,7 @@ from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
+from tests.support.sb_rows import seed_app_type
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
 PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
@@ -920,86 +921,56 @@ def _profile_printer(client: TestClient) -> str:
     return store.create(PrinterCreate(serial="01P00A0000000AA", name="Garage")).id
 
 
-@respx.mock
-def test_profile_with_unknown_spool_is_422(client: TestClient) -> None:
-    """#6153: each spool of the shop slice profile is one the print dialog offers on its
-    printer; here Bambuddy's inventory, as the printer runs on Bambuddy's path."""
+def test_a_profile_names_a_filament_type_per_material(client: TestClient) -> None:
+    """#6574: the shop slice profile names the filament type each material is sliced
+    with, casefolded; no spool is checked, as a type's preset needs no tray."""
     printer = _profile_printer(client)
-    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
-    respx.get("https://bambuddy.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
+    pla = str(seed_app_type(client, "PLA-W", "PLA", {"0.4": "Bambu PLA Basic @BBL H2C"}))
+    saved = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": printer, "materials": {"PLA": pla}}},
     )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["storefront_slice_profile"] == {
+        "printer": printer,
+        "materials": {"pla": pla},
+    }
+    # The old shape, a spool per material, is refused.
     refused = client.put(
         "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": printer, "spools": {"PETG": 8}}},
+        json={"storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}}},
+    )
+    assert refused.status_code == 422
+    cleared = client.put("/api/v1/settings", json={"storefront_slice_profile": None})
+    assert cleared.json()["storefront_slice_profile"] is None
+
+
+def test_profile_with_an_unknown_type_is_422(client: TestClient) -> None:
+    """#6574: each filament type of the profile is one not archived."""
+    printer = _profile_printer(client)
+    refused = client.put(
+        "/api/v1/settings",
+        json={
+            "storefront_slice_profile": {
+                "printer": printer,
+                "materials": {"PETG": str(uuid.uuid4())},
+            }
+        },
     )
     assert refused.status_code == 422, refused.text
     assert refused.json()["errors"][0]["loc"] == [
         "body",
         "storefront_slice_profile",
-        "spools",
+        "materials",
         "petg",
     ]
-    assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
-
-    saved = client.put(
-        "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}}},
-    )
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
-    cleared = client.put("/api/v1/settings", json={"storefront_slice_profile": None})
-    assert cleared.json()["storefront_slice_profile"] is None
-
-
-@respx.mock
-def test_profile_is_checked_against_the_connection_sent_beside_it(client: TestClient) -> None:
-    """#6255 review: one PUT that sets the Bambuddy URL and the profile checks the spools
-    at the new URL, not the stored one."""
-    printer = _profile_printer(client)
-    client.put("/api/v1/settings", json={"bambuddy_url": "https://old.test"})
-    respx.get("https://old.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[])
-    )
-    respx.get("https://new.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
-    )
-    saved = client.put(
-        "/api/v1/settings",
-        json={
-            "bambuddy_url": "https://new.test",
-            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
-        },
-    )
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
-
-
-@respx.mock
-def test_profile_is_checked_against_a_connection_reset_beside_it(client: TestClient) -> None:
-    """#6255 review: a PUT that resets the Bambuddy URL and sets the profile checks the
-    spools at the deployment's URL, not the stored one."""
-    printer = _profile_printer(client)
-    client.put("/api/v1/settings", json={"bambuddy_url": "https://stored.test"})
-    respx.get("https://stored.test/api/v1/inventory/spools").mock(
-        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
-    )
-    refused = client.put(
-        "/api/v1/settings",
-        json={
-            "reset": ["bambuddy_url"],
-            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
-        },
-    )
-    # The tests' deployment has no Bambuddy URL, so spool 7 cannot be read.
-    assert refused.status_code != 200, refused.text
     assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
 
 
 def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
     refused = client.put(
         "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": "nowhere", "spools": {}}},
+        json={"storefront_slice_profile": {"printer": "nowhere", "materials": {}}},
     )
     assert refused.status_code == 422
     assert refused.json()["errors"][0]["loc"] == ["body", "storefront_slice_profile", "printer"]
@@ -1008,7 +979,7 @@ def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
 def test_profile_takes_no_support_or_process_setting(client: TestClient) -> None:
     refused = client.put(
         "/api/v1/settings",
-        json={"storefront_slice_profile": {"printer": "p", "spools": {}, "supports": {}}},
+        json={"storefront_slice_profile": {"printer": "p", "materials": {}, "supports": {}}},
     )
     assert refused.status_code == 422
 
@@ -1061,3 +1032,101 @@ def test_a_storefront_mail_setting_out_of_bounds_is_refused(
     client: TestClient, name: str, value: object
 ) -> None:
     assert client.put("/api/v1/settings", json={name: value}).status_code == 422
+
+
+_DEFAULT_SYNC = {
+    "spools": "bb_to_sb",
+    "weights": "bb_to_sb",
+    "tags": "bb_to_sb",
+    "presets": "bb_to_sb",
+    "suppliers": "off",
+    "locations": "off",
+}
+_DIRECTIONS = ("off", "sb_to_bb", "bb_to_sb", "two_way")
+
+
+def test_filament_sync_defaults_keep_todays_behaviour() -> None:
+    """#6265 Decision 3: what the pull already did stays on (``bb_to_sb``); the new data
+    types start off."""
+    assert FilamentSync().model_dump() == _DEFAULT_SYNC
+
+
+def test_filament_sync_takes_every_direction_for_every_type(client: TestClient) -> None:
+    for key in _DEFAULT_SYNC:
+        for direction in _DIRECTIONS:
+            saved = client.put("/api/v1/settings", json={"filament_sync": {key: direction}})
+            assert saved.status_code == 200, (key, direction, saved.text)
+            read = client.get("/api/v1/settings").json()["filament_sync"]
+            assert read == _DEFAULT_SYNC | {key: direction}
+
+
+def test_filament_settings_round_trip(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert body["filament_sync"] == _DEFAULT_SYNC
+    assert body["filament_low_stock_pct"] == 20
+    assert body["filament_default_cost_per_kg"] is None
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "filament_sync": {"spools": "off"},
+            "filament_low_stock_pct": 35,
+            "filament_default_cost_per_kg": "24.50",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    again = client.get("/api/v1/settings").json()
+    assert again["filament_sync"] == _DEFAULT_SYNC | {"spools": "off"}
+    saved = client.put(
+        "/api/v1/settings", json={"filament_sync": {"spools": "off", "weights": "off"}}
+    )
+    assert saved.status_code == 200, saved.text
+    assert client.get("/api/v1/settings").json()["filament_sync"]["weights"] == "off"
+    assert again["filament_low_stock_pct"] == 35
+    assert Decimal(again["filament_default_cost_per_kg"]) == Decimal("24.50")
+    assert again["applies"]["filament_low_stock_pct"] == "live"
+    assert client.put("/api/v1/settings", json={"filament_low_stock_pct": 101}).status_code == 422
+    assert (
+        client.put("/api/v1/settings", json={"filament_default_cost_per_kg": "-1"}).status_code
+        == 422
+    )
+    for bad in (
+        {"spools": "both"},
+        {"spools": "off", "extra": 1},
+        {"tags": ""},
+        {"weights": None},
+    ):
+        assert client.put("/api/v1/settings", json={"filament_sync": bad}).status_code == 422
+
+
+def test_the_shopping_auto_add_switch_round_trips(client: TestClient) -> None:
+    """#6868: stored only, on by default, and a null puts the default back."""
+    name = "filament_shopping_auto_add_empty"
+    body = client.get("/api/v1/settings").json()
+    assert body[name] is True
+    assert name not in body["sources"]
+    assert client.put("/api/v1/settings", json={name: False}).status_code == 200
+    assert client.get("/api/v1/settings").json()[name] is False
+    with _state(client).settings_store.pool.connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE name = %s", (name,)).fetchone()
+    # `shopping.add_for_empty_on` reads this row as JSON `false` in the write's transaction.
+    assert row == {"value": False}
+    assert client.put("/api/v1/settings", json={name: None}).status_code == 200
+    assert client.get("/api/v1/settings").json()[name] is True
+
+
+def test_a_saved_sync_reads_back_as_a_filament_sync(client: TestClient) -> None:
+    """The path the spool refresh Schedule's pull takes (`main.py`)."""
+    assert (
+        client.put("/api/v1/settings", json={"filament_sync": {"spools": "off"}}).status_code == 200
+    )
+    read = _state(client).settings_store.read({"filament_sync"})["filament_sync"]
+    assert isinstance(read, FilamentSync)
+    assert read.spools == "off"
+
+
+def test_filament_metrics_settings_defaults(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert body["filament_burn_window_days"] == 30
+    assert body["filament_lead_time_days"] == 7
+    assert body["filament_safety_margin_days"] == 3
+    assert body["applies"]["filament_burn_window_days"] == "live"

@@ -36,6 +36,12 @@ type V1PrintLibraryRequestBuilderGetRequestConfiguration struct {
 	QueryParameters *V1PrintLibraryRequestBuilderGetQueryParameters
 }
 
+// Associations the associations property
+// returns a *V1PrintLibraryAssociationsRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Associations() *V1PrintLibraryAssociationsRequestBuilder {
+	return NewV1PrintLibraryAssociationsRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
 // ByFile_id gets an item from the github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client/client.api.v1.print.library.item collection
 // Deprecated: This indexer is deprecated and will be removed in the next major version. Use the one with the typed parameter instead.
 // returns a *V1PrintLibraryWithFile_ItemRequestBuilder when successful

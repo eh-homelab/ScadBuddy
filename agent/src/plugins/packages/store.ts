@@ -2,6 +2,8 @@ import type { Sql, TransactionSql } from 'postgres'
 import { builtinItem, itemKindIn, skillItem, subagentItem } from '../../access/items.js'
 import { packageSource } from '../../access/model.js'
 import { notifyWarmEvict } from '../../sessions/warmEvict.js'
+import { CrudReadError } from '../../api/crudRead.js'
+import { type CrudCallInit, type CrudTarget, crudOf, qs, segment } from '../../api/crudStores.js'
 import { PluginError } from '../registry.js'
 import { diffFiles, type FileDiff, type FileList } from './hash.js'
 import type { PackageSource } from './source.js'
@@ -276,12 +278,7 @@ export class PackageStore implements PackageRepo {
 
   async pinOf(name: string): Promise<(PackagePin & { source: PackageSource }) | undefined> {
     const [row] = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name}`
-    if (!row) return undefined
-    const source: PackageSource =
-      row.source_kind === 'git'
-        ? { kind: 'git', url: row.source_url, ref: row.source_ref, path: row.fetch_path }
-        : { kind: 'marketplace', url: row.source_url, ref: row.source_ref, entry: row.marketplace_entry ?? '' }
-    return { ...pin(row), source }
+    return row ? { ...pin(row), source: sourceOf(row) } : undefined
   }
 
   async create(p: PreparedPackage): Promise<PackageView> {
@@ -435,19 +432,152 @@ export class PackageStore implements PackageRepo {
 
   async filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined> {
     const [row] = await this.sql<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name}`
-    if (!row) return undefined
-    if (!pending) return { pin: pin(row), files: row.files }
-    if (!row.pending_commit_sha || !row.pending_content_hash || !row.pending_files) return undefined
-    if (row.pending_fetch_url === null || row.pending_fetch_path === null) return undefined
-    return {
-      pin: {
-        name: row.name,
-        fetchUrl: row.pending_fetch_url,
-        fetchPath: row.pending_fetch_path,
-        commit: row.pending_commit_sha,
-        contentHash: row.pending_content_hash,
-      },
-      files: row.pending_files,
+    return row ? filesOfRow(row, pending) : undefined
+  }
+}
+
+function sourceOf(row: Row): PackageSource {
+  return row.source_kind === 'git'
+    ? { kind: 'git', url: row.source_url, ref: row.source_ref, path: row.fetch_path }
+    : { kind: 'marketplace', url: row.source_url, ref: row.source_ref, entry: row.marketplace_entry ?? '' }
+}
+
+/** The name a package may have (the table's CHECK): any other is never sent to the API. */
+const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+/** A row as the API answers it: every column, its times as ISO text. */
+type WireRow = Omit<Row, 'approved_at' | 'created_at' | 'updated_at'> & {
+  approved_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+function fromWire(row: WireRow): Row {
+  return {
+    ...row,
+    approved_at: row.approved_at === null ? null : new Date(row.approved_at),
+    created_at: new Date(row.created_at),
+    updated_at: new Date(row.updated_at),
+  }
+}
+
+/** A prepared pin as the routes take it. */
+function pinBody(p: PreparedPackage) {
+  return { fetch_url: p.fetchUrl, fetch_path: p.fetchPath, commit_sha: p.commit, content_hash: p.contentHash, files: p.files, review: p.review }
+}
+
+/**
+ * The packages through the API's CRUD routes, area `plugin-packages` (#5299 step 5; backend
+ * api/crud_agent_packages.py): each method one route and one transaction there, the row lock,
+ * the prune of stale access rows and listings, and the warm eviction included. The API answers
+ * raw rows, so `view` and `pin` shape them here as for the SQL store. A route's 404 or 409 is the
+ * PluginError the SQL store throws, with the API's text.
+ */
+export class CrudPackageStore implements PackageRepo {
+  readonly #call: ReturnType<typeof crudOf>
+
+  constructor(target: CrudTarget) {
+    this.#call = crudOf(target)
+  }
+
+  async #row(step: string, path: string, init?: CrudCallInit): Promise<Row> {
+    try {
+      return fromWire(await this.#call<WireRow>(step, path, init))
+    } catch (err) {
+      if (err instanceof CrudReadError && err.fromRoute && (err.status === 404 || err.status === 409)) {
+        throw new PluginError(err.detail, err.status)
+      }
+      throw err
     }
+  }
+
+  async #rowOf(name: string): Promise<Row | undefined> {
+    if (!PACKAGE_NAME_RE.test(name)) return undefined
+    const { package: row } = await this.#call<{ package: WireRow | null }>('a plugin package', `/plugin-packages/${segment(name, PACKAGE_NAME_RE, 'a package name')}`)
+    return row ? fromWire(row) : undefined
+  }
+
+  #path(name: string, action: string): string {
+    if (!PACKAGE_NAME_RE.test(name)) throw new PluginError(`no plugin package named "${name}"`, 404)
+    return `/plugin-packages/${segment(name, PACKAGE_NAME_RE, 'a package name')}/${action}`
+  }
+
+  async list(): Promise<PackageView[]> {
+    const { packages } = await this.#call<{ packages: WireRow[] }>('the plugin packages', '/plugin-packages')
+    return packages.map((row) => view(fromWire(row)))
+  }
+
+  async get(name: string): Promise<PackageView | undefined> {
+    const row = await this.#rowOf(name)
+    return row ? view(row) : undefined
+  }
+
+  async pinOf(name: string): Promise<(PackagePin & { source: PackageSource }) | undefined> {
+    const row = await this.#rowOf(name)
+    return row ? { ...pin(row), source: sourceOf(row) } : undefined
+  }
+
+  async create(p: PreparedPackage): Promise<PackageView> {
+    const body = {
+      name: p.review.name,
+      source_kind: p.source.kind,
+      source_url: p.source.url,
+      source_ref: p.source.ref,
+      marketplace_entry: p.source.kind === 'marketplace' ? p.source.entry : null,
+      ...pinBody(p),
+    }
+    return view(await this.#row('a plugin package installed', '/plugin-packages', { body }))
+  }
+
+  async setPending(name: string, p: PreparedPackage): Promise<PackageView> {
+    if (p.review.name !== name) {
+      throw new PluginError(`the new commit names the plugin "${p.review.name}", not "${name}"`, 409)
+    }
+    const body = { ref: p.source.ref, ...pinBody(p) }
+    return view(await this.#row('a plugin package re-pinned', this.#path(name, 'pending'), { body }))
+  }
+
+  async discardPending(name: string): Promise<PackageView> {
+    return view(await this.#row("a plugin package's re-pin discarded", this.#path(name, 'discard-pending'), { method: 'POST' }))
+  }
+
+  async approve(name: string, commit: string, contentHash: string, allowRefused = false): Promise<PackageView> {
+    const body = { commit_sha: commit, content_hash: contentHash, allow_refused: allowRefused }
+    return view(await this.#row('a plugin package approved', this.#path(name, 'approve'), { body }))
+  }
+
+  async setEnabled(name: string, enabled: boolean): Promise<PackageView> {
+    return view(await this.#row('a plugin package switched', this.#path(name, 'enabled'), { body: { enabled } }))
+  }
+
+  async delete(name: string): Promise<boolean> {
+    if (!PACKAGE_NAME_RE.test(name)) return false
+    return (await this.#call<{ done: boolean }>('a plugin package removed', this.#path(name, 'delete'), { method: 'POST' })).done
+  }
+
+  async enabledPins(): Promise<PackagePin[]> {
+    const { packages } = await this.#call<{ packages: WireRow[] }>('the enabled plugin packages', `/plugin-packages${qs({ enabled: 'true' })}`)
+    return packages.map((row) => pin(fromWire(row)))
+  }
+
+  async filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined> {
+    const row = await this.#rowOf(name)
+    return row ? filesOfRow(row, pending) : undefined
+  }
+}
+
+function filesOfRow(row: Row, pending: boolean): { pin: PackagePin; files: FileList } | undefined {
+  if (!pending) return { pin: pin(row), files: row.files }
+  if (!row.pending_commit_sha || !row.pending_content_hash || !row.pending_files) return undefined
+  if (row.pending_fetch_url === null || row.pending_fetch_path === null) return undefined
+  return {
+    pin: {
+      name: row.name,
+      fetchUrl: row.pending_fetch_url,
+      fetchPath: row.pending_fetch_path,
+      commit: row.pending_commit_sha,
+      contentHash: row.pending_content_hash,
+    },
+    files: row.pending_files,
   }
 }

@@ -18,6 +18,7 @@ import { AcceptForCustomerButton } from './AcceptForCustomer'
 import { ArchiveQuote } from './ArchiveQuote'
 import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
+import { leastBacked, rateTag } from './machineRateTag'
 import type { SliceQuoteRun } from './useSliceQuotes'
 import { elapsed, useNow } from './useNow'
 import { When } from './When'
@@ -64,6 +65,11 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
       <CollapsibleTrigger className="cursor-pointer text-left">
         Machine rate {rate.rate_per_hour} per hour for {printer}
         {INTERVALS[rate.intervals] ? `, ${INTERVALS[rate.intervals]}` : ''}
+        {' · '}
+        {/* #6665 (machine-rate actuals spec §6): the job cost's tag, and the least-backed part on hover. */}
+        <span data-testid="quote-machine-tag" title={leastBacked(rate) ? `Least backed: ${leastBacked(rate)}` : undefined}>
+          {rateTag(rate.actuals, rate.confidence)}
+        </span>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <ul className="ml-3" aria-label="Machine rate parts">
@@ -84,7 +90,7 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
  */
 function SetupFacts({ orderId, itemId, quote, changes }: { orderId: string; itemId: string; quote: Quote; changes: string[] }) {
   const [missing, setMissing] = useState<ReadonlySet<number>>(new Set())
-  if (quote.source === 'manual') return null
+  if (quote.source === 'manual' || quote.source === 'storefront') return null
   const stats = setupStats(quote)
   const plates = quote.sliced_blob_key ? setupPlates(quote).filter((plate) => !missing.has(plate)) : []
   return (
@@ -280,7 +286,7 @@ export function QuoteEditor({
               <span className="flex flex-wrap items-center gap-2">
                 <span className="sb-num">{formatMoney(quote.unit_price_minor, currency, exponent)} × {quote.quantity} = {formatMoney(quote.total_minor, currency, exponent)}</span>
                 <span className="text-muted-foreground">
-                  {quote.source === 'slice' ? 'From a slice' : quote.source === 'archive' ? 'From a past print' : (quote.lines[0]?.label ?? quote.source)}
+                  {quote.source === 'slice' ? 'From a slice' : quote.source === 'archive' ? 'From a past print' : quote.source === 'storefront' ? 'From the storefront' : (quote.lines[0]?.label ?? quote.source)}
                   {quote.sliced_sha256 ? <span className="font-mono text-xs"> · {quote.sliced_sha256.slice(0, 12)}</span> : null}
                 </span>
                 <span className="text-xs text-muted-foreground">

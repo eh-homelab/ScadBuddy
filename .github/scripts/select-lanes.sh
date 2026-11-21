@@ -8,7 +8,8 @@
 #   rust           the `rust` and `slicer-image` jobs
 #   image          the app image: build, ruff and mypy, container smoke, real-backend
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
-#                  frontend and Go trees that run against it
+#                  frontend and Go trees that run against it; and the
+#                  `profile-fetch-image` job (#6625)
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.
@@ -21,12 +22,12 @@ if [ "${1:-}" = all ]; then
 fi
 
 wiring='Dockerfile$|\.dockerignore$|\.github/workflows/ci\.yml$|\.github/scripts/(select-lanes|changed-paths)(\.test)?\.sh$'
-backend="^(backend/|models/|deploy/grafana/|test-fixtures/|e2e-stack/|workers/rust/vectors/|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
+backend="^(backend/|models/|deploy/grafana/|deploy/security/|test-fixtures/|e2e-stack/|workers/rust/vectors/|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
 # agent-durable's tests read agent/ (fixtures, vectors) and the agent's migrations in
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
 rust="^(workers/rust/|$wiring)"
-image_extra='^(frontend/|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
+image_extra='^(frontend/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 
 paths=$(cat)
 pick() { if grep -qE "$1" <<<"$paths"; then echo true; else echo false; fi; }

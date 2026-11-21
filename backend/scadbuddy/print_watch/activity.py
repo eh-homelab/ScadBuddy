@@ -87,8 +87,8 @@ def lan_row_of(row: LanImport) -> ActivityRow:
 
 def imported_row(row: AutoImport, record: PrintImport) -> ActivityRow:
     """``row``'s activity row once Import print (#4698) linked its archive to a model
-    (#6029): the print is on that model now, from the source the person chose. The
-    ``print_auto_imports`` row stays as the watcher wrote it."""
+    (#6029), or to a library file (#6394): the print is there now, from the source the
+    person chose. The ``print_auto_imports`` row stays as the watcher wrote it."""
     linked = row.model_copy(
         update={
             "state": "linked",
@@ -100,7 +100,17 @@ def imported_row(row: AutoImport, record: PrintImport) -> ActivityRow:
             "suggested": [],
         }
     )
-    return row_of(linked, matched_by="import")
+    activity = row_of(linked, matched_by="import")
+    target = PrintSubject.parse(record.subject)
+    if target.file_id is None:
+        return activity
+    name = row.print_name or record.filename or f"archive {row.archive_id}"
+    return activity.model_copy(
+        update={
+            "subject": target.key,
+            "title": f"Imported print {name} onto library file {target.file_id}",
+        }
+    )
 
 
 PRINT_AUTO_IMPORT = ActivityKind(

@@ -14,20 +14,26 @@ import asyncio
 import json
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import send
 from scadbuddy.bambuddy.print_source import OutputSource
+from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.models import SpoolPresetCreate
 from tests.api.test_print import presets_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.sb_rows import set_app_sb_presets
 
 API = f"{BASE}/api/v1"
 
 
 def inventory_routes(*, printer_id: int | None = 1) -> None:
+    # The picker's spools are SB spools (#6262 Task 7, `recorded_sb_spools`); an order
+    # print's `item_plan` still reads Bambuddy's until Task 9.
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(200, json=recording("inventory-spools.json"))
     )
@@ -144,6 +150,7 @@ def prepared(client: TestClient, model: str) -> str:
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("recorded_sb_spools")
 def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,6 +180,7 @@ def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("recorded_sb_spools")
 def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model: str) -> None:
     """The inventory does not need a printer; only the reconciled weights do."""
     output_id = prepared(client, model)
@@ -184,6 +192,86 @@ def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model
     assert body["printer_id"] is None
     assert body["spools"]
     assert all(row["loaded"] is None or row["loaded"]["printer_id"] for row in body["spools"])
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+@pytest.mark.sb_offset(100)
+@pytest.mark.usefixtures("recorded_sb_spools")
+def test_the_picker_names_each_spool_by_its_sb_number_never_its_bambuddy_id(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6262 Task 7 review I5: SB numbers no Bambuddy id shares (Bambuddy's spool 9 is
+    SB spool #109). The options, the suggestion and the loaded tray all name #109."""
+    slots_from_bambuddy(monkeypatch)
+    output_id = prepared(client, model)
+    upload_route()
+    presets_routes()
+    inventory_routes()
+    nozzle_routes()
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+
+    ids = {row["spool_id"] for row in body["spools"] if not row.get("tray_only")}
+    assert ids == {spool["id"] + 100 for spool in recording("inventory-spools.json")}
+    assert {choice["spool_id"] for choice in body["suggested"]} <= ids
+    [loaded] = [row for row in body["spools"] if row["spool_id"] == 109]
+    assert loaded["loaded"] is not None and loaded["sb_number"] == 109
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_spools_that_cannot_be_read_answer_503_as_bambuddys_do(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6262 Task 7 review M6: the SB spools' store failing is a 503, as a failed
+    Bambuddy read is, never a 500."""
+
+    def down(*_args: object, **_kwargs: object) -> None:
+        raise psycopg.OperationalError("the database is gone")
+
+    monkeypatch.setattr(FilamentInventory, "rows", down)
+    output_id = prepared(client, model)
+    upload_route()
+    presets_routes()
+    inventory_routes(printer_id=None)
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments")
+
+    assert response.status_code == 503, response.text
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+@pytest.mark.usefixtures("recorded_sb_spools")
+def test_each_option_names_its_preset_for_the_mounted_nozzle(
+    client: TestClient, model: str
+) -> None:
+    """#6262 Task 7 re-review M-c: the step names a spool's preset for the printer's
+    mounted nozzle, a 0.6 here, not the 0.4 default."""
+    set_app_sb_presets(
+        client,
+        9,
+        [
+            SpoolPresetCreate(
+                printer_model="H2C",
+                nozzle_diameter=size,
+                slicer_filament=f"GF{size}",
+                slicer_filament_name=f"Preset for {size}",
+            )
+            for size in ("0.4", "0.6")
+        ],
+    )
+    output_id = prepared(client, model)
+    upload_route()
+    presets_routes()
+    inventory_routes()
+    nozzle_routes("0.6")
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+
+    [nine] = [row for row in body["spools"] if row["spool_id"] == 9]
+    assert (nine["slicer_filament"], nine["slicer_filament_name"]) == ("GF0.6", "Preset for 0.6")
 
 
 def nozzle_routes(*diameters: str) -> respx.Route:
@@ -297,6 +385,7 @@ def test_an_unreadable_status_opens_the_filament_step_with_no_nozzles(
 
 @pytest.mark.requires_postgres
 @respx.mock
+@pytest.mark.usefixtures("recorded_sb_spools")
 def test_each_loaded_spool_says_which_extruder_it_feeds(client: TestClient, model: str) -> None:
     """#469 — the recorded H2C has the Filament Track Switch: AMS 0/1 on inlet B (the
     right extruder), AMS 2 on inlet A (the left). A shelf spool has no side."""

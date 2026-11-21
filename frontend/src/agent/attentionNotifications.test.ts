@@ -140,6 +140,19 @@ describe('useAttentionNotifications', () => {
     expect(onOpen).toHaveBeenCalledWith(null)
   })
 
+  it('raises a flow grant request and opens where it is answered (#6399)', () => {
+    const { rerender, onOpen } = setup()
+    rerender({ notices: [], on: true })
+    const grant: AttentionNotice = { id: 'run-grant:r1', sessionId: null, reason: 'grant', message: 'Coaster asks for a grant', href: '/activity#needs-you' }
+    rerender({ notices: [grant], on: true })
+    const made = FakeNotification.made[0]!
+    expect(made.title).toBe('A flow asks for a grant')
+    expect(made.options.tag).toBe('run-grant:r1')
+    vi.spyOn(window, 'focus').mockImplementation(() => {})
+    made.onclick?.()
+    expect(onOpen).toHaveBeenCalledWith(null, '/activity#needs-you')
+  })
+
   it('cuts a long message to the body limit', () => {
     const { rerender } = setup()
     rerender({ notices: [], on: true })

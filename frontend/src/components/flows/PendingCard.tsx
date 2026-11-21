@@ -214,6 +214,8 @@ function Escalation({ entry }: { entry: EscalationInfo }) {
           it now.
         </p>
       )}
+      {/* #5299: no deadline while the starting session's deny is being sent. */}
+      {entry.hop === 'parent' && !entry.hop_until && <p>With the session that started the run; you may decide it now.</p>}
       {entry.reason && <p>Outside the grant: {entry.reason}</p>}
       {entry.proposed && <p>Narrowed by the starting session: approve it as proposed, or decide the call as it was made.</p>}
       {entry.hops.length > 1 && (

@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.flows import FLOW_NAMESPACE
 from tests.api.conftest import FakeAgentTools
+from tests.api.test_crud_agent_cost import token
 from tests.api.test_customers import create as create_customer
 from tests.api.test_flows import AGENT, register, script, settings, start, until
 from tests.api.test_orders import create_order
@@ -383,3 +384,91 @@ def test_an_agents_run_from_a_run_is_linked_and_only_requests_its_grant(
             json={},
         )
         assert refused.status_code == 409, refused.text
+
+
+def test_the_grant_requests_list_a_requested_grant_until_it_is_decided(
+    client: TestClient,
+) -> None:
+    """#6399: the bell's and Activity's "Needs you" read. An agent's request is listed with
+    its run; a browser start's approved grant never is; a decision takes it off."""
+    asked = started(client, "q1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    started(client, "q2", {"grant": grant({"fn": "queue_print"})})
+    listed = client.get("/api/v1/flow-grant-requests")
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [r["run_id"] for r in body["runs"]] == [asked]
+    request = body["runs"][0]
+    assert request["run_status"] == "waiting"
+    assert request["started_by"]["kind"] == "agent"
+    assert (request["grant"]["status"], request["grant"]["in_force"]) == ("requested", False)
+    assert request["grant"]["requested_by"]["principal"] == "token:p1"
+    # The agent's Web Push reads the same request by its grant's id (#6399).
+    waiting = "/api/v1/internal/crud/agent/push/waiting"
+    assert client.get(waiting, headers=token(client)).json() == {
+        "requests": [
+            {
+                "id": f"run-grant:{request['grant']['id']}",
+                "reason": "grant",
+                "since": request["grant"]["created_at"],
+            }
+        ]
+    }
+    # Read as any flow read is: an agent sees the same list, and still cannot decide.
+    assert client.get("/api/v1/flow-grant-requests", headers=AGENT).json()["runs"] == body["runs"]
+    refused = client.post(f"/api/v1/workflow-runs/{asked}/grant/decline", headers=AGENT)
+    assert refused.status_code == 403
+    assert client.post(f"/api/v1/workflow-runs/{asked}/grant/decline").status_code == 200
+    assert client.get("/api/v1/flow-grant-requests").json()["runs"] == []
+    assert client.get(waiting, headers=token(client)).json() == {"requests": []}
+
+
+def test_the_push_route_lists_only_requests_young_enough_to_push(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#6399: the agent pushes a request in its first 24 h only, so the route lists no older
+    one, and older ones never crowd a new one out of its page. The UI's list keeps them."""
+    old = started(client, "w1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    new = started(client, "w2", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE flow_grants SET created_at = now() - interval '25 hours' WHERE run_id = %s",
+            (old,),
+        )
+    waiting = client.get("/api/v1/internal/crud/agent/push/waiting", headers=token(client))
+    assert [r["id"] for r in waiting.json()["requests"]] == [
+        f"run-grant:{view_grant(client, new)['id']}"
+    ]
+    listed = client.get("/api/v1/flow-grant-requests").json()
+    # Newest first, with how many wait in all, so a page past the cap still says so.
+    assert [r["run_id"] for r in listed["runs"]] == [new, old]
+    assert (listed["runs_total"], listed["triggers_total"]) == (2, 0)
+
+
+def test_the_grant_requests_list_the_newest_and_count_the_rest(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6399: past the cap a new request is still listed (the oldest drop off), and the
+    total says how many more wait."""
+    monkeypatch.setattr("scadbuddy.api.flow_triggers.GRANT_REQUESTS_MAX", 1)
+    started(client, "c1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    new = started(client, "c2", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    listed = client.get("/api/v1/flow-grant-requests").json()
+    assert [r["run_id"] for r in listed["runs"]] == [new]
+    assert listed["runs_total"] == 2
+
+
+def test_the_grant_requests_leave_out_a_run_that_ended(client: TestClient) -> None:
+    """A run that ended asks for nothing more, so its undecided grant is not listed."""
+    asked = started(client, "e1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    assert [r["run_id"] for r in client.get("/api/v1/flow-grant-requests").json()["runs"]] == [
+        asked
+    ]
+    view = until(client, asked, lambda v: v["status"] == "waiting" and v["pending"])
+    answered = client.post(
+        f"/api/v1/workflow-runs/{asked}/answer",
+        json={"call_id": view["pending"][0]["call_id"], "answer": "yes"},
+        headers={"Idempotency-Key": "e1-answer"},
+    )
+    assert answered.status_code == 200, answered.text
+    until(client, asked, lambda v: v["status"] == "succeeded")
+    assert client.get("/api/v1/flow-grant-requests").json()["runs"] == []

@@ -14,6 +14,7 @@ import type {
   FlowState,
   FlowStep,
 } from '../../api/types'
+import { changeFlowTrigger, requestedTriggers } from './flowTriggers'
 
 /**
  * #1057 — flow runs (backend `api/flows.py`): the list, one run's view, and a person's
@@ -439,6 +440,15 @@ export function setFlowRunStarting(id: string): void {
   starting.add(id)
 }
 
+/**
+ * #6399 — tests that count only the assistant's requests (its badge, the tab title): no grant
+ * waits for a person, neither `run-ask`'s nor `trig-render`'s standing grant.
+ */
+export function clearFlowGrantRequests(): void {
+  grants.delete('run-ask')
+  changeFlowTrigger('trig-render', { grant: null })
+}
+
 /** Tests: a run's grant, as its view shows it; null for none. */
 export function setFlowRunGrant(id: string, next: FlowGrantView | null): void {
   if (next) grants.set(id, next)
@@ -756,6 +766,24 @@ async function keep(request: Request): Promise<Record<string, unknown>> {
 }
 
 export const handlers = [
+  // #6399 — the grants waiting for a person (backend `api/flow_triggers.py`
+  // `list_flow_grant_requests`): requested run grants of runs not ended, and the triggers'.
+  http.get('/api/v1/flow-grant-requests', () => {
+    const ended = new Set(['succeeded', 'failed', 'terminated'])
+    const asked = runs
+      .map((r) => ({ run: r, grant: grants.get(r.id) }))
+      .filter(({ run: r, grant: g }) => g?.status === 'requested' && !g.revoked_at && !ended.has(r.status))
+      .map(({ run: r, grant: g }) => ({
+        run_id: r.id,
+        run_status: r.status,
+        name: r.name,
+        display_name: detailsOf(r.name).display_name ?? null,
+        started_by: r.started_by,
+        grant: g!,
+      }))
+    const triggers = requestedTriggers()
+    return HttpResponse.json({ runs: asked, triggers, runs_total: asked.length, triggers_total: triggers.length })
+  }),
   // As `FlowStates.newest`: each name's newest version only, by name; archived and
   // deleted flows only with `?archived=true`.
   http.get('/api/v1/workflows', ({ request }) => {

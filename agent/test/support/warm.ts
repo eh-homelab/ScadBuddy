@@ -1,7 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { SDKMessage, SDKResultMessage, SessionKey, SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
-import type { Sql } from 'postgres'
 import { vi } from 'vitest'
 import type { Credential } from '../../src/credentials.js'
 import { userMessage } from '../../src/harness/inbox.js'
@@ -28,8 +27,8 @@ export type WarmHarnessOptions = {
   maxEntries?: number
   idleMs?: number
   now?: () => number
-  /** Wraps the Postgres client WarmSessions is given (the store keeps the real one). */
-  sql?: (sql: Sql) => Sql
+  /** Wraps the transcript tail read WarmSessions is given (the store keeps the real one). */
+  moved?: (moved: PostgresSessionStore['moved']) => PostgresSessionStore['moved']
   /** Runs at each model request, before the fake replies. */
   onRequest?: () => Promise<void>
   /** Runs at each transcript append the process hands over, before it is written. */
@@ -55,9 +54,15 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
       })
     : store
   const spawns: Spawned[] = []
+  const moved = options.moved
   const warm = new WarmSessions({
-    sql: options.sql ? options.sql(db.db.sql) : db.db.sql,
-    store,
+    store: moved
+      ? {
+          lastOfType: (key: SessionKey, type: string) => store.lastOfType(key, type),
+          head: (id) => store.head(id),
+          moved: moved((id, since, own) => store.moved(id, since, own)),
+        }
+      : store,
     maxEntries: options.maxEntries ?? 8,
     idleMs: options.idleMs ?? 600_000,
     ...(options.now ? { now: options.now } : {}),

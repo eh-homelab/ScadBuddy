@@ -66,15 +66,19 @@ on:
     - cron: "23 7 * * 1"
   workflow_dispatch:
 
-# One run per ref. A newer push supersedes an older one, so cancelling costs
-# nothing but the wasted minutes.
+# One run per ref. On a pull request a newer push supersedes an older one, so
+# cancelling costs nothing but the wasted minutes. Elsewhere a running run
+# finishes (#6806): a push to main selects every lane, so its run is the only
+# one of the full suite, and when each merge cancelled the one before it, 84
+# of 100 main runs never reported (2026-11-20). GitHub still keeps only the
+# newest pending run of the group, so runs do not pile up.
 #
 # `event_name` is in the key so a scheduled or dispatched run on main never
 # cancels a push run on main (or the other way round): they share the ref, and
 # a cancelled push run is a merge whose CI never reported.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -318,7 +322,8 @@ jobs:
         run: .github/scripts/deploy-wait.test.sh
 
       # deploy/grafana is built by kustomize in ArgoCD's repo-server, which
-      # runs 5.6.0 (clusters/prod/bambuddy/kustomization.yaml says so), so the
+      # runs v5.8.1 (`kustomize version` in the prod argocd-repo-server pod,
+      # Argo CD v3.4.13, after eh-homelab/clusters#3740, 2026-11-18), so the
       # lint builds it with that release, never whatever kustomize the runner
       # image happens to carry. The sha256 is the one kustomize published in
       # that release's checksums.txt, pinned here so a replaced asset fails.
@@ -327,9 +332,9 @@ jobs:
       # version bump changes it too; the sha256 check covers both.
       - name: Install kustomize
         env:
-          KUSTOMIZE_VERSION: v5.6.0
-          KUSTOMIZE_SHA256: 54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f
-          KUSTOMIZE_ASSET_ID: "220363320"
+          KUSTOMIZE_VERSION: v5.8.1
+          KUSTOMIZE_SHA256: 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
+          KUSTOMIZE_ASSET_ID: "353160972"
           # Sent with the fallback only: the anonymous API rate limit is low.
           KUSTOMIZE_API_TOKEN: ${{ github.token }}
         run: |
@@ -432,13 +437,18 @@ jobs:
         run: .github/scripts/check-plugin-version.test.sh
 
   # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
+  #
+  # The unit tests run in `frontend-unit`, three shards of their own (#6783). In
+  # this job they took 11 to 16 of its 20 minutes (runs 44785128035, 44800511189,
+  # 44802150504: vitest's own Duration 963.89 s on 44800511189), so 10 of 27 green
+  # runs took 19 minutes, and runs 44807121481 and 44768125590 were cancelled in
+  # the Build step after every test file had passed. Lint, typecheck and build
+  # took about 1 minute each there, so this job now takes about 5.
   frontend:
-    name: Frontend lint, typecheck, test, build
+    name: Frontend lint, typecheck, build
     needs: layout
     if: ${{ needs.layout.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
-    # About 10 minutes now that Playwright is `frontend-e2e`: on the slowest
-    # recent main run the other steps add up to 613 s. 20 is twice that.
     timeout-minutes: 20
     defaults:
       run:
@@ -481,9 +491,6 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Unit tests
-        run: pnpm test
-
       - name: Build
         run: pnpm build
 
@@ -498,6 +505,50 @@ jobs:
           SCADBUDDY_STOREFRONT_DIST: ${{ github.workspace }}/frontend/dist
         working-directory: backend
         run: uv run --frozen pytest tests/storefront/test_real_build.py -p no:cacheprovider
+
+  # ── Frontend unit tests: vitest, in three shards (#6783) ────────────────────
+  #
+  # `vitest run --shard=N/3` gives each shard a third of the test files, so the
+  # three together run every file once. vitest fails a shard that gets no file.
+  # A third of the 11 to 16 minutes, plus about 2 minutes of install and
+  # `pnpm gen:api`, is 6 to 8 minutes a shard.
+  frontend-unit:
+    name: Frontend unit tests (${{ matrix.shard }}/3)
+    needs: layout
+    if: ${{ needs.layout.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # `pnpm test` runs `pnpm gen:api` first, which exports the spec with uv.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Unit tests
+        run: pnpm test --shard=${{ matrix.shard }}/3
 
   # ── Frontend e2e: the msw-backed Playwright suite, in shards ────────────────
   #
@@ -546,7 +597,7 @@ jobs:
         with:
           node-version: "24"
 
-      # The webServer's `pnpm build` runs typecheck, which runs `pnpm gen:api`.
+      # `pnpm gen:api` (below, and the webServer's `pnpm build` again) exports the spec with uv.
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -573,6 +624,12 @@ jobs:
       - name: Install Playwright browsers
         timeout-minutes: 5
         run: pnpm exec playwright install chromium
+
+      # #887: `--list` loads every spec, and two import src/mocks/fixtures.ts, which
+      # imports the generated src/api/settingDocs.json. So the spec is exported and
+      # the generated files written before it, not only by the webServer's build.
+      - name: Generate the API files
+        run: pnpm gen:api
 
       # `--list` needs no server. Its last line is "Total: N tests in M files".
       - name: Count this shard's tests
@@ -1068,7 +1125,7 @@ jobs:
       - name: mypy
         run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync mypy
 
-      # The backend suite runs in `backend-pytest`, six jobs of its own (#1167).
+      # The backend suite runs in `backend-pytest`, eight jobs of its own (#1167, #6783).
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
@@ -1162,7 +1219,7 @@ jobs:
       # exercise the shipped artefact. This way the bytes under test are
       # exactly the bytes that were built and probed.
       #
-      # The msw-backed suite stays in the `frontend` job, where its own
+      # The msw-backed suite runs in the `frontend-e2e` job, where its own
       # `webServer` serves the production bundle with no backend at all. The
       # two suites are complements, not duplicates: that one pins the UI
       # against a fixed contract, this one proves a real OpenSCAD renders,
@@ -1180,6 +1237,21 @@ jobs:
         if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+
+      # #887: Playwright loads every spec, and two import src/mocks/fixtures.ts,
+      # which imports the generated src/api/settingDocs.json; nothing else here
+      # runs `pnpm gen:api`, so it is run here, with uv for the spec's export.
+      - name: Set up uv
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Generate the API files
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        run: pnpm gen:api
 
       # No `--with-deps`: see the frontend-e2e job (#4882).
       - name: Install Playwright browsers
@@ -1273,15 +1345,23 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-ci temporal-ci || true
 
-  # ── Backend pytest, in six shards (#1167) ──────────────────────────────────
+  # ── Backend pytest, in eight shards (#1167, #6783) ─────────────────────────
   #
   # One 4-vCPU runner is CPU-bound on this suite: eight xdist workers took longer
   # than four (25:59 against 23:53, the per-test setup 0.70 s -> 2.66 s at the
-  # median). So the lever is more runners: six jobs, each running a sixth by
+  # median). So the lever is more runners: eight jobs, each running an eighth by
   # time with pytest-split and `-n auto` inside it. Four shards took 15-26 min
   # each on main (run 40144180572, 2026-10-24), about 295 worker-minutes of tests
-  # in all; six bring a balanced shard to ~12 min of pytest plus ~3.5 min of image
-  # build and setup, below `models` on main and beside the other jobs on a PR.
+  # in all. The suite grew: the timings of main run 44785128035 (2026-11-20) add up
+  # to 805 worker-minutes. Six shards then took 27 to 46 min of pytest each on runs
+  # 44785128035, 44759348040, 44800511189 and 44802150504, plus 2 to 3 min of image
+  # build and 1 min of counting, and slow runners hit the 55 min limit with no
+  # failed test (#6783). The shards that ran long were the ones the stale timings
+  # overloaded: with the file of 2026-11-18, the split gives shards 1-3 about 37.6
+  # min of tests and shards 4-6 about 29.5 min, as run 44785128035 measured (41 and
+  # 30). With the fresh file, eight shards give about 25.2 min of tests each
+  # (simulated least_duration over the file, 4 workers), so a shard takes about 30
+  # min and a runner 1.6 times slower (run 44800511189 shard 4) about 45.
   #
   # Each shard builds the test image itself, READING the `image` job's gha cache
   # (`cache-from` only: no new cache scope, nothing written, so the 10 GB ceiling
@@ -1292,11 +1372,24 @@ jobs:
   # The split reads backend/.test_durations (pytest-split's format). A test it does
   # not list -- a new one -- is placed by the average duration, so it always runs
   # in some shard; a stale file only balances the shards worse, it never fails a
-  # run. Its timings must be CI's own: a file stored on another machine had the
-  # non-API tests at about twice their CI time, so the shard holding them finished
-  # ten minutes before the rest. So each shard stores what it ran, timed here
+  # run. The split is `least_duration` (each test, slowest first, goes to the
+  # shard with the least time so far), not pytest-split's default
+  # `duration_based_chunks`, which cuts the collection order into runs of
+  # tests. With chunks, a file a week stale (3,325 of 17,091 tests missing, the
+  # tests/api tier twice its listed time) put the slow tests/api modules in one
+  # run of shards: on main's run 44270713273 the shards took 17 to 48 min of
+  # pytest, and PRs' shard 2 hit the 55 min timeout (#6596). least_duration with a
+  # fresh file was simulated at about 28.6 min a shard, but that sum of per-test
+  # timings leaves out the module- and session-scoped fixtures each shard now
+  # builds for every module it gets a part of. Measured pytest time a shard: 28 to
+  # 40 min on PR run 44300526218 (all six shards; the 40 min one on a slow runner),
+  # 27 to 28 min on main run 44308254023 (the three shards that finished before a
+  # newer push cancelled the run) (#6651). The durations file's timings must be
+  # CI's own: a file stored on another machine had the non-API tests at about
+  # twice their CI time, so the shard holding them finished ten minutes before the
+  # rest. So each shard stores what it ran, timed here
   # (`--store-durations --clean-durations`), and `backend-pytest-split` merges the
-  # six into the `backend-test-durations` artifact. To refresh, download that
+  # eight into the `backend-test-durations` artifact. To refresh, download that
   # artifact from a green run on main, unzip it into backend/ and commit.
   #
   # `--durations-path` takes its value after `=`, never as a second word: pytest
@@ -1307,9 +1400,9 @@ jobs:
   # the committed file is what it splits by.
   #
   # Each shard also counts what it selected and what the whole suite collects,
-  # and `backend-pytest-split` checks the six counts add up to the whole, so no
+  # and `backend-pytest-split` checks the eight counts add up to the whole, so no
   # test can fall between the shards unnoticed.
-  # The LFS fixtures, pulled once per change of them into the Actions cache the six
+  # The LFS fixtures, pulled once per change of them into the Actions cache the eight
   # shards restore from: a miss in `lfs-fixtures` (a new fixture, or an entry evicted
   # before the run) costs one ~290 MB pull of the LFS bandwidth quota, not one per
   # shard. A shard that then misses too (a save that never landed, or an eviction
@@ -1348,17 +1441,18 @@ jobs:
           key: lfs-fixtures-${{ steps.lfs.outputs.key }}
 
   backend-pytest:
-    name: Backend pytest (${{ matrix.group }}/6)
+    name: Backend pytest (${{ matrix.group }}/8)
     needs: [layout, lfs-fixtures]
     if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_backend == 'true' }}
     runs-on: ubuntu-latest
-    # A shard's image build takes about 4 minutes and its tests 25 to 36 (2026-11-14, #6214 and #6211);
-    # at 40 a slow runner cancelled shards at 98% with no failed test.
+    # A shard's image build takes 2 to 3 minutes. With six shards its tests took 27 to
+    # 46 (2026-11-20, #6783), and slow runners hit this limit; eight shards bring
+    # that to about 25 (see the section comment above).
     timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6]
+        group: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
@@ -1424,7 +1518,7 @@ jobs:
           line=$(docker run --rm -v "$PWD/results:/results" \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
-            --collect-only -q --splits 6 --group ${{ matrix.group }} \
+            --collect-only -q --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
             --durations-path=/results/durations.json | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
           selected=${line%%/*}
@@ -1463,7 +1557,7 @@ jobs:
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
-          --splits 6 --group ${{ matrix.group }}
+          --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration
           --store-durations --clean-durations --durations-path=/results/durations.json
           --junitxml=/results/junit.xml --durations=20
 
@@ -1475,8 +1569,12 @@ jobs:
       # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces;
       # Ubuntu runners from 24.04 on refuse `unshare` without it:
       # https://github.com/actions/runner-images/issues/10443), and the container runs
-      # unconfined by seccomp and AppArmor as uid 10001, as the intake sandbox's own
-      # pod runs. It runs test_runner.py and test_sandbox.py (the sandbox's RPC).
+      # unconfined by AppArmor as uid 10001, under the intake sandbox pod's own seccomp
+      # file (deploy/security/seccomp/intake-sandbox.json, #6779). AppArmor is
+      # unconfined here because the pod's profile allows the launcher's mounts at the
+      # pod's paths only, and the tests use their own; lifting the sysctl stands in for
+      # it. The next step runs the sandbox under both pod profiles. It runs
+      # test_runner.py and test_sandbox.py (the sandbox's RPC).
       # SCADBUDDY_REQUIRE_CONFINEMENT=1 makes a refusal a failure, never a skip.
       # Shard 1 only: its test image is already built.
       - name: Intake sandbox confinement
@@ -1487,10 +1585,69 @@ jobs:
             if [ -e "/proc/sys/kernel/$key" ]; then sudo sysctl -w "kernel.$key=0"; fi
           done
           docker run --rm --user 10001:10001 \
-            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt seccomp=deploy/security/seccomp/intake-sandbox.json \
+            --security-opt apparmor=unconfined \
             -e SCADBUDDY_REQUIRE_CONFINEMENT=1 -e HOME=/tmp -e UV_CACHE_DIR=/tmp/uv \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
             -p no:cacheprovider -q -rs tests/intake_worker/test_runner.py tests/intake_worker/test_sandbox.py
+
+      # The intake sandbox as its pod runs it (#6779): its seccomp file and its AppArmor
+      # profile (deploy/security/), the AppArmor restriction of unprivileged user
+      # namespaces on as on the nodes, uid 10002, a read-only root, no capabilities, its
+      # spool and the RPC token's directory at the pod's paths. The sandbox starts only
+      # where its launcher can confine a check (it exits 3 otherwise), and one STL check
+      # must answer 200 with a verdict.
+      - name: Intake sandbox under its pod profiles
+        if: ${{ matrix.group == 1 }}
+        run: |
+          set -euo pipefail
+          sudo apparmor_parser -r -W deploy/security/apparmor/scadbuddy-intake-sandbox
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          rpc="$RUNNER_TEMP/intake-rpc"
+          mkdir -p "$rpc"
+          token="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          printf '%s' "$token" > "$rpc/token"
+          chmod 0755 "$rpc"
+          chmod 0444 "$rpc/token"
+          # The container goes on every exit path, the early failures included. A failed
+          # step first prints what the sandbox logged, once, from here (#6811, #6821).
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "sandbox logs:"; docker logs intake-sandbox 2>&1 || true; fi; docker rm -f intake-sandbox >/dev/null 2>&1 || true' EXIT
+          docker run -d --name intake-sandbox --user 10002:10002 --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=deploy/security/seccomp/intake-sandbox.json \
+            --security-opt apparmor=scadbuddy-intake-sandbox \
+            --tmpfs /var/lib/scadbuddy-intake:rw,exec,nosuid,nodev,size=512m,mode=1777 \
+            -v "$rpc:/etc/scadbuddy-intake-rpc:ro" \
+            -e SCADBUDDY_INTAKE_WORK_DIR=/var/lib/scadbuddy-intake \
+            -e TMPDIR=/var/lib/scadbuddy-intake -e SCADBUDDY_INTAKE_SANDBOX_PORT=8090 \
+            -e SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE=/etc/scadbuddy-intake-rpc/token \
+            -p 127.0.0.1:8090:8090 scadbuddy:ci-test python -m scadbuddy.intake_worker.sandbox
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:8090/healthz 2>/dev/null && break
+            if [ "$(docker inspect -f '{{.State.Running}}' intake-sandbox)" != true ]; then break; fi
+            sleep 1
+          done
+          # A sandbox that exited (3: it could not confine a check) fails here, by name.
+          if [ "$(docker inspect -f '{{.State.Running}}' intake-sandbox)" != true ]; then
+            echo "::error::the intake sandbox exited under its pod profiles"
+            exit 1
+          fi
+          printf 'solid t\nfacet normal 0 0 -1\nouter loop\nvertex 0 0 0\nvertex 0 10 0\nvertex 10 0 0\nendloop\nendfacet\nendsolid t\n' > "$RUNNER_TEMP/t.stl"
+          code="$(curl -sS -o "$RUNNER_TEMP/verdict.bin" -D "$RUNNER_TEMP/verdict.headers" -w '%{http_code}' \
+            -H "Authorization: Bearer $token" -H 'Content-Type: application/octet-stream' \
+            -H 'X-Intake-Request: {"filename":"t.stl","timeout":120,"address_space":4294967296,"id":"0123456789abcdef0123456789abcdef"}' \
+            --data-binary @"$RUNNER_TEMP/t.stl" http://127.0.0.1:8090/check || true)"
+          echo "check: HTTP $code"
+          head -c 300 "$RUNNER_TEMP/verdict.bin" | tr -c '[:print:]' '.'; echo
+          test "$code" = 200
+          # The body is the verdict's JSON, then the preview: X-Intake-Verdict-Bytes says
+          # where the JSON ends (intake_worker/runner.py VERDICT_BYTES_HEADER).
+          n="$(tr -d '\r' < "$RUNNER_TEMP/verdict.headers" | awk -F': ' 'tolower($1) == "x-intake-verdict-bytes" {print $2}')"
+          if [ -z "$n" ]; then
+            echo "::error::the check's reply has no X-Intake-Verdict-Bytes header"
+            exit 1
+          fi
+          head -c "$n" "$RUNNER_TEMP/verdict.bin" | jq -e '.isolation == null'
 
       # Even when pytest failed, so the split check still says what ran.
       # The timings go along only when they are this run's: one entry per test it
@@ -1562,16 +1719,16 @@ jobs:
           set -euo pipefail
           cat counts/shard-*.txt
           files=(counts/shard-*.txt)
-          [ "${#files[@]}" -eq 6 ] || { echo "::error::expected 6 shard counts, got ${#files[@]}"; exit 1; }
+          [ "${#files[@]}" -eq 8 ] || { echo "::error::expected 8 shard counts, got ${#files[@]}"; exit 1; }
           totals=$(awk '{print $3}' counts/shard-*.txt | sort -u)
           [ "$(echo "$totals" | wc -l)" -eq 1 ] || { echo "::error::the shards collected different suites: $totals"; exit 1; }
           sum=$(awk '{s += $2} END {print s}' counts/shard-*.txt)
           [ "$sum" -eq "$totals" ] || { echo "::error::the shards selected ${sum} of ${totals} tests"; exit 1; }
           short=$(awk '$4 != $2 {print "shard " $1 " ran " $4 " of the " $2 " it selected"}' counts/shard-*.txt)
           [ -z "$short" ] || { echo "::error::${short//$'\n'/; }"; exit 1; }
-          echo "The six shards select and ran all ${totals} tests."
+          echo "The eight shards select and ran all ${totals} tests."
 
-      # Only from a green run whose six shards each timed what they ran: a shard
+      # Only from a green run whose eight shards each timed what they ran: a shard
       # that failed early sends none, a partial merge would split the next run
       # worse, and a red run's timings are not ones to commit.
       - name: Merge the shards' timings
@@ -1581,8 +1738,8 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           files=(durations/durations-*.json)
-          if [ "${#files[@]}" -ne 6 ]; then
-            echo "::notice::${#files[@]} of 6 shards sent timings; no merged backend/.test_durations from this run"
+          if [ "${#files[@]}" -ne 8 ]; then
+            echo "::notice::${#files[@]} of 8 shards sent timings; no merged backend/.test_durations from this run"
             exit 0
           fi
           collected=$(awk '{print $3}' counts/shard-*.txt | sort -u)
@@ -1934,6 +2091,109 @@ jobs:
           count="$(docker run --rm scadbuddy-slicer:ci /opt/bambu-studio/AppRun --help 2>&1 | grep -c -- '--slice')"
           echo "AppRun --help names --slice on ${count} line(s)"
           test "$count" -ge 1
+
+  # The profile-fetch worker's image (#6625, plan 2026-11-18-profile-fetch-worker.md
+  # Decision 17): the Dockerfile's `profile-fetch` target, checked as the cluster runs
+  # it, and the 3DFP driver's tests (tests/profile_fetch/test_site.py) in its
+  # `profile-fetch-test` target, which is that image plus the dev group and the tests.
+  # `--network none`: the driver drives the local replica only, never the real site.
+  # SCADBUDDY_TEST_CHROMIUM_REQUIRED=1, so a missing Chromium fails rather than skips.
+  # The driver tests run under the pod's own profiles (#6779): the seccomp file
+  # deploy/security/seccomp/profile-fetch.json and the AppArmor profile
+  # deploy/security/apparmor/scadbuddy-profile-fetch, with the AppArmor restriction of
+  # unprivileged user namespaces on, as on the nodes. Chromium's own sandbox stays on
+  # (Decision 6) and needs user namespaces, which the runtime's default seccomp profile
+  # refuses ("No usable sandbox!"). So a Chromium that needs a call the profile does not
+  # allow fails here, before the cluster runs it.
+  # `--ulimit core=0`: the crash tests crash a renderer, and the runner's core_pattern
+  # pipes the dump to systemd-coredump, which held each crashed renderer for about five
+  # minutes, so the crash event never came (measured on ubuntu-latest, 2026-11-18).
+  # In the `image` lane, and in `CI Summary`'s needs.
+  profile-fetch-image:
+    name: Profile-fetch image build and driver tests
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      # The build itself checks that the worker imports no Postgres code and that
+      # Playwright's full Chromium is installed. build-image.yml's `profile-fetch`
+      # job shares the scope; mode=min (the Actions cache is at its ceiling, #743).
+      - name: Build the profile-fetch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: profile-fetch
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-profile-fetch:ci
+          cache-from: type=gha,scope=profile-fetch
+          cache-to: type=gha,scope=profile-fetch,mode=min
+
+      - name: Build the profile-fetch test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: profile-fetch-test
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-profile-fetch-test:ci
+          cache-from: type=gha,scope=profile-fetch
+
+      # As the cluster runs it: uid 10001, and with no settings each process refuses to
+      # start (exit 2), naming each missing one. The default command is the browser
+      # service (#6780), which needs the 3DFP login; the worker
+      # (`python -m scadbuddy.profile_fetch`) needs the browser service's URL instead, and
+      # refuses the login.
+      - name: Profile-fetch smoke
+        run: |
+          set -euo pipefail
+          test "$(docker run --rm scadbuddy-profile-fetch:ci id -u)" = 10001
+          docker run --rm scadbuddy-profile-fetch:ci python -c \
+            "import sys, scadbuddy.profile_fetch.worker; sys.exit(any(m.split('.')[0] == 'psycopg' for m in sys.modules))"
+          docker run --rm scadbuddy-profile-fetch:ci python -c \
+            "import sys, scadbuddy.profile_fetch.browser; sys.exit(any(m.split('.')[0] in ('psycopg', 'temporalio') for m in sys.modules))"
+          status=0
+          docker run --rm --network none scadbuddy-profile-fetch:ci > "$RUNNER_TEMP/start.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/start.log"
+          test "$status" -eq 2
+          grep -q 'setting tdfp_password: Field required' "$RUNNER_TEMP/start.log"
+          status=0
+          docker run --rm --network none scadbuddy-profile-fetch:ci python -m scadbuddy.profile_fetch \
+            > "$RUNNER_TEMP/worker.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/worker.log"
+          test "$status" -eq 2
+          grep -q 'setting profile_fetch_browser_url: Field required' "$RUNNER_TEMP/worker.log"
+          status=0
+          docker run --rm --network none -e SCADBUDDY_TDFP_PASSWORD=x scadbuddy-profile-fetch:ci \
+            python -m scadbuddy.profile_fetch > "$RUNNER_TEMP/worker-login.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/worker-login.log"
+          test "$status" -eq 2
+          grep -q 'SCADBUDDY_TDFP_PASSWORD is set' "$RUNNER_TEMP/worker-login.log"
+
+      - name: Driver tests in the image
+        run: |
+          set -euo pipefail
+          sudo apparmor_parser -r -W deploy/security/apparmor/scadbuddy-profile-fetch
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          docker run --rm --network none --ulimit core=0 --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=deploy/security/seccomp/profile-fetch.json \
+            --security-opt apparmor=scadbuddy-profile-fetch \
+            -e SCADBUDDY_TEST_CHROMIUM_REQUIRED=1 scadbuddy-profile-fetch-test:ci \
+            xvfb-run -a python -m pytest -rs tests/profile_fetch/test_site.py
 
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
@@ -2411,7 +2671,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, freshness, go-client]
+    needs: [layout, lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2437,6 +2697,7 @@ jobs:
           LAYOUT_RESULT: ${{ needs.layout.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          FRONTEND_UNIT_RESULT: ${{ needs.frontend-unit.result }}
           FRONTEND_E2E_RESULT: ${{ needs.frontend-e2e.result }}
           FRONTEND_E2E_SPLIT_RESULT: ${{ needs.frontend-e2e-split.result }}
           AGENT_RESULT: ${{ needs.agent.result }}
@@ -2449,6 +2710,7 @@ jobs:
           GO_RESULT: ${{ needs.go.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
+          PROFILE_FETCH_IMAGE_RESULT: ${{ needs.profile-fetch-image.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -2521,12 +2783,14 @@ jobs:
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
-          assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
+          assert "Frontend lint, typecheck, build"        "$FRONTEND_RESULT" "$has_frontend"
+          assert "Frontend unit tests (every shard)"      "$FRONTEND_UNIT_RESULT" "$has_frontend"
           assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$has_e2e"
           assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$has_e2e"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
           assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$need_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$need_image"
+          assert "Profile-fetch image build and driver tests" "$PROFILE_FETCH_IMAGE_RESULT" "$need_image"
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$need_backend"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$need_backend"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
@@ -2572,7 +2836,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
+    needs: [lint, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

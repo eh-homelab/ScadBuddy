@@ -3,7 +3,7 @@ import { ChevronRightIcon } from 'lucide-react'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './controls'
-import { RUNTIME_FIELDS, type FieldName, type FieldSpec, type SectionId } from './fields'
+import { RUNTIME_FIELDS, docOf, type FieldName, type FieldSpec, type SectionId } from './fields'
 import type { BackendSettings } from './useBackendSettings'
 import { extraSpecs, isSecret, type Secret } from './values'
 
@@ -63,9 +63,8 @@ function RuntimeRow({ form, spec }: { form: BackendSettings; spec: FieldSpec }) 
   return (
     <FieldRow
       id={`setting-${spec.name}`}
-      label={spec.label}
+      {...docOf(form.settings, spec.name)}
       badge={<FieldBadge form={form} name={spec.name} />}
-      help={spec.help}
       error={form.errors[spec.name]}
     >
       <RuntimeInput

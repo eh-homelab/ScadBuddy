@@ -38,12 +38,16 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.print import (
+    RemoteBbPull,
+    RemoteFilamentSync,
+    RemoteFilamentTrays,
     RemoteHeldPresets,
     RemoteNativeSlices,
-    RemoteNativeSpools,
     RemotePrinterStore,
-    RemoteSpoolStore,
+    RemotePrintUses,
+    RemoteSensorNotifications,
 )
+from scadbuddy.filament.bb_pull_models import PULL_READ_ACTIVITY
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.kinds import OperationKind
@@ -51,7 +55,6 @@ from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import RackUsageStore
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.spools.spool_providers import native_provider
 from scadbuddy.worker import PrintWorkerDeps, build_print_deps
 from scadbuddy.workflows.print_models import (
     LAN_PRINT_ACTIVITY,
@@ -135,8 +138,8 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
             if getattr(fn, "__temporal_activity_definition").name == "print_check"
         ]
         print_deps = check.__self__.d  # type: ignore[attr-defined]
-        assert isinstance(print_deps.spools.store, RemoteSpoolStore)
-        assert isinstance(native_provider(print_deps.spools).store, RemoteNativeSpools)
+        # A native run's SB spools through the API (#6262 Task 6).
+        assert isinstance(print_deps.sb_spools, RemoteFilamentTrays)
         assert print_deps.native is not None
         assert isinstance(print_deps.native.profiles.held, RemoteHeldPresets)
         [lan] = [
@@ -144,12 +147,37 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
             for fn in deps.activities
             if getattr(fn, "__temporal_activity_definition").name == "lan_print"
         ]
-        assert isinstance(lan.__self__.d.native_spools, RemoteNativeSpools)  # type: ignore[attr-defined]
+        assert isinstance(lan.__self__.d.uses, RemotePrintUses)  # type: ignore[attr-defined]
         # With no KEK, a LAN print still reads its sliced file: the API mints the URL
         # (#5298 Task 32).
         assert settings.secret_key_file is None
         blobs = lan.__self__.d.blobs  # type: ignore[attr-defined]
         assert isinstance(blobs, RemoteBlobs) and blobs._crud is deps.crud
+        # The filament sync's pass reaches SB through the API's routes (#6265).
+        [sync_pass] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "filament_bb_sync_pass"
+        ]
+        api = sync_pass.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(api, RemoteFilamentSync) and api._client is deps.crud
+        # The Bambuddy pull's reads send SB's side through the API's routes (#6772).
+        [pull_read] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == PULL_READ_ACTIVITY
+        ]
+        pull_api = pull_read.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(pull_api, RemoteBbPull) and pull_api._client is deps.crud
+        # The sensors' notifications are claimed and ended through the API's routes (#6646).
+        [notify] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "sensor_notify_send"
+        ]
+        notify_api = notify.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(notify_api, RemoteSensorNotifications)
+        assert notify_api._client is deps.crud
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()
@@ -174,6 +202,8 @@ async def test_a_native_slice_starts_through_the_api(
     try:
         [kwargs] = built
         assert isinstance(kwargs["native_slices"], RemoteNativeSlices)
+        # Its SB spools through the API too (#6262 Task 6).
+        assert isinstance(kwargs["sb_spools"], RemoteFilamentTrays)
     finally:
         await deps.aclose()
 
@@ -484,6 +514,10 @@ async def test_a_bambuddy_send_runs_on_a_worker_with_no_database_and_no_kek(
     under the API's copy lease, and the API records the copy."""
     monkeypatch.delenv("SCADBUDDY_DATABASE_URL", raising=False)
     monkeypatch.delenv("SCADBUDDY_SECRET_KEY_FILE", raising=False)
+    # Nor the Bambuddy URL or key: the worker reads them from the API's settings route
+    # only, never its own environment (#6189).
+    monkeypatch.delenv("SCADBUDDY_BAMBUDDY_URL", raising=False)
+    monkeypatch.delenv("SCADBUDDY_BAMBUDDY_API_KEY", raising=False)
     api_store.save(
         SettingsPatch(bambuddy_url=BAMBUDDY, bambuddy_api_key="s3cret", library_folder_id=2)
     )

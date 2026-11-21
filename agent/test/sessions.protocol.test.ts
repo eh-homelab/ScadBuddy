@@ -6,6 +6,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
 import { HTTP_TOOL_NAME, httpTierOf } from '../src/harness/httpRequest.js'
 import { event, type ServerEvent, type ServerEventType } from '../src/sessions/protocol.js'
+import { QUEUE_MAX } from '../src/temporal/session/models.js'
 import { INPUT_MAX, REDACTED, scrubForLog, SdkEventMapper, SUMMARY_MAX } from '../src/sessions/sdkEvents.js'
 import {
   ANSWER_MAX,
@@ -15,6 +16,7 @@ import {
   QUESTION_TEXT_MAX,
   QUESTIONS_MAX,
 } from '../src/harness/questions.js'
+import { MESSAGE_MAX } from '../src/sessions/clientProtocol.js'
 import { expectPanelAccepts, frontendClientMessages, frontendParseServerEvent } from './support/frontendProtocol.js'
 
 const S = '11111111-2222-4333-8444-555555555555'
@@ -296,6 +298,21 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'credential.fallback', sessionId: S, from: 'credential 1 "Work" (API key …abcd)', to: 'credential 2 (OAuth token …wxyz)', outcome: 'rate_limited', until: '2026-10-09T01:00:00.000Z' }),
     event({ type: 'credential.fallback', sessionId: S, from: 'credential 1 (API key …abcd)', to: 'credential 2 (OAuth token …wxyz)', outcome: 'refused' }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),
+    // #6386: the queue after a change, an entry with a sent image by name.
+    event({
+      type: 'session.queue',
+      sessionId: S,
+      version: 2,
+      queue: [
+        {
+          id: 'q1',
+          text: 'and a lid',
+          author: { kind: 'browser', id: 'browser', label: 'You' },
+          images: [{ name: `${'a'.repeat(64)}.png`, mediaType: 'image/png', preview: { name: `${'b'.repeat(64)}.webp`, mediaType: 'image/webp' } }],
+          queuedAt: '2026-11-15T00:00:00.000Z',
+        },
+      ],
+    }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'retain', bank: 'b', outcome: 'timeout', detail: 'timed out' }),
   ]
 
@@ -315,7 +332,13 @@ describe('the agent’s protocol mirror', () => {
       OPTIONS_MAX: panel.OPTIONS_MAX,
       QUESTION_TEXT_MAX: panel.QUESTION_TEXT_MAX,
       PREVIEW_MAX: panel.PREVIEW_MAX,
-    }).toEqual({ ANSWER_MAX, QUESTIONS_MAX, OPTIONS_MIN, OPTIONS_MAX, QUESTION_TEXT_MAX, PREVIEW_MAX })
+      QUEUE_MAX: panel.QUEUE_MAX,
+    }).toEqual({ ANSWER_MAX, QUESTIONS_MAX, OPTIONS_MIN, OPTIONS_MAX, QUESTION_TEXT_MAX, PREVIEW_MAX, QUEUE_MAX })
+  })
+
+  it('bounds a queued message\'s edit in the panel exactly where the agent does (#6386)', async () => {
+    const panel = (await frontendClientMessages()) as unknown as Record<string, number>
+    expect(panel.MESSAGE_MAX).toBe(MESSAGE_MAX)
   })
 
   it('covers every server event type the panel declares', async () => {

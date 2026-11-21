@@ -1,6 +1,7 @@
 import type { Sql } from 'postgres'
 import type { FlowRunReads } from '../flows/backendReads.js'
 import type { Owner } from '../sessions/protocol.js'
+import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
 
 // A flow run's tool calls (#1057, plan 2026-10-09-durable-phase-6-flows.md Task D1):
 // ProjectWorkflow (`flow-<run id>`) calls a tool on `agent-tools` with activity id
@@ -72,13 +73,19 @@ function ownerOfPrincipal(id: string): Owner | undefined {
   return undefined
 }
 
+/** A session id as Postgres prints a uuid: the only spelling `id::text` matched. */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export class PgFlowRuns implements FlowRuns {
-  readonly #sql: Sql
+  readonly #sessions: Pick<SessionRows, 'get'>
   readonly #reads: FlowRunReads
 
-  /** `reads`: the backend's flow tables, through its CRUD routes (flows/backendReads.ts). */
-  constructor(sql: Sql, reads: FlowRunReads) {
-    this.#sql = sql
+  /**
+   * `reads`: the backend's flow tables, through its CRUD routes (flows/backendReads.ts).
+   * `sessions`: the sessions' rows, for a run a session started (`gated` in main.ts; SQL on `sql` when omitted).
+   */
+  constructor(sql: Sql, reads: FlowRunReads, sessions: Pick<SessionRows, 'get'> = new PgSessionRows(sql)) {
+    this.#sessions = sessions
     this.#reads = reads
   }
 
@@ -109,9 +116,9 @@ export class PgFlowRuns implements FlowRuns {
     }
     if (by.kind !== 'agent' || typeof by.principal !== 'string') return undefined
     // Started from a session: its owner, as that session's own turns run.
-    if (typeof by.session === 'string') {
-      const [session] = await this.#sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
-        SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id::text = ${by.session}`
+    // Only a lowercase UUID, as `id::text = …` matched one: any other text names no session.
+    if (typeof by.session === 'string' && SESSION_ID.test(by.session)) {
+      const session = await this.#sessions.get(by.session)
       if (session) return { kind: session.owner_kind, id: session.owner_id, label: session.owner_label }
     }
     return ownerOfPrincipal(decoded(by.principal))

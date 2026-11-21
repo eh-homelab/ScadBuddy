@@ -859,8 +859,9 @@ line (`attachment.added`, `attachment.caption`, `attachment.role`,
 `attachment.removed`). Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may
 be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE SET NULL`) names
 the item's image a person marked as what was actually delivered; the
-order page shows it as the item's picture, before it the item's output's thumbnail, then
-its template's.
+order page shows it as the item's picture. With none marked, the picture is the item's
+newest finished-print photo (on the item or on one of its attempts, never a revision's
+file, #6392), then the item's output's thumbnail, then its template's.
 
 The original design follows.
 
@@ -1413,6 +1414,8 @@ usable on its own.
   only makes the tool outward. Whether a "customer approved the quote" step belongs in
   the lifecycle (a `quoted` → `accepted` transition the customer makes through a
   declared page) waits on §9.
+  *Settled 2026-11-17:* the storefront's customer accept (#5283) is that step, and it
+  needs no declared page (`2026-11-17-declared-pages-design.md` §11).
 - **Where the built-in flow's script lives.** Registered at start as version 1 of a
   named flow (proposed, §7.2), or as a hidden default the Flows tab offers to copy
   so a shop that never wants it never sees it.

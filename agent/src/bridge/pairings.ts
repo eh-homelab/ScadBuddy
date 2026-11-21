@@ -97,7 +97,6 @@ export interface PairingStore {
 
 // Ids are uuid columns; anything else cannot match a row, and would make
 // Postgres raise `invalid input syntax for type uuid` instead of answering.
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** What the tab shows for a principal that is not a named token. */
 function fallbackLabel(principal: Pick<Principal, 'kind' | 'id' | 'clientIp'>): string {
@@ -170,7 +169,7 @@ export class PostgresPairingStore implements PairingStore {
   /** A bearer principal is named after its token (`token:<uuid>`, auth/tokens.ts `principalFor`). */
   async #label(principal: Principal): Promise<string> {
     const tokenId = principal.kind === 'bearer' ? principal.id.replace(/^token:/, '') : ''
-    if (UUID.test(tokenId)) {
+    if (UUID_SEGMENT.test(tokenId)) {
       const [token] = await this.#sql<{ name: string }[]>`SELECT name FROM ai_mcp_tokens WHERE id = ${tokenId}`
       if (token) return `MCP token “${token.name}”`
     }
@@ -178,7 +177,7 @@ export class PostgresPairingStore implements PairingStore {
   }
 
   async accept(id: string, code: string, tabId: string): Promise<AcceptResult> {
-    if (!UUID.test(id)) return { ok: false, reason: 'gone' }
+    if (!UUID_SEGMENT.test(id)) return { ok: false, reason: 'gone' }
     return this.#sql.begin(async (tx) => {
       const [row] = await tx<(Row & { code_hash: string; attempts: number; principal_kind: Principal['kind']; principal_id: string })[]>`
         SELECT id, principal_kind, principal_id, principal_label, code_hash, attempts, expires_at
@@ -218,7 +217,7 @@ export class PostgresPairingStore implements PairingStore {
   }
 
   async deny(id: string): Promise<boolean> {
-    if (!UUID.test(id)) return false
+    if (!UUID_SEGMENT.test(id)) return false
     const rows = await this.#sql`
       UPDATE ai_browser_pairings SET status = 'denied', ended_at = now()
        WHERE id = ${id} AND status = 'pending' RETURNING id`
@@ -226,7 +225,7 @@ export class PostgresPairingStore implements PairingStore {
   }
 
   async end(id: string, tabId: string): Promise<boolean> {
-    if (!UUID.test(id)) return false
+    if (!UUID_SEGMENT.test(id)) return false
     const rows = await this.#sql`
       UPDATE ai_browser_pairings SET status = 'ended', ended_at = now()
        WHERE id = ${id} AND status = 'paired' AND tab_id = ${tabId} RETURNING id`
@@ -305,7 +304,7 @@ export class CrudPairingStore implements PairingStore {
   }
 
   async accept(id: string, code: string, tabId: string): Promise<AcceptResult> {
-    if (!UUID.test(id)) return { ok: false, reason: 'gone' }
+    if (!UUID_SEGMENT.test(id)) return { ok: false, reason: 'gone' }
     const answer = await this.#call<{
       result: 'ok' | 'wrong_code' | 'gone'
       pairing: WirePairing | null
@@ -321,12 +320,12 @@ export class CrudPairingStore implements PairingStore {
   }
 
   async deny(id: string): Promise<boolean> {
-    if (!UUID.test(id)) return false
+    if (!UUID_SEGMENT.test(id)) return false
     return (await this.#call<{ done: boolean }>('a pairing denied', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/deny`, { method: 'POST' })).done
   }
 
   async end(id: string, tabId: string): Promise<boolean> {
-    if (!UUID.test(id)) return false
+    if (!UUID_SEGMENT.test(id)) return false
     return (await this.#call<{ done: boolean }>('a pairing ended', `/pairings/${segment(id, UUID_SEGMENT, 'a pairing id')}/end`, { body: { tab_id: tabId } })).done
   }
 

@@ -48,6 +48,7 @@ from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.bb_sync_nudge import FilamentSyncNudger
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
@@ -190,6 +191,8 @@ class AppState:
     #: The print dialog's runs (#470), on Temporal (#1052): the record, and where to
     #: start them.
     print_runs: PrintCommands
+    #: Tells the filament sync's workflow that ScadBuddy's filament changed (#6265).
+    filament_sync: FilamentSyncNudger
     metrics: Metrics
     #: Caps the openscad runs that do NOT go through a render — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
@@ -488,6 +491,9 @@ def _build_core(settings: Settings) -> AppState:
             task_queue=settings.temporal_task_queue_bambuddy,
             search_attributes=settings.temporal_search_attributes,
             outcomes=outcomes,
+        ),
+        filament_sync=FilamentSyncNudger(
+            lambda: temporal, settings_store.read, settings.temporal_task_queue_bambuddy
         ),
         checkouts=checkouts,
         installs=installs,

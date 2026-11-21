@@ -55,6 +55,34 @@ export interface PendingCounts {
   unattached?: PendingApproval[]
   /** #815 — the requests waiting on the user (approvals, questions, attention requests), by request id: what an OS notification announces. */
   notices?: AttentionNotice[]
+  /** #6399 — every entry `totalOf` counts, with what the bell and Activity's "Needs you" show of it. */
+  waiting?: WaitingEntry[]
+}
+
+/**
+ * #6399 — one entry of the agent's read that waits on the person: what "Needs you" lists. A flow
+ * run's call is answered on its run's page; the rest through the one respond route or the panel.
+ */
+export interface WaitingEntry {
+  /** The pending-input request id; empty when the agent did not say (an older agent). */
+  id: string
+  kind: 'approval' | 'question' | 'attention'
+  /** The session it is in; null for an MCP client's prepared action or a flow run's call. */
+  sessionId: string | null
+  /** The approval's tool. */
+  tool: string
+  /** An approval's summary, a question's text or an attention request's message. */
+  text: string
+  /** An attention request's reason (`harness/attention.ts`). */
+  reason?: string
+  /** When it began to wait, when the agent says. */
+  since?: string
+  inputHash?: string
+  /** Who prepared a session-less approval (an MCP token's label). */
+  by?: string
+  expiresAt?: string
+  /** A flow run's call, waiting on the person on the run's page. */
+  run?: { id: string; name: string }
 }
 
 /** #815 — a request waiting on the user (an approval, a question or an attention request), as a notification shows it. */
@@ -65,6 +93,8 @@ export interface AttentionNotice {
   sessionId: string | null
   reason: string
   message: string
+  /** #6399 — where a click on it goes, for a request no session holds (a flow grant, a pairing). */
+  href?: string
 }
 
 /** What waits on the user: everything but the done summaries. */
@@ -202,6 +232,31 @@ function notices(entries: readonly PendingEntry[]): AttentionNotice[] {
   return out
 }
 
+/** Every entry `read` counts as waiting, in the agent's order (oldest first). */
+function waitingEntries(entries: readonly PendingEntry[]): WaitingEntry[] {
+  const out: WaitingEntry[] = []
+  for (const entry of entries) {
+    if (entry.expiring || entry.run?.hop === 'parent') continue
+    const a = entry.attention
+    if (entry.kind !== 'approval' && a && isDoneSummary(a.reason, a.on_timeout !== null)) continue
+    const kind = entry.kind === 'approval' ? 'approval' : a ? 'attention' : 'question'
+    out.push({
+      id: entry.id ?? '',
+      kind,
+      sessionId: typeof entry.session_id === 'string' ? entry.session_id : null,
+      tool: entry.tool ?? '',
+      text: (kind === 'approval' ? entry.summary : entry.prompt) ?? '',
+      ...(a ? { reason: a.reason } : {}),
+      ...(entry.created_at ? { since: entry.created_at } : {}),
+      ...(entry.input_hash ? { inputHash: entry.input_hash } : {}),
+      ...(entry.requested_by ? { by: entry.requested_by.label } : {}),
+      ...(entry.expires_at ? { expiresAt: entry.expires_at } : {}),
+      ...(entry.run?.id ? { run: { id: entry.run.id, name: entry.run.name ?? entry.run.id } } : {}),
+    })
+  }
+  return out
+}
+
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
     const response = await fetchNotingSignedOut(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
@@ -227,6 +282,8 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
     if (loose.length > 0) counts.unattached = loose
     const waiting = notices(parsed.data.entries)
     if (waiting.length > 0) counts.notices = waiting
+    const listed = waitingEntries(parsed.data.entries)
+    if (listed.length > 0) counts.waiting = listed
     return counts
   } catch {
     return null

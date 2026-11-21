@@ -42,6 +42,8 @@ from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.component import FILAMENT
+from scadbuddy.filament.inventory import read_sb_spools
 from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import PIN_TIMEOUT
@@ -84,6 +86,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotPresets,
     library_file_gone,
     operation_quote_id,
     quote_check,
@@ -91,18 +94,27 @@ from scadbuddy.orders.quote import (
     reference_of,
     support_check,
 )
-from scadbuddy.orders.rendering import AttachTo, output_for_reference
+from scadbuddy.orders.rendering import AttachTo, RenderedOutput, output_for_reference
 from scadbuddy.orders.spools import item_plan
+from scadbuddy.orders.storefront.slice_price import (
+    RUN_ATTEMPTS,
+    SLICE_PRICE_KIND,
+    SliceRun,
+    SliceUnavailableError,
+    SliceVariant,
+    model_digest,
+    price_variant,
+)
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.read_budget import budget_of
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
-from scadbuddy.store.cache import StaleBlobError
+from scadbuddy.store.cache import StaleBlobError, materialize_result
 from scadbuddy.store.content_models import BlobMissingError
 
 if TYPE_CHECKING:
@@ -147,6 +159,8 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
 #: blob swept, while the run read it. The next attempt's ``ensure_output`` renders and
 #: saves the output again, and slices again.
 QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
+#: A storefront slice also tries again after a passing failure (#6370 review).
+SLICE_RETRYABLE: tuple[type[Exception], ...] = (*QUOTE_RETRYABLE, SliceUnavailableError)
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:
@@ -195,9 +209,14 @@ class PreviewSlicer:
         self.components = components
 
     async def start(
-        self, output_id: str, request: SliceQuoteRequest, subject: str
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
-        return await self._start(request, subject, output_id=output_id)
+        return await self._start(request, subject, output_id=output_id, slot_presets=slot_presets)
 
     async def start_library(
         self, file_id: int, request: SliceQuoteRequest, subject: str
@@ -213,6 +232,7 @@ class PreviewSlicer:
         *,
         output_id: str | None = None,
         file_id: int | None = None,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
@@ -232,6 +252,15 @@ class PreviewSlicer:
         lan = route is not None and route.native
         native_reads = await self.components.get(PRINT_LIBRARY).serving_native()
         slicing = self.components.get(SLICING)
+        # Bambuddy's path offers ScadBuddy's own spools (#6262 Task 7), as the run's.
+        reads = self.components.get(FILAMENT).reads
+        # A native printer's held SB spools and their presets, read as the dialog's
+        # background slice reads them (`bambuddy/operations.py` `preview_run`), so the
+        # quote's grams, time and price use the preset the print will (#6262 Task 9).
+        sb = None
+        if lan:
+            assert route is not None
+            sb = await read_sb_spools(reads, route.row, route.status)
         if file_id is not None:
             return await start_library_quote_preview(
                 file_id,
@@ -245,6 +274,8 @@ class PreviewSlicer:
                 temporal=slicing.temporal(),
                 native_reads=native_reads,
                 route=route,
+                reads=reads,
+                sb=sb,
             )
         assert output_id is not None
         outputs = LocalOutputs(core.outputs, core.catalogue)
@@ -278,6 +309,9 @@ class PreviewSlicer:
             native_reads=native_reads,
             route=route,
             title=naming.title,
+            reads=reads,
+            sb=sb,
+            slot_presets=slot_presets,
         )
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
@@ -730,20 +764,24 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         native = await native_run(body, settings)
         if body.path == "native" and "path" not in sent_keys(sent) and not native:
             raise quoted_path_refusal(request["item_id"])
-        # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, in the check
-        # so a refusal writes nothing, and recorded with it so a retry keys its run as
-        # the first try did. On the native path the plan is the request's.
+        # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, ScadBuddy's
+        # own (#6262 Task 9), in the check so a refusal writes nothing, and recorded with
+        # it so a retry keys its run as the first try did. On the native path the plan is
+        # the request's: its choices are the printer's trays.
         if not native:
-            printer_id = body.printer_id
-            if printer_id is None and body.printer is not None:
-                row = await asyncio.to_thread(components.get(PRINTERS).store.get, body.printer)
-                printer_id = None if row is None else row.bambuddy_printer_id
+            printer = body.printer
+            if printer is None and body.printer_id is not None:
+                row = await asyncio.to_thread(
+                    components.get(PRINTERS).store.by_bambuddy_id, body.printer_id
+                )
+                printer = None if row is None else row.id
             plan = await item_plan(
                 orders.store,
+                orders.inventory,
                 orders.integrations,
                 request["item_id"],
                 body.filament_plan,
-                printer_id,
+                printer,
             )
             if plan is not None:
                 checked["filament_plan"] = plan.model_dump(mode="json")
@@ -1045,7 +1083,74 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         dumped: dict[str, Any] = attachment.model_dump(mode="json")
         return dumped
 
+    async def storefront_slice_check(request: dict[str, Any]) -> dict[str, Any]:
+        SliceVariant.model_validate(request)
+        return {}
+
+    async def storefront_slice_run(
+        request: dict[str, Any], checked: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A storefront variant sliced and priced as a back-office quote is (#6153,
+        ``orders/storefront/slice_price.py`` ``price_variant``): the same render, slicer
+        and price book, here over this process's services."""
+        # Read when it runs: these import back into this module's imports.
+        from scadbuddy.operations.component import OPERATIONS
+
+        orders = components.get(ORDERS)
+        create = components.get(OPERATIONS).kinds["output_create"]
+
+        async def create_output(body: dict[str, Any]) -> dict[str, Any]:
+            return await create.run(body, {})
+
+        async def rendered_sha256(rendered: RenderedOutput) -> str | None:
+            if rendered.job_id is None:
+                return None
+            try:
+                job = await asyncio.to_thread(core.render.store.read, rendered.job_id)
+            except JobNotFoundError:
+                return None
+            if job.result is None:
+                return None
+            await materialize_result(core.store.blobs, job.result)
+            path = core.paths.root / job.result.model_3mf
+            return await asyncio.to_thread(model_digest, job.id, path)
+
+        run = SliceRun(
+            prices=orders.slice_prices,
+            filament=orders.store.filament,
+            book=orders.price_book,
+            outputs=core.outputs,
+            renders=_Renders(core),
+            create_output=create_output,
+            slicer=PreviewSlicer(core, components),
+            rendered_sha256=rendered_sha256,
+        )
+        try:
+            row = await price_variant(run, SliceVariant.model_validate(request))
+        except SLICE_RETRYABLE:
+            raise
+        except QUOTE_DETERMINISTIC as error:
+            # As a quote's: a bug is not tried again.
+            raise ApplicationError(
+                type(error).__name__, type=type(error).__name__, non_retryable=True
+            ) from error
+        return {"price_key": row.price_key, "status": row.status}
+
     return [
+        OperationKind(
+            SLICE_PRICE_KIND,
+            storefront_slice_check,
+            storefront_slice_run,
+            # As a quote's (#5353): a worker that stops mid-run is tried again, and every
+            # attempt writes the same row, by the variant's key.
+            run_attempts=RUN_ATTEMPTS,
+            queue="library",
+            run_timeout=QUOTE_TIMEOUT,
+            where="the storefront's slice prices",
+            # The render and the slice outlast the command deadline: the page reads the
+            # price again.
+            answers_running=True,
+        ),
         OperationKind(
             ORDER_ATTEMPT_COPY,
             copy_check_kind,

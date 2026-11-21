@@ -271,4 +271,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`forgetSubject with the route${TEST_DATABASE
     expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
     expect(await db.sql`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`).toHaveLength(1)
   })
+
+  it('needs no KEK here for a session with forks once the route copies their ranges (#5299 step 9)', async () => {
+    const parent = randomUUID()
+    const fork = randomUUID()
+    for (const [id, parentId, cut] of [
+      [parent, null, null],
+      [fork, parent, 2],
+    ] as const) {
+      await db.sql`
+        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, fork_parent_id, fork_cut)
+        VALUES (${id}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'idle', 10, 1, ${parentId}, ${cut})`
+    }
+    const asked: string[] = []
+    // As the API does: the fork takes its range and its link goes, in the forget's transaction.
+    const crud = {
+      forget: async (s: string) => {
+        asked.push(s)
+        await db.sql`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL WHERE id = ${fork}`
+        return true
+      },
+    }
+    const done = await forgetSubject({ sql: db.sql, crud }, `session-${parent}`)
+    expect(asked).toEqual([`session-${parent}`])
+    expect(done.key).toBe(true)
+  })
 })

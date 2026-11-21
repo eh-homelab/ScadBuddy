@@ -6,9 +6,32 @@ import type { Operation } from './registry.js'
 
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
+  ...(
+    [
+      'POST /api/v1/filament/invoices/{invoice_id}/file',
+      'GET /api/v1/filament/invoices/{invoice_id}/file',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A multipart upload and a binary download. The assistant gets an invoice's file in the import session's first message, as an image or a PDF document block (#6267), not through a tool.",
+  })),
+  {
+    operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
+    reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
+  },
+  {
+    operation: 'GET /api/v1/filament/sync/reset-links',
+    reason:
+      "The dry run of a reset of the Bambuddy links (#6773), for Settings' confirm dialog. The assistant reads the links' instance in filament_sync_status, and filament_sync_reset_links with `expect_kept: true` keeps the links when the configured Bambuddy is proven the same one (409 `proof_changed` otherwise, #6845), so it needs no dry run.",
+  },
+  {
+    operation: 'GET /api/v1/filament/spools/{spool_id}/k-values',
+    reason: "A spool's effective pressure-advance values (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
+  },
   {
     operation: 'GET /api/v1/storefront/slice-profile/options',
-    reason: "The printers and spools the Storefront settings control offers for the shop's slice profile (#6153). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
+    reason: "The materials and filament types the Storefront settings control offers for the shop's slice profile (#6153, #6574). The assistant reads the profile through get_settings; the shop sets it in Settings, Storefront pricing.",
   },
   {
     operation: 'GET /api/v1/storefront/listings',
@@ -334,6 +357,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'agent-authored request.',
   },
   {
+    operation: 'GET /api/v1/flow-grant-requests',
+    reason:
+      'The grants waiting for a decision, for the bell and the Activity page\'s "Needs you" (#6399). Only a person ' +
+      'decides a grant; the assistant reads a run\'s grant with get_flow_run and a trigger\'s with get_flow_trigger.',
+  },
+  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
     reason:
       "A parent's narrowing beside the call it narrows, for the person to compare before approving it by " +
@@ -473,14 +502,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'agent reads profiles with get_filament_profiles and applies one through print_output, whose run ' +
       'warns (profile-not-applied) when one cannot apply.',
   },
-  ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(
-    (operation) => ({
-      operation,
-      reason:
-        "The print dialog's check before Print (#755). An agent's print_output run makes the same refusals " +
-        'itself, as a 422 with the same words, before anything is uploaded, so a separate check adds nothing.',
-    }),
-  ),
   ...(
     [
       'GET /api/v1/print/library/{file_id}/thumbnail',
@@ -612,8 +633,9 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/print/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',
     reason:
-      "Records in Bambuddy which spool is in an untagged tray (#2164), sent only on a person's own answer " +
-      "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
+      'Records which ScadBuddy spool is in an untagged tray (#2164, #6262): its tray place first, then, for a ' +
+      "spool linked to Bambuddy's, Bambuddy's assignment. Sent only on a person's own answer to the print " +
+      "dialog's question; an agent cannot see which spool is physically in the tray.",
   },
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/camera/stream',
@@ -634,6 +656,19 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
       "print time and open picks in the print check's rack options, for the hotends that job could use. " +
       "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
+  },
+  {
+    operation: 'DELETE /api/v1/printers/{printer_id}/machine-rate/events/{event_id}',
+    reason:
+      "Deleting a maintenance event (#5774) is a person's correction on the Settings machine-rate page. The spec " +
+      "gives the agent no delete tool (2026-11-17-machine-rate-actuals §5): it adds and updates events only.",
+  },
+  {
+    operation: 'POST /api/v1/printers/{printer_id}/machine-rate/import',
+    reason:
+      "Settings' \"Read from Bambuddy\" button (#5774 PR 3). The spec gives the agent no import tool " +
+      '(2026-11-17-machine-rate-actuals §5): machine_rate_get already reads the log after its live task read, ' +
+      'and the housekeeping sweep reads it on its Schedule (§3.7).',
   },
 ]
 
@@ -679,6 +714,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     reason:
       "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
+  },
+  {
+    route: 'POST /api/v1/ai/filament/invoice-import',
+    reason:
+      "The invoice page's Import button (#6267): it starts the import session, with the invoice's file attached to its first " +
+      'message. An assistant that is already in a session reads and edits invoices with the filament_invoice_* tools.',
   },
   // Web Push (#815 §3, routes/push.ts).
   ...['GET /api/v1/ai/push/key', 'PUT /api/v1/ai/push/subscription', 'DELETE /api/v1/ai/push/subscription'].map((route) => ({

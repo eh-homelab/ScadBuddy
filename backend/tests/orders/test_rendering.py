@@ -75,6 +75,36 @@ async def test_a_reference_renders_and_saves_with_no_item(shop: Shop) -> None:
     assert shop.get_item() == before
 
 
+async def test_a_new_output_is_the_back_offices_unless_the_caller_says(shop: Shop) -> None:
+    """#6371: an order's render and a quote save with the default, the back office's;
+    only the storefront slice run passes ``storefront``."""
+    outputs = SavedOutputs()
+    bodies: list[dict[str, Any]] = []
+
+    async def create(body: dict[str, Any]) -> dict[str, Any]:
+        bodies.append(body)
+        return await outputs.create(body)
+
+    await output_for_reference(
+        reference_of(shop),
+        outputs=outputs,
+        renders=FakeRenders(),
+        create_output=create,
+        name="Variant",
+        follow_every=0.0,
+    )
+    await output_for_reference(
+        reference_of(shop),
+        outputs=outputs,
+        renders=FakeRenders(),
+        create_output=create,
+        name="Variant",
+        follow_every=0.0,
+        source="storefront",
+    )
+    assert [body["source"] for body in bodies] == ["back_office", "storefront"]
+
+
 async def test_an_output_saved_under_the_id_is_reused_with_no_render(shop: Shop) -> None:
     outputs = SavedOutputs()
     outputs.metas["kept"] = OutputMeta.model_construct(

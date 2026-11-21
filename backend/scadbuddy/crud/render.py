@@ -44,9 +44,10 @@ sent again is the same row (ON CONFLICT), a use stamps the row again.
 and `InstallSlots` (the render leases, pin holds and install slots) over the routes, with
 the same names, signatures and answers. The worker chooses each token, so every take and
 claim is natural; a take that waits on the API's removal keeps waiting (`REMOVAL_RUNNING`),
-as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses (no row of that token,
-a slot another token holds) is a `CrudRefusedError`, which the renewing loop logs, as it
-logs any failed renewal; the SQL path renewed nothing there silently. A slot's release
+as the SQL take waited on `REMOVAL_LOCK`. A renew the API refuses because the row is gone or
+lapsed (`NO_LEASE`, `NO_HOLD`) or another token holds it (`NOT_HOLDER`) returns False, as the SQL
+renew does; `_renewed` then ends the block with `HoldLostError`. Any other refusal is still
+raised, and the renewing loop logs it as a failed renewal. A slot's release
 that finds another token on it (`NOT_HOLDER`: ours lapsed and was taken) is released,
 as the SQL path's was.
 """
@@ -90,6 +91,22 @@ QUEUE_FULL = "queue-full"
 #: `api/crud_render.py` `REUSE_LOST` and `DEADLOCK`.
 REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
+#: `api/crud_render.py` `OTHER_BACKEND`: a put or swap of a ref on another backend than
+#: the API's store (this worker still renders to the old one after a `/store/migrate`).
+OTHER_BACKEND = "other-backend"
+#: A put's or swap's wait for its answer (#6534): the API reads and hashes a new object
+#: before it answers (`api/crud_render.py` `_verified`), so the wait grows with the
+#: ref's size. The floor is the client's default per-request timeout (10 s). Past it, the
+#: wait grows by `VERIFY_SECONDS_PER_MIB` for each whole MiB: a read at 1 MiB/s, a
+#: quarter of the 4.5 MB/s that `intake_worker/sandbox.py` `REQUEST_DEADLINE` calls well
+#: below the pod network's speed. A read through the Bambuddy store is slower than S3.
+VERIFY_TIMEOUT_FLOOR = 10.0
+VERIFY_SECONDS_PER_MIB = 1.0
+#: The most a put or swap waits, whatever the ref's size (#6538). A render activity
+#: budgets one `TRANSFER` (180 s, `workflows/pipelines.py`) for each piece it moves, and
+#: a publish is the upload plus this index write. The upload and the API's read move the
+#: same bytes, so each gets half of that budget. A ref of 80 MiB or more waits this long.
+VERIFY_TIMEOUT_CEILING = 90.0
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
 #: `api/crud_render.py` `FORGETTABLE_PREFIXES` and `LIBRARY_PIECE_KEY`: the keys only the
@@ -108,6 +125,10 @@ FOLDER_LOCKED = "folder-locked"
 REMOVAL_RUNNING = "removal-running"
 #: `api/crud_render.py` `NOT_HOLDER`: a slot another token holds.
 NOT_HOLDER = "not-holder"
+#: `api/crud_render.py` `NO_LEASE`, `NO_HOLD`: a renew of a lease or a hold with no live
+#: row (gone, or lapsed).
+NO_LEASE = "no-lease"
+NO_HOLD = "no-hold"
 #: A take's wait for its answer: the route's `LEASE_LOCK_WAIT` (2 s) and a pool wait
 #: (`tests/crud/test_crud_library_leases.py` checks that the two agree).
 TAKE_TIMEOUT = 2.0 + PROJECT_POOL_TIMEOUT
@@ -367,6 +388,27 @@ class WriteKeys:
         return activity_key(ordinal, self.namespace)
 
 
+class OtherBackendError(Exception):
+    """The API refused a put or swap of a ref on another backend than its store (a 409
+    ``other-backend``): this worker still renders to the store's old backend after a
+    `/store/migrate`. It renders to the new one once it reads the new settings."""
+
+    def __str__(self) -> str:
+        detail = super().__str__()
+        return (
+            "This render worker stores on another backend than the API's store; it has"
+            f" not read the store's new settings yet. {detail}"
+        ).strip()
+
+
+def verify_timeout(ref: BlobRef) -> float:
+    """A put's or swap's wait for ``ref``: `VERIFY_TIMEOUT_FLOOR`, plus
+    `VERIFY_SECONDS_PER_MIB` for each whole MiB the API may read and hash, never past
+    `VERIFY_TIMEOUT_CEILING`."""
+    scaled = VERIFY_TIMEOUT_FLOOR + (ref.size >> 20) * VERIFY_SECONDS_PER_MIB
+    return min(scaled, VERIFY_TIMEOUT_CEILING)
+
+
 class RemoteBlobIndex:
     """`BlobIndex` over the routes. Each call has the client's own budget, as each SQL
     call waited the pool's default for a connection."""
@@ -378,12 +420,20 @@ class RemoteBlobIndex:
     def _read(self, path: str, **query: Any) -> Any:
         return self._client.request("GET", _with(f"{BASE}/blob-index{path}", query)).json()
 
-    def _write(self, method: str, path: str, *, json: Any = None, **query: Any) -> Any:
+    def _write(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        timeout: float | None = None,
+        **query: Any,
+    ) -> Any:
         url = _with(f"{BASE}/blob-index{path}", query)
         try:
             try:
                 response = self._client.request(
-                    method, url, json=json, idempotency_key=self._keys.next()
+                    method, url, json=json, idempotency_key=self._keys.next(), timeout=timeout
                 )
             except CrudRefusedError as error:
                 if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
@@ -391,7 +441,7 @@ class RemoteBlobIndex:
                 # An earlier attempt of this activity sent another write under this
                 # ordinal (`WriteKeys`): this one is a write of its own.
                 response = self._client.request(
-                    method, url, json=json, idempotency_key=uuid.uuid4().hex
+                    method, url, json=json, idempotency_key=uuid.uuid4().hex, timeout=timeout
                 )
         except CrudRefusedError as error:
             reason = error.problem.get("reason") if error.status == 409 else None
@@ -399,6 +449,8 @@ class RemoteBlobIndex:
                 raise ReuseLostError(str(error.problem.get("detail", ""))) from error
             if reason == DEADLOCK:
                 raise DeadlockDetected(str(error.problem.get("detail", ""))) from error
+            if reason == OTHER_BACKEND:
+                raise OtherBackendError(str(error.problem.get("detail", ""))) from error
             raise
         return response.json()
 
@@ -423,6 +475,7 @@ class RemoteBlobIndex:
             "PUT",
             f"/{_part(key)}",
             json={"ref": ref.model_dump(mode="json"), "slug": slug, "meta": meta, "reuse": reuse},
+            timeout=verify_timeout(ref),
         )
         previous = body["previous"]
         return None if previous is None else BlobRef.model_validate(previous)
@@ -447,6 +500,7 @@ class RemoteBlobIndex:
                 "meta": meta,
                 "reuse": reuse,
             },
+            timeout=verify_timeout(ref),
         )
         return bool(body["swapped"])
 
@@ -707,8 +761,18 @@ class RemoteCheckoutLeases:
         )
         return token
 
-    def renew(self, token: uuid.UUID) -> None:
-        self._client.request("PUT", f"{BASE}/leases/{token}", json={"ttl_s": self.ttl})
+    def _renew(self, path: str, gone: tuple[int, str]) -> bool:
+        """Whether the row was still there to renew: False for the API's ``gone``."""
+        try:
+            self._client.request("PUT", f"{BASE}{path}", json={"ttl_s": self.ttl})
+        except CrudRefusedError as error:
+            if (error.status, error.problem.get("reason")) == gone:
+                return False
+            raise
+        return True
+
+    def renew(self, token: uuid.UUID) -> bool:
+        return self._renew(f"/leases/{token}", (404, NO_LEASE))
 
     def drop(self, token: uuid.UUID) -> None:
         self._client.request("DELETE", f"{BASE}/leases/{token}")
@@ -718,8 +782,8 @@ class RemoteCheckoutLeases:
         self._take("/pin-holds", {"token": str(token), "ttl_s": self.ttl})
         return token
 
-    def renew_pin(self, token: uuid.UUID) -> None:
-        self._client.request("PUT", f"{BASE}/pin-holds/{token}", json={"ttl_s": self.ttl})
+    def renew_pin(self, token: uuid.UUID) -> bool:
+        return self._renew(f"/pin-holds/{token}", (404, NO_HOLD))
 
     def drop_pin(self, token: uuid.UUID) -> None:
         self._client.request("DELETE", f"{BASE}/pin-holds/{token}")
@@ -737,8 +801,15 @@ class RemoteInstallSlots:
         slot = response.json()["slot"]
         return None if slot is None else int(slot)
 
-    def renew(self, slot: int, token: uuid.UUID) -> None:
-        self._client.request("PUT", f"{BASE}/install-slots/{slot}?token={token}")
+    def renew(self, slot: int, token: uuid.UUID) -> bool:
+        """Whether ``token`` still held ``slot``: False once another token holds it."""
+        try:
+            self._client.request("PUT", f"{BASE}/install-slots/{slot}?token={token}")
+        except CrudRefusedError as error:
+            if (error.status, error.problem.get("reason")) != (409, NOT_HOLDER):
+                raise
+            return False
+        return True
 
     def drop(self, slot: int, token: uuid.UUID) -> None:
         """A slot another token holds is ours no longer: it lapsed and was taken."""

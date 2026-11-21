@@ -96,14 +96,21 @@ export async function disableWebPush(): Promise<void> {
   }
 }
 
-/** The service worker's "open this session" after a notification click on a tab that was already open. */
-export function onPushOpen(handler: (sessionId: string | null) => void): () => void {
+/**
+ * The service worker's "open this session" after a notification click on a tab that was already
+ * open; for a flow grant or a pairing request (#6399) it names a page of this app instead, `href`.
+ */
+export function onPushOpen(handler: (sessionId: string | null, href?: string) => void): () => void {
   if (!webPushSupported()) return () => {}
   const container = navigator.serviceWorker
   const listener = (event: MessageEvent) => {
-    const data = event.data as { type?: unknown; sessionId?: unknown } | null
+    const data = event.data as { type?: unknown; sessionId?: unknown; href?: unknown } | null
     if (data?.type !== 'scadbuddy.openSession') return
-    handler(typeof data.sessionId === 'string' ? data.sessionId : null)
+    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : null
+    // A path of this app only, never another origin's page.
+    const href = typeof data.href === 'string' && data.href.startsWith('/') && !data.href.startsWith('//') ? data.href : undefined
+    if (href) handler(sessionId, href)
+    else handler(sessionId)
   }
   container.addEventListener('message', listener)
   container.startMessages()
@@ -128,7 +135,7 @@ export function takeSessionParam(): string | null {
  * (when notifications are granted) and opens the session a push notification's click names,
  * from the worker's message to an open tab or from the address of a tab it opened.
  */
-export function useWebPush(enabled: boolean, onOpen: (sessionId: string | null) => void): void {
+export function useWebPush(enabled: boolean, onOpen: (sessionId: string | null, href?: string) => void): void {
   const open = useRef(onOpen)
   useEffect(() => {
     open.current = onOpen
@@ -138,6 +145,6 @@ export function useWebPush(enabled: boolean, onOpen: (sessionId: string | null) 
     void enableWebPush()
     const named = takeSessionParam()
     if (named !== null) open.current(named)
-    return onPushOpen((id) => open.current(id))
+    return onPushOpen((id, href) => (href ? open.current(id, href) : open.current(id)))
   }, [enabled])
 }

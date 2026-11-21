@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { createTabLink, type TabLink, type TabLinkState } from '../agent/link'
+import type { PairingEntry } from '../agent/linkProtocol'
 import { useAgentBridge } from '../agent/useAgentHandlers'
 import { PairingPrompt } from './PairingPrompt'
 
@@ -32,7 +33,14 @@ function defaultFactory(): TabLinkFactory | null {
 const IDLE: TabLinkState = { connected: false, pending: [], paired: [], results: {} }
 const noSubscribe = () => () => {}
 
-export function AgentLink({ factory }: { factory?: TabLinkFactory | null }) {
+export function AgentLink({
+  factory,
+  onPairings,
+}: {
+  factory?: TabLinkFactory | null
+  /** #6399 — the pairing requests waiting in this tab, for the bell's "Needs you"; [] once the link goes. */
+  onPairings?: (pending: readonly PairingEntry[]) => void
+}) {
   const bridge = useAgentBridge()
   const [link, setLink] = useState<TabLink | null>(null)
 
@@ -49,6 +57,11 @@ export function AgentLink({ factory }: { factory?: TabLinkFactory | null }) {
   }, [bridge, factory])
 
   const state = useSyncExternalStore(link?.subscribe ?? noSubscribe, link?.getState ?? (() => IDLE))
+  const pending = state.pending
+  useEffect(() => {
+    onPairings?.(pending)
+  }, [pending, onPairings])
+  useEffect(() => () => onPairings?.([]), [onPairings])
   if (!link) return null
   return (
     <PairingPrompt

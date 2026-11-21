@@ -30,6 +30,7 @@ from scadbuddy.orders.models import (
     PricingPolicy,
     Quote,
     Reference,
+    WearPartRate,
 )
 from scadbuddy.orders.operations import preview_request
 from scadbuddy.orders.problems import PROBLEMS
@@ -38,6 +39,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotPresets,
     ensure_output,
     operation_output_id,
     output_matches,
@@ -158,11 +160,19 @@ class FakeSlicer:
     def __init__(self, files: Mapping[int, bytes]) -> None:
         self.files = dict(files)
         self.subjects: list[str] = []
+        #: Each start's ``slot_presets`` (#6574).
+        self.slot_presets: list[SlotPresets | None] = []
 
     async def start(
-        self, output_id: str, request: SliceQuoteRequest, subject: str
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
     ) -> list[PreviewStarted]:
         self.subjects.append(subject)
+        self.slot_presets.append(slot_presets)
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
     async def start_library(
@@ -1125,6 +1135,23 @@ async def test_a_quote_is_priced_at_its_printers_machine_rate(shop: Shop, tmp_pa
         currency="USD",
         depreciation_per_hour="0.89",
         intervals="typed",
+        # #5774 §6: the quote keeps which parts priced from actuals, and how sure.
+        wear=[
+            WearPartRate(
+                name="Nozzle",
+                cost="35",
+                life_hours="1000",
+                per_hour="0",
+                priced_by="actual",
+                basis="actual",
+                have=3,
+                need=3,
+                confidence=100,
+            )
+        ],
+        actuals=True,
+        actuals_window=3,
+        confidence=100,
     )
     machine = FakeMachineRate(rate)
     run = run_of(shop, tmp_path, {1: sliced_plate(1, 7200, [10.0, 5.0])}, machine_rate=machine)
@@ -1278,4 +1305,27 @@ async def test_a_revision_made_after_the_check_refuses_the_slice(
     with pytest.raises(ApiError) as during:
         await quote_run(run, shop.order.id, shop.item.id, request, BY, expected_revision_id=current)
     assert during.value.type == PROBLEMS + "revision_superseded"
+    assert shop.rows.quotes(shop.item.id) == []
+
+
+class FollowRefused(FakeSlicer):
+    """A slicer whose follow of a plate fails as a sliced plate that cannot be priced."""
+
+    async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
+        raise QuoteError(f"plate {started.plate_id}: the slicer lost it", plate=started.plate_id)
+
+
+async def test_a_quote_error_while_following_a_slice_is_the_sliced_plate_problem(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#6370 review: the start and the follow run inside the price step
+    (`slice_and_price`), so a `QuoteError` raised while a back-office slice is followed is
+    the 422 ``sliced_plate`` problem naming the plate, and no quote is recorded."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    run.slicer = FollowRefused({1: sliced_plate(1, 3600, [12.5, 3.0])})
+    request = shop.request(s0=shop.pla, s1=shop.petg)
+    with pytest.raises(ApiError) as refused:
+        await quote_run(run, shop.order.id, shop.item.id, request, BY)
+    assert (refused.value.status, refused.value.type) == (422, PROBLEMS + "sliced_plate")
+    assert refused.value.extensions["plate"] == 1
     assert shop.rows.quotes(shop.item.id) == []

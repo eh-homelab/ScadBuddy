@@ -18,8 +18,18 @@ from scadbuddy.library.output_index import (
     OutputQuery,
     params_text,
 )
-from scadbuddy.library.outputs import META_NAME, PARAMS_NAME, OutputMeta, OutputStore
+from scadbuddy.library.outputs import (
+    INPUTS_NAME,
+    META_NAME,
+    PARAMS_NAME,
+    STOREFRONT,
+    OutputMeta,
+    OutputStore,
+    storefront_output_id,
+)
 from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.inputs import inputs_key
+from scadbuddy.render.job_models import render_key
 from scadbuddy.render.projection import JobProjection
 
 pytestmark = pytest.mark.requires_postgres
@@ -145,3 +155,49 @@ def test_rename_and_delete_keep_the_row_in_step(store: OutputStore) -> None:
     assert ids(store, q="brand") == [meta.id]
     store.delete(meta.id)
     assert ids(store) == []
+
+
+def test_storefront_outputs_are_listed_only_when_asked(store: OutputStore) -> None:
+    """#6371: the storefront slice run's outputs stay out of the back office's list."""
+    shop = saved(store, "sign", "e" * 32, age=timedelta(hours=1))
+    storefront = saved(store, "sign", "f" * 32, name="Storefront: Sign").model_copy(
+        update={"source": STOREFRONT}
+    )
+    index_of(store).record(shop, {})
+    index_of(store).record(storefront, {})
+    assert ids(store) == [shop.id]
+    assert index_of(store).query(OutputQuery()) == ([shop.id], 1)
+    assert ids(store, include_storefront=True) == [storefront.id, shop.id]
+
+
+def test_the_sync_marks_only_what_the_storefront_run_saved(store: OutputStore) -> None:
+    """#6371: an output saved before the mark is the storefront's only when it has the
+    run's name and its id is `storefront_output_id` of its own render key: the params'
+    key, or the whole inputs' key for a pipeline template. The name alone is not."""
+    version = "a" * 40
+    inputs = {"params": {"width": 12}, "colors": {}}
+    by_params = storefront_output_id(render_key("sign", {"width": 12}, version))
+    by_inputs = storefront_output_id(inputs_key("sign", inputs, version))
+    renamed = storefront_output_id(render_key("tag", {"width": 12}, version))
+    rows = {
+        by_params: ("sign", "Storefront: Sign"),
+        by_inputs: ("sign", "Storefront: Sign"),
+        # The run's name on an output of another id: a person's.
+        "1" * 32: ("sign", "Storefront: Sign"),
+        # The run's id with another name: renamed since, so the back office's.
+        renamed: ("tag", "My tag"),
+    }
+    for output_id, (slug, name) in rows.items():
+        meta = saved(store, slug, output_id, name=name, params={"width": 12})
+        directory = store.paths.outputs / slug / output_id
+        (directory / META_NAME).write_text(
+            meta.model_copy(update={"model_version": version}).model_dump_json(),
+            encoding="utf-8",
+        )
+        (directory / INPUTS_NAME).write_text(json.dumps(inputs), encoding="utf-8")
+    assert index_of(store).sync(store) == (4, 0)
+    marked = {by_params, by_inputs}
+    assert set(ids(store, include_storefront=True)) - set(ids(store)) == marked
+    for output_id in rows:
+        expected = STOREFRONT if output_id in marked else "back_office"
+        assert store.get(output_id).source == expected

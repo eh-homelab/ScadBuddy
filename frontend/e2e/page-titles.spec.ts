@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
+import { spoolId, T } from '../src/mocks/features/filament/seed'
+import { INVOICE, SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
 
 // #2454 review — every routed page names its tab from its <h1> (usePageTitle). A page
 // with no <h1> inside <main> would quietly get the bare "ScadBuddy" title: one per route
@@ -41,9 +43,37 @@ const PAGES = [
   '/storefront',
   // A listing's editor (#6157): its tab is the listing's title, "New listing" for a new one.
   '/storefront/listings/new',
+  // The Filament section (#6262): each tab, a seeded spool (#3) and a seeded type, from
+  // src/mocks/features/filament/seed.ts.
+  // `/filament` redirects to the Spools tab.
+  '/filament',
+  '/filament/spools',
+  `/filament/spools/${spoolId(3)}`,
+  '/filament/types',
+  `/filament/types/${T.JADE}`,
+  '/filament/tags',
+  // Purchasing (#6266): a seeded supplier and a seeded invoice, from
+  // src/mocks/features/filamentPurchasingSeed.ts.
+  '/filament/suppliers',
+  `/filament/suppliers/${SUPPLIER.BAMBU}`,
+  '/filament/invoices',
+  `/filament/invoices/${INVOICE.CONFIRMED_A}`,
+  '/filament/locations',
+  '/filament/catalog',
+  '/filament/metrics',
+  '/filament/shopping-list',
+  '/filament/ledger',
+  // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
+  '/filament/labels',
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]
+
+/**
+ * #6399 — the tab title leads with what waits on the person, "(2) Parts · ScadBuddy": the mocks
+ * hold an agent's requested run grant and a requested standing grant.
+ */
+const waiting = (title: string) => new RegExp(`^(\\(\\d+\\) )?${title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
 
 for (const path of PAGES) {
   test(`${path} names its tab from its heading`, async ({ page }) => {
@@ -54,17 +84,17 @@ for (const path of PAGES) {
 
 test('/orders/profit is the profit report, not an order', async ({ page }) => {
   await page.goto('/orders/profit')
-  await expect(page).toHaveTitle('Profit by model · ScadBuddy')
+  await expect(page).toHaveTitle(waiting('Profit by model · ScadBuddy'))
 })
 
 test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
   await page.goto('/prints/queue/260')
-  await expect(page).toHaveTitle('Bracket.gcode.3mf · ScadBuddy')
+  await expect(page).toHaveTitle(waiting('Bracket.gcode.3mf · ScadBuddy'))
 })
 
 test('/orders/parts is the parts inventory, not an order', async ({ page }) => {
   await page.goto('/orders/parts')
-  await expect(page).toHaveTitle('Parts · ScadBuddy')
+  await expect(page).toHaveTitle(waiting('Parts · ScadBuddy'))
 })
 
 test('covers every route App.tsx declares', () => {

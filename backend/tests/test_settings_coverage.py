@@ -71,6 +71,7 @@ def test_every_env_seeded_field_is_shown_and_no_secret_is() -> None:
         ("storefront_materials", [" ", ""], "SCADBUDDY_STOREFRONT_MATERIALS needs at least one"),
         ("storefront_materials", [f"M{n}" for n in range(17)], "at most 16 materials"),
         ("storefront_materials", ["P" * 65], "at most 64 characters"),
+        ("profile_fetch_nozzles", ["0.5"], "SCADBUDDY_PROFILE_FETCH_NOZZLES"),
     ],
 )
 def test_a_value_out_of_bounds_is_refused_by_name(name: str, value: object, message: str) -> None:

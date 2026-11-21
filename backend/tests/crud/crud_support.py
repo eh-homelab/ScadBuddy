@@ -71,6 +71,20 @@ from scadbuddy.crud.render import (
     RemoteGeometryIndex,
     RemoteJobProjection,
 )
+from scadbuddy.crud.wire import PREFIX
+from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.component import FILAMENT, Filament
+from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.invoices import InvoiceStore
+from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
+from scadbuddy.filament.presets import PoolSpoolPresets
+from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.sensors import SensorStore
+from scadbuddy.filament.shopping import ShoppingStore
+from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
+from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
@@ -91,14 +105,11 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.store import NativeSliceStore
-from scadbuddy.spools.component import SPOOLS
-from scadbuddy.spools.native import NativeSpoolStore
-from scadbuddy.spools.spool_providers import NativeProvider
-from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobRef, BlobStat
 from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
@@ -128,6 +139,42 @@ class _Noted:
 class _NoSessions:
     def resolve(self, token: str) -> None:
         return None
+
+
+#: The warm-up's bound: the helpers' own start deadline, not a test's.
+WARM_TIMEOUT = 30.0
+
+
+def _areas(caller: str) -> str:
+    return f"/api/v1{PREFIX}/{caller}/areas"
+
+
+def warm_crud_routes(base_url: str, auth: httpx.Auth, caller: str) -> None:
+    """One request to a CRUD app just served, before a test's first call (#6666, #6678).
+
+    FastAPI builds an included router's routes on the first request that matches one
+    (`_IncludedRouter.effective_candidates`): about 95 print routes, 0.2 to 0.6 s of CPU
+    on the server's loop (measured 2026-11-18). A helper serves a new app for each
+    test, so each test's first call paid that cost inside its own short timeout (the
+    watch's and a render job's 2 s) and timed out on a loaded runner. This request, to
+    ``caller``'s areas route, goes past the app's other routers first, so it builds
+    them; with ``auth`` it also mints and resolves the credential. It is bounded by
+    `WARM_TIMEOUT`, not a test's bound, and a refusal (another caller's credential)
+    still builds the routes. A 5xx fails here, at the helper, not in the test's first
+    timed call (#6682)."""
+    with httpx.Client(base_url=base_url, auth=auth, timeout=WARM_TIMEOUT) as warm:
+        _warmed(warm.get(_areas(caller)))
+
+
+async def warm_crud_routes_async(base_url: str, auth: httpx.Auth, caller: str) -> None:
+    """`warm_crud_routes` for a helper on the test's event loop."""
+    async with httpx.AsyncClient(base_url=base_url, auth=auth, timeout=WARM_TIMEOUT) as warm:
+        _warmed(await warm.get(_areas(caller)))
+
+
+def _warmed(reply: httpx.Response) -> None:
+    """Any answer but a server error: a refusal still built the routes."""
+    assert reply.status_code < 500, f"the CRUD warm-up got {reply.status_code}: {reply.text}"
 
 
 def agent_key_tables(store: FlowStore) -> Connect:
@@ -237,13 +284,11 @@ async def served_crud(
         settings_store=settings_store,
     )
     await listener.start(app, 0)
-    crud = CrudClient(
-        f"http://127.0.0.1:{listener.crud_listener_port(app)}",
-        "projects",
-        ServiceAuth(InProcessProvider("projects", lambda: credentials)),
-        **options,
-    )
+    base_url = f"http://127.0.0.1:{listener.crud_listener_port(app)}"
+    auth = ServiceAuth(InProcessProvider("projects", lambda: credentials))
+    crud = CrudClient(base_url, "projects", auth, **options)
     try:
+        await warm_crud_routes_async(base_url, auth, "projects")
         yield crud
     finally:
         await crud.aclose()
@@ -318,13 +363,11 @@ async def served_render_crud(
     credentials = ServiceCredentialStore(pool)
     app = render_crud_app(pool, settings, credentials, projection=projection)
     await listener.start(app, 0)
-    crud = CrudClient(
-        f"http://127.0.0.1:{listener.crud_listener_port(app)}",
-        "render",
-        ServiceAuth(InProcessProvider("render", lambda: credentials)),
-        **options,
-    )
+    base_url = f"http://127.0.0.1:{listener.crud_listener_port(app)}"
+    auth = ServiceAuth(InProcessProvider("render", lambda: credentials))
+    crud = CrudClient(base_url, "render", auth, **options)
     try:
+        await warm_crud_routes_async(base_url, auth, "render")
         yield crud
     finally:
         await crud.aclose()
@@ -378,13 +421,11 @@ def threaded_render_crud(
         assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
         time.sleep(0.01)
     port = server.servers[0].sockets[0].getsockname()[1]
-    client = CrudSyncClient(
-        f"http://127.0.0.1:{port}",
-        "render",
-        ServiceAuth(InProcessProvider("render", lambda: credentials)),
-        unavailable_budget=5,
-    )
+    base_url = f"http://127.0.0.1:{port}"
+    auth = ServiceAuth(InProcessProvider("render", lambda: credentials))
+    client = CrudSyncClient(base_url, "render", auth, unavailable_budget=5)
     try:
+        warm_crud_routes(base_url, auth, "render")
         yield client
     finally:
         client.close()
@@ -578,6 +619,26 @@ def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient
     )
 
 
+def filament_on(pool: Pool) -> Filament:
+    """The API's `Filament` on ``pool``."""
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool)
+    return Filament(
+        catalog=CatalogStore(pool),
+        types=types,
+        spools=spools,
+        locations=LocationStore(pool),
+        sensors=SensorStore(pool),
+        inventory=FilamentInventory(pool),
+        presets=PoolSpoolPresets(pool),
+        rfid=RfidModeStore(pool),
+        suppliers=SuppliersStore(pool, lambda: "USD"),
+        invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
+        metrics=MetricsStore(pool, spools, MetricsSettings),
+    )
+
+
 def print_crud_app(
     store: SettingsStore,
     credentials: ServiceCredentialStore,
@@ -602,8 +663,9 @@ def print_crud_app(
     project records and outputs' last prints on ``store``'s pool. A LAN-only printer's
     print records go to the watcher's store on ``store``'s pool, matched against
     ``catalogue`` (none when not given), and the rack hotends' usage goes through
-    ``rack`` (no rack route answers without one), and the spools, native spools, kept
-    presets and native slices through the API's own stores on ``store``'s pool; the
+    ``rack`` (no rack route answers without one), and the kept
+    presets, native slices and a native run's SB spools through the API's own stores on
+    ``store``'s pool; the
     exchange too, of the proofs ``bootstrap`` takes, when given (#5298 Task 33)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
@@ -621,15 +683,14 @@ def print_crud_app(
             reports=PrinterReportStore(store.pool),
         ),
         RACK_USAGE: rack,
-        # The spools, ScadBuddy's own and the kept presets and native slices: the API's
-        # own stores on ``store``'s pool (#5298 Task 31).
-        SPOOLS: SimpleNamespace(
-            store=SpoolStore(store.pool),
-            providers=[NativeProvider(NativeSpoolStore(store.pool))],
-        ),
+        # The kept presets and native slices: the API's own stores on ``store``'s pool
+        # (#5298 Task 31).
         SLICING: SimpleNamespace(
             store=NativeSliceStore(store.pool), held=HeldPresetStore(store.pool)
         ),
+        # A native run's SB spools (#6262 Task 6) and the Bambuddy sync's plan and results
+        # (#6265 Task 6): the API's own stores on ``store``'s pool.
+        FILAMENT: filament_on(store.pool),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -666,21 +727,23 @@ def threaded_print_crud(
     )
     thread = threading.Thread(target=server.run, name="crud print routes", daemon=True)
     thread.start()
-    deadline = time.monotonic() + 30
-    while not server.started:
-        assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
-        time.sleep(0.01)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    client = CrudSyncClient(
-        f"http://127.0.0.1:{port}",
-        "print",
-        ServiceAuth(InProcessProvider(caller, lambda: credentials)),
-        unavailable_budget=0.5,
-    )
+    client: CrudSyncClient | None = None
+    # Everything after the start is under the `finally`, so a server that does not start
+    # or a warm-up that fails still stops the thread (#6673).
     try:
+        deadline = time.monotonic() + 30
+        while not server.started:
+            assert thread.is_alive() and time.monotonic() < deadline, "the server did not start"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        auth = ServiceAuth(InProcessProvider(caller, lambda: credentials))
+        warm_crud_routes(base_url, auth, "print")
+        client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
         yield client
     finally:
-        client.close()
+        if client is not None:
+            client.close()
         server.should_exit = True
         thread.join(30)
 
@@ -692,13 +755,11 @@ async def served_print_crud(store: SettingsStore, **parts: Any) -> AsyncIterator
     credentials = ServiceCredentialStore(store.pool)
     app = print_crud_app(store, credentials, **parts)
     await listener.start(app, 0)
-    crud = CrudClient(
-        f"http://127.0.0.1:{listener.crud_listener_port(app)}",
-        "print",
-        ServiceAuth(InProcessProvider("print", lambda: credentials)),
-        unavailable_budget=5,
-    )
+    base_url = f"http://127.0.0.1:{listener.crud_listener_port(app)}"
+    auth = ServiceAuth(InProcessProvider("print", lambda: credentials))
+    crud = CrudClient(base_url, "print", auth, unavailable_budget=5)
     try:
+        await warm_crud_routes_async(base_url, auth, "print")
         yield crud
     finally:
         await crud.aclose()
@@ -709,24 +770,8 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = [
-        "settings",
-        "runs",
-        "operations",
-        "events",
-        "printer-ensure",
-        "reprints",
-        "uploads",
-        "previews",
-        "copy-leases",
-        "links",
-        "lan-imports",
-        "printers",
-        "rack",
-        "spools",
-        "transfer-urls",
-        "access-codes",
-    ]
+    # Every area the print worker waits for, so a new one never leaves it waiting (#6855).
+    areas = sorted(PRINT_CRUD_AREAS)
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):

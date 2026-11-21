@@ -5,6 +5,7 @@ import { createPortal } from "react-dom"
 import { cn } from "@/lib/utils"
 import { usePortalContainer } from "@/components/ui/portal-container"
 import { Dialog as DialogPrimitive } from "radix-ui"
+import { RemoveScroll } from "react-remove-scroll"
 import {
   ModalCompanionContext,
   besideNow,
@@ -177,8 +178,12 @@ function DialogLayer({
     }
   }, [opener])
   return (
+    // A modal layer under it (the record drawer's Sheet, a Radix-modal dialog) holds a scroll
+    // lock that cancels every wheel and touch move outside its own DOM, which this portalled
+    // dialog is: its body could not scroll. Its own lock, topmost, retires that one while it is
+    // open; `noIsolation` blocks nothing outside it (the assistant beside it, a popover).
+    <RemoveScroll ref={overlay} forwardProps noIsolation removeScrollBar={false} allowPinchZoom>
     <div
-      ref={overlay}
       data-slot="dialog-overlay"
       className={cn(
         "fixed inset-0 isolate z-50 flex bg-black/50 duration-100 animate-in fade-in-0 supports-backdrop-filter:backdrop-blur-xs",
@@ -256,6 +261,7 @@ function DialogLayer({
         )}
       </DialogPrimitive.Content>
     </div>
+    </RemoveScroll>
   )
 }
 

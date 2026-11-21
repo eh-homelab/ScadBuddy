@@ -35,7 +35,7 @@ async function openItem(user: ReturnType<typeof render>['user']) {
 describe("an order's files (#4251)", () => {
   beforeEach(() => resetMockState())
 
-  it("shows an item's render as its picture until a photo is marked delivered", async () => {
+  it("shows an item's render as its picture until a finished photo is added, and the delivered one once marked", async () => {
     const { user } = render()
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
     const row = screen.getByTestId(`order-item-${ITEM_APPROVED}`)
@@ -49,6 +49,13 @@ describe("an order's files (#4251)", () => {
     expect(within(card).getByRole('combobox', { name: 'Role of final.png' })).toHaveTextContent('Finished print')
     const added = only()
     expect(added).toMatchObject({ item_id: ITEM_APPROVED, kind: 'image', media_type: 'image/png', role: 'finished' })
+    await waitFor(() =>
+      expect(within(drawer).getByRole('img', { name: 'The finished print: Name Keychain' })).toHaveAttribute(
+        'src',
+        `/api/v1/orders/${ORDER_ACCEPTED}/attachments/${added.id}/thumbnail`,
+      ),
+    )
+    expect(within(drawer).getByText('Finished print', { selector: 'figcaption' })).toBeInTheDocument()
 
     await user.click(within(card).getByRole('button', { name: 'Mark as delivered' }))
     await waitFor(() => expect(within(card).getByRole('button', { name: 'Delivered (unmark)' })).toHaveAttribute('aria-pressed', 'true'))
@@ -132,5 +139,14 @@ describe("an order's files (#4251)", () => {
     const card = await within(files).findByRole('listitem', { name: 'done.png' })
     expect(within(card).getByText('Attempt 1')).toBeInTheDocument()
     expect(only()).toMatchObject({ item_id: ITEM_APPROVED, fulfilment_id: 'f-attempt', subject: 'order_item_fulfilment:f-attempt' })
+    // An attempt's finished photo stands as the item's picture too, in the drawer and in the items table.
+    expect(within(drawer).getByRole('img', { name: 'The finished print: Name Keychain' })).toHaveAttribute(
+      'src',
+      `/api/v1/orders/${ORDER_ACCEPTED}/attachments/${only().id}/thumbnail`,
+    )
+    await user.click(within(drawer).getByRole('button', { name: 'Close' }))
+    await waitFor(() =>
+      expect(within(screen.getByTestId(`order-item-${ITEM_APPROVED}`)).getByRole('img', { name: 'The finished print: Name Keychain' })).toBeInTheDocument(),
+    )
   })
 })

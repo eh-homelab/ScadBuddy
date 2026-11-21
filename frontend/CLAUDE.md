@@ -13,7 +13,9 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the bundle
 ```
 
-CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Playwright
+CI runs the lint, typecheck and build in the `frontend` job, the unit tests in three
+`frontend-unit` jobs (`pnpm test --shard=N/3`; in one job they took 11 to 16 minutes and
+cancelled it at 20, #6783), and Playwright
 in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 `frontend-e2e-split` checks that the three selections add up to the whole `--list` and
 that each shard ran what it selected, as `backend-pytest-split` does.
@@ -23,8 +25,9 @@ that each shard ran what it selected, as `backend-pytest-split` does.
 (its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
 same way, `vite.config.ts`).
 - `pnpm exec tsc -p tsconfig.app.json --noEmit` - the quick typecheck. It skips
-  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts` and
-  `src/storefront/api/schema.d.ts` are missing.
+  `pretypecheck`, so run `pnpm gen:api` once first, or the generated `src/api/schema.d.ts`,
+  `src/storefront/api/schema.d.ts` and `src/api/settingDocs.json` (the Settings field docs
+  `mocks/fixtures.ts` imports) are missing.
   Run it again after a merge or rebase onto main: a stale `schema.d.ts` gives type errors
   about fields the merge added or removed.
   Playwright's web server runs `pnpm build`, which typechecks first, so one type error in
@@ -131,7 +134,8 @@ same way, `vite.config.ts`).
   unsaved (`components/storefront/sellSource.ts`; the list redirects the address to
   `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
   every colour offered, from the priced filaments of the design's material, the rest locked;
-  a support setting is never offered, `isSupport`), pinned by
+  a support setting is never offered, `isSupport`; an offered colour whose template default
+  no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
   (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
@@ -144,10 +148,25 @@ same way, `vite.config.ts`).
   position…" send `POST /storefront/listings/{id}/move`; there is no drag. The editor is
   `pages/StorefrontListingPage.tsx` at `/storefront/listings/<id>` (or `new`); the list's
   links pass its query in the history state, which "Back to listings" returns to. While it
-  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks. The old
-  `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
+  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks.
+  Each offered parameter's "Starts at" (`DefaultField`, #6144) is the value an unpicked render
+  takes: the template's while the bounds allow it, else the listing's `default`, which
+  narrowed bounds move to the nearest value they allow (`listingDraft.ts` `fittedDefault`). A
+  publish refused about one parameter (`listingRefusal` kind `param`) is said under it. The old
+  `/storefront?listing=<id>` and `?sell=…` addresses redirect to the editor. Mocks
   `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
   listings into the mock's `sessionStorage`.
+  Materials (#6258): the editor's "Materials allowed" is the listing's `materials`, first
+  preferred (`components/storefront/MaterialOrder.tsx`: up, down and remove buttons, the
+  moved row's button keeps the focus; "Add a material" offers the price book's customer
+  materials); empty shows "Shop default (…)" from `storefront_materials`, which Settings →
+  Storefront pricing's `components/settings/StorefrontMaterials.tsx` edits with the same
+  list. "Colours on offer" groups the price book's filaments by allowed material, in that
+  order, with "Offer all" and "Offer none", support filaments last; a ticked filament of a
+  material not allowed is named apart. A publish refused `listing_material_not_allowed` or
+  `listing_locked_colours_unprintable` (`listingDraft.ts` `listingRefusal`) is said beside
+  "Materials allowed" or "Colours on offer" until the next edit. The mock's publish checks
+  only the materials (`materialRefusal`).
   Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` lists every
   id of the draft's `media_ids` (a video, a missing file or an unknown id says so), orders,
   removes and adds a listing's images, uploads one into the template's media, and marks
@@ -208,6 +227,104 @@ same way, `vite.config.ts`).
   its answer says the print is in Activity (`prints.ts` `lanPrintsActivityPath`), as a
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
+- `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
+  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
+  Catalog, Metrics, Shopping list and Ledger.
+  History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
+  the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
+  `charts/LineChart`) and metrics panel (`SpoolMetricsPanel`); the Metrics tab (`pages/filament/MetricsTab.tsx`:
+  range, bucket and group in the address through `metricsQuery.ts`, behind "Remember my view"); the
+  forecast view of the Spools tab (`SpoolForecast`, `TypeForecastTable`) and the "Consumed" tile. The
+  charts are plain SVG in `components/filament/charts/` (`ColumnChart`, `LineChart`, `BarList`, `useWidth`).
+  A value's colour follows the value, ranked over 365 days (`MetricsTab` `ranked`); until that request
+  returns the chart uses the range's own rank. The forecast table's "Reorder now" badge moves under the type
+  name by a container query (`@max-[44rem]`), exactly when the table scrolls sideways. The mocks are
+  `mocks/features/filament/metrics.ts`; the burn depends on today, so tests and `e2e/filament-metrics.spec.ts`
+  fix the clock at 2026-11-18T12:00Z.
+  Purchasing (#6266): `api/filamentPurchasing.ts`, the exact decimal strings of `lib/decimal.ts`
+  (money never goes through `Number`), and the mocks `src/mocks/features/filamentPurchasing.ts`.
+  `TypePage` shows a saved type's supplier prices (`components/filament/purchasing/PricePanel.tsx`);
+  "Use as default cost" only fills the cost field as an unsaved edit, and the Types tab's
+  "Newest price" column reads the suppliers' price sheets. The Invoices tab (`InvoicesTab`,
+  `components/filament/purchasing/invoicesQuery.ts`: status and supplier in the address, "Remember my
+  view", the last supplier) starts a draft from a dropped, chosen or pasted file
+  (`InvoiceUpload`), and `/filament/invoices/:id` (`InvoicePage`) is the file beside the typed
+  receipt (`InvoiceFile`: a PDF in a same-origin `<iframe>`, never an `<object>`, which the page
+  CSP's `object-src 'none'` blocks; a photo in `InvoicePhoto`, zoomed 1x to 8x by the wheel, the
+  buttons, a double-click or a pinch, and panned by a drag, #6889): the header saves on blur, the lines through `putInvoiceLines` as they are left
+  (debounced, `invoiceLines.ts` checks them first), and Confirm waits for a type on every line, the
+  shop's currency and `reconciles`. A confirmed invoice keeps only its note and file. A unit test
+  that uploads a file answers the `/file` part itself (jsdom's `FormData` does not reach msw;
+  `InvoiceUpload.test.tsx`). The Shopping list tab (`ShoppingListTab`) adds an item from a type or by
+  text, marks an item an empty spool added "Auto" with its note linked to that spool (#6868; the switch
+  is Settings → Filament's `filament_shopping_auto_add_empty`), marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
+  purchased" and "Clear all"; the last quantity is remembered (`QUANTITY_KEY`). The Types tab's row
+  and `TypePage` add a type to it as one pending spool (one click at a time: the button is off
+  while its request is out). `useMoney.format` shows the bare decimal, with no symbol, while the
+  shop's currency is unread or failed to read. `InvoicePage` refetches only when no save is in
+  flight (it waits and refetches after it), keys the server figures by line id, dims them while
+  an edit is unsaved, holds Confirm while a header change is in flight, and on a phone folds the
+  file viewer so the form leads. `AddProductSheet`, `message` and `today` are shared in
+  `components/filament/purchasing/` (`priceFormat.ts`).
+  `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
+  1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
+  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Scan a tag"
+  button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
+  the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind; `NtagPanel` writes an NTAG through a SpoolBuddy
+  reader and polls `confirmNtag` every 2 s for 60 s, says `Bound tag <uid>`, offers Cancel after the 60 s too and drops a queued write when the page unmounts, #6264) and `/filament/types/:id`
+  (`TypePage`; its Drying section, the temperature and hours a spool's drying form starts
+  from unless the spool overrides them in Storage, the spool page saying where they came from
+  and that a profile's are the AMS HT's (#6720, R-6714-18); its K table says who set each saved
+  row, and nothing on a row edited since, `KValueTable` `saved`, R-6714-19, R-6714-22; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
+  line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
+  tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
+  configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
+  `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
+  Bambuddy" has one `ChoiceSelect` row per data type (spools and types, weights, tags,
+  suppliers and prices, locations, presets and K values; `SYNC_ROWS`, `SYNC_KINDS` in
+  `pages/settings/values.ts`) with Off, ScadBuddy → Bambuddy, Bambuddy → ScadBuddy or Both
+  ways (newer change wins), saved with "Save Filament" as `filament_sync`; the sync status
+  (`getSyncStatus`, `GET /filament/sync/status`: the last pass, why none runs, and each
+  item whose last write failed or was held back, with `syncErrorText`); and "Sync now"
+  (`runSync`, `POST /filament/sync/run`), after which the status is read again until a
+  pass has started at or after the run's `requested_at` (R-T11-2, #6836). While the status says
+  `instance_changed` it offers "Reset Bambuddy links" (#6773, `ResetLinks`: a dry run's
+  counts in a confirm dialog, then `resetSyncLinks` with the dry run's `instance`; the mock's
+  `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the
+  Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
+  `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
+  says why, `loseSameBambuddy`; a dry run that cannot read Bambuddy notes it and offers the
+  delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264;
+  the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
+  `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
+  `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
+  `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
+  `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
+  `e2e/filament-sensors.spec.ts` (a place's sensor, its limit and history, #6268) and
+  `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
+  total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
+  call), `settings.spec.ts` and `page-titles.spec.ts`. Sensors and weights (#6268):
+  `LocationSensors` and `SensorChart` on the Locations tab (#6646: the "Notify me through Bambuddy" box in the add and edit forms, and the newest `last_notification` under the sensor: sent, waiting (within about a minute while a Bambuddy URL is set, else "once Bambuddy is connected in Settings"; no promise before settings load), or not sent ("may not have been sent" for `interrupted`) with `NOTIFY_FAILURE`'s reason for each `error` code; the seed's shelf sent one, the dry box's failed `scope`), `NeedsDrying` and `outsideDry.ts`,
+  and the Spools tab button "Sync weights from AMS". Type proposals (#6701): `TypeProposals` ("Create types") shows on the Needs-type filter, over
+  `GET /filament/type-proposals` and its confirm; the mocks group the seed's untyped spools (#6 is one
+  group, #7 lacks a label weight).
+- "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
+  (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
+  `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s
+  `onPairings`), which `AppShell` provides as `NeedsYouContext`. The bell
+  (`components/activity/ActivityBell.tsx`) lists it first, counts it until it is answered
+  (opening the bell clears only the finished rows) and turns `bg-needs` (the `--sb-needs`
+  tokens, AA in `theme.contrast.test.ts`) while anything waits; the Activity page's
+  `#needs-you` (`components/activity/NeedsYou.tsx`) lists it in full. Each new item is
+  toasted and, while the page is hidden, notified (`needsYouNotices`). With every tab closed
+  the agent pushes the grants and pairing requests too (`agent/src/notify/waiting.ts`, read
+  every 30 s, and pushed only in its first 24 h, so a swept claim never pushes it again), under the same notice ids (`run-grant:<grant id>`, `trigger-grant:<grant id>:<requested_at, epoch s>`,
+  `pairing:<id>`), so a push and the page's notification share one tag; a click opens
+  `#needs-you` (`public/push-sw.js`). Tests build the same
+  context with `src/test/needsYou.tsx` `NeedsYouHarness`; a Playwright test parks agent
+  requests with the `sessionStorage` key `scadbuddy.mock.pending-input`
+  (`mocks/features/pendingInput.ts`). The mocks hold two requested grants by default
+  (`run-ask`, `trig-render`), so the tab title of the mocked app starts with `(2)`.
 - `frontend/src/lib/appLinks.ts` (`appUrl`, `useAppUrl`, `components/AppLink.tsx`) — links
   to ScadBuddy's own pages use the host the user is on: a path, or a URL on a known origin
   (`public_url` plus `SCADBUDDY_ALLOWED_ORIGINS`), is put on `window.location.origin`

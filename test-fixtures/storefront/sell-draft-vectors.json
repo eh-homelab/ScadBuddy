@@ -29,7 +29,7 @@
     }
   },
   {
-    "name": "a blank listing: the template's defaults; a colour no filament has is still offered (colourProblems names its default)",
+    "name": "a blank listing: the template's defaults; a colour whose template default no filament has is still offered, starting at the first colour on offer (#6144)",
     "schema": {
       "groups": ["Size", "Colours"],
       "parameters": [
@@ -43,13 +43,13 @@
     ],
     "values": {},
     "expected": {
-      "params": { "body": { "kind": "choice", "choices": [] }, "trim": { "kind": "choice", "choices": [] } },
+      "params": { "body": { "kind": "choice", "choices": [] }, "trim": { "kind": "choice", "choices": [], "default": "#ffffff" } },
       "fixed": { "width": 10 },
       "colours": ["f-white"]
     }
   },
   {
-    "name": "no colour matches: every priced filament, of any material",
+    "name": "no colour matches: every priced filament, of any material; the colour starts at the first of them (#6144)",
     "schema": {
       "groups": ["Colours"],
       "parameters": [{ "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#123456" }]
@@ -60,7 +60,7 @@
     ],
     "values": {},
     "expected": {
-      "params": { "body": { "kind": "choice", "choices": [] } },
+      "params": { "body": { "kind": "choice", "choices": [], "default": "#F9D72C" } },
       "fixed": {},
       "colours": ["f-pla", "f-petg"]
     }
@@ -179,10 +179,49 @@
     ],
     "values": {},
     "expected": {
-      "params": { "body": { "kind": "choice", "choices": [] } },
+      "params": { "body": { "kind": "choice", "choices": [], "default": "#ffffff" } },
       "fixed": {},
       "colours": ["f-white", "f-pva"]
     },
-    "input": { "body": { "kind": "choice", "choices": ["#ffffff"] } }
+    "input": { "body": { "kind": "choice", "choices": ["#ffffff"], "default": "#ffffff" } }
+  },
+  {
+    "name": "a colour starts at the first colour on offer that is not a support material, even when the support material comes first (#6144, #6402 review)",
+    "schema": {
+      "groups": ["Colours"],
+      "parameters": [{ "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#123456" }]
+    },
+    "filaments": [
+      { "id": "f-pva", "material": "PVA", "subtype": null, "brand": null, "colour_name": "Natural", "colour": "#F5F5DC", "cost_per_kg": "60", "density_g_cm3": "1.23", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": {},
+    "expected": {
+      "params": { "body": { "kind": "choice", "choices": [], "default": "#ffffff" } },
+      "fixed": {},
+      "colours": ["f-pva", "f-white"]
+    },
+    "input": { "body": { "kind": "choice", "choices": ["#ffffff"], "default": "#ffffff" } }
+  },
+  {
+    "name": "a colour starts at the first colour on offer that is not a support-only filament's: one of another material whose colour only a support setting uses (#6144, #6402 review)",
+    "schema": {
+      "groups": ["Supports", "Colours"],
+      "parameters": [
+        { "name": "support_colour", "type": "color", "group": "Supports", "caption": "Support material", "initial": "#000000" },
+        { "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#123456" }
+      ]
+    },
+    "filaments": [
+      { "id": "f-black", "material": "PETG", "subtype": null, "brand": null, "colour_name": "Black", "colour": "#000000", "cost_per_kg": "25", "density_g_cm3": "1.27", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": {},
+    "expected": {
+      "params": { "body": { "kind": "choice", "choices": [], "default": "#ffffff" } },
+      "fixed": { "support_colour": "#000000" },
+      "colours": ["f-black", "f-white"]
+    },
+    "input": { "body": { "kind": "choice", "choices": ["#ffffff"], "default": "#ffffff" } }
   }
 ]

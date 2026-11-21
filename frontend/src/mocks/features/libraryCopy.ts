@@ -38,6 +38,7 @@ function file(id: number, filename: string, folder_id: number | null): LibraryEn
     file_size: 12_345,
     created_at: '2026-11-01T10:00:00Z',
     is_external: false,
+    per_print: false,
   }
 }
 

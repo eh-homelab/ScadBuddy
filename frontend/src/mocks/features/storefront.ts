@@ -1,13 +1,13 @@
 import { http, HttpResponse } from 'msw'
 import type { CustomizerSchema, ListingBound, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
-import { mockModels, problem } from '../handlers'
+import { mockModels, mockSettings, problem } from '../handlers'
 import * as orders from './orders/state'
 
 /**
  * #5282 (spec 2026-11-02 §5.3; backend `api/storefront.py`): the back office's storefront
  * listings. An edit names the `updated_at` it read and unpublishes the listing; a delete
  * is refused while it is published. Publish here checks nothing against the template: the
- * backend's tests do that.
+ * backend's tests do that. It checks only each filament's material (`materialRefusal`, #6258).
  *
  * The listings are kept in `sessionStorage` too, so a reload shows the order a test set,
  * as the backend's rows would. Each Playwright test has its own context; `reset` clears it.
@@ -97,6 +97,27 @@ function emptyChoice(body: StorefrontListingInput) {
   return refused(422, 'listing_choice_empty', `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`)
 }
 
+/** A support material, as the backend's `wire.py` `SUPPORT_MATERIAL` reads it. */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
+
+/**
+ * #6258 — the backend's 422 `listing_material_not_allowed` (`orders/storefront/listings.py`
+ * `check_materials`), or null: a listing filament of a material neither the listing's
+ * `materials` nor, when it names none, the shop's `storefront_materials` allows. The mock
+ * does not check the locked colours (`check_locked_colours`): it has no schema. A row a
+ * test seeded without `materials` (or one kept in `sessionStorage` from before #6258) has none.
+ */
+function materialRefusal(listing: StorefrontListing) {
+  const own = (listing as Partial<StorefrontListing>).materials ?? []
+  const allowed = new Set((own.length > 0 ? own : (mockSettings().storefront_materials ?? [])).map((m) => m.trim().toLowerCase()))
+  for (const id of listing.colours) {
+    const material = orders.state.filaments.find((f) => f.id === id)?.material
+    if (material === undefined || SUPPORT_MATERIAL.test(material) || allowed.has(material.trim().toLowerCase())) continue
+    return refused(422, 'listing_material_not_allowed', `'${id}' is ${material}, which this listing does not allow; allow ${material} or take the filament out`, { name: id })
+  }
+  return null
+}
+
 /** #6213 — what a publish copies: one entry per picture, keyed by its media id. */
 function publishedMedia(listing: StorefrontListing): StorefrontListing['media'] {
   return listing.media_ids.map((id) => ({ blob_key: `listing-media-${id}`, kind: 'image', media_type: 'image/png', caption: '', media_id: id }))
@@ -145,14 +166,22 @@ const EMPTY_SCHEMA: CustomizerSchema = { title: null, source_sha256: '', groups:
 /** The backend's bounds on a page (`wire.py` `ListingQuery`: `LISTING_PAGE_MAX`, `LISTING_OFFSET_MAX`). */
 const PAGE_BOUNDS = { limit: [1, 200], offset: [0, 1_000_000] } as const
 
+/**
+ * `raw` as Pydantic reads an int from a query (measured with `TypeAdapter(int)`, pydantic
+ * 2.14.2): decimal digits with an optional sign and surrounding spaces, single `_` between
+ * digits, and a fraction of zeros only (`1_000.00` is 1000); `5.`, `.0`, `5.5`, `1e2` and
+ * `0x10` are refused (NaN).
+ */
+function queryInt(raw: string): number {
+  return /^\s*[+-]?\d+(_\d+)*(\.0+)?\s*$/.test(raw) ? Number(raw.replace(/_/g, '')) : NaN
+}
+
 /** FastAPI's 422 for a `limit` or `offset` out of its bounds, as the real route answers; null when both fit. */
 function outOfBounds(url: URL): Response | null {
   const detail = Object.entries(PAGE_BOUNDS).flatMap(([name, [min, max]]) => {
     const raw = url.searchParams.get(name)
     if (raw === null) return []
-    // As Pydantic reads an int from a query (measured with its `TypeAdapter(int)`): decimal
-    // digits with an optional sign and surrounding spaces; `1e2` and `0x10` are refused.
-    const value = /^\s*[+-]?\d+\s*$/.test(raw) ? Number(raw) : NaN
+    const value = queryInt(raw)
     if (!Number.isInteger(value)) return [{ type: 'int_parsing', loc: ['query', name], msg: 'Input should be a valid integer' }]
     if (value < min) return [{ type: 'greater_than_equal', loc: ['query', name], msg: `Input should be greater than or equal to ${min}` }]
     if (value > max) return [{ type: 'less_than_equal', loc: ['query', name], msg: `Input should be less than or equal to ${max}` }]
@@ -168,8 +197,8 @@ function page(url: URL): StorefrontListingPage {
   const slugs = url.searchParams.getAll('slug')
   const materials = url.searchParams.getAll('material').map((m) => m.toUpperCase())
   const status = get('status')
-  const limit = Number(get('limit') || 50)
-  const offset = Number(get('offset') || 0)
+  const limit = queryInt(get('limit') || '50')
+  const offset = queryInt(get('offset') || '0')
   const ordered = sorted()
   const place = new Map(ordered.map((listing, index) => [listing.id, index + 1]))
   const materialOf = new Map(orders.state.filaments.map((f) => [f.id, f.material.toUpperCase()]))
@@ -306,6 +335,8 @@ export const handlers = [
     const id = String(params['id'])
     const found = listings.find((l) => l.id === id)
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    const notAllowed = materialRefusal(found)
+    if (notAllowed) return notAllowed
     const at = stamp()
     const published: StorefrontListing = {
       ...found,

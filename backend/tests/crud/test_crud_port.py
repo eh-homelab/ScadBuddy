@@ -69,8 +69,39 @@ class _Credentials:
         }.get(token)
 
 
+_PRINT_AREAS_THROUGH_FILAMENT_PULL = [
+    "settings",
+    "runs",
+    "operations",
+    "events",
+    "printer-ensure",
+    "reprints",
+    "uploads",
+    "previews",
+    "copy-leases",
+    "links",
+    "lan-imports",
+    "printers",
+    "rack",
+    "spools",
+    "transfer-urls",
+    "access-codes",
+    "filament",
+    "filament-sync",
+    "filament-pull",
+]
+
+
 def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert set(CRUD_AREAS) == {"projects", "render", "print", "storefront", "agent", "intake"}
+    assert set(CRUD_AREAS) == {
+        "projects",
+        "render",
+        "print",
+        "storefront",
+        "agent",
+        "intake",
+        "profile-fetch",
+    }
     monkeypatch.setitem(CRUD_AREAS, "render", ["blob-index"])
     app = FastAPI(dependencies=[Depends(auth_check)])
     app.state.scadbuddy = SimpleNamespace(settings=SimpleNamespace(auth_mode="off"))
@@ -83,26 +114,11 @@ def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> Non
         "areas": ["blob-index"]
     }
     printing = {"authorization": "Bearer sbsvc_print"}
-    assert client.get("/api/v1/internal/crud/print/areas", headers=printing).json() == {
-        "areas": [
-            "settings",
-            "runs",
-            "operations",
-            "events",
-            "printer-ensure",
-            "reprints",
-            "uploads",
-            "previews",
-            "copy-leases",
-            "links",
-            "lan-imports",
-            "printers",
-            "rack",
-            "spools",
-            "transfer-urls",
-            "access-codes",
-        ]
-    }
+    # Areas are appended, so an older API's list is a prefix of a newer one's; a new area
+    # extends the list and this test.
+    areas = client.get("/api/v1/internal/crud/print/areas", headers=printing).json()["areas"]
+    assert areas == CRUD_AREAS["print"]
+    assert areas[: len(_PRINT_AREAS_THROUGH_FILAMENT_PULL)] == _PRINT_AREAS_THROUGH_FILAMENT_PULL
     assert client.get("/api/v1/internal/crud/render/areas", headers=printing).status_code == 403
 
 

@@ -9,7 +9,7 @@ import { type AuditActor, type AuditSink, safeDetail } from '../audit/log.js'
 import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
-import { type SessionFiles, sha256, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
+import { type WorkspaceFiles, sha256, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
 import type { ToolAccess } from '../access/model.js'
 import type { RiskTier, TierResolver } from './permissions.js'
 
@@ -183,7 +183,15 @@ export const HttpReadInput = {
     .string()
     .regex(SAVED_ID, 'a saved response id')
     .describe('The `saved.id` an http_request result gave'),
-  offset: z.number().int().min(0).optional().describe('Byte offset to start at (the previous page\'s next_offset)'),
+  // At most what Postgres's `substring` takes (an int4), where a session's saved body is read: the
+  // API's ranged read takes the same bound (backend api/crud_agent_blobs.py `OFFSET_MAX`).
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .max(2 ** 31 - 2)
+    .optional()
+    .describe('Byte offset to start at (the previous page\'s next_offset)'),
   length: z
     .number()
     .int()
@@ -227,7 +235,7 @@ export type HttpRequestContext = {
    * Where `save_to_workspace` and a binary body go (#2329, #2511): a session's workspace, or a
    * flow run's starter's own. save_to_workspace is refused without it.
    */
-  workspace?: { files: SessionFiles; ref: WorkspaceRef } | undefined
+  workspace?: { files: WorkspaceFiles; ref: WorkspaceRef } | undefined
   /** A redirect to another host is returned (`redirectTo`) instead of followed, as Claude Code's WebFetch does (#2393). */
   sameHostRedirects?: boolean | undefined
   /** Refuse a host that is, or resolves to, the pod's loopback: WebFetch fetches web pages, and loopback is the agent's own services (#2679). */

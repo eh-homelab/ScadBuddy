@@ -5,7 +5,7 @@ import { IMAGE_DATA_MAX } from '../sessions/images.js'
 import {
   decodeText,
   sniffImage,
-  type SessionFiles,
+  type WorkspaceFiles,
   type WorkspaceFileInfo,
   WorkspaceError,
   workspaceOf,
@@ -50,7 +50,7 @@ const path = z
 
 const sha = z.string().regex(/^[0-9a-f]{64}$/, 'a sha256 as workspace_read or workspace_list gives it')
 
-function filesOf(ctx: ToolContext): { files: SessionFiles; ws: WorkspaceRef } {
+function filesOf(ctx: ToolContext): { files: WorkspaceFiles; ws: WorkspaceRef } {
   if (!ctx.workspace) throw new ToolError('the workspace is not available here: it needs the agent database')
   return { files: ctx.workspace, ws: workspaceOf(ctx) }
 }

@@ -385,8 +385,9 @@ drive sessions over `/mcp`. What bounds them:
   nobody can follow a session it may not see. Notifications carry only the URI.
 - **`session.*` events** carry ids and a seq, never content
   ([`agent/src/sessions/busEvents.ts`](../../agent/src/sessions/busEvents.ts)). Anyone
-  who can LISTEN on the database can see that sessions are active and when; that is the
-  same exposure as every other event on the channel (spec §7).
+  who can LISTEN on the database, or holds the `agent` service credential (the change
+  stream, #5299 D4), can see that sessions are active and when; that is the same exposure
+  as every other event on the channel (spec §7).
 
 ## Envelope encryption and AAD binding
 
@@ -420,9 +421,24 @@ AAD, so a row either side seals opens on the other).
   [`backend/scadbuddy/api/crud_agent_notify.py`](../../backend/scadbuddy/api/crud_agent_notify.py)):
   the agent gets the VAPID private key, a subscription's keys and a channel's token only
   from the routes that send with them, and with no KEK of its own Web Push and the
-  channels work from then on. The API re-wraps them at a rotation. The agent still opens
-  its plugin secrets, plugin sign-ins and workspace file keys itself, until the later
-  steps of #5299.
+  channels work from then on. The API re-wraps them at a rotation. So it is for the remote
+  plugins' header secrets and their OAuth sign-ins once the API lists area `plugins`
+  (#5299 step 5,
+  [`backend/scadbuddy/api/crud_agent_plugins.py`](../../backend/scadbuddy/api/crud_agent_plugins.py)):
+  the API seals a header value or a sign-in's tokens under the agent's own AAD, and opens
+  them only for the routes that load a plugin for a turn or a test, refresh a token, and
+  list the secrets the tools redact. A token refresh holds the lease
+  `plugin-oauth:<plugin>` on the API (#5299 D3) in place of the grant row's lock, and the
+  refreshed tokens are stored only while that lease holds. Its workspace files are
+  sealed and opened on the API once it lists area `workspace` (#5299 step 7,
+  [`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py)):
+  the agent sends and gets plaintext and never holds a file key. Its session images, the staged attachments and the saved HTTP bodies
+  go through the API's routes too once it lists areas `session-blobs`, `attachments` and
+  `http-bodies` (#5299 step 7,
+  [`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)):
+  the same statements, the owner's caps under the owner's lock there, the bytes as the
+  bodies' bytes, never base64. Until the API lists each area, the agent seals and opens that
+  area's secrets itself, as before.
 
 - **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
   secret under it with AES-256-GCM, then seals the data key under the KEK (the key file,
@@ -459,9 +475,11 @@ AAD, so a row either side seals opens on the other).
 - **Wrong key vs. tampering.** `openSecret()` compares `kek_id` first, so "wrong key"
   is reported as such. Anything else that fails authentication raises `SealError`,
   which never carries plaintext.
-- **Rotation** re-wraps data keys only (`rewrap()`). The API re-wraps the Claude
-  credentials and the payload keys at its start (`agent_data/rotation.py`), the agent the
-  rest. See [operating.md](operating.md#33-rotating-it).
+- **Rotation** re-wraps data keys only (`rewrap()`). The API re-wraps every agent
+  secret at its start (`agent_data/rotation.py`): the Claude credentials, the payload keys,
+  the Web Push keys, the notification channels' tokens, the plugins' header secrets and
+  sign-ins, and the workspace's principal file keys. The agent re-wraps nothing. See
+  [operating.md](operating.md#33-rotating-it).
 - **Plaintext in memory.** The Buffers the module creates are zeroed after use. JS
   strings cannot be zeroed, and the header states it: "Zeroing the Buffers shortens the
   exposure; it does not remove it."
@@ -1130,7 +1148,10 @@ an upload is refused with 429, so the route cannot fill the database. Every pane
 upload is the browser user's, so the cap covers all tabs together: drafts abandoned in
 several tabs can hold it for up to the TTL. Removing an image in the composer deletes
 its upload; a message the agent refuses after the composer has cleared leaves its
-uploads to expire. The bytes are plaintext, as in `ai_session_blobs`.
+uploads to expire. The bytes are plaintext, as in `ai_session_blobs`. Once the API lists
+area `attachments`, each of these runs on its CRUD routes
+([`agent/src/attachments/crudStore.ts`](../../agent/src/attachments/crudStore.ts); #5299
+step 7): the same owner checks, caps and lock, and the image's signature checked again there.
 
 **The turn.** The chat socket, and `sessions_send` for an MCP caller
 (`tools/imageRefs.ts`, where `attachment` is a member of #1906's reference union), read
@@ -1382,9 +1403,9 @@ From the merged code and PR bodies:
    started (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin is
    loaded into each of those turns (#896, see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
-   (the API's `agent_data/rotation.py` for the Claude credentials, payload keys, Web
-   Push keys and notification channel tokens, the agent's `rewrapFrom()` for its
-   workspace file keys, plugin secrets and plugin sign-ins).
+   (the API's `agent_data/rotation.py`, for the Claude credentials, payload keys, Web
+   Push keys, notification channel tokens, the plugins' header secrets and sign-ins, and
+   the workspace's principal file keys; the agent re-wraps nothing itself).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
    `update_source` and other `write` tools in the tier that runs without a human,
    because a write is reversible through the model's git history (spec §8.1). The

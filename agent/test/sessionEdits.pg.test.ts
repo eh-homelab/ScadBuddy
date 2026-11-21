@@ -136,10 +136,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edi
 
     it('records no ok row for a fork whose events could not be logged (#2159)', async () => {
       const parent = await session(1)
-      const append = m.events.append.bind(m.events)
-      vi.spyOn(m.events, 'append').mockImplementation((id, events, ...rest) =>
-        events.some((e) => e.type === 'session.started') ? Promise.reject(new Error('log down')) : append(id, events, ...rest),
-      )
+      vi.spyOn(m.events, 'forkLog').mockRejectedValue(new Error('log down'))
       expect((await fork(parent)).status).toBeGreaterThanOrEqual(500)
       expect((await resourceRows('session_fork')).map((r) => r.outcome)).toEqual(['error'])
     })

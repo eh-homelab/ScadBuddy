@@ -108,6 +108,19 @@ lines 94-135 and `services/virtual_printer/manager.py` lines 44-67, maziggy/bamb
   API-key scope maps to (`core/auth.py` `_APIKEY_SCOPE_BY_PERMISSION`, lines 79-82). The
   reads need `SETTINGS_READ`, which Read Status grants (line 130).
 
+Added for #5774 PR 3 on 2026-11-18, from prod's live Bambuddy **1.3.1**
+(`GET /api/v1/updates/version`) over the pod's loopback, as at the top of this file (a
+`GET`, no key). Nothing was redacted: the body carries no serial, tag or user.
+
+| File | Source |
+|---|---|
+| `maintenance-history.json` | `GET /api/v1/maintenance/items/5/history` (printer 1's Clean Build Plate) |
+
+- **The rows are newest first, and `performed_at` has no zone** (UTC, spec
+  2026-11-17-machine-rate-actuals §2.1). `hours_at_maintenance` is the counter as a float.
+- **An item Bambuddy does not have answers `[]` with 200, not 404**
+  (`GET /api/v1/maintenance/items/99999/history`, same read), as does an item never done.
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
@@ -389,3 +402,26 @@ Record each result in the same section:
   - If any call answers 403 with the Manage-Library-only key, the scope declared for it in
     `backend/scadbuddy/bambuddy/client.py` is wrong. Fix it there and in
     `backend/scadbuddy/bambuddy/errors.py`'s docstring.
+
+Added for #6262 (Bambuddy 1.2.6b1):
+
+| File | Source |
+|---|---|
+| `inventory-catalog.json` | `GET /api/v1/inventory/catalog`. Not a live recording: built by hand from the 1.2.6b1 OpenAPI `CatalogEntry {id, name, weight}` quoted in spec `2026-11-14-filament-management-design.md` §3; the names and weights are examples. |
+
+Added for #6268 (Bambuddy 1.3.1):
+
+| File | Source |
+|---|---|
+| `ha-entities.json` | `GET /api/v1/location-ha-sensors/entities?search=`. Not a live recording: built by hand from the 1.3.1 OpenAPI `HADisplayEntity {entity_id, friendly_name, state, domain, device_class, unit_of_measurement}` (read-only, 2026-11-18, plan `docs/superpowers/plans/2026-11-18-filament-weights-sensors.md`); the entities and states are examples. |
+Added for #6264 (Bambuddy 1.3.1):
+
+| File | Source |
+|---|---|
+| `openapi/rfid-routes.json` | `GET /openapi.json` of `https://bambuddy.internal.nullreference.io` on 2026-11-17 (200, `info.version` 1.3.1, no key): the RFID routes (link-tag, by-tag, spool PATCH, settings, configure, the `nfc/*` routes, cancel-write, devices, ws-token) and every schema they reference, copied unchanged. `routes`, `conflict_409`, `ws_events`, `data_origin_values` and the permissions are read from the Bambuddy source at tag `v1.3.1`, each with its file and line. `measured_2026-11-17` holds the read-only answers (auth status, the setting, the device list, by-tag 404 and 400, the WebSocket's first frames). Writes were never called; the 409 body and the write answers are from the source only. |
+
+Added for #6265 (Bambuddy 1.3.1):
+
+| File | Source |
+|---|---|
+| `openapi/sync-routes.json` | `GET /openapi.json` of `https://bambuddy.internal.nullreference.io` on 2026-11-18 (200, 1,245,373 bytes, `info.version` 1.3.1, no key): the filament sync's routes (spool create, update, archive, restore, the K-profile, preset and supplier list PUTs, supplier and location list/create/update, spool catalog create/update, filament catalog create/update) and every schema they reference, copied unchanged. `routes` carries each one's `Permission` with its line in the Bambuddy source at tag `v1.3.1`, the API-key flag `_APIKEY_SCOPE_BY_PERMISSION` maps it to (none for the filament catalog's writes: `core/auth.py` lines 300-301), and ScadBuddy's `Scope`. `write_semantics` is read from the same source. `measured_2026-11-18` holds the read-only counts (106 spools, none with a K-profile, 4 with suppliers; 3 suppliers; 0 locations; 91 catalog entries; 0 filaments). Writes were never called. |

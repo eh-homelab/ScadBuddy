@@ -6,6 +6,7 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { deleteUpstreamSession, type SessionLedger } from './forwarder.js'
 import { loadEnabledPlugins, type PluginStore } from './registry.js'
 import type { Resolver } from '../http/egress.js'
+import { type CrudTarget, crudOf } from '../api/crudStores.js'
 
 // The upstream MCP sessions this service's forwarders have open (migration `plugin_sessions`).
 //
@@ -32,7 +33,23 @@ const WORKFLOW_TASK_QUEUE = 1
 const PACKAGE_PREFIX = 'pkg:'
 export const packageLedgerId = (server: string): string => `${PACKAGE_PREFIX}${server}`
 
-export class PluginSessions implements SessionLedger {
+type Row = { plugin_id: string; upstream_session_id: string; old: boolean }
+
+/**
+ * The rows of `ai_plugin_sessions`: the forwarders' ledger (`seen`, `ended`) and the sweep's
+ * reads. `PluginSessions` runs them over SQL, `CrudPluginSessions` through the API's CRUD
+ * routes (area `plugin-sessions`, #5299 step 5).
+ */
+export type PluginSessionRows = SessionLedger & {
+  /** The database's clock now, as Postgres's text (`startMark`). */
+  mark(): Promise<string>
+  /** The rows of replicas not in `live`, older than `graceMs`; `old` past SWEEP_GIVE_UP_MS. */
+  dead(live: ReadonlySet<string>, graceMs: number): Promise<Row[]>
+  /** `self`'s rows recorded before `mark`. */
+  own(self: string, mark: string): Promise<Row[]>
+}
+
+export class PluginSessions implements PluginSessionRows {
   private readonly sql: Sql
   private readonly replica: string
 
@@ -51,6 +68,55 @@ export class PluginSessions implements SessionLedger {
   async ended(plugin: string, id: string): Promise<void> {
     await this.sql`DELETE FROM ai_plugin_sessions WHERE plugin_id = ${plugin} AND upstream_session_id = ${id}`
   }
+
+  mark(): Promise<string> {
+    return startMark(this.sql)
+  }
+
+  async dead(live: ReadonlySet<string>, graceMs: number): Promise<Row[]> {
+    return this.sql<Row[]>`
+      SELECT plugin_id, upstream_session_id, created_at < now() - ${SWEEP_GIVE_UP_MS / 1000} * interval '1 second' AS old
+      FROM ai_plugin_sessions
+      WHERE replica <> ALL(${[...live]}) AND created_at < now() - ${graceMs / 1000} * interval '1 second'`
+  }
+
+  async own(self: string, mark: string): Promise<Row[]> {
+    return this.sql<Row[]>`
+      SELECT plugin_id, upstream_session_id, false AS old FROM ai_plugin_sessions
+      WHERE replica = ${self} AND created_at < ${mark}::text::timestamptz`
+  }
+}
+
+/** `PluginSessions` through the API's CRUD routes (backend api/crud_agent_access.py). */
+export class CrudPluginSessions implements PluginSessionRows {
+  readonly #call: ReturnType<typeof crudOf>
+  readonly #replica: string
+
+  constructor(target: CrudTarget, replica: string = replicaIdentity()) {
+    this.#call = crudOf(target)
+    this.#replica = replica
+  }
+
+  async seen(plugin: string, id: string): Promise<void> {
+    await this.#call('an upstream MCP session seen', '/plugin-sessions/seen', { body: { plugin, id, replica: this.#replica } })
+  }
+
+  async ended(plugin: string, id: string): Promise<void> {
+    await this.#call('an upstream MCP session ended', '/plugin-sessions/ended', { body: { plugin, id } })
+  }
+
+  async mark(): Promise<string> {
+    return (await this.#call<{ mark: string }>("the database's clock", '/plugin-sessions/mark')).mark
+  }
+
+  async dead(live: ReadonlySet<string>, graceMs: number): Promise<Row[]> {
+    const body = { live: [...live], grace_ms: graceMs, give_up_ms: SWEEP_GIVE_UP_MS }
+    return (await this.#call<{ rows: Row[] }>("the sessions of replicas that do not poll", '/plugin-sessions/dead', { body })).rows
+  }
+
+  async own(self: string, mark: string): Promise<Row[]> {
+    return (await this.#call<{ rows: Row[] }>("this replica's earlier sessions", '/plugin-sessions/own', { body: { replica: self, mark } })).rows
+  }
 }
 
 export type SweepDeps = {
@@ -65,8 +131,6 @@ export type SweepDeps = {
 /** A row whose DELETE keeps failing is dropped after this, however it failed. */
 export const SWEEP_GIVE_UP_MS = 24 * 3_600_000
 
-type Row = { plugin_id: string; upstream_session_id: string; old: boolean }
-
 /**
  * Sends each row's session its DELETE, as the plugin is now (the registry's URL and header, the
  * address the egress check passes), and forgets it. A session of a plugin that is gone, disabled
@@ -75,7 +139,7 @@ type Row = { plugin_id: string; upstream_session_id: string; old: boolean }
  * registry (the packages are not resolved here). A failed DELETE keeps its row for the next sweep unless it is `old` or
  * `forgetFailed`.
  */
-async function endSessions(sql: Sql, rows: Row[], deps: SweepDeps, forgetFailed: boolean): Promise<void> {
+async function endSessions(ledger: PluginSessionRows, rows: Row[], deps: SweepDeps, forgetFailed: boolean): Promise<void> {
   if (rows.length === 0) return
   const log = deps.log ?? (() => {})
   const loaded = await loadEnabledPlugins(deps.plugins, deps.kek, deps.resolve)
@@ -94,9 +158,7 @@ async function endSessions(sql: Sql, rows: Row[], deps: SweepDeps, forgetFailed:
       const checked = registered(row.plugin_id)
       const ended = checked ? await deleteUpstreamSession(checked.plugin, checked.address, row.upstream_session_id, log) : true
       if (!ended && !row.old && !forgetFailed) return
-      await sql`
-        DELETE FROM ai_plugin_sessions
-        WHERE plugin_id = ${row.plugin_id} AND upstream_session_id = ${row.upstream_session_id}`
+      await ledger.ended(row.plugin_id, row.upstream_session_id)
     }),
   )
 }
@@ -105,12 +167,9 @@ async function endSessions(sql: Sql, rows: Row[], deps: SweepDeps, forgetFailed:
  * Ends every recorded session whose replica is not in `liveReplicas`, then forgets it (see
  * `endSessions`). Returns how many rows it looked at.
  */
-export async function sweepDeadReplicas(sql: Sql, liveReplicas: Set<string>, deps: SweepDeps): Promise<number> {
-  const rows = await sql<Row[]>`
-    SELECT plugin_id, upstream_session_id, created_at < now() - ${SWEEP_GIVE_UP_MS / 1000} * interval '1 second' AS old
-    FROM ai_plugin_sessions
-    WHERE replica <> ALL(${[...liveReplicas]}) AND created_at < now() - ${(deps.graceMs ?? SWEEP_GRACE_MS) / 1000} * interval '1 second'`
-  await endSessions(sql, rows, deps, false)
+export async function sweepDeadReplicas(ledger: PluginSessionRows, liveReplicas: Set<string>, deps: SweepDeps): Promise<number> {
+  const rows = await ledger.dead(liveReplicas, deps.graceMs ?? SWEEP_GRACE_MS)
+  await endSessions(ledger, rows, deps, false)
   return rows.length
 }
 
@@ -130,11 +189,9 @@ export async function startMark(sql: Sql): Promise<string> {
  * recorded before `mark` (`startMark`), never this incarnation's. Failed DELETEs are forgotten
  * too: nothing would retry them.
  */
-export async function endOwnSessions(sql: Sql, self: string, deps: SweepDeps, mark: string): Promise<number> {
-  const rows = await sql<Row[]>`
-    SELECT plugin_id, upstream_session_id, false AS old FROM ai_plugin_sessions
-    WHERE replica = ${self} AND created_at < ${mark}::text::timestamptz`
-  await endSessions(sql, rows, deps, true)
+export async function endOwnSessions(ledger: PluginSessionRows, self: string, deps: SweepDeps, mark: string): Promise<number> {
+  const rows = await ledger.own(self, mark)
+  await endSessions(ledger, rows, deps, true)
   return rows.length
 }
 
@@ -151,7 +208,7 @@ export async function pollingReplicas(client: Pick<Client, 'workflowService' | '
 }
 
 export type SweepRunDeps = SweepDeps & {
-  sql: Sql
+  ledger: PluginSessionRows
   /** Undefined when Temporal is not configured. */
   client: Pick<Client, 'workflowService' | 'options' | 'withDeadline'> | undefined
   self?: string
@@ -177,6 +234,6 @@ export async function runPluginSessionSweep(deps: SweepRunDeps): Promise<void> {
   }
   if (live.size === 0) return log('plugin session sweep skipped: no agent-tools worker polls')
   live.add(deps.self ?? replicaIdentity())
-  const removed = await sweepDeadReplicas(deps.sql, live, deps)
+  const removed = await sweepDeadReplicas(deps.ledger, live, deps)
   if (removed > 0) log(`plugin session sweep: ended ${removed} session(s) of replicas that no longer poll`)
 }

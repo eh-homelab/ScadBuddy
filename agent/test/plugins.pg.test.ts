@@ -143,13 +143,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         ).rejects.toThrow(/check constraint/)
       })
 
-      it('re-wraps plugin secrets on key rotation', async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN }, kek)
-        expect(await store.rewrapFrom(kek, otherKek)).toEqual({ rewrapped: 1, failed: 0 })
-        expect((await store.reveal('mem', otherKek))?.header?.value).toBe(TOKEN)
-        await expect(store.reveal('mem', kek)).rejects.toThrow(SealError)
-      })
-
       it('loads only enabled plugins whose endpoint passes the egress check now', async () => {
         for (const name of ['good', 'moved', 'off']) {
           await store.create({ name, url: `https://${name}.example/mcp` }, kek)

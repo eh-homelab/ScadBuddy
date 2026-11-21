@@ -187,6 +187,7 @@ class NativeLibrary:
                 print_count=0,
                 created_at=_naive_utc(f.created_at),
                 is_external=False,
+                per_print=f.print_subject is not None,
             )
             for f in files
         ]

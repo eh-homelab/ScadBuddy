@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../../api/client'
-import type { ProfileSpool } from '../../../api/types'
+import type { ProfileType, StorefrontSliceProfile } from '../../../api/types'
 import { useAsync } from '../../../lib/useAsync'
 import { refusalText } from '../../../components/orders/refusal'
+import { StorefrontMaterials } from '../../../components/settings/StorefrontMaterials'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -18,7 +19,8 @@ export const order = 45
 
 /**
  * #6153 — how the storefront slices a visitor's design to price it: the slices at once, and
- * the shop slice profile (a printer and a spool per material), which is saved on its own.
+ * the shop slice profile (a printer and a filament type per material, #6574), which is saved on its own.
+ * #6258 — and the shop's default materials (`storefront_materials`), saved on their own.
  */
 export function Component() {
   const form = useBackendSettings(id, (s) => fieldsOf(id, s))
@@ -27,47 +29,50 @@ export function Component() {
       form={form}
       id={id}
       title={title}
-      description="A visitor's design is sliced as the back office slices a quote: the template gives the support and process settings, and the print dialog's remembered choices give the rest. With no slice profile, the storefront shows no price, and the shop prices each line."
+      description="A visitor's design is sliced as the back office slices a quote: the template gives the support and process settings, and the choices the print dialog opens on give the rest. With no slice profile, the storefront shows no price, and the shop prices each line."
     >
       <RuntimeRows form={form} section={id} />
+      {/* #6258 — the shop's default materials, saved on their own. */}
+      <StorefrontMaterials />
       <SliceProfileEditor />
     </SavedSection>
   )
 }
 
-/** The spools to offer for `material`: those of that material, else every one. */
-function spoolsFor(material: string, spools: readonly ProfileSpool[]): readonly ProfileSpool[] {
-  const same = spools.filter((spool) => spool.material.toLowerCase() === material.toLowerCase())
-  return same.length > 0 ? same : spools
+/** The types to offer for `material`: those of that material, else every one. */
+function typesFor(material: string, types: readonly ProfileType[]): readonly ProfileType[] {
+  const same = types.filter((type) => type.material.toLowerCase() === material.toLowerCase())
+  return same.length > 0 ? same : types
 }
 
 /**
- * #6153 — the shop slice profile (`storefront_slice_profile`): the registry printer that
- * routes the slice and prices machine time, and one spool per material of the price book,
- * from the spools the print dialog offers on that printer. Support materials are listed
- * apart: support is the shop's choice, and a visitor never sees it.
+ * #6153, #6574 — the shop slice profile (`storefront_slice_profile`): the registry printer that
+ * routes the slice and prices machine time, and one filament type per material of the price
+ * book. A slot is sliced with its type's preset for the printer's nozzle (Filament → Types), in
+ * the visitor's colour and with no spool, so the profile keeps no preset of its own. Support
+ * materials are listed apart: support is the shop's choice, and a visitor never sees it.
  */
 function SliceProfileEditor() {
   const settings = useAsync(() => api.getSettings(), [])
   const printers = useAsync(() => api.listPrinters(), [])
   const [printer, setPrinter] = useState<string | null>(null)
-  const [spools, setSpools] = useState<Record<string, string> | null>(null)
+  const [chosen, setChosen] = useState<Record<string, string> | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
-  const options = useAsync(() => api.storefrontSliceOptions(printer ?? undefined), [printer])
+  const options = useAsync(() => api.storefrontSliceOptions(), [])
 
   useEffect(() => {
-    if (settings.data === undefined || spools !== null) return
+    if (settings.data === undefined || chosen !== null) return
     const profile = settings.data.storefront_slice_profile
     setPrinter(profile?.printer ?? null)
-    setSpools(Object.fromEntries(Object.entries(profile?.spools ?? {}).map(([material, spool]) => [material, String(spool)])))
-  }, [settings.data, spools])
+    setChosen({ ...(profile?.materials ?? {}) })
+  }, [settings.data, chosen])
 
-  const chosen = spools ?? {}
+  const picks = chosen ?? {}
   const materials = options.data?.materials ?? []
-  const offered = options.data?.spools ?? []
-  const save = (profile: { printer: string; spools: Record<string, number> } | null) => {
+  const offered = options.data?.types ?? []
+  const save = (profile: StorefrontSliceProfile | null) => {
     setBusy(true)
     setError(null)
     setSaved(false)
@@ -78,26 +83,26 @@ function SliceProfileEditor() {
       .finally(() => setBusy(false))
   }
 
-  const spoolRow = (material: string) => {
+  const typeRow = (material: string) => {
     const key = material.toLowerCase()
-    const choices = spoolsFor(material, offered)
+    const choices = typesFor(material, offered)
     return (
       <div key={key} className="flex flex-col gap-1">
         <Label>{material}</Label>
         <Select
-          value={chosen[key] ?? ''}
+          value={picks[key] ?? ''}
           onValueChange={(value) => {
             setSaved(false)
-            setSpools({ ...chosen, [key]: value })
+            setChosen({ ...picks, [key]: value })
           }}
         >
-          <SelectTrigger aria-label={`Spool for ${material}`} className="w-72">
-            <SelectValue placeholder="No spool" />
+          <SelectTrigger aria-label={`Filament type for ${material}`} className="w-72">
+            <SelectValue placeholder="No filament type" />
           </SelectTrigger>
           <SelectContent position="popper">
-            {choices.map((spool) => (
-              <SelectItem key={spool.spool_id} value={String(spool.spool_id)}>
-                {spool.label}
+            {choices.map((type) => (
+              <SelectItem key={type.id} value={type.id}>
+                {type.label}
               </SelectItem>
             ))}
           </SelectContent>
@@ -110,7 +115,7 @@ function SliceProfileEditor() {
     <section aria-label="Shop slice profile" className="space-y-2 rounded-md border p-3">
       <h4 className="text-sm font-medium">Shop slice profile</h4>
       <p className="text-xs text-muted-foreground">
-        What a visitor cannot choose: the printer to slice for, and the spool whose filament preset slices each material. The colour comes from the design, and the price from the price-book filament the visitor picks. Publish refuses a listing with a material that has no spool here.
+        What a visitor cannot choose: the printer to slice for, and the filament type each material is sliced as. Each colour slot is sliced in the visitor's colour with the type's preset for the nozzle (set on Filament → Types), and priced at the price-book filament the visitor picks. The nozzles, quality and plate are the ones the print dialog opens on for the design on this printer. A type with no preset for that nozzle gives no price. Publish refuses a listing with a material that has no type here.
       </p>
       <form
         className="flex flex-col gap-3"
@@ -120,16 +125,17 @@ function SliceProfileEditor() {
             setError('Choose the printer to slice for.')
             return
           }
-          // Until this printer's spools are read, the form shows none: saving then would
-          // drop every stored spool (#6255 review).
+          // Until the types are read, the form shows none: saving then would drop every
+          // stored type (#6255 review).
           if (options.data === undefined) return
-          // Only the materials the editor lists, and only spools this printer offers: a
-          // spool the form does not show is never sent (#6255 review).
-          const offeredIds = new Set(offered.map((spool) => String(spool.spool_id)))
-          const named = materials
-            .map((m) => [m.material.toLowerCase(), chosen[m.material.toLowerCase()] ?? ''] as const)
-            .filter(([, spool]) => offeredIds.has(spool))
-          save({ printer, spools: Object.fromEntries(named.map(([material, spool]) => [material, Number(spool)])) })
+          // Only the materials the editor lists, and only types it offers: a type the form
+          // does not show is never sent (#6255 review).
+          const live = new Set(offered.map((type) => type.id))
+          const named = materials.flatMap((m) => {
+            const type = picks[m.material.toLowerCase()]
+            return type && live.has(type) ? [[m.material.toLowerCase(), type] as const] : []
+          })
+          save({ printer, materials: Object.fromEntries(named) })
         }}
       >
         <div className="flex flex-col gap-1">
@@ -138,8 +144,6 @@ function SliceProfileEditor() {
             value={printer ?? ''}
             onValueChange={(value) => {
               setSaved(false)
-              // Another printer offers other spools: the old choices do not carry over.
-              if (value !== printer) setSpools({})
               setPrinter(value)
             }}
           >
@@ -155,9 +159,7 @@ function SliceProfileEditor() {
             </SelectContent>
           </Select>
         </div>
-        {printer === null ? (
-          <p className="text-[13px] text-muted-foreground">Choose the printer first: the spools are the ones the print dialog offers on it.</p>
-        ) : options.error ? (
+        {options.error ? (
           <p role="alert" className="text-[13px] text-warn">
             {refusalText(options.error)}
           </p>
@@ -165,18 +167,18 @@ function SliceProfileEditor() {
           <>
             <fieldset className="flex flex-col gap-2">
               <legend className="text-xs font-medium">Customer materials</legend>
-              {materials.filter((m) => !m.support).map((m) => spoolRow(m.material))}
+              {materials.filter((m) => !m.support).map((m) => typeRow(m.material))}
             </fieldset>
             {materials.some((m) => m.support) && (
               <fieldset className="flex flex-col gap-2">
                 <legend className="text-xs font-medium">Support (internal)</legend>
-                {materials.filter((m) => m.support).map((m) => spoolRow(m.material))}
+                {materials.filter((m) => m.support).map((m) => typeRow(m.material))}
               </fieldset>
             )}
           </>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="submit" size="sm" disabled={busy || settings.data === undefined || (printer !== null && options.data === undefined)}>
+          <Button type="submit" size="sm" disabled={busy || settings.data === undefined || options.data === undefined}>
             Save slice profile
           </Button>
           <Button
@@ -186,7 +188,7 @@ function SliceProfileEditor() {
             disabled={busy || settings.data === undefined}
             onClick={() => {
               setPrinter(null)
-              setSpools({})
+              setChosen({})
               save(null)
             }}
           >

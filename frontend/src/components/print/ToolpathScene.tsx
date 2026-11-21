@@ -12,6 +12,7 @@ import {
   type Toolpath,
   type ToolpathView,
 } from '../../lib/toolpath'
+import { WheelGate } from './WheelGate'
 
 type Props = {
   path: Toolpath
@@ -28,16 +29,18 @@ type Props = {
  */
 export function ToolpathScene({ path, view, layer, background }: Props) {
   return (
-    <Canvas
-      data-testid="toolpath-scene"
-      frameloop="demand"
-      gl={{ antialias: true }}
-      camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
-    >
-      <color attach="background" args={[background]} />
-      <ToolpathLines path={path} view={view} layer={layer} />
-      <OrbitControls makeDefault enablePan minDistance={20} maxDistance={1200} />
-    </Canvas>
+    <WheelGate>
+      <Canvas
+        data-testid="toolpath-scene"
+        frameloop="demand"
+        gl={{ antialias: true }}
+        camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
+      >
+        <color attach="background" args={[background]} />
+        <ToolpathLines path={path} view={view} layer={layer} />
+        <OrbitControls makeDefault enablePan minDistance={20} maxDistance={1200} />
+      </Canvas>
+    </WheelGate>
   )
 }
 

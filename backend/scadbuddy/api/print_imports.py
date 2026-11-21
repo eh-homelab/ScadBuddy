@@ -1,12 +1,14 @@
 """Import print (#4698): adopt a Bambuddy archive ScadBuddy did not start, and link it
-to a model.
+to a model, or (#6394) to a native library file.
 
 ``GET /print-imports/{archive_id}/sources`` lists every place the print's 3MF can be
-(`bambuddy/print_import.py`), with why one cannot be used, and suggests models by the
-job's name. ``POST /print-imports/{archive_id}`` imports it from the source the person
-chose, onto a model that exists or onto a new mesh model made from that 3MF. The link is
-a ``print_links`` row with the subject ``model:<slug>`` (`PrintLinkStore.record_import`),
-so every print route then takes the archive, as it takes a print ScadBuddy started.
+(`bambuddy/print_import.py`), with why one cannot be used, and suggests models and
+native library files by the job's name. ``POST /print-imports/{archive_id}`` imports it
+from the source the person chose, onto a model that exists, onto a new mesh model made
+from that 3MF, or onto a file of ScadBuddy's own library that stands. The link is a
+``print_links`` row with the subject ``model:<slug>`` or ``library:<file id>``
+(`PrintLinkStore.record_import`), so every print route then takes the archive, as it
+takes a print ScadBuddy started.
 
 ScadBuddy links its own prints lazily, so both routes first run the link passes for the
 one archive (`linking.link_archive`): a print ScadBuddy made is linked to its run then,
@@ -52,21 +54,28 @@ from scadbuddy.bambuddy.print_import import (
     forget_copy,
     keep_printer_file,
     read_source,
+    suggested_files,
     suggested_slugs,
 )
 from scadbuddy.bambuddy.print_links import (
     IMPORT_LOCK_WAIT_S,
+    NOT_STANDING,
+    PER_PRINT_COPY,
     ImportBusyError,
+    ImportTargetGoneError,
     LinkedPrint,
     PrintImport,
     PrintLinkStore,
 )
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
+from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
+from scadbuddy.print_library.ids import NATIVE_ID_BASE, is_native_id
 from scadbuddy.print_watch.component import AutoImportsDep
 from scadbuddy.print_watch.lan_store import (
     LanImportLinkedError,
@@ -92,6 +101,14 @@ class PrintOwner(BaseModel):
     library_file_id: int | None = None
 
 
+class LibraryFileSuggestion(BaseModel):
+    """A native library file the job's name suggests (#6394)."""
+
+    id: int
+    filename: str
+    folder_id: int | None
+
+
 class PrintSources(BaseModel):
     archive_id: int
     #: The job's name in Bambuddy, and its file's.
@@ -101,13 +118,16 @@ class PrintSources(BaseModel):
     status: str | None
     printer_id: int | None
     #: What the archive is a print of already, when a link names it; an import then
-    #: answers only for the same model.
+    #: answers only for the same model or library file.
     linked: PrintOwner | None
     #: What its import read, when it was imported.
     imported: PrintImport | None
     sources: list[FoundSource]
     #: Models the job's name suggests; only a suggestion.
     suggested_models: list[ModelSuggestion]
+    #: Files of ScadBuddy's own library the job's name suggests (#6394); only a
+    #: suggestion, and empty when that library does not serve.
+    suggested_library_files: list[LibraryFileSuggestion]
 
 
 class NewModel(BaseModel):
@@ -117,20 +137,34 @@ class NewModel(BaseModel):
 
 class ImportRequest(BaseModel):
     source: SourceChoice
-    #: A model that exists; or ``new_model``, a mesh model made from the source's 3MF.
+    #: What the print is imported onto, exactly one of: ``slug``, a model that exists;
+    #: ``new_model``, a mesh model made from the source's 3MF; or ``library_file_id``
+    #: (#6394), a file of ScadBuddy's own library that stands.
     slug: str | None = Field(default=None, pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
     new_model: NewModel | None = None
+    library_file_id: int | None = Field(
+        default=None,
+        ge=NATIVE_ID_BASE,
+        description="A file of ScadBuddy's own library (native ids start at 1000000000)",
+    )
 
     @model_validator(mode="after")
-    def _one_model(self) -> Self:
-        if (self.slug is None) == (self.new_model is None):
-            raise ValueError("name exactly one of slug and new_model")
+    def _one_target(self) -> Self:
+        named = [self.slug, self.new_model, self.library_file_id]
+        if sum(target is not None for target in named) != 1:
+            raise ValueError("name exactly one of slug, new_model and library_file_id")
         return self
 
 
 class ImportedPrint(BaseModel):
     archive_id: int
-    slug: str
+    #: What the print is linked to: ``model:<slug>`` or ``library:<file id>`` (#6394).
+    subject: str
+    #: The model it is linked to; None for a library file.
+    slug: str | None
+    #: The library file it is linked to (#6394); None for a model. ``imported`` says
+    #: where its 3MF was read from.
+    library_file_id: int | None
     #: The print's record: ``GET /prints/{archive_id}``.
     print_url: str
     #: Whether the import made the model (``new_model``); a repeat answers the same.
@@ -158,6 +192,26 @@ async def _archive(client: BambuddyClient, archive_id: int) -> ArchiveDetail:
                 status.HTTP_404_NOT_FOUND, f"Bambuddy has no archive {archive_id}"
             ) from None
         raise
+
+
+async def _file_suggestions(
+    library: PrintLibrary, archive: ArchiveDetail
+) -> list[LibraryFileSuggestion]:
+    """The native library's files the job's name suggests (#6394), by the same match as
+    the models (`suggested_slugs`, on each file's name without its extensions)."""
+    native = await library.serving_native()
+    if native is None:
+        return []
+    rows = await asyncio.to_thread(native.rows.files, None, every_folder=True)
+    # A run's per-print copies and slices are ScadBuddy's working files, never offered.
+    files = {row.id: row for row in rows if row.print_subject is None}
+    found = suggested_files(
+        [(row.id, row.name) for row in files.values()], archive.print_name or archive.filename
+    )
+    return [
+        LibraryFileSuggestion(id=i, filename=files[i].name, folder_id=files[i].folder_id)
+        for i in found
+    ]
 
 
 def _suggestions(catalogue: Catalogue, archive: ArchiveDetail) -> list[ModelSuggestion]:
@@ -190,6 +244,7 @@ async def get_sources(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     catalogue: CatalogueDep,
+    library: PrintLibraryDep,
     printer: Annotated[
         bool, Query(description="Also read the printer's storage (it reaches the printer)")
     ] = False,
@@ -209,18 +264,19 @@ async def get_sources(
         # A run's link found after an import owns the print; the import is then no answer.
         imported=(
             await links.import_of(archive_id)
-            if linked is not None and linked.slug is not None
+            if linked is not None and linked.matched_by == "import"
             else None
         ),
         sources=sources,
         suggested_models=await asyncio.to_thread(_suggestions, catalogue, archive),
+        suggested_library_files=await _file_suggestions(library, archive),
     )
 
 
 async def _answer(
     links: PrintLinksDep,
     response: Response,
-    slug: str,
+    target: PrintSubject,
     archive_id: int,
     *,
     new: bool,
@@ -232,7 +288,9 @@ async def _answer(
     response.status_code = status.HTTP_201_CREATED if new else status.HTTP_200_OK
     return ImportedPrint(
         archive_id=archive_id,
-        slug=slug,
+        subject=target.key,
+        slug=target.slug,
+        library_file_id=target.file_id,
         print_url=f"/api/v1/prints/{archive_id}",
         created_model=record.created_model,
         made_now=new,
@@ -258,6 +316,45 @@ def _refused(archive_id: int, owner: LinkedPrint, *, made: str | None = None) ->
         ),
         owner=_owner(owner).model_dump(),
     )
+
+
+async def _imported_onto(links: PrintLinkStore, owner: LinkedPrint, target: PrintSubject) -> bool:
+    """Whether ``owner``, the archive's link, is an import onto ``target`` already: the
+    same import again answers what it made (#6394: onto a library file too, whose own
+    send may have taken the import's link over since)."""
+    if owner.subject != target.key:
+        return False
+    record = await links.import_of(owner.archive_id)
+    return record is not None and record.subject == target.key
+
+
+async def _require_native_file(library: PrintLibrary, file_id: int) -> None:
+    """The 404 unless ``file_id`` is a file of ScadBuddy's own library that stands (#6394):
+    a trashed file, or any file while that library does not serve, is not one. A run's
+    per-print copy (``print_subject``) is a 422: the sweep trashes it, and its purge would
+    forget the import with the print's attachments (#6394 review). `import_in` checks
+    both again in the import's transaction."""
+    native = await library.serving_native()
+    found = (
+        await asyncio.to_thread(native.rows.file, file_id)
+        if native is not None and is_native_id(file_id)
+        else None
+    )
+    if found is None:
+        raise _target_refused(ImportTargetGoneError(file_id, NOT_STANDING))
+    if found.print_subject is not None:
+        raise _target_refused(ImportTargetGoneError(file_id, PER_PRINT_COPY))
+
+
+def _target_refused(error: ImportTargetGoneError) -> ApiError:
+    """A library target `require_import_target` refused: 422 for a per-print copy, which
+    stands but is never a target, 404 for a file that does not stand."""
+    code = (
+        status.HTTP_422_UNPROCESSABLE_CONTENT
+        if error.reason == PER_PRINT_COPY
+        else status.HTTP_404_NOT_FOUND
+    )
+    return ApiError(code, str(error), file_id=error.file_id)
 
 
 @asynccontextmanager
@@ -436,20 +533,23 @@ async def link_lan_auto_import(
         200: {"model": ImportedPrint, "description": "Imported onto this model already"},
         **OPERATION_RESPONSES,
     },
-    summary="Import a print ScadBuddy did not start, onto a model",
+    summary="Import a print ScadBuddy did not start, onto a model or a library file",
     description=(
-        "Links the archive to a model (#4698): `slug`, a model that exists, or "
+        "Links the archive to exactly one target (#4698): `slug`, a model that exists; "
         "`new_model`, a mesh model made from the source's 3MF (a sliced file has no "
         "meshes, so that is a 422; it needs an `Idempotency-Key`, 428 without one, and "
-        "answers 202 while the model is still being made: send the same request again). "
+        "answers 202 while the model is still being made: send the same request again); "
+        "or `library_file_id` (#6394), a file of ScadBuddy's own library that stands "
+        "(404 for a trashed or missing file, or while that library does not serve; a "
+        "file purged from the trash forgets its imports; a restore keeps them). "
         "`source` must be one `GET …/sources` lists as available (422 when it is not "
         "listed, 409 when it cannot be used now, or while another import of the archive "
         "runs past 30 s: send it again). For the archive's and the library's "
         "files ScadBuddy records which file and its hash, and copies nothing; a printer "
         "file is read over FTP and kept as a Bambuddy library file in the inbox folder "
         "(one there with its name and SHA-256 already is used again), "
-        "as the printer overwrites its cache. The same archive onto the same model again "
-        "is 200 with the import made then; onto another model, or an archive "
+        "as the printer overwrites its cache. The same archive onto the same target again "
+        "is 200 with the import made then; onto another target, or an archive "
         "ScadBuddy printed, is 409, naming the owner. A print still printing can be "
         "imported: its status comes from Bambuddy on each read."
     ),
@@ -464,6 +564,7 @@ async def import_print(
     catalogue: CatalogueDep,
     ops: OperationsDep,
     auto_imports: AutoImportsDep,
+    library: PrintLibraryDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ImportedPrint | JSONResponse:
     if body.new_model is not None and idempotency_key is None:
@@ -471,10 +572,12 @@ async def import_print(
             status.HTTP_428_PRECONDITION_REQUIRED, KEY_REQUIRED_DETAIL, type_=KEY_REQUIRED_PROBLEM
         )
     if body.slug is not None:
-        target = body.slug
+        target = PrintSubject.model(body.slug)
+    elif body.library_file_id is not None:
+        target = PrintSubject.library(body.library_file_id)
     else:
         assert body.new_model is not None
-        target = _slug_from_name(body.new_model.name)
+        target = PrintSubject.model(_slug_from_name(body.new_model.name))
     settings = store.load()
     # One import of an archive at a time, from the owner check to the record: two at once
     # never both make a model or keep a printer file (#4698 review).
@@ -485,11 +588,13 @@ async def import_print(
         owner = await links.linked(archive_id)
         if owner is not None:
             # Nothing is read again: the same import answers what it made.
-            if owner.slug == target:
+            if await _imported_onto(links, owner, target):
                 return await _answer(links, response, target, archive_id, new=False)
             raise _refused(archive_id, owner)
         if body.slug is not None:
             require_model_exists(catalogue, body.slug)
+        if body.library_file_id is not None:
+            await _require_native_file(library, body.library_file_id)
         sources = await find_sources(client, archive, printer=body.source.kind == "printer")
         source = chosen(sources, body.source)
         if body.new_model is not None and source.sliced:
@@ -514,7 +619,7 @@ async def import_print(
             made = await _new_model(ops, response, catalogue, idempotency_key, body.new_model, read)
             if isinstance(made, JSONResponse):
                 return made
-            target, created = made, True
+            target, created = PrintSubject.model(made), True
         library_file_id = source.library_file_id
         kept: int | None = None
         if source.kind == "printer":
@@ -525,7 +630,8 @@ async def import_print(
             kept = library_file_id if uploaded else None
         record = PrintImport(
             archive_id=archive_id,
-            slug=target,
+            subject=target.key,
+            slug=target.slug,
             source=source.kind,
             library_file_id=library_file_id,
             printer_id=archive.printer_id if source.kind == "printer" else None,
@@ -536,13 +642,16 @@ async def import_print(
             content_hash=archive.content_hash,
             created_model=created,
         )
-        owner = await _record(links, auto_imports, client, record, archive, kept)
+        try:
+            owner = await _record(links, auto_imports, client, record, archive, kept)
+        except ImportTargetGoneError as error:
+            raise _target_refused(error) from None
     if owner is not None:
         # Only a run's link can come between the check above and the record (imports of
         # one archive wait on `import_lock`), and a run's print is its own.
-        if owner.slug == target:
+        if await _imported_onto(links, owner, target):
             return await _answer(links, response, target, archive_id, new=False)
-        raise _refused(archive_id, owner, made=target if created else None)
+        raise _refused(archive_id, owner, made=target.slug if created else None)
     return await _answer(links, response, target, archive_id, new=True)
 
 

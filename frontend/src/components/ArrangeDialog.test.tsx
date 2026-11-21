@@ -230,6 +230,17 @@ describe('ArrangeDialog: a library file filed under its own model (#3638)', () =
     create.mockRestore()
   })
 
+  it('times the model it makes from when that stage began, not from the epoch', async () => {
+    const create = vi.spyOn(api, 'createMeshModel').mockReturnValue(new Promise<never>(() => {}))
+    const { user } = renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)
+    const filing = await screen.findByLabelText('File under')
+    await waitFor(() => expect(filing).toHaveTextContent("A new model: Clara's Wand"))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByText(`Making a model for ${wand.filename}…`)).toBeVisible()
+    expect(await screen.findByTestId('arrange-elapsed', {}, { timeout: 5000 })).toHaveTextContent(/^[3-9] s$/)
+    create.mockRestore()
+  })
+
   it('offers no new model when the model list could not be read', async () => {
     server.use(http.get('/api/v1/models', () => problem(503, 'Service Unavailable', 'try again')))
     renderPage(<ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={vi.fn()} />)

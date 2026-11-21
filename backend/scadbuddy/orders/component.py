@@ -29,6 +29,8 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.filament.component import FILAMENT
+from scadbuddy.filament.inventory import FilamentInventory
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
@@ -45,6 +47,7 @@ from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.listings import ListingStore
 from scadbuddy.orders.storefront.mail import MAIL_SETTINGS, MailConfig, StorefrontMail
+from scadbuddy.orders.storefront.slice_price import SlicePrices
 from scadbuddy.payments.registry import providers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.rows.component import ROWS
@@ -110,6 +113,11 @@ class OrdersComponent:
         return self._listings
 
     @property
+    def slice_prices(self) -> SlicePrices:
+        """The storefront variants' slice prices (#6153), on the rows' pool."""
+        return SlicePrices(self._opened())
+
+    @property
     def integrations(self) -> OrderIntegrations:
         """The seam for the running ``bambuddy_url`` (F10, Ruling 7)."""
         url = self.core.settings.bambuddy_url
@@ -120,6 +128,13 @@ class OrdersComponent:
             )
         return self._integrations[1]
 
+    @property
+    def inventory(self) -> FilamentInventory:
+        """ScadBuddy's own spools (#6262 Task 9): what an item print fills its plan from
+        and what the price book imports from."""
+        assert self._components is not None
+        return self._components.get(FILAMENT).inventory
+
     def densities(self) -> DensityTable | None:
         """The image's vendor presets by id (#6136, `orders/density.py`), built once per
         process; ``None`` without the image's tree. Blocking: call it in a thread."""
@@ -128,11 +143,7 @@ class OrdersComponent:
     @property
     def price_book(self) -> PriceBookReader:
         """The book in force (#4250): the stored policy and the filament records."""
-        return PriceBookReader(
-            self.core.settings_store,
-            self.store,
-            spool_import=self.integrations.linked,
-        )
+        return PriceBookReader(self.core.settings_store, self.store)
 
     def rules(self) -> OrderRules:
         """The shop's money rules (#5281) as stored now: the lifecycle reads them on each

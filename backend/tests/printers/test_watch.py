@@ -4,7 +4,8 @@ say the printer was heard from, and how it ends on a worker's shutdown."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import inspect
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -39,6 +40,21 @@ HOTEND = serial(51)
 LONG_AGO = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+def _seen_at(reports: PrinterReportStore, pid: str) -> datetime:
+    got = reports.get(pid)
+    assert got is not None
+    return got[1]
+
+
+def _names(reports: PrinterReportStore, pid: str, subtask: str = "someone-elses-print") -> bool:
+    got = reports.get(pid)
+    return got is not None and got[0].get("subtask_name") == subtask
+
+
+async def _settled(rack: RackUsageStore) -> bool:
+    return (await rack.usage([HOTEND]))[HOTEND].pending == 0
+
+
 class Lan:
     """A connection that subscribes (or never does), yields ``deltas``, then stays
     quiet until cancelled."""
@@ -48,6 +64,8 @@ class Lan:
         self.deltas = deltas or []
         #: Each report yielded, so a test can name the one that ended a print.
         self.sent: list[LanReport] = []
+        #: True once every delta is yielded and the connection waits.
+        self.quiet = False
 
     async def reports(self, connected: asyncio.Event | None = None) -> AsyncIterator[LanReport]:
         if not self.subscribes:  # a connect to an address that never answers
@@ -58,6 +76,7 @@ class Lan:
             report = LanReport(serial=SERIAL, received_at=datetime.now(UTC), print=delta)
             self.sent.append(report)
             yield report
+        self.quiet = True
         await asyncio.Event().wait()
 
 
@@ -73,12 +92,35 @@ def linked(pg_pool: PgPool) -> tuple[PrinterStore, PrinterReportStore, str]:
     return printers, reports, row.id
 
 
-async def _run_for(env: ActivityEnvironment, watches: WatchActivities, pid: str, s: float) -> None:
+async def run_until(
+    env: ActivityEnvironment,
+    watches: WatchActivities,
+    pid: str,
+    until: Callable[[], bool | Awaitable[bool]],
+    *,
+    within: float = 10.0,
+) -> None:
+    """Run the watch until ``until`` holds, then cancel it (#6452). A fixed window missed
+    the last delta on a loaded CI runner; ``within`` only bounds a watch that never gets
+    there, and that fails the test."""
     task = asyncio.ensure_future(env.run(watches.printer_watch, PrinterWatchInput(printer_id=pid)))
-    await asyncio.sleep(s)
-    env.cancel()
-    with pytest.raises(BaseException):  # noqa: B017 - cancelled, however the env says it
-        await task
+    try:
+        async with asyncio.timeout(within):
+            while True:
+                done = until()
+                if inspect.isawaitable(done):
+                    done = await done
+                if done:
+                    break
+                if task.done():
+                    await task  # the watch ended early: its error, not a timeout
+                    pytest.fail("the watch ended before the condition held")
+                await asyncio.sleep(0.01)
+    finally:
+        if not task.done():
+            env.cancel()
+            with pytest.raises(BaseException):  # noqa: B017 - cancelled, however the env says it
+                await task
 
 
 async def test_no_touch_while_the_printer_never_answers(
@@ -90,7 +132,11 @@ async def test_no_touch_while_the_printer_never_answers(
     monkeypatch.setattr(watch_module, "HEARD_EVERY", 0.05)
     lan = Lan(subscribes=False)
     watches = WatchActivities(printers, reports, None, connect=lambda *a: cast(LanPrinter, lan))
-    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+    began = asyncio.get_running_loop().time()
+    # An absence has no event to wait for: the window spans several `HEARD_EVERY`s.
+    await run_until(
+        ActivityEnvironment(), watches, pid, lambda: asyncio.get_running_loop().time() - began > 0.4
+    )
     got = reports.get(pid)
     assert got is not None and got[1] == LONG_AGO
 
@@ -102,7 +148,7 @@ async def test_a_quiet_connection_is_touched(
     monkeypatch.setattr(watch_module, "HEARD_EVERY", 0.05)
     lan = Lan(subscribes=True)
     watches = WatchActivities(printers, reports, None, connect=lambda *a: cast(LanPrinter, lan))
-    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+    await run_until(ActivityEnvironment(), watches, pid, lambda: _seen_at(reports, pid) > LONG_AGO)
     got = reports.get(pid)
     assert got is not None and datetime.now(UTC) - got[1] < timedelta(seconds=5)
 
@@ -116,7 +162,9 @@ async def test_the_watch_ends_on_worker_shutdown(
     watches = WatchActivities(printers, reports, None, connect=lambda *a: cast(LanPrinter, lan))
     env = ActivityEnvironment()
     task = asyncio.ensure_future(env.run(watches.printer_watch, PrinterWatchInput(printer_id=pid)))
-    await asyncio.sleep(0.2)
+    async with asyncio.timeout(10):
+        while not lan.quiet:
+            await asyncio.sleep(0.01)
     env.worker_shutdown()
     with pytest.raises(ApplicationError, match="shutting down"):
         async with asyncio.timeout(5):
@@ -142,7 +190,20 @@ async def test_a_touch_claims_only_what_keepalive_proves(
     lan = Lan(subscribes=True)
     watches = WatchActivities(printers, reports, None, connect=lambda *a: cast(LanPrinter, lan))
     started = datetime.now(UTC)
-    await _run_for(ActivityEnvironment(), watches, pid, 1.0)
+    # A touch stamps the later of the connect and `now - LINK_PROOF`. Every touch before
+    # `now - LINK_PROOF` passes the connect stamps the same connect time, so a stamp later
+    # than the first touch's is a `now - LINK_PROOF` one, however late the connect came.
+    first: list[datetime] = []
+
+    def proven() -> bool:
+        seen_at = _seen_at(reports, pid)
+        if seen_at == LONG_AGO:
+            return False
+        if not first:
+            first.append(seen_at)
+        return seen_at > first[0]
+
+    await run_until(ActivityEnvironment(), watches, pid, proven)
     got = reports.get(pid)
     assert got is not None
     lag = datetime.now(UTC) - got[1]
@@ -182,7 +243,7 @@ async def test_the_watch_settles_a_start_its_printer_ends_whatever_run_follows(
         watches = WatchActivities(
             printers, reports, None, connect=lambda *a: cast(LanPrinter, lan), rack=rack
         )
-        await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+        await run_until(ActivityEnvironment(), watches, pid, lambda: _settled(rack))
 
         usage = (await rack.usage([HOTEND]))[HOTEND]
         assert (usage.prints, usage.pending) == (1, 0)
@@ -216,7 +277,7 @@ async def test_a_start_the_printer_moved_on_from_settles_untimed(
             rack=rack,
             write_every=0,
         )
-        await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+        await run_until(ActivityEnvironment(), watches, pid, lambda: _settled(rack))
 
         usage = (await rack.usage([HOTEND]))[HOTEND]
         assert (usage.prints, usage.pending, usage.print_seconds) == (1, 0, 0)
@@ -263,7 +324,7 @@ async def test_a_failed_print_settles_timed_at_the_report_that_says_so(
         connect=lambda *a: cast(LanPrinter, lan),
         rack=cast(LanUsage, rack),
     )
-    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+    await run_until(ActivityEnvironment(), watches, pid, lambda: bool(rack.ended))
 
     assert rack.ended == [(pid, OLD_START, lan.sent[1].received_at, True)]
 
@@ -292,7 +353,9 @@ async def test_an_end_held_back_settles_when_the_quiet_watch_writes_it(
         rack=cast(LanUsage, rack),
         write_every=3600,
     )
-    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+    await run_until(
+        ActivityEnvironment(), watches, pid, lambda: bool(rack.ended) and _names(reports, pid)
+    )
 
     assert rack.ended == [(pid, OLD_START, lan.sent[1].received_at, False)]
     got = reports.get(pid)
@@ -406,7 +469,8 @@ async def test_the_watch_nudges_the_print_watcher_once_per_job_start(
         write_every=0,
         nudge=nudges.nudge,
     )
-    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+    # ``y`` is the last delta, so a nudge for it means every delta was handled.
+    await run_until(ActivityEnvironment(), watches, pid, lambda: (pid, "y") in nudges.seen)
 
     assert nudges.seen == [(pid, "x"), (pid, "y")]
 
@@ -428,7 +492,12 @@ async def test_a_nudge_that_fails_never_ends_the_watch(
         write_every=0,
         nudge=nudges.nudge,
     )
-    await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+    await run_until(
+        ActivityEnvironment(),
+        watches,
+        pid,
+        lambda: len(nudges.seen) >= 2 and _names(reports, pid, "y"),
+    )
 
     assert nudges.seen == [(pid, "x"), (pid, "y")]
     got = reports.get(pid)

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
+import { formatMoney } from '../../lib/money'
 import { ActionKey, errorText, store, type Draft, type DraftItem, type SubmittedOrder } from '../api/client'
 import { CartSources } from '../components/ModelSources'
 import { blocksSubmit } from '../models'
@@ -20,6 +21,12 @@ import { POLL } from '../poll'
  * (`CartSources`). While a file is being checked the page reads the cart again (`POLL`), so
  * its preview and "Ready", or its reason, show without a reload. A refused or expired file
  * blocks the submit (409 `model_file_refused`) until the request is removed.
+ *
+ * Each line shows its firm price, which the shop's server read from the slice of its design
+ * (#6153), or says the shop prices it by hand: never a rough number. With every line firm the
+ * order goes to payment when it is sent; otherwise the shop prices the other lines first, and
+ * the customer pays once, after that. A price that changed before the send (409
+ * `prices_changed`) loads the cart again, so the new price shows before anything is paid.
  */
 export function DraftPage() {
   const [draft, setDraft] = useState<Draft | null>()
@@ -115,13 +122,19 @@ export function DraftPage() {
         <h1 className="sf-h1">Your order</h1>
         <div className="sf-panel" role="status">
           <p className="sf-lead">{`We have your order. We sent a link to ${submitted.email}.`}</p>
-          <p className="sf-hint">{`Your order number is ${submitted.number}. Follow the link in the mail to see your order.`}</p>
+          <p className="sf-hint">
+            {submitted.pay_now
+              ? `Your order number is ${submitted.number}. Follow the link in the mail to pay for your order.`
+              : `Your order number is ${submitted.number}. We price the rest of your order, then the link in the mail shows the full price. You pay once, after that.`}
+          </p>
         </div>
       </section>
     )
   }
 
   const items = draft?.items ?? []
+  const money = (minor: number) => (draft ? formatMoney(minor, draft.currency, draft.minor_exponent) : '')
+  const firmTotal = items.reduce((sum, item) => sum + (item.total_minor ?? 0), 0)
   const refused = items.filter((item) => (item.sources ?? []).some(blocksSubmit))
   return (
     <section>
@@ -148,6 +161,14 @@ export function DraftPage() {
                 <h2 className="sf-item-title">{item.title}</h2>
                 <span className="sf-item-qty">{`Quantity ${item.quantity}`}</span>
               </div>
+              {item.price === 'firm' && item.unit_price_minor != null && item.total_minor != null ? (
+                <p className="sf-item-price">
+                  {money(item.total_minor)}
+                  {item.quantity > 1 && <span className="sf-item-each">{` (${money(item.unit_price_minor)} each)`}</span>}
+                </p>
+              ) : (
+                <p className="sf-item-price sf-item-price-by-hand">The shop prices this by hand</p>
+              )}
               {item.inputs && Object.keys(item.inputs).length > 0 && (
                 <dl className="sf-values">
                   {Object.entries(item.inputs).map(([name, value]) => (
@@ -190,6 +211,22 @@ export function DraftPage() {
           {`A file cannot be printed. Remove “${item.title}”, then add the files again without it.`}
         </p>
       ))}
+      {draft && items.length > 0 && (
+        <div className="sf-checkout-note" role="note">
+          {draft.pay_now ? (
+            <>
+              <p className="sf-checkout-total">{`Total ${money(firmTotal)}`}</p>
+              <p className="sf-hint">Shipping and tax come on top. Once you send your order, you pay from the link we mail you.</p>
+            </>
+          ) : (
+            <p className="sf-hint">
+              {firmTotal > 0
+                ? `The prices shown come to ${money(firmTotal)}. The shop prices the other designs by hand, then sends you the full price. You pay once, after that.`
+                : 'The shop prices your order by hand, then sends you the price. You pay after that.'}
+            </p>
+          )}
+        </div>
+      )}
       {draft && items.length > 0 && <SubmitForm draft={draft} onSubmitted={sent} onSent={sentElsewhere} />}
     </section>
   )

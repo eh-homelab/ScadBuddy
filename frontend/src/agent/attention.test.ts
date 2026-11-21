@@ -30,14 +30,18 @@ describe('fetchPendingInput', () => {
     // The mock's approvals are sessionless, as an MCP client's prepare is (#4813).
     const unattached = [expect.objectContaining({ tool: 'send_to_bambuddy' }), expect.objectContaining({ tool: 'send_to_bambuddy' })]
     const approvalNotices = Array.from({ length: 2 }, () => expect.objectContaining({ reason: 'approval' }))
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false, unattached, notices: approvalNotices })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false, unattached, notices: approvalNotices, waiting: expect.any(Array) })
     setPendingAnswers(1, 3)
     const notices = [
       ...approvalNotices,
       expect.objectContaining({ reason: 'question' }),
       ...Array.from({ length: 3 }, () => expect.objectContaining({ reason: 'tab_disconnected' })),
     ]
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false, unattached, notices })
+    const counts = await fetchPendingInput()
+    expect(counts).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false, unattached, notices, waiting: expect.any(Array) })
+    // #6399: "Needs you" lists exactly what the count counts.
+    expect(counts!.waiting).toHaveLength(totalOf(counts!))
+    expect(counts!.waiting!.map((w) => w.kind)).toEqual(['approval', 'approval', 'question', 'attention', 'attention', 'attention'])
   })
 
   it('lists the approvals in no session and no flow run, which no feed shows, with what their card says (#4813)', async () => {
@@ -87,7 +91,7 @@ describe('fetchPendingInput', () => {
   it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
     setPendingAnswers(1, 1, 2)
     const counts = await fetchPendingInput()
-    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false, notices: [expect.objectContaining({ reason: 'question' }), expect.objectContaining({ reason: 'tab_disconnected' })] })
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false, notices: [expect.objectContaining({ reason: 'question' }), expect.objectContaining({ reason: 'tab_disconnected' })], waiting: [expect.objectContaining({ kind: 'question', text: 'Which colour?' }), expect.objectContaining({ kind: 'attention', reason: 'tab_disconnected' })] })
     expect(totalOf(counts!)).toBe(2)
     expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
     expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
@@ -149,7 +153,7 @@ describe('fetchPendingInput', () => {
         HttpResponse.json({ entries: [{ kind: 'approval' }, { kind: 'approval', expiring: true }, { kind: 'answer', expiring: true }] }),
       ),
     )
-    expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0, waiting: [expect.objectContaining({ kind: 'approval', id: '' })] })
   })
 
   it("counts a flow run's call once it is the user's, not while it waits for the starting session (#2482)", async () => {
@@ -173,6 +177,7 @@ describe('fetchPendingInput', () => {
         { id: 'r1', name: 'r1', waiting: 1 },
         { id: 'r2', name: 'r2', waiting: 1 },
       ],
+      waiting: [expect.objectContaining({ run: { id: 'r1', name: 'r1' } }), expect.objectContaining({ run: { id: 'r2', name: 'r2' } })],
     })
   })
 
@@ -198,7 +203,7 @@ describe('fetchPendingInput', () => {
         HttpResponse.json({ entries: [{ kind: 'answer', attention: { reason: 'done', on_timeout: 'proceed' } }] }),
       ),
     )
-    expect(await fetchPendingInput()).toEqual({ approvals: 0, questions: 0, attention: 1, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 0, questions: 0, attention: 1, summaries: 0, waiting: [expect.objectContaining({ kind: 'attention', reason: 'done' })] })
   })
 
   it('is unknown (null), not zero, when the agent cannot answer', async () => {

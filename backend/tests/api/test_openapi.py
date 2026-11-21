@@ -209,11 +209,11 @@ def test_the_storefront_estimate_type_follows_what_the_edge_sends(
 ) -> None:
     import scadbuddy.storefront.routes as edge_routes
 
-    monkeypatch.setattr(edge_routes, "ESTIMATE_FIELDS", frozenset({"estimate", "price_minor"}))
+    monkeypatch.setattr(edge_routes, "ESTIMATE_FIELDS", frozenset({"source", "price_minor"}))
     spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
     schema = spec["components"]["schemas"]["StoreEstimate"]
-    assert set(schema["properties"]) == {"estimate", "price_minor"}
-    assert set(schema.get("required", [])) <= {"estimate", "price_minor"}
+    assert set(schema["properties"]) == {"source", "price_minor"}
+    assert set(schema.get("required", [])) <= {"source", "price_minor"}
 
 
 def test_an_account_orders_status_is_the_order_status_enum(tmp_path: Path) -> None:
@@ -222,3 +222,15 @@ def test_an_account_orders_status_is_the_order_status_enum(tmp_path: Path) -> No
     spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
     status = spec["components"]["schemas"]["AccountOrder"]["properties"]["status"]
     assert status["enum"] == list(get_args(OrderStatus))
+
+
+def test_openapi_has_no_module_qualified_names(tmp_path: Path) -> None:
+    """#6262 F16: two models of one name in the spec get module-qualified names
+    (``scadbuddy__bambuddy__farm__InventorySpool``), which the clients then carry. Each
+    schema is named by its class alone, and ScadBuddy's spool inventory is
+    `FilamentInventorySpool`, apart from Bambuddy's."""
+    schema = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))
+    names = set(schema["components"]["schemas"])
+    assert [name for name in sorted(names) if name.startswith("scadbuddy__")] == []
+    assert {"FilamentInventoryView", "FilamentInventorySpool", "FilamentSpoolSummary"} <= names
+    assert not {"InventoryView", "SpoolSummary", "InventorySpool"} & names

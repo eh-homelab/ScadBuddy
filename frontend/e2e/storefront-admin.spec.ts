@@ -28,6 +28,7 @@ async function seedListings(page: Page) {
           fixed: {},
           colours: [],
           media_ids: [],
+          materials: [],
           snapshot: null,
           media: [],
           published_at: null,

@@ -29,7 +29,8 @@ import { createExternalServer, refreshOfferedTools } from '../tools/projections.
 import type { Tool, ToolServices } from '../tools/registry.js'
 import { recordFailure, tracer } from '../telemetry/trace.js'
 import { BoundedEventStore } from './eventStore.js'
-import { type McpSessionRelay, type RelayedRequest, sessionHash } from './sessionRelay.js'
+import { RELAY_IDLE_SECONDS_MAX } from './relayRows.js'
+import { directoryIdleMs, type McpSessionRelay, type RelayedRequest, sessionHash } from './sessionRelay.js'
 import { mountMcpUploads } from './uploads.js'
 
 // `/mcp`: the external projection over the MCP Streamable HTTP transport
@@ -298,6 +299,10 @@ export function mountMcp(
   const maxSessions = deps.maxSessions ?? 200
   const maxPerCaller = deps.maxSessionsPerCaller ?? 20
   const idleSessionMs = deps.idleSessionMs ?? 60 * 60_000
+  // The relay's CRUD routes take an idle window of at most a week: refused here, never cut short there.
+  if (deps.relay && directoryIdleMs(idleSessionMs) / 1000 > RELAY_IDLE_SECONDS_MAX) {
+    throw new RangeError(`idleSessionMs is past the MCP relay's ${RELAY_IDLE_SECONDS_MAX} s idle window`)
+  }
   // Sweeps on a timer, not only when a session opens, so an abandoned session
   // (dropped without DELETE) is ended promptly even when nobody else connects.
   // unref'd: it never keeps the process alive; `close` stops it.

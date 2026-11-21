@@ -2,23 +2,26 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, type Throwaway, throwawayDatabase } from './support/postgres.js'
-import type { Sql } from 'postgres'
+import type { PostgresSessionStore } from '../src/sessions/store.js'
 import { warmHarness } from './support/warm.js'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** A Postgres client whose next transcript-tail read waits until the test lets it go (or fails it). */
-function gatedSql(real: Sql) {
+/** The next transcript-tail read waits until the test lets it go (or fails it). */
+type Moved = PostgresSessionStore['moved']
+
+/** The store's tail read (`moved`), held at its next call until released or failed. */
+function gatedMoved(real: Moved) {
   let gate: { reached: () => void; release: Promise<void> } | undefined
-  const sql = ((strings: TemplateStringsArray, ...values: never[]) => {
+  const moved: Moved = (...args) => {
     const held = gate
-    if (held && strings[0]?.trim().startsWith('SELECT uuid FROM ai_session_entries')) {
+    if (held) {
       gate = undefined
       held.reached()
-      return held.release.then(() => real(strings, ...values))
+      return held.release.then(() => real(...args))
     }
-    return real(strings, ...values)
-  }) as unknown as Sql
+    return real(...args)
+  }
   const hold = () => {
     let reached!: () => void
     let release!: () => void
@@ -33,7 +36,7 @@ function gatedSql(real: Sql) {
     }
     return { reached: at, release, fail }
   }
-  return { sql, hold }
+  return { moved, hold }
 }
 
 // WarmSessions' transcript tail and budget rules (spec 2026-10-13 §5.3 "Reuse
@@ -84,14 +87,14 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
 
   it('keeps the entry it is checking from an idle expiry during the tail read', async () => {
     let now = 1_000
-    const gated: { hold?: ReturnType<typeof gatedSql>['hold'] } = {}
+    const gated: { hold?: ReturnType<typeof gatedMoved>['hold'] } = {}
     h = await warmHarness(db, {
       idleMs: 200,
       now: () => now,
-      sql: (real) => {
-        const g = gatedSql(real)
+      moved: (real) => {
+        const g = gatedMoved(real)
         gated.hold = g.hold
-        return g.sql
+        return g.moved
       },
     })
     const id = h.newSession()
@@ -112,12 +115,12 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
   }, 60_000)
 
   it('recycles an entry evicted during the tail read', async () => {
-    const gated: { hold?: ReturnType<typeof gatedSql>['hold'] } = {}
+    const gated: { hold?: ReturnType<typeof gatedMoved>['hold'] } = {}
     h = await warmHarness(db, {
-      sql: (real) => {
-        const g = gatedSql(real)
+      moved: (real) => {
+        const g = gatedMoved(real)
         gated.hold = g.hold
-        return g.sql
+        return g.moved
       },
     })
     const id = h.newSession()
@@ -138,12 +141,12 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
   }, 60_000)
 
   it('lets go of an entry whose check failed', async () => {
-    const gated: { hold?: ReturnType<typeof gatedSql>['hold'] } = {}
+    const gated: { hold?: ReturnType<typeof gatedMoved>['hold'] } = {}
     h = await warmHarness(db, {
-      sql: (real) => {
-        const g = gatedSql(real)
+      moved: (real) => {
+        const g = gatedMoved(real)
         gated.hold = g.hold
-        return g.sql
+        return g.moved
       },
     })
     const id = h.newSession()

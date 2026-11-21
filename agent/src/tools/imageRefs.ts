@@ -4,7 +4,7 @@ import {
   AttachmentError,
   type AttachmentRef,
   AttachmentRefSchema,
-  type AttachmentStore,
+  type Attachments,
   type ResolvedAttachment,
   unknownAttachment,
 } from '../attachments/store.js'
@@ -53,7 +53,7 @@ import { type FlowImages, ToolError } from './registry.js'
 // attachments/store.ts). Only that owner can send it, so over /mcp it resolves
 // only for the principal that uploaded it; the panel's uploads are the browser
 // user's. Its preview is the one uploaded with it, and once the turn has
-// started its bytes move into the session (`AttachmentStore.claim`).
+// started its bytes move into the session (`Attachments.claim`).
 //
 // One kind is a flow run's (#2477): `flow_image`, an image one of the run's own
 // calls returned, kept under the run (temporal/flowBlobs.ts) and named by its bytes.
@@ -252,7 +252,7 @@ async function flowImageAt(flowImages: FlowImages | undefined, name: string, ind
 }
 
 /** Where `attachment` references are read, and for whom: the principal sending the turn. */
-export type AttachmentSource = { store: AttachmentStore; owner: Owner }
+export type AttachmentSource = { store: Attachments; owner: Owner }
 
 /** A send's images, and the attachments among them to claim once its turn has started. */
 export type ResolvedImages = { images: UserImage[]; attached: ResolvedAttachment[] }

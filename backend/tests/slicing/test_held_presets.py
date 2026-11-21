@@ -14,15 +14,11 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import SlicePlan
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
-from scadbuddy.bambuddy.models import (
-    LocalPresetDetail,
-    PresetRef,
-    SlotChoice,
-    SpoolFilamentPreset,
-)
+from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef, SlotChoice
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices, resolve
 from scadbuddy.bambuddy.slot_presets import slot_preset_name
 from scadbuddy.bambuddy.trays import tray_spool_id
+from scadbuddy.filament.models import EffectivePreset
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.slicing import catalogue as catalogue_module
 from scadbuddy.slicing.catalogue import catalogue_for, native_catalogue
@@ -37,7 +33,6 @@ from scadbuddy.slicing.held_presets import (
 from scadbuddy.slicing.presets import build_presets, native_preset_key, needs_bambuddy
 from scadbuddy.slicing.profiles import ProfileError, Profiles
 from scadbuddy.slicing.values import native_values
-from scadbuddy.spools.models import SpoolSnapshot
 from tests.slicing.conftest import PROFILES, MemoryHeld, local_preset
 
 BASE = "https://bambuddy.test"
@@ -266,7 +261,8 @@ def h2c_choices(**kwargs: object) -> PrintChoices:
     return PrintChoices(nozzles=[NozzleChoice(size="0.4")], **kwargs)  # type: ignore[arg-type]
 
 
-def tray(records: dict[str, SpoolSnapshot] | None = None) -> FilamentOptions:
+def tray(sb_number: int | None = None) -> FilamentOptions:
+    """A tray chosen for itself, holding SB spool ``sb_number`` (#6262) or none."""
     return FilamentOptions(
         library_file_id=None,
         slots=[SlotNeed(slot_id=1, colour="#FFFFFF")],
@@ -276,10 +272,23 @@ def tray(records: dict[str, SpoolSnapshot] | None = None) -> FilamentOptions:
                 material="PLA",
                 colour="#000000",
                 tray_only=True,
-                records=records or {},
+                sb_number=sb_number,
             )
         ],
     )
+
+
+def kept_preset(preset: str = "7") -> list[EffectivePreset]:
+    """An SB spool's H2C 0.4 preset naming Bambuddy's local preset ``preset`` (#6262 F1)."""
+    return [
+        EffectivePreset(
+            printer_model="H2C",
+            nozzle_diameter="0.4",
+            slicer_filament=preset,
+            slicer_filament_name=None,
+            overridden=False,
+        )
+    ]
 
 
 def tray_plan() -> FilamentPlan:
@@ -311,25 +320,31 @@ async def test_a_local_override_not_kept_is_refused_saying_so(kept: Profiles) ->
     assert "a Bambuddy local preset ScadBuddy has no copy of" in error.message
 
 
-async def test_a_providers_record_naming_a_kept_preset_resolves(kept: Profiles) -> None:
-    """Bambuddy's spool names its imported preset by its local id: on a native run that
-    is the kept preset."""
-    records = {"bambuddy": SpoolSnapshot(record_id="16", preset="7")}
+async def test_a_trays_spool_naming_a_kept_preset_resolves(kept: Profiles) -> None:
+    """The tray's SB spool (#16) names the preset Bambuddy's spool was imported with, by
+    its local id (#6262: carried from Bambuddy): on a native run that is the kept preset."""
     resolved = resolve(
-        tray(records), tray_plan(), h2c_choices(), await catalogue_for(None, native=kept), {}
+        tray(16),
+        tray_plan(),
+        h2c_choices(),
+        await catalogue_for(None, native=kept),
+        {16: kept_preset()},
     )
     assert resolved.errors == []
     assert resolved.filament_presets == [PresetRef(source="local", id="7")]
 
 
-async def test_a_providers_record_naming_a_kept_preset_for_any_printer_resolves() -> None:
+async def test_a_trays_spool_naming_a_kept_preset_for_any_printer_resolves() -> None:
     """An empty ``compatible_printers`` declares no restriction (`PresetChoice`), so a
-    kept preset that leaves it empty matches a provider's record too (#4645 review)."""
+    kept preset that leaves it empty matches the tray's spool's too (#4645 review)."""
     anywhere = PLA.model_copy(update={"compatible_printers": None})
     profiles = Profiles(PROFILES, held=MemoryHeld(anywhere))
-    records = {"bambuddy": SpoolSnapshot(record_id="16", preset="7")}
     resolved = resolve(
-        tray(records), tray_plan(), h2c_choices(), await catalogue_for(None, native=profiles), {}
+        tray(16),
+        tray_plan(),
+        h2c_choices(),
+        await catalogue_for(None, native=profiles),
+        {16: kept_preset()},
     )
     assert resolved.errors == []
     assert resolved.filament_presets == [PresetRef(source="local", id="7")]
@@ -361,11 +376,9 @@ async def test_a_spools_own_kept_preset_resolves_on_native(kept: Profiles) -> No
     options = FilamentOptions(
         library_file_id=None,
         slots=[SlotNeed(slot_id=1, colour="#FFFFFF")],
-        spools=[SpoolOption(spool_id=16, material="PLA", colour="#000000")],
+        spools=[SpoolOption(spool_id=16, material="PLA", colour="#000000", sb_number=16)],
     )
-    own = {
-        16: [SpoolFilamentPreset(printer_model="H2C", nozzle_diameter="0.4", slicer_filament="7")]
-    }
+    own = {16: kept_preset()}
     resolved = resolve(
         options,
         FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=16)]),

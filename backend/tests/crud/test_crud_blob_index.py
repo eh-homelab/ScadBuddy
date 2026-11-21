@@ -9,10 +9,12 @@ commits with the index write, inside the API's deadlock retry."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import timedelta
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +26,8 @@ from temporalio import activity
 from scadbuddy.api import crud_render
 from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient, activity_key
 from scadbuddy.crud.render import BASE, RemoteBlobIndex, WriteKeys
+from scadbuddy.render.job_models import Job
+from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.archive import pack_dir
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore
@@ -462,11 +466,38 @@ async def test_the_worker_cannot_store_a_key_that_is_not_a_render_jobs(
         assert sql.get(key) is not None
 
 
+@contextmanager
+def _jobs(pg_conninfo: str) -> Iterator[JobProjection]:
+    jobs = JobProjection(pg_conninfo, pool_size=2)
+    jobs.open()
+    try:
+        yield jobs
+    finally:
+        jobs.close()
+
+
+def _accepted(jobs: JobProjection, job_id: str | None = None) -> Job:
+    """A render job that runs: its outputs are written (#6233)."""
+    job = Job(
+        id=job_id or uuid.uuid4().hex,
+        slug="demo",
+        params={"w": 12},
+        inputs={"params": {"w": 12}},
+        model_version="abc123",
+        created_at=datetime.now(UTC),
+    )
+    key = uuid.uuid4().hex
+    return jobs.accept(job, key, workflow_id=f"render-{key}", run_id="run-1")
+
+
 @pytest.mark.parametrize("key", [K, "act-" + "a" * 40, "output-" + "0123456789abcdef" * 2 + "-3"])
 async def test_the_worker_stores_and_drops_a_render_jobs_pieces(
-    index: RemoteBlobIndex, pool: Pool, key: str
+    index: RemoteBlobIndex, pool: Pool, pg_conninfo: str, key: str
 ) -> None:
-    """A piece's key, a template call's emitted files and an output's files."""
+    """A piece's key, a template call's emitted files and an output's files (of a job that
+    runs)."""
+    with _jobs(pg_conninfo) as jobs:
+        _accepted(jobs, "0123456789abcdef" * 2)
     sql = BlobIndex(pool)
     assert await asyncio.to_thread(index.put, key, _ref("a"), slug="demo", meta={}) is None
     assert await asyncio.to_thread(
@@ -694,3 +725,90 @@ async def test_a_worker_fetching_an_altered_library_object_has_the_api_forget_it
         )
         assert await worker.fetch(LIB3) is False
     assert api_content.index.get(LIB3) is None
+
+
+# -- a render write is bound to its job and to its object's bytes (#6233) -------------
+
+
+async def test_a_render_publishes_its_pieces_and_its_running_jobs_outputs_only(
+    api_content: ContentStore, pool: Pool, pg_conninfo: str, tmp_path: Path
+) -> None:
+    """The render path through the routes: the worker publishes a piece and its job's
+    output, and the API reads each new object and hashes it before it indexes it. Once
+    the job settles, its output is not written again. A ref whose SHA-256 is not its
+    object's bytes is refused, and the row keeps the true ref."""
+    with _jobs(pg_conninfo) as jobs, threaded_render_crud(pool, content=api_content) as client:
+        job = _accepted(jobs)
+        output = f"output-{job.id}-0"
+        worker = CachedBlobStore(
+            LocalBlobStore(tmp_path / "worker"),
+            ContentStore(api_content.backend, RemoteBlobIndex(client)),
+            max_bytes=1 << 30,
+            min_age=0,
+        )
+        scope = BlobScope(slug="demo")
+        for key in (K, output):
+            directory = worker.dir_for(key)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "model.3mf").write_bytes(key.encode())
+            await worker.publish_fresh(key, scope=scope, expected=None)
+            held = api_content.index.get(key)
+            assert held is not None and held.ref.sha256 == await worker.indexed_sha(key)
+        jobs.finish(job.model_copy(update={"state": "failed", "error": "stopped"}))
+        (worker.dir_for(output) / "model.3mf").write_bytes(b"forged")
+        with pytest.raises(CrudRefusedError) as refused:
+            await worker.publish(output, scope=scope)
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "job-closed"
+        real = api_content.index.get(K)
+        assert real is not None
+        forged = real.ref.model_copy(update={"sha256": "f" * 64})
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(RemoteBlobIndex(client).put, K, forged, slug="demo", meta={})
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "ref-mismatch"
+    held = api_content.index.get(K)
+    assert held is not None and held.ref == real.ref
+
+
+def _local_object(content: ContentStore, data: bytes) -> BlobRef:
+    """The ref of ``data`` at the object id its bytes give on the local backend."""
+    sha = hashlib.sha256(data).hexdigest()
+    return BlobRef(
+        sha256=sha, kind="piece", backend=content.name, backend_id=f"piece/{sha}", size=len(data)
+    )
+
+
+async def test_only_a_row_the_api_verified_spares_the_read(
+    api_content: ContentStore, pool: Pool
+) -> None:
+    """A row written before #6233, or by a path that did not hash, may name forged bytes:
+    a render write of its ref reads the object again, and refuses it. A ref the route
+    read and marked (`verified_at`) is not read again, even with its object gone. A
+    write that points the row at another object clears the mark."""
+    sql = BlobIndex(pool)
+    forged = _local_object(api_content, b"the real piece")
+    await overwrite_object(api_content, forged.backend_id, b"forged bytes!!")
+    sql.put(K1, forged, slug="demo", meta={})  # no mark: as a row from before #6233
+    true = await api_content.put("piece", b"another piece", name="p", scope=BlobScope(), key=K2)
+    with threaded_render_crud(pool, content=api_content) as client:
+        index = RemoteBlobIndex(client)
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(index.put, K, forged, slug="demo", meta={}, reuse=True)
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "ref-mismatch"
+        assert sql.get(K) is None
+        # K2's row has no mark either (the API's own put): read once, then marked.
+        assert sql.vouched(true) == (False, False)
+        await asyncio.to_thread(index.put, K, true, slug="demo", meta={}, reuse=True)
+        assert sql.vouched(true) == (True, False)
+        await api_content.backend.remove(true.backend_id)
+        await asyncio.to_thread(
+            index.put, "act-" + "a" * 40, true, slug="demo", meta={}, reuse=True
+        )
+    sql.put(K, forged, slug="demo", meta={})
+    held = sql.get(K)
+    assert held is not None and held.ref == forged
+    with pool.connection() as conn:
+        row = conn.execute("SELECT verified_at FROM store_blobs WHERE key = %s", (K,)).fetchone()
+    assert row is not None and row["verified_at"] is None

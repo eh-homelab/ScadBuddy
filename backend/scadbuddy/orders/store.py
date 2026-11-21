@@ -469,15 +469,18 @@ class ImportRecord:
     extra_colours: list[str]
     effect: FilamentEffect | None
     colour_source: ColourSource
-    #: The spools' ``#RRGGBB`` and ids at the last import; ``None`` and empty before one.
+    #: The spools' ``#RRGGBBAA`` (an old ``#RRGGBB`` takes the record's alpha,
+    #: `spools.link_rgba`) and SB
+    #: numbers at the last import; ``None`` and empty before one.
     spool_colour: str | None
     spool_ids: list[int]
 
 
 @dataclass(frozen=True)
 class SpoolLink:
-    """A record's link to its spools at the last spool import (#6209): their ``#RRGGBB``
-    (``None`` before one) and Bambuddy ids."""
+    """A record's link to its spools at the last spool import (#6209): their ``#RRGGBBAA``
+    (``None`` before one; an old ``#RRGGBB`` takes the record's alpha) and SB spool
+    numbers."""
 
     spool_colour: str | None
     spool_ids: frozenset[int]
@@ -2112,11 +2115,12 @@ class OrderStore:
         """What printed Bambuddy archive ``archive_id`` (#4777): the output or library file
         whose link owns it, an output's before a library file's, both before an import's,
         as every owner lookup orders (``bambuddy/print_links.py`` ``_OWNER_ORDER``); None
-        when ScadBuddy printed neither."""
+        when ScadBuddy printed neither, an import's included (#6394: onto a library file
+        too)."""
         with self._read(conn) as c:
             row = c.execute(
-                "SELECT subject FROM print_links WHERE archive_id = %s"
-                " ORDER BY (subject LIKE 'model:%%'), (subject LIKE 'library:%%'), first_seen,"
+                "SELECT subject, matched_by FROM print_links WHERE archive_id = %s"
+                " ORDER BY (matched_by = 'import'), (subject LIKE 'library:%%'), first_seen,"
                 " subject, queue_item_id"
                 " LIMIT 1",
                 (archive_id,),
@@ -2124,12 +2128,12 @@ class OrderStore:
         if row is None:
             return None
         kind, _, key = str(row["subject"]).partition(":")
+        if row["matched_by"] == "import":
+            # A print a person imported onto a model (#4698) or a library file (#6394):
+            # ScadBuddy did not print it, so its file is copied as any other archive's.
+            return None
         if kind == "library":
             return ArchiveOrigin(output_id=None, library_file_id=int(key))
-        if kind == "model":
-            # A print imported onto a model (#4698): no output or library file printed
-            # it, so its file is copied as any other archive's.
-            return None
         return ArchiveOrigin(output_id=key, library_file_id=None)
 
     def archive_run_plates(
@@ -2143,7 +2147,7 @@ class OrderStore:
             rows = c.execute(
                 "WITH owner AS (SELECT subject, queue_item_id FROM print_links"
                 "  WHERE archive_id = %(a)s"
-                "  ORDER BY (subject LIKE 'model:%%'), (subject LIKE 'library:%%'), first_seen,"
+                "  ORDER BY (matched_by = 'import'), (subject LIKE 'library:%%'), first_seen,"
                 "  subject, queue_item_id"
                 "  LIMIT 1),"
                 " run AS (SELECT s.subject, s.run_id FROM print_sends s JOIN owner o"

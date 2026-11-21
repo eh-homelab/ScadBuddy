@@ -142,13 +142,12 @@ function fakeBackend() {
 function exchanging(
   backend: ReturnType<typeof fakeBackend>,
   clock: { now: number },
-  options: { proof?: 'k8s' | 'bootstrap'; fallback?: ServiceCredential; proofText?: () => string } = {},
+  options: { proof?: 'k8s' | 'bootstrap'; proofText?: () => string } = {},
 ) {
   return new ExchangeCredential({
     backendUrl: 'http://backend:8080/',
     proofFile: '/var/run/scadbuddy/token',
     proof: options.proof ?? 'k8s',
-    ...(options.fallback ? { fallback: options.fallback } : {}),
     fetchImpl: backend.fetchImpl,
     readProof: async () => (options.proofText ?? (() => 'jwt-1\n'))(),
     now: () => clock.now,
@@ -303,24 +302,7 @@ describe('ExchangeCredential', () => {
     expect(backend.state.calls.length).toBe(calls)
   })
 
-  it('falls back to the view while an old API answers 404', async () => {
-    const backend = fakeBackend()
-    const clock = { now: 0 }
-    const view = new ServiceCredential(fakeSql(() => [row()]).sql, kek, () => clock.now)
-    const credential = exchanging(backend, clock, { fallback: view })
-    backend.state.status = 404
-    expect(await credential.current()).toBe(TOKEN)
-    clock.now = 30_000
-    expect(await credential.current()).toBe(TOKEN)
-    expect(backend.state.calls.length).toBe(1)
-    backend.state.status = 200
-    clock.now = 60_000
-    const token = await credential.current()
-    expect(token).toMatch(/^sbsvc_/)
-    expect(token).not.toBe(TOKEN)
-  })
-
-  it('has nothing on a 404 without a database to fall back to', async () => {
+  it('reads no view: a 404 is a failed exchange, with no credential (#6501)', async () => {
     const backend = fakeBackend()
     backend.state.status = 404
     expect(await exchanging(backend, { now: 0 }).current()).toBeUndefined()

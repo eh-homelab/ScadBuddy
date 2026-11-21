@@ -121,6 +121,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const serverExtras: unknown[] = []
   const runner = new TurnRunner({
     sql: unusedSql,
+    rows: { get: () => Promise.resolve(undefined) },
     paths,
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     settings: {

@@ -9,6 +9,7 @@ import { libraryPath, libraryPathOf } from '../../lib/libraryPath'
 import { nameParts } from '../../lib/libraryNames'
 import { folderLabel } from '../../lib/libraryTransfer'
 import { useAsync } from '../../lib/useAsync'
+import { isNativeFileId } from '../../lib/associations'
 import { BlobDownload } from '../BlobDownload'
 import { libraryPrintsPath, printLabel, printPath, printerLabel } from '../prints/prints'
 import { PrintStatus } from '../prints/PrintStatus'
@@ -16,6 +17,7 @@ import { Swatch } from '../print/Swatch'
 import { RecordDrawer } from '../records/RecordDrawer'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { RelatedAssociations } from './RelatedAssociations'
 import type { TransferMode } from './TransferLibraryFilesDialog'
 
 const PlateScene = lazy(async () => ({ default: (await import('../print/PlateScene')).PlateScene }))
@@ -278,6 +280,12 @@ function Details({
               {problem(output.error, 'Could not read the output it was made from.')}
             </p>
           )}
+        </Section>
+      )}
+
+      {isNativeFileId(id) && (
+        <Section title="Related" testId="library-details-related">
+          <RelatedAssociations subject={{ kind: 'library', id }} />
         </Section>
       )}
 

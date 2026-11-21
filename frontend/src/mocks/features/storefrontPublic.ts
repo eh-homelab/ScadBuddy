@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomerOrder, Draft, Listing, ListingCard, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import type { CustomerOrder, Draft, Listing, ListingCard, ParamValue, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import { colourPlan } from '../../storefront/colours'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
 import { advanceChecks, modelsOrderOf } from './storefrontModels'
@@ -123,15 +124,18 @@ export function listingsPage(listings: readonly Listing[], url: URL, requestsEna
   }
 }
 
+/** A slice price (#6153): firm, and only the price. */
 export const ESTIMATE: StoreEstimate = {
-  estimate: true,
+  source: 'slice',
   price_minor: 1240,
   currency: 'USD',
   minor_exponent: 2,
-  grams: '9.40',
-  parts: [],
-  unknown_parts: 0,
+  retry_after: null,
 }
+/** The price while the shop's slice runs: read again after `retry_after` seconds. */
+export const PENDING_PRICE: StoreEstimate = { source: 'pending', price_minor: null, currency: null, minor_exponent: null, retry_after: 2 }
+/** No firm price: the shop prices the design by hand. */
+export const NO_PRICE: StoreEstimate = { source: 'none', price_minor: null, currency: null, minor_exponent: null, retry_after: null }
 
 /** The shop's shipping options (backend `storefront_shipping_options`): one ships, one does not. */
 const SHIPPING = [
@@ -265,7 +269,7 @@ async function orderOf(request: Request): Promise<CustomerOrder | Response> {
 }
 
 export function ensureDraft(): Draft {
-  draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
+  draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING, pay_now: false }
   return draft
 }
 
@@ -304,15 +308,10 @@ export const handlers = [
       colors: null,
       preview_url: null,
       error: null,
-      // #6302 review: the colours the render takes. The mock moves none: a part not given
-      // keeps the listing's default.
-      values: Object.fromEntries(
-        Object.entries(checked.params).flatMap(([name, param]) => {
-          if (param.kind !== 'choice' || !param.colour) return []
-          const value = body.values?.[name] ?? param.default
-          return typeof value === 'string' ? [[name, value]] : []
-        }),
-      ),
+      // #6258, #6302 review: the colours the render takes. A part not given moves to the
+      // closest colour of the material, as the shop's `resolve_choice` does: the mock uses
+      // the page's copy of that rule.
+      values: colourPlan(checked, (body.values ?? {}) as Record<string, ParamValue>).shown,
     }
     renders.set(id, { render, polls: 0 })
     return HttpResponse.json(render, { status: 202 })
@@ -365,6 +364,8 @@ export const handlers = [
       attachments: [],
       sources: [],
       own_model: false,
+      // The mocks slice nothing: every line is priced by hand (#6153).
+      price: 'by_hand',
     })
     save()
     return HttpResponse.json(current)
@@ -393,7 +394,7 @@ export const handlers = [
     if (!option) return refused(422, 'shipping_option_id', 'Choose how your order reaches you.')
     if (option.ships && !body.address) return refused(409, 'shipping_address_required', 'This way of shipping needs your address.')
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)) return refused(422, 'email_invalid', 'Give one email address, such as ada@example.com.')
-    const submitted = { id: draft.id, number: `ORD-2026-${++orders}`, email: body.email }
+    const submitted = { id: draft.id, number: `ORD-2026-${++orders}`, email: body.email, pay_now: false }
     draft = null
     save()
     return HttpResponse.json(submitted)
@@ -463,6 +464,8 @@ export const handlers = [
       attachments: files.map((file) => ({ filename: file.name, kind: 'image', url: `/mock-files/${encodeURIComponent(file.name)}` })),
       sources: [],
       own_model: false,
+      // The mocks slice nothing: every line is priced by hand (#6153).
+      price: 'by_hand',
     })
     save()
     return HttpResponse.json(current)

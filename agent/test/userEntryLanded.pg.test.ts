@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
-import { userEntryLanded } from '../src/sessions/turnHost.js'
+import { PgTranscriptRows } from '../src/sessions/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // TurnHost's check that a turn's message reached the transcript (a continuation lost after it
@@ -34,9 +34,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`userEntryLanded${TEST_DATABASE_URL ? '' : `
     await legacy(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'x', input: { type: 'user' } }] } }))
     await legacy('not json "user" {')
     await legacy(JSON.stringify({ type: 'user', message: { content: 'side' } }), 'subagents/a')
-    expect(await userEntryLanded(db.sql, id, mark)).toBe(false)
+    expect(await new PgTranscriptRows(db.sql, undefined).userLanded(id, mark)).toBe(false)
     await legacy(JSON.stringify({ uuid: 'u1', type: 'user', message: { content: 'hello' } }))
-    expect(await userEntryLanded(db.sql, id, mark)).toBe(true)
+    expect(await new PgTranscriptRows(db.sql, undefined).userLanded(id, mark)).toBe(true)
   })
 
   it('takes a sealed row`s entry_type', async () => {
@@ -44,6 +44,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`userEntryLanded${TEST_DATABASE_URL ? '' : `
     await db.sql`
       INSERT INTO ai_session_entries (project_key, session_id, subpath, entry_type, sealed)
       VALUES ('p', ${id}, '', 'user', ${Buffer.from('opaque')})`
-    expect(await userEntryLanded(db.sql, id, mark)).toBe(true)
+    expect(await new PgTranscriptRows(db.sql, undefined).userLanded(id, mark)).toBe(true)
   })
 })

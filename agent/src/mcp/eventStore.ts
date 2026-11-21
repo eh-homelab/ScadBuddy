@@ -15,8 +15,8 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 // into a session that no longer exists.
 //
 // What IS durable is the layer below: the backend's `events` table. When the
-// agent's LISTEN connection drops, src/events/pgListener.ts replays the gap
-// from it by `seq`, so notifications this store then carries are not missing
+// agent's change stream drops, the API replays the gap from it after the
+// stream's `Last-Event-ID` (src/events/changeStream.ts), so notifications this store then carries are not missing
 // events the bus sent meanwhile.
 
 type Stored = { id: string; streamId: string; message: JSONRPCMessage }

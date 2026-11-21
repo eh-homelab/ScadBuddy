@@ -88,8 +88,10 @@ covers the same ground more briefly.
   `_TOOL_TIMEOUT`, plus the retries' backoff), not 90 s; one whose last attempt ends on
   its 120 s start-to-close instead takes no fallback and fails there. A flow's tool
   calls have no such fallback: one slower than 30 s that lands on an old replica times
-  out, a read up to three times and a write at once, and the script sees the error
-  (`flow_session_check` retries without limit).
+  out, a read up to three times and a write at once, except a `keyed` write (one whose
+  commands carry an Idempotency-Key), which is asked once more under the same key
+  (#6345, backend `workflows/flow_tools.py` FLOW_KEYED_RETRY_PATCH); the script sees
+  the error (`flow_session_check` retries without limit).
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
   another replica is a `BridgeCall` workflow, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
@@ -367,7 +369,7 @@ as unset (`present()`).
 
 | Variable | Default | Read by | Meaning |
 |---|---|---|---|
-| `SCADBUDDY_DATABASE_URL` | unset → AI disabled | `loadConfig()` | Postgres URL, shared with the backend (#241). It must be `postgres://` or `postgresql://`; anything else is a `ConfigError` at start. The URL is not echoed in the error because it normally carries the password. With it unset the service still runs, and `/healthz` reports `"ai": "disabled (no database)"`. Each replica opens up to 4 connections in its shared pool, about 4 more of its own for plugin connection-test locks (briefly more while a failed lock connection is replaced) (`TEST_LOCK_CONNECTIONS` in [`agent/src/db.ts`](../../agent/src/db.ts), #4994) and one `LISTEN` connection: `AGENT_DB_CONNECTIONS`, 9, is what to count when sizing Postgres `max_connections`. The pool and the lock connections close after 60 s idle (`IDLE_TIMEOUT_SECONDS`, #5226), and show in `pg_stat_activity` as `scadbuddy-agent` (the listener as `scadbuddy-agent-listener`). |
+| `SCADBUDDY_DATABASE_URL` | unset → AI disabled | `loadConfig()` | Postgres URL, shared with the backend (#241). It must be `postgres://` or `postgresql://`; anything else is a `ConfigError` at start. The URL is not echoed in the error because it normally carries the password. With it unset the service still runs, and `/healthz` reports `"ai": "disabled (no database)"`. Each replica opens up to 4 connections in its shared pool, about 4 more of its own for plugin connection-test locks (briefly more while a failed lock connection is replaced) (`TEST_LOCK_CONNECTIONS` in [`agent/src/db.ts`](../../agent/src/db.ts), #4994), and no `LISTEN` connection (its NOTIFY channels come over the API's change stream, #5299 D4): `AGENT_DB_CONNECTIONS`, 8, is what to count when sizing Postgres `max_connections`. Once the API lists the agent's CRUD area `access` (#5299 step 5), a connection test holds a lease row of the API's `agent_leases` (key `tool-listing:<source>`, through `…/crud/agent/leases/{key}`, #5299 D3) in place of the lock connection. The pool and the lock connections close after 60 s idle (`IDLE_TIMEOUT_SECONDS`, #5226), and show in `pg_stat_activity` as `scadbuddy-agent`. |
 | `SCADBUDDY_BACKEND_URL` | `http://127.0.0.1:8080` | `loadConfig()` | Where the backend listens. Must be `http(s)`. Trailing slashes are stripped. `/healthz` probes `GET {url}/healthz` with a 2 s timeout (`backendReachable()`, [`agent/src/api/backend.ts`](../../agent/src/api/backend.ts)). |
 | `SCADBUDDY_SECRET_KEY_FILE` | unset → credentials cannot be saved | `loadKek()` in [`agent/src/secrets.ts`](../../agent/src/secrets.ts) | Path of the key-encryption key (KEK) file. See §3. |
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
@@ -443,9 +445,10 @@ kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
   payload keys: the API seals and opens them
   ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent asks it whether it holds a key (`GET …/crud/agent/credentials/key`). The
-  agent's own file still opens its plugin secrets, Web Push and channel keys, plugin
-  sign-ins and workspace file keys, until the later steps of #5299. Mount the same key
-  in both.
+  agent's own file still opens the Web Push and channel keys (area `notify`), the plugins'
+  header secrets and their sign-ins (area `plugins`, #5299 step 5) and its workspace file
+  keys (area `workspace`, #5299 step 7) only while the API does not list their areas yet,
+  until the later steps of #5299. Mount the same key in both.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key; `kekFromBase64()`). A credential sealed under a lost key cannot
   be opened. `/healthz` then reports "stored credential was sealed with a different
@@ -474,15 +477,15 @@ key, and they stop opening once the old key's mount is removed.
 3. Each one re-wraps its own tables at its start. Only the data key of a row whose
    `kek_id` is the old key's is sealed again under the new key:
    - The API, after its migrations: `ai_credentials` (the Claude credentials),
-     `ai_payload_keys` (the durable payload keys), and `ai_push_vapid`,
+     `ai_payload_keys` (the durable payload keys), `ai_push_vapid`,
      `ai_push_subscriptions` and `ai_notify_channels` (the Web Push keys and the
-     notification channels' tokens, #5299 step 5). The log line reads
-     `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`, or
-     `notify`), with the counts.
-   - The agent, once migrations have applied (the `afterMigrate` hook of
-     `connectDatabase()`): `ai_session_files` (workspace file keys), `ai_plugins` (plugin
-     secrets) and `ai_plugin_oauth` (plugin sign-ins). The later steps of #5299 move these
-     to the API too.
+     notification channels' tokens, #5299 step 5), `ai_plugins` and `ai_plugin_oauth`
+     (the plugins' header secrets and sign-ins, #5299 step 5; the sign-ins under way in
+     `ai_plugin_oauth_flows` that the old key sealed are deleted, as before), and
+     `ai_session_files` (the workspace's principal file keys, #5299 step 7). The log line
+     reads `secret key rotation: re-wrapped the agent's credentials` (or `payload_keys`,
+     `notify`, `plugins` or `session_files`), with the counts.
+   - The agent re-wraps nothing itself any more.
 
    The sealed secret and `updated_at` are not touched. Each `UPDATE` is conditional on
    `kek_id`, so two pods rotating at once do not overwrite each other.
@@ -705,6 +708,7 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   |---|---|
   | `disabled (no database)` | `SCADBUDDY_DATABASE_URL` unset |
   | `unavailable (database unreachable)` | Ping failed, or the credential read threw |
+  | `unavailable (the API does not answer the agent's CRUD areas)` | Once the API lists every area the agent wants: the Postgres ping held, but `GET …/crud/agent/areas` did not answer (`agent/src/api/dataHealth.ts`, #6501) |
   | `unavailable (database migrations failed)` | `ready()` returned false |
   | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
@@ -969,10 +973,17 @@ nothing until #5299 step 12 removes the agent's database URL. Until then the gua
 Every flow tool call reads its run
 `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`); the backend's
 route takes that lock in its own transaction. The gate's grant check
-(`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and `flow_grant_uses`
-over SQL, under the grant row's share lock, so the role keeps `SELECT` on both and
-`UPDATE` on `flow_grants` (Postgres requires `UPDATE` for `FOR SHARE`), until the gate
-moves to the CRUD service (#5299 step 10).
+(`agent/src/gate/store.ts` `grantInput`) reads `flow_grants` and `flow_grant_uses` on the
+API, under the grant row's share lock, in the grant route's transaction
+(`backend/scadbuddy/api/crud_agent_gate.py`, area `gate`, #5299 step 10), so the role
+holds no backend table: the API takes back `flow_grants` and `flow_grant_uses` at every
+start too, and `agent/test/retiredTables.test.ts` names them.
+
+When the API and the agent connect as different roles, the API's role must own the `ai_*`
+tables: the agent grants nothing since #6501 (it granted `API_AI_GRANTS` at each start
+before), and the API's CRUD routes read and write those tables. The files the API applies
+(#5299 D6) are its role's already; transfer the older ones with `ALTER TABLE … OWNER TO`.
+Production connects both as one role, so it needs nothing.
 
 ## 8. Per-query limits
 
@@ -1701,7 +1712,9 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
   #2511), never base64 in the result. A longer text body is saved in
   Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, so any replica pages it with `http_response_read`. That is up to
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
-  per-session storage. The rows go with the session. A flow run's bodies stay on the
+  per-session storage. The rows go with the session; once the API lists area `http-bodies`
+  (#5299 step 7), they are written and read by range through its CRUD routes
+  ([`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)). A flow run's bodies stay on the
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
   pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
   directory a pod left before #2374.
@@ -1718,6 +1731,21 @@ the pod's disk, so every replica, every session and `/mcp` see the same
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
+- Who keeps them (#5299 step 7): the API, once it lists area `workspace` (`GET
+  …/crud/agent/areas`). Its routes `/api/v1/internal/crud/agent/workspace/*`
+  ([`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py),
+  the `crud.agent` credential; the agent's
+  [`agent/src/workspace/crudStore.ts`](../../agent/src/workspace/crudStore.ts)) take and give
+  plaintext and seal, store and open each file on the API, with its KEK and the session's
+  payload key, in the format below, so either side opens what the other sealed. A write's
+  row, its blob's hold and its `workspace.file` events are one transaction there, so no hold
+  waits for a release, and the API re-wraps principals' file keys at a rotation
+  (`agent_data/rotation.py`). The reconcile is one transaction on the API too, under
+  `RECONCILE_LOCK` as a transaction lock, which an agent pod still on SQL takes as a session
+  lock: never two at once. A workspace and a path go in the query or the body, never in a
+  route's path. A file is at most `workspace_file_max_bytes` and, whatever that setting says,
+  100 MiB (the Settings form's ceiling, `FILE_BYTES_CEILING`). Until the API lists the area
+  (a rolling deploy) the agent does all of the below itself, over SQL.
 - Where the bytes are (#4789): a blob of the backend's content store (`store_backend` s3
   or bambuddy), `workspace-<sha256 of the sealed bytes>`. The agent reads which store the
   backend runs on from its `/healthz` (`store.backend`), and asks its hidden
@@ -2082,6 +2110,9 @@ How the agent does it
    the resource, the issuer, the token endpoint and the client id. The forwarder asks
    for a token on every request and refreshes it shortly before it expires. The
    refresh runs under the row's lock, so replicas never spend one refresh token twice.
+   Once the API lists the agent's CRUD area `plugins` (#5299 step 5), the API seals and
+   opens them, and the refresh runs under the lease `plugin-oauth:<plugin>` on the API
+   (#5299 D3) in place of the row's lock.
    Claude Code, the browser and every route see only the sign-in's state.
 6. **Failure.** A refused refresh, or a server that refuses a renewed token, marks the
    sign-in `error` and the card shows **Sign in again**. Until then, turns run without

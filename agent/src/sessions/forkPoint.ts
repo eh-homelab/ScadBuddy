@@ -52,7 +52,7 @@ export function transcriptCut(entries: readonly SessionStoreEntry[], messageId: 
 }
 
 /**
- * Where a fork cuts the parent's log (eventLog.ts `inheritThrough`): the seq of that reply's
+ * Where a fork cuts the parent's log (eventLog.ts `forkLog`): the seq of that reply's
  * `assistant.text.done` with `upTo`, else the log's last. Undefined when `upTo` names no finished
  * reply in the log.
  */
@@ -80,7 +80,7 @@ export function blobNames(events: readonly ServerEvent[]): string[] {
     if (e.type === 'user.turn') {
       for (const image of e.images ?? []) {
         if (image.name !== undefined) names.add(image.name)
-        names.add(image.preview.name)
+        if ('preview' in image) names.add(image.preview.name)
       }
     }
   }

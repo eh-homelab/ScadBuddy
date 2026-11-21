@@ -8,7 +8,11 @@ import { Turnstile } from './Turnstile'
 interface Props {
   draft: Draft
   onSubmitted: (order: SubmittedOrder) => void
-  /** The cart was sent already (409 `order_submitted`, from another tab): the page loads it again. */
+  /**
+   * The cart changed under the send: it was sent already (409 `order_submitted`, from another
+   * tab), or a firm price changed (409 `prices_changed`, #6153). The page loads it again and
+   * shows the shop's message.
+   */
   onSent: (message: string) => void
 }
 
@@ -94,7 +98,8 @@ export function SubmitForm({ draft, onSubmitted, onSent }: Props) {
       onSubmitted(order)
     } catch (caught) {
       if (caught instanceof StoreError && caught.slug === 'bot_check_failed') forgetTurnstileSiteKey()
-      if (caught instanceof StoreError && caught.slug === 'order_submitted') onSent(errorText(caught))
+      if (caught instanceof StoreError && (caught.slug === 'order_submitted' || caught.slug === 'prices_changed'))
+        onSent(errorText(caught))
       else setError(errorText(caught))
     } finally {
       setSending(false)

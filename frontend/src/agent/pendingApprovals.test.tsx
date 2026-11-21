@@ -25,7 +25,7 @@ describe('useApprovalToasts (#4813)', () => {
     expect(toasts.getAllByText('Needs your approval')).toHaveLength(MAX_APPROVAL_TOASTS)
     expect(toasts.getByText('More approvals wait for you')).toBeInTheDocument()
     expect(toasts.getAllByRole('link', { name: 'Review' }).map((a) => a.getAttribute('href'))).toEqual(
-      Array.from({ length: MAX_APPROVAL_TOASTS + 1 }, () => '/activity'),
+      Array.from({ length: MAX_APPROVAL_TOASTS + 1 }, () => '/activity#needs-you'),
     )
     // None waits any more: every toast goes.
     rerender({ list: [] })

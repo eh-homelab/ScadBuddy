@@ -3,6 +3,7 @@ import type { Sql } from 'postgres'
 import { type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import { event, type ServerEvent } from '../sessions/protocol.js'
+import type { SweepRoutes } from './crudPending.js'
 import { inputResolved } from './projection.js'
 import { parseRequestId } from './ids.js'
 
@@ -46,6 +47,11 @@ export type SweepDeps = {
   minAgeS?: number
   /** An open run is described again only after this long (default 600 s). */
   recheckS?: number
+  /**
+   * The API's routes, area `pending-input` (gate/crudPending.ts, #5299 step 10), used while `use()`
+   * holds: each cancel is one transaction there, its audit row in it. The SQL above otherwise.
+   */
+  routes?: { crud: SweepRoutes; use: () => boolean } | undefined
 }
 
 export class PendingInputSweep {
@@ -62,11 +68,14 @@ export class PendingInputSweep {
   /** One pass; returns the rows it removed. */
   async sweep(): Promise<number> {
     const { sql } = this.#deps
-    const runs = await sql<{ workflow_id: string; workflow_run_id: string }[]>`
-      SELECT DISTINCT workflow_id, workflow_run_id FROM ai_pending_input
-      WHERE created_at < now() - make_interval(secs => ${this.#minAgeS})
-        AND (last_checked_at IS NULL OR last_checked_at < now() - make_interval(secs => ${this.#recheckS}))
-      LIMIT 100`
+    const crud = this.#deps.routes?.use() ? this.#deps.routes.crud : undefined
+    const runs = crud
+      ? await crud.runs(this.#minAgeS, this.#recheckS)
+      : await sql<{ workflow_id: string; workflow_run_id: string }[]>`
+          SELECT DISTINCT workflow_id, workflow_run_id FROM ai_pending_input
+          WHERE created_at < now() - make_interval(secs => ${this.#minAgeS})
+            AND (last_checked_at IS NULL OR last_checked_at < now() - make_interval(secs => ${this.#recheckS}))
+          LIMIT 100`
     let removed = 0
     for (const run of runs) {
       let state: RunState
@@ -76,7 +85,9 @@ export class PendingInputSweep {
         continue
       }
       if (state === 'open') {
-        await sql`
+        if (crud) await crud.checked(run.workflow_id, run.workflow_run_id)
+        else
+          await sql`
           UPDATE ai_pending_input SET last_checked_at = now()
           WHERE workflow_id = ${run.workflow_id} AND workflow_run_id = ${run.workflow_run_id}`
       } else {
@@ -118,10 +129,16 @@ export class PendingInputSweep {
  * Returns the entries it resolved.
  */
 export async function cancelOrphanedEntries(
-  deps: Pick<SweepDeps, 'sql' | 'events' | 'audit'>,
+  deps: Pick<SweepDeps, 'sql' | 'events' | 'audit' | 'routes'>,
   of: { workflowId: string; runId: string } | { sessionId: string },
   reason: string = ORPHAN_REASON,
 ): Promise<number> {
+  if (deps.routes?.use()) {
+    // Each entry one transaction on the API, an approval's audit row in it.
+    const { removed, logged } = await deps.routes.crud.cancel(of, reason)
+    for (const l of logged) deps.events.committed(l.session_id, l.events, l.seqs)
+    return removed
+  }
   const { sql } = deps
   const ids =
     'sessionId' in of

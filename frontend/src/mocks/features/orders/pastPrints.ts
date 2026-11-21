@@ -59,7 +59,7 @@ export const archiveCopies = new Map<number, { id: number; filename: string }>()
 
 const LISTED = ['id', 'print_name', 'status', 'printer_id', 'project_id', 'plate_id', 'created_at', 'completed_at', 'print_time_seconds', 'actual_time_seconds', 'filament_used_grams', 'quantity', 'run_count', 'successful_run_count', 'failed_run_count'] as const
 
-/** #4698 — the archives a person imported onto a model, by archive id: the model's slug. */
+/** #4698 — the archives a person imported, by archive id: the model's slug, or `library:<file id>` for a library file (#6394). */
 export const archiveImports = new Map<number, string>()
 
 export function reset(): void {

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryEventSource } from '../src/events/bus.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import { busKindOf, followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
+import { PgPublisher } from '../src/sessions/publish.js'
 import { event } from '../src/sessions/protocol.js'
 import { turnPrincipal } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -29,6 +30,8 @@ describe('the sessions_* tools', () => {
       sessions_start: 'write',
       sessions_send: 'write',
       sessions_fork: 'write',
+      sessions_queue_remove: 'write',
+      sessions_queue_edit: 'write',
       sessions_interrupt: 'write',
       sessions_handoff: 'write',
       sessions_accept_handoff: 'write',
@@ -190,7 +193,7 @@ describe('session.* on the bus', () => {
   it('sends ids only, and throttles streamed messages per session, never lifecycle changes', () => {
     vi.useFakeTimers()
     const { sql, payloads } = fakeSql()
-    const publisher = new SessionEventPublisher(sql, { replica: 'r1', throttleMs: 100 })
+    const publisher = new SessionEventPublisher(new PgPublisher(sql), { replica: 'r1', throttleMs: 100 })
     const delta = (n: number) => [event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm', delta: `secret ${n}` })]
     for (let seq = 1; seq <= 20; seq++) publisher.onAppend(S, delta(seq), seq)
     expect(payloads).toHaveLength(1)
@@ -214,7 +217,7 @@ describe('session.* on the bus', () => {
   it('keeps throttling when the wall clock steps forward (#1485)', () => {
     vi.useFakeTimers()
     const { sql, payloads } = fakeSql()
-    const publisher = new SessionEventPublisher(sql, { replica: 'r1', throttleMs: 100 })
+    const publisher = new SessionEventPublisher(new PgPublisher(sql), { replica: 'r1', throttleMs: 100 })
     const delta = (n: number) => [event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm', delta: `${n}` })]
     publisher.onAppend(S, delta(1), 1)
     // NTP steps the clock an hour on; no time has passed.

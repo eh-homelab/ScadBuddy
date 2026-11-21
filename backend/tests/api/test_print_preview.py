@@ -1,8 +1,9 @@
 """#2169 — the dialog's background slice, and #2164 — recording the spool in a tray.
 
 A background slice goes through the run's own path and is never queued; a run of the
-same choices queues that slice rather than slicing again. The tray's spool is recorded
-through Bambuddy's ``POST /inventory/assignments`` on the person's own "yes".
+same choices queues that slice rather than slicing again. The tray's spool, an SB spool
+by its number, is recorded at the tray on the person's own "yes", then, for a spool
+linked to Bambuddy's, through Bambuddy's ``POST /inventory/assignments`` (#6262 Task 7).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID
 
 import httpx
 import pytest
@@ -27,22 +29,35 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import library_view, preview
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import OutputSource, ReadOutOfMemoryError
+from scadbuddy.bambuddy.trays import seen_trays
 from scadbuddy.core.events import Event, PreviewSliceEvent
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.filament.component import FILAMENT, Filament
+from scadbuddy.filament.models import Material, SpoolCreate
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.preview_follow.component import PREVIEW_FOLLOWS
 from tests.api.conftest import follow_operation
+from tests.api.test_customers import create as create_customer
+from tests.api.test_orders import create_order
+from tests.api.test_orders_lifecycle import add_item
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
+from tests.api.test_recent_outputs import saved
 from tests.api.test_send import BASE, configure, upload_route
 from tests.api.test_settings_runtime import _state
+from tests.api.test_versions import SLUG, upload
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.printers import linked_printer
+from tests.support.sb_rows import seed_sb_spools
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 API = f"{BASE}/api/v1"
 SLICED = 77
@@ -318,12 +333,73 @@ def test_a_background_slice_with_a_project_chosen_files_nothing_in_the_project(
     assert not folder.called
 
 
+@pytest.mark.requires_git
+@respx.mock
+def test_a_storefront_output_on_an_order_item_opens_in_the_dialog_and_slices(
+    client: TestClient,
+) -> None:
+    """#6371: only lists leave the storefront slice run's outputs out. Read by its id (an
+    order item's ``output_id``, the print dialog's routes, the slice) it is found as any
+    other output."""
+    configure(client)
+    upload(client)
+    output_id = saved(client, SLUG, {"width": 12}, "Storefront: Keychain")
+    outputs = _state(client).outputs
+    meta = outputs.mark_storefront(output_id)
+    assert outputs.index is not None
+    outputs.index.record(meta, outputs.params(output_id))
+    assert client.get("/api/v1/outputs").json() == []
+    order = create_order(client, create_customer(client)["id"])
+    item = add_item(client, order["id"], output_id=output_id, quantity=1)
+    assert item["output_id"] == output_id
+    detail = client.get(f"/api/v1/outputs/{output_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["source"] == "storefront"
+    upload_route()
+    run_routes()
+    sliced = Job().routes()
+    sliced_routes()
+
+    started = start_slice(client, output_id, body())
+
+    assert sliced.call_count == 1
+    preview = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/{started['job_id']}")
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["status"] == "completed"
+
+
 @respx.mock
 def test_an_unknown_background_slice_is_a_404(client: TestClient, model: str) -> None:
     output_id = prepared(client, model)
     assert client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/12345").status_code == 404
     # Nor is one read through another source.
     assert client.get("/api/v1/print/library/5/preview-slices/12345").status_code == 404
+
+
+@respx.mock
+def test_a_background_slice_with_object_conflicts_names_the_plate(
+    client: TestClient, model: str
+) -> None:
+    """#6732: Bambuddy's slice that Bambu Studio refused with "Object conflicts were
+    detected" (#3770, Knitted Cat) is also one ``object-conflict`` warning for the plate."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    job = Job()
+    job.routes()
+    started = start_slice(client, output_id, body())
+    conflict = (
+        "Object conflicts were detected. Please verify the slicing of all plates in Bambu"
+        " Studio before uploading."
+    )
+    job.body = {**job.body, "status": "failed", "result": None, "error_status": 400}
+    job.body["error_detail"] = conflict
+
+    answer = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9").json()
+
+    assert (answer["status"], answer["failure"]) == ("failed", conflict)
+    [warning] = answer["slice_warnings"]
+    assert (warning["kind"], warning["plate_id"]) == ("object-conflict", started["plate_id"])
 
 
 @pytest.fixture(autouse=True)
@@ -564,45 +640,123 @@ def test_a_job_that_no_longer_is_the_background_slice_is_sliced_again(
     assert read.status_code == 404, read.text
 
 
-@respx.mock
-def test_yes_records_the_spool_in_the_tray(client: TestClient) -> None:
+#: Tray 2/3 of the recorded rack status (``printer-status-rack.json``): filled.
+TRAY = "/api/v1/print/printers/1/trays/2/3/spool"
+
+
+def _filament(client: TestClient) -> Filament:
+    return _state(client).components.get(FILAMENT)
+
+
+def _tray_answer_setup(client: TestClient, *, bb_link: int | None) -> int:
+    """Bambuddy configured, its printer 1 in the registry with the rack's status, and an
+    SB spool (linked to Bambuddy's spool ``bb_link``, or to none): that spool's number."""
     configure(client)
+    linked_printer(client, 1)
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=recording("printer-status-rack.json"))
+    )
+    filament = _filament(client)
+    if bb_link is not None:
+        # An SB number no Bambuddy id shares (review I5): the route must map it.
+        seed_sb_spools(filament, [BbSpool(id=bb_link, material="PLA")], offset=100)
+        found = filament.inventory.bb_to_sb([bb_link])
+        return found[bb_link]
+    material = next(
+        r.id
+        for r in filament.catalog.list("materials")
+        if isinstance(r, Material) and r.name == "PLA"
+    )
+    made = filament.spools.create(SpoolCreate(material_id=material), actor="ann")
+    return made.number
+
+
+def _trays_of(client: TestClient, number: int) -> set[tuple[int, int]]:
+    """The trays of the registry's printer 1 that hold SB spool #``number``, as the
+    native path's tray view reads the rack's status (a Bambuddy-only printer has no
+    report for `FilamentInventory.rows` to read). The recording redacts every tray's tag
+    to one value, so a link that binds the tag is held by every tray."""
+    status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
+    view = _filament(client).inventory.trays(UUID(linked_printer(client, 1)), seen_trays(status))
+    return {
+        (tray.ams_id, tray.tray_id)
+        for tray in view.trays
+        if tray.spool is not None and tray.spool.number == number
+    }
+
+
+@respx.mock
+def test_yes_records_the_sb_spool_in_the_tray_then_bambuddys(client: TestClient) -> None:
+    """#6262 Task 7: the answer names the SB spool's number. ScadBuddy places it at the
+    tray, then writes Bambuddy's assignment of its linked Bambuddy spool (16)."""
+    number = _tray_answer_setup(client, bb_link=16)
     assigned = respx.post(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(
             200,
             json={
                 **recording("inventory-assignments.json")[0],
                 "spool_id": 16,
-                "ams_id": 3,
+                "ams_id": 2,
                 "tray_id": 3,
             },
         )
     )
 
-    response = client.post(
-        "/api/v1/print/printers/1/trays/3/3/spool", json={"spool_id": 16}, headers=press()
-    )
+    response = client.post(TRAY, json={"spool_id": number}, headers=press())
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"spool_id": 16, "printer_id": 1, "ams_id": 3, "tray_id": 3}
+    assert response.json() == {"spool_id": number, "printer_id": 1, "ams_id": 2, "tray_id": 3}
     assert json.loads(assigned.calls.last.request.content) == {
         "spool_id": 16,
         "printer_id": 1,
-        "ams_id": 3,
+        "ams_id": 2,
         "tray_id": 3,
     }
+    assert (2, 3) in _trays_of(client, number)
+    # A 202's follower reads the recorded operation (GET /operations/{id}): it names the
+    # SB spool too, never Bambuddy's (review M2).
+    with _state(client).components.get(OPERATIONS).store._pool.connection() as conn:
+        [row] = conn.execute(
+            "SELECT result FROM operations WHERE kind = 'assign_tray_spool'"
+        ).fetchall()
+    assert row["result"]["spool_id"] == number
+
+
+@respx.mock
+def test_yes_for_an_unlinked_sb_spool_writes_nothing_to_bambuddy(client: TestClient) -> None:
+    number = _tray_answer_setup(client, bb_link=None)
+    assigned = respx.post(f"{API}/inventory/assignments")
+
+    response = client.post(TRAY, json={"spool_id": number}, headers=press())
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"spool_id": number, "printer_id": 1, "ams_id": 2, "tray_id": 3}
+    assert not assigned.called
+    assert (2, 3) in _trays_of(client, number)
+
+
+@respx.mock
+def test_yes_for_an_unknown_spool_or_an_empty_tray_is_refused(client: TestClient) -> None:
+    number = _tray_answer_setup(client, bb_link=None)
+
+    unknown = client.post(TRAY, json={"spool_id": 999_999}, headers=press())
+    assert unknown.status_code == 404, unknown.text
+
+    empty = client.post(
+        "/api/v1/print/printers/1/trays/3/3/spool", json={"spool_id": number}, headers=press()
+    )
+    assert empty.status_code == 409, empty.text
+    assert _trays_of(client, number) == set()
 
 
 @respx.mock
 def test_a_key_without_manage_inventory_is_named(client: TestClient) -> None:
-    configure(client)
+    number = _tray_answer_setup(client, bb_link=16)
     respx.post(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(403, json={"detail": "Missing permission"})
     )
 
-    response = client.post(
-        "/api/v1/print/printers/1/trays/3/3/spool", json={"spool_id": 16}, headers=press()
-    )
+    response = client.post(TRAY, json={"spool_id": number}, headers=press())
 
     assert response.status_code >= 400
     assert "Manage Inventory" in response.text
@@ -755,6 +909,7 @@ def _start_every_plate(client: TestClient, output_id: str, subject: str) -> list
                 state.uploads,
                 PrintRunRequest.model_validate(body()),
                 subject=subject,
+                reads=_filament(client).reads,
             )
 
     return asyncio.run(start())

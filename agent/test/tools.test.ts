@@ -666,7 +666,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       copies: 2,
       plate_id: 1,
       all_plates: false,
-      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }], force_colour_match: true },
+      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }], force_colour_match: true, ids: 'sb' },
       choices: {
         nozzles: [{ size: '0.6', flow: 'standard' }],
         tier: 'draft',
@@ -1890,6 +1890,21 @@ describe('arrange (#1864)', () => {
     expect(arranged).toMatchObject({ objects, goal: 'fewest_swaps', slug: 'lid', filament_plan: plan, name: 'mix', printer: ROW })
     expect(saved).toEqual({ slug: 'lid', body: { job_id: JOB, name: 'mix' } })
     expect(firstText(result)).toMatchObject({ job_id: JOB, slug: 'lid', plates: 2, output: { id: ARRANGED } })
+  })
+
+  it('sends the prime tower choice, and none when it is omitted (#3770)', async () => {
+    const bodies: Record<string, unknown>[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/arrange`, async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json(job('pending'), { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/${JOB}`, () => HttpResponse.json(job('failed'))),
+    )
+    await runTool(tool('arrange'), { objects: [{ output_id: A }], prime_tower: { enabled: false } }, ctx({ pollIntervalMs: 1 }))
+    await runTool(tool('arrange'), { objects: [{ output_id: A }] }, ctx({ pollIntervalMs: 1 }))
+    expect(bodies[0]).toMatchObject({ prime_tower: { enabled: false } })
+    expect(bodies[1]).not.toHaveProperty('prime_tower')
   })
 
   it("says the job's warnings, such as a planned spool the arrange did not use (#4684 review)", async () => {
@@ -3555,6 +3570,25 @@ describe('list_recent_outputs (#4777)', () => {
     // The cursor is the filters' own.
     const other = await runTool(recent, { ...args, q: 'other', cursor: first.next_cursor }, ctx())
     expect(other.isError).toBe(true)
+  })
+
+  it("leaves the storefront's outputs out unless asked, as the backend does (#6371)", async () => {
+    const queries: URLSearchParams[] = []
+    const record = ({ request }: { request: Request }) => {
+      queries.push(new URL(request.url).searchParams)
+      return HttpResponse.json([], { headers: { 'X-Total-Count': '0' } })
+    }
+    server.use(http.get(`${BACKEND}/api/v1/outputs`, record), http.get(`${BACKEND}/api/v1/models/:slug/outputs`, record))
+    for (const [name, args] of [
+      ['list_recent_outputs', {}],
+      ['list_outputs', { slug: 'box' }],
+    ] as const) {
+      expect(z.object(tool(name).shape).safeParse({ ...args, include_storefront: 'yes' }).success).toBe(false)
+      await runTool(tool(name), args, ctx())
+      await runTool(tool(name), { ...args, include_storefront: false }, ctx())
+      await runTool(tool(name), { ...args, include_storefront: true }, ctx())
+    }
+    expect(queries.map((q) => q.get('include_storefront'))).toEqual([null, null, 'true', null, null, 'true'])
   })
 })
 

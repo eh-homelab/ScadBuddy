@@ -169,6 +169,32 @@ describe('useRunPrint', () => {
     await waitFor(() => expect(result.current.refused).toBe(false))
   })
 
+  it("gives a failed run's plate-named object-conflict warning, until a choice changes (#6737)", async () => {
+    const conflict = {
+      kind: 'object-conflict',
+      plate_id: 3,
+      message: 'Plate 3: the slicer found the prime tower stands on an object, or objects overlap.',
+    }
+    runPrint.mockRejectedValueOnce(
+      new ApiError({ title: 'Slice failed', status: 502, detail: 'Object conflicts were detected', warnings: [conflict] }),
+    )
+    const { result, rerender } = renderHook((props) => useRunPrint(props), { initialProps: input() })
+    await act(() => result.current.run())
+    expect(result.current.runError).toBe('Object conflicts were detected')
+    expect(result.current.runWarnings).toEqual([conflict])
+
+    rerender(input({ tier: 'fine' }))
+    await waitFor(() => expect(result.current.runWarnings).toEqual([]))
+  })
+
+  it('gives no run warnings for a refusal without them (#6737)', async () => {
+    runPrint.mockRejectedValueOnce(new ApiError(502, 'Bambuddy is down.'))
+    const props = input()
+    const { result } = renderHook(() => useRunPrint(props))
+    await act(() => result.current.run())
+    expect(result.current.runWarnings).toEqual([])
+  })
+
   it('anything but a 422 is worth retrying as it stands', async () => {
     runPrint.mockRejectedValueOnce(new ApiError(502, 'Bambuddy is down.'))
     const props = input()

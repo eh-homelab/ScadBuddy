@@ -3,6 +3,10 @@ import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { lazyRetry } from '../lib/lazyRetry'
 import { renderPage } from '../test/utils'
+import { http, HttpResponse } from 'msw'
+import { clearFlowGrantRequests } from '../mocks/features/flows'
+import { setPendingApprovals } from '../mocks/features/pendingInput'
+import { server } from '../mocks/server'
 import { AppShell } from './AppShell'
 
 vi.mock('../agent/chat/availability', () => ({
@@ -94,8 +98,26 @@ describe('the shell’s page boundary retries a page chunk (#3241, #3754)', () =
   })
 })
 
+describe('Needs you in the shell (#6399)', () => {
+  it("lists the assistant's approvals while the grant requests cannot be read", async () => {
+    server.use(http.get('/api/v1/flow-grant-requests', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    setPendingApprovals(1)
+    renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} tabLink={null} />}>
+          <Route path="*" element={<h1>Models</h1>} />
+        </Route>
+      </Routes>,
+    )
+    expect(await screen.findByRole('button', { name: 'Activity, 1 needs you' })).toBeInTheDocument()
+    await waitFor(() => expect(document.title).toBe('(1) Models · ScadBuddy'))
+  })
+})
+
 describe('the shell’s orientation (#2454)', () => {
   it('names the tab after the page’s heading, and follows navigation', async () => {
+    // #6399: no request waits on the person, so the title has no count.
+    clearFlowGrantRequests()
     const { user } = renderPage(
       <Routes>
         <Route element={<AppShell embedded={false} tabLink={null} />}>

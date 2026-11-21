@@ -1,5 +1,6 @@
 import type { CustomizerSchema, ParamPreset, ParamValue } from '../api/types'
 import { joinInputs, splitInputs, type InputsExtra, type JsonObject } from './inputs'
+import { normalisePresetText } from './presetName'
 import { allParams, defaultValues, diffFromDefaults, textLength, type ParamValues } from './params'
 
 export interface AppliedPreset {
@@ -71,7 +72,7 @@ export function parsePresetTags(text: string): string[] {
   const seen = new Set<string>()
   const tags: string[] = []
   for (const raw of text.split(',')) {
-    const tag = raw.trim().replace(/\s+/g, ' ')
+    const tag = normalisePresetText(raw)
     if (tag && !seen.has(foldTag(tag))) {
       seen.add(foldTag(tag))
       tags.push(tag)

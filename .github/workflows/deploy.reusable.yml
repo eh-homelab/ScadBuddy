@@ -38,12 +38,20 @@ name: Deploy (reusable)
 #      SCADBUDDY_SANDBOX_IMAGE value and the egress proxy's image line), so the
 #      agent's sandbox client and the pods' server never drift apart. As for
 #      the slicer, a build that published no sandbox image keeps the pins.
+#      The profile-fetch worker's line (#6625) is pinned like the slicer's, to
+#      `ghcr.io/eh-homelab/scadbuddy-profile-fetch:<version>@sha256:<its digest>`,
+#      in scadbuddy-profile-fetch.yaml, once that file exists; a build that
+#      published no profile-fetch image keeps the pin and warns.
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
-#      And, once clusters#1596 Phase 5 adds it, the `ref=` of the remote
-#      resource line in clusters/prod/scadbuddy/kustomization.yaml that pulls
-#      in this repo's deploy/grafana dashboard (#988), to the same `revision`,
-#      so the dashboard shown is the one written for the build that serves.
+#      And, when clusters has it, the vendored copy of this repo's
+#      deploy/grafana dashboards (#988) in clusters/prod/scadbuddy/grafana/
+#      (eh-homelab/clusters#3734): its kustomization.yaml and *.json are
+#      replaced with the files at the same `revision`, and its `.revision`
+#      file names that revision, so the dashboard shown is the one written
+#      for the build that serves. The overlay no longer pulls deploy/grafana
+#      in as a remote resource (Argo CD's repo-server failed to fetch it), and
+#      an overlay that still names it fails the deploy.
 #      Last, every ScadBuddy image named anywhere under applications/scadbuddy/
 #      or the overlay's directory must be one this run pinned, or the deploy
 #      fails: no Deployment stays behind on an old build unnoticed (#5037).
@@ -133,6 +141,11 @@ env:
   # SCADBUDDY_SANDBOX_IMAGE value) and the egress proxy's. Pinned wherever a
   # scanned file names it; like the slicer, its absence for a build keeps the pins.
   SANDBOX_IMAGE: ghcr.io/eh-homelab/scadbuddy-sandbox
+  # The 3DFP profile-fetch worker (#6625), same run, same tags, its own
+  # Deployment. Optional until that file lands in clusters; resolved and pinned
+  # like the slicer, so its absence for a build keeps the pin.
+  PROFILE_FETCH_IMAGE: ghcr.io/eh-homelab/scadbuddy-profile-fetch
+  MANIFEST_PROFILE_FETCH: applications/scadbuddy/scadbuddy-profile-fetch.yaml
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
@@ -144,10 +157,11 @@ env:
   # is still a sidecar there. Never both.
   AGENT_DURABLE_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent-durable
   MANIFEST_AGENT_DURABLE: applications/scadbuddy/scadbuddy-agent-durable.yaml
-  # The overlay that pulls in deploy/grafana as a remote kustomize resource,
-  # and that resource without its `?ref=` (spec 2026-10-01 §7, #988).
+  # The overlay, and the directory in it that holds a vendored copy of
+  # deploy/grafana with its `.revision` (spec 2026-10-01 §7, #988,
+  # eh-homelab/clusters#3734).
   KUSTOMIZATION: clusters/prod/scadbuddy/kustomization.yaml
-  DASHBOARD_RESOURCE: https://github.com/eh-homelab/ScadBuddy//deploy/grafana
+  DASHBOARD_DIR: clusters/prod/scadbuddy/grafana
 
 jobs:
   pin:
@@ -155,8 +169,8 @@ jobs:
     runs-on: ubuntu-latest
     # The agent wait below can take up to 10 of these, the open deploy PR's
     # 45 (90 when the first round times out, #6368), the agent-durable one
-    # 20, the slicer 10.
-    timeout-minutes: 140
+    # 20, the slicer 10, the profile-fetch worker 10.
+    timeout-minutes: 150
     # The one place the two callers can race: this job waits for the open
     # deploy PR, closes it if it cannot land, replaces the `deploy/scadbuddy`
     # branch and opens a new PR. Job-level, so deploy-release's image wait and
@@ -463,6 +477,36 @@ jobs:
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The profile-fetch worker (#6625), resolved like the slicer: only when its
+      # manifest exists and names the image, and an image its continue-on-error
+      # job did not publish is a warning and an empty digest.
+      - name: Resolve the profile-fetch image
+        id: profile-fetch
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -sqE "^\s*(- )?image:.*${PROFILE_FETCH_IMAGE//./\\.}" "clusters/${MANIFEST_PROFILE_FETCH}"; then
+            echo "clusters/${MANIFEST_PROFILE_FETCH} is absent or does not run the profile-fetch worker; not resolving it"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ref="${PROFILE_FETCH_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 60); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::could not resolve $ref (got '$digest'); the profile-fetch pin stays as it is"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The sessions' shell sandbox (#5864), resolved like the slicer, but only
       # when a file under the manifests' or the overlay's directory names it.
       - name: Resolve the sandbox image
@@ -492,31 +536,84 @@ jobs:
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # The dashboard's ref= may only move to a revision that has the
-      # kustomization it points at: one without it (a rollback to a build from
-      # before #988) would fail the whole overlay's sync, the images included.
-      # Only a 404 means "absent". Any other failure is retried with a
-      # backoff, and one that persists is `unknown`: the edit step fails on it
-      # only when the overlay pins the dashboard, so until then a GitHub API
-      # error cannot stop an image deploy (#1179). deploy-pin.test.sh runs this.
-      - name: Check deploy/grafana exists at the revision
+      # The dashboards clusters vendors (eh-homelab/clusters#3734) may only be
+      # refreshed from a revision that has them: one without deploy/grafana (a
+      # rollback to a build from before #988) keeps the copy clusters has.
+      # Only a 404 of its kustomization.yaml means "absent". With it, every
+      # entry of the directory is fetched into a scratch directory (`dir`) for
+      # the edit step, each file checked against its git blob sha, so the bytes
+      # are the ones at REVISION. A subdirectory or other non-file entry becomes
+      # an empty directory there, and a file whose name is not
+      # kustomization.yaml or `[a-z0-9-]+.json` an empty file, which the edit
+      # step rejects. Any other failure is retried with a backoff, and one that
+      # persists (or a hash that does not match) is `unknown`: the edit step
+      # fails on it only when clusters vendors the dashboards, so until then a
+      # GitHub API error cannot stop an image deploy (#1179).
+      # deploy-pin.test.sh runs this.
+      - name: Fetch deploy/grafana at the revision
         id: grafana
         env:
           GH_TOKEN: ${{ github.token }}
           REVISION: ${{ inputs.revision }}
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5; do
-            if err=$(gh api "repos/${GITHUB_REPOSITORY}/contents/deploy/grafana/kustomization.yaml?ref=${REVISION}" --silent 2>&1); then
-              echo "present=true" >> "$GITHUB_OUTPUT"; exit 0
-            elif grep -q 'HTTP 404' <<< "$err"; then
-              echo "present=false" >> "$GITHUB_OUTPUT"; exit 0
+          dir="${RUNNER_TEMP}/grafana-at-revision"
+          rm -rf "$dir" && mkdir -p "$dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          api="repos/${GITHUB_REPOSITORY}/contents/deploy/grafana"
+          # `fetch <out> <gh api args>...`: 0 when fetched into <out>, 2 on a
+          # 404, 1 when it still fails after five tries; $err holds the error.
+          fetch() {
+            local out=$1 attempt; shift
+            for attempt in 1 2 3 4 5; do
+              if err=$(gh api "$@" 2>&1 > "$out"); then
+                return 0
+              elif grep -q 'HTTP 404' <<< "$err"; then
+                return 2
+              fi
+              echo "attempt ${attempt}: ${err}"
+              [ "$attempt" -eq 5 ] || sleep $((attempt * 10))
+            done
+            return 1
+          }
+          unknown() { # reason
+            echo "::warning::could not tell whether ${REVISION} has deploy/grafana, or read it: $1"
+            echo "present=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          rc=0
+          fetch /dev/null "${api}/kustomization.yaml?ref=${REVISION}" --silent || rc=$?
+          case "$rc" in
+            0) ;;
+            2) echo "present=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            *) unknown "$err" ;;
+          esac
+          listing="${RUNNER_TEMP}/grafana-listing.json"
+          fetch "$listing" "${api}?ref=${REVISION}" || unknown "the listing: $err"
+          jq -e 'type == "array"' "$listing" > /dev/null 2>&1 || unknown "the listing is not a directory's"
+          # The contents API lists at most 1,000 entries; a listing that long
+          # may be cut short, and a partial copy must not deploy.
+          jq -e 'length < 1000' "$listing" > /dev/null || unknown "the listing has 1,000 entries or more, the contents API's cap"
+          # A tab or newline in a name would be escaped by @tsv below and
+          # reach the checks under another name: refuse it here, by name.
+          jq -e 'all(.[]; .name | test("^[^\t\n/]+$"))' "$listing" > /dev/null 2>&1 \
+            || unknown "the listing names an entry with a tab, newline or slash: $(jq -c '[.[].name | select(test("^[^\t\n/]+$") | not)]' "$listing")"
+          jq -e 'all(.[]; .sha | type == "string" and test("^[0-9a-f]{40}$"))' "$listing" > /dev/null 2>&1 \
+            || unknown "the listing has an entry without a 40-hex blob sha"
+          while IFS=$'\t' read -r type sha name; do
+            case "$name" in . | ..) unknown "the listing names '${name}'" ;; esac
+            if [ "$type" != file ]; then
+              mkdir "$dir/$name"
+            elif [[ "$name" =~ ^(kustomization\.yaml|[a-z0-9-]+\.json)$ ]]; then
+              fetch "$dir/$name" -H "Accept: application/vnd.github.raw+json" "${api}/${name}?ref=${REVISION}" \
+                || unknown "${name}: $err"
+              [ "$(git hash-object "$dir/$name")" = "$sha" ] \
+                || unknown "${name} as fetched does not hash to its blob ${sha}"
+            else
+              : > "$dir/$name"
             fi
-            echo "attempt ${attempt}: ${err}"
-            [ "$attempt" -eq 5 ] || sleep $((attempt * 10))
-          done
-          echo "::warning::could not tell whether ${REVISION} has deploy/grafana: ${err}"
-          echo "present=unknown" >> "$GITHUB_OUTPUT"
+          done < <(jq -r '.[] | [.type, .sha, .name] | @tsv' "$listing")
+          echo "present=true" >> "$GITHUB_OUTPUT"
 
       # sed against anchored lines rather than a YAML rewrite: yq would
       # reflow the whole document and bury the one-line change in noise. Each
@@ -529,11 +626,13 @@ jobs:
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
           AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
           SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
+          PROFILE_FETCH_DIGEST: ${{ steps.profile-fetch.outputs.digest }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
           DASHBOARD_AT_REVISION: ${{ steps.grafana.outputs.present }}
+          DASHBOARD_SOURCE: ${{ steps.grafana.outputs.dir }}
         run: |
           set -euo pipefail
           expect_one() { # manifest pattern description
@@ -659,6 +758,25 @@ jobs:
             slicer=pinned
           }
 
+          # The profile-fetch worker's line (#6625), in its own Deployment's file,
+          # exactly as the slicer's: optional until clusters has the file, then
+          # exactly one line, and a build with no image keeps the pin and warns.
+          # Sets $profile_fetch to `pinned`, `kept` or (file absent) `none`.
+          profile_fetch=none
+          pin_profile_fetch() { # manifest
+            local target=$1
+            local pf_line="^(\s*)image: ${PROFILE_FETCH_IMAGE//./\\.}[:@][^[:space:]]*\$"
+            expect_one "$target" "$pf_line" "profile-fetch image"
+            if [[ ! "${PROFILE_FETCH_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::warning file=$target::no ${PROFILE_FETCH_IMAGE} image was published for ${VERSION}; keeping the profile-fetch pin as it is"
+              profile_fetch=kept
+              return 0
+            fi
+            sed -i -E "s|${pf_line}|\1image: ${PROFILE_FETCH_IMAGE}:${VERSION}@${PROFILE_FETCH_DIGEST}|" "$target"
+            expect_one "$target" "^\s*image: ${PROFILE_FETCH_IMAGE//./\\.}:${VERSION//./\\.}@${PROFILE_FETCH_DIGEST}\$" "pinned profile-fetch image"
+            profile_fetch=pinned
+          }
+
           # True when transformers[] holds a NamespaceTransformer with
           # `unsetOnly` the YAML boolean true: as a map, as an inline YAML
           # string, or as a relative path (resolved against the overlay's
@@ -697,73 +815,95 @@ jobs:
             return 1
           }
 
-          # The dashboard's `ref=` (#988, spec 2026-10-01 §7). Optional, unlike
-          # the agent: until clusters#1596 Phase 5 adds the line, the overlay
-          # does not mention deploy/grafana at all and the images deploy alone.
-          # A line that mentions it but does not match the anchor exactly (a
-          # short SHA, a branch, a trailing comment, other casing or spacing,
-          # commented out) is an error, never "not configured": read that way,
-          # the dashboard would stay pinned to an old build without a word.
-          # Sets $dashboard to `pinned` when it rewrote the line; a global, not
-          # a printed value, so its ::error lines reach the log instead of a
-          # command substitution.
-          #
-          # The one suffix allowed after the SHA is `&timeout=<n>s|m|h`:
-          # kustomize's per-git-command timeout, 27s by default, which
-          # `git checkout FETCH_HEAD` of this repo (its LFS test fixtures) now
-          # outlasts, failing clusters' CI and ArgoCD's render of the overlay.
-          # Any other parameter or shape is still a near miss. The rewrite
-          # moves only the SHA and carries the suffix over byte for byte.
+          # The dashboards (#988, spec 2026-10-01 §7), vendored in clusters
+          # (eh-homelab/clusters#3734): $DASHBOARD_DIR holds a byte-for-byte
+          # copy of this repo's deploy/grafana (kustomization.yaml and every
+          # *.json) and `.revision`, the 40-hex revision it was copied from,
+          # and the overlay lists that directory. Argo CD's repo-server fetching
+          # the old remote resource (`deploy/grafana?ref=<sha>`) failed in prod
+          # and wedged syncs, so an overlay that still names it in any form
+          # fails the deploy. Optional, unlike the agent: an overlay with no
+          # such directory deploys the images alone. Sets $dashboard to
+          # `vendored` when it refreshed the copy, or `kept` when REVISION has
+          # no deploy/grafana; a global, not a printed value, so its ::error
+          # lines reach the log instead of a command substitution.
           dashboard=none
-          pin_dashboard() { # kustomization
-            local target=$1 n mentions suffix
-            local suffix_re='(&timeout=[0-9]+[smh])?'
-            local line="^(\s*)- ${DASHBOARD_RESOURCE//./\\.}\?ref=[0-9a-f]{40}${suffix_re}\$"
-            [ -f "$target" ] || { echo "::error::${target} is not in clusters; cannot tell whether it pins the dashboard"; exit 1; }
-            # Only an entry of `.resources[]` is the pin: the same text under
-            # transformers: or elsewhere is a mention, which the count below
-            # turns into the near-miss error.
-            n=$(DRE="^${DASHBOARD_RESOURCE//./\\.}\\?ref=[0-9a-f]{40}${suffix_re}\$" yq '[(.resources // [])[] | select(tag == "!!str") | select(test(strenv(DRE)))] | length' "$target")
-            # YAML ignores a trailing comment and extra spacing, but the
-            # rewrite below is by line: an entry that is not also exactly the
-            # line is a near miss, not a pin.
-            [ "$n" -eq 0 ] || [ "$(grep -cE "$line" "$target" || true)" -eq "$n" ] || n=0
-            mentions=$(grep -ciE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana' "$target" || true)
-            if [ "$n" -eq 0 ]; then
-              if [ "$mentions" -gt 0 ]; then
-                echo "::error file=$target::mentions eh-homelab/ScadBuddy//deploy/grafana but no line is exactly '- ${DASHBOARD_RESOURCE}?ref=<40-hex revision>[&timeout=<n>s|m|h]'"; exit 1
-              fi
-              echo "::notice::${target} has no dashboard pin yet (clusters#1596 Phase 5); pinning the images only"
+          vendor_dashboard() { # kustomization
+            local target=$1 dir=$DASHBOARD_DIR src=${DASHBOARD_SOURCE:-} rel n f name stripped
+            local name_re='^(kustomization\.yaml|[a-z0-9-]+\.json)$'
+            [ -f "$target" ] || { echo "::error::${target} is not in clusters; cannot tell whether it vendors the dashboards"; exit 1; }
+            # Comments stripped first: a note about where the copy came from is
+            # not the remote line. Captured first: `sed | grep -q` under
+            # pipefail fails with 141 when grep exits on a match while sed is
+            # still writing, and the `if` would read a match as none.
+            stripped=$(sed -E 's/(^|[[:space:]])#.*$//' "$target")
+            if grep -qiE 'eh-homelab/scadbuddy(\.git)?/+deploy/grafana' <<< "$stripped"; then
+              echo "::error file=$target::still names eh-homelab/ScadBuddy//deploy/grafana, the remote resource Argo CD's repo-server failed to fetch; clusters vendors the dashboards in ${dir}/ with a .revision file instead (eh-homelab/clusters#3734)"; exit 1
+            fi
+            if [ ! -e "$dir" ]; then
+              echo "::notice::${dir} is not in clusters; pinning the images only"
               return 0
             fi
-            [ "$n" -eq 1 ] || { echo "::error file=$target::expected at most one dashboard line, found $n"; exit 1; }
-            # A second, unpinned mention beside the exact line is a near miss too.
-            if [ "$mentions" -ne "$n" ]; then
-              echo "::error file=$target::mentions eh-homelab/ScadBuddy//deploy/grafana $mentions times but only $n line is exactly '- ${DASHBOARD_RESOURCE}?ref=<40-hex revision>[&timeout=<n>s|m|h]'"; exit 1
-            fi
-            # A top-level namespace: would move the ConfigMap out of
-            # cattle-dashboards, where the sidecar never sees it.
+            [ -f "$dir/.revision" ] \
+              || { echo "::error file=$dir::exists but has no .revision, so it is not the vendored copy this deploy refreshes (eh-homelab/clusters#3734)"; exit 1; }
+            # Nothing but the copy and .revision: any other entry would survive
+            # the refresh, and the directory would no longer be deploy/grafana.
+            while IFS= read -r -d '' f; do
+              name=${f##*/}
+              if [ -L "$f" ] || [ ! -f "$f" ] || ! [[ "$name" == .revision || "$name" =~ $name_re ]]; then
+                echo "::error file=$f::is not kustomization.yaml, a [a-z0-9-]+.json dashboard or .revision; the vendored copy must hold only deploy/grafana's files (eh-homelab/clusters#3734)"; exit 1
+              fi
+            done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0)
+            rel=${dir#"$(dirname "$target")/"}
+            n=$(REL="$rel" yq '[(.resources // [])[] | select(tag == "!!str") | sub("^\./"; "") | sub("/$"; "") | select(. == strenv(REL))] | length' "$target")
+            [ "$n" -eq 1 ] \
+              || { echo "::error file=$target::lists ${rel}/ (or ${rel}, ./${rel}/) ${n} time(s) in resources, not once, so the vendored dashboards would not deploy as one copy"; exit 1; }
+            # A top-level namespace: would move the ConfigMaps out of
+            # cattle-dashboards, where the sidecar never sees them.
             if yq -e '.namespace' "$target" > /dev/null 2>&1; then
-              echo "::error file=$target::has a top-level namespace:, which moves the dashboard ConfigMap out of cattle-dashboards; use a NamespaceTransformer with unsetOnly: true (clusters#1596 Phase 5)"; exit 1
+              echo "::error file=$target::has a top-level namespace:, which moves the dashboard ConfigMaps out of cattle-dashboards; use a NamespaceTransformer with unsetOnly: true (clusters#1596 Phase 5)"; exit 1
             fi
             if ! ns_transformer_ok "$target"; then
-              echo "::error file=$target::pins the dashboard but has no NamespaceTransformer with unsetOnly: true (a YAML boolean; the string \"true\" does not count) in transformers, inline, as a file or as a directory (clusters#1596 Phase 5)"; exit 1
+              echo "::error file=$target::vendors the dashboards but has no NamespaceTransformer with unsetOnly: true (a YAML boolean; the string \"true\" does not count) in transformers, inline, as a file or as a directory (clusters#1596 Phase 5)"; exit 1
             fi
             if [ "${DASHBOARD_AT_REVISION:-}" = unknown ]; then
-              echo "::error file=$target::could not tell whether ${REVISION} has deploy/grafana (see the step before), so the dashboard's ref cannot move"; exit 1
+              echo "::error file=$dir::could not tell whether ${REVISION} has deploy/grafana, or read it (see the step before), so the vendored dashboards cannot be refreshed"; exit 1
             fi
-            # A rollback past #988: the images move, the dashboard stays where it is.
+            # A rollback past #988: the images move, the dashboards stay as they are.
             if [ "${DASHBOARD_AT_REVISION:-}" != true ]; then
-              echo "::warning file=$target::${REVISION} has no deploy/grafana/kustomization.yaml; the dashboard stays at its current ref"
+              echo "::warning file=$dir::${REVISION} has no deploy/grafana/kustomization.yaml; the vendored dashboards stay at their .revision"
               dashboard=kept
               return 0
             fi
-            # The suffix's characters are all literal in an ERE, so it goes
-            # into expect_one's pattern unescaped.
-            suffix=$(grep -E "$line" "$target" | sed -E "s|${line}|\2|")
-            sed -i -E "s|${line}|\1- ${DASHBOARD_RESOURCE}?ref=${REVISION}\2|" "$target"
-            expect_one "$target" "^\s*- ${DASHBOARD_RESOURCE//./\\.}\?ref=${REVISION}${suffix}\$" "pinned dashboard"
-            dashboard=pinned
+            if [ -z "$src" ] || [ ! -f "$src/kustomization.yaml" ]; then
+              echo "::error::the step before fetched no deploy/grafana/kustomization.yaml at ${REVISION}"; exit 1
+            fi
+            # Only kustomization.yaml and `[a-z0-9-]+.json`, all regular files:
+            # anything else (a subdirectory, a README) would be dropped or
+            # half-copied, and the copy would no longer be deploy/grafana.
+            while IFS= read -r -d '' f; do
+              name=${f##*/}
+              if [ -L "$f" ] || [ ! -f "$f" ]; then
+                echo "::error::deploy/grafana/${name} at ${REVISION} is not a regular file (a subdirectory?); only kustomization.yaml and *.json files are vendored"; exit 1
+              fi
+              [[ "$name" =~ $name_re ]] \
+                || { echo "::error::deploy/grafana/${name} at ${REVISION} is not kustomization.yaml or a [a-z0-9-]+.json dashboard, so it cannot be vendored"; exit 1; }
+            done < <(find "$src" -mindepth 1 -maxdepth 1 -print0)
+            # Replace, not merge: a dashboard the revision dropped goes too.
+            # "$src"/* never stays a literal `*`: $src holds kustomization.yaml
+            # (checked above).
+            find "$dir" -maxdepth 1 -type f \( -name '*.json' -o -name kustomization.yaml \) -delete
+            cp -- "$src"/* "$dir/"
+            for f in "$src"/*; do
+              cmp -s "$f" "$dir/${f##*/}" \
+                || { echo "::error file=$dir/${f##*/}::is not byte-identical to deploy/grafana/${f##*/} at ${REVISION}"; exit 1; }
+            done
+            if [ "$(find "$dir" -maxdepth 1 -type f \( -name '*.json' -o -name kustomization.yaml \) -printf '%f\n' | sort)" \
+              != "$(find "$src" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" ]; then
+              echo "::error file=$dir::does not hold exactly deploy/grafana's files at ${REVISION}"; exit 1
+            fi
+            printf '%s\n' "$REVISION" > "$dir/.revision"
+            dashboard=vendored
           }
 
           # Every string in a YAML file that names a ScadBuddy image (any
@@ -821,6 +961,13 @@ jobs:
             echo "::notice::${MANIFEST_SLICER} is not in clusters yet; not pinning it"
           fi
           echo "slicer=$slicer" >> "$GITHUB_OUTPUT"
+          if [ -f "$MANIFEST_PROFILE_FETCH" ]; then
+            pin_profile_fetch "$MANIFEST_PROFILE_FETCH"
+            [ "$profile_fetch" != pinned ] || manifests+=("$MANIFEST_PROFILE_FETCH")
+          else
+            echo "::notice::${MANIFEST_PROFILE_FETCH} is not in clusters yet; not pinning it"
+          fi
+          echo "profile_fetch=$profile_fetch" >> "$GITHUB_OUTPUT"
           # The sessions' shell sandbox (#5864): every scanned file that names
           # it, each such line an `image:` or a `value:` (the agent worker's
           # SCADBUDDY_SANDBOX_IMAGE) holding the image alone. A build with no
@@ -847,10 +994,15 @@ jobs:
             manifests+=("$f")
           done < <(scanned)
           echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
-          pin_dashboard "$KUSTOMIZATION"
+          vendor_dashboard "$KUSTOMIZATION"
           echo "dashboard=$dashboard" >> "$GITHUB_OUTPUT"
-          if [ "$dashboard" = pinned ]; then
-            manifests+=("$KUSTOMIZATION")
+          if [ "$dashboard" = vendored ]; then
+            # The new files as intent-to-add, so the diff below (and the PR's
+            # `git add`) sees a dashboard the revision added. Only those: a
+            # plain `git add -N` of the directory would also stage a removed
+            # dashboard's deletion, which the diff would then no longer show.
+            git ls-files -z --others --exclude-standard -- "$DASHBOARD_DIR" | xargs -0 -r git add -N --
+            manifests+=("$DASHBOARD_DIR")
           fi
           # Conditional until clusters#1454 adds the worker's file: without it
           # this still deploys the API alone, as before #547.
@@ -894,11 +1046,12 @@ jobs:
           # not know (a new worker's Deployment), a sibling package this
           # workflow does not resolve, or a second copy of a pin outside its
           # file fails the deploy here, rather than staying on its old build.
-          # The exceptions are a slicer pin kept on purpose (pin_slicer) and
-          # the sandbox pins kept the same way.
+          # The exceptions are a slicer pin kept on purpose (pin_slicer), a
+          # profile-fetch pin kept the same way, and the sandbox pins.
           allowed=("${IMAGE}:${VERSION}@${DIGEST}" "${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}")
           [ "$durable" != pinned ] || allowed+=("${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}")
           [ "$slicer" != pinned ] || allowed+=("${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}")
+          [ "$profile_fetch" != pinned ] || allowed+=("${PROFILE_FETCH_IMAGE}:${VERSION}@${PROFILE_FETCH_DIGEST}")
           [ "$sandbox" != pinned ] || allowed+=("${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}")
           stale=0
           while IFS= read -r f; do
@@ -909,6 +1062,7 @@ jobs:
               ok=false
               for a in "${allowed[@]}"; do [ "$ref" != "$a" ] || ok=true; done
               if [ "$slicer" = kept ] && [ "$f" = "$MANIFEST_SLICER" ] && [[ "$ref" == "${SLICER_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$profile_fetch" = kept ] && [ "$f" = "$MANIFEST_PROFILE_FETCH" ] && [[ "$ref" == "${PROFILE_FETCH_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$sandbox" = kept ] && [[ "$ref" == "${SANDBOX_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$ok" != true ]; then
                 echo "::error file=$f::names ${ref}, which this deploy does not move to ${VERSION}; deploy.reusable.yml must pin this file"
@@ -941,6 +1095,8 @@ jobs:
           DURABLE: ${{ steps.edit.outputs.durable }}
           SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
           SLICER: ${{ steps.edit.outputs.slicer }}
+          PROFILE_FETCH_DIGEST: ${{ steps.profile-fetch.outputs.digest }}
+          PROFILE_FETCH: ${{ steps.edit.outputs.profile_fetch }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           SANDBOX: ${{ steps.edit.outputs.sandbox }}
           VERSION: ${{ inputs.version }}
@@ -968,11 +1124,11 @@ jobs:
           read -ra manifest_files <<< "$FILES"
           listed=""
           for f in "${manifest_files[@]}"; do listed+="\`${f}\` "; done
-          # The dashboard moves with the image, or the overlay has no pin yet.
+          # The dashboards move with the image, or clusters does not vendor them.
           case "$DASHBOARD" in
-            pinned) dashboard_note="deploy/grafana at ${REVISION}" ;;
-            kept)   dashboard_note="left at its current ref: ${REVISION} has no deploy/grafana" ;;
-            *)      dashboard_note="not pinned in clusters yet (clusters#1596 Phase 5)" ;;
+            vendored) dashboard_note="deploy/grafana at ${REVISION}, vendored in \`${DASHBOARD_DIR}/\`" ;;
+            kept)     dashboard_note="vendored copy kept at its \`.revision\`: ${REVISION} has no deploy/grafana" ;;
+            *)        dashboard_note="not vendored in clusters (eh-homelab/clusters#3734)" ;;
           esac
           if [ "$DURABLE" = pinned ]; then
             durable_note="\`${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}\`"
@@ -983,6 +1139,11 @@ jobs:
             pinned) slicer_note="\`${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}\`" ;;
             kept)   slicer_note="kept at its current pin: no image was published for ${VERSION}" ;;
             *)      slicer_note="not run in clusters yet (#3822)" ;;
+          esac
+          case "$PROFILE_FETCH" in
+            pinned) profile_fetch_note="\`${PROFILE_FETCH_IMAGE}:${VERSION}@${PROFILE_FETCH_DIGEST}\`" ;;
+            kept)   profile_fetch_note="kept at its current pin: no image was published for ${VERSION}" ;;
+            *)      profile_fetch_note="not run in clusters yet (#6625)" ;;
           esac
           case "$SANDBOX" in
             pinned) sandbox_note="\`${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}\`" ;;
@@ -996,7 +1157,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
-          (agent-durable: ${durable_note}; slicer: ${slicer_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
+          (agent-durable: ${durable_note}; slicer: ${slicer_note}; profile-fetch: ${profile_fetch_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -1018,6 +1179,7 @@ jobs:
           - **Agent:** \`${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}\`
           - **Agent-durable:** ${durable_note}
           - **Slicer:** ${slicer_note}
+          - **Profile-fetch:** ${profile_fetch_note}
           - **Sandbox:** ${sandbox_note}
           - **Dashboard:** ${dashboard_note}
           - **Files:** ${listed}

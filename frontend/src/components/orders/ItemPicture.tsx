@@ -4,7 +4,7 @@ import type { OrderAttachment, OrderItem } from '../../api/types'
 import { itemPictureSources } from './attachmentMedia'
 import { cn } from '@/lib/utils'
 
-/** A line item's picture: what was delivered once marked, the render before. */
+/** A line item's picture: what was delivered once marked, else a finished-print photo, else the render. */
 export function ItemPicture({
   orderId,
   item,
@@ -50,6 +50,9 @@ export function ItemPicture({
       )}
       {source?.delivered && size === 'lg' && (
         <figcaption className="absolute inset-x-0 bottom-0 bg-background/80 px-2 py-0.5 text-center text-[11px] font-medium">Delivered</figcaption>
+      )}
+      {source?.finished && size === 'lg' && (
+        <figcaption className="absolute inset-x-0 bottom-0 bg-background/80 px-2 py-0.5 text-center text-[11px] text-muted-foreground">Finished print</figcaption>
       )}
     </figure>
   )

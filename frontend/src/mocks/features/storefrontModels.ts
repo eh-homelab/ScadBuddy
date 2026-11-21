@@ -250,6 +250,7 @@ export const handlers = [
       attachments: [],
       sources,
       own_model: true,
+      price: 'by_hand',
     })
     save()
     return HttpResponse.json(draft)

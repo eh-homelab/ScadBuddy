@@ -259,12 +259,14 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
   it('writes the file and its event together, or neither (#2469)', async () => {
     const id = await session()
     expect((await upload(id, 'a.txt', 'one')).status).toBe(201)
-    const append = vi.spyOn(m.events, 'append').mockRejectedValue(new Error('the event log is unreachable'))
+    // The event's insert fails in the write's transaction (a constraint no event meets, on
+    // this test's own database), so the file must not commit either.
+    await db.sql`ALTER TABLE ai_session_events ADD CONSTRAINT no_event_lands CHECK (event IS NULL) NOT VALID`
     try {
       expect((await upload(id, 'b.txt', 'two')).status).toBe(500)
       expect((await remove(id, 'a.txt')).status).toBe(500)
     } finally {
-      append.mockRestore()
+      await db.sql`ALTER TABLE ai_session_events DROP CONSTRAINT no_event_lands`
     }
     // Neither change committed: a.txt is still there, b.txt never was.
     const listed = (await (await list(id)).json()) as { files: FileView[] }

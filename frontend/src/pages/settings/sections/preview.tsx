@@ -4,6 +4,7 @@ import { useAsync } from '../../../lib/useAsync'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../../../lib/units'
 import { useSettingsAgentField } from '../agentFields'
 import { FieldRow } from '../controls'
+import { docOf } from '../fields'
 import { FieldBadge, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
@@ -43,8 +44,7 @@ export function Component() {
     <SavedSection form={form} id={id} title={title}>
       <FieldRow
         id="display-unit"
-        label="Show dimensions in"
-        help="For every model: the bounding box, plate sizes and fit warnings. Models, parameters and the files sent to Bambuddy stay in millimetres."
+        {...docOf(form.settings, 'display_unit')}
       >
         <ChoiceSelect
           id="display-unit"
@@ -59,10 +59,9 @@ export function Component() {
 
       <FieldRow
         id="default-plate"
-        label="Default plate"
+        {...docOf(form.settings, 'default_plate')}
         badge={<FieldBadge form={form} name="default_plate" />}
         error={errors.default_plate}
-        help="The plate the customizer draws and checks the model against until a printer is chosen in the print picker."
       >
         <ChoiceSelect
           id="default-plate"

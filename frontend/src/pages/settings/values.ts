@@ -1,5 +1,5 @@
 import type { Settings } from '../../api/types'
-import { RUNTIME_FIELDS, envVar, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
+import { RUNTIME_FIELDS, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 export function ofLimit(used: string, limit: number, format: (n: number) => string): string {
@@ -84,6 +84,30 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
   // #959 — where the agent's `fetch_asset` (and `POST /models/{slug}/assets/fetch`) may fetch from.
   uploads: ['asset_fetch_domains'],
+  // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools and weights in, tags out.
+  // #6625 — and the nozzles a 3DFP preset fetch exports.
+  // #6868 — and whether an empty spool adds its type to the shopping list (stored only).
+  filament: ['filament_sync', 'profile_fetch_nozzles', 'filament_shopping_auto_add_empty'],
+}
+
+/** #6265 — the six data types `filament_sync` gives a direction, in the form's order. */
+export const SYNC_KINDS = ['spools', 'weights', 'tags', 'suppliers', 'locations', 'presets'] as const
+export type SyncKind = (typeof SYNC_KINDS)[number]
+export type FilamentSync = NonNullable<Settings['filament_sync']>
+export type SyncDirection = FilamentSync[SyncKind]
+const DIRECTIONS: readonly string[] = ['off', 'sb_to_bb', 'bb_to_sb', 'two_way'] satisfies SyncDirection[]
+
+/** The form's value of `filament_sync`, the six directions joined by `|` in `SYNC_KINDS` order, as an object. */
+export function syncParts(raw: string): FilamentSync {
+  const parts = raw.split('|')
+  return Object.fromEntries(
+    SYNC_KINDS.map((kind, i) => [kind, DIRECTIONS.includes(parts[i] ?? '') ? parts[i] : 'off']),
+  ) as FilamentSync
+}
+
+/** `syncParts`'s inverse: the form's value of a stored `filament_sync`. A type it does not name is `off`. */
+export function syncValue(sync: Partial<FilamentSync> | null | undefined): string {
+  return SYNC_KINDS.map((kind) => sync?.[kind] ?? 'off').join('|')
 }
 
 export const SPECS: Record<string, FieldSpec> = Object.fromEntries(RUNTIME_FIELDS.map((spec) => [spec.name, spec]))
@@ -101,7 +125,6 @@ export function extraSpecs(settings: Settings | undefined): FieldSpec[] {
       return {
         name: name as FieldName,
         section: 'diagnostics' as const,
-        label: envVar(name),
         kind:
           typeof current === 'boolean'
             ? ('bool' as const)
@@ -156,6 +179,15 @@ export function sourcesValue(sources: readonly string[]): string {
   return AUTO_IMPORT_SOURCES.filter((source) => sources.includes(source)).join(',')
 }
 
+/** #6625 — the nozzle diameters a 3DFP preset fetch may export (`bambuddy/models.py` `NozzleSize`). */
+export const FETCH_NOZZLES = ['0.2', '0.4', '0.6', '0.8'] as const
+export type FetchNozzle = (typeof FETCH_NOZZLES)[number]
+
+/** The form's value for a list of nozzles: in `FETCH_NOZZLES` order, comma-joined. */
+export function nozzlesValue(nozzles: readonly string[]): string {
+  return FETCH_NOZZLES.filter((nozzle) => nozzles.includes(nozzle)).join(',')
+}
+
 /** The form's value for a list of printer ids: ascending, comma-joined. */
 export function printerIdsValue(ids: readonly number[]): string {
   return [...new Set(ids)].sort((a, b) => a - b).join(',')
@@ -167,11 +199,15 @@ export function registryIdsValue(ids: readonly string[]): string {
 }
 
 export function baseline(settings: Settings, name: FieldName): string {
+  if (name === 'filament_sync') return syncValue(settings.filament_sync)
   if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
+  // #6868 — on until the settings say otherwise, as the backend's default.
+  if (name === 'filament_shopping_auto_add_empty') return settings.filament_shopping_auto_add_empty === false ? 'false' : 'true'
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
     return registryIdsValue(settings.print_auto_import_skip_lan_printers ?? [])
+  if (name === 'profile_fetch_nozzles') return nozzlesValue(settings.profile_fetch_nozzles ?? FETCH_NOZZLES)
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
   if (name === 'destination_sort') return settings.destination_sort ?? 'touched'
   if (name === 'activity_follow') {
@@ -201,11 +237,17 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     name === 'slicer_backend'
   )
     return raw
-  if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
+  if (name === 'store_s3_path_style' || name === 'print_auto_import' || name === 'filament_shopping_auto_add_empty') return raw === 'true'
+  // #6265 — one direction per data type: the form's six-part string, split.
+  if (name === 'filament_sync') return syncParts(raw)
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)
   if (name === 'print_auto_import_skip_lan_printers') return raw === '' ? [] : raw.split(',')
+  // #6625 — a fetch with no nozzle would export nothing, so the API needs one.
+  if (name === 'profile_fetch_nozzles') {
+    return raw === '' ? ({ problem: 'Choose at least one nozzle.' } satisfies Problem) : raw.split(',')
+  }
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null

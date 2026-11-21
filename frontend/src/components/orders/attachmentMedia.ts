@@ -37,11 +37,12 @@ export function attachmentImageUrl(orderId: string, attachment: OrderAttachment)
     : api.orderAttachmentUrl(orderId, attachment.id)
 }
 
-type Source = { url: string; label: string; delivered: boolean }
+type Source = { url: string; label: string; delivered: boolean; finished?: boolean }
 
 /**
  * Where an item's picture comes from, best first (#4251): the photo marked as what was
- * delivered, then the output it was ordered from, then its template's own thumbnail.
+ * delivered, then the item's newest finished-print photo (on the item or on one of its
+ * attempts), then the output it was ordered from, then its template's own thumbnail.
  * A source that fails to load (an output deleted since) gives way to the next.
  */
 export function itemPictureSources(orderId: string, item: OrderItem, attachments: OrderAttachment[]): Source[] {
@@ -49,6 +50,12 @@ export function itemPictureSources(orderId: string, item: OrderItem, attachments
   const delivered = attachments.find((a) => a.id === item.delivered_attachment_id)
   const deliveredUrl = delivered ? attachmentImageUrl(orderId, delivered) : null
   if (deliveredUrl) sources.push({ url: deliveredUrl, label: `What was delivered: ${item.title}`, delivered: true })
+  const finished = attachments
+    .filter((a) => a.item_id === item.id && !a.revision_id && a.role === 'finished' && a.id !== delivered?.id)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .map((a) => attachmentImageUrl(orderId, a))
+    .find((url) => url !== null)
+  if (finished) sources.push({ url: finished, label: `The finished print: ${item.title}`, delivered: false, finished: true })
   if (item.output_id) sources.push({ url: api.outputThumbnailUrl(item.output_id), label: `The render of ${item.title}`, delivered: false })
   // A custom item (#4954) names no template, so it has no template thumbnail.
   if (item.reference) {

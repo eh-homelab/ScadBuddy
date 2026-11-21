@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { api } from '../../api/client'
 import type { AttemptCost, CostEntry, ItemCost, OrderCosts as Costs, TimeEntry } from '../../api/types'
 import { Badge } from '@/components/ui/badge'
@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 import { formatDuration } from '../../lib/format'
 import { formatMoney } from '../../lib/money'
 import { AddCost, COST_KINDS, LogTime, readTimer, TIME_KINDS } from './CostEntryForms'
+import { attemptTag, basesNote } from './machineRateTag'
 import { refusalSlug, refusalText } from './refusal'
 
 type MarginView = Pick<Costs, 'margin_minor' | 'margin_percent' | 'margin_state' | 'estimated' | 'unknown'>
@@ -52,16 +53,45 @@ function MarginCell({ view, money }: { view: MarginView; money: (minor: number) 
   )
 }
 
-function attemptLine(a: AttemptCost, money: (minor: number) => string): string {
-  const figures = [
+/** #6665 (machine-rate actuals spec §6): the machine figure carries its tag, the rate's source on hover. */
+function AttemptLine({ a, money }: { a: AttemptCost; money: (minor: number) => string }) {
+  const tag = attemptTag(a.machine_rate_basis, a.machine_rate_confidence)
+  const figures: ReactNode[] = [
     a.grams != null ? `${a.grams} g` : null,
     a.seconds != null ? formatDuration(a.seconds) : null,
     a.filament_minor != null ? `filament ${money(a.filament_minor)}` : null,
-    a.machine_minor != null ? `machine ${money(a.machine_minor)}` : null,
-  ].filter(Boolean)
+    a.machine_minor != null ? (
+      <Fragment key="machine">
+        machine {money(a.machine_minor)}
+        {tag && (
+          <>
+            {' ('}
+            <span title={tag.title} className="cursor-help underline decoration-dotted underline-offset-2">
+              {tag.text}
+            </span>
+            {')'}
+          </>
+        )}
+      </Fragment>
+    ) : null,
+  ].filter((f) => f != null)
   const estimated = (a.estimated ?? []).length ? ` · estimated ${(a.estimated ?? []).map((f) => FIGURE[f] ?? f).join(', ')}` : ''
   const unknown = a.unknown ? ' · part unknown' : ''
-  return `Attempt ${a.attempt} (${a.purpose ?? 'production'}, ${a.outcome}): ${figures.join(' · ') || 'nothing recorded'}${estimated}${unknown}`
+  return (
+    <li>
+      Attempt {a.attempt} ({a.purpose ?? 'production'}, {a.outcome}):{' '}
+      {figures.length
+        ? figures.map((f, i) => (
+            <Fragment key={i}>
+              {i > 0 && ' · '}
+              {f}
+            </Fragment>
+          ))
+        : 'nothing recorded'}
+      {estimated}
+      {unknown}
+    </li>
+  )
 }
 
 function Entries({
@@ -147,7 +177,7 @@ function ItemParts({ costs, item, money, onChanged }: { costs: Costs; item: Item
       {item.attempts.length > 0 && (
         <ul className="flex flex-col gap-0.5" aria-label="Attempts">
           {item.attempts.map((a) => (
-            <li key={a.fulfilment_id}>{attemptLine(a, money)}</li>
+            <AttemptLine key={a.fulfilment_id} a={a} money={money} />
           ))}
         </ul>
       )}
@@ -178,6 +208,7 @@ export function OrderCosts({ costs, onChanged }: { costs: Costs; onChanged: () =
       return next
     })
   const anything = (costs.cost_minor ?? 0) > 0 || costs.revenue_minor != null || costs.items.some((i) => i.revenue_minor != null || (i.cost_minor ?? 0) > 0)
+  const bases = basesNote(costs.machine_rate_bases)
   return (
     <section className="flex flex-col gap-2" aria-label="Cost">
       <h2 className="text-sm font-medium">Cost and margin</h2>
@@ -243,6 +274,7 @@ export function OrderCosts({ costs, onChanged }: { costs: Costs; onChanged: () =
       </table>
       {costs.revenue_minor == null && costs.items.length > 0 && <p className="text-xs text-muted-foreground">The order's margin shows once every item has an accepted quote.</p>}
       <div className="flex flex-col gap-2 text-[13px]" aria-label="Order costs">
+        {bases && <p className="text-xs text-muted-foreground">{bases}</p>}
         <p className="text-xs text-muted-foreground">
           On the order: shipping {money(costs.shipping_minor ?? 0)}, charges other than tax {money(costs.charges_minor ?? 0)}.
         </p>

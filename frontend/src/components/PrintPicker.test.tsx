@@ -9,7 +9,7 @@ import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { printersState } from '../mocks/features/printers'
-import { HOT_PRINTER, NO_BAMBUDDY, UNLINKED_RECORD, hotFilaments, setHotPath } from '../mocks/features/hotPath'
+import { HOT_PRINTER, NO_BAMBUDDY, SHELF_NUMBER, hotFilaments, setHotPath } from '../mocks/features/hotPath'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { startedFresh } from '../mocks/features/printPreview'
 import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
@@ -402,6 +402,7 @@ describe('PrintPicker', () => {
           { slot_id: 2, spool_id: 27 },
         ],
         force_colour_match: true,
+        ids: 'sb',
       },
       choices: {
         nozzles: [
@@ -739,6 +740,53 @@ describe('PrintPicker', () => {
       filament_plan: { slots: expect.arrayContaining([{ slot_id: 1, spool_id: spool }]) },
       choices: { tier: null, process_name: '0.24mm Standard @BBL H2C' },
     })
+  })
+
+  it('remembers the chosen spools by SB number and sends the plan as ids: sb (#6262)', async () => {
+    // Each option carries its SB number (Task 7: an option's spool_id is that number on
+    // Bambuddy's path); the numbers here are far from any Bambuddy id.
+    const sbNumber = (spoolId: number) => spoolId + 700
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: {
+            ...choicesView.filaments,
+            spools: (choicesView.filaments?.spools ?? []).map((option) => ({
+              ...option,
+              spool_id: sbNumber(option.spool_id),
+              sb_number: sbNumber(option.spool_id),
+            })),
+            suggested: (choicesView.filaments?.suggested ?? []).map((choice) => ({
+              ...choice,
+              spool_id: sbNumber(choice.spool_id),
+            })),
+          },
+        }),
+      ),
+    )
+    const remember = vi.spyOn(api, 'putModelChoices')
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByTestId('change-slot-1'))
+    const other = within(screen.getByTestId('filament-slot-1'))
+      .getAllByRole('radio')
+      .find((radio) => radio.getAttribute('aria-checked') !== 'true') as HTMLButtonElement
+    const spool = Number(other.value)
+    expect(spool).toBeGreaterThan(700)
+    await user.click(other)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({
+      filament_plan: { slots: expect.arrayContaining([{ slot_id: 1, spool_id: spool }]), ids: 'sb' },
+    })
+    await waitFor(() => expect(remember).toHaveBeenCalled())
+    // The remembered choices (`ModelPrintChoices`) hold the plan as a slot list by SB number
+    // and carry no `ids` field by design: only the run request names the id space.
+    const saved = remember.mock.calls[0]![1] as { filament_plan: unknown }
+    expect(saved.filament_plan).toEqual(expect.arrayContaining([{ slot_id: 1, spool_id: spool }]))
+    expect(saved).not.toHaveProperty('ids')
   })
 
   /** Slot 1's checked spool, and one that is not. */
@@ -2461,6 +2509,20 @@ describe('PrintPicker · Prime tower (#3628)', () => {
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject(wanted))
     await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject(wanted), { timeout: 5000 })
   })
+
+  it('judges the print with the chosen tower, and again when it changes (#6721)', async () => {
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0))
+    expect(bodies.at(-1)?.['request']).not.toHaveProperty('prime_tower')
+
+    await pick(user, screen.getByLabelText('Prime tower'), 'on')
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { prime_tower: { enabled: true } } }))
+    await pick(user, screen.getByLabelText('Prime tower'), 'off')
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { prime_tower: { enabled: false } } }))
+  })
 })
 
 describe('PrintPicker · Supports (#1899)', () => {
@@ -2797,6 +2859,75 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await pick(user, screen.getByLabelText('Print sequence'), 'by layer')
     expect(screen.queryByText(refusal)).toBeNull()
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
+
+  it('names the plate of a run the slicer refused for an object conflict (#6737)', async () => {
+    const message = 'Plate 1: the slicer found the prime tower stands on an object, or objects overlap.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        title: 'Slice failed',
+        status: 502,
+        detail: 'Object conflicts were detected',
+        warnings: [{ kind: 'object-conflict', plate_id: 1, message }],
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByTestId('run-warnings')).toHaveTextContent(message)
+    expect(screen.getByText('Object conflicts were detected')).toBeInTheDocument()
+  })
+
+  it('names the plate of a followed run that fails for an object conflict (#6743)', async () => {
+    const message = 'Plate 2: the slicer found the prime tower stands on an object, or objects overlap.'
+    server.use(
+      http.post('/api/v1/print/outputs/:id/run', () =>
+        HttpResponse.json(
+          {
+            id: 'run-6743',
+            output_id: output.id,
+            status: 'failed',
+            created_at: '2026-09-28T10:00:00Z',
+            finished_at: '2026-09-28T10:00:01Z',
+            result: null,
+            error: {
+              title: 'Slice failed',
+              status: 502,
+              detail: 'Object conflicts were detected',
+              extensions: { warnings: [{ kind: 'object-conflict', plate_id: 2, message }] },
+            },
+            may_have_queued: false,
+            repeated: false,
+          },
+          { status: 202 },
+        ),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByTestId('run-warnings')).toHaveTextContent(message)
+    expect(screen.getByText('Object conflicts were detected')).toBeInTheDocument()
+  })
+
+  it('shows a warning of a kind it does not know in the quiet tone (#6743)', async () => {
+    const message = 'Plate 1: a warning a newer API sends.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        title: 'Slice failed',
+        status: 502,
+        detail: 'The slice failed',
+        warnings: [{ kind: 'from-a-newer-api', plate_id: 1, message }],
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const list = await screen.findByTestId('run-warnings')
+    expect(within(list).getByText(message)).toHaveClass('text-subtle')
   })
 
   it('is remembered for the model once it prints (#4970)', async () => {
@@ -5190,7 +5321,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     const { user } = renderPicker()
     await loaded()
     await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
-    expect(within(screen.getByTestId('filament-slot-1')).getByText('PLA blue in AMS-A slot 1')).toBeInTheDocument()
+    expect(within(screen.getByTestId('filament-slot-1')).getByRole('radio', { name: /PLA Blue in AMS-A slot 1/ })).toBeInTheDocument()
     expect(screen.getByText('Filed under:')).toHaveTextContent('the template’s folder')
     expect(screen.queryByText(NO_BAMBUDDY)).not.toBeInTheDocument()
     const pair = { printer: HOT_PRINTER.id, printer_id: HOT_PRINTER.bambuddy_printer_id }
@@ -5389,14 +5520,14 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     }
   })
 
-  it("names a tray question's records by the answer's provider labels (#4516)", async () => {
+  it("names a tray question's candidate by its SB spool number (#6262)", async () => {
     setHotPath(true)
     server.use(
       http.get('/api/v1/print/outputs/:id/choices', () =>
         HttpResponse.json({
           ...choicesView,
           printer_id: HOT_PRINTER.bambuddy_printer_id,
-          filaments: { ...hotFilaments(), provider_labels: { bambuddy: 'Bambuddy (garage)' } },
+          filaments: hotFilaments(),
           model_choices: { printer_id: null, filament_plan: [] },
           lan_printers: [HOT_PRINTER.id],
         }),
@@ -5405,14 +5536,14 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     renderPicker()
     await loaded()
     const question = await screen.findByTestId('tray-question-0-1')
-    expect(within(question).getByText(/Bambuddy \(garage\)'s record/)).toBeInTheDocument()
+    expect(within(question).getByText(new RegExp(`spool #${SHELF_NUMBER}`))).toBeInTheDocument()
   })
 
   it('offers a shelf row one tray claimed to no other tray, until the re-read lands', async () => {
     setHotPath(true)
     const answer = hotFilaments()
     const untagged = answer.trays![0]!
-    // Two untagged trays, both asked about the one Bambuddy record on the shelf.
+    // Two untagged trays, both asked about the one SB spool on the shelf.
     const twoTrays = {
       ...answer,
       trays: [untagged, { ...untagged, tray_id: 2, label: 'AMS-A slot 3', spool_id: -3, fingerprint: 'PLA|FF1493' }],
@@ -5436,7 +5567,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     await loaded()
     const first = await screen.findByTestId('tray-question-0-1')
     expect(screen.getByTestId('tray-question-0-2')).toBeInTheDocument()
-    expect(twoTrays.shelf?.map((spool) => spool.spool_id)).toEqual([UNLINKED_RECORD])
+    expect(twoTrays.shelf?.map((spool) => spool.spool_id)).toEqual([SHELF_NUMBER])
     const asked = choices.urls.length
     await user.click(within(first).getByRole('button', { name: 'Yes, that one' }))
     // The link is made and the re-read is out: neither tray is asked about the record now.

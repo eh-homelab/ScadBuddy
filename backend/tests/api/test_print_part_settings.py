@@ -32,7 +32,7 @@ from tests.api.test_print_supports import routes
 from tests.api.test_send import _uploaded_3mf, configure, upload_route
 from tests.bambuddy.test_part_settings import author_two_colours, without_project_settings
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 #: The dialog's check, asking for the process's part settings too (#5627).
 WITH_VALUES = "?process_values=true"

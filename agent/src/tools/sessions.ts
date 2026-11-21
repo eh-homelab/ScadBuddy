@@ -13,7 +13,7 @@ import type { LoggedEvent } from '../sessions/eventLog.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
-import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
+import { type Origin, ORIGINS, type Owner, ownerSeenBy, type QueuedEntry, SESSION_MODES, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
 import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveSendImages } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
@@ -42,7 +42,9 @@ import { defineTool, json, type Tool, type ToolContext, ToolError } from './regi
 // unchanged: a caller sees the sessions it owns or started, and those
 // offered to it (the browser user sees all, spec §6), only the owner sends,
 // the owner hands off, anyone who may see a session may interrupt it (spec
-// §8.6), and a send while a turn runs is refused (`busy`). A session the caller may not see answers "no
+// §8.6), and a send while a turn runs is queued to run after it (#6386; the
+// owner removes or edits a queued message with sessions_queue_remove and
+// sessions_queue_edit until it starts). A session the caller may not see answers "no
 // session", so its existence is not revealed. A turn a token sends runs its
 // in-process tools with that token's tiers (SendOptions.tiers).
 //
@@ -219,6 +221,11 @@ export function condense(rows: readonly LoggedEvent[], viewer?: Pick<Owner, 'kin
       continue
     }
     const { v: _v, sessionId: _s, ...rest } = event as typeof event & { sessionId?: string }
+    // The queue (#6386): each entry's author as the viewer is shown it, its images as their count.
+    if (rest.type === 'session.queue') {
+      out.push({ seq, ...rest, queue: queuedSeenBy(viewer, rest.queue) })
+      continue
+    }
     // A turn's image previews (#1866), and a result's images (#782), as their count:
     // the images are the panel's to show (a tool caller got a result's in the result).
     const row: Record<string, unknown> =
@@ -226,6 +233,17 @@ export function condense(rows: readonly LoggedEvent[], viewer?: Pick<Owner, 'kin
     out.push({ seq, ...(viewer ? principalsSeenBy(viewer, row) : row) })
   }
   return out
+}
+
+/** A session's queued messages (#6386) as `viewer` is shown them: authors without ids that are not the viewer's, images as their count. */
+export function queuedSeenBy(viewer: Pick<Owner, 'kind' | 'id'> | undefined, queue: readonly QueuedEntry[]): Record<string, unknown>[] {
+  return queue.map(({ id, text, author, images, queuedAt }) => ({
+    id,
+    text,
+    author: viewer ? ownerSeenBy(viewer, author) : author,
+    ...(images?.length ? { images: images.length } : {}),
+    queued_at: queuedAt,
+  }))
 }
 
 /** The principals an event names (`owner`, `author`, `by`), as `viewer` is shown them. */
@@ -268,6 +286,7 @@ function ownerNamed(to: string): Owner {
 }
 
 const sessionId = z.string().min(1).describe('The session id (sessions_list, sessions_start).')
+const queuedId = z.string().min(1).max(200).describe("The queued message's id: sessions_send's turn_id, or an id in sessions_get's queue.")
 const waitSeconds = z
   .number()
   .int()
@@ -455,7 +474,9 @@ export const sessionTools: Tool[] = [
     label: 'Send a message to a session',
     description:
       'Add a user message to a session this caller owns and start its turn. One turn at a time: while a turn ' +
-      'is running this is refused; wait, or sessions_interrupt it. An outward action in the turn waits for a ' +
+      'is running the message is queued (the answer says `queued` and its `position`, 1 being next) and runs as ' +
+      'its own turn once the turns before it end; sessions_get lists the queue, and sessions_queue_remove or ' +
+      'sessions_queue_edit change a queued message until it starts. A full queue is refused. An outward action in the turn waits for a ' +
       "decision in the ScadBuddy UI or by sessions_approve/sessions_deny (the approval grant). Read the reply with " +
       'sessions_get or sessions_attach from after_seq. Images go by reference (`images`), never inline.',
     input: z.object({
@@ -493,6 +514,9 @@ export const sessionTools: Tool[] = [
           ...(ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
           // From a flow run, or a session with none (#5870): this turn gets no background built-in.
           ...(bare ? { withoutBackground: true } : {}),
+          // While a turn runs, it waits in the queue (#6386). A flow run's call does not: it is
+          // refused `busy`, so a queued turn never runs tagged as a flow call that has ended.
+          queue: ctx.flowTurn === undefined,
         }),
       )
       // The turn has the bytes; the uploads move into the session (attachments/store.ts `claim`).
@@ -504,7 +528,13 @@ export const sessionTools: Tool[] = [
       }
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session_id, owner))
-      return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: before })
+      return json({
+        session: sessionView(now, viewerOf(ctx)),
+        turn_id: turn.turnId,
+        ...(turn.queued ? { queued: true, position: turn.queued.position } : {}),
+        turn: outcomeView(outcome),
+        after_seq: before,
+      })
     },
   }),
 
@@ -512,7 +542,7 @@ export const sessionTools: Tool[] = [
     name: 'sessions_get',
     label: 'Read an agent session',
     description:
-      "A session this caller may see: its status and owner, its pending approvals, and its transcript after " +
+      "A session this caller may see: its status and owner, its pending approvals, the messages queued to run after its turn, and its transcript after " +
       'after_seq (streamed text joined per message). Page with next_seq while more is true. The same as the ' +
       'resource scadbuddy://sessions/{session_id}, which can be subscribed to for live updates.',
     input: z.object({
@@ -527,13 +557,15 @@ export const sessionTools: Tool[] = [
       const sessions = manager(ctx)
       const owner = ownerOf(ctx.principal)
       const session = await refusals(() => sessions.get(session_id, owner))
-      const [rows, pending] = await Promise.all([
+      const [rows, pending, queued] = await Promise.all([
         sessions.events.read(session.id, after_seq, limit),
         refusals(() => sessions.approvals.list(owner, { sessionId: session.id, pending: true })),
+        refusals(() => sessions.queued(session.id, owner)),
       ])
       return json({
         session: sessionView(session, viewerOf(ctx)),
         pending_approvals: pending.map((a) => approvalSeenBy(viewerOf(ctx), a)),
+        queue: queuedSeenBy(viewerOf(ctx), queued.queue),
         transcript: condense(rows, viewerOf(ctx)),
         next_seq: rows.at(-1)?.seq ?? after_seq,
         more: rows.length === limit,
@@ -634,6 +666,40 @@ export const sessionTools: Tool[] = [
         }),
       )
       return json(sessionView(child, viewerOf(ctx)))
+    },
+  }),
+
+  defineTool({
+    name: 'sessions_queue_remove',
+    label: 'Remove a queued message',
+    description:
+      'Remove a message queued in a session this caller owns before it starts (#6386; its id is the turn_id ' +
+      'sessions_send answered, or an id in sessions_get `queue`). Refused once it has started or gone. Answers the queue after it.',
+    input: z.object({ session_id: sessionId, message_id: queuedId }),
+    risk: 'write',
+    routes: [],
+    source: TRANSCRIPT_SOURCE,
+    summarize: ({ session_id, message_id }) => `remove queued message ${message_id} from session ${session_id}`,
+    handler: async ({ session_id, message_id }, ctx) => {
+      const queued = await refusals(() => manager(ctx).removeQueued(session_id, ownerOf(ctx.principal), message_id))
+      return json({ queue: queuedSeenBy(viewerOf(ctx), queued.queue) })
+    },
+  }),
+
+  defineTool({
+    name: 'sessions_queue_edit',
+    label: 'Edit a queued message',
+    description:
+      'Replace the text of a message queued in a session this caller owns before it starts (#6386); its images ' +
+      'stay. Refused once it has started or gone. Answers the queue after it.',
+    input: z.object({ session_id: sessionId, message_id: queuedId, text: z.string().min(1).max(MESSAGE_MAX) }),
+    risk: 'write',
+    routes: [],
+    source: TRANSCRIPT_SOURCE,
+    summarize: ({ session_id, message_id }) => `edit queued message ${message_id} in session ${session_id}`,
+    handler: async ({ session_id, message_id, text }, ctx) => {
+      const queued = await refusals(() => manager(ctx).editQueued(session_id, ownerOf(ctx.principal), message_id, text))
+      return json({ queue: queuedSeenBy(viewerOf(ctx), queued.queue) })
     },
   }),
 

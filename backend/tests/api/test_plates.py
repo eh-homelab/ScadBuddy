@@ -122,3 +122,10 @@ def test_the_filament_cutter_is_reported(client: TestClient) -> None:
     body = _fit(client, model="X1C", x=256, y=256, z=10, colours=1)
     assert body["overshoots"] == []
     assert "filament cutter" in body["problem"]
+
+
+def test_the_prime_tower_grows_with_the_colours(client: TestClient) -> None:
+    """#6735: the tower is the one the slice builds; eight colours make it 65 mm square
+    on the H2C, so a box that leaves room for a two-colour tower is refused."""
+    assert _fit(client, model="H2C", x=300, y=245, z=10, colours=2)["problem"] is None
+    assert "prime tower" in _fit(client, model="H2C", x=300, y=245, z=10, colours=8)["problem"]

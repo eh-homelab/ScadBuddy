@@ -20,6 +20,82 @@ export const SECRET_AREAS = ['settings', 'credentials', 'payload-keys'] as const
  */
 export const FORGET_AREAS = ['forget'] as const
 
+/**
+ * The area of the workspace files, which the API keeps, seals and opens (#5299 step 7; backend
+ * api/crud_agent_workspace.py; workspace/crudStore.ts).
+ */
+export const WORKSPACE_AREAS = ['workspace'] as const
+
+/**
+ * The areas of a session's images, the staged attachments and the saved http_request bodies
+ * (#5299 step 7; backend api/crud_agent_blobs.py; sessions/crudBlobs.ts, attachments/crudStore.ts).
+ */
+export const BLOB_AREAS = ['session-blobs', 'attachments', 'http-bodies'] as const
+
+/**
+ * The areas of a session's background tasks (with a Monitor's events and a Workflow's journal)
+ * and of the agent's command record, `ai_operations` (#5299 step 8; backend
+ * api/crud_agent_tasks.py; background/store.ts, operations/store.ts).
+ */
+export const TASK_AREAS = ['background-tasks', 'operations'] as const
+
+/**
+ * The tool-call gate's areas (#5299 step 10). `gate`, its writes: an entry opened, resolved or
+ * decided, a flow's refusal and a request's response read (backend api/crud_agent_gate.py;
+ * gate/crudStore.ts); a run grant's check goes through its route whether or not it is listed.
+ * `pending-input`: the projection's reads, the orphan sweep's cancels, a durable turn's response
+ * read and its fenced span mark, and a call's recorded approval (backend
+ * api/crud_agent_pending.py; gate/crudPending.ts). `audit`: the audit log's rows written, listed
+ * and pruned (backend api/crud_agent_audit.py; audit/crudAudit.ts). `approvals`: the classic
+ * approvals, each decision written once with its events and audit row (backend
+ * api/crud_agent_approvals.py; approvals/crudApprovals.ts).
+ */
+export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals', 'questions', 'escalations'] as const
+
+/**
+ * The areas of the sessions' rows and of what their tool calls touched (#5299 step 9, part a;
+ * backend api/crud_agent_sessions.py; sessions/rows.ts, sessions/touched.ts), and of their
+ * transcripts, sealed and opened by the API, and their event logs (part b;
+ * api/crud_agent_transcripts.py, api/crud_agent_events.py; sessions/crudTranscripts.ts,
+ * sessions/crudEvents.ts).
+ */
+export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'] as const
+
+/**
+ * The area of the /mcp session relay's directory and messages (#5299 step 11; backend
+ * api/crud_agent_mcp.py; mcp/relayRows.ts).
+ */
+export const RELAY_AREAS = ['mcp-relay'] as const
+
+/**
+ * The NOTIFYs sent outside a store's write (a `session.*` bus event, a warm eviction) and a
+ * session's last event reads (its open calls, a child's reasoning) (#6501; backend
+ * api/crud_agent_publish.py; sessions/publish.ts, sessions/sessionReads.ts).
+ */
+export const REST_AREAS = ['publish', 'session-reads'] as const
+
+/**
+ * The areas of a durable turn's writes of its session's row, each with its events in one
+ * transaction and its fence checked there (`session-turns`), and of an edit of a session with its
+ * events (`session-edits`) (#6449; backend api/crud_agent_turns.py, api/crud_agent_edits.py;
+ * sessions/turnRows.ts, sessions/edits.ts).
+ */
+export const TURN_AREAS = ['session-turns', 'session-edits'] as const
+
+/**
+ * What the agent read at its start and per request (#6501; backend api/crud_agent_start.py):
+ * the ledger of its migrations (db/schema.ts `crudLedger`) and a signed-in person's session
+ * (auth/browserSession.ts `CrudSessionLookup`).
+ */
+export const START_AREAS = ['migrations', 'auth-sessions'] as const
+
+/**
+ * Which sessions still have a row, for the pod's directory sweeps, and a forget's last rows
+ * (#6501; backend api/crud_agent_sweeps.py; sessions/presence.ts, sessions/forget.ts
+ * `CrudForgetRows`).
+ */
+export const SWEEP_AREAS = ['session-sweeps', 'forget-rows'] as const
+
 export type CrudAreasOptions = {
   fetch?: typeof fetch
   /** The areas the agent waits for. */
@@ -39,6 +115,7 @@ export class CrudAreas {
   readonly #firstMs: number
   readonly #maxMs: number
   readonly #listed = new Set<string>()
+  #answering: Promise<boolean> | undefined
   #timer: NodeJS.Timeout | undefined
   #started = false
   #stopped = false
@@ -62,6 +139,23 @@ export class CrudAreas {
   /** Whether every wanted area is served. */
   get complete(): boolean {
     return this.#wanted.every((a) => this.#listed.has(a))
+  }
+
+  /**
+   * Whether the API answers the agent's areas within `timeoutMs`: what health requires besides
+   * the Postgres ping once every area is listed (#6501). One read at a time, shared by every
+   * caller; never throws.
+   */
+  answers(timeoutMs = 2_000): Promise<boolean> {
+    this.#answering ??= crudRead<unknown>(this.#fetch, this.#base, 'its areas', '/areas', { timeoutMs })
+      .then(
+        () => true,
+        () => false,
+      )
+      .finally(() => {
+        this.#answering = undefined
+      })
+    return this.#answering
   }
 
   /** Reads the areas until every wanted one is listed, in the background; never throws. */

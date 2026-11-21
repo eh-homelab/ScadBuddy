@@ -1,6 +1,7 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
+import type { SessionPresence } from '../sessions/presence.js'
 import { toolOffReason } from '../access/items.js'
 import { BUILTIN_SOURCES, packageServerSource } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
@@ -17,7 +18,7 @@ import {
   httpTierOf,
   type SavedBodies,
 } from '../harness/httpRequest.js'
-import { PgHttpBodies } from '../sessions/httpBodies.js'
+import { type HttpBodiesFor, pgHttpBodies } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -25,7 +26,7 @@ import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.
 import { type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
-import type { SessionFiles } from '../workspace/store.js'
+import type { WorkspaceFiles } from '../workspace/store.js'
 import { localPackageServers, switchedOffServer } from './packageServers.js'
 import { connectHttp, connectInProcess, type TurnContext, type TurnServer, type TurnServers } from './turnTools.js'
 
@@ -62,15 +63,13 @@ export async function removeTurnDir(root: string, subject: string): Promise<void
  * before #2374 wrote: each replica keeps its own (the server is pinned), so each sweeps
  * its own, whichever pod the session was forgotten on.
  */
-export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): Promise<string[]> {
+export async function sweepTurnDirs(root: string, presence: SessionPresence, now = Date.now()): Promise<string[]> {
   const names = await readdir(root).catch((err: NodeJS.ErrnoException) => {
     if (err.code === 'ENOENT') return [] as string[]
     throw err
   })
   const sessions = names.filter((n) => UUID.test(n))
-  const live = new Set(
-    sessions.length ? (await sql<{ id: string }[]>`SELECT id::text FROM ai_sessions WHERE id = ANY(${sessions}::uuid[])`).map((r) => r.id) : [],
-  )
+  const live = await presence.live(sessions)
   const removed: string[] = []
   for (const name of names) {
     const dir = path.join(root, name)
@@ -115,7 +114,9 @@ export type TurnServerDeps = {
         resolve?: Resolver
         limits?: Partial<HttpLimits>
         /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a classic turn's. */
-        files?: SessionFiles | undefined
+        files?: WorkspaceFiles | undefined
+        /** A session's saved bodies (`PgHttpBodies` on `sql` when omitted). */
+        bodies?: HttpBodiesFor | undefined
       }
     | undefined
   /** The enabled plugin packages (`loadPackagesForRun`, as a turn's): their MCP servers offered as turn tools. */
@@ -202,7 +203,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         const saveDir = path.join(http.saveRoot, context.session, 'http')
         await mkdir(saveDir, { recursive: true })
         saved = dirBodies(saveDir)
-      } else saved = new PgHttpBodies(http.sql, context.session)
+      } else saved = (http.bodies ?? pgHttpBodies(http.sql))(context.session)
       servers.push({
         name: HTTP_SERVER,
         connect: () =>

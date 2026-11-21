@@ -7,7 +7,7 @@ import { kekFromBase64, SealError } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { payloadKeyLock, SubjectForgotten } from '../src/temporal/payloadCodec.js'
 import { BackendWorkspaceBlobs, WORKSPACE_BLOB_REFS, WORKSPACE_BLOBS } from '../src/workspace/blobs.js'
-import { rewrapWorkspaceKeys, WorkspaceSealing } from '../src/workspace/sealing.js'
+import { WorkspaceSealing } from '../src/workspace/sealing.js'
 import { SessionFiles, sha256, type WorkspaceRef } from '../src/workspace/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -151,7 +151,6 @@ class FakeBackend {
 }
 
 const kek = kekFromBase64(Buffer.alloc(32, 9).toString('base64'))
-const nextKek = kekFromBase64(Buffer.alloc(32, 10).toString('base64'))
 
 describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let db: Database
@@ -315,15 +314,14 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     expect(await holders()).toEqual([])
   })
 
-  it("seals a principal's file under the KEK, re-wrapped at a rotation", async () => {
+  // The API re-wraps a principal's file keys at a rotation (#5299 step 7, backend
+  // agent_data/workspace.py `rewrap`, tests/crud/test_crud_agent_workspace.py).
+  it("seals a principal's file under the KEK", async () => {
     const principal: WorkspaceRef = { kind: 'principal', principalKind: 'bearer', principalId: 'token:t1' }
     await files.write(principal, 'p.txt', Buffer.from('mine'))
     expect((await row('p.txt', 'principal:bearer:token:t1'))?.key_kek_id).toBe(kek.id)
-    expect(await rewrapWorkspaceKeys(db.sql, kek, nextKek)).toEqual({ rewrapped: 1, failed: 0 })
-    expect((await row('p.txt', 'principal:bearer:token:t1'))?.key_kek_id).toBe(nextKek.id)
-    const rotated = filesWith({ fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB }, nextKek)
-    expect((await rotated.read(principal, 'p.txt'))?.bytes.toString()).toBe('mine')
-    await rotated.sweep(0)
+    expect((await files.read(principal, 'p.txt'))?.bytes.toString()).toBe('mine')
+    await files.sweep(0)
     expect(await holders()).toEqual([])
   })
 
@@ -472,6 +470,10 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
   describe('review of 10b6be073', () => {
     it("deletes a failed fork's row under its key's lock, so no key creation reads it as standing", async () => {
       const { session: child } = await m.start(browser, { origin: 'chat' })
+      // A failed fork has no log of its own (its events are written only once it is whole), and a
+      // discard deletes only such a row (#5299 step 9: never a session with a log).
+      await db.sql`DELETE FROM ai_session_events WHERE session_id = ${child.id}`
+      await db.sql`UPDATE ai_sessions SET event_seq = 0 WHERE id = ${child.id}`
       const subject = `session-${child.id}`
       let release!: () => void
       const held = new Promise<void>((resolve) => (release = resolve))

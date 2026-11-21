@@ -127,9 +127,9 @@ export const storefrontTools: Tool[] = [
             colours: listing.colours,
             media_ids: sellMedia(record.media ?? []),
             // #6258, #6302 review: the materials of the filaments it offers, so a design of a material
-            // the shop's default (`storefront_materials`) leaves out still publishes. A listing's
-            // materials have no back-office control yet: they are set through the API, and an
-            // empty list means the shop's default.
+            // the shop's default (`storefront_materials`) leaves out still publishes. The listing
+            // editor's "Materials allowed" changes them later, and an empty list means the shop's
+            // default (Settings → Storefront pricing → Storefront materials).
             materials: draftMaterials(listing.colours, filaments),
           },
         }),

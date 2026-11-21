@@ -37,13 +37,15 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import LifecycleError, SubmitInput
-from scadbuddy.orders.models import Order
+from scadbuddy.orders.models import Order, OrderItem
 from scadbuddy.orders.storefront.accounts import Account
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
+from scadbuddy.orders.storefront.line_prices import reprice
 from scadbuddy.orders.storefront.listings import problem
 from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import SubmitBody, SubmittedOrder
+from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.credentials import KekMissingError
 from scadbuddy.storefront.wire import ITEM_ID
 
@@ -54,6 +56,24 @@ if TYPE_CHECKING:
 SUBMIT_ROUTE: Final = "POST /storefront/draft/submit"
 #: A cart that holds a refused file (#6133).
 MODEL_FILE_REFUSED: Final = "model_file_refused"
+#: A cart whose firm prices changed since the page read it (#6153).
+PRICES_CHANGED: Final = "prices_changed"
+
+
+def _cart_items(state: AppState, visitor_id: str, body: SubmitBody) -> list[OrderItem]:
+    """The items of the visitor's cart ``body.draft_id``, or none when it is not the
+    visitor's unsubmitted cart (`Lifecycle.submit_order` refuses it then). Blocking."""
+    orders: OrdersComponent = state.components.get(ORDERS)
+    visitor = VisitorStore(state.projection.pool).find(visitor_id)
+    order = orders.store.order(body.draft_id)
+    if (
+        visitor is None
+        or order is None
+        or order.storefront_visitor_id != visitor.id
+        or not order.unsubmitted
+    ):
+        return []
+    return orders.store.items(order.id)
 
 
 def draft_not_found() -> ApiError:
@@ -120,8 +140,15 @@ async def submit_draft(
 ) -> SubmittedOrder:
     """The visitor's cart ``body.draft_id`` submitted (`Lifecycle.submit_order`). A retry
     of a committed submit (the same key) answers its reply and does nothing else.
+    Each listing line is priced again first (`line_prices.reprice`, #6153): a line whose
+    firm price changed, came or went is 409 ``prices_changed`` (``items``: each line's
+    ``id`` and its ``price`` now, ``firm`` or ``by_hand``), and the page shows the cart
+    again before the customer sends it; a line with no price then goes to the shop's
+    check. When every line is firm, the
+    order is accepted and its balance request opens (``pay_now``).
     Refusals: 404 ``draft_not_found``, 409 ``order_submitted``, 409 ``draft_empty``, 409
-    ``shipping_address_required``, 409 ``model_file_refused`` (#6133), 422
+    ``shipping_address_required``, 409 ``model_file_refused`` (#6133), 409
+    ``prices_changed`` (#6153), 422
     ``shipping_option_id``, 422 ``email_invalid``,
     503 ``submit_unavailable`` (no KEK to seal the link with)."""
     orders: OrdersComponent = state.components.get(ORDERS)
@@ -140,6 +167,15 @@ async def submit_draft(
         return SubmittedOrder.model_validate(reply.body)
     if ITEM_ID.fullmatch(body.draft_id) is None:
         raise draft_not_found()
+    # Each line priced again by its variant's key (#6153), never by the browser.
+    repriced = await reprice(state, await asyncio.to_thread(_cart_items, state, visitor_id, body))
+    if repriced.told:
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            PRICES_CHANGED,
+            "Some prices changed. Check your order, then send it again.",
+            items=[line.model_dump() for line in repriced.told],
+        )
     entry = SubmitInput(
         **body.model_dump(exclude={"draft_id"}),
         account_id=None if account is None else account.id,
@@ -150,30 +186,39 @@ async def submit_draft(
         if visitor is None:
             raise draft_not_found()
         by = visitor_actor(visitor)
-        changes: list[Order] = []
+        changes: list[tuple[Order, list[OrderItem]]] = []
 
         def submit(conn: Any) -> Replay:
             _no_refused_file(conn, body.draft_id, visitor.id)
             order, _token = orders.lifecycle.submit_order(
-                body.draft_id, entry, by, cart_of=visitor.id, conn=conn
+                body.draft_id, entry, by, cart_of=visitor.id, conn=conn, firm=repriced.firm
             )
-            changes.append(order)
+            changes.append((order, orders.store.items(order.id, conn=conn)))
             assert order.number is not None
             # The address the link was mailed to: `submit_order` checked it the same way.
             sent_to = check_address(entry.email)
-            answer = SubmittedOrder(id=order.id, number=order.number, email=sent_to)
+            answer = SubmittedOrder(
+                id=order.id,
+                number=order.number,
+                email=sent_to,
+                pay_now=order.status == "accepted",
+            )
             return Replay(200, answer.model_dump(mode="json"))
 
         with state.projection.pool.connection() as conn:
             done = idempotent_write(
                 conn, "storefront", key, SUBMIT_ROUTE, asked, lambda: submit(conn)
             )
-        for order in changes:
-            orders.lifecycle.told(order)
+        for order, items in changes:
+            orders.lifecycle.told(order, items)
         return done
 
     try:
-        reply = await asyncio.to_thread(write)
+        # A checkout of firm lines accepts the order, which opens its balance request
+        # and cancels the deposit's: their pages are linked and closed after the commit.
+        reply = await state.components.get(PAYMENTS).service.run_closing_linked(
+            body.draft_id, write
+        )
     except LifecycleError as error:
         raise _refusal(error) from None
     except EmailInvalidError:
