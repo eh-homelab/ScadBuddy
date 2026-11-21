@@ -983,6 +983,8 @@ class _Planner:
         if self.refused(kind, item.sb_id, create=False):
             self.unsure.add(key)
             return
+        # `take` walks phase 0 first, in insertion order, and nothing leaves phase 0, so its
+        # length is the count of probes already planned (R-6688-9). A reorder breaks the cap.
         if len(self.phases[0]) >= self.limit:
             self.capped.add(key)
             self.deferred.add(key)
