@@ -1,5 +1,6 @@
-# The profile-fetch worker's AppArmor profile (eh-homelab/ScadBuddy#6779).
-# Its Chromium loads untrusted web pages, and Chromium's own sandbox stays on.
+# The profile-fetch browser service's AppArmor profile (eh-homelab/ScadBuddy#6779,
+# #6780). Its Chromium loads untrusted web pages, and Chromium's own sandbox stays
+# on. The worker runs no browser and keeps the runtime's default.
 # apparmor-loader.yaml loads it on every amd64 node. The source is ScadBuddy
 # deploy/security/apparmor/scadbuddy-profile-fetch (the same bytes).
 #
