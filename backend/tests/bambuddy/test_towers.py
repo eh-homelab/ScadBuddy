@@ -412,24 +412,24 @@ def _relative(payload: bytes, index: int, count: int = 2) -> Rect:
     return Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
 
 
-def test_objects_every_extruder_reaches_keep_their_place(tmp_path: Path) -> None:
+#: The H2C's reach (x 25..325, y 0..320) centres a 30 mm box here.
+_CENTRED_ON_THE_H2C = Rect(160, 145, 190, 175)
+
+
+def test_a_smaller_beds_plates_are_centred_where_every_extruder_reaches(
+    tmp_path: Path,
+) -> None:
+    """Bambu Studio's Adapt Settings: a file from another bed size moves each plate's
+    content so its centre is on the new plate's centre. Here the centre is that of the
+    area every extruder reaches, so an A1 mini plate lands at (175, 160) on the H2C,
+    also when it was in reach already. Every other entry keeps its bytes."""
     payload = _laid_out_on_an_a1_mini(tmp_path)
-    assert objects_within_reach(payload, H2C) is payload
-
-
-def test_objects_only_one_extruder_reaches_move_where_both_reach(tmp_path: Path) -> None:
-    """#6820: library copy 1000001621's spool lay at x 0..180, where its author put it
-    on an A1 mini, and the H2C's right nozzle reaches only x 25..330: "Found G-code in
-    unprintable area", T65535. The same file with the plate's objects at x 75..255
-    sliced on the right extruder (measured 2026-11-20, BambuStudio 02.08.02.61). The
-    group moves the least that brings it inside x 25..325; plate 2 stays."""
-    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
-    assert _relative(payload, 1) == Rect(0, 75, 30, 105)
+    assert _relative(payload, 1) == Rect(75, 75, 105, 105)
 
     moved = objects_within_reach(payload, H2C)
 
-    assert _relative(moved, 1) == Rect(25, 75, 55, 105)
-    assert _relative(moved, 2) == _relative(payload, 2)
+    assert _relative(moved, 1) == _CENTRED_ON_THE_H2C
+    assert _relative(moved, 2) == _CENTRED_ON_THE_H2C
     with (
         zipfile.ZipFile(io.BytesIO(payload)) as before,
         zipfile.ZipFile(io.BytesIO(moved)) as after,
@@ -439,13 +439,52 @@ def test_objects_only_one_extruder_reaches_move_where_both_reach(tmp_path: Path)
             if name != ROOT_MODEL_NAME:
                 assert after.read(name) == before.read(name), name
         model = after.read(ROOT_MODEL_NAME).decode()
-    assert 'objectid="5" transform="1 0 0 0 1 0 0 0 1 40 90 10"' in model
-    assert 'objectid="6" transform="1 0 0 0 1 0 0 0 1 306 90 10"' in model
+    assert 'objectid="5" transform="1 0 0 0 1 0 0 0 1 175 160 10"' in model
+    assert 'objectid="6" transform="1 0 0 0 1 0 0 0 1 391 160 10"' in model
 
 
-def test_objects_past_the_far_side_move_back_inside(tmp_path: Path) -> None:
-    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 310)
-    assert _relative(objects_within_reach(payload, H2C), 1) == Rect(295, 75, 325, 105)
+def test_objects_only_one_extruder_reaches_move_where_both_reach(tmp_path: Path) -> None:
+    """#6820: library copy 1000001621's spool lay at x 0..180, where its author put it
+    on an A1 mini, and the H2C's right nozzle reaches only x 25..330: "Found G-code in
+    unprintable area", T65535. The same file with the plate's objects at x 75..255
+    sliced on the right extruder (measured 2026-11-20, BambuStudio 02.08.02.61)."""
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    assert _relative(payload, 1) == Rect(0, 75, 30, 105)
+    assert _relative(objects_within_reach(payload, H2C), 1) == _CENTRED_ON_THE_H2C
+
+
+def _h2c_plate_at(payload: bytes, x: float) -> bytes:
+    """An H2C file's one plate moved so that its 30 mm box starts at ``x``."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        model = archive.read(ROOT_MODEL_NAME).decode()
+    moved = model.replace(
+        'transform="1 0 0 0 1 0 0 0 1 175 160 10"',
+        f'transform="1 0 0 0 1 0 0 0 1 {x + 15:g} 160 10"',
+    )
+    assert moved != model
+    return rezipped(payload, {ROOT_MODEL_NAME: moved.encode()})
+
+
+def _h2c_box(payload: bytes) -> Rect:
+    low, high = plate_boxes(payload).boxes[1]
+    return Rect(float(low[0]), float(low[1]), float(high[0]), float(high[1]))
+
+
+def test_objects_on_a_bed_of_the_same_size_keep_their_place_in_reach(tmp_path: Path) -> None:
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "20"))
+    assert objects_within_reach(payload, H2C) is payload
+    beside = _h2c_plate_at(payload, 40)
+    assert objects_within_reach(beside, H2C) is beside
+
+
+def test_objects_on_a_bed_of_the_same_size_move_the_least_into_reach(tmp_path: Path) -> None:
+    """The bed is the target's, so the author placed the objects for it: only a group
+    that not every extruder reaches moves, by the smallest shift."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "20"))
+    left = _h2c_plate_at(payload, 0)
+    assert _h2c_box(objects_within_reach(left, H2C)) == Rect(25, 145, 55, 175)
+    right = _h2c_plate_at(payload, 310)
+    assert _h2c_box(objects_within_reach(right, H2C)) == Rect(295, 145, 325, 175)
 
 
 def test_the_tower_is_placed_beside_the_moved_objects(tmp_path: Path) -> None:

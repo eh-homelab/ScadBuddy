@@ -634,13 +634,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   replaces the file's own process keys, `enable_support`, `support_filament` and
   `support_interface_filament` among them; the supports option passes only enable, type and
   build-plate-only (`supports.py` `SCALAR_KEYS`). An author layout (`render/bambu3mf.py`
-  `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its scale,
-  and its placement unless a plate's objects lie where not every extruder reaches: then
-  they move as one group, by translation only, to where every extruder reaches, when they
-  fit there (`objects_within_reach`, #6820). An A1 mini layout at x 0..180 failed on the
-  H2C, whose right nozzle reaches x 25..330, with "Found G-code in unprintable area" and
-  T65535; the same file moved to x 75..255 sliced (measured 2026-11-20, BambuStudio
-  02.08.02.61). It keeps its tower unless the target's extruders cannot reach it, it stands on
+  `layout_of`: a `print_settings_id` other than ScadBuddy's placeholder) keeps its scale.
+  Each plate's objects move as one group, by translation only, as Bambu Studio's "Adapt
+  Settings" moves them
+  ([`update_objects_position_when_select_preset`](https://github.com/bambulab/BambuStudio/blob/8e524a39d4c4cd0541801c1c46d2f77debb0bf1d/src/slic3r/GUI/Plater.cpp#L20417)):
+  when the file's bed is another size, their box is centred on the area every extruder
+  reaches (`PlateGeometry.usable`); on a bed of the same size, only a box outside that
+  area moves, by the smallest shift; a box that does not fit keeps its place, where Bambu
+  Studio re-arranges it (`objects_within_reach`, #6820). An A1 mini layout at x 0..180
+  failed on the H2C, whose right nozzle reaches x 25..330, with "Found G-code in
+  unprintable area" and T65535; the same file moved to x 75..255 sliced (measured
+  2026-11-20, BambuStudio 02.08.02.61). It keeps its tower unless the target's extruders cannot reach it, it stands on
   its plate's objects' box (#3770), or the file states "No sparse layers" and the tower is
   inside that keep-out of them (#6735); the tower is judged at the size the slice builds,
   `tower_footprint` with the file's filaments and rib wall (`towers_within_reach`, in

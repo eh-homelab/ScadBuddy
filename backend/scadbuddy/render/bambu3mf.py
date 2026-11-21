@@ -2433,9 +2433,9 @@ def hint_painted_slots(payload: bytes) -> bytes:
 
 #: Who laid a 3MF out, which decides how a print lays it out for the printer (#1752):
 #: ``scadbuddy`` is re-placed for the printer's plate (:func:`replate_3mf`), ``author``
-#: keeps its placement, except objects that not every extruder reaches (``send``
-#: ``objects_within_reach``, #6820), and states the nozzles (:func:`state_nozzles`), and
-#: ``as_is`` is sliced as it stands.
+#: keeps its plates, each moved as one group as Bambu Studio adapts a project made for
+#: another printer (``send`` ``objects_within_reach``, #6820), and states the nozzles
+#: (:func:`state_nozzles`), and ``as_is`` is sliced as it stands.
 Layout = Literal["scadbuddy", "author", "as_is"]
 
 

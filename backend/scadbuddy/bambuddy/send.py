@@ -451,10 +451,12 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     written at render time, when no printer was chosen, so the plate it carries is the
     fallback. Moving it now is what puts the object — and the prime tower a
     multi-colour print needs — where every extruder can reach them. An author's file
-    keeps every plate it lays out and its scale. Its placement stays too, except that a
-    plate's objects that not every extruder reaches move as one group to where every
-    extruder does, when they fit there (:func:`objects_within_reach`, #6820), and its
-    towers then move as :func:`towers_within_reach` says. The nozzles and colours are
+    keeps every plate it lays out and its scale. Each plate's objects move as one group,
+    as Bambu Studio adapts a project made for another printer: centred where every
+    extruder reaches when the file's bed is another size, else only when not every
+    extruder reaches them, and never when they do not fit there
+    (:func:`objects_within_reach`, #6820). Its towers then move as
+    :func:`towers_within_reach` says. The nozzles and colours are
     stated (:func:`state_nozzles`), and its covers redrawn in those colours
     (:func:`_recoloured_covers`, #6170). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
@@ -629,26 +631,52 @@ def _inside(low: float, high: float, start: float, end: float) -> float | None:
     return 0.0
 
 
+#: Bambu Studio's tolerance for "the plate size is unchanged", in millimetres
+#: (:data:`ADAPT_SETTINGS_SOURCE`, ``plate_size_eps``).
+SAME_BED_MM = 0.1
+
+#: Bambu Studio's rule for a project opened on another printer ("Adapt Settings"):
+#: ``Plater::priv::update_objects_position_when_select_preset`` at master 8e524a3.
+ADAPT_SETTINGS_SOURCE = (
+    "https://github.com/bambulab/BambuStudio/blob/8e524a39d4c4cd0541801c1c46d2f77debb0bf1d"
+    "/src/slic3r/GUI/Plater.cpp#L20417"
+)
+
+
 def objects_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
-    """``payload`` with each plate's objects moved, as one group, into the area every
-    extruder of ``plate`` reaches (``PlateGeometry.usable``), when their box lies
-    outside it but fits inside it; else unchanged (#6820). The move is the least
-    translation that does it: no rotation, no scale, and the objects keep their places
-    relative to each other. Only that plate's build items move
+    """``payload`` with each plate's objects moved, as one group, where every extruder
+    of ``plate`` reaches (``PlateGeometry.usable``), as Bambu Studio adapts a project
+    made for another printer (:data:`ADAPT_SETTINGS_SOURCE`, #6820). The move is a
+    translation only: no rotation, no scale, and the objects keep their places relative
+    to each other. Only that plate's build items move
     (:func:`~scadbuddy.render.objects3mf.plates_moved`), and every other entry keeps its
     bytes.
 
-    An author lays a file out for their own printer. Library copy 1000001621 put its
-    spool at x 0..180 on an A1 mini, and an H2C's right nozzle reaches only x 25..330, so
-    the slicer moved the filament to the left nozzle, which had none: "Found G-code in
-    unprintable area", T65535. The same file with the plate's objects at x 75..255
-    sliced on the right nozzle (measured 2026-11-20 with the prod slicer pod's
-    BambuStudio 02.08.02.61). The ``<assemble_item>`` transforms in
-    ``model_settings.config`` are not changed: they place the objects in Bambu Studio's
-    assembly view, not on a plate. A plate whose objects do not fit keeps its place, and
-    the slicer says why; so does a file that cannot be read within the read budget, or
-    one sent with no printer chosen. The objects are read as :func:`towers_within_reach`
-    reads them, less their plate's origin on the file's own bed."""
+    - The file's bed (:func:`_source_bed`) differs from ``plate.size`` by more than
+      :data:`SAME_BED_MM`: each plate's box is centred on ``usable``'s centre, whether
+      or not it was in reach. Bambu Studio centres the plate's content on the new
+      plate's centre; here the centre is that of the area every extruder reaches, which
+      is the bed on a single-extruder printer.
+    - The beds are the same size: the author placed the objects for this bed, so only a
+      box outside ``usable`` moves, by the smallest shift that brings it inside.
+    - A box wider or deeper than ``usable`` keeps its place. Bambu Studio re-arranges
+      such content (its ``reschedule_set``, an ArrangeJob); ScadBuddy does not yet, and
+      the slicer says why it fails.
+
+    The prime tower is not moved here. :func:`towers_within_reach` then judges it on the
+    moved boxes, where Bambu Studio moves it with the content.
+
+    The measurement behind it: library copy 1000001621 put its spool at x 0..180 on an
+    A1 mini, and an H2C's right nozzle reaches only x 25..330, so the slicer moved the
+    filament to the left nozzle, which had none: "Found G-code in unprintable area",
+    T65535. The same file with the plate's objects at x 75..255 sliced on the right
+    nozzle (measured 2026-11-20 with the prod slicer pod's BambuStudio 02.08.02.61).
+
+    The ``<assemble_item>`` transforms in ``model_settings.config`` are not changed:
+    they place the objects in Bambu Studio's assembly view, not on a plate. A file that
+    cannot be read within the read budget, or one sent with no printer chosen, keeps its
+    placement. The objects are read as :func:`towers_within_reach` reads them, less
+    their plate's origin on the file's own bed."""
     if plate.model is None:
         return payload  # no printer chosen: nothing to judge the objects against
     try:
@@ -669,14 +697,23 @@ def objects_within_reach(payload: bytes, plate: PlateGeometry) -> bytes:
         model=None, size=bed, usable=Rect(0, 0, *bed), exclusions=(), extruders=1, height=0
     )
     usable = plate.usable
+    same_bed = (
+        abs(bed[0] - plate.size[0]) <= SAME_BED_MM and abs(bed[1] - plate.size[1]) <= SAME_BED_MM
+    )
     moves: dict[int, tuple[float, float]] = {}
     for index, (low, high) in read.boxes.items():
         if index > read.count:
             continue
         ox, oy = plate_origin(index, read.count, source)
-        dx = _inside(float(low[0] - ox), float(high[0] - ox), usable.min_x, usable.max_x)
-        dy = _inside(float(low[1] - oy), float(high[1] - oy), usable.min_y, usable.max_y)
-        if dx is None or dy is None or (dx == 0 and dy == 0):
+        box = Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
+        dx = _inside(box.min_x, box.max_x, usable.min_x, usable.max_x)
+        dy = _inside(box.min_y, box.max_y, usable.min_y, usable.max_y)
+        if dx is None or dy is None:
+            continue  # it does not fit: Bambu Studio re-arranges it, ScadBuddy not yet
+        if not same_bed:
+            dx = usable.centre[0] - box.centre[0]
+            dy = usable.centre[1] - box.centre[1]
+        if dx == 0 and dy == 0:
             continue
         moves[index] = (dx, dy)
     if not moves:
