@@ -4,6 +4,7 @@ import { getInventory } from '../../api/filament'
 import type { FilamentInventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
 import { spoolColour, spoolName, spoolValue } from '../../lib/filamentColour'
+import { readPickerFilters, writePickerFilters, type PickerFilters } from '../../lib/filamentPickerFilters'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Button } from '@/components/ui/button'
@@ -15,32 +16,6 @@ type State =
   | { kind: 'loading' }
   | { kind: 'failed'; message: string }
   | { kind: 'open'; spools: FilamentInventorySpool[] }
-
-/** The list's filters, remembered in this browser. A material no spool has reads as all. */
-type Filters = { material: string | null; loadedOnly: boolean }
-const FILTERS_KEY = 'scadbuddy.colourPicker.filters'
-const NO_FILTERS: Filters = { material: null, loadedOnly: false }
-
-function readFilters(): Filters {
-  try {
-    const raw: unknown = JSON.parse(localStorage.getItem(FILTERS_KEY) ?? 'null')
-    if (raw && typeof raw === 'object') {
-      const { material, loadedOnly } = raw as Record<string, unknown>
-      return { material: typeof material === 'string' ? material : null, loadedOnly: loadedOnly === true }
-    }
-  } catch {
-    // Blocked or broken storage: start with no filters.
-  }
-  return NO_FILTERS
-}
-
-function writeFilters(filters: Filters) {
-  try {
-    localStorage.setItem(FILTERS_KEY, JSON.stringify(filters))
-  } catch {
-    // Blocked storage: the choice lasts until the list closes.
-  }
-}
 
 const materialOf = (row: FilamentInventorySpool) => row.spool.names?.material ?? null
 
@@ -72,11 +47,11 @@ export function FilamentColourPicker({
   onPick: (hex: string, value: string) => void
 }) {
   const [state, setState] = useState<State>({ kind: 'loading' })
-  const [filters, setFilters] = useState<Filters>(readFilters)
-  const setFilter = (next: Partial<Filters>) => {
+  const [filters, setFilters] = useState<PickerFilters>(readPickerFilters)
+  const setFilter = (next: Partial<PickerFilters>) => {
     const merged = { ...filters, ...next }
     setFilters(merged)
-    writeFilters(merged)
+    writePickerFilters(merged)
   }
   // Each mount is one read; closing the popover unmounts the list, so a late answer
   // never lands anywhere.

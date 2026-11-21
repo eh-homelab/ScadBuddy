@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router'
 import { tabsListVariants } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
+import { FilamentQuickFind } from '../../components/filament/FilamentQuickFind'
 import { CatalogTab } from './CatalogTab'
 import { LedgerTab } from './LedgerTab'
 import { InvoicesTab } from './InvoicesTab'
@@ -39,14 +40,18 @@ const INTRO: Record<TabId, string> = {
 /**
  * #6262 — the Filament section (`/filament/<tab>`, spec §10): ScadBuddy's own spools and
  * what describes them, one tab per page. Only the available tabs (`tabs.ts`) are shown.
+ * Every tab has the quick find over the spools and types (#6894, `FilamentQuickFind`).
  */
 export function FilamentPage({ tab }: { tab: TabId }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
-        <div className="mb-4">
-          <h1 className="text-lg font-semibold tracking-tight">Filament</h1>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">{INTRO[tab]}</p>
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h1 className="text-lg font-semibold tracking-tight">Filament</h1>
+            <p className="mt-0.5 text-[13px] text-muted-foreground">{INTRO[tab]}</p>
+          </div>
+          <FilamentQuickFind />
         </div>
         <nav aria-label="Filament" className={cn(tabsListVariants(), 'mb-4 h-9 max-w-full justify-start overflow-x-auto')}>
           {FILAMENT_TABS.filter((one) => one.available).map((one) => (
