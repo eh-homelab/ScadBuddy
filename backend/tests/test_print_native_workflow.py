@@ -58,6 +58,7 @@ from scadbuddy.workflows.print_models import (
     SlicedUploadInput,
     SliceRunInput,
     SourceSpec,
+    SucceedInput,
     lan_sequence_id,
 )
 from scadbuddy.workflows.printing import LanSequenceWorkflow, PrintRunWorkflow
@@ -233,6 +234,10 @@ class NativeFake(Fake):
         self.holds_for: list[str | None] = []
         #: The failures the next `slice_run` calls raise, in turn (#6736).
         self.slice_failures: list[ApplicationError] = []
+        #: The plan's `lan_queue_when_busy` (#6871); off, as a plan from before it.
+        self.queue_when_busy = False
+        #: Each result `print_succeed` recorded, in order (#6871).
+        self.succeeded: list[PrintRunResult] = []
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
@@ -260,6 +265,7 @@ class NativeFake(Fake):
             rack_position=self.rack_position,
             has_rack=True,
             plate_clear=self.plate_clear,
+            queue_when_busy=self.queue_when_busy,
         )
 
     @activity.defn(name=SLICE_RUN_ACTIVITY)
@@ -278,6 +284,11 @@ class NativeFake(Fake):
         self.calls.append("finish")
         lan = [outcome.lan for outcome in input.outcomes if outcome.lan is not None]
         return PrintRunResult(library_file_id=41, copies=self.copies, path="native", lan=lan)
+
+    @activity.defn(name="print_succeed")
+    async def succeed(self, input: SucceedInput) -> PrintRun:
+        self.succeeded.append(input.result)
+        return await super().succeed(input)
 
     @activity.defn(name=PRINT_LAN_UPDATE_ACTIVITY)
     async def lan_update(self, input: LanUpdateInput) -> PrintRun:
@@ -335,6 +346,18 @@ class FakeReports:
         return dict(self.fake_lan.printer.state), datetime.now(UTC)
 
 
+class Places:
+    """The runs a queued run is placed after (#6871): ``place`` for every run."""
+
+    def __init__(self, place: int = 1) -> None:
+        self.place = place
+        self.asked: list[tuple[str, str]] = []
+
+    async def queue_place(self, printer: str, run_id: str) -> int:
+        self.asked.append((printer, run_id))
+        return self.place
+
+
 class Unsure(LanActivities):
     """The real ``lan_print``, answered ``LAN_UNSURE`` for its first ``unsure`` starts
     *after* each ran: a start the printer took whose answer was lost."""
@@ -376,6 +399,8 @@ async def _run(
     slice_keys: list[str] | None = None,
     plate_clear: bool = False,
     slice_failures: list[ApplicationError] | None = None,
+    queue_when_busy: bool = False,
+    places: Places | None = None,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
@@ -390,6 +415,7 @@ async def _run(
     fake.rack_position = rack_position
     fake.rack_algorithm = rack_algorithm
     fake.plate_clear = plate_clear
+    fake.queue_when_busy = queue_when_busy
     deps = LanDeps(
         printers=PrinterStore(pg_pool, KEK),
         # Never read: a native file and a blob need no Bambuddy client.
@@ -400,6 +426,7 @@ async def _run(
         rack=rack,  # type: ignore[arg-type]
         reports=reports,  # type: ignore[arg-type]
         wait_poll=0.2,
+        runs=places or Places(),
     )
     lan = Unsure(deps, unsure)
     arg = PrintRunInput(
@@ -417,7 +444,7 @@ async def _run(
             client,
             task_queue=queue,
             workflows=[PrintRunWorkflow, FollowPrint, LanSequenceWorkflow],
-            activities=[*fake.all(), lan.lan_upload, lan.lan_print, lan.lan_wait],
+            activities=[*fake.all(), *lan.all()],
         ),
         Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
     ):
@@ -426,7 +453,8 @@ async def _run(
             await during(client, arg, fake)
         run = await ended(client, arg)
         stopped = run.result is not None and run.result.lan_stopped is not None
-        if len(fake.plates) * copies > 1 and run.status == "succeeded" and not stopped:
+        waiting = run.result is not None and bool(run.result.lan_waiting)
+        if waiting and run.status == "succeeded" and not stopped:
             # The later copies are the run's `PrintLanSequence`, which outlives it: its
             # last row is the run's as it ends.
             sequence = client.get_workflow_handle(lan_sequence_id(run.id), result_type=PrintRun)
@@ -489,12 +517,14 @@ async def test_native_run_records_print_error(
     client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
 ) -> None:
     """A start the printer refuses (here: a file it no longer has) fails the run with
-    the printer's code, once: no second start."""
+    the printer's code, once: no second start. The refusal is definite (#6871 rulings 3
+    and 4): nothing was queued, and the run says so."""
     fake_lan.printer._missing = lambda path: "the file is gone"
-    fake, run = await _run(client, pg_pool, registry_native, blobs=Blobs())
-    assert run.status == "failed"
+    fake, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), queue_when_busy=True)
+    assert run.status == "failed" and not run.may_have_queued
     error = run.error
-    assert error is not None and "refused the print" in error.detail
+    assert error is not None and "refused the print: the file is gone." in error.detail
+    assert "Nothing was sent to print" in error.detail
     assert len(fake_lan.project_files()) == 1
     assert fake.outcomes == []
 
@@ -1023,3 +1053,183 @@ async def test_a_stop_while_it_waits_for_a_clear_stops_the_rest(
     assert result is not None and result.lan_waiting == [1]
     assert result.lan_stopped is not None and result.lan_stopped.stage == "cancelled"
     assert not result.lan_awaiting_clear
+
+
+#: Another print the printer runs (#6871): Bambuddy's queue started it, or a person.
+THEIRS = "Bambu Refill spool"
+
+
+def busy(fake_lan: FakeLan, state: str = "RUNNING") -> None:
+    """The fake printer reporting another print in ``state``, as the H2C did at 15:04
+    UTC on 2026-11-21 (#6871)."""
+    fake_lan.printer.state.update(gcode_state=state, subtask_name=THEIRS, print_error=0)
+
+
+async def _queued(fake: NativeFake) -> PrintRunResult:
+    """The result the run succeeded with, once it has."""
+    async with asyncio.timeout(60):
+        while not fake.succeeded:
+            await asyncio.sleep(0.1)
+    return fake.succeeded[0]
+
+
+async def test_a_busy_printer_queues_the_print_and_starts_it_once_free_and_cleared(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6871 rulings 1 and 2: the run reads the printer before it uploads. Busy, it sends
+    nothing and succeeds queued, with its place; once the print it waits for ends and
+    someone says the plate is clear, it uploads and starts."""
+    busy(fake_lan)
+    seen: dict[str, Any] = {}
+
+    async def free_then_clear(client: Client, arg: PrintRunInput, fake: NativeFake) -> None:
+        seen["queued"] = await _queued(fake)
+        seen["sent_while_busy"] = (fake_lan.received()["ftps"], fake_lan.project_files())
+        fake_lan.printer.state.update(gcode_state="FINISH")
+        await _awaiting_clear(fake)
+        seen["sent_before_clear"] = len(fake_lan.project_files())
+        await client.get_workflow_handle(lan_sequence_id("run-1")).signal(PLATE_CLEARED_SIGNAL, 0)
+
+    places = Places(place=2)
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        reports=FakeReports(fake_lan),
+        queue_when_busy=True,
+        places=places,
+        during=free_then_clear,
+    )
+    queued: PrintRunResult = seen["queued"]
+    assert queued.lan == [] and queued.lan_waiting == [1]
+    assert queued.lan_queued is not None
+    assert (queued.lan_queued.state, queued.lan_queued.place) == ("RUNNING", 2)
+    assert queued.lan_queued.job is not None and queued.lan_queued.job.subtask_name == THEIRS
+    assert places.asked == [(registry_native, "run-1")]
+    assert seen["sent_while_busy"] == ([], [])
+    assert seen["sent_before_clear"] == 0
+    assert run.status == "succeeded"
+    result = run.result
+    assert result is not None and result.lan_waiting == [] and result.lan_stopped is None
+    assert [start.subtask_name for start in result.lan] == ["scadbuddy-run-1-p1"]
+    assert result.lan_queued is None
+    assert len(fake_lan.project_files()) == 1 and fake_lan.received()["refused"] == []
+    # The plate is recorded once, by its start.
+    assert [outcome.lan is not None for outcome in fake.outcomes] == [True]
+    # #6871 review: its first start names the slice and the sliced file, as a run that
+    # started at once does.
+    [outcome] = fake.outcomes
+    assert queued.sliced_library_file_id is None
+    assert outcome.sliced_library_file_id is not None
+    assert (result.slice_job_id, result.sliced_library_file_id) == (
+        outcome.slice_job_id,
+        outcome.sliced_library_file_id,
+    )
+
+
+async def test_a_queued_run_waits_again_when_the_printer_is_busy_once_cleared(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6871: the plate said clear, the run reads the printer again before it uploads; a
+    print started meanwhile is waited out too, and needs its own clear."""
+    busy(fake_lan)
+    sent_meanwhile: list[int] = []
+
+    async def another_print_meanwhile(client: Client, arg: PrintRunInput, fake: NativeFake) -> None:
+        await _queued(fake)
+        sequence = client.get_workflow_handle(lan_sequence_id("run-1"))
+        fake_lan.printer.state.update(gcode_state="FINISH")
+        await _awaiting_clear(fake)
+        fake_lan.printer.state.update(gcode_state="RUNNING", subtask_name="next one")
+        await sequence.signal(PLATE_CLEARED_SIGNAL, 0)
+        await asyncio.sleep(1.5)
+        sent_meanwhile.append(len(fake_lan.project_files()))
+        fake_lan.printer.state.update(gcode_state="FINISH")
+        await _awaiting_clear(fake, 2)
+        await sequence.signal(PLATE_CLEARED_SIGNAL, 0)
+
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        reports=FakeReports(fake_lan),
+        queue_when_busy=True,
+        during=another_print_meanwhile,
+    )
+    assert sent_meanwhile == [0]
+    assert run.status == "succeeded"
+    assert len(fake_lan.project_files()) == 1 and fake_lan.received()["refused"] == []
+    jobs = [
+        update.lan_queued.job.subtask_name
+        for update in fake.updates
+        if update.lan_queued is not None and update.lan_queued.job is not None
+    ]
+    assert jobs[-1] == "next one"
+
+
+async def test_an_idle_printer_starts_at_once_with_the_check_on(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), queue_when_busy=True)
+    assert run.status == "succeeded"
+    result = run.result
+    assert result is not None and result.lan_queued is None and result.lan_waiting == []
+    assert len(fake_lan.project_files()) == 1
+    with pytest.raises(RPCError):
+        await client.get_workflow_handle(lan_sequence_id(run.id)).describe()
+
+
+async def test_a_finished_print_holds_the_run_for_a_clear_when_the_setting_asks(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6871 ruling 1: a printer holding a finished print whose plate must be cleared
+    (``lan_require_plate_clear``) queues the run until someone says it is clear."""
+    busy(fake_lan, "FINISH")
+    seen: dict[str, Any] = {}
+
+    async def clear(client: Client, arg: PrintRunInput, fake: NativeFake) -> None:
+        seen["queued"] = await _queued(fake)
+        await _awaiting_clear(fake)
+        seen["sent"] = len(fake_lan.project_files())
+        await client.get_workflow_handle(lan_sequence_id("run-1")).signal(PLATE_CLEARED_SIGNAL, 0)
+
+    _, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        reports=FakeReports(fake_lan),
+        queue_when_busy=True,
+        plate_clear=True,
+        during=clear,
+    )
+    queued: PrintRunResult = seen["queued"]
+    assert queued.lan_queued is not None and queued.lan_queued.job is None
+    assert seen["sent"] == 0
+    assert run.status == "succeeded" and len(fake_lan.project_files()) == 1
+
+
+async def test_with_the_setting_off_a_busy_printer_refuses_and_nothing_was_sent(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6871 ruling 5: off, the run sends as before and the printer refuses it; ruling
+    4: that refusal is definite, so the run is failed with nothing queued."""
+    busy(fake_lan)
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), queue_when_busy=False)
+    assert run.status == "failed" and not run.may_have_queued
+    error = run.error
+    assert error is not None
+    assert error.detail.startswith("Fake H2C refused the print: ERROR STATE.")
+    assert "Nothing was sent to print" in error.detail
+    assert fake_lan.received()["refused"][0]["reason"] == "ERROR STATE"
+
+
+async def test_a_start_whose_answer_is_lost_every_time_may_have_queued(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6871 ruling 4: an outcome ScadBuddy cannot know (every start's answer lost) is
+    the one that says the print may still be queued."""
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), unsure=3)
+    assert run.status == "failed" and run.may_have_queued

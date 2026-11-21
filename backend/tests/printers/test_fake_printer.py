@@ -285,6 +285,36 @@ async def test_a_stop_fails_the_print(lan: _Lan) -> None:
     assert "FINISH" not in seen
 
 
+async def test_a_start_while_a_print_runs_is_refused_error_state(lan: _Lan) -> None:
+    """#6871, as the H2C answered on 2026-11-21: a ``project_file`` sent while the printer
+    runs a print is refused ``ERROR STATE`` (its HMS said "Device is busy and cannot
+    start new task"), and the print it runs carries on to its end."""
+    await asyncio.to_thread(lan.upload, b"x", "/job.3mf")
+    await asyncio.to_thread(lan.upload, b"y", "/other.3mf")
+    other = _project_file("")
+    other["print"].update(url="ftp://other.3mf", subtask_name="other")
+    seen: list[dict[str, Any]] = []
+    async with asyncio.timeout(30):
+        async for report in lan.reports():
+            seen.append(report)
+            if len(seen) == 1:
+                await lan.publish(_project_file(""))
+            elif report.get("gcode_state") == "RUNNING" and other not in seen:
+                seen.append(other)
+                await lan.publish(other)
+            elif report.get("gcode_state") == "FINISH":
+                break
+    echoes = [
+        r for r in seen if r.get("command") == "project_file" and r.get("url") == "ftp://other.3mf"
+    ]
+    assert [(e["result"], e["reason"]) for e in echoes] == [("FAIL", "ERROR STATE")]
+    assert seen[-1]["subtask_name"] == "job"
+    states = [r["gcode_state"] for r in seen if "gcode_state" in r]
+    assert "FAILED" not in states
+    refused = lan.control("GET", "/__received")["refused"]
+    assert refused == [{"url": "ftp://other.3mf", "reason": "ERROR STATE"}]
+
+
 async def test_the_upload_dir_takes_a_file(lan: _Lan, tmp_path: Path) -> None:
     module = sys.modules["fake_printer"]
     upload_dir = module.DEFAULT_UPLOAD_DIR.rstrip("/")

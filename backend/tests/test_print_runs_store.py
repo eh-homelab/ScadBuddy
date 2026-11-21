@@ -173,6 +173,44 @@ async def test_lan_waiting_reads_each_printers_newest_run_with_prints_to_start(
     assert await store.lan_waiting([]) == {}
 
 
+async def test_a_queued_runs_place_counts_the_printers_runs_waiting_before_it(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """#6871: a run queued on a busy printer stands after every older run of that printer
+    with prints still to start, stopped or not; another printer's runs, a stopped run and
+    a newer one do not count."""
+    printers = PrinterStore(jobs.pool, KEK)
+    one = printers.create(PrinterCreate(serial="01P00A000000001", name="One")).id
+    two = printers.create(PrinterCreate(serial="01P00A000000002", name="Two")).id
+    waiting = RESULT.model_copy(update={"path": "native", "lan_waiting": [1]})
+    stopped = waiting.model_copy(
+        update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
+    )
+    for run_id, printer, result in [
+        ("a", one, waiting),
+        ("b", one, stopped),
+        ("c", two, waiting),
+        ("d", one, waiting),
+        ("me", one, None),
+        ("later", one, waiting),
+    ]:
+        await store.insert_accepted(
+            run_id,
+            subject=PrintSubject.output(OUTPUT),
+            key=run_id,
+            slug="demo",
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="w",
+            retention=None,
+            printer=printer,
+        )
+        if result is not None:
+            await store.succeed(run_id, "demo", result)
+    assert await store.queue_place(one, "me") == 3
+    assert await store.queue_place(two, "me") == 2
+    assert await store.queue_place(one, "a") == 1
+
+
 async def test_a_run_with_prints_still_to_start_is_still_using_its_files(
     store: PrintRunStore,
 ) -> None:

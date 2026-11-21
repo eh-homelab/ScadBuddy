@@ -53,13 +53,15 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.bambuddy.subject import PrintSubject
     from scadbuddy.library.outputs import PlateSend
-    from scadbuddy.printers.lan_models import LanStarted, LanStopped
+    from scadbuddy.printers.lan_models import LanQueued, LanStarted, LanStopped
     from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
         FAILED,
+        LAN_CHECK_ACTIVITY,
         LAN_PRINT_ACTIVITY,
         LAN_PROBE_TIMEOUT,
+        LAN_REFUSED,
         LAN_SEQUENCE_WORKFLOW,
         LAN_START_WAIT,
         LAN_UNSURE,
@@ -81,6 +83,8 @@ with workflow.unsafe.imports_passed_through():
         FailInput,
         FinishInput,
         InsertInput,
+        LanCheck,
+        LanCheckInput,
         LanPrintInput,
         LanSequenceInput,
         LanStart,
@@ -193,6 +197,8 @@ _LAN_CANCELLED = LanStopped(
 #: Where a LAN run's later copies stopped: waiting for a print, waiting for the plate to
 #: be cleared (#4939), starting the next copy, or recording a plate it started.
 LanStep = Literal["wait", "clear", "start", "record"]
+#: A plate ready to start: its plan, sliced file, slice job, preset key and native slice.
+_SlicedPlate = tuple[PlatePlan, int, int | None, str | None, NativeSliced | None]
 
 
 class _ClearTimeoutError(Exception):
@@ -330,6 +336,16 @@ PLATE_CLEAR_PATCH = "print-lan-plate-clear"
 #: so the print worker's read URL of the file follows the run. A history from before it
 #: sends none; its run reads its file by the slice's row while that stands.
 RUN_HOLD_PATCH = "print-lan-run-holds-its-files"
+#: ``workflow.patched`` id of a LAN run that reads the printer before its first upload
+#: and, finding it busy, sends nothing and waits for it (#6871): ``lan_check``, then the
+#: run succeeds queued and its ``PrintLanSequence`` waits for the printer to be free and
+#: its plate cleared before the first start. A run of one print planned so takes
+#: ``_print_lan`` too. Only a run planned with ``queue_when_busy`` asks, and no recorded
+#: run was.
+BUSY_PATCH = "print-lan-queue-when-busy"
+#: One ``lan_check``: its report read (`LAN_PROBE_TIMEOUT`), its MQTT connect and the
+#: place read.
+LAN_CHECK_TIMEOUT = timedelta(seconds=LAN_PROBE_TIMEOUT + 45)
 #: ``lan_wait`` only reads, so it is taken up again whenever it stops, within the bound:
 #: a heartbeat timeout (a worker that died) is retried too, and only the bound ends the
 #: wait (`_lan_failed`'s wait text).
@@ -361,6 +377,22 @@ class _PlateStarts:
         self.cancel_absorbed = False
         #: The run whose sliced files ``slice_run`` holds (`RUN_HOLD_PATCH`): a LAN run's.
         self.hold_for: str | None = None
+        #: Whether the last LAN start failed having started nothing, for sure (#6871): its
+        #: first attempt's upload failed, or the printer refused it (``LAN_REFUSED``).
+        self.start_refused = False
+
+    async def _lan_check(
+        self, planned: PlannedRun, run_id: str, *, plate_clear: bool
+    ) -> LanQueued | None:
+        """Whether the printer is busy before an upload (#6871, `BUSY_PATCH`)."""
+        checked: LanCheck = await workflow.execute_activity(
+            LAN_CHECK_ACTIVITY,
+            LanCheckInput(printer=planned.printer, run_id=run_id, plate_clear=plate_clear),
+            result_type=LanCheck,
+            start_to_close_timeout=LAN_CHECK_TIMEOUT,
+            retry_policy=READ_RETRY,
+        )
+        return checked.queued
 
     async def _shielded[T](
         self, handle: workflow.ActivityHandle[T], patch: str = CANCEL_PATCH
@@ -534,20 +566,25 @@ class _PlateStarts:
         attempt = 1
         while True:
             remote = f"{stem}.3mf" if attempt == 1 else f"{stem}-{attempt}.3mf"
-            uploaded = await workflow.execute_activity(
-                LAN_UPLOAD_ACTIVITY,
-                LanUploadInput(
-                    run_id=accepted.run.id,
-                    printer=planned.printer,
-                    sliced=source,
-                    remote_name=remote,
-                    plate_id=plate.plate_id,
-                ),
-                result_type=LanUploaded,
-                start_to_close_timeout=LAN_UPLOAD_TIMEOUT,
-                heartbeat_timeout=HEARTBEAT,
-                retry_policy=BOUNDED_RETRY,
-            )
+            try:
+                uploaded = await workflow.execute_activity(
+                    LAN_UPLOAD_ACTIVITY,
+                    LanUploadInput(
+                        run_id=accepted.run.id,
+                        printer=planned.printer,
+                        sliced=source,
+                        remote_name=remote,
+                        plate_id=plate.plate_id,
+                    ),
+                    result_type=LanUploaded,
+                    start_to_close_timeout=LAN_UPLOAD_TIMEOUT,
+                    heartbeat_timeout=HEARTBEAT,
+                    retry_policy=BOUNDED_RETRY,
+                )
+            except ActivityError:
+                # An upload starts nothing; after an unsure attempt, one may have started.
+                self.start_refused = attempt == 1
+                raise
             start = workflow.start_activity(
                 LAN_PRINT_ACTIVITY,
                 LanPrintInput(
@@ -580,6 +617,13 @@ class _PlateStarts:
                     isinstance(cause, ApplicationError) and cause.type == LAN_UNSURE
                 )
                 if not unsure or attempt >= LAN_START_ATTEMPTS:
+                    # The printer's own refusal of the first attempt started nothing
+                    # (#6871); after an unsure attempt, that one may have.
+                    self.start_refused = (
+                        attempt == 1
+                        and isinstance(cause, ApplicationError)
+                        and cause.type == LAN_REFUSED
+                    )
                     raise
             workflow.logger.warning(
                 "a LAN start may not have been taken; uploading and starting it again",
@@ -703,7 +747,10 @@ class PrintRunWorkflow(_PlateStarts):
                 run_id=accepted.run.id,
                 slug=input.slug,
                 error=error,
-                unqueued=self.enqueue_unstarted,
+                # Every LAN start of a `PrintRun` is its first: one that started nothing
+                # for sure queued nothing (#6871, ruling 4). Only the record's input
+                # changes, so a history replays as before.
+                unqueued=self.enqueue_unstarted or self.start_refused,
             ),
             result_type=PrintRun,
             start_to_close_timeout=SHORT,
@@ -838,10 +885,9 @@ class PrintRunWorkflow(_PlateStarts):
         )
         if planned.lan_start and workflow.patched(RUN_HOLD_PATCH):
             self.hold_for = accepted.run.id
-        if (
-            planned.lan_start
-            and len(planned.plates) * planned.copies > 1
-            and workflow.patched(NATIVE_PATCH)
+        if planned.lan_start and (
+            (len(planned.plates) * planned.copies > 1 and workflow.patched(NATIVE_PATCH))
+            or (planned.queue_when_busy and workflow.patched(BUSY_PATCH))
         ):
             return await self._print_lan(input, accepted, planned)
         outcomes: list[QueueOutcome] = []
@@ -1000,7 +1046,8 @@ class PrintRunWorkflow(_PlateStarts):
     async def _print_lan(
         self, input: PrintRunInput, accepted: Accepted, planned: PlannedRun
     ) -> PrintRun:
-        """A LAN run of several plates or copies (#4541). The printer has no queue, and a
+        """A LAN run of several plates or copies (#4541), or of one print planned with
+        ``queue_when_busy`` (#6871). The printer has no queue, and a
         second ``project_file`` replaces the print it runs, so the run is the queue, as
         Bambuddy's is on its path: every plate is sliced first (a slice that fails then
         starts nothing), then each plate's copies start in turn, plate by plate as
@@ -1013,7 +1060,12 @@ class PrintRunWorkflow(_PlateStarts):
         print, and its result names each start still to come (``lan_waiting``). The rest
         are ``PrintLanSequence``'s, a child left to run past this run, which closes after
         its repeat window as any run does: a repeat of the request is answered as one of
-        any run is, never kept waiting days for the last copy."""
+        any run is, never kept waiting days for the last copy.
+
+        With ``queue_when_busy`` the run first reads the printer (``lan_check``). When it
+        is busy (#6871), the run succeeds with nothing started: its result names every
+        print in ``lan_waiting`` and the wait in ``lan_queued``, and ``PrintLanSequence``
+        waits for the printer and a cleared plate before the first start."""
         plates: list[tuple[PlatePlan, int, int | None, str | None, NativeSliced | None]] = []
         for plate in planned.plates:
             if plate.sliced_file_id is not None and workflow.patched(SLICED_PATCH):
@@ -1022,7 +1074,16 @@ class PrintRunWorkflow(_PlateStarts):
                 started, sliced = await self._slice(planned, plate, input.subject)
                 plates.append((plate, sliced, *_sliced_by(started)))
         starts = [(entry, copy) for entry in plates for copy in range(1, planned.copies + 1)]
+        queued: LanQueued | None = None
+        if planned.queue_when_busy and workflow.patched(BUSY_PATCH):
+            # Read before the upload (#6871, ruling 2), and before the start counts as
+            # queueing: a check that fails sent nothing.
+            queued = await self._lan_check(
+                planned, accepted.run.id, plate_clear=planned.plate_clear
+            )
         await self._start_enqueue(accepted)
+        if queued is not None:
+            return await self._queue_lan(input, accepted, planned, starts, queued)
         (plate, sliced, job_id, preset_key, native), _ = starts[0]
         first_plate = plate.plate_id
         # As the last plate of a run's would: a cancel waits for the start, and the run
@@ -1081,6 +1142,9 @@ class PrintRunWorkflow(_PlateStarts):
             # A cancel after `print_finish` (during `print_succeed` or the follow) stops
             # the rest too, so the waiting copies never read as queued for good.
             return await self._lan_stop(input, accepted, row, row.result or result)
+        if len(starts) == 1:
+            # One print, taken here through `BUSY_PATCH`: nothing is left to start.
+            return row
         later = [
             LanStart(
                 plate=plate,
@@ -1092,21 +1156,101 @@ class PrintRunWorkflow(_PlateStarts):
             )
             for (plate, sliced, job_id, preset_key, native), copy in starts[1:]
         ]
+        return await self._start_sequence(
+            accepted,
+            row,
+            LanSequenceInput(
+                input=input,
+                accepted=accepted,
+                planned=planned,
+                starts=later,
+                result=row.result or result,
+                recorded=[first_plate],
+                sent=sent,
+            ),
+        )
+
+    async def _queue_lan(
+        self,
+        input: PrintRunInput,
+        accepted: Accepted,
+        planned: PlannedRun,
+        starts: list[tuple[_SlicedPlate, int]],
+        queued: LanQueued,
+    ) -> PrintRun:
+        """The printer was busy (#6871, ruling 1): nothing was uploaded or sent. The run
+        succeeds queued, every print waiting (``lan_waiting``, ``lan_queued``), and its
+        ``PrintLanSequence`` starts the first once the printer is free and someone says
+        the plate is clear. It is followed from that start, the first thing to follow."""
+        result: PrintRunResult = await self._shielded(
+            workflow.start_activity(
+                "print_finish",
+                FinishInput(
+                    input=input,
+                    run_id=accepted.run.id,
+                    planned=planned,
+                    outcomes=[],
+                    queued=[],
+                ),
+                result_type=PrintRunResult,
+                start_to_close_timeout=SHORT,
+                retry_policy=RECORD_RETRY,
+            )
+        )
+        result = result.model_copy(
+            update={
+                "lan_waiting": [entry[0].plate_id for entry, _ in starts],
+                "lan_queued": queued,
+                "lan_stopped": _LAN_CANCELLED if self.cancel_absorbed else None,
+            }
+        )
+        row: PrintRun = await self._shielded(
+            workflow.start_activity(
+                "print_succeed",
+                SucceedInput(input=input, run_id=accepted.run.id, result=result),
+                result_type=PrintRun,
+                start_to_close_timeout=SHORT,
+                retry_policy=RECORD_RETRY,
+            )
+        )
+        self.row = row
+        if self.cancel_absorbed:
+            return await self._lan_stop(input, accepted, row, row.result or result)
+        later = [
+            LanStart(
+                plate=plate,
+                sliced=sliced,
+                slice_job_id=job_id,
+                preset_key=preset_key,
+                native=native,
+                copy_number=copy,
+            )
+            for (plate, sliced, job_id, preset_key, native), copy in starts
+        ]
+        return await self._start_sequence(
+            accepted,
+            row,
+            LanSequenceInput(
+                input=input,
+                accepted=accepted,
+                planned=planned,
+                starts=later,
+                result=row.result or result,
+                queued=queued,
+            ),
+        )
+
+    async def _start_sequence(
+        self, accepted: Accepted, row: PrintRun, sequence: LanSequenceInput
+    ) -> PrintRun:
+        """Start the run's ``PrintLanSequence`` with the prints still to start."""
         # Left to run past this run, which closes after its repeat window as any run
         # does: its next start may be days away (`LAN_WAIT_BOUND`). The start is waited
         # for through a cancel, which the child is then sent: it records the stop itself.
         start = asyncio.ensure_future(
             workflow.start_child_workflow(
                 LAN_SEQUENCE_WORKFLOW,
-                LanSequenceInput(
-                    input=input,
-                    accepted=accepted,
-                    planned=planned,
-                    starts=later,
-                    result=row.result or result,
-                    recorded=[first_plate],
-                    sent=sent,
-                ),
+                sequence,
                 id=lan_sequence_id(accepted.run.id),
                 parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                 cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
@@ -1163,18 +1307,30 @@ class LanSequenceWorkflow(_PlateStarts):
 
     A run planned with ``plate_clear`` (#4939) then waits, as Bambuddy's queue does with
     ``require_plate_clear`` on, for `PLATE_CLEARED_SIGNAL` before each later copy: its
-    result says so (``lan_awaiting_clear``) until it comes."""
+    result says so (``lan_awaiting_clear``) until it comes.
+
+    A run queued on a busy printer (#6871, ``queued``) has started nothing: the sequence
+    starts every print, the first included. Before the first it waits for the printer's
+    print to end and for a cleared plate, whatever ``plate_clear`` says, then reads the
+    printer again and waits again while it is busy."""
 
     def __init__(self) -> None:
         super().__init__()
         #: The most prints a plate-cleared signal said had started (`plate_cleared`).
         self.cleared = 0
+        #: How many plate-cleared signals came (#6871): a queued run's wait, before its
+        #: first start, opens on one that came after it began.
+        self.clears = 0
 
     @workflow.signal(name=PLATE_CLEARED_SIGNAL)
     def plate_cleared(self, starts: int) -> None:
         """The plate is clear after the run's ``starts``-th print: a confirmation sent
         for an earlier wait than the current one starts nothing."""
         self.cleared = max(self.cleared, starts)
+        self.clears += 1
+
+    def _cleared_since(self, clears: int) -> bool:
+        return self.clears > clears
 
     def _cleared_after(self, starts: int) -> bool:
         return self.cleared >= starts
@@ -1184,6 +1340,9 @@ class LanSequenceWorkflow(_PlateStarts):
         input, accepted, planned = sequence.input, sequence.accepted, sequence.planned
         if workflow.patched(RUN_HOLD_PATCH):
             self.hold_for = accepted.run.id
+        queued = sequence.queued
+        if queued is not None and not workflow.patched(BUSY_PATCH):
+            queued = None
         result = sequence.result
         recorded = set(sequence.recorded)
         sent = sequence.sent
@@ -1198,30 +1357,77 @@ class LanSequenceWorkflow(_PlateStarts):
                 plate, native = start.plate, start.native
                 plate_id = plate.plate_id
                 step = "wait"
-                ended = await workflow.execute_activity(
-                    LAN_WAIT_ACTIVITY,
-                    LanWaitInput(printer=planned.printer, started=result.lan[-1]),
-                    result_type=LanStarted,
-                    schedule_to_close_timeout=LAN_WAIT_BOUND,
-                    heartbeat_timeout=HEARTBEAT,
-                    retry_policy=LAN_WAIT_RETRY,
-                )
-                result = result.model_copy(update={"lan": [*result.lan[:-1], ended]})
-                gate = planned.plate_clear and workflow.patched(PLATE_CLEAR_PATCH)
-                if gate:
-                    result = result.model_copy(update={"lan_awaiting_clear": True})
-                row = await self._lan_update(input, accepted, result)
-                self._stop_if_cancelled()
-                if gate:
-                    step = "clear"
-                    try:
-                        await workflow.wait_condition(
-                            partial(self._cleared_after, len(result.lan)), timeout=LAN_WAIT_BOUND
+                if queued is not None and not result.lan:
+                    # The run's first start, queued on a busy printer (#6871): until the
+                    # printer is free and its plate said clear.
+                    while True:
+                        if queued.job is not None:
+                            step = "wait"
+                            await workflow.execute_activity(
+                                LAN_WAIT_ACTIVITY,
+                                LanWaitInput(printer=planned.printer, started=queued.job),
+                                result_type=LanStarted,
+                                schedule_to_close_timeout=LAN_WAIT_BOUND,
+                                heartbeat_timeout=HEARTBEAT,
+                                retry_policy=LAN_WAIT_RETRY,
+                            )
+                        # Counted before the wait is recorded, so a confirmation sent as
+                        # soon as the run says it waits is never missed.
+                        clears = self.clears
+                        result = result.model_copy(
+                            update={"lan_awaiting_clear": True, "lan_queued": queued}
                         )
-                    except TimeoutError:
-                        raise _ClearTimeoutError from None
-                    # Recorded with the next start, which follows at once.
-                    result = result.model_copy(update={"lan_awaiting_clear": False})
+                        row = await self._lan_update(input, accepted, result)
+                        self._stop_if_cancelled()
+                        step = "clear"
+                        try:
+                            await workflow.wait_condition(
+                                partial(self._cleared_since, clears), timeout=LAN_WAIT_BOUND
+                            )
+                        except TimeoutError:
+                            raise _ClearTimeoutError from None
+                        step = "start"
+                        # Read again before the upload: a print started meanwhile is
+                        # waited out too. The plate was just said clear.
+                        again = await self._lan_check(planned, accepted.run.id, plate_clear=False)
+                        if again is None:
+                            break
+                        queued = again
+                        result = result.model_copy(
+                            update={"lan_awaiting_clear": False, "lan_queued": queued}
+                        )
+                        row = await self._lan_update(input, accepted, result)
+                        self._stop_if_cancelled()
+                    # Recorded with the start, which follows at once.
+                    result = result.model_copy(
+                        update={"lan_awaiting_clear": False, "lan_queued": None}
+                    )
+                else:
+                    ended = await workflow.execute_activity(
+                        LAN_WAIT_ACTIVITY,
+                        LanWaitInput(printer=planned.printer, started=result.lan[-1]),
+                        result_type=LanStarted,
+                        schedule_to_close_timeout=LAN_WAIT_BOUND,
+                        heartbeat_timeout=HEARTBEAT,
+                        retry_policy=LAN_WAIT_RETRY,
+                    )
+                    result = result.model_copy(update={"lan": [*result.lan[:-1], ended]})
+                    gate = planned.plate_clear and workflow.patched(PLATE_CLEAR_PATCH)
+                    if gate:
+                        result = result.model_copy(update={"lan_awaiting_clear": True})
+                    row = await self._lan_update(input, accepted, result)
+                    self._stop_if_cancelled()
+                    if gate:
+                        step = "clear"
+                        try:
+                            await workflow.wait_condition(
+                                partial(self._cleared_after, len(result.lan)),
+                                timeout=LAN_WAIT_BOUND,
+                            )
+                        except TimeoutError:
+                            raise _ClearTimeoutError from None
+                        # Recorded with the next start, which follows at once.
+                        result = result.model_copy(update={"lan_awaiting_clear": False})
                 step = "start"
                 if native is not None and plate.plan is not None:
                     # Days may have passed: the slice's row, and its hold on the blob, is
@@ -1240,10 +1446,18 @@ class LanSequenceWorkflow(_PlateStarts):
                     copy=start.copy_number,
                 )
                 taken = taken.model_copy(update={"plate_id": plate_id})
+                # A queued run's first start (#6871) names the slice and its file, as a
+                # run that started at once does (`finish_run`).
+                first: dict[str, Any] = (
+                    {"slice_job_id": start.slice_job_id, "sliced_library_file_id": start.sliced}
+                    if queued is not None and not result.lan
+                    else {}
+                )
                 # On the run before anything else, so whatever fails next never reads a
                 # copy the printer is printing as one it never started.
                 result = result.model_copy(
                     update={
+                        **first,
                         "lan": [*result.lan, taken],
                         "lan_waiting": result.lan_waiting[1:],
                         "warnings": [

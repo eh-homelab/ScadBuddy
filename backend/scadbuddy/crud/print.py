@@ -238,6 +238,9 @@ class RemoteSettingsStore:
     def plate_clear_required(self) -> bool:
         return self.load().lan_require_plate_clear
 
+    def queue_when_busy(self) -> bool:
+        return self.load().lan_queue_when_busy
+
     def close(self) -> None:
         self._client.close()
 
@@ -300,6 +303,10 @@ class RemotePrintRunStore:
             return {}
         body = await self._read(f"{BASE}/runs/lan-waiting", {"printers": printers})
         return {printer: PrintRun.model_validate(run) for printer, run in body.items()}
+
+    async def queue_place(self, printer: str, run_id: str) -> int:
+        body = await self._read(f"{_run(run_id)}/queue-place", {"printer": printer})
+        return int(body)
 
     async def running_for(self, output_id: str) -> list[PrintRun]:
         return (await self.running_for_outputs([output_id]))[output_id]

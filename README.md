@@ -2318,6 +2318,9 @@ Each next one starts once the printer's report says the one before ended, finish
 failed. Bambuddy's queue does the same with its defaults (`require_plate_clear` and
 `require_previous_success` off). Nothing asks for the plate to be cleared between them
 yet (#4939), so clear the bed before each print ends. The run succeeds at the first start.
+When the printer is busy and "Queue when the printer is busy" is on (#6871), the run, even
+of one print, succeeds with nothing started. It starts its first print once the printer
+has ended its print and someone says the plate is clear.
 The dialog and the progress show each copy still to start as queued. A start that fails,
 or a cancel, stops the rest, and the progress says why. A wait longer than 7 days stops
 them too. A copy counts the one before as ended only after a report has shown that print
