@@ -18,7 +18,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from psycopg import Connection
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 from scadbuddy.bambuddy.models import (
     BbLocation,
@@ -305,7 +305,9 @@ class SyncPassResult(BaseModel, extra="forbid"):
     ``error_label``; `record_pass` sets ``last_error`` from it, and ``last_ok_at`` only
     when it is ``None`` (Decision 19, F7). ``conflicts``: the largest ``SyncPlan.conflicts``
     of the pass's rounds (R-T4-33). ``unmapped_k``: the largest ``SyncPlan.unmapped_k`` of
-    its rounds, for the same reason (decision 58)."""
+    its rounds, for the same reason (decision 58). ``started_at``: when the pass began, by
+    the worker's clock; `record_pass` stores it as ``last_pass_started_at`` (#6836). A
+    result from a build before it has none, and the record falls back to its own time."""
 
     written: int
     failed: int
@@ -317,6 +319,7 @@ class SyncPassResult(BaseModel, extra="forbid"):
     interval_s: float
     skipped: SkipReason | None = None
     error: str | None = None
+    started_at: AwareDatetime | None = None
 
 
 #: The data types the engine pushes (`tags` is #6264's drain, Decision 6).
@@ -382,6 +385,7 @@ class SyncStatus(BaseModel, extra="forbid"):
 
     instance: str | None
     last_pass_at: datetime | None
+    last_pass_started_at: datetime | None
     last_ok_at: datetime | None
     last_error: str | None
     counts: dict[str, int]
@@ -391,6 +395,9 @@ class SyncStatus(BaseModel, extra="forbid"):
 
 
 class SyncRun(BaseModel, extra="forbid"):
-    """``POST /filament/sync/run``'s answer: the full pass was asked for."""
+    """``POST /filament/sync/run``'s answer: the full pass was asked for. ``requested_at`` is
+    the API's clock when it asked; a pass whose ``last_pass_started_at`` is at or after it
+    ran for this request (#6836)."""
 
     started: Literal[True] = True
+    requested_at: AwareDatetime

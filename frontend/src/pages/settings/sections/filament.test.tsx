@@ -130,6 +130,7 @@ describe('Filament (#6262)', () => {
         HttpResponse.json({
           instance: null,
           last_pass_at: null,
+          last_pass_started_at: null,
           last_ok_at: null,
           last_error: null,
           counts: {},
@@ -202,6 +203,7 @@ describe('Filament (#6262)', () => {
           return HttpResponse.json({
             instance: null,
             last_pass_at: '2026-11-15T07:00:30Z',
+            last_pass_started_at: '2026-11-15T07:00:00Z',
             last_ok_at: '2026-11-15T07:00:30Z',
             last_error: null,
             counts: {},
@@ -225,9 +227,37 @@ describe('Filament (#6262)', () => {
     }
   })
 
+  it('ends the read on a pass that started after the request even when the browser clock is ahead', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      server.use(http.post('*/api/v1/filament/sync/run', () => HttpResponse.json({ started: true, requested_at: '2026-11-15T08:00:00Z' }, { status: 202 })))
+      const { filament } = await startSync()
+      // The browser's clock is the real now, far past the server's 2026-11-15.
+      server.use(
+        http.get('*/api/v1/filament/sync/status', () =>
+          HttpResponse.json({
+            instance: null,
+            last_pass_at: '2026-11-15T08:00:07Z',
+            last_pass_started_at: '2026-11-15T08:00:05Z',
+            last_ok_at: '2026-11-15T08:00:07Z',
+            last_error: null,
+            counts: {},
+            errors: [],
+            directions: { ...DEFAULT_SYNC, weights: 'two_way' },
+            skipped: null,
+          }),
+        ),
+      )
+      await act(() => vi.advanceTimersByTimeAsync(3_000))
+      expect(await within(filament).findByText('Sync finished.')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('says the pass is still running after 60 s with no new pass', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    server.use(http.post('*/api/v1/filament/sync/run', () => HttpResponse.json({ started: true }, { status: 202 })))
+    server.use(http.post('*/api/v1/filament/sync/run', () => HttpResponse.json({ started: true, requested_at: '2026-11-15T08:00:00Z' }, { status: 202 })))
     const count = countStatusReads()
     try {
       const { filament } = await startSync()

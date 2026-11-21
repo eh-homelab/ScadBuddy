@@ -1082,8 +1082,8 @@ export const filamentTools: Tool[] = [
       'How the ScadBuddy-to-Bambuddy filament sync stands. `directions` is the stored `filament_sync`: `off`, ' +
       '`sb_to_bb`, `bb_to_sb` or `two_way` for each of `spools`, `weights`, `tags`, `presets`, `suppliers` and ' +
       '`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or `two_way`, never for `tags` (the ' +
-      "spool refresh's tag drain sends those). `last_pass_at` is the " +
-      "last pass, `last_error` its error (null when it worked), `last_ok_at` the last pass with no error (a skipped " +
+      "spool refresh's tag drain sends those). `last_pass_at` is when the " +
+      "last pass ended, `last_pass_started_at` when it started, `last_error` its error (null when it worked), `last_ok_at` the last pass with no error (a skipped " +
       "one too), `counts` the last pass's (`written`, `failed`, `deferred`, `conflicts`, `unmapped_k`). `errors` " +
       'lists each item whose last write to Bambuddy failed, or was held back (`name_taken`: another Bambuddy row ' +
       "has its name, so it was never sent), with `kind`, its ScadBuddy `sb_id`, its `label` (a spool's `#N`, a " +
