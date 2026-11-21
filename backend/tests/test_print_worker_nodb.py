@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.print import (
+    RemoteBbPull,
     RemoteFilamentSync,
     RemoteFilamentTrays,
     RemoteHeldPresets,
@@ -45,6 +46,7 @@ from scadbuddy.crud.print import (
     RemotePrinterStore,
     RemotePrintUses,
 )
+from scadbuddy.filament.bb_pull_models import PULL_READ_ACTIVITY
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.kinds import OperationKind
@@ -158,6 +160,14 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
         ]
         api = sync_pass.__self__.api  # type: ignore[attr-defined]
         assert isinstance(api, RemoteFilamentSync) and api._client is deps.crud
+        # The Bambuddy pull's reads send SB's side through the API's routes (#6772).
+        [pull_read] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == PULL_READ_ACTIVITY
+        ]
+        pull_api = pull_read.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(pull_api, RemoteBbPull) and pull_api._client is deps.crud
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

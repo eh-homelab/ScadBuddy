@@ -115,7 +115,8 @@ Each says why, and what it costs if wrong.
    plan gates it per data type and adds archive, K values, suppliers and locations to it.
    Why: moving it into the worker would rewrite #6261-#6268's tested code for no user-visible
    gain. Cost: Bambuddy reads for the pull stay in the CRUD service's pod; Task 12 files a
-   follow-up issue to move them to the worker through a CRUD route.
+   follow-up issue to move them to the worker through a CRUD route. That issue, #6772,
+   moved them: Decisions 172-181.
 6. **Tags keep #6264's queue and drain** (`filament_bb_tag_pending`, `rfid_push.drain_tags`,
    with its 409 move rule), gated by `pushes(tags)`. The engine never sends `tag_uid` or
    `tray_uuid`; when `results` links a new BB spool, it queues the spool's open tags. Why: the
@@ -1794,7 +1795,167 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_place_mapping_only_to_an_archived_location_is_not_seeded`,
     `test_a_place_mapping_only_to_a_printers_place_is_not_seeded`,
     `test_a_seed_of_a_place_archived_since_still_counts`.
-172. R-6688-1 (#6688; replaces 42): a linked supplier, location, insert type or filament
+172. #6772 (replaces Decision 5's place; its cost note asked for this): the pull's Bambuddy
+    reads run on the print worker, and the CRUD service makes no Bambuddy call for the
+    pull. A new workflow type, `FilamentBbPull` (`workflows/filament_pull.py`), on the
+    `bambuddy` queue runs one activity, `filament_bb_pull_read` (`filament/bb_pull_run.py`).
+    It reads Bambuddy with the key the worker already holds and sends each read to a new
+    CRUD area, `filament-pull` (`api/crud_print.py`; client `crud/print.py`
+    `RemoteBbPull`), which applies it (`filament/bb_pull_apply.py` `LocalBbPull`, which
+    runs `bambuddy_pull.pull`, `bambuddy_usage`, `sensors` and `reconcile_trays` as before).
+    The routes require the print service credential from this first PR (the CRUD router's
+    guard). Rule: `CLAUDE.md` "Database access (#5295)". Where the API serves the
+    `bambuddy` queue itself (dev, tests), the same activity runs on `LocalBbPull`.
+173. #6772: `SpoolRefresh` keeps its commands. Its `filament_bambuddy_pull` activity keeps its
+    name, timeout (5 min) and result, so no `workflow.patched` is needed and the committed
+    `spool_refresh_histories` replay as they are. The activity now reads no Bambuddy: it
+    decides the start (`pull_start`) and waits for `FilamentBbPull` (`execute_pull`, its
+    run bounded at 4.5 min, under the activity's 5). The pull still runs on the spool
+    refresh's Schedule, in the same place among the steps (kept presets, pull, capture
+    backstop, RFID), and a tick still never fails on it. `FilamentBbSync` (the push) stays
+    a workflow of its own: it ends when nothing pushes (R-T8-2), runs on its own timer and
+    signals, and the pull must run when nothing pushes. Neither waits on the other. Cost:
+    a tick where both run reads Bambuddy's spool listing twice, as before #6772.
+174. #6772: the person's import (`POST /filament/bambuddy/import`) runs the same workflow
+    with `strict`. The route answers 409 for no Bambuddy URL as before, starts
+    `FilamentBbPull` and waits. A Bambuddy refusal of the spool listing comes back as its
+    problem (`PullProblem`: status, type, title, detail, extensions, headers and what
+    Bambuddy itself answered, Decision 185), so the route answers what it answered when it
+    read Bambuddy itself. New: a run that did not finish (Temporal out of reach, the worker
+    down, the run or its read timed out) is 503 "the print worker did not finish the
+    import in time; it may still be running, so check the spools before importing again"
+    (Decision 183), SB refusing what the worker read is 502 (Decision 184), and a Bambuddy
+    URL changed between the route and the read is 409 "the Bambuddy URL changed during the
+    import; import again". The answer is the same `PullReport`.
+175. #6772: what crosses, in the order the pull read it before. (1) Home Assistant's states,
+    only when the start says a sensor is set up (`…/pull/ha-states`; `states` null when the
+    read failed, so the sensors are marked unreachable). (2) One body with the spool rows
+    as Bambuddy sent them (the API validates each with `parse_rows`, so a malformed row is
+    still counted `invalid` there), the usage rows and whether their read failed, the
+    suppliers and locations (null: not read) and the spool catalog (null: the read failed)
+    (`…/pull`). The API answers the report and `archives_since`, the date from which the
+    archives are needed for the usage rows that would book and are not booked yet (the
+    query `read_and_pull` ran between the pull and the archive read). (3) The usage rows
+    with the archives read for them, only `id`, `printer_id` and `completed_at`
+    (`bambuddy_usage.match_archive`'s fields) (`…/pull/usage`). (4) After the Schedule's
+    pull, Bambuddy's tray assignments (`…/pull/trays`). Each read but the spools still
+    fails alone, logged.
+176. #6772: the API decides what the worker reads, because it needs SB's tables. No
+    Bambuddy URL: skipped, no run. A Home Assistant sensor set up: `ha`. No data type
+    pulls: `pulls` is null, and with no Home Assistant sensor there is no run either
+    (`skipped`, as before). A failed read of the sensor list counts as "a sensor is set
+    up", so the worker reads the states and the route marks what it can, as the old
+    `read_ha_sensors` did. `reconcile` is set for the Schedule's pull only.
+177. #6772 (as Decision 168 for the push): every body names the Bambuddy instance the worker
+    read (`instance_for` of its URL). The routes and `LocalBbPull` refuse a body of
+    another instance than the configured Bambuddy's with 409 `instance_changed` and write
+    nothing; the worker then answers `skipped`. The worker also compares the start's
+    instance with the settings it loads and reads nothing when they differ.
+178. #6772: the routes take no `Idempotency-Key`; each is natural, so the CRUD client sends
+    it again on its retries: a pull of the same rows changes nothing the first did not, a
+    usage row is booked once (its `bb_usage` event names it), a Home Assistant reading of
+    the same value within 15 minutes is not stored again, and a tray already set right is
+    left alone. A body is at most 8 MiB: the app's `BodySizeGate` refuses a larger
+    body with 413 on its headers, whatever its content type, because the four routes carry
+    their own `RouteLimit` (Decision 182, #6861; the routes check nothing in a dependency). Each model forbids extra keys, caps each listing at 20,000 rows (archives at 2,000), checks the instance's form
+    and the run's id (`filament-bb-pull-<32 hex>`). No body names an actor (Decision 181).
+179. #6772: `FilamentBbPull` runs its activity once (start-to-close and, since Decision 183,
+    schedule-to-close 4 min, no retry): the
+    Schedule's next tick is the retry, as it was for the API's activity, and a person
+    imports again. No heartbeat: the apply of a large inventory is one long CRUD call (its
+    own client timeout is 180 s, `RemoteBbPull.APPLY_TIMEOUT`). Each run has an id of its
+    own (`filament-bb-pull-<uuid>`): the Schedule's pull and an import may run at once, as
+    before; each BB spool is still taken under its own advisory lock. The workflow is
+    AUTO_UPGRADE on the print worker, and `tests/test_filament_pull_replay.py` replays the
+    committed `filament_pull_histories/v1.json`.
+180. #6772, the rollout: `FilamentBbPull` is a new workflow type on the `bambuddy` queue, so
+    the release rolls `scadbuddy-print` with `Recreate` (README, "A release that needs
+    `Recreate`"), through a clusters PR merged before the deploy PR and a second one that
+    restores `RollingUpdate`. The worker waits for the API to serve `filament-pull`
+    (`PRINT_CRUD_AREAS`). A pull started while the old print build is still current waits
+    (its workflow task fails) until the new build takes the queue, at most the run's 4.5
+    min; the next tick retries. The API still needs the Bambuddy key for other work (the
+    inventory view's tray assignments, the RFID mode, tag push and slot steps of the same
+    Schedule, the kept presets refresh, NTAG, MakerWorld, the Home Assistant entity list,
+    the print dialog's reads and Bambuddy's print path), so no manifest change follows for
+    the key.
+181. #6772, the actor (security review, decided as the most secure option): the worker never
+    names who a pull's events are booked to. `PullStart`, `PullBody` and `UsageBody` carry
+    the run's id (`pull_id`, also its workflow id, `bb_pull_apply.new_pull_id`), never an
+    actor, and their models forbid extra keys, so a body with `actor` is a 422. For an
+    import a person started, the API keeps the person under that id before it starts the
+    run (`remember_actor`, table `filament_pull_actors`, migration
+    `20261121T0911Z_filament_pull_actors.sql`) and deletes the row once the read answered
+    (`forget_actor`; Decision 183); the routes read the actor there (`LocalBbPull._actor`), and an id
+    with no row (the Schedule's pull) books as `bambuddy`. A row left behind, because the
+    read did not answer in time or the API died mid-run, is deleted by a later
+    `remember_actor` once it is an hour old (`ACTOR_KEPT`).
+    Tests: `test_crud_filament_pull.py` refuses a body with `actor` on the pull and usage
+    routes, and `test_the_events_name_the_actor_the_api_kept_never_the_workers` checks the
+    events name the kept person.
+182. PR #6858 review (Blocking): the pull's routes had a cap of their own,
+    `PULL_BODY_BYTES_MAX` (32 MiB) with a 411 for no `Content-Length`, checked in a
+    dependency. Neither held: the CRUD listener serves the same app, whose `BodySizeGate`
+    (`api/limits.py`, `main.py`) refuses an `application/json` body past
+    `MAX_TEXT_BODY_BYTES` (8 MiB) on its headers first, and counts a chunked one as it
+    arrives; and FastAPI reads the body before it runs a route's dependencies. Ruling: the
+    gate's 8 MiB is the cap. The gate counts only a content type in its table, and FastAPI reads
+    a body with no Content-Type as JSON, so a header left out skipped the cap (#6861): the four
+    routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`, installed in
+    `main.py`) at `MAX_TEXT_BODY_BYTES`, applied whatever the content type. `_pull_bounded` and `PULL_BODY_BYTES_MAX` are gone, and so is
+    the 411 (a chunked body is counted by the gate, not refused).
+    `test_a_body_past_the_gate_is_413_on_its_headers` sends a 9 MiB body to each route
+    through `create_app`'s CRUD listener with a real print credential and gets the gate's
+    413, with and without a Content-Type (`test_a_body_with_no_content_type_is_413_too`). A body past it is never silent: the worker's `CrudRefusedError` 413 is logged
+    ("could not pull Bambuddy's spools", with the detail) on the Schedule's pull, and an
+    import answers 502 naming it (Decision 184). Estimate (JSON as sent,
+    `model_dump(mode="json")`): a Bambuddy spool row is about 0.93 KiB (mean of the 12 rows
+    in `tests/bambuddy/recordings/inventory-spools.json`, the largest 979 B), a usage row
+    219 B, an archive as the usage body sends it 232 B, a catalog entry about 52 B. The
+    pull's body is spools + usage + catalog (+ suppliers and locations, small): 1,000
+    spools and 10,000 usage rows are about 0.9 + 2.1 = 3 MiB; it reaches 8 MiB at about
+    6,500 spools with 10,000 usage rows, or 8,800 spools alone. The usage body is at most
+    20,000 × 219 B + 2,000 × 232 B = 4.6 MiB, under the gate at its caps. The models' caps
+    (20,000 rows a listing) allow more than the gate (20,000 spools are about 18 MiB), so
+    the gate, not the cap, binds a very large inventory. The usage rows grow with every
+    print (Bambuddy's listing is not paged), so a farm that prints for years is the one
+    that nears it; prod's counts were not measured for this ruling. Either way, past
+    the gate the pull fails loudly every tick, as above, and a later change
+    can page the usage rows.
+183. PR #6858 review: the actor was lost when the read outlived the import route. The
+    route ran `forget_actor` in a `finally`, so on a 503 the row went while the worker could
+    still send bodies, which then booked as `bambuddy`; and the read's start-to-close counts
+    from the worker's pickup, so a late pickup let the run's 4.5 min timeout fire mid-apply.
+    Ruling: the read has a `schedule_to_close_timeout` too (`PULL_READ_TIMEOUT`, 4 min,
+    inside `PULL_RUN_TIMEOUT`), and the route deletes the actor row only once the read
+    answered (a report, or a problem); when the run raised or the read failed or timed out
+    (`failed` with no problem) the row stays, and the next `remember_actor` drops it once it
+    is `ACTOR_KEPT` (1 h) old. Temporal's timeout does not stop an activity with no
+    heartbeat, so a read past its timeout may still write, under the kept person. The 503
+    says "the print worker did not finish the import in time; it may still be running, so
+    check the spools before importing again", never that it failed. Tests:
+    `test_the_read_ends_within_the_runs_bound_however_late_it_starts`,
+    `test_a_finished_import_drops_its_kept_actor`,
+    `test_an_import_that_did_not_finish_keeps_its_actor_and_says_it_may_run_on`. The
+    agent's `filament_bambuddy_import` lists the 409s, this 503 and the 502 of Decision 184,
+    and says the print worker reads Bambuddy.
+184. PR #6858 review: an import's `run_pull` re-raised every failure but `ApiError`, so SB
+    refusing the body (`CrudRefusedError`: the gate's 413, a listing past its cap or the
+    schema's 422) became the route's 503 "try again", which would fail the same way every
+    time. Ruling: in strict mode a `CrudRefusedError` other than a 429 is a `PullProblem`
+    502 "ScadBuddy refused what the print worker read of Bambuddy (<status>: <detail>);
+    importing again gets the same answer", logged; a 429 still raises (503). The Schedule's
+    pull logs it as before. Test: `test_an_import_answers_sbs_refusal_as_a_502_not_a_retry`.
+185. PR #6858 review: `PullProblem` dropped `ApiError.headers` (a `Retry-After`) and
+    `upstream` (what Bambuddy itself answered). Ruling: it carries both (`upstream` when it
+    is an `UpstreamAnswer`), and `error()` sets them again, so the import answers what it
+    answered when the API read Bambuddy. Test: `test_a_problem_keeps_its_headers_and_upstream`.
+186. PR #6858 review: `PullStart` is a Temporal input, so with `extra="forbid"` a field a
+    later build adds would fail the read on an older print worker during a roll. Ruling:
+    `PullStart` ignores unknown fields; the CRUD bodies keep `forbid` (a body with `actor`
+    is still a 422, Decision 181). Test:
+    `test_a_start_with_a_field_of_a_later_build_is_read`.
+187. R-6688-1 (#6688; replaces 42): a linked supplier, location, insert type or filament
     catalog entry gets one `probe` write when its Bambuddy id is missing from its kind's
     listing, the pass read that listing, the kind pushes (`rows` plans nothing for a kind
     that does not push, so its link stays as it is), Bambuddy did not refuse the item's
@@ -1806,7 +1967,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `filaments.py` line 20, https://github.com/maziggy/bambuddy/tree/v1.3.1/backend/app/api/routes).
     A listing not read (`None`) gets no probe. Why: the issue's scope, as spools are probed
     (Decision 13, F16). Cost: one Bambuddy call per such row per pass, toward the cap.
-173. R-6688-2: a probe is `GET` only and never writes. A filament entry is read by its id
+188. R-6688-2: a probe is `GET` only and never writes. A filament entry is read by its id
     (`GET /filament-catalog/{id}`, `FILAMENTS_READ` as the list, `filaments.py` line 44 at
     v1.3.1; client `BambuddyClient.filament`). Bambuddy has no `GET` of one supplier,
     location or spool catalog entry (measured 2026-11-21: `GET
@@ -1816,7 +1977,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     kind's listing again and looks for the id. Why: an empty `PATCH` would answer by id but
     is a write, and the catalog's `PUT` needs a name and a weight SB does not know Bambuddy
     holds. Cost: a probe reads a whole listing.
-174. R-6688-3: only a definite "not found" for that row's id drops the link: the `GET` by
+189. R-6688-3: only a definite "not found" for that row's id drops the link: the `GET` by
     id's 404, or a listing that answered 200 and parsed whole without the id (the worker
     reports that as `status` 404, `error` `not_found`). Any other answer keeps the link and
     upserts the item's error row, counted `failed`: a 5xx, a timeout, a 401 or 403, a
@@ -1825,12 +1986,12 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `results` is unchanged: a probe's 404 already drops any kind's link (decision 88).
     Why: a dropped live link makes the plan create the row again, a duplicate Bambuddy
     refuses (409) on every pass. Cost: a row whose probe keeps failing stays linked.
-175. R-6688-4: once a probe's 404 dropped a link, the next plan round of the same pass
+190. R-6688-4: once a probe's 404 dropped a link, the next plan round of the same pass
     plans the row as any unlinked one: a create when it is unarchived and its kind pushes,
     or an adoption of an unlinked Bambuddy row of its name (Decision 10, 41). An archived
     row stays unlinked. No direction rule is new. Why: the issue's "recreate under the
     direction rules". Cost: none known.
-176. R-6688-5: a spool that names a supplier, location or insert type that is missing from
+191. R-6688-5: a spool that names a supplier, location or insert type that is missing from
     its complete listing, and that `results` has not written in this pass, waits: the plan
     takes those rows out of `BbRefs` (`BbRefs.without`), so the spool names them as a
     `Pending`. It counts `deferred` while the row's probe (then its create) is planned in
@@ -1839,7 +2000,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     entry holds no spool back: a spool names its type by code. Why: a spool update naming a
     deleted Bambuddy location gets a 404 or 422 and an error row. Cost: a spool waits up to
     two rounds; with a probe that keeps failing, it waits for later passes.
-177. R-6688-6: a row's probe is a phase-0 write, with its kind's other writes, and counts
+192. R-6688-6: a row's probe is a phase-0 write, with its kind's other writes, and counts
     toward the cap as a spool's probe does; it writes nothing, so `written` does not count
     it, and its 404 is an answer, not `failed` (decision 116). Tests:
     `test_bb_sync_plan.py` (`test_a_row_missing_from_its_listing_is_probed`,
