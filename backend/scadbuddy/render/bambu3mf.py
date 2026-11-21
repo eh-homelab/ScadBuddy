@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from array import array
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import MAX_CODE_DIGITS, PaintCodeError, states
+from scadbuddy.render.paint import MAX_CODE_DIGITS, DistinctCodes, states
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -1126,10 +1126,7 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
         return None
     if any(len(code) > MAX_CODE_DIGITS or not code.isascii() for code in codes):
         return None
-    painted: set[int] = set()
-    for code in codes:
-        if code:
-            painted.update(states(code.decode("ascii")))
+    painted = DistinctCodes().states(code.decode("ascii") for code in codes)
     return np.array([low, high]), frozenset(painted)
 
 
@@ -1162,6 +1159,7 @@ def _plate_geometry(
     highs: list[np.ndarray] = []
     floors: list[float] = []
     painted: set[int] = set()
+    decoder = DistinctCodes()
     for name in names:
         printed = name not in unprinted
         written = _written_extents(entries[name])
@@ -1180,9 +1178,7 @@ def _plate_geometry(
                 highs.append(points.max(axis=0))
                 if printed:
                     floors.append(float(points[:, 2].min()))
-            for code in set(mesh.paint or ()):
-                if code:
-                    painted.update(states(code))
+            painted |= decoder.states(mesh.paint or ())
     if not lows:
         raise ValueError("the 3MF has no object geometry to place")
     low = np.min(lows, axis=0)
@@ -2418,40 +2414,13 @@ _ANY_ID = re.compile(rb'\sid="(\d+)"')
 #: The most digits of distinct paint codes :func:`hint_painted_slots` decodes in one
 #: file. Each distinct code is held and decoded once, so this bounds both; a file past
 #: it is left without hints (the slice is still checked, ``sliced_as_planned``). A real
-#: two-colour project's codes are a few thousand digits.
+#: two-colour project's codes are a few thousand digits. The by-object count
+#: (``bambuddy/clearance.py``) holds its own read of a file to it too, and past it
+#: counts no painting (#6823).
 MAX_HINT_PAINT_DIGITS = 4_000_000
 
 
-class _TooMuchPaintError(ValueError):
-    """More distinct painting than :data:`MAX_HINT_PAINT_DIGITS`."""
-
-
-class _Codes:
-    """Distinct paint codes, counted against :data:`MAX_HINT_PAINT_DIGITS` as they are
-    added, each decoded once."""
-
-    def __init__(self) -> None:
-        self.seen: dict[bytes, frozenset[int]] = {}
-        self.digits = 0
-
-    def states(self, codes: Iterable[bytes]) -> set[int]:
-        found: set[int] = set()
-        for code in codes:
-            known = self.seen.get(code)
-            if known is None:
-                self.digits += len(code)
-                if self.digits > MAX_HINT_PAINT_DIGITS:
-                    raise _TooMuchPaintError("the painting is past what is decoded for hints")
-                try:
-                    known = frozenset(states(code.decode("ascii")))
-                except PaintCodeError:
-                    known = frozenset()  # left out, never guessed at
-                self.seen[code] = known
-            found |= known
-        return found
-
-
-def _painted_states(archive: zipfile.ZipFile, name: str, codes: _Codes) -> set[int]:
+def _painted_states(archive: zipfile.ZipFile, name: str, codes: DistinctCodes) -> set[int]:
     """The extruders ``name``'s triangles are painted with, read as Bambu Studio reads
     a code (:func:`~scadbuddy.render.paint.states`), in windows overlapping by more
     than a code, so a code a window boundary splits is read whole from the next."""
@@ -2460,7 +2429,9 @@ def _painted_states(archive: zipfile.ZipFile, name: str, codes: _Codes) -> set[i
     with archive.open(name) as entry:
         while chunk := entry.read(_CHUNK):
             window = tail + chunk
-            found |= codes.states(set(_ANY_PAINT_CODE.findall(window)))
+            found |= codes.states(
+                code.decode("ascii") for code in set(_ANY_PAINT_CODE.findall(window))
+            )
             tail = window[-_CODE_OVERLAP:]
     return found
 
@@ -2470,7 +2441,7 @@ def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[in
     and each component's, whether in another model file or in the root. The root is
     read by :func:`parse_model`, its meshes as arrays."""
     model = parse_model(archive, ROOT_MODEL_NAME)
-    codes = _Codes()
+    codes = DistinctCodes(MAX_HINT_PAINT_DIGITS, skip_unreadable=True)
     objects = list(model.root.iter(f"{{{CORE_NS}}}object"))
     own: dict[str, set[int]] = {}
     for obj in objects:
@@ -2478,7 +2449,7 @@ def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[in
         for mesh in obj.iter(f"{{{CORE_NS}}}mesh"):
             arrays = model.meshes.get(mesh)
             if arrays is not None and arrays.paint:
-                found |= codes.states({code.encode("ascii") for code in arrays.paint if code})
+                found |= codes.states(arrays.paint)
         own[obj.get("id", "")] = found
     files: dict[str, set[int]] = {}
     slots: dict[str, set[int]] = {}
