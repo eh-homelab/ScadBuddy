@@ -11,8 +11,8 @@ import type { WarmSessions } from './warm.js'
 // changed hands or ended must lose its process wherever it is warm. The payload
 // is what to evict: a session id, or `*` for every entry. Sent inside the
 // writer's transaction where there is one, so it goes out on commit and never
-// for a write that rolled back. A NOTIFY sent while a replica's listener is down
-// is lost (events/pgListener.ts): the fingerprint and the transcript tail rules
+// for a write that rolled back. A NOTIFY sent while a replica's change stream is down
+// is lost (events/changeStream.ts): the fingerprint and the transcript tail rules
 // still keep such a process from serving a turn it no longer matches; what is
 // lost is only its eviction, until it goes idle.
 
@@ -44,7 +44,7 @@ export async function notifyWarmEvict(sql: Sql | TransactionSql, target: string 
   await sql`SELECT pg_notify(${WARM_EVICT_CHANNEL}, ${target})`
 }
 
-/** The LISTEN consumer (main.ts): a payload that is not a session id or `*` is ignored. */
+/** The change-stream consumer (main.ts): a payload that is not a session id or `*` is ignored. */
 export function evictOnNotify(warm: Pick<WarmSessions, 'evict'>): (payload: string) => void {
   return (payload) => {
     if (payload === '*' || isUuid(payload)) void warm.evict(payload, 'notified')

@@ -10,10 +10,9 @@ export type DataCheck = { ok: boolean; apiUnanswered: boolean }
 
 /**
  * `database` with a ping that is the Postgres ping and, once the API lists every area, the
- * API's answer to them too: the agent still runs SQL (the LISTEN bus, a turn's edits, the MCP
- * relay) until #5299 step 12. `check` answers the same with which part failed, per call (no
- * state shared between concurrent probes), which aiStatus names; each change in the API's
- * answer is logged.
+ * API's answer to them too: the agent still runs SQL (a turn's edits, the MCP relay) until #5299
+ * step 12. `check` answers the same with which part failed, per call (no state shared between
+ * concurrent probes), which aiStatus names; each change in the API's answer is logged.
  */
 export function dataHealthOf<D extends { ping(timeoutMs?: number): Promise<boolean> }>(
   database: D,

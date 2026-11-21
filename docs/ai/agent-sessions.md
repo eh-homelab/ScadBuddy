@@ -199,8 +199,9 @@ one ids-only event
 | `session.done` | A turn or the session ended (`idle`, `done`, `failed`) |
 | `session.message` | Anything else (streamed text, tool calls), at most one per 100 ms per session |
 
-The payload is `{ id, at, kind, session_id, seq, status?, replica }`. The agent and the
-backend each LISTEN on the channel on their own (spec §7):
+The payload is `{ id, at, kind, session_id, seq, status?, replica }`. Every API replica
+hears it on its one LISTEN connection, and hands it to the agent replicas over their change
+streams (#5299 D4, `agent/src/events/changeStream.ts`):
 
 - **Agent replicas** wake their event-log followers (`followSessionEvents()` →
   `EventLog.wake()`), so a watcher on replica B sees a turn on replica A at once rather

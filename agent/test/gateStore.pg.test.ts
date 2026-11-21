@@ -18,7 +18,7 @@ import {
   type Responder,
 } from '../src/gate/store.js'
 import { type BusEvent } from '../src/events/bus.js'
-import { PgEventListener } from '../src/events/pgListener.js'
+import { PgEventListener } from './support/pgListener.js'
 import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
 import { PgPublisher } from '../src/sessions/publish.js'
 import { EventLog } from '../src/sessions/eventLog.js'

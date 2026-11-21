@@ -15,10 +15,10 @@ import {
 } from '../src/db.js'
 
 describe('the connection budget (#5226)', () => {
-  it('sums the stores, the lock client and the listener, and every client closes what sits idle', () => {
+  it('sums the stores and the lock client (no LISTEN connection, #5299 D4), and every client closes what sits idle', () => {
     // Change this on purpose: README "Running it" counts it per pod.
-    expect(AGENT_DB_CONNECTIONS).toBe(9)
-    expect(SQL_CONNECTIONS + TEST_LOCK_CONNECTIONS + 1).toBe(AGENT_DB_CONNECTIONS)
+    expect(AGENT_DB_CONNECTIONS).toBe(8)
+    expect(SQL_CONNECTIONS + TEST_LOCK_CONNECTIONS).toBe(AGENT_DB_CONNECTIONS)
     expect(IDLE_TIMEOUT_SECONDS).toBe(60)
     expect(clientOptions(SQL_CONNECTIONS)).toMatchObject({
       max: SQL_CONNECTIONS,

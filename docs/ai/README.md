@@ -15,7 +15,7 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 |---|---|---|
 | [operating.md](operating.md) | Operators | Deploying the agent sidecar, its environment variables, the key-encryption key and its rotation, the credential routes, `/healthz`, the origin allowlist and trusted proxies |
 | [security.md](security.md) | Reviewers, operators | The threat model as built: risk tiers, the permission seam, envelope encryption, DNS-rebinding defence, egress checks, stderr redaction, plugin vetting, event-log scrubbing, known limitations and open §3.2 items |
-| [mcp-resources.md](mcp-resources.md) | MCP client authors, operators | The `scadbuddy://` resources on `/mcp`, subscriptions and their notifications, and the agent's LISTEN on the event bus (#264) |
+| [mcp-resources.md](mcp-resources.md) | MCP client authors, operators | The `scadbuddy://` resources on `/mcp`, subscriptions and their notifications, and the agent's change stream from the event bus (#264, #5299 D4) |
 | [browser-bridge.md](browser-bridge.md) | Contributors | The browser tools (#254): the tab side, `data-agent-user-only`, the WebMCP opt-in, the agent's `browser_*` tools, the tab's socket, and pairing an agent with a tab (spec §8.5) |
 | [agent-sessions.md](agent-sessions.md) | MCP client authors, operators | Agent-to-agent control (#300): the `sessions_*` tools, the session resources, `session.*` events, and approvals under a per-token grant |
 | [headless-browser.md](headless-browser.md) | Operators, contributors | A browser for sessions with no tab: Microsoft's Playwright MCP added as a remote plugin (the built-in headless browser of #349 was removed), its suggested tiers, and how its browser state lives across calls |

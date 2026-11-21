@@ -46,8 +46,7 @@ stays while the agent still runs SQL, until #5299 step 12 (backend `api/crud_age
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
 holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
 "Layout"), the assistant's spend on an order, and its reads of the backend's tables (#5299
-D7): area `events` (the LISTEN gap replay's head and gap, `src/events/eventLogReads.ts`, used
-by `pgListener.ts`) and area `flows` (a run's starter, its decision checks, a grant in force,
+D7): area `flows` (a run's starter, its decision checks, a grant in force,
 a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
 wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
 `flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
@@ -57,7 +56,8 @@ wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns
 `test/support/sqlFlowRunReads.ts` (the backend's queries on the test database). Its settings, Claude credentials and payload data keys (#5299 step 4, D5;
 #5342; `SECRET_AREAS`): area `settings` (`src/credentials.ts` `SettingsStore`'s `remote`,
 `CrudSettings`: a compare-and-set sends what its check read as `expect`, and the API sends the
-warm-evict and runtime NOTIFYs in the write's transaction, so the LISTEN side is unchanged),
+warm-evict and runtime NOTIFYs in the write's transaction, which reach every replica over its
+change stream),
 area `credentials` (`CrudCredentials`, `gatedCredentials`: the API seals and opens with the
 KEK, the routes and the turn's pool read the API's key through the repo's `opener`, and a turn's
 credentials come from `…/credentials/reveal`, audited per call) and area `payload-keys`
@@ -250,7 +250,19 @@ on `scadbuddy-db-1`, deploy/CLAUDE.md "Prod checks"). Test `test/crudSweeps.test
 `SharedMcpSessionRelay` takes) takes the /mcp session relay's directory (`ai_mcp_sessions`) and
 messages (`ai_mcp_relay_messages`): a session hash, a replica, a request and a row id travel in the
 body only, and a message's row and its `scadbuddy_mcp` NOTIFY commit in one transaction on the API.
-`test/mcpSessions.pg.test.ts` runs every relay case over both `PgRelayRows` and `CrudRelayRows`. A route's
+`test/mcpSessions.pg.test.ts` runs every relay case over both `PgRelayRows` and `CrudRelayRows`.
+Area `changes` (#5299 D4, step 11, backend `api/crud_agent_changes.py` and `agent_changes/hub.py`):
+`src/events/changeStream.ts` `ChangeStream` is the agent's one source of NOTIFYs, a server-sent
+event stream `GET …/agent/changes` opened with the service credential, which carries the six
+channels (`scadbuddy_events`, `_input`, `_pending`, `_mcp`, `_warm_evict`, `_settings`) in the
+order the API's one LISTEN connection heard them. The agent opens no LISTEN connection. A dropped
+stream is opened again with back-off and `Last-Event-ID`; the API replays its `events` log after
+it, or says `resync`, and the stream then runs `onReconnect` so what had no log row is re-read.
+It needs no area wait: a stream an older API pod does not serve is retried, and the 1 s polls
+(`sessions/eventLog.ts` followers, `sessions/turnHost.ts` held calls) cover it meanwhile (D4). The
+Postgres tests hear their own NOTIFYs through `test/support/pgListener.ts`, a LISTEN stand-in for
+the stream; `test/changeStream.test.ts` tests the client against a fake API.
+A route's
 answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's existing
 error path (a lookup failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
