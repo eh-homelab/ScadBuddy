@@ -16,7 +16,8 @@ type Props = {
 }
 
 /**
- * An Advanced step (#768): Simple mode does not show it, and sends the tier the dialog
+ * The quality step (#6885): Simple opens it from the summary row's quality cell, and
+ * Advanced shows it in its "Quality and plate" section. It opens on the tier the dialog
  * opened on (this model's last, else Standard). Here the tier shows as its process, and
  * any of Bambu's processes for the size can be chosen instead.
  */
