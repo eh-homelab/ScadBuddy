@@ -1,30 +1,20 @@
-import { createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
-import type { Sql, TransactionSql } from 'postgres'
+import { createHmac, randomUUID } from 'node:crypto'
 import type { Tier } from '../auth/principal.js'
 import type { RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
-import { type Kek, redact } from '../secrets.js'
+import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
-import {
-  type ApprovalDecisionMessage,
-  canSee,
-  event,
-  type Owner,
-  PROTOCOL_VERSION,
-  sameOwner,
-  type ServerEvent,
-} from '../sessions/protocol.js'
+import { type ApprovalDecisionMessage, canSee, event, type Owner, PROTOCOL_VERSION, sameOwner } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
-import { approvalEntry, inputRequested, inputResolved } from '../gate/projection.js'
-import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
+import type { AuditSurface } from '../audit/log.js'
 import { type Span, SpanKind } from '@opentelemetry/api'
 import { linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
 import { type WorkspaceFiles, type WorkspaceRef, withWorkspaceSize } from '../workspace/store.js'
 import type { ApprovalRoutes, NewApprovalRow } from './crudApprovals.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
-// a human approval in the ScadBuddy UI, in every auth mode"). Stored in
-// Postgres (`ai_approvals`, backend/scadbuddy/migrations_agent/*_approvals.sql), so any replica can
+// a human approval in the ScadBuddy UI, in every auth mode"). Stored on the API
+// (`ai_approvals`, approvals/crudApprovals.ts, area `approvals`), so any replica can
 // decide one and a pending one survives a restart.
 //
 // WHO ASKS. An outward call over /mcp (#251's prepare/confirm, below). A session's
@@ -35,7 +25,7 @@ import type { ApprovalRoutes, NewApprovalRow } from './crudApprovals.js'
 //
 // BINDING. Each approval stores an HMAC-SHA256 of the tool name and the
 // canonical JSON of the FULL input (`hash()`), keyed by a server-side key:
-// derived from the key-encryption key (`approvalHashKey`), so a hash stays
+// the API derives it from the key-encryption key and releases it, so a hash stays
 // comparable across restarts and cannot be brute-forced back to a
 // low-entropy input by someone who can read the table. A prepared action is
 // used only by a confirm with the same hash, so a changed input needs a new
@@ -81,15 +71,6 @@ export const SETTING_APPROVAL_EXPIRY_SECONDS = 'approval_expiry_seconds'
 export const DEFAULT_APPROVAL_EXPIRY_SECONDS = 600
 export const MIN_APPROVAL_EXPIRY_SECONDS = 10
 export const MAX_APPROVAL_EXPIRY_SECONDS = 86_400
-/**
- * The longest `approval.required` summary, which the panel's card shows: 500 for the call's
- * arguments, plus a resolving tool's line and its newline (APPROVAL_LINE_MAX, #4442 gate
- * re-review N1), so the line never takes the arguments' room. agent-durable gate/store.py and
- * gate/store.ts keep the same cap.
- */
-export const APPROVAL_SUMMARY_MAX = 500 + 200 + 1
-/** The advisory-lock key MCP prepares serialise on (`createPrepared`). */
-const PREPARE_LOCK = 'scadbuddy:ai_approvals:mcp_prepare'
 
 export const DECISIONS = ['approved', 'denied', 'expired', 'cancelled'] as const
 export type Decision = (typeof DECISIONS)[number]
@@ -171,36 +152,20 @@ export type GrantCheck = (principal: Owner) => Promise<boolean>
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
 
 export type ApprovalServiceDeps = {
-  sql: Sql
+  /** The API's routes, area `approvals` (approvals/crudApprovals.ts). */
+  routes: ApprovalRoutes
   /** The session event log the approval events go to. */
   events: EventLog
   settings?: SettingsReader
   /** Per-token grants; none when omitted. */
   grants?: GrantCheck
   /**
-   * The HMAC key for input hashes (`approvalHashKey`). Without one, a random
-   * key for this process: hashes then do not survive a restart, so a prepared
-   * action approved before one is never confirmed (safe) and needs a new approval.
+   * The HMAC key for input hashes, which the API derives from its key-encryption key and
+   * releases (see BINDING). Read at each hash; it throws until the key is released.
    */
-  hashKey?: Buffer
-  /**
-   * The audit log (#258, audit/log.ts): every decision, expiry, cancellation
-   * and void is recorded as an `approval` row.
-   */
-  audit?: AuditSink
+  hashKey: () => Buffer
   /** The workspace (#2329): a workspace upload's size is read from it for the card (`withWorkspaceSize`). */
   workspace?: WorkspaceFiles
-  /**
-   * The API's routes, area `approvals` (approvals/crudApprovals.ts, #5299 step 10), used while
-   * `use()` holds: a decision is written there with its events and its audit row in one
-   * transaction. The SQL here otherwise.
-   */
-  routes?: { crud: ApprovalRoutes; use: () => boolean } | undefined
-}
-
-/** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
-export function approvalHashKey(kek: Kek): Buffer {
-  return Buffer.from(hkdfSync('sha256', kek.key, Buffer.alloc(0), 'scadbuddy:ai_approvals:input_hash:v1', 32))
 }
 
 /**
@@ -221,7 +186,7 @@ export type ParkTrace = {
 
 export type GateTrace = { park(toolUseId: string, toolName: string): ParkTrace }
 
-/** An `ai_approvals` row as COLUMNS reads it (approvals/crudApprovals.ts answers the same). */
+/** An `ai_approvals` row as approvals/crudApprovals.ts answers it. */
 export type ApprovalRow = {
   id: string
   session_id: string | null
@@ -252,14 +217,6 @@ export type ApprovalRow = {
   due: boolean
 }
 type Row = ApprovalRow
-
-const COLUMNS = `id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, created_at, expires_at, decision,
-  decided_by_kind, decided_by_id, decided_by_label, decided_at, reason, usable_until, resume_turn_id,
-  consumed_at, revoked_at, traceparent, decision_traceparent, (decision IS NULL AND expires_at <= now()) AS due`
-
-/** An approved row that can still be used. */
-const USABLE = `decision = 'approved' AND consumed_at IS NULL AND revoked_at IS NULL AND usable_until > now()`
 
 function record(row: Row): ApprovalRecord {
   return {
@@ -382,11 +339,6 @@ export type DecideOptions = {
   surface?: AuditSurface
 }
 
-/** An approval decision as the audit log's outcome: approved ok, denied denied, the rest refused. */
-function auditOutcome(decision: Decision): AuditOutcome {
-  return decision === 'approved' ? 'ok' : decision === 'denied' ? 'denied' : 'refused'
-}
-
 /**
  * The decision's own trace (spec 2026-10-01 §5.4): a principal's decision is a
  * child of the request that made it; an expiry or a cancellation, which no one
@@ -414,21 +366,14 @@ function decisionSpan(approval: ApprovalRecord, by: Owner | undefined): Span {
 
 export class ApprovalService {
   private readonly deps: ApprovalServiceDeps
-  private readonly hashKey: Buffer
 
   constructor(deps: ApprovalServiceDeps) {
     this.deps = deps
-    this.hashKey = deps.hashKey ?? randomBytes(32)
-  }
-
-  /** The API's routes while the area is listed; undefined while the SQL serves. */
-  private get crud(): ApprovalRoutes | undefined {
-    return this.deps.routes?.use() ? this.deps.routes.crud : undefined
   }
 
   /** The input hash a decision binds to (see BINDING). */
   hash(tool: string, input: Record<string, unknown>): string {
-    return inputHash(this.hashKey, tool, input)
+    return inputHash(this.deps.hashKey(), tool, input)
   }
 
   // -- reads -------------------------------------------------------------------
@@ -441,30 +386,12 @@ export class ApprovalService {
 
   private async row(id: string): Promise<(ApprovalRecord & { due: boolean }) | undefined> {
     if (!isUuid(id)) return undefined
-    const crud = this.crud
-    const [row] = crud ? [await crud.row(id)].filter((r) => r !== undefined) : await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_approvals WHERE id = $1`, [id])
+    const row = await this.deps.routes.row(id)
     return row ? { ...record(row), due: row.due } : undefined
   }
 
   private async session(id: string): Promise<SessionAccess | undefined> {
-    const crud = this.crud
-    const [row] = crud
-      ? [await crud.session(id)].filter((r) => r !== undefined)
-      : await this.deps.sql<
-      {
-        owner_kind: Owner['kind']
-        owner_id: string
-        owner_label: string
-        creator_kind: Owner['kind']
-        creator_id: string
-        offer_kind: Owner['kind'] | null
-        offer_id: string | null
-      }[]
-    >`
-      SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id,
-             CASE WHEN pending_owner_until > now() THEN pending_owner_kind END AS offer_kind,
-             CASE WHEN pending_owner_until > now() THEN pending_owner_id END AS offer_id
-      FROM ai_sessions WHERE id = ${id}`
+    const row = await this.deps.routes.session(id)
     if (!row) return undefined
     return {
       owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label },
@@ -486,18 +413,7 @@ export class ApprovalService {
   async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
     if (principal.kind === 'browser' || (await this.hasGrant(principal))) return this.list(principal, { pending: true })
     await this.expireDue()
-    const crud = this.crud
-    if (crud) return (await crud.visiblePending(principal)).map(record)
-    const rows = await this.deps.sql.unsafe<Row[]>(
-      `SELECT ${COLUMNS} FROM ai_approvals a
-       WHERE a.decision IS NULL AND (
-         (a.session_id IS NULL AND a.requested_by_kind = $1 AND a.requested_by_id = $2)
-         OR EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id = a.session_id
-                    AND ((s.owner_kind = $1 AND s.owner_id = $2) OR (s.creator_kind = $1 AND s.creator_id = $2))))
-       ORDER BY a.created_at, a.id LIMIT 500`,
-      [principal.kind, principal.id],
-    )
-    return rows.map(record)
+    return (await this.deps.routes.visiblePending(principal)).map(record)
   }
 
   private async hasGrant(principal: Owner): Promise<boolean> {
@@ -541,22 +457,10 @@ export class ApprovalService {
       if (!session || !(everything || canSee(principal, session))) {
         throw new ApprovalError('not_found', `no session ${sessionId}`)
       }
-      const crud = this.crud
-      if (crud) return (await crud.list(sessionId, pending === true)).map(record)
-      const rows = await this.deps.sql.unsafe<Row[]>(
-        `SELECT ${COLUMNS} FROM ai_approvals WHERE session_id = $1 ${pending ? 'AND decision IS NULL' : ''}
-         ORDER BY created_at, id LIMIT 500`,
-        [sessionId],
-      )
-      return rows.map(record)
+      return (await this.deps.routes.list(sessionId, pending === true)).map(record)
     }
     if (!everything) throw new ApprovalError('invalid', 'name a session to list its approvals')
-    const crud = this.crud
-    if (crud) return (await crud.list(undefined, true)).map(record)
-    const rows = await this.deps.sql.unsafe<Row[]>(
-      `SELECT ${COLUMNS} FROM ai_approvals WHERE decision IS NULL ORDER BY created_at, id LIMIT 500`,
-    )
-    return rows.map(record)
+    return (await this.deps.routes.list(undefined, true)).map(record)
   }
 
   // -- writes ------------------------------------------------------------------
@@ -580,36 +484,6 @@ export class ApprovalService {
     }
   }
 
-  /** The INSERT of a pending approval, on `db` (the pool, or a transaction). */
-  private async insert(db: Sql | TransactionSql, request: CreateApproval, summary: string): Promise<Row | undefined> {
-    const ttl = await this.expirySeconds()
-    const { requestedBy: by } = request
-    const [row] = await db.unsafe<Row[]>(
-      `INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                 requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at,
-                                 traceparent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 * interval '1 second'), $14)
-       RETURNING ${COLUMNS}`,
-      [
-        randomUUID(),
-        request.sessionId,
-        request.turnId,
-        request.toolUseId,
-        request.tool,
-        summary,
-        this.hash(request.tool, request.input),
-        request.tier,
-        by.kind,
-        by.id,
-        by.label,
-        request.requestedTiers ? [...request.requestedTiers] : null,
-        ttl,
-        request.traceparent ?? null,
-      ],
-    )
-    return row
-  }
-
   /** The row's and the card's summary of the call: its input with a workspace upload's size (never hashed). */
   private async summary(request: Omit<CreateApproval, 'sessionId' | 'turnId'> & { sessionId?: string | null }): Promise<string> {
     const ws = request.workspace ?? (request.sessionId ? { kind: 'session' as const, sessionId: request.sessionId } : undefined)
@@ -623,48 +497,19 @@ export class ApprovalService {
    * createPrepared writes one now (an MCP prepare, sessionless); tests also seed rows.
    */
   async create(request: CreateApproval): Promise<ApprovalRecord> {
-    const secrets = request.secrets ?? []
     const summary = await this.summary(request)
-    const crud = this.crud
-    if (crud) {
-      // The summary is scrubbed of the turn's secrets already, and the tool and its use id carry none.
-      const made = await crud.create(await this.newRow(request, summary))
-      for (const l of made.logged) this.deps.events.committed(l.session_id, l.events, l.seqs)
-      return record(made.approval)
-    }
-    // The row and its `approval.required` commit together: a decision can only
-    // see the row once it has committed, so its `approval.resolved` cannot be
-    // logged before the event that asked for it.
-    let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
-    const approval = await this.deps.sql.begin(async (tx) => {
-      const row = await this.insert(tx, request, summary)
-      if (!row) throw new Error('approval vanished after insert')
-      const created = record(row)
-      if (created.sessionId === null) return created
-      const tail: ServerEvent[] = [
-        event({
-          type: 'approval.required',
-          sessionId: created.sessionId,
-          id: created.id,
-          tool: request.toolUseId,
-          summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
-          risk: 'outward',
-        }),
-        inputRequested(created.sessionId, approvalEntry(created)),
-      ]
-      const events = tail.map((e) => scrubForLog(e, secrets))
-      logged = { sessionId: created.sessionId, events, seqs: await this.deps.events.append(created.sessionId, events, tx) }
-      return created
-    })
-    // Committed: wake followers, and announce it on the bus (#300).
-    if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
-    return approval
+    // The summary is scrubbed of the turn's secrets already, and the tool and its use id carry none.
+    const made = await this.deps.routes.create(await this.newRow(request, summary))
+    for (const l of made.logged) this.deps.events.committed(l.session_id, l.events, l.seqs)
+    return record(made.approval)
   }
 
   /**
-   * Decides a pending approval, once: the first decision wins. An approval
-   * becomes usable for the expiry window, counted from now and fixed on the
-   * row. Emits `approval.resolved` in a session.
+   * Decides a pending approval, once: the first decision wins. An approval becomes usable for
+   * the expiry window, counted from now and fixed on the row. The API writes the decision, its
+   * span's context, its events (`approval.resolved` in a session) and its audit row in one
+   * transaction. The span is started here from the row as read before; a decision that loses
+   * (another won, or it expired) never ends it, so it is never exported.
    * Undefined when it was already decided (or, for approve/deny, has expired).
    */
   private async settle(
@@ -675,91 +520,13 @@ export class ApprovalService {
     where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
   ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
-    const crud = this.crud
-    if (crud) return await this.settleOnApi(crud, id, decision, by, reason, ttl, where)
-    // The decision and its `approval.resolved` commit together, so a watcher never sees
-    // one without the other.
-    let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
-    // Started only once the UPDATE has won, so a lost race leaves no span.
-    const traced: { span?: Span; committed?: boolean } = {}
-    try {
-      const approval = await this.deps.sql.begin(async (tx) => {
-        const [row] = await tx.unsafe<Row[]>(
-          `UPDATE ai_approvals
-           SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
-               decided_at = now(), reason = $6,
-               usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
-           WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
-           RETURNING ${COLUMNS}`,
-          [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
-        )
-        if (!row) return undefined
-        const settled = record(row)
-        // In the same transaction, so whoever sees the decision sees its span too.
-        traced.span = decisionSpan(settled, by)
-        const traceparent = traceparentOf(traced.span)
-        if (traceparent !== undefined) {
-          await tx`UPDATE ai_approvals SET decision_traceparent = ${traceparent} WHERE id = ${id}`
-          settled.decisionTraceparent = traceparent
-        }
-        if (settled.sessionId !== null) {
-          const resolved = event({
-            type: 'approval.resolved',
-            sessionId: settled.sessionId,
-            id,
-            approved: decision === 'approved',
-            decision,
-            ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
-            ...(reason && (decision === 'expired' || decision === 'cancelled') ? { reason } : {}),
-          })
-          const events = [
-            scrubForLog(resolved, []),
-            inputResolved(settled.sessionId, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
-          ]
-          logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
-        }
-        return settled
-      })
-      traced.committed = true
-      if (!approval) return undefined
-      // Committed: wake followers, and announce it on the bus (#300).
-      if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
-      await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
-      return approval
-    } catch (err) {
-      if (traced.span) {
-        recordFailure(traced.span, err)
-        // The span says the decision; a rollback means nothing was decided.
-        if (!traced.committed) traced.span.setAttribute('scadbuddy.outcome', 'rolled_back')
-      }
-      throw err
-    } finally {
-      traced.span?.end()
-    }
-  }
-
-  /**
-   * `settle` on the API: the decision, its span's context, its events and its audit row in one
-   * transaction there. The span is started from the row as read before, so the API writes its
-   * context with the decision; a decision that loses (another won, or it expired) never ends it,
-   * so it is never exported, and a lost race still leaves no span.
-   */
-  private async settleOnApi(
-    crud: ApprovalRoutes,
-    id: string,
-    decision: Decision,
-    by: Owner | undefined,
-    reason: string | null,
-    ttl: number,
-    where: Pick<DecideOptions, 'clientIp' | 'surface'>,
-  ): Promise<ApprovalRecord | undefined> {
-    const before = await crud.row(id)
+    const before = await this.deps.routes.row(id)
     if (!before || before.decision !== null) return undefined
     const now = new Date().toISOString()
     const span = decisionSpan({ ...record(before), decision, decidedAt: now }, by)
     let settled
     try {
-      settled = await crud.settle({ id, decision, by, reason, expiryS: ttl, traceparent: traceparentOf(span), surface: where.surface, clientIp: where.clientIp })
+      settled = await this.deps.routes.settle({ id, decision, by, reason, expiryS: ttl, traceparent: traceparentOf(span), surface: where.surface, clientIp: where.clientIp })
     } catch (err) {
       // Whether it was written is not known: the span says so.
       recordFailure(span, err)
@@ -770,35 +537,6 @@ export class ApprovalService {
     span.end()
     for (const l of settled.logged) this.deps.events.committed(l.session_id, l.events, l.seqs)
     return record(settled.approval)
-  }
-
-  /** One `approval` row in the audit log (#258). */
-  private async audited(
-    approval: ApprovalRecord,
-    action: string,
-    outcome: AuditOutcome,
-    by: Owner | undefined,
-    reason: string | null,
-    where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
-  ): Promise<void> {
-    await this.deps.audit?.record({
-      kind: 'approval',
-      action,
-      surface: by ? (where.surface ?? 'http') : 'system',
-      actor: by ?? SYSTEM_ACTOR,
-      clientIp: where.clientIp,
-      sessionId: approval.sessionId,
-      turnId: approval.turnId,
-      toolUseId: approval.toolUseId,
-      tier: approval.tier,
-      inputHash: approval.inputHash,
-      inputSummary: approval.inputSummary,
-      approvalId: approval.id,
-      outcome,
-      detail: `${approval.tool}${reason ? `: ${reason}` : ''} (requested by ${approval.requestedBy.label})`,
-      startedAt: new Date(approval.createdAt),
-      finishedAt: new Date(),
-    })
   }
 
   private async authorize(principal: Owner, approval: ApprovalRecord, session: SessionAccess | null): Promise<void> {
@@ -889,16 +627,8 @@ export class ApprovalService {
     const failures: unknown[] = []
     let full = false
     for (let taken = 0; taken < pages; taken += 1) {
-      const crud = this.crud
-      const due = crud
-        ? (await crud.due(tried, page)).map((id) => ({ id }))
-        : await this.deps.sql.unsafe<{ id: string }[]>(
-            `SELECT id FROM ai_approvals
-             WHERE decision IS NULL AND expires_at <= now() AND NOT (id = ANY($1::uuid[]))
-             ORDER BY expires_at LIMIT $2`,
-            [tried, page],
-          )
-      for (const { id } of due) {
+      const due = await this.deps.routes.due(tried, page)
+      for (const id of due) {
         tried.push(id)
         try {
           if (await this.expire(id)) n += 1
@@ -920,109 +650,36 @@ export class ApprovalService {
 
   /** A principal's sessionless approvals still waiting for a decision, oldest first. */
   async listPrepared(by: Owner): Promise<ApprovalRecord[]> {
-    const crud = this.crud
-    if (crud) return (await crud.prepared(by)).map(record)
-    const rows = await this.deps.sql.unsafe<Row[]>(
-      `SELECT ${COLUMNS} FROM ai_approvals
-       WHERE session_id IS NULL AND requested_by_kind = $1 AND requested_by_id = $2
-         AND decision IS NULL AND expires_at > now()
-       ORDER BY created_at, id LIMIT 500`,
-      [by.kind, by.id],
-    )
-    return rows.map(record)
+    return (await this.deps.routes.prepared(by)).map(record)
   }
 
   /**
-   * Records a sessionless pending approval (an MCP prepare) within bounds, in
-   * one transaction under one advisory lock, so concurrent prepares cannot
-   * overshoot them: the requester's oldest pending ones are cancelled to keep
-   * it under `perPrincipal`; at `total` pending sessionless rows from anyone,
-   * nothing is inserted and `undefined` is returned (nobody's row is evicted).
+   * Records a sessionless pending approval (an MCP prepare) within bounds, in one transaction
+   * under one lock on the API, so concurrent prepares cannot overshoot them: the requester's
+   * oldest pending ones are cancelled to keep it under `perPrincipal`; at `total` pending
+   * sessionless rows from anyone, nothing is inserted and `undefined` is returned (nobody's row
+   * is evicted).
+   *
+   * An eviction is a system cancellation with its own root `agent.approval` span. A span is
+   * started here before the call, one for each of the asker's pending rows past its bound as
+   * last read, so the API writes each evicted row's context with its cancellation; the spans the
+   * API did not use are never ended, so never exported. The count is read before the API takes
+   * its lock, so a concurrent prepare of the same asker can make the API evict more rows than
+   * there are spans: those rows are cancelled all the same, with no `decision_traceparent`.
    */
   async createPrepared(
     request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
     bounds: { perPrincipal: number; total: number; evictReason: string },
   ): Promise<ApprovalRecord | undefined> {
     const summary = await this.summary(request)
-    const by = request.requestedBy
-    const crud = this.crud
-    if (crud) return await this.createPreparedOnApi(crud, request, summary, bounds)
-    // An eviction is a system cancellation: each evicted row gets its root
-    // `agent.approval` span and `decision_traceparent` in this transaction, as
-    // settle() gives one. The spans end once the transaction has settled.
-    const evicted: Span[] = []
-    try {
-      const row = await this.deps.sql.begin(async (tx) => {
-        // One key for every MCP prepare: the per-principal and the global
-        // bound are both read and written under it. Held until commit.
-        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
-        const own = await tx<{ id: string }[]>`
-          SELECT id FROM ai_approvals
-          WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
-            AND decision IS NULL AND expires_at > now()
-          ORDER BY created_at, id`
-        const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
-        if (evict.length > 0) {
-          const cancelled = await tx.unsafe<Row[]>(
-            `UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = $2
-             WHERE id = ANY($1::uuid[]) AND decision IS NULL
-             RETURNING ${COLUMNS}`,
-            [evict, bounds.evictReason],
-          )
-          for (const cancelledRow of cancelled) {
-            const span = decisionSpan(record(cancelledRow), undefined)
-            evicted.push(span)
-            const traceparent = traceparentOf(span)
-            if (traceparent !== undefined) {
-              await tx`UPDATE ai_approvals SET decision_traceparent = ${traceparent} WHERE id = ${cancelledRow.id}`
-            }
-          }
-        } else {
-          const [n] = await tx<{ n: number }[]>`
-            SELECT count(*)::int AS n FROM ai_approvals
-            WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
-          if ((n?.n ?? 0) >= bounds.total) return undefined
-        }
-        const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
-        if (!inserted) throw new Error('approval vanished after insert')
-        return inserted
-      })
-      return row ? record(row) : undefined
-    } catch (err) {
-      // Only the transaction can throw here, and it rolled the cancellations back.
-      for (const span of evicted) {
-        recordFailure(span, err)
-        span.setAttribute('scadbuddy.outcome', 'rolled_back')
-      }
-      throw err
-    } finally {
-      for (const span of evicted) span.end()
-    }
-  }
-
-  /**
-   * `createPrepared` on the API, under its lock there. An eviction's span is started here before
-   * the call, one for each of the asker's pending rows past its bound as last read, so the API
-   * writes each evicted row's context with its cancellation; the spans the API did not use are
-   * never ended, so never exported. The count is read before the API takes `PREPARE_LOCK`, so
-   * a concurrent prepare of the same asker can make the API evict more rows than there are
-   * spans: those rows are cancelled all the same, with no `decision_traceparent`, as the SQL
-   * path's rows past its spans would be (backend `create_prepared` zips them, not strictly).
-   */
-  private async createPreparedOnApi(
-    crud: ApprovalRoutes,
-    request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
-    summary: string,
-    bounds: { perPrincipal: number; total: number; evictReason: string },
-  ): Promise<ApprovalRecord | undefined> {
-    const own = await crud.prepared(request.requestedBy)
+    const own = await this.deps.routes.prepared(request.requestedBy)
     const spans = Array.from({ length: Math.max(own.length - bounds.perPrincipal + 1, 0) }, () =>
       tracer().startSpan('agent.approval', { kind: SpanKind.INTERNAL, root: true }),
     )
     const traceparents = spans.map((span) => traceparentOf(span)).filter((t): t is string => t !== undefined)
     let made
     try {
-      made = await crud.createPrepared(await this.newRow({ ...request, sessionId: null, turnId: null }, summary), bounds, traceparents)
+      made = await this.deps.routes.createPrepared(await this.newRow({ ...request, sessionId: null, turnId: null }, summary), bounds, traceparents)
     } catch (err) {
       for (const span of spans) {
         recordFailure(span, err)
@@ -1056,23 +713,12 @@ export class ApprovalService {
    * Uses a sessionless approval once (`confirm_action`): only the principal
    * that asked for it, only for the input it was asked (and approved) for,
    * only while it is approved, unused, not voided and within `usable_until`.
-   * One UPDATE decides all of that, so two confirms cannot both win.
+   * One UPDATE on the API decides all of that, so two confirms cannot both win.
    */
   async consumePrepared(id: string, by: Owner, hash: string): Promise<ApprovalRecord | undefined> {
     if (!isUuid(id)) return undefined
-    const crud = this.crud
-    if (crud) {
-      const used = await crud.consume(id, by, hash)
-      return used ? record(used) : undefined
-    }
-    const [row] = await this.deps.sql.unsafe<Row[]>(
-      `UPDATE ai_approvals SET consumed_at = now()
-       WHERE id = $1 AND session_id IS NULL AND requested_by_kind = $2 AND requested_by_id = $3
-         AND input_hash = $4 AND ${USABLE}
-       RETURNING ${COLUMNS}`,
-      [id, by.kind, by.id, hash],
-    )
-    return row ? record(row) : undefined
+    const used = await this.deps.routes.consume(id, by, hash)
+    return used ? record(used) : undefined
   }
 
   /**

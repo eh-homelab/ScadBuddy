@@ -13,6 +13,8 @@ import { z } from 'zod'
 import { appFetch, BACKEND, connect, firstText, INGRESS, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser } from './support/sessions.js'
+import { SqlApprovals } from './support/sql/approvals.js'
+import { PgEventRows } from './support/sql/eventRows.js'
 
 // MCP prepare/confirm on ai_approvals (spec §8.2, #258): an outward tool
 // called over /mcp records a pending approval; the UI decides it through the
@@ -68,9 +70,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await db.ready()).toBe(true)
       grants = new Set()
       approvals = new ApprovalService({
-        sql: db.sql,
-        events: new EventLog(db.sql),
-        hashKey: Buffer.alloc(32, 3),
+        routes: new SqlApprovals(db.sql),
+        events: new EventLog(new PgEventRows(db.sql)),
+        hashKey: () => Buffer.alloc(32, 3),
         grants: async (p) => grants.has(p.id),
       })
       actions = new ApprovalActions(approvals, { perPrincipal: 3, total: 5 })
@@ -342,7 +344,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     async function setup() {
-      const approvals = new ApprovalService({ sql: db.sql, events: new EventLog(db.sql), hashKey: Buffer.alloc(32, 4) })
+      const approvals = new ApprovalService({ routes: new SqlApprovals(db.sql), events: new EventLog(new PgEventRows(db.sql)), hashKey: () => Buffer.alloc(32, 4) })
       const t = testApp({
         services: services({ pending: new ApprovalActions(approvals) }),
         deps: { approvals, database: { ping: async () => true, ready: () => db.ready() } },

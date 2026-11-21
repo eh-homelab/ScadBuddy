@@ -1,9 +1,8 @@
 import { ApplicationFailure, Context } from '@temporalio/activity'
-import type { Sql } from 'postgres'
-import { type EventRows, PgEventRows } from '../sessions/eventLog.js'
+import type { EventRows } from '../sessions/eventLog.js'
 import type { ServerEvent } from '../sessions/protocol.js'
 import { sameOwner } from '../sessions/protocol.js'
-import { PgSessionRows, type SessionRows } from '../sessions/rows.js'
+import type { SessionRows } from '../sessions/rows.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from './toolActivities.js'
 
@@ -32,23 +31,19 @@ const POLL_MS = 1_000
 export type TurnAnswer = { session_id: string; turn_id: string; text: string; outward_calls: number }
 
 export type FlowSessionDeps = {
-  sql: Sql
   flows: FlowRuns | undefined
   pollMs?: number
-  /** Where the sessions' logs are read (`PgEventRows` on `sql` when omitted; gated in main.ts, #5299 step 9). */
-  events?: Pick<EventRows, 'turnEvents'>
-  /** The sessions' rows, for a session's owner (`PgSessionRows` on `sql` when omitted; gated in main.ts). */
-  sessions?: Pick<SessionRows, 'get'>
+  /** Where the sessions' logs are read (sessions/eventLog.ts, area `session-events`). */
+  events: Pick<EventRows, 'turnEvents'>
+  /** The sessions' rows, for a session's owner (sessions/rows.ts, area `sessions`). */
+  sessions: Pick<SessionRows, 'get'>
 }
 
 function refused(message: string): ApplicationFailure {
   return ApplicationFailure.nonRetryable(message, SESSION_REFUSED)
 }
 
-/**
- * A session id as Postgres prints a uuid. Checked before any query, so the queries can
- * compare `id = $1::uuid` and use the primary key: `id::text = $1` scanned every row.
- */
+/** A session id as a lowercase uuid, checked before any read: any other text names no session. */
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown): Promise<string> {
@@ -59,10 +54,10 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
   // #2258: as flowCaller and turnCaller refuse it, a call without its execution's run id.
   const runId = workflowExecution?.runId
   if (!runId) throw ApplicationFailure.nonRetryable(`${what}: flow run ${flow}'s call carries no workflow execution run id`, UNKNOWN_FLOW)
-  // A lookup that throws (the database is away) is left to the activity's retries.
+  // A lookup that throws (the API is away) is left to the activity's retries.
   const starter = deps.flows ? await deps.flows.startedBy(flow, runId) : undefined
   if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
-  const row = await (deps.sessions ?? new PgSessionRows(deps.sql)).get(sessionId)
+  const row = await deps.sessions.get(sessionId)
   if (!row || !sameOwner(starter, { kind: row.owner_kind, id: row.owner_id })) {
     throw refused(`no session ${sessionId} of the person who started this run`)
   }
@@ -152,7 +147,7 @@ export function flowSessionActivities(deps: FlowSessionDeps): Record<string, (ar
       const sessionId = await allowed(deps, FLOW_SESSION_TURN, session_id)
       if (typeof turn_id !== 'string' || turn_id === '') throw refused(`${FLOW_SESSION_TURN} takes a turn_id`)
       const context = Context.current()
-      const read = turnReader(deps.events ?? new PgEventRows(deps.sql), sessionId, turn_id)
+      const read = turnReader(deps.events, sessionId, turn_id)
       const scan: Scan = { from: 0 }
       for (;;) {
         context.heartbeat()
