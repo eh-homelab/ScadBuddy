@@ -23,7 +23,8 @@ as the owner URL and the KEK (`docs/ai/security.md`, "Plugin packages").
 Under the rule the agent holds no database secret. Its data (sessions, transcripts,
 approvals, credentials, payload keys) goes behind CRUD routes, the cross-service reads
 become routes, and Claude Code and plugin code run where no database secret exists
-(#5299). Its 8081 routes move to `enforce` (#5297). Never add a backend table read, a new
+(#5299). Its 8081 routes get a service-credential guard in #5297 part 2; prod never runs
+`enforce` (the owner's decision of 2026-11-17). Never add a backend table read, a new
 `ai_*` grant or a trigger on another service's table; add a CRUD route that requires a
 service credential instead.
 

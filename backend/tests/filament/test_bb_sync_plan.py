@@ -1532,3 +1532,152 @@ def test_a_double_lost_answer_still_adopts(pg_pool: PgPool) -> None:
     row = _row(60, **(create.body | {"color_name": "Brick"}), created_at=made)
     (write,) = _plan(f, _snap([row], read_at=_later())).writes
     assert (write.op, write.bb_id, write.body) == ("update", 60, {})
+
+
+# -- linked rows Bambuddy deleted (#6688, decisions 187-192) ------------------------------
+
+#: Every data type that a row kind follows pushes.
+_ROWS_PUSH = SPOOLS.model_copy(update={"suppliers": "sb_to_bb", "locations": "sb_to_bb"})
+#: Each row kind's listing in the snapshot.
+_LISTING = {
+    "supplier": "suppliers",
+    "location": "locations",
+    "insert_type": "catalog",
+    "filament": "filaments",
+}
+
+
+def _linked(pool: PgPool, f: Filament, kind: str, bb_id: int = 40) -> UUID:
+    """An SB row of ``kind`` linked to Bambuddy's row ``bb_id``."""
+    if kind == "supplier":
+        sb_id = f.suppliers.create(SupplierCreate(name="Shop")).id
+        sql = "UPDATE filament_suppliers SET bb_supplier_id = %s WHERE id = %s"
+    elif kind == "location":
+        sb_id = f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"))).id
+        sql = "UPDATE filament_locations SET bb_location_id = %s WHERE id = %s"
+    elif kind == "insert_type":
+        sb_id = uuid4()
+        with pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO filament_insert_types (id, name, empty_weight_g)"
+                " VALUES (%s, 'Cardboard', 250)",
+                (sb_id,),
+            )
+        sql = "UPDATE filament_insert_types SET bb_catalog_id = %s WHERE id = %s"
+    else:
+        sb_id = _type(f)
+        sql = "UPDATE filament_spool_types SET bb_filament_id = %s WHERE id = %s"
+    with pool.connection() as conn:
+        conn.execute(sql, (bb_id, sb_id))
+    return sb_id
+
+
+@pytest.mark.parametrize("kind", list(_LISTING))
+def test_a_row_missing_from_its_listing_is_probed(pg_pool: PgPool, kind: str) -> None:
+    """R-6688-1: a linked row missing from its kind's listing, which is read whole or not
+    at all, gets one probe with its link's Bambuddy id, and no other write."""
+    f = _filament(pg_pool)
+    sb_id = _linked(pg_pool, f, kind)
+    listings: dict[str, Any] = {_LISTING[kind]: []}
+    writes = _plan(f, _snap([], **listings), _ROWS_PUSH).writes
+    probes = [w for w in writes if w.kind == kind]
+    assert [(w.op, w.sb_id, w.bb_id, w.body, w.hashes) for w in probes] == [
+        ("probe", sb_id, 40, {}, {})
+    ]
+    assert probes[0].key == f"{kind}:{sb_id}:probe"
+
+
+@pytest.mark.parametrize("kind", list(_LISTING))
+def test_a_row_of_an_unread_listing_is_not_probed(pg_pool: PgPool, kind: str) -> None:
+    """R-6688-1: a listing this pass did not read (``None``) tells nothing: no probe."""
+    f = _filament(pg_pool)
+    _linked(pg_pool, f, kind)
+    writes = _plan(f, _snap([]), _ROWS_PUSH).writes
+    assert [w for w in writes if w.kind == kind] == []
+
+
+def test_a_row_whose_kind_does_not_push_is_not_probed(pg_pool: PgPool) -> None:
+    """R-6688-1: only a kind that pushes is probed; the link stays as it is."""
+    f = _filament(pg_pool)
+    _linked(pg_pool, f, "location")
+    sync = _ROWS_PUSH.model_copy(update={"locations": "bb_to_sb"})
+    writes = _plan(f, _snap([], locations=[]), sync).writes
+    assert [w for w in writes if w.kind == "location"] == []
+
+
+def test_a_row_written_this_pass_is_not_probed(pg_pool: PgPool) -> None:
+    """R-6688-1: ``results`` stored an answer after the snapshot was read (a create or a
+    probe earlier in this pass): the snapshot cannot hold it, so it is not probed."""
+    f = _filament(pg_pool)
+    shelf = _linked(pg_pool, f, "location")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET bb_seen = %s, bb_seen_at = now() WHERE id = %s",
+            (Jsonb({"name": "Shelf A", "identifier": None}), shelf),
+        )
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    assert _plan(f, _snap([], locations=[], read_at=read_at), _ROWS_PUSH).writes == []
+
+
+def test_a_listed_row_is_not_probed(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    _linked(pg_pool, f, "location")
+    bb = [{"id": 40, "name": "Shelf A", "identifier": None}]
+    assert _plan(f, _snap([], locations=bb), _ROWS_PUSH).writes == []
+
+
+def test_a_row_refused_this_pass_is_not_probed_again(pg_pool: PgPool) -> None:
+    """R-6688-3: a probe that failed in this pass (its error row is newer than the
+    snapshot) waits for the next pass, as any refused write does (R-T4-1)."""
+    f = _filament(pg_pool)
+    shelf = _linked(pg_pool, f, "location")
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    _refuse(pg_pool, "location", shelf)
+    result = _plan(f, _snap([], locations=[], read_at=read_at), _ROWS_PUSH)
+    assert result.writes == [] and result.failed == 1
+
+
+def test_a_spool_waits_for_the_probe_of_its_location(pg_pool: PgPool) -> None:
+    """R-6688-5: a spool whose location is missing from Bambuddy's listing sends nothing
+    while the location's probe goes: Bambuddy may have deleted it, and a spool update
+    naming a deleted location fails. It waits for a later round of this pass."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    _put(pg_pool, spool, shelf)
+    row = _matching(pg_pool, spool, 50, _ROWS_PUSH)
+    _link(pg_pool, spool, 50)
+    result = _plan(f, _snap([row | {"location_id": None}], locations=[]), _ROWS_PUSH)
+    assert [(w.kind, w.op) for w in result.writes] == [("location", "probe")]
+    assert (result.deferred, result.blocked) == (1, 0)
+
+
+def test_a_spool_is_blocked_while_its_locations_probe_failed(pg_pool: PgPool) -> None:
+    """R-6688-5: the location's probe failed in this pass, so whether Bambuddy still has
+    it is not known: the spool's write waits for a later pass (``blocked``)."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = _linked(pg_pool, f, "location")
+    _put(pg_pool, spool, shelf)
+    row = _matching(pg_pool, spool, 50, _ROWS_PUSH)
+    _link(pg_pool, spool, 50)
+    read_at = datetime.now(UTC) - timedelta(minutes=1)
+    _refuse(pg_pool, "location", shelf)
+    snap = _snap([row | {"location_id": None}], locations=[], read_at=read_at)
+    result = _plan(f, snap, _ROWS_PUSH)
+    assert result.writes == []
+    assert (result.deferred, result.blocked) == (0, 1)
+
+
+def test_an_unlinked_row_is_made_again(pg_pool: PgPool) -> None:
+    """R-6688-4: once the probe's 404 dropped the link, the next round creates the row
+    again under the kind's direction, and the spool waits for that create."""
+    f = _filament(pg_pool)
+    spool = _spool(f, _type(f))
+    shelf = f.locations.create(LocationCreate(name="Shelf A", kind_id=_kind(f, "Shelf"))).id
+    _put(pg_pool, spool, shelf)
+    row = _matching(pg_pool, spool, 50, _ROWS_PUSH)
+    _link(pg_pool, spool, 50)
+    result = _plan(f, _snap([row | {"location_id": 40}], locations=[]), _ROWS_PUSH)
+    assert [(w.kind, w.op, w.sb_id) for w in result.writes] == [("location", "create", shelf)]
+    assert result.deferred == 1

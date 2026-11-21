@@ -454,6 +454,103 @@ class SensorPatch(_Patch):
         return self
 
 
+#: Why a send failed, as the print worker records it (`filament/sensor_notify.py`
+#: `failure_of`): Bambuddy refused the key (401, ``unauthorized``), the key lacks "Send
+#: notifications" (403, ``scope``), Bambuddy has no app-message route (404, older than
+#: 1.3.1, ``not_found``), it refused it for its rate limit, could not be reached, refused it
+#: for another reason, took it into no channel, Bambuddy is not configured, or the send
+#: broke in ScadBuddy.
+SendError = Literal[
+    "unauthorized",
+    "scope",
+    "not_found",
+    "rate_limited",
+    "unavailable",
+    "rejected",
+    "no_channel",
+    "not_configured",
+    "internal",
+    "interrupted",
+]
+
+#: Why a notification was not delivered: a send's `SendError`, or what a claim decided
+#: (`filament/sensors.py` `claim_on`): the sensor's ``notify`` was turned off or it was
+#: archived before the send (``cancelled``), a newer change of the sensor was queued
+#: (``superseded``), or a send was cut off before its end was recorded (``interrupted``:
+#: it may have reached Bambuddy, and it is never sent again).
+NotificationError = Literal[
+    "unauthorized",
+    "scope",
+    "not_found",
+    "rate_limited",
+    "unavailable",
+    "rejected",
+    "no_channel",
+    "not_configured",
+    "internal",
+    "cancelled",
+    "superseded",
+    "interrupted",
+]
+
+#: The most rows one claim takes: Bambuddy takes 20 app messages a minute per key.
+CLAIM_MAX = 20
+
+
+class NotificationClaim(_In):
+    """``POST …/print/filament/sensor-notifications/claim``'s body (#6646)."""
+
+    limit: int = Field(ge=1, le=CLAIM_MAX)
+
+
+class ClaimedNotification(BaseModel):
+    """A row a claim marked ``sending``: what to send (made when it was queued)."""
+
+    id: UUID
+    title: str
+    message: str
+
+
+class NotificationEnd(_In):
+    """How a send ended: ``channels`` (how many Bambuddy channels took it) when Bambuddy
+    answered, else ``error``. An answer of 0 channels is ended ``no_channel``."""
+
+    channels: int | None = Field(default=None, ge=0)
+    error: SendError | None = None
+    #: Hand a claimed row back to ``queued``: the pass ran out of time before it tried it.
+    requeue: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> NotificationEnd:
+        if self.requeue:
+            if self.error is not None or self.channels is not None:
+                raise ValueError("a row handed back has neither channels nor error")
+            return self
+        if self.error is None and not self.channels:
+            raise ValueError("a sent message needs channels above 0; else give error")
+        if self.error not in (None, "no_channel") and self.channels is not None:
+            raise ValueError("a failed send has no channels")
+        return self
+
+
+class SensorNotification(BaseModel):
+    """A notification a sensor queued when it started (`started`) or stopped (`stopped`)
+    alerting (#6646). ``read_at`` and ``value`` are the reading that changed it; ``state``
+    goes ``queued``, ``sending``, then ``sent`` or ``failed`` (a row a claim skipped goes
+    from ``queued`` to ``failed``); ``sent_at`` is when it was ended; ``channels`` how many
+    of Bambuddy's channels took it."""
+
+    kind: Literal["started", "stopped"]
+    value: float
+    read_at: datetime
+    channel: Literal["bambuddy"]
+    state: Literal["queued", "sending", "sent", "failed"]
+    channels: int | None
+    error: NotificationError | None
+    queued_at: datetime
+    sent_at: datetime | None
+
+
 class Sensor(BaseModel):
     id: UUID
     location_id: UUID
@@ -473,6 +570,8 @@ class Sensor(BaseModel):
     created_at: datetime
     archived_at: datetime | None
     alerting: bool = False
+    #: The newest notification this sensor queued, whatever its state (#6646).
+    last_notification: SensorNotification | None = None
 
     @model_validator(mode="after")
     def _alerting(self) -> Sensor:

@@ -57,6 +57,7 @@ from scadbuddy.workflows.printer_watch import PrinterWatch
 from scadbuddy.workflows.printing import LanSequenceWorkflow, PrintRunWorkflow
 from scadbuddy.workflows.problems import operation_lost
 from scadbuddy.workflows.registered import RegisteredActivities
+from scadbuddy.workflows.sensor_notify import SensorNotifyPass
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -162,8 +163,8 @@ def bambuddy_worker(
 ) -> Worker:
     """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun``,
     ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves), and the
-    filament sync's ``FilamentBbSync`` (#6265), and the Bambuddy pull's ``FilamentBbPull``
-    (#6772).
+    filament sync's ``FilamentBbSync`` (#6265), the Bambuddy pull's ``FilamentBbPull``
+    (#6772), and ``SensorNotifyPass`` (#6646).
     With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned, and
     every workflow on it is AUTO_UPGRADE (`print_deployment`): each run moves to the
     current build. Pinned runs were stranded by every deploy (#2066): the Deployment
@@ -211,6 +212,9 @@ def bambuddy_worker(
             # One Bambuddy pull, read here for the API (#6772); AUTO_UPGRADE by the
             # worker's default.
             FilamentBbPull,
+            # The sensors' alert notifications sent through Bambuddy, a pass a minute on
+            # its Schedule (#6646); AUTO_UPGRADE by the worker's default.
+            SensorNotifyPass,
         ],
         activities=activities,
         workflow_runner=sandboxed_runner(),

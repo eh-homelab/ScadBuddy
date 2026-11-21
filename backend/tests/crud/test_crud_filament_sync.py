@@ -52,10 +52,11 @@ DIRECTIONS = f"{BASE}/filament/sync/directions"
 
 
 def test_the_print_areas_list_filament_sync() -> None:
-    """The routes are an area of their own, appended last, so a new worker waits for an
-    API that serves them (`wait_for_areas`) rather than planning into a 404."""
+    """The routes are an area of their own, appended after the older ones, so a new worker waits
+    for an API that serves them (`wait_for_areas`) rather than planning into a 404."""
     assert "filament-sync" in PRINT_CRUD_AREAS
-    assert CRUD_AREAS["print"][-2:] == ["filament-sync", "filament-pull"]
+    assert "filament-sync" in CRUD_AREAS["print"]
+    assert CRUD_AREAS["print"].index("filament-pull") > CRUD_AREAS["print"].index("filament-sync")
     assert set(CRUD_AREAS["print"]) == PRINT_CRUD_AREAS
 
 
