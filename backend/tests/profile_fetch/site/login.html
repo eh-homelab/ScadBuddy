@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Sign In | 3D Filament Profiles (replica)</title>
+  </head>
+  <body>
+    <!-- The structure 3dfp.mjs relies on: input[name=email], input[name=password] and a
+         "Sign In" button. -->
+    <form method="post" action="/login">
+      <p id="error">__ERROR__</p>
+      <label>Email <input name="email" type="email" __DISABLED__ /></label>
+      <label>Password <input name="password" type="password" __DISABLED__ /></label>
+      <button type="submit">Sign In</button>
+      <button type="button">Sign In with Google</button>
+    </form>
+    <script>
+      // The replica echoes the browser's own user agent (test_the_user_agent_is_not_headless).
+      fetch("/api/ua", { method: "POST", body: navigator.userAgent });
+    </script>
+  </body>
+</html>

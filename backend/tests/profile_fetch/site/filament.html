@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Filament __ID__ | 3D Filament Profiles (replica)</title>
+  </head>
+  <body>
+    <h1>Inland PLA+ White</h1>
+    <!-- 3dfp.mjs `add`: the "Add to My Spools" button, absent once the spool is added. -->
+    <div id="actions" data-in-spools="__IN_SPOOLS__"></div>
+    <script>
+      const actions = document.getElementById("actions");
+      if (actions.dataset.inSpools === "false") {
+        const add = document.createElement("button");
+        add.type = "button";
+        add.textContent = "Add to My Spools";
+        add.onclick = async () => {
+          await fetch("/api/spools/__ID__", { method: "POST" });
+          add.remove();
+        };
+        actions.appendChild(add);
+      }
+    </script>
+  </body>
+</html>

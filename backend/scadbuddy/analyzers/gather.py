@@ -31,15 +31,20 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.extruders import one_flow
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
+    Inventory,
+    SbRows,
     asked_plates,
     every_plate,
     gather_plate_options,
+    read_inventory,
+    sb_plan,
 )
 from scadbuddy.bambuddy.library_view import NotViewableError, library_geometry
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.print_run import RunRoute
-from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
+from scadbuddy.bambuddy.resolver import DEFAULT_BED, PRINTER_MODEL, PrintChoices
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament.presets import preset_for
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.print_library.reads import LibraryReads, served_reads
@@ -76,6 +81,7 @@ async def gather_context(
     route: RunRoute | None = None,
     trays: Callable[[], Awaitable[FilamentOptions | None]] | None = None,
     refused: str | None = None,
+    reads: SbRows | None = None,
 ) -> AnalysisContext:
     """``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
     the plate's filament slots are read off an uploaded file. ``remembered`` is what the
@@ -89,10 +95,11 @@ async def gather_context(
 
     ``route`` is the dialog's native route (#4629): the printer is its registry row, and
     ``trays`` reads the filament step as the dialog's native read does (the LAN report's
-    trays under the spool overlay), so nothing is asked of Bambuddy, configured or not.
+    trays with the SB spools they hold), so nothing is asked of Bambuddy, configured or not.
     ``refused`` is why the registry printer the request named cannot be judged (gone, a
     disagreeing pair): the printer is then unavailable for that reason, the rest read as
-    before."""
+    before. On Bambuddy's path the spools are ScadBuddy's own, read from ``reads``
+    (#6262 Task 7), and a plan that names Bambuddy spools is read as SB numbers."""
     context = AnalysisContext(
         slug=slug, params=params, request=request, output=meta, library_file_id=library_subject
     )
@@ -137,7 +144,9 @@ async def gather_context(
                 await _read_library_geometry(
                     context, client, cache, library_subject, budget, downloads, native
                 )
-            await _read_bambuddy(context, client, settings, remembered, library_file_id, native)
+            await _read_bambuddy(
+                context, client, settings, remembered, library_file_id, native, reads
+            )
 
     if refused is not None:
         context.printer = None
@@ -208,7 +217,13 @@ async def _read_bambuddy(
     remembered: ModelPrintChoices | None,
     library_file_id: int | None,
     native: LibraryReads | None = None,
+    reads: SbRows | None = None,
 ) -> None:
+    if context.request.filament_plan is not None:
+        # A plan from before #6262 Task 7 names Bambuddy spools: read as SB numbers (F14).
+        context.request = context.request.model_copy(
+            update={"filament_plan": await sb_plan(context.request.filament_plan, reads)}
+        )
     request = context.request
     meta = context.output
     printers: list[Printer] = []
@@ -244,7 +259,7 @@ async def _read_bambuddy(
                 else f"Bambuddy has no active printer {printer_id}"
             )
     _read_choices(context, settings, remembered, printer_id)
-    await _read_filaments(context, client)
+    inventory = await _read_filaments(context, client, reads)
 
     if request.filament_plan is None:
         context.unavailable["inventory"] = "no filament plan was chosen"
@@ -289,7 +304,10 @@ async def _read_bambuddy(
             printer_id=context.printer.id if context.printer else None,
             plate_ids=plate_ids,
             fallback_colours=list(meta.colors) if meta is not None else None,
+            inventory=inventory,
             native=native,
+            reads=reads,
+            nozzle=_nozzle(context),
         )
         context.filament_options = read[0] if len(read) == 1 else every_plate(read)
     except ApiError as error:
@@ -300,7 +318,7 @@ async def _read_trays(
     context: AnalysisContext, trays: Callable[[], Awaitable[FilamentOptions | None]] | None
 ) -> None:
     """A native run's filaments and inventory (#4629): each slot's spool as the printer's
-    trays and the spool overlay describe it, read as the dialog's filament step does."""
+    trays and the SB spools they hold describe it, read as the dialog's filament step does."""
     plan = context.request.filament_plan
     if plan is None or not plan.slots:
         context.unavailable["filaments"] = "no filament plan was chosen"
@@ -368,30 +386,44 @@ def _read_choices(
     context.choices_origin = "remembered"
 
 
-async def _read_filaments(context: AnalysisContext, client: BambuddyClient) -> None:
-    """Each slot's spool, as the plan chose it and the inventory describes it."""
+async def _read_filaments(
+    context: AnalysisContext, client: BambuddyClient, reads: SbRows | None
+) -> Inventory | None:
+    """Each slot's spool, as the plan chose it and ScadBuddy's own spools describe it
+    (#6262 Task 7: the plan names each by its SB number); the spools read, for the
+    filament step's read to reuse, or ``None`` when none were read."""
     plan = context.request.filament_plan
     if plan is None or not plan.slots:
         context.unavailable["filaments"] = "no filament plan was chosen"
-        return
+        return None
     try:
-        spools = {spool.id: spool for spool in await client.spools()}
+        inventory = await read_inventory(client, reads)
     except ApiError as error:
         context.unavailable["filaments"] = error.detail
-        return
+        return None
+    rows = {row.spool.number: row for row in inventory}
     for choice in sorted(plan.slots, key=lambda row: row.slot_id):
-        spool = spools.get(choice.spool_id)
-        if spool is None:
+        row = rows.get(choice.spool_id)
+        if row is None:
             continue
+        spool = row.spool
+        preset = preset_for(row.presets, PRINTER_MODEL, _nozzle(context))
         context.filaments.append(
             FilamentSlot(
                 slot_id=choice.slot_id,
-                spool_id=spool.id,
-                material=spool.material,
-                subtype=spool.subtype,
-                brand=spool.brand,
-                preset_name=spool.slicer_filament_name,
+                spool_id=spool.number,
+                material=spool.names.material,
+                subtype=spool.names.subtype,
+                brand=spool.names.brand,
+                # The SB spool's preset for the chosen nozzle (#6262 Task 7 review R2).
+                preset_name=preset.slicer_filament_name if preset else None,
             )
         )
     if not context.filaments:
-        context.unavailable["filaments"] = "no spool of the plan is in Bambuddy's inventory"
+        context.unavailable["filaments"] = "no spool of the plan is in ScadBuddy's spools"
+    return inventory
+
+
+def _nozzle(context: AnalysisContext) -> str:
+    """The nozzle size a spool's preset is read for: the choices' first, else 0.4."""
+    return context.choices.nozzles[0].size if context.choices is not None else "0.4"

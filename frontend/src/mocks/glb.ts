@@ -16,6 +16,8 @@ export interface GlbPart {
    */
   min: [number, number, number]
   max: [number, number, number]
+  /** #6349 — the alpha byte of a translucent part, as `scadbuddy_alpha` on its own mesh (`glb.py`). */
+  alpha?: number
 }
 
 const BOX_INDICES = [
@@ -107,21 +109,29 @@ export function buildGlb(parts: GlbPart[]): Uint8Array {
     type: 'SCALAR',
   })
 
+  // One mesh for the opaque parts, as the writer's, and one of its own for each translucent
+  // part, which carries its alpha as an extra.
+  const primitiveOf = (i: number) => ({
+    attributes: { POSITION: i },
+    indices: indexAccessorIndex,
+    material: i,
+  })
+  const opaque = parts.flatMap((part, i) => (part.alpha === undefined ? [primitiveOf(i)] : []))
+  const meshDefs = [
+    ...(opaque.length > 0 || parts.length === 0 ? [{ name: 'model', primitives: opaque }] : []),
+    ...parts.flatMap((part, i) =>
+      part.alpha === undefined
+        ? []
+        : [{ name: 'model', primitives: [primitiveOf(i)], extras: { scadbuddy_alpha: part.alpha } }],
+    ),
+  ]
+
   const gltf = {
     asset: { version: '2.0', generator: 'scadbuddy-mock' },
     scene: 0,
-    scenes: [{ nodes: [0] }],
-    nodes: [{ name: 'model', mesh: 0 }],
-    meshes: [
-      {
-        name: 'model',
-        primitives: parts.map((_, i) => ({
-          attributes: { POSITION: i },
-          indices: indexAccessorIndex,
-          material: i,
-        })),
-      },
-    ],
+    scenes: [{ nodes: meshDefs.map((_, i) => i) }],
+    nodes: meshDefs.map((_, i) => ({ name: 'model', mesh: i })),
+    meshes: meshDefs,
     materials: parts.map((part, i) => {
       const [r, g, b] = hexToLinearRgb(part.color)
       return {
@@ -170,6 +180,13 @@ export function buildGlb(parts: GlbPart[]): Uint8Array {
   return out
 }
 
+/** #6349 — the alpha byte of a `#RRGGBBAA` colour below `FF`; none for any other. */
+function alphaOf(colour: string): number | undefined {
+  const match = /^#?[0-9a-f]{6}([0-9a-f]{2})$/i.exec(colour)
+  const alpha = match ? Number.parseInt(match[1]!, 16) : 255
+  return alpha < 255 ? alpha : undefined
+}
+
 /**
  * The two-colour keychain the mock catalogue ships: a plate plus raised text.
  *
@@ -182,9 +199,10 @@ export function keychainGlb(colors: string[], bbox: { x: number; y: number; z: n
   const halfDepth = bbox.y / 2
   const plateHeight = Math.min(3, bbox.z * 0.5)
   return buildGlb([
-    { color: body, min: [-halfX, 0, -halfDepth], max: [halfX, plateHeight, halfDepth] },
+    { color: body, alpha: alphaOf(body), min: [-halfX, 0, -halfDepth], max: [halfX, plateHeight, halfDepth] },
     {
       color: text,
+      alpha: alphaOf(text),
       min: [-halfX * 0.78, plateHeight, -halfDepth * 0.45],
       max: [halfX * 0.86, bbox.z, halfDepth * 0.45],
     },

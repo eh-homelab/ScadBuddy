@@ -8,11 +8,18 @@ inventing one.
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Generator, Sequence
+from typing import Any, cast
+from uuid import uuid4
+
 import pytest
 
 from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice, _choice
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
 from scadbuddy.bambuddy.models import PresetCatalogue, PresetRef, SlotChoice, SpoolFilamentPreset
+from scadbuddy.bambuddy.print_run import resolve_plates
 from scadbuddy.bambuddy.resolver import (
     TIERS,
     NozzleChoice,
@@ -20,9 +27,25 @@ from scadbuddy.bambuddy.resolver import (
     printer_preset_name,
     resolve,
 )
+from scadbuddy.bambuddy.trays import tray_spool_id
+from scadbuddy.filament.models import EffectivePreset
+from scadbuddy.slicing.catalogue import native_catalogue
+from scadbuddy.slicing.profiles import Profiles
 from tests.bambuddy.conftest import recording
+from tests.slicing.conftest import PROFILES
 
 H2C = "Bambu Lab H2C {} nozzle"
+
+
+def _preset(nozzle: str, filament: str) -> EffectivePreset:
+    """An SB spool's effective preset for the H2C (#6262 F1)."""
+    return EffectivePreset(
+        printer_model="H2C",
+        nozzle_diameter=nozzle,
+        slicer_filament=filament,
+        slicer_filament_name=None,
+        overridden=True,
+    )
 
 
 def row(source: str, id_: str, name: str, *sizes: str, kind: str | None = None) -> PresetChoice:
@@ -58,6 +81,7 @@ def without_cloud() -> Catalogue:
 def spool(spool_id: int, material: str, preset: str | None, name: str | None) -> SpoolOption:
     return SpoolOption(
         spool_id=spool_id,
+        sb_number=spool_id,
         material=material,
         colour="#112233",
         slicer_filament=preset,
@@ -188,15 +212,30 @@ def test_a_spools_own_per_nozzle_row_wins_over_everything_but_an_override() -> N
         plan(4),
         PrintChoices(nozzles=[NozzleChoice(size="0.2")]),
         catalogue,
-        {
-            4: [
-                SpoolFilamentPreset(
-                    printer_model="H2C", nozzle_diameter="0.2", slicer_filament="34"
-                )
-            ]
-        },
+        {4: [_preset("0.2", "34")]},
     )
     assert resolved.filament_presets == [PresetRef(source="local", id="34")]
+
+
+def test_an_own_preset_bambuddys_catalogue_lacks_is_found_by_its_name() -> None:
+    """#6262 Task 7: a pulled Bambuddy spool's preset is its BBL filament_id ("GFA00"),
+    which Bambuddy's catalogue rows do not carry; its name finds Bambu's preset, as the
+    Bambuddy spool's own name did before."""
+    bare = spool(1, "PLA", None, None)
+    own = _preset("0.4", "GFA00").model_copy(update={"slicer_filament_name": "Bambu PLA Basic"})
+    resolved = resolve(
+        options(bare),
+        plan(1),
+        PrintChoices(nozzles=[NozzleChoice(size="0.4")]),
+        recorded(),
+        {1: [own]},
+    )
+    named = resolve(
+        options(BASIC), plan(1), PrintChoices(nozzles=[NozzleChoice(size="0.4")]), recorded(), {}
+    )
+    assert resolved.filament_presets == named.filament_presets
+    assert "Generic" not in resolved.filament_presets[0].id
+    assert resolved.warnings == []
 
 
 def test_an_advanced_override_wins() -> None:
@@ -413,3 +452,209 @@ def test_colours_and_bed_type_pass_through() -> None:
     )
     assert resolved.filament_colours == ["#112233"]
     assert resolved.bed_type == "Cool Plate"
+
+
+# --- SB spools' presets (#6262 Task 5) --------------------------------------------------
+
+
+def _with_petg(catalogue: Catalogue) -> Catalogue:
+    """The image's test catalogue with a PETG preset per nozzle whose ``filament_id`` is
+    the tray's ``tray_info_idx`` below."""
+    petg = [
+        PresetChoice(
+            ref=PresetRef(source="standard", id=f"Tray PETG @BBL H2C {size} nozzle"),
+            name=f"Tray PETG @BBL H2C {size} nozzle",
+            compatible_printers=[H2C.format(size)],
+            filament_id="GFG00",
+        )
+        for size in ("0.4", "0.6")
+    ]
+    return dataclasses.replace(catalogue, filament=[*catalogue.filament, *petg])
+
+
+def _tray_holding(number: int | None) -> FilamentOptions:
+    tray = SpoolOption(
+        spool_id=tray_spool_id(0, 1),
+        material="PLA",
+        colour="#FFFFFF",
+        slicer_filament="GFG00",
+        tray_only=True,
+        sb_number=number,
+        sb_spool_id=None if number is None else uuid4(),
+    )
+    return FilamentOptions(
+        library_file_id=None, slots=[SlotNeed(slot_id=1, colour="#FFFFFF")], spools=[tray]
+    )
+
+
+def test_a_trays_preset_comes_from_its_spool() -> None:
+    """The SB spool in the tray (#7) names its preset per nozzle (F1): on 0.4 it is the
+    spool's, over the tray's ``tray_info_idx``; on 0.6 it has none, so the tray's."""
+    catalogue = _with_petg(native_catalogue(Profiles(PROFILES)))
+    held = _tray_holding(7)
+    tray_plan = plan(tray_spool_id(0, 1))
+    own = {7: [_preset("0.4", "Bambu PLA Basic @BBL H2C")]}
+
+    on_04 = resolve(
+        held, tray_plan, PrintChoices(nozzles=[NozzleChoice(size="0.4")]), catalogue, own
+    )
+    on_06 = resolve(
+        held, tray_plan, PrintChoices(nozzles=[NozzleChoice(size="0.6")]), catalogue, own
+    )
+
+    assert on_04.filament_presets == [PresetRef(source="standard", id="Bambu PLA Basic @BBL H2C")]
+    assert on_06.filament_presets == [
+        PresetRef(source="standard", id="Tray PETG @BBL H2C 0.6 nozzle")
+    ]
+
+
+class _Reads:
+    """`SpoolPresetSource` over fixed answers, recording what it was asked."""
+
+    def __init__(
+        self, presets: dict[int, list[EffectivePreset]], bb: dict[int, int] | None = None
+    ) -> None:
+        self._presets, self._bb = presets, bb or {}
+        self.asked: list[list[int]] = []
+
+    async def presets(self, numbers: Sequence[int]) -> dict[int, list[EffectivePreset]]:
+        self.asked.append(sorted(numbers))
+        return {n: self._presets[n] for n in numbers if n in self._presets}
+
+    async def bb_spools(self, numbers: Sequence[int]) -> dict[int, int]:
+        return {n: self._bb[n] for n in numbers if n in self._bb}
+
+
+class _Bambuddy:
+    """Only what `resolve_plates` may ask Bambuddy: a spool's presets."""
+
+    def __init__(self, presets: dict[int, list[SpoolFilamentPreset]]) -> None:
+        self._presets = presets
+        self.asked: list[int] = []
+
+    async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
+        self.asked.append(spool_id)
+        return self._presets.get(spool_id, [])
+
+
+def _sb_row(number: int) -> FilamentOptions:
+    spool = SpoolOption(spool_id=number, sb_number=number, material="PLA", colour="#FFFFFF")
+    return FilamentOptions(
+        library_file_id=41, slots=[SlotNeed(slot_id=1, colour="#FFFFFF")], spools=[spool]
+    )
+
+
+@pytest.mark.parametrize(
+    ("size", "asked", "preset"),
+    [("0.4", [], "GFSA00_22"), ("0.6", [16], "GFSA00_31")],
+)
+async def test_a_bb_preset_is_read_only_without_an_sb_one(
+    size: str, asked: list[int], preset: str
+) -> None:
+    """SB spool #7 is linked to Bambuddy's spool 16. Its own 0.4 row is used and Bambuddy
+    is not asked; for 0.6 it has none, so Bambuddy's row for 0.6 is read (F1)."""
+    reads = _Reads({7: [_preset("0.4", "GFSA00_22")]}, bb={7: 16})
+    bambuddy = _Bambuddy(
+        {
+            16: [
+                SpoolFilamentPreset(
+                    printer_model="H2C", nozzle_diameter="0.6", slicer_filament="GFSA00_31"
+                )
+            ]
+        }
+    )
+    (resolved,), errors = await resolve_plates(
+        cast(BambuddyClient, bambuddy),
+        [1],
+        [_sb_row(7)],
+        plan(7),
+        PrintChoices(nozzles=[NozzleChoice(size=size)]),  # type: ignore[arg-type]
+        recorded(),
+        presets=reads,
+    )
+    assert errors == [] and reads.asked == [[7]]
+    assert bambuddy.asked == asked
+    assert resolved.filament_presets == [PresetRef(source="cloud", id=preset)]
+
+
+class _Unused:
+    """An early read of presets that fails the test if it is awaited."""
+
+    def __await__(self) -> Generator[Any, None, dict[int, list[EffectivePreset]]]:
+        raise AssertionError("the early read of other spools was used")
+        yield
+
+
+@pytest.mark.parametrize("early_numbers", [[7, 9], []])
+async def test_early_presets_of_other_spools_are_not_used(early_numbers: list[int]) -> None:
+    """#6611: the check's early read named other spools than the options (``[7, 9]``: a
+    spool the options lack; ``[]``: the inventory row was archived), so `resolve_plates`
+    reads the presets of its own spools and does not await the early read."""
+
+    async def numbering() -> list[int]:
+        return early_numbers
+
+    reads = _Reads({7: [_preset("0.4", "GFSA00_22")]})
+    (resolved,), errors = await resolve_plates(
+        None,
+        [1],
+        [_sb_row(7)],
+        plan(7),
+        PrintChoices(nozzles=[NozzleChoice(size="0.4")]),
+        recorded(),
+        presets=reads,
+        early=(numbering(), _Unused()),
+    )
+    assert errors == [] and reads.asked == [[7]]
+    assert resolved.filament_presets == [PresetRef(source="cloud", id="GFSA00_22")]
+
+
+async def test_native_options_read_no_bambuddy() -> None:
+    """A native run has no client: a linked SB spool with no row for the nozzle falls
+    back to the tray's preset, and nothing asks Bambuddy (no ``TypeError``)."""
+    reads = _Reads({}, bb={7: 16})
+    (resolved,), errors = await resolve_plates(
+        None,
+        [1],
+        [_tray_holding(7)],
+        plan(tray_spool_id(0, 1)),
+        PrintChoices(nozzles=[NozzleChoice(size="0.4")]),
+        _with_petg(native_catalogue(Profiles(PROFILES))),
+        presets=reads,
+    )
+    assert errors == [] and reads.asked == [[7]]
+    assert resolved.filament_presets == [
+        PresetRef(source="standard", id="Tray PETG @BBL H2C 0.4 nozzle")
+    ]
+
+
+def test_a_storefront_slot_takes_its_filament_types_preset_and_own_colour() -> None:
+    """#6574: a storefront price names a filament that is not loaded as a slot with no
+    spool and its filament type's presets (``slot_presets``). The slot is sliced with the
+    type's preset for the H2C and the chosen nozzle, as a spool of the type would be, in
+    the file's own colour for the slot. Without them a slot with no spool is refused, as
+    a print refuses it."""
+    built = FilamentOptions(
+        library_file_id=41,
+        slots=[SlotNeed(slot_id=1, colour="#FF0000"), SlotNeed(slot_id=2, colour="#0000FF")],
+        spools=[],
+    )
+    choices = PrintChoices(nozzles=[NozzleChoice(size="0.4")])
+    pla = [_preset("0.4", "GFSA00_22"), _preset("0.6", "GFSA00_31")]
+    priced = resolve(built, FilamentPlan(), choices, recorded(), {}, slot_presets={1: pla, 2: pla})
+    assert priced.errors == []
+    assert priced.filament_presets == [PresetRef(source="cloud", id="GFSA00_22")] * 2
+    assert priced.filament_colours == ["#FF0000", "#0000FF"]
+    printed = resolve(built, FilamentPlan(), choices, recorded(), {})
+    assert [(e.kind, e.slot_id) for e in printed.errors] == [("no-choice", 1), ("no-choice", 2)]
+    # A type with no preset for the nozzle has nothing to slice with.
+    bare = resolve(
+        built,
+        FilamentPlan(),
+        PrintChoices(nozzles=[NozzleChoice(size="0.2")]),
+        recorded(),
+        {},
+        slot_presets={1: pla, 2: pla},
+    )
+    assert [(e.kind, e.slot_id) for e in bare.errors] == [("no-preset", 1), ("no-preset", 2)]
+    assert bare.errors[0].message.startswith("Slot 1's filament has no slicer preset")

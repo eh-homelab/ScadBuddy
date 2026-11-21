@@ -370,9 +370,18 @@ async def test_one_bad_source_row_does_not_stop_the_rest(
 
 
 class RecordingIndex:
-    def __init__(self, fail_repair: bool = False) -> None:
+    def __init__(self, fail_repair: bool = False, fail_notifications: bool = False) -> None:
         self.calls: list[tuple[str, float, float | None]] = []
         self.fail_repair = fail_repair
+        self.fail_notifications = fail_notifications
+        self.notification_prunes = 0
+
+    def prune_notifications(self) -> int:
+        """`SensorStore.prune_notifications` (#6646 Decision 49)."""
+        self.notification_prunes += 1
+        if self.fail_notifications:
+            raise RuntimeError("boom")
+        return 0
 
     async def repair(self, window: float) -> int:
         self.calls.append(("repair", window, None))
@@ -386,7 +395,7 @@ class RecordingIndex:
 
 
 def sweep_state(stored: StoredSettings, index: RecordingIndex) -> Any:
-    components = SimpleNamespace(get=lambda key: SimpleNamespace(index=index))
+    components = SimpleNamespace(get=lambda key: SimpleNamespace(index=index, sensors=index))
     return SimpleNamespace(
         settings_store=SimpleNamespace(load=lambda: stored), components=components
     )
@@ -421,6 +430,19 @@ async def test_the_sweep_prunes_even_when_repair_fails() -> None:
     assert [call[0] for call in index.calls] == ["repair", "prune"]
 
 
+async def test_the_sweep_prunes_the_sensor_notifications_too() -> None:
+    """#6646 Decision 49: each run prunes the sensors' old notification rows, after the
+    activity's prune; a failed one fails the sweep, and the activity is still pruned."""
+    index = RecordingIndex()
+    await main._sweep_activity_logged(sweep_state(StoredSettings(), index))
+    assert index.notification_prunes == 1
+    failing = RecordingIndex(fail_notifications=True)
+    with pytest.raises(RuntimeError, match="the activity sweep failed"):
+        await main._sweep_activity_logged(sweep_state(StoredSettings(), failing))
+    assert [call[0] for call in failing.calls] == ["repair", "prune"]
+    assert failing.notification_prunes == 1
+
+
 async def test_the_sweep_prunes_nothing_when_the_settings_cannot_be_read() -> None:
     def broken() -> StoredSettings:
         raise RuntimeError("database down")
@@ -431,6 +453,7 @@ async def test_the_sweep_prunes_nothing_when_the_settings_cannot_be_read() -> No
     with pytest.raises(RuntimeError, match="database down"):
         await main._sweep_activity_logged(state)
     assert index.calls == []
+    assert index.notification_prunes == 0
 
 
 def test_a_repair_commits_each_row_it_restores(pg_pool: PgPool, index: ActivityIndex) -> None:

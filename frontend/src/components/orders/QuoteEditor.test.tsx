@@ -427,6 +427,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
               power_per_hour: '0.03',
               wear_per_hour: '0.035',
               maintenance_per_hour: '0.12',
+              actuals: false,
             },
           },
         ]}
@@ -434,8 +435,79 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     const rate = screen.getByTestId('quote-machine-rate')
     expect(rate).toHaveTextContent('Machine rate 0.665 per hour for Garage, with the intervals last read: Bambuddy did not answer')
+    // #6665: the same tag as the job cost's.
+    expect(within(rate).getByTestId('quote-machine-tag')).toHaveTextContent('estimate')
     await user.click(within(rate).getByRole('button', { name: /Machine rate 0.665/ }))
     expect(within(rate).getByRole('list', { name: 'Machine rate parts' })).toHaveTextContent('Depreciation 0.48 per hour')
+  })
+
+  // #6665 (machine-rate actuals spec §6): a quote priced partly from actuals says so, and names the least-backed part.
+  it("tags a quote's machine line actuals with its confidence and the least-backed part", () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'quoted')
+    const wear = (name: string, have: number, confidence: number) => ({
+      name,
+      cost: '35',
+      life_hours: '1000',
+      per_hour: '0.05',
+      priced_by: 'actual' as const,
+      basis: have >= 3 ? ('actual' as const) : ('estimate' as const),
+      have,
+      need: 3,
+      confidence,
+      partly_typed: false,
+    })
+    renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        editable
+        onChanged={vi.fn()}
+        item={draft}
+        quotes={[
+          {
+            id: 'q-actuals',
+            order_item_id: ITEM_DRAFT,
+            created_at: '2026-11-18T10:00:00Z',
+            source: 'slice',
+            accepted: false,
+            sliced_sha256: null,
+            sliced_blob_key: null,
+            plates: [],
+            lines: [{ kind: 'machine_time', label: 'Machine time, 1 h at 0.7 per hour', quantity: 1, unit_minor: 70, amount_minor: 70 }],
+            unit_cost_minor: 70,
+            unit_price_minor: 70,
+            quantity: 1,
+            total_minor: 70,
+            created_by: { kind: 'browser', principal: null, session: null },
+            printer: 'p-1',
+            machine_rate_breakdown: {
+              printer: 'p-1',
+              printer_name: 'Garage',
+              source: 'profile',
+              rate_per_hour: '0.7',
+              currency: 'USD',
+              intervals: 'typed',
+              purchase_price: '2400',
+              watts: '200',
+              kwh_price: '0.15',
+              depreciation_per_hour: '0.48',
+              power_per_hour: '0.03',
+              wear_per_hour: '0.1',
+              maintenance_per_hour: '0.09',
+              actuals: true,
+              actuals_window: 3,
+              confidence: 66,
+              wear: [wear('Nozzle', 3, 100), wear('Plate', 2, 66)],
+            },
+          },
+        ]}
+      />,
+    )
+    const tag = within(screen.getByTestId('quote-machine-rate')).getByTestId('quote-machine-tag')
+    expect(tag).toHaveTextContent('actuals, 66 % confidence')
+    expect(tag).toHaveAttribute('title', 'Least backed: Plate: 2 of 3 replacements logged')
   })
 })
 

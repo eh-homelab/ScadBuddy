@@ -75,12 +75,25 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: (#4699 phase 4). Its ``printers`` area is every other ``…/print/printers`` route (the
 #: reads, a printer's access code, a virtual printer's sync) and ``…/print/reports``
 #: (#5298 Task 29). Its ``rack`` area is ``…/print/rack``, the rack hotends' usage
-#: (#5298 Task 30). Its ``spools`` area is ``…/print/spools``, ``…/print/native-spools``,
-#: ``…/print/held-presets`` and ``…/print/native-slices`` (#5298 Task 31). Its
+#: (#5298 Task 30). Its ``spools`` area is ``…/print/held-presets`` and
+#: ``…/print/native-slices`` (#5298 Task 31; its ``…/print/spools`` routes went with the
+#: spool overlay, #6262 Task 12). Its
 #: ``transfer-urls`` area is ``…/print/transfer-urls``, a LAN print's read URL of a
 #: native slice's file (#5298 Task 32). Its ``access-codes`` area is
 #: ``…/print/access-codes`` and ``…/access-codes/virtual-printer``: whether the API opens
-#: access codes, and a virtual printer's sealed code opened (#5298 Task 33). The intake
+#: access codes, and a virtual printer's sealed code opened (#5298 Task 33). Its
+#: ``filament`` area is ``…/print/filament/trays``, ``…/filament/presets``,
+#: ``…/filament/print-uses`` and ``…/filament/print-uses/settle``: a native run's SB
+#: spools and what its LAN starts use of them (#6262 Task 6); and ``…/filament/rows`` and
+#: ``…/filament/bb-to-sb``, the Bambuddy path's SB spools (Task 7). An area of its own, so a
+#: print worker that books there waits for an API that serves them. Its ``filament-sync``
+#: area is ``…/print/filament/sync/directions``, ``…/plan``, ``…/results`` and ``…/pass``:
+#: the sync pass's reads and writes of SB, `FilamentSyncApi` (#6265 Task 6). Its
+#: ``filament-pull`` area is ``…/print/filament/pull``, ``…/pull/usage``,
+#: ``…/pull/ha-states`` and ``…/pull/trays``: what the worker read of Bambuddy for the pull,
+#: applied by the API, `BbPullApi` (#6772). Its ``sensor-notify`` area is
+#: ``…/print/filament/sensor-notifications/claim`` and ``…/{id}/end``: the sensors' alert
+#: notifications the print worker sends through Bambuddy (#6646). The intake
 #: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
 #: customer's staged file, checked by the intake worker (#6133). The agent's small stores
 #: (#5299 step 5, `api/crud_agent_stores.py`): its ``activity-kinds`` area is
@@ -147,6 +160,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: row, for its directory sweeps; its ``forget-rows`` area is
 #: ``…/agent/sessions/{id}/forget-rows``, a forgotten session's last rows deleted with its
 #: unnamed workspace bytes and its warm-evict NOTIFY (#6501, `api/crud_agent_sweeps.py`).
+#: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
+#: ``…/import`` and ``…/failed``: a fetch's preset files, their import into Bambuddy as the
+#: type's presets, and its failure (#6625, `api/crud_profile_fetch.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -167,6 +183,10 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "spools",
         "transfer-urls",
         "access-codes",
+        "filament",
+        "filament-sync",
+        "filament-pull",
+        "sensor-notify",
     ],
     "storefront": [
         "listings",
@@ -227,6 +247,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "forget-rows",
     ],
     "intake": ["sources"],
+    "profile-fetch": ["runs"],
 }
 
 

@@ -39,6 +39,7 @@ from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.profiles import Profiles
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.slicing.conftest import PROFILES
+from tests.support.sb_rows import FakeSbRows
 
 API = f"{BASE_URL}/api/v1"
 
@@ -914,17 +915,21 @@ async def test_a_failing_catalogue_beats_the_filament_steps_failure_with_no_prin
 
 
 @respx.mock
-async def test_the_spools_and_assignments_are_read_together(bambuddy: BambuddyClient) -> None:
-    """#2354: the assignments waited for the spools."""
-    asked = asyncio.Event()
-    respx.get(f"{API}/inventory/spools").mock(side_effect=_after(asked, "inventory-spools.json"))
-    respx.get(f"{API}/inventory/assignments").mock(
-        side_effect=_marks(asked, "inventory-assignments.json")
-    )
+async def test_the_inventory_is_sb_spools_placed_by_bambuddys_assignments(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#6262 Task 7: Bambuddy's spools are not read; its assignments place the SB rows."""
+    spools = respx.get(f"{API}/inventory/spools").mock(return_value=_ok("inventory-spools.json"))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=_ok("inventory-assignments.json"))
+    reads = FakeSbRows([])
 
-    spools, assignments = await read_inventory(bambuddy)
+    async with asyncio.timeout(5):
+        rows = await read_inventory(bambuddy, reads)
 
-    assert spools and assignments
+    assert rows == []
+    assert not spools.called
+    [asked] = reads.assignments
+    assert asked
 
 
 @respx.mock
@@ -996,18 +1001,17 @@ async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
     bambuddy: BambuddyClient,
 ) -> None:
     """#4196: the check read the printer, then the 3MF, then the spools, one after
-    another. Here the printer list answers only once the download and the spools have
-    been asked for, and it lists no printer 1, so the check refuses and drops the
-    download and the assignments read it started."""
+    another. Here the printer list answers only once the download and the spools'
+    assignments have been asked for (the SB spools are placed by them since #6262), and
+    it lists no printer 1, so the check refuses and drops the download and the
+    assignments read it started."""
     source = _CheckSource()
     spools_asked = asyncio.Event()
-    respx.get(f"{API}/inventory/spools").mock(
-        side_effect=_marks(spools_asked, "inventory-spools.json")
-    )
     assignments_dropped = False
 
     async def assignments_never(request: httpx.Request) -> httpx.Response:
         nonlocal assignments_dropped
+        spools_asked.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -1025,7 +1029,7 @@ async def test_the_checks_download_and_spools_do_not_wait_on_the_printer(
     respx.get(f"{API}/printers/").mock(side_effect=no_printers)
     request = PrintRunRequest.model_validate(
         {
-            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "filament_plan": {"ids": "sb", "slots": [{"slot_id": 1, "spool_id": 9}]},
             "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
             "printer_id": 1,
         }
@@ -1058,22 +1062,55 @@ async def test_the_checks_early_reads_fail_in_the_order_they_were_read_in(
     respx.get(f"{API}/printers/").mock(return_value=_ok("printers.json"))
     respx.get(f"{API}/printers/1/status").mock(return_value=_ok("printer-status-rack.json"))
     _preset_routes()
-    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
-    respx.get(f"{API}/inventory/assignments").mock(return_value=_ok("inventory-assignments.json"))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(500))
     source = _DownloadFails() if download_fails else _CheckDone()
     request = PrintRunRequest.model_validate(
         {
-            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+            "filament_plan": {"ids": "sb", "slots": [{"slot_id": 1, "spool_id": 9}]},
             "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
             "printer_id": 1,
         }
     )
 
     expected, said = (
-        (ValueError, "the download failed") if download_fails else (ApiError, "filament spools")
+        (ValueError, "the download failed") if download_fails else (ApiError, "spool assignments")
     )
     with pytest.raises(expected, match=said):
         await check_print(bambuddy, cast(PrintSource, source), StoredSettings(), request)
+
+
+@respx.mock
+async def test_the_printers_status_does_not_wait_on_the_catalogue(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#4196: `prepare_run` read the preset catalogue, then the printer's status. Here the
+    catalogue answers only once the status has been asked for, so a check that still read
+    them one after the other hangs. The choices are refused by the catalogue, and the
+    refusal is the check's answer, as before."""
+    respx.get(f"{API}/printers/").mock(return_value=_ok("printers.json"))
+    status_asked = asyncio.Event()
+    respx.get(f"{API}/printers/1/status").mock(
+        side_effect=_marks(status_asked, "printer-status-rack.json")
+    )
+    presets = respx.get(f"{API}/slicer/presets").mock(
+        side_effect=_after(status_asked, "slicer-presets-h2c.json")
+    )
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+    respx.get(f"{API}/printers/1").mock(return_value=_ok("printer.json"))
+    respx.get(f"{API}/printers/1/inventory-remain").mock(return_value=_ok("inventory-remain.json"))
+    request = PrintRunRequest.model_validate(
+        {
+            "filament_plan": {"ids": "sb", "slots": []},
+            "choices": {"nozzles": [{"size": "0.4"}, {"size": "0.2"}], "tier": "standard"},
+            "printer_id": 1,
+        }
+    )
+
+    check = await check_print(bambuddy, cast(PrintSource, _CheckDone()), StoredSettings(), request)
+
+    [error] = check.errors
+    assert "different sizes" in error
+    assert presets.call_count == 1
 
 
 def _sidecar_unanswered() -> httpx.Response:

@@ -11,8 +11,9 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from scadbuddy.bambuddy.send import towers_within_reach
+from scadbuddy.bambuddy.send import _tower_on, objects_within_reach, towers_within_reach
 from scadbuddy.render.bambu3mf import (
+    MAX_SETTINGS_BYTES,
     MODEL_SETTINGS_NAME,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
@@ -25,10 +26,11 @@ from scadbuddy.render.objects3mf import plate_boxes, read_objects
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     PRIME_TOWER_BRIM,
-    PRIME_TOWER_SIDE,
     TOWER_CLEARANCE,
     Rect,
+    TowerSettings,
     plate_for,
+    tower_footprint,
     tower_reaches,
 )
 from scadbuddy.render.split import ColourPart
@@ -84,7 +86,7 @@ def test_a_tower_the_h2c_cannot_reach_is_moved_beside_each_plates_objects(
     moved = towers_within_reach(payload, H2C)
 
     boxes = plate_boxes(moved).boxes
-    reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+    reserved = tower_footprint(H2C, 20.0).size[0]
     for index, (x, y) in enumerate(_towers(moved), start=1):
         assert tower_reaches((x, y), H2C, height=20.0)
         (low, high), (ox, oy) = boxes[index], plate_origin(index, 2, A1_MINI)
@@ -107,14 +109,34 @@ def test_a_tower_the_h2c_cannot_reach_is_moved_beside_each_plates_objects(
 
 
 def test_a_tower_every_extruder_reaches_is_left_where_its_author_put_it(tmp_path: Path) -> None:
-    """Judged at the file's own 22 mm width: (165, 250) is the tower that sliced plate 2
-    by hand (job 151), and #105's 60 mm square there would cross the H2C's wrapping
-    strip at y 310."""
+    """Judged as the two-filament tower the slice builds (#6735): (165, 250) is the tower
+    that sliced plate 2 by hand (job 151), and #105's 60 mm square there would cross the
+    H2C's wrapping strip at y 310."""
     payload = _laid_out_on_an_a1_mini(tmp_path, ("165", "250"))
     assert towers_within_reach(payload, H2C) is payload
     # The A1 mini reaches its own tower.
     unmoved = _laid_out_on_an_a1_mini(tmp_path)
     assert towers_within_reach(unmoved, A1_MINI) is unmoved
+
+
+def test_a_file_whose_settings_pass_the_cap_keeps_its_towers(tmp_path: Path) -> None:
+    """#6792: the file is untrusted, so the send reads `project_settings.config` within
+    `MAX_SETTINGS_BYTES`, as plate fit does. Past the cap the file keeps its towers,
+    and the slicer says why, rather than the send reading it whole. Defence in depth:
+    the send's `layout_of` already reads such a file as `as_is` and never calls this."""
+    payload = _laid_out_on_an_a1_mini(tmp_path)
+    assert towers_within_reach(payload, H2C) is not payload  # (15, 145): moved
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings["padding"] = "x" * MAX_SETTINGS_BYTES
+    padded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+    assert towers_within_reach(padded, H2C) is padded
+
+
+def test_a_file_whose_settings_are_not_json_keeps_its_towers(tmp_path: Path) -> None:
+    payload = _laid_out_on_an_a1_mini(tmp_path)
+    damaged = rezipped(payload, {PROJECT_SETTINGS_NAME: b"{not json"})
+    assert towers_within_reach(damaged, H2C) is damaged
 
 
 def test_no_printer_chosen_moves_no_tower(tmp_path: Path) -> None:
@@ -246,3 +268,258 @@ def _painted(payload: bytes) -> bytes:
                 data = archive.read(name)
                 changed[name] = re.sub(rb"(<triangle [^/]*)/>", rb'\1 paint_color="8"/>', data)
     return rezipped(payload, changed)
+
+
+def _clear_of_its_objects(
+    payload: bytes,
+    corner: tuple[float, float],
+    height: float,
+    settings: TowerSettings | None = None,
+) -> bool:
+    """Whether the tower the slice builds (#6735) at ``corner``, with its brim, keeps its
+    clearance from plate 1's objects, as :func:`tower_beside` places one (the #4014 test
+    above)."""
+    low, high = plate_boxes(payload).boxes[1]
+    tower = tower_footprint(H2C, height, settings)
+    x0, y0 = corner[0] - tower.brim, corner[1] - tower.brim
+    gap = tower.clearance
+    return not Rect(x0, y0, x0 + tower.size[0], y0 + tower.size[1]).overlaps(
+        Rect(
+            float(low[0]) - gap,
+            float(low[1]) - gap,
+            float(high[0]) + gap,
+            float(high[1]) + gap,
+        )
+    )
+
+
+def test_a_reachable_tower_on_top_of_the_objects_is_moved_beside_them(tmp_path: Path) -> None:
+    """#3770: Knitted Cat sliced with "Object conflicts were detected": the tower stood
+    on the objects. Every extruder reaches (160, 140), so #4014's rule kept it; a tower
+    on its plate's objects is moved beside them before the slice."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "140"))
+    assert tower_reaches((160, 140), H2C, height=20.0)
+    # The tower overlaps the objects, not only their clearance: the case _tower_on moves.
+    read = plate_boxes(payload)
+    (low, high), (ox, oy) = read.boxes[1], plate_origin(1, read.count, H2C)
+    objects = Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
+    assert _tower_on((160, 140), tower_footprint(H2C, 20.0), objects)
+
+    moved = towers_within_reach(payload, H2C)
+
+    corner = _towers(moved)[0]
+    assert corner != (160.0, 140.0)
+    assert tower_reaches(corner, H2C, height=20.0)
+    assert _clear_of_its_objects(moved, corner, 20.0)
+
+
+def test_a_tower_on_objects_that_leave_no_room_stays(tmp_path: Path) -> None:
+    """With nowhere clear to go the author's tower stays, and the slicer says why."""
+    slab = trimesh.creation.box(extents=(300, 320, 5))
+    eye = trimesh.creation.box(extents=(4, 4, 4))
+    out = tmp_path / "slab.3mf"
+    write_plates_3mf(
+        [
+            PlateParts(
+                (ColourPart(1, "Slab", "#D3CFB5", slab), ColourPart(2, "Eye", "#27272C", eye)),
+                (1, 2),
+            )
+        ],
+        ["#D3CFB5", "#27272C"],
+        out,
+        thumbnails=None,
+    )
+    payload = out.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings.update(
+        printable_area=["0x0", "330x0", "330x320", "0x320"],
+        wipe_tower_x=["160"],
+        wipe_tower_y=["140"],
+        prime_tower_width="60",
+    )
+    crowded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+
+    assert towers_within_reach(crowded, H2C) is crowded
+
+
+def _stated(payload: bytes, **values: object) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings.update(values)
+    return rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+
+
+def test_a_tower_inside_the_no_sparse_keep_out_is_moved_out_of_it(tmp_path: Path) -> None:
+    """#6735: with "No sparse layers" the slicer refuses a tower within about 100 mm of
+    an object taller than 4 mm, "relative position of the model and the prime tower".
+    (160, 20) clears the 20 mm plate's objects, so it stays without the option; with it,
+    the tower moves to where the keep-out holds."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "20"))
+    assert towers_within_reach(payload, H2C) is payload
+
+    no_sparse = _stated(payload, wipe_tower_no_sparse_layers="1")
+    moved = _towers(towers_within_reach(no_sparse, H2C))[0]
+
+    asked = TowerSettings(no_sparse_layers=True)
+    assert moved != (160.0, 20.0)
+    assert tower_reaches(moved, H2C, 20.0, asked)
+    assert _clear_of_its_objects(no_sparse, moved, 20.0, asked)
+
+
+def test_a_tower_with_its_rib_wall_off_is_judged_at_the_files_width(tmp_path: Path) -> None:
+    """#6735: without the rib wall the tower is ``prime_tower_width`` wide and its depth
+    grows with the prime volume; at (262, 150) a 60 mm wide one passes the right
+    nozzle's reach (x 323), while the two-filament rib tower (36 mm) fits."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("262", "150"))
+    assert towers_within_reach(payload, H2C) is payload
+
+    flat = _stated(payload, prime_tower_rib_wall="0", prime_tower_width="60")
+
+    assert _towers(towers_within_reach(flat, H2C))[0] != (262.0, 150.0)
+
+
+def test_a_file_that_states_no_tower_width_is_judged_at_the_default(tmp_path: Path) -> None:
+    """#6735 review: a file is untrusted. A ``prime_tower_width`` of "0", a negative or a
+    non-finite one, with the rib wall off, is judged at the default width, as a missing
+    one is, not divided by. The send keeps working."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "140"))
+    default = _towers(towers_within_reach(_stated(payload, prime_tower_rib_wall=["0"]), H2C))
+
+    for width in (["0"], "-5", "nan", "inf"):
+        stated = _stated(payload, prime_tower_rib_wall=["0"], prime_tower_width=width)
+        assert _towers(towers_within_reach(stated, H2C)) == default, width
+
+
+def _plate_one_at(payload: bytes, x: float) -> bytes:
+    """``payload`` with plate 1's build item moved so that its objects start at ``x``
+    (the item is centred on its 30 mm box), as an A1 mini author puts a part at its
+    bed's left edge."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        model = archive.read(ROOT_MODEL_NAME).decode()
+    moved = model.replace(
+        'objectid="5" transform="1 0 0 0 1 0 0 0 1 90 90 10"',
+        f'objectid="5" transform="1 0 0 0 1 0 0 0 1 {x + 15:g} 90 10"',
+    )
+    assert moved != model
+    return rezipped(payload, {ROOT_MODEL_NAME: moved.encode()})
+
+
+def _relative(payload: bytes, index: int, count: int = 2) -> Rect:
+    """Plate ``index``'s objects' box, less its origin on the A1 mini's bed."""
+    low, high = plate_boxes(payload).boxes[index]
+    ox, oy = plate_origin(index, count, A1_MINI)
+    return Rect(float(low[0] - ox), float(low[1] - oy), float(high[0] - ox), float(high[1] - oy))
+
+
+#: The H2C's reach (x 25..325, y 0..320) centres a 30 mm box here.
+_CENTRED_ON_THE_H2C = Rect(160, 145, 190, 175)
+
+
+def test_a_smaller_beds_plates_are_centred_where_every_extruder_reaches(
+    tmp_path: Path,
+) -> None:
+    """Bambu Studio's Adapt Settings: a file from another bed size moves each plate's
+    content so its centre is on the new plate's centre. Here the centre is that of the
+    area every extruder reaches, so an A1 mini plate lands at (175, 160) on the H2C,
+    also when it was in reach already. Every other entry keeps its bytes."""
+    payload = _laid_out_on_an_a1_mini(tmp_path)
+    assert _relative(payload, 1) == Rect(75, 75, 105, 105)
+
+    moved = objects_within_reach(payload, H2C)
+
+    assert _relative(moved, 1) == _CENTRED_ON_THE_H2C
+    assert _relative(moved, 2) == _CENTRED_ON_THE_H2C
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(moved)) as after,
+    ):
+        assert after.namelist() == before.namelist()
+        for name in before.namelist():
+            if name != ROOT_MODEL_NAME:
+                assert after.read(name) == before.read(name), name
+        model = after.read(ROOT_MODEL_NAME).decode()
+    assert 'objectid="5" transform="1 0 0 0 1 0 0 0 1 175 160 10"' in model
+    assert 'objectid="6" transform="1 0 0 0 1 0 0 0 1 391 160 10"' in model
+
+
+def test_objects_only_one_extruder_reaches_move_where_both_reach(tmp_path: Path) -> None:
+    """#6820: library copy 1000001621's spool lay at x 0..180, where its author put it
+    on an A1 mini, and the H2C's right nozzle reaches only x 25..330: "Found G-code in
+    unprintable area", T65535. The same file with the plate's objects at x 75..255
+    sliced on the right extruder (measured 2026-11-20, BambuStudio 02.08.02.61)."""
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    assert _relative(payload, 1) == Rect(0, 75, 30, 105)
+    assert _relative(objects_within_reach(payload, H2C), 1) == _CENTRED_ON_THE_H2C
+
+
+def _h2c_plate_at(payload: bytes, x: float) -> bytes:
+    """An H2C file's one plate moved so that its 30 mm box starts at ``x``."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        model = archive.read(ROOT_MODEL_NAME).decode()
+    moved = model.replace(
+        'transform="1 0 0 0 1 0 0 0 1 175 160 10"',
+        f'transform="1 0 0 0 1 0 0 0 1 {x + 15:g} 160 10"',
+    )
+    assert moved != model
+    return rezipped(payload, {ROOT_MODEL_NAME: moved.encode()})
+
+
+def _h2c_box(payload: bytes) -> Rect:
+    low, high = plate_boxes(payload).boxes[1]
+    return Rect(float(low[0]), float(low[1]), float(high[0]), float(high[1]))
+
+
+def test_objects_on_a_bed_of_the_same_size_keep_their_place_in_reach(tmp_path: Path) -> None:
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "20"))
+    assert objects_within_reach(payload, H2C) is payload
+    beside = _h2c_plate_at(payload, 40)
+    assert objects_within_reach(beside, H2C) is beside
+
+
+def test_objects_on_a_bed_of_the_same_size_move_the_least_into_reach(tmp_path: Path) -> None:
+    """The bed is the target's, so the author placed the objects for it: only a group
+    that not every extruder reaches moves, by the smallest shift."""
+    payload = _one_plate_on_the_h2c(tmp_path, 20.0, ("160", "20"))
+    left = _h2c_plate_at(payload, 0)
+    assert _h2c_box(objects_within_reach(left, H2C)) == Rect(25, 145, 55, 175)
+    right = _h2c_plate_at(payload, 310)
+    assert _h2c_box(objects_within_reach(right, H2C)) == Rect(295, 145, 325, 175)
+
+
+def test_the_tower_is_placed_beside_the_moved_objects(tmp_path: Path) -> None:
+    """The tower is judged where the objects now stand, not where they stood."""
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    moved = towers_within_reach(objects_within_reach(payload, H2C), H2C)
+    assert _clear_of_its_objects(moved, _towers(moved)[0], 20.0, TowerSettings())
+
+
+def test_objects_wider_than_the_reach_keep_their_place(tmp_path: Path) -> None:
+    """A group wider than x 25..325 fits nowhere that both nozzles reach: it stays, and
+    the slicer's failure says why (#6820)."""
+    slab = trimesh.creation.box(extents=(310, 30, 5))
+    out = tmp_path / "slab.3mf"
+    write_plates_3mf(
+        [PlateParts((ColourPart(1, "Slab", "#D3CFB5", slab),), (1,))],
+        ["#D3CFB5"],
+        out,
+        thumbnails=None,
+    )
+    payload = _stated(out.read_bytes(), printable_area=["0x0", "180x0", "180x180", "0x180"])
+    assert objects_within_reach(payload, H2C) is payload
+
+
+def test_no_printer_chosen_moves_no_objects(tmp_path: Path) -> None:
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    assert objects_within_reach(payload, DEFAULT_PLATE) is payload
+
+
+def test_a_file_whose_objects_do_not_read_keeps_their_place(tmp_path: Path) -> None:
+    payload = _plate_one_at(_laid_out_on_an_a1_mini(tmp_path), 0)
+    damaged = _without_settings(payload, b"<config><plate>")
+    assert objects_within_reach(damaged, H2C) is damaged
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+    settings["padding"] = "x" * MAX_SETTINGS_BYTES
+    padded = rezipped(payload, {PROJECT_SETTINGS_NAME: json.dumps(settings).encode()})
+    assert objects_within_reach(padded, H2C) is padded

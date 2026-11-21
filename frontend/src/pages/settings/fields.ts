@@ -2,13 +2,14 @@ import type { Settings, SettingsUpdate } from '../../api/types'
 
 /**
  * #2171 — the Settings sections that save runtime fields (`RUNTIME_FIELDS`, `HAND_LAID`).
- * `printers` and `inventory` own none, so they are not here.
+ * `printers` owns none, so it is not here.
  */
 export type SectionId =
   | 'connection'
   | 'printing'
   | 'print-watcher'
   | 'orders'
+  | 'filament'
   | 'projects'
   | 'uploads'
   | 'rendering'
@@ -167,10 +168,37 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'administration',
     kind: 'url',
   },
+  // #6262 Task 13 — the Filament section: the numbers a spool falls back on. Its sync choices
+  // (`filament_sync`) are laid out by hand in the section (`HAND_LAID`).
   {
     name: 'spool_overlay_refresh_seconds',
-    section: 'administration',
+    section: 'filament',
     kind: 'seconds',
+  },
+  {
+    name: 'filament_low_stock_pct',
+    section: 'filament',
+    kind: 'count',
+  },
+  {
+    name: 'filament_default_cost_per_kg',
+    section: 'filament',
+    kind: 'text',
+  },
+  {
+    name: 'filament_burn_window_days',
+    section: 'filament',
+    kind: 'count',
+  },
+  {
+    name: 'filament_lead_time_days',
+    section: 'filament',
+    kind: 'count',
+  },
+  {
+    name: 'filament_safety_margin_days',
+    section: 'filament',
+    kind: 'count',
   },
   {
     name: 'media_upload_max_bytes',

@@ -208,7 +208,7 @@ spool for gets a `trays` question. Its `candidates` name rows of the answer's `s
   positional and valid within that one answer only. "Yes" links the row by its
   `physical_spool_id`, else one of its `records` (`{provider, record_id}`), through
   `PUT /api/v1/printers/{id}/trays/{ams_id}/{tray_id}/spool` (`api/tray_spools.py`).
-  That writes `tray_spool_links` and nothing in any provider.
+  That wrote `tray_spool_links` and nothing in any provider (the table was dropped in #6348; a tray link is a filament tray place now, #6262).
 
 ## 4. What ScadBuddy sends, and what Bambuddy decides
 
@@ -291,6 +291,25 @@ slicer is the only judge.
   with) or the native slicer's `slicing/presets.py` `apply_overrides`, and from there into
   the sliced 3MF. A list over a single value is written as it is (Bambu Studio's JSON
   loader reads it joined with commas), where `apply_overrides` refused it before.
+- **Over the file's plates (#6820).** The CLI applies a `<plate>`'s own settings
+  (`Metadata/model_settings.config`) over the process file, and command-line options
+  over both: `new_print_config.apply(*part_plate->config())`, then `m_extra_config`
+  ([BambuStudio.cpp v02.08.02.61](https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/src/BambuStudio.cpp)
+  ~6890). Measured on 2026-11-20 with the prod slicer pod's binary (BambuStudio
+  02.08.02.61): a plate's `print_sequence` "by object" beat the process file's "by
+  layer". So the laid-out copy states the request's `process_overrides` (and the
+  `print_sequence` shorthand under them) over each plate's own value of the same key
+  (`bambu3mf.py` `plate_overrides`, `set_plate_settings`; `send.Target.plate_settings`,
+  written last in `send._laid_out_for`, after ScadBuddy's pinned plate map, #3955). The
+  plate's keys are those Bambu Studio's 3MF reader takes into the plate's config
+  (`bbs_3mf.cpp` `_handle_start_config_metadata`): `curr_bed_type` as `bed_type`,
+  `filament_map` as `filament_maps` and `filament_volume_map` as `filament_volume_maps`
+  (numbers space-separated), `print_sequence`, `first_layer_print_sequence`,
+  `other_layers_print_sequence`, `other_layers_print_sequence_nums`, `spiral_mode`
+  (`true`/`false`) and `filament_map_mode` (`bambu3mf.PLATE_KEYS`). The reader ignores
+  any other plate key. A key no plate states is left to the process file. Both slicer
+  paths slice the same copy, so this needs no command-line option. The copy's key
+  names them (`&plates:<digest>`), so a copy laid out with other values is not reused.
 - **Checks.** Bambu Studio's option definitions (`PrintConfigDef`) are compiled into its
   binary; neither the image nor the repo holds them as data. So the only check is
   against the resolved process preset's own values: a key it has no value for, or a

@@ -361,7 +361,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // and no other site may embed it.
         'Content-Security-Policy': "default-src 'none'; sandbox",
         'Cross-Origin-Resource-Policy': 'same-origin',
-        'Content-Disposition': 'inline',
+        // A PDF is untrusted bytes on the app's origin (#6267): never shown in the page, so it
+        // downloads. `Content-Security-Policy: sandbox` would also stop the browser's PDF viewer,
+        // and `attachment` keeps the chat's link working (it opens in a new tab and saves).
+        'Content-Disposition': blob.mediaType === 'application/pdf' ? 'attachment; filename="document.pdf"' : 'inline',
         // The name is the bytes' hash: what it names never changes.
         'Cache-Control': 'private, max-age=31536000, immutable',
       })

@@ -1,7 +1,7 @@
 import { CrudReadError, crudRead, crudResponse } from '../api/crudRead.js'
 import type { SavedBodies, SavedMeta } from '../harness/httpRequest.js'
-import { BLOB_NAME, type MadeImages, type SessionImage, type SessionImages, type StoredBlob, type TurnFence } from './blobs.js'
-import { IMAGE_MEDIA_TYPES, type ImageMediaType } from './images.js'
+import { BLOB_NAME, type MadeImages, type SessionBlob, type SessionImages, type StoredSessionBlob, type TurnFence } from './blobs.js'
+import { type BlobMediaType, DOCUMENT_MEDIA_TYPES, IMAGE_MEDIA_TYPES } from './images.js'
 
 // A session's images and saved HTTP bodies over the API's CRUD routes (#5299 step 7; backend
 // api/crud_agent_blobs.py, areas `session-blobs` and `http-bodies`): `SessionBlobs` and
@@ -22,7 +22,7 @@ type Written = { stored: boolean; created?: string[]; at?: string | null }
 
 const fenceOf = (fence: TurnFence) => ({ attempt: fence.attempt, turn_id: fence.turnId })
 
-function imageForm(meta: object, images: readonly SessionImage[]): FormData {
+function imageForm(meta: object, images: readonly SessionBlob[]): FormData {
   const form = new FormData()
   form.append('meta', JSON.stringify(meta))
   images.forEach((image, index) => {
@@ -44,7 +44,7 @@ export class CrudSessionBlobs implements SessionImages {
     this.#fetch = options.fetch ?? globalThis.fetch
   }
 
-  async #write(sessionId: string, images: readonly SessionImage[], extra: object): Promise<Written> {
+  async #write(sessionId: string, images: readonly SessionBlob[], extra: object): Promise<Written> {
     const meta = { session_id: sessionId, images: images.map((i) => ({ name: i.name, media_type: i.mediaType })), ...extra }
     const response = await crudResponse(this.#fetch, this.#base, `the images of session ${sessionId}`, '/session-blobs', {
       method: 'POST',
@@ -54,7 +54,7 @@ export class CrudSessionBlobs implements SessionImages {
     return (await response.json()) as Written
   }
 
-  async put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void> {
+  async put(sessionId: string, images: readonly SessionBlob[], toolUseId?: string): Promise<void> {
     if (toolUseId !== undefined) {
       // One tool call's images are recorded whole, in one transaction: never split.
       if (images.length > IMAGES_PER_WRITE) throw new Error(`a tool call keeps at most ${IMAGES_PER_WRITE} images`)
@@ -68,7 +68,7 @@ export class CrudSessionBlobs implements SessionImages {
    * Each batch is its own transaction, so each answers what it made with its own `at`: a name a
    * later batch made is deleted against that batch's time, never an earlier one's.
    */
-  async putMade(sessionId: string, images: readonly SessionImage[]): Promise<MadeImages[]> {
+  async putMade(sessionId: string, images: readonly SessionBlob[]): Promise<MadeImages[]> {
     const made: MadeImages[] = []
     for (let i = 0; i < images.length; i += IMAGES_PER_WRITE) {
       const written = await this.#write(sessionId, images.slice(i, i + IMAGES_PER_WRITE), {})
@@ -97,7 +97,7 @@ export class CrudSessionBlobs implements SessionImages {
    * and answers false (a batch stored before it stays: named by its bytes, and only the session
    * reads it).
    */
-  async putIf(sessionId: string, images: readonly SessionImage[], fence: TurnFence): Promise<boolean> {
+  async putIf(sessionId: string, images: readonly SessionBlob[], fence: TurnFence): Promise<boolean> {
     const extra = { fence: fenceOf(fence) }
     if (images.length === 0) return (await this.#write(sessionId, images, extra)).stored
     for (let i = 0; i < images.length; i += IMAGES_PER_WRITE) {
@@ -106,7 +106,7 @@ export class CrudSessionBlobs implements SessionImages {
     return true
   }
 
-  async get(sessionId: string, name: string): Promise<StoredBlob | undefined> {
+  async get(sessionId: string, name: string): Promise<StoredSessionBlob | undefined> {
     if (!BLOB_NAME.test(name)) return undefined
     let response: Response
     try {
@@ -116,11 +116,11 @@ export class CrudSessionBlobs implements SessionImages {
       throw error
     }
     const mediaType = (response.headers.get('content-type') ?? '').split(';')[0]?.trim() ?? ''
-    if (!(IMAGE_MEDIA_TYPES as readonly string[]).includes(mediaType)) {
+    if (![...IMAGE_MEDIA_TYPES, ...DOCUMENT_MEDIA_TYPES].includes(mediaType as BlobMediaType)) {
       await response.body?.cancel()
       throw new CrudReadError(`image ${name}: the backend answered a ${mediaType || 'missing'} type`)
     }
-    return { mediaType: mediaType as ImageMediaType, bytes: Buffer.from(await response.arrayBuffer()) }
+    return { mediaType: mediaType as BlobMediaType, bytes: Buffer.from(await response.arrayBuffer()) }
   }
 }
 

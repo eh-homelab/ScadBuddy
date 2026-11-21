@@ -5,12 +5,11 @@ import { resetMockState } from '../handlers'
 import {
   HOT_FOLDERS,
   HOT_PATH_KEY,
-  HOT_PATH_STALE_KEY,
   HOT_PRINTER,
   NO_BAMBUDDY,
   NO_BAMBUDDY_HEADER,
+  SHELF_NUMBER,
   TAGGED_TRAY,
-  UNLINKED_RECORD,
   UNTAGGED_TRAY,
   setHotPath,
 } from './hotPath'
@@ -45,39 +44,32 @@ describe('hot-path mock (#3818, plan 2026-10-18 Task 11)', () => {
     ])
   })
 
-  it('answers the filaments as trays: one with a Bambuddy record, one untagged with a record to link', async () => {
+  it('answers the filaments as trays: one holding an SB spool, one untagged with a spool to link', async () => {
     setHotPath(true)
     const options = await api.getFilaments('out-1', { printer: HOT_PRINTER.id })
     expect(options.source).toBe('trays')
-    expect(options.overlay_notes).toEqual([])
     const [tagged, untagged, ...rest] = options.spools ?? []
-    expect(tagged).toMatchObject({ spool_id: TAGGED_TRAY, label: 'AMS-A slot 1', records: { bambuddy: { brand: 'Bambu Lab' } } })
-    expect(untagged).toMatchObject({ spool_id: UNTAGGED_TRAY, records: {} })
-    // The record to link is on the shelf (#4506), never a print choice in `spools`.
+    expect(tagged).toMatchObject({ spool_id: TAGGED_TRAY, label: 'AMS-A slot 1', brand: 'Bambu Lab', sb_number: 1 })
+    expect(untagged).toMatchObject({ spool_id: UNTAGGED_TRAY, sb_spool_id: null, sb_number: null })
+    // The spool to link is on the shelf (#4506), never a print choice in `spools`.
     expect(rest).toEqual([])
-    expect(options.shelf).toEqual([expect.objectContaining({ spool_id: UNLINKED_RECORD, loaded: null })])
-    expect(options.trays).toEqual([expect.objectContaining({ ams_id: 0, tray_id: 1, candidates: [UNLINKED_RECORD] })])
+    expect(options.shelf).toEqual([expect.objectContaining({ spool_id: SHELF_NUMBER, sb_number: SHELF_NUMBER, loaded: null })])
+    expect(options.trays).toEqual([expect.objectContaining({ ams_id: 0, tray_id: 1, candidates: [SHELF_NUMBER] })])
   })
 
-  it('answers a stale overlay with no records and one note', async () => {
-    localStorage.setItem(HOT_PATH_KEY, '1')
-    localStorage.setItem(HOT_PATH_STALE_KEY, '1')
-    resetMockState()
-    const options = await api.getFilaments('out-1')
-    expect(options.overlay_notes).toHaveLength(1)
-    expect(options.overlay_notes?.[0]).toMatch(/Bambuddy/)
-    expect((options.spools ?? []).every((spool) => Object.keys(spool.records ?? {}).length === 0)).toBe(true)
-    expect(options.trays).toEqual([])
-    expect(options.shelf).toEqual([])
-  })
-
-  it('links the untagged tray, after which it carries the record', async () => {
+  it('links the untagged tray to the shelf spool, after which it holds it', async () => {
     setHotPath(true)
-    const linked = await api.linkTraySpool(HOT_PRINTER.id, 0, 1, { provider: 'bambuddy', record_id: '27' })
-    expect(linked).toMatchObject({ ams_id: 0, tray_id: 1, linked_by: 'manual', records: { bambuddy: { name: 'Pink' } } })
+    const shelf = (await api.getFilaments('out-1')).shelf?.[0]
+    expect(shelf?.sb_spool_id).toBeTruthy()
+    const linked = await api.linkTraySpool(HOT_PRINTER.id, 0, 1, { spool_id: shelf?.sb_spool_id ?? '' })
+    expect(linked).toMatchObject({ id: shelf?.sb_spool_id, number: SHELF_NUMBER, colour_name: 'Pink' })
+    expect(linked.location_id).toBeTruthy()
     const options = await api.getFilaments('out-1')
     expect(options.trays).toEqual([])
-    expect(options.spools?.find((spool) => spool.spool_id === UNTAGGED_TRAY)?.records?.['bambuddy']).toBeTruthy()
+    expect(options.spools?.find((spool) => spool.spool_id === UNTAGGED_TRAY)).toMatchObject({
+      sb_spool_id: shelf?.sb_spool_id,
+      sb_number: SHELF_NUMBER,
+    })
   })
 
   it('lists native folders, and refuses Bambuddy projects', async () => {
@@ -93,7 +85,6 @@ describe('hot-path mock (#3818, plan 2026-10-18 Task 11)', () => {
     for (const [path, method] of [
       ['/print/printers/1/camera', 'GET'],
       ['/print/printers/1/camera/stream', 'GET'],
-      ['/farm/inventory', 'GET'],
       ['/print/printers/1/trays/0/1/spool', 'POST'],
       ['/print/projects', 'POST'],
     ] as const) {

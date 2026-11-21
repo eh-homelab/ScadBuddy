@@ -359,13 +359,6 @@ PRINT_HELD = (
     "rack_nozzle_picks",
     "rack_nozzle_pick_spools",
     "rack_nozzle_prints",
-    "physical_spools",
-    "spool_provider_records",
-    "spool_record_links",
-    "spool_provider_refreshes",
-    "tray_spool_links",
-    "native_spools",
-    "native_spool_uses",
     "held_local_presets",
     "native_slices",
 )

@@ -1,63 +1,51 @@
-"""Which spool is in a registry printer's tray (#3818 tier A, plan 2026-10-18 D1, Task 6c).
+"""Which SB spool is in a registry printer's tray (#3818 tier A, #6262 Task 4).
 
-The native path's manual link: a person says which physical spool, or which spool
-provider's record, is in an untagged tray, and ScadBuddy remembers it in
-``tray_spool_links`` against the tray's fingerprint (`SpoolStore.link`), so a changed tray
-drops it. It replaces, on the native path, the print dialog's question that writes
-Bambuddy's assignment (``POST /print/printers/{id}/trays/.../spool``, `api/printing.py`):
-nothing here reaches Bambuddy or any other provider. The tray is read from the printer's
-latest LAN report, so a printer that has never reported, or a tray it does not show
-filled, is a 409.
+The native path's manual link: a person says which SB spool is in an untagged tray, and
+ScadBuddy places the spool at the tray (its location is the tray's place) with the
+tray's fingerprint (`FilamentInventory.link`), so a changed tray drops it. It replaces,
+on the native path, the print dialog's question that writes Bambuddy's assignment
+(``POST /print/printers/{id}/trays/.../spool``, `api/printing.py`): nothing here reaches
+Bambuddy or any other provider. The tray is read from the printer's latest LAN report,
+so a printer that has never reported, or a tray it does not show filled, is a 409.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated, Self
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Path, Response, status
-from psycopg.errors import ForeignKeyViolation
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import APIRouter, Depends, Path, Response, status
+from pydantic import BaseModel, ConfigDict
 
+from scadbuddy.api.filament import actor, nudge_after_write
+from scadbuddy.auth.component import CallerDep
 from scadbuddy.bambuddy.trays import EXTERNAL, seen_trays, tray_label
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament import models as m
+from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.component import FilamentDep
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.reports import report_status
 from scadbuddy.printers.store import printer_uuid
-from scadbuddy.spools.component import SpoolsDep
-from scadbuddy.spools.models import SeenTray, TraySpool
-from scadbuddy.spools.seen import report_status
+from scadbuddy.spools.models import SeenTray
 
-router = APIRouter(prefix="/printers", tags=["printers"])
+router = APIRouter(prefix="/printers", tags=["printers"], dependencies=[Depends(nudge_after_write)])
 
 TRAY_PATH = "/{printer_id}/trays/{ams_id}/{tray_id}/spool"
-#: ``20261019T0304Z_tray_spool_links_printer_fkey.sql``: the one foreign key a deleted
-#: printer breaks; the spool's would be a different failure.
-PRINTER_FKEY = "tray_spool_links_printer_fkey"
 AmsId = Annotated[int, Path(ge=0, le=255)]
 TrayId = Annotated[int, Path(ge=0, le=15)]
 
 
 class TraySpoolLink(BaseModel):
-    """A physical spool, or one provider's record of a spool; exactly one of the two."""
+    """The SB spool in the tray."""
 
     model_config = ConfigDict(extra="forbid")
 
-    physical_spool_id: UUID | None = None
-    provider: str | None = Field(default=None, min_length=1, max_length=64)
-    record_id: str | None = Field(default=None, min_length=1, max_length=128)
-
-    @model_validator(mode="after")
-    def _one_spool(self) -> Self:
-        record = self.provider is not None or self.record_id is not None
-        if self.physical_spool_id is not None and record:
-            raise ValueError("name a physical spool or a provider's record, not both")
-        if self.physical_spool_id is None and (self.provider is None or self.record_id is None):
-            raise ValueError("name a physical spool, or a provider and its record_id")
-        return self
+    spool_id: UUID
 
 
 def _no_printer(printer_id: str) -> ApiError:
@@ -113,15 +101,13 @@ async def _tray(printers: PrintersDep, row: PrinterRow, ams_id: int, tray_id: in
     return tray
 
 
-async def _written[T](printer_id: str, write: Awaitable[T]) -> T:
-    """The store's refusals as problem documents. A printer deleted after it was read
-    fails the link's insert on ``tray_spool_links``' foreign key: its 404, not a 500
-    (the #4186 review's handoff to this task)."""
+def _written[T](printer_id: str, write: Callable[[], T]) -> T:
+    """The inventory's refusals as problem documents. A printer deleted after it was read
+    is its 404, not a 500 (the #4186 review's handoff): the link's own printer read, or
+    the tray place's foreign key (`CatalogRefError`)."""
     try:
-        return await write
-    except ForeignKeyViolation as error:
-        if error.diag.constraint_name != PRINTER_FKEY:
-            raise
+        return write()
+    except CatalogRefError:
         raise _no_printer(printer_id) from None
     except LookupError as error:
         raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
@@ -131,36 +117,40 @@ async def _written[T](printer_id: str, write: Awaitable[T]) -> T:
 
 @router.put(
     TRAY_PATH,
-    response_model=TraySpool,
+    response_model=m.Spool,
     summary="Say which spool is in a tray",
     description=(
-        "The native path's manual link (#3818): the physical spool, or a spool provider's "
-        "record, in an untagged tray, remembered until the tray's material or colour "
-        "changes. A record moves to the tray's spool and a spool from any other tray; "
-        "nothing is duplicated. An RFID tray's spool is the one its tag names. 404 for an "
-        "unknown printer, spool or record; 409 when the printer has not reported the tray "
-        "filled, or the tray's tag names another spool. Writes ScadBuddy only."
+        "The native path's manual link (#3818, #6262): the SB spool (`spool_id`, from "
+        "`GET /filament/spools`) in an untagged tray. The spool moves to the tray's place, "
+        "and the tray's previous spool to no place, each with a `moved` ledger event. It "
+        "holds the tray until the tray's material or colour (alpha included) changes. An "
+        "RFID tray's spool is the one its tag names; a tagged tray's tag is bound to the "
+        "spool (one on no spool, or on an archived one, is taken), and a spool that held "
+        "another tag is rebound to the tray's. 404 for an unknown printer or spool; 409 "
+        "when the printer has not reported the tray filled, the tray's tag is on another "
+        "spool, or its two keys name two different tags. Writes ScadBuddy; while "
+        "`filament_sync.tags` pushes (`sb_to_bb` or `two_way`), the spool refresh then pushes "
+        "the tag change to Bambuddy."
     ),
 )
 async def put_tray_spool(
     printers: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
+    caller: CallerDep,
     printer_id: str,
     ams_id: AmsId,
     tray_id: TrayId,
     body: TraySpoolLink,
-) -> TraySpool:
+) -> m.Spool:
     _known_slot(ams_id, tray_id)
     row = await _row(printers, printer_id)
     tray = await _tray(printers, row, ams_id, tray_id)
-    return await _written(
+    who = actor(caller)
+    return await asyncio.to_thread(
+        _written,
         printer_id,
-        spools.store.link(
-            UUID(row.id),
-            tray,
-            physical_spool_id=body.physical_spool_id,
-            provider=body.provider,
-            record_id=body.record_id,
+        lambda: filament.inventory.link(
+            UUID(row.id), ams_id, tray_id, body.spool_id, tray, actor=who
         ),
     )
 
@@ -170,16 +160,22 @@ async def put_tray_spool(
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     summary="Forget which spool is in a tray",
-    description="The spool and its records stay. 404 for an unknown printer.",
+    description=(
+        "The tray's spool moves to no place, with a `moved` ledger event; the spool "
+        "itself stays. 404 for an unknown printer."
+    ),
 )
 async def delete_tray_spool(
     printers: PrintersDep,
-    spools: SpoolsDep,
+    filament: FilamentDep,
+    caller: CallerDep,
     printer_id: str,
     ams_id: AmsId,
     tray_id: TrayId,
 ) -> Response:
     _known_slot(ams_id, tray_id)
     row = await _row(printers, printer_id)
-    await spools.store.unlink(UUID(row.id), ams_id, tray_id)
+    await asyncio.to_thread(
+        filament.inventory.unlink, UUID(row.id), ams_id, tray_id, actor=actor(caller)
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

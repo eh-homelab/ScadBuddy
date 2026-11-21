@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from scadbuddy.render.paint import (
+    DistinctCodes,
     PaintCodeError,
+    PaintDigitsSpentError,
     pieces,
     remap,
     single_code,
@@ -201,3 +203,20 @@ def test_a_split_leaf_of_extruder_3_and_up_reads_its_extension_groups() -> None:
     m12 = (V1 + V2) / 2
     code = remap("481", {2: 20, 1: 3})
     assert _found(code) == {_tri(V0, V1, m12): 3, _tri(m12, V2, V0): 20}
+
+
+def test_distinct_codes_decode_each_code_once_against_one_digit_budget() -> None:
+    """#6823: the plate box, the slot hints and the by-object count share one decode.
+    A repeated code costs its digits once; a new one past the budget raises."""
+    codes = DistinctCodes(max_digits=3)
+    assert codes.states(["8", "8", "", "0C"]) == {2, 3}
+    assert codes.digits == 3
+    assert codes.states(["8"]) == {2}
+    with pytest.raises(PaintDigitsSpentError):
+        codes.states(["4"])
+
+
+def test_distinct_codes_skip_or_raise_on_a_code_that_does_not_parse() -> None:
+    assert DistinctCodes(skip_unreadable=True).states(["F", "8"]) == {2}
+    with pytest.raises(PaintCodeError):
+        DistinctCodes().states(["F"])

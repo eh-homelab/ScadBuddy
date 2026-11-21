@@ -54,14 +54,14 @@ import {
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, type SessionImages, type StoredBlob } from './blobs.js'
+import { SessionBlobs, type SessionImages, type StoredSessionBlob } from './blobs.js'
 import { type HttpBodiesFor, pgHttpBodies } from './httpBodies.js'
 import { SessionFiles, type WorkspaceFiles } from '../workspace/store.js'
 import { SessionEdits, type EditRows } from './edits.js'
 import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore, type TranscriptRows } from './store.js'
-import type { UserImage } from './images.js'
+import type { UserAttachment } from './images.js'
 import { PgResourceRows, type ResourceRows, SessionResources, type TouchedRecord } from './touched.js'
 import { type ListFilter, PgSessionRows, ROW_TITLE_MAX, type SessionRow, type SessionRows, type TurnRow } from './rows.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
@@ -561,7 +561,7 @@ export type StartOptions = {
   /** With `prompt`: see SendOptions.context. */
   context?: string
   /** With `prompt`: see SendOptions.images. */
-  images?: readonly UserImage[]
+  images?: readonly UserAttachment[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
   /** With `prompt`: see SendOptions.flow. */
@@ -588,7 +588,7 @@ export type SendOptions = {
    * them as image blocks before the text; the `user.turn` event names them and
    * their previews, stored with the session first (#2479).
    */
-  images?: readonly UserImage[]
+  images?: readonly UserAttachment[]
   /**
    * The sender's tiers (spec §8.1), for the turn's in-process tools: an MCP
    * token's, as `/mcp` authenticated it for this send (tools/sessions.ts).
@@ -1087,7 +1087,7 @@ export class SessionManager {
    * its name; not_found for a session the principal may not see, a name that is
    * not a blob's, or one that is not this session's.
    */
-  async blob(id: string, name: string, principal: Owner): Promise<StoredBlob> {
+  async blob(id: string, name: string, principal: Owner): Promise<StoredSessionBlob> {
     await this.get(id, principal)
     const blob = await this.blobs.get(id, name)
     if (!blob) throw new SessionError('not_found', `no image ${name} in session ${id}`)

@@ -14,7 +14,7 @@ import re
 import socket
 import ssl
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import status
@@ -29,6 +29,9 @@ CONFLICT_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-conflict"
 REJECTED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-rejected"
 UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-unavailable"
 NOT_CONFIGURED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-configured"
+#: Bambuddy answered a listing with a success whose body is not JSON, or not a JSON array
+#: (a proxy's error page, say; R-T7-10). Its own type, so a stored `error_label` says so.
+BAD_BODY_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-bad-body"
 PLATE_FIT_PROBLEM = "https://scadbuddy.dev/problems/plate-does-not-fit"
 #: Several library files asked by id and Bambuddy has none: a misrouted base URL more
 #: likely than every file deleted (the names route, #2349). Its own type, so a client can
@@ -60,11 +63,51 @@ class Scope(StrEnum):
     #: a person confirmed it is in (#2164; Bambuddy ``auth.py`` maps
     #: ``INVENTORY_UPDATE`` to it).
     MANAGE_INVENTORY = "Manage Inventory"
+    #: ``can_send_notifications``: a message through Bambuddy's notification channels
+    #: that take "Messages from connected apps" (``POST /notifications/app-message``,
+    #: #6646; ``require_notification_send`` in ``backend/app/core/auth.py`` and the label
+    #: ``sendNotifications`` in ``frontend/src/i18n/locales/en.ts``, maziggy/bambuddy v1.3.1).
+    SEND_NOTIFICATIONS = "Send notifications"
     #: Bambuddy's ``settings:update``, which a virtual printer's writes need (#4747). No
     #: API key can hold it: it is admin-only and absent from ``_APIKEY_SCOPE_BY_PERMISSION``
-    #: (``backend/app/core/auth.py`` lines 79-82, maziggy/bambuddy v1.3.0b1-daily.20261025),
+    #: (``backend/app/core/auth.py`` line 90, maziggy/bambuddy v1.3.1),
     #: so such a write works only while Bambuddy's auth is off.
     ADMIN_SETTINGS = "Settings (admin only)"
+    #: Bambuddy's ``FILAMENTS_CREATE`` and ``FILAMENTS_UPDATE``, which the filament
+    #: catalog's writes need (#6265). No API key can hold them: they are absent from
+    #: ``_APIKEY_SCOPE_BY_PERMISSION`` and listed in ``_APIKEY_DENIED_PERMISSIONS``
+    #: (``backend/app/core/auth.py`` lines 90 and 300-301, maziggy/bambuddy v1.3.1), so
+    #: such a write works only while Bambuddy's auth is off.
+    ADMIN_FILAMENTS = "Filament catalog (admin only)"
+
+
+#: What no API key can do, per admin-only scope, for the 403 that says so.
+_ADMIN_ONLY = {
+    Scope.ADMIN_SETTINGS: "change its settings",
+    Scope.ADMIN_FILAMENTS: "change its filament catalog",
+}
+
+
+class TagAlreadyLinkedError(ApiError):
+    """Bambuddy's 409 ``tag_already_linked`` from ``link-tag``: another spool holds the tag.
+    ``holder_id`` is that spool's Bambuddy id and ``field`` the identifier that clashed
+    (``backend/app/services/tag_conflict.py`` lines 24-40, maziggy/bambuddy v1.3.1)."""
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        holder_id: int,
+        field: Literal["tag_uid", "tray_uuid"],
+    ) -> None:
+        super().__init__(
+            status.HTTP_409_CONFLICT,
+            detail,
+            type_=CONFLICT_PROBLEM,
+            bambuddy_status=status.HTTP_409_CONFLICT,
+        )
+        self.holder_id = holder_id
+        self.field: Literal["tag_uid", "tray_uuid"] = field
 
 
 def not_configured(detail: str) -> ApiError:
@@ -190,11 +233,11 @@ def _mapped(
     body = None if scope == Scope.ADMIN_SETTINGS else upstream_body(response)
 
     if code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
-        if scope == Scope.ADMIN_SETTINGS and code == status.HTTP_403_FORBIDDEN:
+        if scope in _ADMIN_ONLY and code == status.HTTP_403_FORBIDDEN:
             return ApiError(
                 status.HTTP_409_CONFLICT,
                 f"Bambuddy refused the API key when asked to {what}. No Bambuddy API key can"
-                " change its settings while Bambuddy's auth is on: turn its auth off, or"
+                f" {_ADMIN_ONLY[scope]} while Bambuddy's auth is on: turn its auth off, or"
                 f" make the change in Bambuddy{suffix}",
                 title="Bambuddy API key scope",
                 type_=SCOPE_PROBLEM,

@@ -8,6 +8,13 @@ export default tseslint.config(
   { ignores: ['dist', 'coverage', 'src/api/schema.d.ts'] },
   js.configs.recommended,
   tseslint.configs.recommended,
+  // The gen-api hook both packages share lives at the repo root, where no package's
+  // lint reaches by itself (#6671). `pnpm lint` lints it from the root with this file.
+  {
+    files: ['scripts/gen-api-request-defaults.mjs'],
+    ...js.configs.recommended,
+    languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: { ...globals.node } },
+  },
   {
     files: ['**/*.ts'],
     languageOptions: {

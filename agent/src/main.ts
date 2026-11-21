@@ -1451,6 +1451,8 @@ const app = !role.http
   // Settings → Orders' messaging binding check and test send (#5660, routes/messagingBinding.ts).
   orderMessaging: toolServices.messaging,
   orderSends: { backend: toolServices.backend, messaging: toolServices.messaging },
+  // The invoice page's Import button (#6267, routes/invoiceImport.ts).
+  invoiceImport: { backend: toolServices.backend },
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),

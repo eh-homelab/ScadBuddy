@@ -216,6 +216,9 @@ export type ProcessOverrides = NonNullable<PrintRunRequest['process_overrides']>
 export type ProcessValues = Schemas['ProcessValues']
 /** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
+/** #6758 — the prime tower judged before the slice, with its fix as process overrides. */
+export type TowerCheck = Schemas['TowerCheck']
+export type TowerConflict = Schemas['TowerConflict']
 export type PrintRun = Schemas['PrintRun']
 /** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
 export type Operation = Schemas['Operation']
@@ -323,11 +326,10 @@ export type NewBatchFile = Schemas['NewBatchFile']
 /** #2951 — Queue all stopped to answer in time: go on from `next_position`. */
 export type BatchQueueProgress = Schemas['BatchQueueProgress']
 export type TrayAssigned = Schemas['TrayAssigned']
-/** #3818 — a provider's record of a spool, as the overlay keeps it (Task 6c). */
-export type SpoolSnapshot = Schemas['SpoolSnapshot']
-/** #3818 — the native manual link's body: a physical spool, or one provider's record. */
+/** #3818, #6262 — the native manual link's body: the SB spool (`spool_id`). */
 export type TraySpoolLink = Schemas['TraySpoolLink']
-export type TraySpool = Schemas['TraySpool-Output']
+/** #6261 — a ScadBuddy spool (`GET /filament/spools/{id}`). */
+export type FilamentSpool = Schemas['Spool']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
@@ -373,9 +375,11 @@ export type LibraryFolderUpdate = Schemas['LibraryFolderUpdate']
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
 
-/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
-export type InventoryView = Schemas['InventoryView']
-export type InventorySpool = Schemas['InventorySpool']
+/** #6262 Task 9 — ScadBuddy's spools and the registry printers' trays (`GET /filament/inventory`). */
+export type FilamentInventoryView = Schemas['FilamentInventoryView']
+export type FilamentInventorySpool = Schemas['FilamentInventorySpool']
+/** The registry printer and AMS tray an SB spool is in. */
+export type TrayPlace = Schemas['TrayPlace']
 
 /**
  * #89 — run tracking.
@@ -530,10 +534,10 @@ export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'metho
  * way an order reaches its customer at a fixed price. */
 export type DepositRule = Schemas['DepositRule']
 export type ShippingOption = Schemas['ShippingOption']
-/** #6153 — the shop slice profile: a printer and a spool per material. */
+/** #6153 — the shop slice profile: a printer and a filament type per material (#6574). */
 export type StorefrontSliceProfile = Schemas['StorefrontSliceProfile']
 export type ProfileOptions = Schemas['ProfileOptions']
-export type ProfileSpool = Schemas['ProfileSpool']
+export type ProfileType = Schemas['ProfileType']
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
  * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
  * places, the backend's (ISO 4217) and never `Intl`'s. */
@@ -546,6 +550,17 @@ export type FilamentPatch = Partial<Schemas['FilamentPatch']>
 export type MachineRateView = Schemas['MachineRateView']
 export type MachineRateBreakdown = Schemas['MachineRateBreakdown']
 export type MaintenancePart = Schemas['MaintenancePart']
+export type WearPartRate = Schemas['WearPartRate']
+/** #5774 (spec 2026-11-17 §5): a printer's logged maintenance and replaced parts, each row's
+ * actual over its window, and its print-hour counter. */
+export type RowActuals = Schemas['RowActuals']
+export type SkippedGap = Schemas['SkippedGap']
+export type CounterView = Schemas['CounterView']
+export type LanCount = Schemas['LanCount']
+export type MachineRateEvent = Schemas['MachineRateEvent']
+export type MachineRateEventCreate = Schemas['MachineRateEventCreate']
+export type MachineRateEventPatch = Schemas['MachineRateEventPatch']
+export type MachineRateEventPage = Schemas['MachineRateEventPage']
 /** The inputs as sent: a field with a default may be left out. Decimals are strings. */
 export type MachineRateInputs = {
   profile: Partial<Schemas['CostProfile']>
@@ -566,10 +581,6 @@ export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Sch
 /** #6157 — one row of the back office's list, and a page of them. */
 export type StorefrontListingRow = Schemas['ListingRow']
 export type StorefrontListingPage = Schemas['ListingPage']
-/** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
-export type NativeSpool = Schemas['NativeSpool']
-export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
-export type NativeSpoolPatch = Schemas['NativeSpoolPatch']
 export type PricingPolicy = Schemas['PricingPolicy']
 /** `PUT /orders/price-book`: the whole policy, and the estimate's factor when sent. */
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>

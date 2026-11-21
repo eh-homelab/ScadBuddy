@@ -4,7 +4,7 @@ These notes cover `plugins/`; paths are repo-relative; the root `CLAUDE.md` has 
 
 ## Layout
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
-  `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
+  `customize`, `filament`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
   `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
   the authoritative manifest check. The agent loads `agent/plugins/scadbuddy/` instead

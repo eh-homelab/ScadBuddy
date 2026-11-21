@@ -11,7 +11,7 @@ import type {
   ProjectChoices,
   SlicePreview,
   SpoolOption,
-  TraySpool,
+  FilamentSpool,
   TraySpoolLink,
   UnknownTray,
 } from '../../api/types'
@@ -32,11 +32,9 @@ import { acceptOperation } from './operations'
  * The switch is `localStorage['sb-mock-hot-path'] === '1'`, read at load and on each
  * `reset()`: the handlers' state lives in the page, a full navigation starts it again,
  * and Playwright's `page.request` never reaches the service worker, so the spec sets it
- * with `addInitScript`. `localStorage['sb-mock-hot-path-stale'] === '1'` is the stale
- * overlay: no provider records, and one note naming Bambuddy. Unit tests call
- * `setHotPath`.
+ * with `addInitScript`. Unit tests call `setHotPath`.
  *
- * Every Bambuddy-only route (the camera, the inventory, Bambuddy's tray assignment, the
+ * Every Bambuddy-only route (the camera, Bambuddy's tray assignment, the
  * projects and their default without `native`) answers 409 "no Bambuddy URL is
  * configured", as the backend does with none set, so a component that still asks
  * Bambuddy shows an error a test catches.
@@ -48,7 +46,6 @@ import { acceptOperation } from './operations'
 const base = '/api/v1'
 
 export const HOT_PATH_KEY = 'sb-mock-hot-path'
-export const HOT_PATH_STALE_KEY = 'sb-mock-hot-path-stale'
 export const NO_BAMBUDDY = 'no Bambuddy URL is configured'
 
 /**
@@ -80,8 +77,8 @@ const HERE = 1
 /** `tray_spool_id(0, 0)` and `tray_spool_id(0, 1)` (`bambuddy/trays.py`). */
 export const TAGGED_TRAY = -1
 export const UNTAGGED_TRAY = -2
-/** A Bambuddy record no tray holds: offered for linking, never printed from. */
-export const UNLINKED_RECORD = 9101
+/** The SB spool no tray holds, by its number: offered for linking, never printed from. */
+export const SHELF_NUMBER = 2
 
 /** Native library folders (`/print/projects?native=true`). */
 export const HOT_FOLDERS = [
@@ -99,7 +96,6 @@ function readFlag(key: string): boolean {
 
 const state = {
   on: readFlag(HOT_PATH_KEY),
-  stale: readFlag(HOT_PATH_STALE_KEY),
   /** The untagged tray's link, once made. */
   linked: false,
   /** Each background slice, by job id, with how often it has been read. */
@@ -111,15 +107,13 @@ const state = {
   seq: 0,
 }
 
-/** Unit tests: the hot path on or off, and (`stale`) the overlay stale. */
-export function setHotPath(on: boolean, { stale = false }: { stale?: boolean } = {}): void {
+/** Unit tests: the hot path on or off. */
+export function setHotPath(on: boolean): void {
   state.on = on
-  state.stale = stale
 }
 
 export function reset(): void {
   state.on = readFlag(HOT_PATH_KEY)
-  state.stale = readFlag(HOT_PATH_STALE_KEY)
   state.linked = false
   state.slices.clear()
   state.runs.clear()
@@ -142,37 +136,22 @@ const noBambuddy = () =>
     { status: 409, headers: { 'Content-Type': 'application/problem+json', [NO_BAMBUDDY_HEADER]: '1' } },
   )
 
-function bambuddyRecord(): NonNullable<SpoolOption['records']> {
-  return {
-    bambuddy: {
-      record_id: '21',
-      material: 'PLA',
-      colour: '#0047BB',
-      brand: 'Bambu Lab',
-      name: 'Blue',
-      remaining_g: 812,
-      label_weight_g: 1000,
-    },
-  }
-}
+/** The SB spool in the tagged tray (#6262): found by its tag, Bambu Lab Blue, #1. */
+const TAGGED_SPOOL = '7a2c1f0e-0000-4000-8000-000000000001'
 
 function trayOptions(): SpoolOption[] {
   const loaded = (tray: number) => ({ printer_id: HERE, printer_name: HOT_PRINTER.name, ams_id: 0, tray_id: tray })
-  const tagged = state.stale ? {} : bambuddyRecord()
-  const linked: NonNullable<SpoolOption['records']> =
-    state.linked && !state.stale
-      ? { bambuddy: { record_id: '27', material: 'PLA', colour: '#FF1493', brand: 'Elegoo', name: 'Pink', remaining_g: 640 } }
-      : {}
   const trays: SpoolOption[] = [
     {
       spool_id: TAGGED_TRAY,
       material: 'PLA',
       colour: '#0047BB',
-      brand: tagged.bambuddy?.brand ?? null,
-      color_name: tagged.bambuddy?.name ?? null,
+      rgba: '#0047BBFF',
+      brand: 'Bambu Lab',
+      color_name: 'Blue',
       slicer_filament: 'GFA05',
-      remaining_g: tagged.bambuddy?.remaining_g ?? null,
-      label_weight_g: tagged.bambuddy?.label_weight_g ?? null,
+      remaining_g: 812,
+      label_weight_g: 1000,
       loaded: loaded(0),
       extruder: 0,
       side: 'R',
@@ -180,17 +159,20 @@ function trayOptions(): SpoolOption[] {
       label: 'AMS-A slot 1',
       colour_word: 'blue',
       remain_percent: 81,
-      physical_spool_id: '7a2c1f0e-0000-4000-8000-000000000001',
-      records: tagged,
+      sb_spool_id: TAGGED_SPOOL,
+      sb_number: 1,
+      needs_type: false,
     },
     {
       spool_id: UNTAGGED_TRAY,
       material: 'PLA',
       colour: '#FF1493',
-      brand: linked.bambuddy?.brand ?? null,
-      color_name: linked.bambuddy?.name ?? null,
+      rgba: '#FF1493FF',
+      brand: null,
+      color_name: state.linked ? 'Pink' : null,
       slicer_filament: null,
-      remaining_g: linked.bambuddy?.remaining_g ?? null,
+      remaining_g: state.linked ? 640 : null,
+      label_weight_g: state.linked ? 1000 : null,
       loaded: loaded(1),
       extruder: 0,
       side: 'R',
@@ -198,34 +180,82 @@ function trayOptions(): SpoolOption[] {
       label: 'AMS-A slot 2',
       colour_word: 'pink',
       remain_percent: null,
-      physical_spool_id: state.linked ? '7a2c1f0e-0000-4000-8000-000000000002' : null,
-      records: linked,
+      sb_spool_id: state.linked ? SHELF_SPOOL : null,
+      sb_number: state.linked ? SHELF_NUMBER : null,
+      needs_type: state.linked ? true : null,
     },
   ]
   return trays
 }
 
-/** The overlay's linking list (D1, #4506's `shelf`): a Bambuddy record of a spool no tray holds. */
+/** The shelf spool: the SB spool the untagged tray's answer places (#6262 Task 4). */
+const SHELF_SPOOL = '7a2c1f0e-0000-4000-8000-000000000002'
+
+/** `PUT …/trays/{ams}/{tray}/spool`'s answer: the SB spool, now in the tray's place. */
+function shelfSpool(): FilamentSpool {
+  return {
+    id: SHELF_SPOOL,
+    number: SHELF_NUMBER,
+    type_id: null,
+    brand_id: null,
+    material_id: null,
+    subtype_id: null,
+    category_id: null,
+    effect_id: null,
+    colour_name: 'Pink',
+    rgba: '#FF1493FF',
+    extra_colours: null,
+    diameter_mm: null,
+    density_g_cm3: null,
+    nozzle_temp_min: null,
+    nozzle_temp_max: null,
+    bed_temp_min: null,
+    bed_temp_max: null,
+    label_weight_g: 1000,
+    insert_type_id: null,
+    low_stock_pct: null,
+    cost_per_kg: null,
+    location_id: '7a2c1f0e-0000-4000-8000-0000000000a2',
+    weight_locked: false,
+    note: null,
+    grams_left: 640,
+    last_weighed_g: null,
+    last_weighed_at: null,
+    last_dried_at: null,
+    last_dried_temp_c: null,
+    last_dried_hours: null,
+    hours_outside_dry: 0,
+    needs_drying: false,
+    last_used_at: null,
+    archived_at: null,
+    created_at: '2026-11-15T07:00:00Z',
+    updated_at: '2026-11-15T07:00:00Z',
+    low_stock: false,
+  }
+}
+
+/** The linking list (D1, #4506's `shelf`): an SB spool no tray holds, under its number (#6262). */
 function shelfOptions(): SpoolOption[] {
-  if (state.stale || state.linked) return []
+  if (state.linked) return []
   const shelf: SpoolOption = {
-    spool_id: UNLINKED_RECORD,
+    spool_id: SHELF_NUMBER,
+    sb_spool_id: SHELF_SPOOL,
+    sb_number: SHELF_NUMBER,
+    needs_type: true,
     material: 'PLA',
     colour: '#FF1493',
-    brand: 'Elegoo',
+    rgba: '#FF1493FF',
+    brand: null,
     color_name: 'Pink',
     remaining_g: 640,
     label_weight_g: 1000,
     loaded: null,
-    records: {
-      bambuddy: { record_id: '27', material: 'PLA', colour: '#FF1493', brand: 'Elegoo', name: 'Pink', remaining_g: 640 },
-    },
   }
   return [shelf]
 }
 
 function unknownTrays(): UnknownTray[] {
-  if (state.stale || state.linked) return []
+  if (state.linked) return []
   return [
     {
       ams_id: 0,
@@ -237,17 +267,16 @@ function unknownTrays(): UnknownTray[] {
       // `material|RRGGBB`, the tray link's own format (#4506).
       fingerprint: 'PLA|FF1493',
       spool_id: UNTAGGED_TRAY,
-      candidates: [UNLINKED_RECORD],
+      candidates: [SHELF_NUMBER],
     },
   ]
 }
 
-/** The filament step on the native path: the trays, with the overlay over them (Task 6c). */
+/** The filament step on the native path: the trays, each with the SB spool it holds (#6262). */
 export function hotFilaments(): FilamentOptions {
   return {
     library_file_id: null,
     source: 'trays',
-    overlay_notes: state.stale ? ["Bambuddy's spool records are from 13:40 UTC; showing the trays only."] : [],
     printer_id: HERE,
     printer_name: HOT_PRINTER.name,
     track_switch: false,
@@ -264,7 +293,6 @@ export function hotFilaments(): FilamentOptions {
     ],
     trays: unknownTrays(),
     warnings: [],
-    provider_labels: { bambuddy: 'Bambuddy' },
   }
 }
 
@@ -423,14 +451,9 @@ const routes: Route[] = [
     answer: async (match, request) => {
       if (match[1] !== HOT_PRINTER.id) return problem(404, `no printer ${match[1]}`)
       const body = (await request.json()) as TraySpoolLink
+      if (body.spool_id !== SHELF_SPOOL) return problem(404, `no spool ${body.spool_id}`)
       state.linked = true
-      return HttpResponse.json({
-        ams_id: Number(match[2]),
-        tray_id: Number(match[3]),
-        linked_by: 'manual',
-        physical_spool_id: body.physical_spool_id ?? '7a2c1f0e-0000-4000-8000-000000000002',
-        records: trayOptions().find((spool) => spool.spool_id === UNTAGGED_TRAY)?.records ?? {},
-      } satisfies TraySpool)
+      return HttpResponse.json(shelfSpool())
     },
   },
   { method: 'GET', path: /^\/print\/(?:outputs|library)\/[^/]+\/choices$/, answer: () => HttpResponse.json(hotChoices()) },
@@ -490,7 +513,6 @@ const routes: Route[] = [
   // Bambuddy's own: a component that still asks is a bug the spec sees as a 409.
   { method: 'POST', path: /^\/print\/projects$/, answer: noBambuddy },
   { method: 'GET', path: /^\/print\/printers\/[^/]+\/camera(?:\/stream)?$/, answer: noBambuddy },
-  { method: 'GET', path: /^\/farm\/inventory$/, answer: noBambuddy },
   { method: 'POST', path: /^\/print\/printers\/[^/]+\/trays\/\d+\/\d+\/spool$/, answer: noBambuddy },
 ]
 

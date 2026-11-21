@@ -2,7 +2,8 @@
 # frontend/, the runtime stage needs backend/ and models/, the agent stages
 # need agent/, and agent-build also copies plugins/scadbuddy/skills and
 # agents, which agent/plugins/scadbuddy links to (#896) and get_authoring_guide
-# serves from, #252). Everything that is not one of those is noise that
+# serves from, #252). The frontend and agent-build stages also copy
+# scripts/gen-api-request-defaults.mjs (#6660). Everything that is not one of those is noise that
 # invalidates layers; do not exclude plugins/ without those.
 
 .git

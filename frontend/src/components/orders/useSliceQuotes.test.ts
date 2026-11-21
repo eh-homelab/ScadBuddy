@@ -9,7 +9,7 @@ import { useSliceQuotes } from './useSliceQuotes'
 
 const BODY: SliceQuoteRequest = {
   printer_id: 1,
-  filament_plan: { slots: [], force_colour_match: false },
+  filament_plan: { slots: [], force_colour_match: false, ids: 'sb' },
   choices: { bed_type: 'Textured PEI Plate', nozzles: [], tier: null },
   filaments: {},
 }

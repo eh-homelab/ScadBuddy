@@ -98,7 +98,9 @@ class PickedSpool(BaseModel):
     """One filament slot of a picked group, and the spool it printed from (#2170)."""
 
     slot_id: int
-    #: Bambuddy's inventory spool; ``None`` when the slot had none.
+    #: The spool as the filament plan names it: an SB spool's number (#6262; older rows'
+    #: Bambuddy ids were rewritten by `20261116T0034Z_filament_plan_spool_numbers.sql`),
+    #: or a tray's negative id; ``None`` when the slot had none.
     spool_id: int | None = None
     label: str | None = None
     material: str | None = None

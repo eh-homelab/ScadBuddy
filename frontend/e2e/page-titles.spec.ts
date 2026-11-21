@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
+import { spoolId, T } from '../src/mocks/features/filament/seed'
+import { INVOICE, SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
 
 // #2454 review — every routed page names its tab from its <h1> (usePageTitle). A page
 // with no <h1> inside <main> would quietly get the bare "ScadBuddy" title: one per route
@@ -41,6 +43,28 @@ const PAGES = [
   '/storefront',
   // A listing's editor (#6157): its tab is the listing's title, "New listing" for a new one.
   '/storefront/listings/new',
+  // The Filament section (#6262): each tab, a seeded spool (#3) and a seeded type, from
+  // src/mocks/features/filament/seed.ts.
+  // `/filament` redirects to the Spools tab.
+  '/filament',
+  '/filament/spools',
+  `/filament/spools/${spoolId(3)}`,
+  '/filament/types',
+  `/filament/types/${T.JADE}`,
+  '/filament/tags',
+  // Purchasing (#6266): a seeded supplier and a seeded invoice, from
+  // src/mocks/features/filamentPurchasingSeed.ts.
+  '/filament/suppliers',
+  `/filament/suppliers/${SUPPLIER.BAMBU}`,
+  '/filament/invoices',
+  `/filament/invoices/${INVOICE.CONFIRMED_A}`,
+  '/filament/locations',
+  '/filament/catalog',
+  '/filament/metrics',
+  '/filament/shopping-list',
+  '/filament/ledger',
+  // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
+  '/filament/labels',
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]

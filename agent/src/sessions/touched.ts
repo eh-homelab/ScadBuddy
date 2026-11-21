@@ -356,12 +356,15 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // answer links it there.
   storefront_listing_draft: () => [],
   storefront_listing_publish: () => [],
-  // The price book (#4250) is a record of its own, edited on the Settings page.
+  // The price book (#4250) is a record of its own, edited on the Filament page's Types tab.
   price_book_set: () => [],
   price_book_import_spools: () => [],
   price_book_fill_densities: () => [],
   // A printer's machine rate (#4625) is a record of its own, edited on the Settings page.
   machine_rate_set: () => [],
+  // Its events (#5774) are part of the same record.
+  machine_rate_event_add: () => [],
+  machine_rate_event_update: () => [],
   // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's
   // analyzer panel and list_analyzer_decisions show them, and an apply sends nothing.
   apply_analyzer_fix: () => [],
@@ -707,21 +710,30 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #6395: nor is a library file's association (the file and the model are unchanged).
   'associate_library_file',
   'remove_association',
-  // #3818: a tray's spool link is no recorded resource kind either (ScadBuddy's
-  // tray_spool_links; the spool and its providers' records are unchanged).
+  // #3818, #6262: a tray's spool link is no recorded resource kind either (it moves the
+  // SB spool to the tray's place, a `moved` ledger event; nothing else changes).
   'link_tray_spool',
   'unlink_tray_spool',
-  // ScadBuddy's own spools (#4643, filament_spools rows since #6261) are no recorded resource kind: the
-  // shelf lists them, and the overlay's cached copy follows each write.
-  'native_spool_upsert',
-  'native_spool_delete',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
+  'filament_catalog_set_aliases',
   'filament_type_upsert',
+  // #6701: the proposed types a person confirmed, and their spools' `edited` events.
+  'filament_type_proposals_confirm',
   'filament_type_set_presets',
   'filament_type_set_k_values',
+  'filament_type_fill_from_profile',
+  // #6625: a 3DFP preset fetch sets the type's presets and K values (and imports Bambuddy
+  // local presets, no recorded kind either); its run is the type's, read with
+  // filament_type_profile_fetch.
+  'filament_type_fetch_profiles',
+  // R-PR2: reading the fetch can end a stale run `failed` and cancel its workflow; the run
+  // is still the type's, no recorded kind.
+  'filament_type_profile_fetch',
   'filament_spool_upsert',
+  'filament_spool_set_presets',
+  'filament_spool_set_k_values',
   'filament_spool_archive',
   'filament_spool_delete',
   'filament_spool_bind_tag',
@@ -730,6 +742,33 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_location_upsert',
   'filament_spool_move',
   'filament_bambuddy_import',
+  'filament_sync_ams_weights',
+  'filament_sensor_save',
+  'filament_sensor_archive',
+  'filament_spool_import',
+  // #6264: the RFID override mode, its reconcile and the NTAG write calls touch the filament
+  // inventory (or a SpoolBuddy reader), and none is a recorded resource kind.
+  'filament_rfid_override_mode',
+  'filament_rfid_reconcile',
+  // #6265: "Sync now" writes Bambuddy and the sync's links and status, no recorded kind.
+  'filament_sync_run',
+  // #6773: the links' reset deletes the sync's links and asks for a pass, no recorded kind.
+  'filament_sync_reset_links',
+  'filament_spool_ntag_write',
+  'filament_spool_ntag_confirm',
+  'filament_spool_ntag_cancel',
+  // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
+  // no recorded resource kind either; an invoice's spools are in each spool's ledger.
+  'filament_supplier_upsert',
+  'filament_product_upsert',
+  'filament_price_add',
+  'filament_price_delete',
+  'filament_invoice_upsert',
+  'filament_invoice_delete',
+  'filament_invoice_confirm',
+  'filament_shopping_add',
+  'filament_shopping_update',
+  'filament_shopping_remove',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

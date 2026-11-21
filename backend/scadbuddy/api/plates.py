@@ -12,7 +12,14 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.render.plate import Axis, PlateGeometry, fit_problem, overshoots, plate_for
+from scadbuddy.render.plate import (
+    Axis,
+    PlateGeometry,
+    TowerSettings,
+    fit_problem,
+    overshoots,
+    plate_for,
+)
 from scadbuddy.render.plate_profiles import PLATE_PROFILES
 
 router = APIRouter(tags=["plates"])
@@ -107,7 +114,10 @@ def get_plate_fit(
     z: Annotated[float, Query(ge=0, description="Bounding box height, mm")],
     model: Annotated[str | None, Query(description="As for GET /plate")] = None,
     colours: Annotated[
-        int, Query(ge=1, description="More than one needs a prime tower, as at send time")
+        int,
+        Query(
+            ge=1, description="More than one needs a prime tower, sized by them, as at send time"
+        ),
     ] = 1,
 ) -> PlateFit:
     plate = _resolve(model, store.load().default_plate)
@@ -117,7 +127,11 @@ def get_plate_fit(
     ]
     # An axis overflow is already the more useful answer; the placement would only say
     # the same thing less precisely.
-    problem = None if over else fit_problem(size, plate, tower=colours > 1)
+    problem = (
+        None
+        if over
+        else fit_problem(size, plate, tower=colours > 1, settings=TowerSettings(filaments=colours))
+    )
     return PlateFit(plate=_view(plate), overshoots=over, problem=problem)
 
 

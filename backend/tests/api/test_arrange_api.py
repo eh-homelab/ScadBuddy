@@ -23,6 +23,7 @@ from scadbuddy.api.outputs import (
 )
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import SlotChoice
+from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -142,6 +143,25 @@ async def test_a_printer_model_sets_the_plate(tmp_path: Path) -> None:
     assert inputs.plate.key == "Bambu Lab H2C" and inputs.plate_model == "H2C"
 
 
+async def test_the_prime_tower_choice_reaches_the_arrange_job(tmp_path: Path) -> None:
+    """#3770: `prime_tower` as print_output takes it; omitted, the job has none, and so
+    does a job queued before the field existed."""
+    paths, meta, written = await saved_output(tmp_path)
+    objects = [ArrangeObject(output_id=meta.id, part=written.manifest[0].part, count=2)]
+    store = OutputStore(paths)
+    _, off = arrange_inputs(
+        store,
+        ArrangeRequest(objects=objects, prime_tower=PrimeTowerChoice(enabled=False)),
+        plate_model=None,
+    )
+    assert off.prime_tower == PrimeTowerChoice(enabled=False)
+    _, omitted = arrange_inputs(store, ArrangeRequest(objects=objects), plate_model=None)
+    assert omitted.prime_tower is None
+    queued_before = omitted.model_dump(mode="json")
+    del queued_before["prime_tower"]
+    assert ArrangeInputs.model_validate(queued_before).prime_tower is None
+
+
 def test_an_unknown_output_is_a_404(client: TestClient) -> None:
     response = client.post(
         "/api/v1/outputs/arrange",
@@ -208,6 +228,25 @@ def test_with_no_printer_the_plate_falls_back_to_the_stored_default(
     assert response.json()["status"] == "pending"
     [inputs] = arranger.inputs
     assert inputs.plate_model == "H2C" and inputs.plate.key == "Bambu Lab H2C"
+
+
+def test_the_route_takes_the_prime_tower_choice(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={
+            "objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 2}],
+            "prime_tower": {"enabled": False, "no_sparse_layers": True},
+        },
+    )
+    assert response.status_code == 202, response.text
+    [inputs] = arranger.inputs
+    # Off drops "No sparse layers", as print_output's choice does (#3648 review).
+    assert inputs.prime_tower == PrimeTowerChoice(enabled=False)
 
 
 def test_an_arrange_passes_its_idempotency_key_as_the_request_id(

@@ -82,7 +82,7 @@ each file and re-wraps principals' keys, a write's row, blob hold and `workspace
 are one transaction there (`WriteOptions.log`, `DeleteOptions.log`), and the reconcile is one
 transaction under `RECONCILE_LOCK`; this process sends and gets plaintext only.
 Areas `session-blobs`, `attachments` and `http-bodies` (#5299 step 7, `BLOB_AREAS`; backend
-`api/crud_agent_blobs.py`): a session's images (`src/sessions/crudBlobs.ts` `CrudSessionBlobs`
+`api/crud_agent_blobs.py`): a session's images and PDFs (the sessions route `src/routes/sessions.ts` serves a PDF with `Content-Disposition: attachment`; `src/sessions/crudBlobs.ts` `CrudSessionBlobs`
 behind the `SessionImages` interface; a durable tool call's images replaced whole, and a turn
 placement's write fenced by `TurnFence`, checked `FOR SHARE` in the API's transaction; a queued
 message's images deleted once it leaves the queue unrun or is refused, `…/session-blobs/deletes`,
@@ -405,7 +405,12 @@ opens every one and seals it again byte for byte).
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
   an edit to `app.ts`: among them `credentials.ts` (`/api/v1/ai/credentials`),
   `status.ts` (`/api/v1/ai/status`), and the assistant's WebSocket `/api/v1/ai/chat` and
-  `/api/v1/ai/sessions` in `chat.ts` and `sessions.ts`, backed by `SessionManager`. A
+  `/api/v1/ai/sessions` in `chat.ts` and `sessions.ts`, backed by `SessionManager`, and
+  `invoiceImport.ts` (`POST /api/v1/ai/filament/invoice-import`, #6267: it starts a session with no
+  prompt, claims the invoice's `import_run_id` through the backend's conditional PATCH, then sends the
+  import prompt, `src/filament/invoiceImportPrompt.ts`, with the invoice file attached as an image or a
+  PDF document block, built in `src/sessions/images.ts` `userPrompt`; the tools
+  `filament_bambu_colour` and `filament_invoice_candidates` are in `src/tools/filamentPurchasing.ts`). A
   dependency only that group needs is declared in its own file, by augmenting `AppDeps`
   (#508); one several groups share (`sessions`, `upgradeWebSocket`) stays in `app.ts`.
   A route module imports only types from `app.ts` (`routes/index.ts` loads them while

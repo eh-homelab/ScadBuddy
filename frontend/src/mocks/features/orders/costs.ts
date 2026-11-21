@@ -14,6 +14,7 @@ import type {
   TimeEntryCreate,
 } from '../../../api/types'
 import { mockSettings } from '../../handlers'
+import { machineRateFor } from './machineRates'
 import { event, itemOf, lock, refused } from './orders'
 import { BROWSER, Refused, fieldProblem, minorExponent, newId, now, problem, state } from './state'
 
@@ -55,6 +56,31 @@ class Unit {
     this.perGram = this.grams > 0 ? this.filament / this.grams : null
     this.perSecond = machine.length && this.seconds > 0 ? machine.reduce((s, l) => s + l.amount_minor, 0) / this.seconds : null
   }
+}
+
+/**
+ * #5774: today's machine rate of the fixtures' two registry printers, as `CostRates`'
+ * `printer_rates`, `printer_actuals` and `printer_confidence` give it: the H2C's rate is
+ * partly from logged actuals, the Garage's only from its typed estimates. The mock's
+ * machine-rate editor logs no events, so these stand whatever Settings saves.
+ */
+export const TODAYS_PRINTER_RATES: Record<string, { perHour: string; actuals: boolean; confidence: number }> = {
+  '00000000-0000-4000-8000-000000000001': { perHour: '0.92', actuals: true, confidence: 66 },
+  '00000000-0000-4000-8000-0000000000aa': { perHour: '0.75', actuals: false, confidence: 33 },
+}
+
+/**
+ * The rate today's machine time is priced at (`costs.py` `todays_rate`): the attempt's
+ * printer's, else the default printer's (`machineRateFor`); a printer with no profile, or
+ * none at all, is the book's `machine_rate_per_hour`.
+ */
+function todaysRate(printer: string | null | undefined): { perHour: string; basis: AttemptCost['machine_rate_basis']; confidence: number | null } {
+  const book = { perHour: mockSettings().pricing_machine_rate_per_hour, basis: 'price_book' as const, confidence: null }
+  const fixed = printer ? TODAYS_PRINTER_RATES[printer] : undefined
+  if (fixed) return { perHour: fixed.perHour, basis: fixed.actuals ? 'printer_actuals' : 'printer_estimate', confidence: fixed.confidence }
+  const breakdown = machineRateFor(printer ?? null)
+  if (!breakdown || breakdown.source !== 'profile') return book
+  return { perHour: breakdown.rate_per_hour, basis: breakdown.actuals ? 'printer_actuals' : 'printer_estimate', confidence: breakdown.confidence ?? null }
 }
 
 const unitOf = (quote: Quote | undefined) => (quote && (quote.source === 'slice' || quote.source === 'archive') && quote.plates.length ? new Unit(quote) : null)
@@ -127,12 +153,23 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
       filament = perGram === null ? null : g * perGram
     }
     let machine: number | null = null
+    // #5774 (machine-rate actuals spec §6): which rate priced the seconds.
+    let basis: AttemptCost['machine_rate_basis'] = null
+    let confidence: number | null = null
     if (s !== null) {
       let perSecond = unit?.perSecond ?? null
       if (perSecond === null && today) {
-        perSecond = (Number(settings.pricing_machine_rate_per_hour) * exp) / 3600
+        const rate = todaysRate(f.printer)
+        perSecond = (Number(rate.perHour) * exp) / 3600
         estimated.push('machine')
-      } else if (perSecond !== null && estimated.includes('seconds')) estimated.push('machine')
+        basis = rate.basis
+        confidence = rate.confidence
+      } else if (perSecond !== null) {
+        if (estimated.includes('seconds')) estimated.push('machine')
+        const breakdown = quote?.machine_rate_breakdown ?? null
+        basis = breakdown?.actuals ? 'quote_actuals' : 'quote_estimate'
+        confidence = breakdown?.confidence ?? null
+      }
       machine = perSecond === null ? null : s * perSecond
     }
     const filamentMinor = round(filament)
@@ -150,6 +187,8 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
       seconds: s,
       filament_minor: filamentMinor,
       machine_minor: machineMinor,
+      machine_rate_basis: machineMinor === null ? null : basis,
+      machine_rate_confidence: machineMinor === null ? null : confidence,
       cost_minor: (filamentMinor ?? 0) + (machineMinor ?? 0),
       estimated,
       unknown: filamentMinor === null || machineMinor === null,
@@ -274,6 +313,7 @@ export function costsOf(orderId: string): OrderCosts | null {
       estimated: parts.filter((p) => items.some((i) => (i.estimated ?? []).includes(p))),
       unknown,
       bambuddy_unavailable: false,
+      machine_rate_bases: [...new Set(items.flatMap((i) => i.attempts.flatMap((a) => (a.machine_rate_basis ? [a.machine_rate_basis] : []))))].sort(),
     },
     thin,
   )

@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 
 from scadbuddy.api.orders import record_fulfilment, update_fulfilment
+from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.problems import ApiError
@@ -34,10 +35,10 @@ from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
+    LocalDensity,
+    MaintenanceDone,
     MaintenanceTask,
     MediaTooLargeError,
-    ShelfSpool,
-    SpoolGroup,
 )
 from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
 from scadbuddy.orders.models import Fulfilment, Order, OrderItem
@@ -67,13 +68,18 @@ class Archives:
         self.facts = {f.archive_id: f for f in facts}
         self.downloads: list[tuple[int, str, str | None]] = []
 
-    async def spool_inventory(self) -> list[ShelfSpool]:
+    async def local_densities(self) -> dict[str, LocalDensity]:
         raise AssertionError("not asked")
 
-    async def spool_groups(self) -> list[SpoolGroup]:
+    async def spool_assignments(self) -> list[SpoolAssignment]:
         raise AssertionError("not asked")
 
     async def maintenance_tasks(self, printer_id: int) -> list[MaintenanceTask]:
+        raise AssertionError("not asked")
+
+    async def maintenance_history(
+        self, item_ids: Sequence[int]
+    ) -> dict[int, list[MaintenanceDone]]:
         raise AssertionError("not asked")
 
     async def project_exists(self, project_id: int) -> bool:

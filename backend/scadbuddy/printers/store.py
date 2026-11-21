@@ -21,18 +21,17 @@ that every foreign key to ``printers`` is listed), in one of two forms:
 - a `PrinterReference` with ``repoint``, a `RepointHook` ``hook(conn, merged, into)``,
   for a table whose key holds more than the printer and whose conflicts only it can
   settle. It runs on the merge's connection, inside its transaction, while both rows
-  still exist; raising undoes the merge. ``tray_spool_links`` (#4180, primary key
-  ``(printer_id, ams_id, tray_id)``) is registered this way with
-  ``spools.store.repoint_tray_links``, in which ``into``'s link wins (#4190). A bare
-  hook is accepted too, for a reference with no column to name: Task 8's print-run
-  activity facet is one (`_repoint_run_activity`). The filament inventory's AMS tray
-  places and K values (#6261) are registered with hooks in `filament/locations.py` and
-  `filament/types.py`.
+  still exist; raising undoes the merge. The filament inventory's AMS tray places and K
+  values (#6261) are registered this way, with hooks in `filament/locations.py` and
+  `filament/types.py`. A bare hook is accepted too, for a reference with no column to
+  name: Task 8's print-run activity facet is one (`_repoint_run_activity`).
 
 A table that names a printer also carries ``REFERENCES printers (id) ON DELETE
-CASCADE`` (``tray_spool_links``: 20261019T0304Z), so a delete takes its rows with it
-and the test above sees it; ``print_runs.printer`` is ``ON DELETE SET NULL`` instead
-(20261020T0327Z), since a run's history outlives its printer."""
+CASCADE``, so a delete takes its rows with it and the test above sees it;
+``print_runs.printer`` is ``ON DELETE SET NULL`` instead (20261020T0327Z), since a run's
+history outlives its printer. The retired spool overlay's tray links (#6262 Task 12) are
+not repointed: nothing reads them, the merge's delete of the gone row cascades to its
+own, and the test leaves that table out until the PR that drops it."""
 
 from __future__ import annotations
 
@@ -154,19 +153,25 @@ class PrinterReference:
     repoint: RepointHook | None = None
 
 
-def _repoint_tray_links(conn: Connection[DictRow], merged: str, into: str) -> None:
-    # Imported here: `spools` is a feature of its own, and the registry needs it only
-    # while merging.
-    from scadbuddy.spools.store import repoint_tray_links
-
-    repoint_tray_links(conn, uuid.UUID(merged), uuid.UUID(into))
-
-
 def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: str) -> None:
-    # Imported here, as `spools` is: the filament inventory is a feature of its own.
+    # Imported here: the filament inventory is a feature of its own, and the registry
+    # needs it only while merging.
     from scadbuddy.filament.locations import repoint_printer_locations
 
     repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
+
+
+def _repoint_filament_sensors(conn: Connection[DictRow], merged: str, into: str) -> None:
+    from scadbuddy.filament.sensors import repoint_printer_sensors
+
+    repoint_printer_sensors(conn, uuid.UUID(merged), uuid.UUID(into))
+
+
+def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str) -> None:
+    """#6264: the merged printer's override-slot rows are dropped, not moved: a row is only
+    the attempt guard of a slot the AMS may have reset, and the kept printer's next
+    reconcile reads its report and configures what differs."""
+    conn.execute("DELETE FROM filament_override_slots WHERE printer_id = %s", (merged,))
 
 
 def _repoint_k_values(table: str) -> RepointHook:
@@ -231,6 +236,34 @@ def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> 
             conn.execute(f"DELETE FROM {table} WHERE printer = %s", (merged,))
         else:
             conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
+
+
+def _repoint_rate_events(table: str) -> RepointHook:
+    """#5774: a printer's logged maintenance events or replaced parts are facts, so a
+    merge moves them all onto the kept printer, except one whose writer key (``source``)
+    or Bambuddy history id the kept printer already has: that one is dropped. A
+    ``source`` names one event across both tables, so it is looked up in both."""
+    history = table == "printer_maintenance_events"
+
+    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+        same_history = (
+            " OR EXISTS (SELECT 1 FROM printer_maintenance_events AS kept"
+            " WHERE kept.printer = %(into)s"
+            " AND kept.bambuddy_history_id = gone.bambuddy_history_id)"
+            if history
+            else ""
+        )
+        conn.execute(
+            f"DELETE FROM {table} AS gone WHERE gone.printer = %(merged)s AND (EXISTS"
+            " (SELECT 1 FROM printer_maintenance_events AS kept"
+            " WHERE kept.printer = %(into)s AND kept.source = gone.source"
+            " UNION ALL SELECT 1 FROM printer_wear_replacements AS kept"
+            f" WHERE kept.printer = %(into)s AND kept.source = gone.source){same_history})",
+            {"merged": merged, "into": into},
+        )
+        conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
+
+    return repoint
 
 
 #: The per-printer settings maps, keyed by the registry id (#4971, #5167).
@@ -301,7 +334,9 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
 #: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_reports", "printer_id", unique=True),
-    PrinterReference("tray_spool_links", "printer_id", repoint=_repoint_tray_links),
+    # #5774: ScadBuddy's hour counter; the kept printer's row stays, the gone one's
+    # moves only when the kept printer has none.
+    PrinterReference("printer_run_hours", "printer", unique=True),
     # #3823 Task 8: the printer a run printed on, and its activity row's facet.
     PrinterReference("print_runs", "printer"),
     # #4747: the printer a Bambuddy virtual printer forwards to.
@@ -318,12 +353,27 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_cost_profiles", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_wear_parts", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_maintenance_costs", "printer", repoint=_repoint_machine_rate),
+    # #5774: the machine rate's logged events, moved whole but for the kept printer's own.
+    PrinterReference(
+        "printer_maintenance_events",
+        "printer",
+        repoint=_repoint_rate_events("printer_maintenance_events"),
+    ),
+    PrinterReference(
+        "printer_wear_replacements",
+        "printer",
+        repoint=_repoint_rate_events("printer_wear_replacements"),
+    ),
+    # #5774 PR 3: when the printer's Bambuddy log was last read; the kept printer's stays.
+    PrinterReference("printer_maintenance_reads", "printer", unique=True),
     # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on, and its
     # job key (#6045).
     PrinterReference("print_lan_imports", "printer", repoint=_repoint_lan_imports),
     # #6261: a printer's AMS tray places (``into``'s wins a tray both have; the gone
     # one's spools move there) and its K values (``into``'s wins a key both have).
     PrinterReference("filament_locations", "printer_id", repoint=_repoint_filament_locations),
+    # #6268: an AMS unit's sensors (``into``'s wins a unit and kind both have).
+    PrinterReference("filament_location_sensors", "printer_id", repoint=_repoint_filament_sensors),
     PrinterReference(
         "filament_spool_type_k_values",
         "printer_id",
@@ -334,6 +384,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
         "printer_id",
         repoint=_repoint_k_values("filament_spool_k_values"),
     ),
+    # #6264: the slots of override tags (dropped; the kept printer's reconcile redoes them).
+    PrinterReference("filament_override_slots", "printer_id", repoint=_drop_override_slots),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries; #4699: the
     # registry ids in the print watcher's skip list.
@@ -435,6 +487,15 @@ class PrinterStore:
                 return None
         found = conn.execute(f"SELECT {_COLUMNS} FROM printers WHERE {where} = %s", (value,))
         data = found.fetchone()
+        return None if data is None else _row(data)
+
+    @staticmethod
+    def read_on(conn: Connection[DictRow], printer_id: str) -> PrinterRow | None:
+        """The printer's row on ``conn``, in the caller's transaction (`filament/capture.py`)."""
+        key = printer_uuid(printer_id)
+        if key is None:
+            return None
+        data = conn.execute(f"SELECT {_COLUMNS} FROM printers WHERE id = %s", (key,)).fetchone()
         return None if data is None else _row(data)
 
     def get(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None:
@@ -698,6 +759,8 @@ class PrinterStore:
             if row is None:
                 raise PrinterNotFoundError(printer_id)
             conn.execute("DELETE FROM printer_reports WHERE printer_id = %s", (row.id,))
+            # #5774: the hours stay (a fact about the printer); no gap spans the unlink.
+            conn.execute("UPDATE printer_run_hours SET state = NULL WHERE printer = %s", (row.id,))
             return self._update(
                 conn,
                 printer_id,

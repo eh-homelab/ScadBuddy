@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
@@ -41,8 +42,9 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from scadbuddy.agent_data import events as event_log
 from scadbuddy.agent_data import turns
 from scadbuddy.api.deps import StateDep
+from scadbuddy.api.limits import RouteLimit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.guard import PREFIX, crud_router
 
 router = crud_router("agent")
 
@@ -64,6 +66,17 @@ TIER_MAX = 64
 TAIL_MAX = 10
 EVENT_CHARS_MAX = 16 * 1024 * 1024
 BODY_BYTES_MAX = 32 * 1024 * 1024
+
+#: For ``main.py``'s `BodySizeGate` (#6863): the gate refuses a JSON body over 8 MiB unless the
+#: route has a limit of its own, so without this ``BODY_BYTES_MAX`` is never reached. The path is
+#: the mounted one; the route's own `_bounded` still answers 411 and 413 for the same bound.
+ROUTE_LIMIT = RouteLimit(
+    "POST",
+    re.compile(rf"^/api/v1{PREFIX}/agent/sessions/[^/]+/turn/[^/]+$"),
+    BODY_BYTES_MAX,
+    "a turn request",
+    "fixed, api/crud_agent_turns.py BODY_BYTES_MAX",
+)
 #: A spend's delta: a session's budget is at most 100 USD (``manager.ts``), and a placement's
 #: estimate may run past it; the most turns one end adds (``MAX_SESSION_MAX_TURNS`` 200).
 USD_MAX = 1_000_000.0

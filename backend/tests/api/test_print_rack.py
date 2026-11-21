@@ -49,9 +49,10 @@ from tests.bambuddy.conftest import recording
 from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
 from tests.support.printers import linked_printer
 from tests.support.rack_guard import foreign_rack_errors
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.temporal import WorkflowReaper
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
 
 def test_the_rack_algorithm_is_remembered_per_printer_and_forgotten(client: TestClient) -> None:
@@ -529,17 +530,18 @@ def test_the_check_previews_the_rack_sides_eligible_positions(
 def test_the_check_reads_the_spools_once_for_the_plan_and_the_rack(
     client: TestClient, model: str
 ) -> None:
-    """#2936: the rack preview reuses the check's inventory read."""
+    """#2936: the rack preview reuses the check's inventory read (Bambuddy's assignments
+    since #6262 Task 7, which place the SB spools)."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
-    spools = respx.get(f"{API}/inventory/spools").mock(
-        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    assignments = respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
 
     assert check(client, output_id)["rack"] is not None
 
-    assert spools.call_count == 1
+    assert assignments.call_count == 1
 
 
 @respx.mock
@@ -639,7 +641,8 @@ def test_an_abrasive_spool_is_warned_about_in_the_preview(client: TestClient, mo
     spools = recording("inventory-spools.json")
     for spool in spools:
         spool["material"], spool["subtype"] = "PLA", "CF"
-    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=spools))
+        spool["updated_at"] = "2026-12-01T00:00:00Z"  # newer: the SB spools take it
+    seed_app_sb_spools(client, spools)
 
     result = check(client, output_id)
 

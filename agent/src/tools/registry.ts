@@ -38,6 +38,9 @@ export type BambuddyScope =
   | 'Control Printer'
   /** #4747: Bambuddy's `settings:update`, which no API key holds while its auth is on. */
   | 'Settings (admin only)'
+  /** #6265: Bambuddy's `FILAMENTS_CREATE`/`FILAMENTS_UPDATE`, which no API key holds while its auth is on. */
+  | 'Filament catalog (admin only)'
+  | 'Manage Inventory'
 
 type HttpMethod = 'get' | 'put' | 'post' | 'delete' | 'patch'
 type MethodsOf<P extends keyof paths> = {

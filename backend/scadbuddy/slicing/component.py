@@ -89,7 +89,7 @@ async def _run(slicing: Slicing) -> AsyncIterator[None]:
     Only with ``slicer_backend`` ``native`` at start (#4348): a later switch builds it on
     the first dialog that needs it.
 
-    With the spool providers' refresh off (``spool_overlay_refresh_seconds`` 0, which
+    With the spool refresh off (``spool_overlay_refresh_seconds`` 0, which
     applies at a start) nothing keeps the copy of Bambuddy's local presets current, so it
     is forgotten here (#4645 review): a ``local`` preset is read from Bambuddy on every
     slice again rather than from a copy that only gets older.

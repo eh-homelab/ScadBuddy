@@ -75,7 +75,7 @@ import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { printRunBody, useRunPrint } from '../lib/useRunPrint'
-import { FilamentPicker } from './FilamentPicker'
+import { FilamentPicker, WarningList } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { ColourMatchSwitch } from './print/ColourMatchSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
@@ -96,7 +96,8 @@ import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SupportsStep } from './print/SupportsStep'
 import { PrimeTowerStep } from './print/PrimeTowerStep'
-import { overriddenTowerKeys } from '../lib/primeTower'
+import { TowerConflictNotice } from './print/TowerConflictNotice'
+import { analysisTower, overriddenTowerKeys } from '../lib/primeTower'
 import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { SlicerSettingsEditor } from './print/SlicerSettingsEditor'
@@ -311,6 +312,46 @@ interface Props {
 
 /** No registry rows: one constant, so a render without them keeps its dependencies. */
 const NO_ROWS: PrinterRow[] = []
+/**
+ * The tower place a "Move the prime tower" wrote: the check's fix (one value per plate),
+ * and the values those keys held before, so an undo gives the user's own back.
+ */
+type TowerMove = { fix: Record<string, string[]>; before: Record<string, unknown> }
+
+/** Whether a setting holds exactly the value `written` gave it. */
+function holds(value: unknown, written: string[] | undefined): boolean {
+  return written !== undefined && JSON.stringify(value) === JSON.stringify(written)
+}
+
+/** Whether `settings` still hold every value of `move`. */
+function holdsMove(settings: Record<string, unknown>, move: TowerMove | null): boolean {
+  const entries = Object.entries(move?.fix ?? {})
+  return entries.length > 0 && entries.every(([key, value]) => holds(settings[key], value))
+}
+
+/** `move` made over `settings`: the fix's values, and what those keys held before. */
+function towerMoveOver(settings: Record<string, unknown>, fix: Record<string, string[]>): TowerMove {
+  const before = Object.fromEntries(Object.keys(fix).filter((key) => key in settings).map((key) => [key, settings[key]]))
+  return { fix, before }
+}
+
+/**
+ * `settings` with each value `move` wrote taken out again, so the tower goes where the
+ * file puts it, or back to the place the user set before. A key the user set to another
+ * value since stays: it is the user's own.
+ */
+function withoutMove<T extends Record<string, unknown>>(move: TowerMove | null): (settings: T) => T {
+  return (settings) => {
+    const written = Object.keys(move?.fix ?? {}).filter((key) => holds(settings[key], move?.fix[key]))
+    if (move === null || written.length === 0) return settings
+    const rest: Record<string, unknown> = { ...settings }
+    for (const key of written) {
+      if (key in move.before) rest[key] = move.before[key]
+      else delete rest[key]
+    }
+    return rest as T
+  }
+}
 const NO_IDS: string[] = []
 /** A closed dialog follows no topic. */
 const NO_TOPICS: readonly string[] = []
@@ -362,6 +403,8 @@ export function PrintPicker({
   const [carry] = useState(() => new CarryBox())
   /** The re-arrange in flight: closing the dialog (or unmounting it) stops its wait. */
   const arrangeRun = useRef<AbortController | null>(null)
+  /** #6758 — the tower place "Move the prime tower" wrote into the slicer settings, if any. */
+  const [towerMove, setTowerMove] = useState<TowerMove | null>(null)
   useEffect(() => {
     if (open) return
     arrangeRun.current?.abort()
@@ -957,7 +1000,7 @@ export function PrintPicker({
     acceptedFixes: sliced ? NO_IDS : acceptedFixes,
     onRan,
   })
-  const { run, running, runError, refused, result, unanswered } = runPrint
+  const { run, running, runError, runWarnings, refused, result, unanswered } = runPrint
   const queueUrl = result?.bambuddy_url ?? null
   /** #4250 — quote mode: the price book's filaments, and the one chosen per slot. */
   const quoting = quote !== undefined
@@ -1079,7 +1122,7 @@ export function PrintPicker({
               goal: arrangeGoal,
               ...(registryPrinter ? { printer: registryPrinter } : {}),
               printer_id: sentPrinterId,
-              filament_plan: { slots: plan, force_colour_match: forceColourMatch },
+              filament_plan: { slots: plan, force_colour_match: forceColourMatch, ids: 'sb' },
               // #3637 — every colour a recoloured copy prints in has its slot, whether
               // or not this output's `colors` already lists it.
               colours: [
@@ -1092,6 +1135,8 @@ export function PrintPicker({
                 ]),
               ],
               name: arrangedName(from.name),
+              // #6758 — room for the tower chosen here, "No sparse layers" keep-out included.
+              ...(primeTower === null ? {} : { prime_tower: primeTower }),
             },
             { signal: controller.signal, within },
           )
@@ -1100,6 +1145,9 @@ export function PrintPicker({
           // History, but this dialog keeps the output it was opened for.
           if (controller.signal.aborted) return
           carry.set({ plan, ready: false })
+          // A tower place this dialog moved for the old layout is not one for the new.
+          setProcessOverrides(withoutMove(towerMove))
+          setTowerMove(null)
           setArranged(next.output)
           setArrangeNote(arrangedNote(next.plates))
         },
@@ -1160,17 +1208,21 @@ export function PrintPicker({
    * prints (#3762 review).
    */
   const printChoices = printChoicesOf(selection)
+  // #6721: plate fit keeps room for a tower over a file that states it off only when the
+  // print turns it on. So the analysis takes the tower that the run takes.
+  const analysisPrimeTower = analysisTower(primeTower, sentProcess)
   const analysisRequest: AnalysisRequest | null =
     choices && printChoices && planReady && !noPlate
       ? {
           // The registry printer, so a native dialog's analysis asks Bambuddy nothing (#4629).
           ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: sentPrinterId,
-          filament_plan: { slots: plan, force_colour_match: forceColourMatch },
+          filament_plan: { slots: plan, force_colour_match: forceColourMatch, ids: 'sb' },
           choices: printChoices,
           ...plateFields(plate),
           copies: effectiveCopies,
           options: sentOptions,
+          ...(analysisPrimeTower === null ? {} : { prime_tower: analysisPrimeTower }),
         }
       : null
 
@@ -1185,7 +1237,7 @@ export function PrintPicker({
       ? {
           ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: sentPrinterId,
-          filament_plan: { slots: plan, force_colour_match: forceColourMatch },
+          filament_plan: { slots: plan, force_colour_match: forceColourMatch, ids: 'sb' },
           choices: printChoices,
           ...plateFields(plate),
           rack_position: rackPosition,
@@ -1362,10 +1414,32 @@ export function PrintPicker({
     ...check.verdict,
     warnings: [...shown(check.verdict.warnings), ...slicedShort],
   }
+  /** #6758 — the slicer settings still hold the tower place this dialog wrote, and a tower is printed. */
+  const towerMoved = check.verdict?.prime_tower != null && holdsMove(processOverrides, towerMove)
   const verdict = (
     <>
       <RackNozzleLine rack={check.verdict?.rack} algorithm={rackAlgorithm} />
       <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
+      {!sliced && (
+        <TowerConflictNotice
+          check={check.verdict?.prime_tower}
+          moved={towerMoved}
+          onMove={(fix) => {
+            // A second move undoes to the place before the first, not to the first move.
+            const base = holdsMove(processOverrides, towerMove) ? withoutMove(towerMove)(processOverrides) : processOverrides
+            setTowerMove(towerMoveOver(base, fix))
+            setProcessOverrides((current) => ({ ...current, ...fix }))
+          }}
+          onUndo={() => {
+            setProcessOverrides(withoutMove(towerMove))
+            setTowerMove(null)
+          }}
+          onRearrange={
+            target && known ? () => (stale ? setAskFor(target.id) : void rearrange(false)) : undefined
+          }
+          arranging={arranging}
+        />
+      )}
     </>
   )
 
@@ -1546,7 +1620,7 @@ export function PrintPicker({
       await quote.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
         printer_id: sentPrinterId,
-        filament_plan: { slots: plan, force_colour_match: forceColourMatch },
+        filament_plan: { slots: plan, force_colour_match: forceColourMatch, ids: 'sb' },
         choices: printChoices,
         filaments: priced,
         // A support slot with no filament chosen yet prices nothing.
@@ -1578,7 +1652,7 @@ export function PrintPicker({
       await itemPrint.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
         printer_id: sentPrinterId,
-        filament_plan: { slots: plan, force_colour_match: forceColourMatch },
+        filament_plan: { slots: plan, force_colour_match: forceColourMatch, ids: 'sb' },
         choices: printChoices,
         // #5627: the quote's, as the background slice was made with them.
         ...(sentParts === null ? {} : { part_settings: apiParts(sentParts) }),
@@ -1948,7 +2022,6 @@ export function PrintPicker({
                         tray={tray}
                         // A native question's candidates are the shelf's (#4506); Bambuddy's, the inventory's.
                         spools={nativeRow ? openShelf : (filaments?.spools ?? [])}
-                        providerLabels={filaments?.provider_labels}
                         onAssigned={(link) => claim(tray, link)}
                         onDecline={() => trays.decline(tray)}
                       />
@@ -2393,6 +2466,7 @@ export function PrintPicker({
                 slicing={previewSlice.slicing}
                 progress={previewSlice.progress}
                 sliceError={previewSlice.error}
+                sliceWarnings={previewSlice.warnings}
                 onReslice={sliced ? null : previewSlice.reslice}
                 canReslice={previewSlice.canReslice}
                 reslicing={previewSlice.reslicing}
@@ -2401,11 +2475,18 @@ export function PrintPicker({
             </div>
           )}
 
-          {runError && (
-            <p role="alert" className="mt-3 text-sm text-destructive">
-              {runError}
-            </p>
-          )}
+          {runError &&
+            (runWarnings.length > 0 ? (
+              // #6737: the plain words lead; the slicer's own text stays, quieter, below them.
+              <div role="alert" className="mt-3 text-sm">
+                <WarningList warnings={runWarnings} testId="run-warnings" />
+                <p className="mt-1 text-xs text-subtle">{runError}</p>
+              </div>
+            ) : (
+              <p role="alert" className="mt-3 text-sm text-destructive">
+                {runError}
+              </p>
+            ))}
           {handingError && (
             <p role="alert" className="mt-3 text-sm text-destructive" data-testid="quote-error">
               {handingError}

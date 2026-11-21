@@ -1,7 +1,8 @@
-"""What the spool overlay is made of (plan 2026-10-18 D1).
+"""A printer's trays as its report shows them, and the cleaners of their RFID keys (plan
+2026-10-18 D1; what is left of the spool overlay, which #6262 Task 12 removed). The SB
+inventory reads them (`filament/inventory.py`, `filament/spools.py`).
 
-A tray holds one physical spool, and each spool provider keeps its own record of it. A
-spool is told by the AMS tray's ``tray_uuid`` and ``tag_uid``, the RFID fields of each
+A spool is told by the AMS tray's ``tray_uuid`` and ``tag_uid``, the RFID fields of each
 ``ams.ams[].tray[]`` entry and of ``vt_tray`` (Doridian/OpenBambuAPI ``mqtt.md`` at
 ``cc383a2c``, the ``pushing.pushall`` example; ha-bambulab ``pybambu/models.py``
 ``AMSTray.tag_uid``/``tray_uuid`` at ``0e027ff1``; both read 2026-10-18). An untagged
@@ -25,16 +26,7 @@ AMS feeds and scans, so :func:`tray_fingerprint` leaves it out.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
-from uuid import UUID
-
-from pydantic import BaseModel, Field
-
-LinkedBy = Literal["rfid", "manual"]
-#: How the overlay found a tray's spool: its tag, a person's link, or the provider's own
-#: assignment of an untagged tray.
-FoundBy = Literal["rfid", "manual", "provider"]
+from pydantic import BaseModel
 
 
 def _hex(value: str | None) -> str:
@@ -56,43 +48,12 @@ def clean_tray_uuid(value: str | None) -> str | None:
 
 
 def tray_fingerprint(material: str | None, colour: str | None) -> str:
-    """``material|RRGGBB``: what a person saw in the tray when they linked it. Never the
+    """``material|RRGGBB``: what the tray shows, so the native dialog remembers a "no" to
+    its question only until it changes (`bambuddy/trays.py` `tray_questions`). Never the
     tray's ``state``, which changes as the AMS feeds; whether the tray is filled at all is
-    a check of its own."""
+    a check of its own. The SB inventory's own, alpha kept, is `filament/inventory.py`
+    `tray_fingerprint`."""
     return f"{(material or '').strip().upper()}|{_hex(colour)[:6]}"
-
-
-class SpoolLocation(BaseModel):
-    """Where a provider itself says a spool is loaded: Bambuddy's
-    ``GET /inventory/assignments`` (`BambuddyClient.spool_assignments`), Spoolman's
-    ``Spool.location``. ``printer`` is the provider's own key for the printer
-    (``bambuddy:<id>``)."""
-
-    printer: str
-    ams_id: int
-    tray_id: int
-    #: `tray_fingerprint` of what the provider saw in the tray, when it says.
-    fingerprint: str | None = None
-
-
-class SpoolSnapshot(BaseModel):
-    """What a provider says of one record; never a provider's raw payload."""
-
-    record_id: str
-    material: str | None = None
-    #: ``#RRGGBB``.
-    colour: str | None = None
-    brand: str | None = None
-    name: str | None = None
-    remaining_g: float | None = None
-    label_weight_g: int | None = None
-    #: When the provider knows them.
-    tray_uuid: str | None = None
-    tag_uid: str | None = None
-    #: The provider's filament preset id, when it has one.
-    preset: str | None = None
-    #: The tray the provider says the spool is in.
-    location: SpoolLocation | None = None
 
 
 class SeenTray(BaseModel):
@@ -105,49 +66,14 @@ class SeenTray(BaseModel):
     material: str | None = None
     colour: str | None = None
     tray_info_idx: str | None = None
+    #: The tray's ``tray_color`` as ``#RRGGBBAA``, alpha kept (#6262, spec §5.1), for
+    #: the SB tray fingerprint (`filament/inventory.py`); ``colour`` stays ``#RRGGBB``
+    #: for the slicer and the colour match.
+    rgba: str | None = None
+    #: The AMS's remaining percent for a tray with RFID keys that sent it (`seen_trays`);
+    #: ``None`` for any other tray.
+    remain: int | None = None
 
     @property
     def fingerprint(self) -> str:
         return tray_fingerprint(self.material, self.colour)
-
-
-class TraySpool(BaseModel):
-    """One tray as the dialog's overlay sees it."""
-
-    ams_id: int
-    tray_id: int
-    physical_spool_id: UUID | None = None
-    linked_by: FoundBy | None = None
-    #: Provider name -> its record of the spool in this tray.
-    records: dict[str, SpoolSnapshot] = Field(default_factory=dict)
-
-
-class ShelfSpool(BaseModel):
-    """A spool no tray holds, as the fresh providers' records know it (#4504): what an
-    untagged tray's question offers to link. ``physical_spool_id`` when a record is
-    linked to one, its records in the providers' order."""
-
-    physical_spool_id: UUID | None = None
-    records: dict[str, SpoolSnapshot] = Field(default_factory=dict)
-
-
-class Overlay(BaseModel):
-    trays: list[TraySpool]
-    #: The fresh records no tray holds: not of a tagged spool (a tag is read where the
-    #: spool is), not of a spool ``trays`` shows, and not of one a person's link or its
-    #: provider's placement puts on another printer (one this printer's tray no longer
-    #: matches holds nothing).
-    shelf: list[ShelfSpool] = Field(default_factory=list)
-    #: Each provider whose records are older than `SPOOL_OVERLAY_STALE`, with when they
-    #: were last refreshed (``None``: never). Its records are left out of ``trays``.
-    stale: dict[str, datetime | None] = Field(default_factory=dict)
-
-
-class ProviderRefresh(BaseModel):
-    """A provider's last refresh, and its last failure."""
-
-    provider: str
-    refreshed_at: datetime | None = None
-    failed_at: datetime | None = None
-    #: The failure's type only, never its message.
-    failure: str | None = None

@@ -1,9 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
-import type { BambuddyStatus, ProfileSpool, Settings, StorefrontSliceProfile } from '../../api/types'
+import type { BambuddyStatus, Settings, StorefrontSliceProfile } from '../../api/types'
 import * as fixtures from '../fixtures'
 import { state as orders } from './orders/state'
-import { printersState } from './printers'
-import { SPOOL_INVENTORY } from './spoolInventory'
+import { profileTypes } from './filament'
 import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
 /**
@@ -15,6 +14,10 @@ import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSett
 
 const base = '/api/v1'
 
+/** `FilamentSync`'s data types and the directions each takes (`core/settings.py`). */
+const FILAMENT_SYNC_KINDS = ['spools', 'weights', 'tags', 'presets', 'suppliers', 'locations'] as const
+const SYNC_DIRECTIONS = ['off', 'sb_to_bb', 'bb_to_sb', 'two_way']
+
 const state = {
   bambuddyStatus: structuredClone(fixtures.bambuddyStatus) as BambuddyStatus,
   /** The values the mock process "started" with, for `restart_required`. */
@@ -24,6 +27,40 @@ const state = {
 export function reset(): void {
   state.bambuddyStatus = structuredClone(fixtures.bambuddyStatus)
   state.running = structuredClone(fixtures.settings)
+  syncRestored = false
+  try {
+    sessionStorage.removeItem(SYNC_STORAGE_KEY)
+  } catch {
+    // Nothing stored.
+  }
+}
+
+/**
+ * #6265 — the saved `filament_sync` is kept in `sessionStorage` too, so a reload shows the
+ * directions a test saved, as the server's row would. Each Playwright test has its own
+ * context; `reset` clears it.
+ */
+const SYNC_STORAGE_KEY = 'sb-mock-filament-sync'
+let syncRestored = false
+
+function keepFilamentSync(): void {
+  try {
+    sessionStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(mockSettings().filament_sync))
+  } catch {
+    // No storage: the choice lasts as long as the page.
+  }
+}
+
+/** Puts back the `filament_sync` a reload kept, once per page. */
+export function restoreFilamentSync(): void {
+  if (syncRestored) return
+  syncRestored = true
+  try {
+    const kept = sessionStorage.getItem(SYNC_STORAGE_KEY)
+    if (kept) setMockSettings({ ...mockSettings(), filament_sync: JSON.parse(kept) as Settings['filament_sync'] })
+  } catch {
+    // No storage, or nothing readable in it: the seeded value stays.
+  }
 }
 
 /** The settings the mock process runs with, as if it had just restarted. */
@@ -49,6 +86,7 @@ const NULLABLE = new Set([
   'default_plate',
   'google_fonts_api_key',
   'temporal_ui_url',
+  'filament_default_cost_per_kg',
   'store_s3_endpoint',
   'store_s3_bucket',
   'store_s3_access_key_id',
@@ -176,7 +214,11 @@ function putSettings(body: Record<string, unknown>) {
     // #6153 — `slice_profile.py` keeps each material casefolded.
     if (name === 'storefront_slice_profile' && value) {
       const profile = value as StorefrontSliceProfile
-      next[name] = { ...profile, spools: Object.fromEntries(Object.entries(profile.spools ?? {}).map(([m, id]) => [m.toLowerCase(), id])) }
+      // As `check_profile`: each type is one not archived.
+      const live = new Set(profileTypes().map((type) => type.id))
+      const gone = Object.entries(profile.materials ?? {}).find(([, id]) => !live.has(id))
+      if (gone) return refused(`${name}.materials.${gone[0].toLowerCase()}`, `no filament type ${gone[1]} for ${gone[0].toLowerCase()}`)
+      next[name] = { ...profile, materials: Object.fromEntries(Object.entries(profile.materials ?? {}).map(([m, id]) => [m.toLowerCase(), id])) }
       continue
     }
     if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
@@ -186,7 +228,9 @@ function putSettings(body: Record<string, unknown>) {
           ? (value ?? 'mm')
           : name === 'asset_fetch_domains'
             ? (value ?? [...fixtures.DEFAULT_ASSET_FETCH_DOMAINS])
-            : value
+            : name === 'filament_shopping_auto_add_empty'
+              ? (value ?? true)
+              : value
       continue
     }
     if (value === null && !NULLABLE.has(name)) {
@@ -223,6 +267,27 @@ function putSettings(body: Record<string, unknown>) {
     }
     if (name === 'storefront_mail_host' && typeof value === 'string' && (/[\s/@]/.test(value.trim()) || !value.trim())) {
       return refused(name, `Value error, ${envName(name)} is a host name, such as smtp.example.com`)
+    }
+    // #6262 Task 13, #6265 — `FilamentSync` (each of its six data types takes the four
+    // directions) and the bounds of the two filament fields.
+    if (name === 'filament_sync') {
+      const sync = (value ?? {}) as Record<string, unknown>
+      if (FILAMENT_SYNC_KINDS.some((kind) => kind in sync && !SYNC_DIRECTIONS.includes(String(sync[kind])))) {
+        return refused(name, "Input should be 'off', 'sb_to_bb', 'bb_to_sb' or 'two_way'")
+      }
+    }
+    // #6625 — `profile_fetch_nozzles`: the resolver's sizes, at least one, each once.
+    if (name === 'profile_fetch_nozzles' && value !== null) {
+      const list = Array.isArray(value) ? (value as unknown[]) : []
+      if (list.length === 0) return refused(name, 'List should have at least 1 item after validation, not 0')
+      if (list.some((one) => !['0.2', '0.4', '0.6', '0.8'].includes(String(one)))) return refused(name, "Input should be '0.2', '0.4', '0.6' or '0.8'")
+      if (new Set(list).size !== list.length) return refused(name, 'Value error, profile_fetch_nozzles lists each nozzle once')
+    }
+    if (name === 'filament_low_stock_pct' && typeof value === 'number' && value > 100) {
+      return refused(name, 'Input should be less than or equal to 100')
+    }
+    if (name === 'filament_default_cost_per_kg' && typeof value === 'string' && !/^\d+(\.\d+)?$/.test(value.trim())) {
+      return refused(name, 'Input should be greater than or equal to 0')
     }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)
@@ -310,35 +375,29 @@ function putSettings(body: Record<string, unknown>) {
 }
 
 export const handlers = [
-  http.get(`${base}/settings`, () => HttpResponse.json(mockSettings())),
+  http.get(`${base}/settings`, () => {
+    restoreFilamentSync()
+    return HttpResponse.json(mockSettings())
+  }),
 
   http.put(`${base}/settings`, async ({ request }) => {
+    restoreFilamentSync()
     const body = (await request.json()) as Record<string, unknown>
     // Stored before the answer comes back, as the server commits before it responds.
     const response = putSettings(body)
+    if (response.ok && ('filament_sync' in body || ((body.reset as string[] | undefined) ?? []).includes('filament_sync'))) keepFilamentSync()
     await delay(120)
     return response
   }),
 
-  // #6153 — the shop slice profile's choices (`api/storefront_slice.py`): the price book's
-  // materials, and Bambuddy's spools, as the mock's printers all run on Bambuddy's path.
-  http.get(`${base}/storefront/slice-profile/options`, ({ request }) => {
+  // #6153, #6574 — the shop slice profile's choices (`api/storefront_slice.py`): the price
+  // book's materials, and the filament types whose presets a slot of a material takes.
+  http.get(`${base}/storefront/slice-profile/options`, () => {
     const materials = new Map<string, string>()
     for (const f of orders.filaments) if (!f.archived_at && !materials.has(f.material.toLowerCase())) materials.set(f.material.toLowerCase(), f.material)
-    const printer = new URL(request.url).searchParams.get('printer')
-    // As the route: 422 for a printer the registry does not hold.
-    if (printer && !printersState().some((row) => row.id === printer)) return problem(422, 'Unprocessable Content', `no printer ${printer}`)
-    const spools: ProfileSpool[] = printer
-      ? SPOOL_INVENTORY.filter((spool) => !spool.archived).map((spool) => ({
-          spool_id: spool.id,
-          material: spool.material,
-          colour: spool.rgba ? `#${spool.rgba.slice(0, 6)}` : null,
-          label: `${[spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ')} (#${spool.id})`,
-        }))
-      : []
     return HttpResponse.json({
       materials: [...materials.values()].sort((a, b) => a.localeCompare(b)).map((material) => ({ material, support: SUPPORT_MATERIAL.test(material) })),
-      spools,
+      types: profileTypes(),
     })
   }),
 

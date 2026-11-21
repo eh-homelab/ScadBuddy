@@ -34,10 +34,21 @@ from tests.support.temporal import temporal_client, terminate_open_workflows
 from tests.test_print_worker_task import StubWorker
 
 
-def _library_state(revision: str) -> SimpleNamespace:
+class _Nudges:
+    """The filament sync's nudger (#6265): what the worker asked of it."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def nudge(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+def _library_state(revision: str, nudges: _Nudges | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         settings=SimpleNamespace(
             temporal_task_queue_library="library",
+            temporal_task_queue_bambuddy="bambuddy",
             revision=revision,
             spool_overlay_refresh_seconds=0,
         ),
@@ -46,10 +57,13 @@ def _library_state(revision: str) -> SimpleNamespace:
         previews=None,
         components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
         settings_store=None,
+        filament_sync=nudges or _Nudges(),
     )
 
 
-async def _run_once(monkeypatch: pytest.MonkeyPatch, revision: str) -> tuple[dict[str, Any], str]:
+async def _run_once(
+    monkeypatch: pytest.MonkeyPatch, revision: str, nudges: _Nudges | None = None
+) -> tuple[dict[str, Any], str]:
     """Start `main._run_library_worker` until its worker is built and its build made
     current; what the worker was built with, and the build it made current."""
     built: dict[str, Any] = {}
@@ -75,7 +89,7 @@ async def _run_once(monkeypatch: pytest.MonkeyPatch, revision: str) -> tuple[dic
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     stop = asyncio.Event()
-    task = asyncio.create_task(main._run_library_worker(_library_state(revision), stop))  # type: ignore[arg-type]
+    task = asyncio.create_task(main._run_library_worker(_library_state(revision, nudges), stop))  # type: ignore[arg-type]
     made_current = await asyncio.wait_for(made, 5)
     stop.set()
     await asyncio.wait_for(task, 5)
@@ -85,7 +99,8 @@ async def _run_once(monkeypatch: pytest.MonkeyPatch, revision: str) -> tuple[dic
 async def test_the_library_worker_is_this_builds_version_and_makes_it_current(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    built, made_current = await _run_once(monkeypatch, "abc123")
+    nudges = _Nudges()
+    built, made_current = await _run_once(monkeypatch, "abc123", nudges)
     config = built["deployment_config"]
     assert isinstance(config, WorkerDeploymentConfig)
     assert config.use_worker_versioning
@@ -96,6 +111,8 @@ async def test_the_library_worker_is_this_builds_version_and_makes_it_current(
     assert config.default_versioning_behavior == VersioningBehavior.UNSPECIFIED
     assert made_current == "abc123"
     assert tuple(built["workflows"]) == main.LIBRARY_WORKFLOWS
+    # #6265 Decision 17: once Temporal answers, one full filament sync pass.
+    assert nudges.calls == [{"full": True}]
 
 
 async def test_the_schedules_wait_for_this_build_to_route_the_queue(
@@ -120,6 +137,10 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     async def no_preview_schedule(*args: Any) -> None:
         pass
 
+    async def notify_schedule(client: object, queue: str) -> None:
+        # The sensor notifications' pass runs on the print worker's queue (#6646).
+        order.append(f"sensor-notify:{queue}")
+
     async def no_triggers() -> None:
         pass
 
@@ -128,6 +149,7 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "ensure_spool_schedule", no_preview_schedule)
+    monkeypatch.setattr(main, "ensure_sensor_notify_schedule", notify_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     stop = asyncio.Event()
@@ -139,7 +161,7 @@ async def test_the_schedules_wait_for_this_build_to_route_the_queue(
     await asyncio.wait_for(set_up.wait(), 5)
     stop.set()
     await asyncio.wait_for(task, 5)
-    assert order == ["routed", "schedules"]
+    assert order == ["routed", "schedules", "sensor-notify:bambuddy"]
 
 
 async def test_a_restarted_worker_does_not_make_its_build_current_again(

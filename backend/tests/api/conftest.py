@@ -26,6 +26,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy import print_source
 from scadbuddy.bambuddy.filaments3mf import UnreadableFilamentsError
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.bb_sync_nudge import FilamentSyncNudger
 from scadbuddy.flows.agent_tools import AgentTools, AgentToolsUnavailableError
 from scadbuddy.main import create_app
 from scadbuddy.render import submit as submit_module
@@ -42,6 +43,7 @@ from tests.support.deployment import (
     BUILD_SERVES_TIMEOUT,
     wait_until_build_serves,
 )
+from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.store import content, pool, s3  # noqa: F401
 from tests.support.temporal import (
     WorkflowReaper,
@@ -250,6 +252,41 @@ def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def filament_nudges(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """#6265 Task 8: the app's filament sync nudges are recorded (each one's ``full``),
+    never sent. A nudge starts a sync workflow whose pass reads Bambuddy beside the test's
+    own mocked reads, as the spool refresh's Schedule did (#4180 CI). The nudge itself is
+    tested on a fake client (`tests/filament/test_bb_sync_nudge.py`)."""
+    nudges: list[bool] = []
+
+    def soon(self: FilamentSyncNudger, *, full: bool = False) -> None:
+        nudges.append(full)
+
+    async def nudge(
+        self: FilamentSyncNudger, *, full: bool = False, raise_errors: bool = False
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(FilamentSyncNudger, "nudge_soon", soon)
+    monkeypatch.setattr(FilamentSyncNudger, "nudge", nudge)
+    return nudges
+
+
+@pytest.fixture(autouse=True)
+def filament_signals(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """R-T10-3: the signal-only nudges a save sends when nothing pushes now, recorded (each
+    one's ``url``, ``None`` for the configured Bambuddy) and never sent, as
+    `filament_nudges` does."""
+    signals: list[str | None] = []
+
+    def soon(self: FilamentSyncNudger, url: str | None = None) -> None:
+        signals.append(url)
+
+    monkeypatch.setattr(FilamentSyncNudger, "signal_running_soon", soon)
+    return signals
+
+
+@pytest.fixture(autouse=True)
 def _clients_wait_for_the_render_build(
     monkeypatch: pytest.MonkeyPatch, workflow_reaper: WorkflowReaper
 ) -> None:
@@ -303,6 +340,25 @@ def _reaper_client(reaper: WorkflowReaper) -> Client:
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def recorded_sb_spools(request: pytest.FixtureRequest) -> None:
+    """Bambuddy's recorded spools (``inventory-spools.json``) as SB spools of the same
+    numbers, linked to them: the Bambuddy path's picker offers SB spools (#6262 Task 7),
+    so a test that plans with the recording's ids needs them. Seeded through the app the
+    test already drives (a module's own ``*_client`` before ``client``), never a new one:
+    a second app would run a second worker on the same task queues. A test that asks for
+    no app fixture seeds nothing. ``@pytest.mark.sb_offset(n)`` numbers them n past their
+    Bambuddy ids."""
+    # Each named fixture is in the test's closure already, so reading it makes nothing new.
+    names = [n for n in request.fixturenames if n.endswith("_client") and not n.startswith("_")]
+    names += ["client"] if "client" in request.fixturenames else []
+    apps = (request.getfixturevalue(name) for name in names)
+    app = next((value for value in apps if isinstance(value, TestClient)), None)
+    marker = request.node.get_closest_marker("sb_offset")
+    if app is not None:
+        seed_app_sb_spools(app, offset=marker.args[0] if marker else 0)
 
 
 @pytest.fixture
