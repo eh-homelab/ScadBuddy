@@ -15,12 +15,14 @@ alone and says why.
 drying temperature and hours from the AMS HT's idle drying values (:data:`DRYING_AT`,
 #6720). ``filament_cost`` is only a hint (:func:`cost_hint`), never written.
 
-A fill writes only the type's empty fields (``diameter_mm`` is never empty). A refresh
+A fill writes only the type's empty fields (``diameter_mm`` is never empty), and not a
+drying field the type's subtype or material sets (R-6714-20). A refresh
 answers what differs, with the values now, and writes nothing; an apply writes the
 fields a person confirmed, once the profile still gives them. A type with no K values
 takes the ``k_profiles`` of the Bambuddy spools its spools are linked to; then each
-printer's K calibrations of a preset's filament fill the keys still without a row
-(#6720, :meth:`TypeFiller._printer_k`), never a key a person set.
+printer's K calibrations of a preset's filament fill the keys still without a row, or
+replace an older calibration's (#6720, R-6714-19, :meth:`TypeFiller._printer_k`), never a
+key a person, the fill or the fetch set.
 """
 
 from __future__ import annotations
@@ -40,7 +42,13 @@ from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import KProfile, LocalPresetDetail, Spool
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
-from scadbuddy.filament.types import LinkedPrinter, SpoolTypeStore, TypeTempError, k_value_key
+from scadbuddy.filament.types import (
+    LinkedPrinter,
+    SpoolTypeStore,
+    TypeTempError,
+    k_identity,
+    k_value_key,
+)
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.orders.density import DensityTable, density_text
 from scadbuddy.slicing.profiles import ProfileError
@@ -75,6 +83,10 @@ Value = int | Decimal
 #: does not cap (ABS: 65 °C on the AMS 2 Pro, 80 °C on the AMS HT). A list of one value
 #: gives that value.
 DRYING_AT = 1
+
+#: The drying fields, which an empty-field fill leaves to a subtype or material that sets
+#: them (#6856, R-6714-20).
+_DRYING: frozenset[Field] = frozenset({"drying_temp_c", "drying_hours"})
 
 
 logger = logging.getLogger(__name__)
@@ -300,10 +312,10 @@ class FillRequest(BaseModel):
     apply: dict[Field, Value] | None = None
     #: With ``apply``: also write the K values a refresh showed, while the type has none.
     k_values: bool = False
-    #: With ``k_values``: the K values the refresh showed (its ``k_values``, without
-    #: ``type_id``; ``[]`` for none), required then (R-6714-i). 409 when Bambuddy now
-    #: gives others (R-6714-g).
-    shown_k_values: list[m.TypeKValueCreate] | None = None
+    #: With ``k_values``: the K values the refresh showed (its ``k_values``, as sent or
+    #: without ``type_id`` and ``source``, which are ignored, R-6714-22; ``[]`` for none),
+    #: required then (R-6714-i). 409 when Bambuddy now gives others (R-6714-g).
+    shown_k_values: list[m.ShownKValue] | None = None
 
     @model_validator(mode="after")
     def _shown_with_k_values(self) -> Self:
@@ -349,7 +361,7 @@ class _Reads:
         self.client = client
         self._presets: dict[int, LocalPresetDetail | ApiError | ValidationError] = {}
         self._spools: dict[int, Spool] | Unread | None = None
-        self._k_tables: dict[tuple[int, str], list[KProfile] | Unread] = {}
+        self._k_tables: dict[tuple[int, str], _KTable | Unread] = {}
         self.printers: list[LinkedPrinter] | None = None
 
     async def local_preset(self, preset_id: int) -> LocalPresetDetail:
@@ -389,19 +401,34 @@ class _Reads:
                     self._spools = found
         return self._spools
 
-    async def k_table(self, printer_id: int, nozzle: str) -> list[KProfile] | Unread:
+    async def k_table(self, printer_id: int, nozzle: str) -> _KTable | Unread:
         """Bambuddy printer ``printer_id``'s K calibrations for one nozzle, read with GET
-        once per fill (#6720). Only while Bambuddy is linked."""
+        once per fill (#6720). Each row is validated on its own, as `spools` does: a row of
+        another shape is left out and counted (#6856). Only while Bambuddy is linked."""
         assert self.client is not None
         key = (printer_id, nozzle)
         if key not in self._k_tables:
             try:
-                self._k_tables[key] = await self.client.k_profiles(printer_id, nozzle)
+                rows = await self.client.k_profile_rows(printer_id, nozzle)
             except ApiError as error:
                 self._k_tables[key] = Unread(str(error.detail))
-            except ValidationError:
-                self._k_tables[key] = Unread("Bambuddy answered in another shape")
+            else:
+                table = _KTable()
+                for row in rows:
+                    try:
+                        table.rows.append(KProfile.model_validate(row))
+                    except ValidationError:
+                        table.skipped += 1
+                self._k_tables[key] = table
         return self._k_tables[key]
+
+
+@dataclass
+class _KTable:
+    """A printer's K table for one nozzle: the rows that validated, and how many did not."""
+
+    rows: list[KProfile] = field(default_factory=list)
+    skipped: int = 0
 
 
 @dataclass(frozen=True)
@@ -444,8 +471,10 @@ def _k_key(rows: Sequence[m.TypeKValueCreate]) -> list[tuple[Any, ...]]:
     )
 
 
-def _rows(type_id: UUID, rows: list[m.TypeKValueCreate]) -> list[m.TypeKValue]:
-    return [m.TypeKValue(type_id=type_id, **one.model_dump()) for one in rows]
+def _rows(
+    type_id: UUID, rows: list[m.TypeKValueCreate], source: m.KSource = "person"
+) -> list[m.TypeKValue]:
+    return [m.TypeKValue(type_id=type_id, source=source, **one.model_dump()) for one in rows]
 
 
 @asynccontextmanager
@@ -568,8 +597,8 @@ class TypeFiller:
 
     async def _write_k(self, result: TypeFill, imported: _KImport, actor: str) -> None:
         """Write the spools' K values while the type has none (R-6714-c), then the
-        printers' calibrations into the keys it has no row for (R-6714-13), into
-        ``result``."""
+        printers' calibrations into the keys it has no row for, or an older calibration
+        holds (R-6714-13, R-6714-19), into ``result``."""
         written: list[m.TypeKValue] = []
         type_id = result.type_id
         if imported.spools:
@@ -621,6 +650,16 @@ class TypeFiller:
                 if (current[name] != value if refresh else current[name] is None)
             }
             result.skipped = _ranges(current, wanted)
+            if not refresh and _DRYING & wanted.keys():
+                # The type comes first in a spool's drying defaults (R-6714-10): a value
+                # the subtype or material sets stands, and only a refresh offers the
+                # profile's (#6856, R-6714-20).
+                inherited = await asyncio.to_thread(self.types.drying_inherited, row.id)
+                for name in [n for n in wanted if n in inherited]:
+                    del wanted[name]
+                    result.skipped[name] = (
+                        f"its {inherited[name]} sets it; a refresh offers the profile's value"
+                    )
             if refresh:
                 result.filled = wanted
                 result.previous = {name: current[name] for name in wanted}
@@ -636,7 +675,10 @@ class TypeFiller:
         imported = await self._k_import(row.id, reads)
         result.k_reason = imported.reason
         if refresh:
-            result.k_values = _rows(row.id, imported.rows)
+            result.k_values = [
+                *_rows(row.id, imported.spools, "profile"),
+                *_rows(row.id, imported.printers, "printer_calibration"),
+            ]
         else:
             await self._write_k(result, imported, actor)
         return result
@@ -685,7 +727,7 @@ class TypeFiller:
         """The K values a fill would import (`_KImport`), and why any were not read."""
         spools, spool_reason = await self._spool_k(type_id, reads)
         printers, printer_reasons = await self._printer_k(type_id, reads, spools)
-        reasons = [r for r in (spool_reason, *printer_reasons) if r]
+        reasons = list(dict.fromkeys(r for r in (spool_reason, *printer_reasons) if r))
         return _KImport(spools, printers, "; ".join(reasons) or None)
 
     async def _printer_k(
@@ -696,7 +738,9 @@ class TypeFiller:
         table for the preset's nozzle (GET only), and a calibration whose ``filament_id``
         is the preset's ``slicer_filament`` is a row for that printer, extruder and nozzle,
         with the calibration's nozzle type, name, slot and setting. A key the type has a
-        row for, or that ``spools`` fills, is left out; calibrations of one key that differ
+        row for that is not a ``printer_calibration`` row, or that ``spools`` fills, is left
+        out, and so is a calibration its key's ``printer_calibration`` row already holds
+        (R-6714-19); calibrations of one key that differ
         in K or nozzle type are left out with a reason. Nothing while no Bambuddy is
         linked."""
         if reads.client is None:
@@ -708,7 +752,16 @@ class TypeFiller:
         if printers is None:
             printers = reads.printers = await asyncio.to_thread(self.types.linked_printers)
         own = await asyncio.to_thread(self.types.k_values, type_id)
-        taken = {k_value_key(r.model_dump()) for r in [*own, *spools]}
+        # A row a person, the fill or the fetch set stands; a calibration replaces only an
+        # earlier calibration of its key, once it differs (R-6714-19).
+        imported = {
+            k_value_key(r.model_dump()): r for r in own if r.source == "printer_calibration"
+        }
+        taken = {
+            k_value_key(r.model_dump())
+            for r in [*own, *spools]
+            if not (isinstance(r, m.TypeKValue) and r.source == "printer_calibration")
+        }
         rows: list[m.TypeKValueCreate] = []
         reasons: list[str] = []
         for preset in presets:
@@ -724,8 +777,13 @@ class TypeFiller:
                         f"{printer.name} did not give its {nozzle} mm K table: {table.reason}"
                     )
                     continue
+                if table.skipped:
+                    reasons.append(
+                        f"{printer.name} sent {table.skipped} K calibrations at {nozzle} mm"
+                        " in another shape, skipped"
+                    )
                 by_extruder: dict[int, list[tuple[KProfile, Decimal]]] = {}
-                for cal in table:
+                for cal in table.rows:
                     value = _k_number(cal.k_value)
                     if cal.filament_id.strip() == filament and value is not None:
                         by_extruder.setdefault(cal.extruder_id, []).append((cal, value))
@@ -757,6 +815,11 @@ class TypeFiller:
                     except ValidationError:
                         continue
                     taken.add(key)
+                    was = imported.get(key)
+                    if was is not None and k_identity(was.model_dump()) == k_identity(
+                        one.model_dump()
+                    ):
+                        continue
                     rows.append(one)
         return rows, reasons
 

@@ -301,11 +301,13 @@ def _low_stock(grams_left: float | None, values: m.EffectiveValues, default_pct:
 
 
 def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
-    """The spool's drying defaults (#6720, R-6714-10): each of temperature and hours from
-    its type, else from its subtype, else from its material, the subtype and material
-    being the spool's own override, else its type's."""
+    """The spool's drying defaults (#6720, R-6714-10, R-6714-18): each of temperature and
+    hours from its own override, else its type, else its subtype, else its material, the
+    subtype and material being the spool's own override, else its type's. The values are
+    its effective ones (`types.effective`); this names where each came from."""
     row = conn.execute(
-        "SELECT t.drying_temp_c AS t_temp, t.drying_hours AS t_hours,"
+        "SELECT s.drying_temp_c AS p_temp, s.drying_hours AS p_hours,"
+        " t.drying_temp_c AS t_temp, t.drying_hours AS t_hours,"
         " st.drying_temp_c AS s_temp, st.drying_hours AS s_hours,"
         " mt.drying_temp_c AS m_temp, mt.drying_hours AS m_hours"
         " FROM filament_spools s"
@@ -320,7 +322,7 @@ def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
         return m.DryingDefaults()
     fields = (("temp_c", "temp_from", "temp"), ("hours", "hours_from", "hours"))
     for field, origin, column in fields:
-        for level, prefix in (("type", "t"), ("subtype", "s"), ("material", "m")):
+        for level, prefix in (("spool", "p"), ("type", "t"), ("subtype", "s"), ("material", "m")):
             if row[f"{prefix}_{column}"] is not None:
                 found[field], found[origin] = row[f"{prefix}_{column}"], level
                 break

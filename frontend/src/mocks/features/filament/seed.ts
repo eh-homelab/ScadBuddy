@@ -337,7 +337,7 @@ const typePresets = (): S['TypePreset'][] => [
 ]
 
 const typeKValues = (): S['TypeKValue'][] => [
-  { type_id: T.JADE, printer_id: H2C.printer_id, extruder: 0, nozzle_diameter: '0.4', nozzle_type: 'hardened_steel', k_value: '0.020', name: 'Jade White 0.4', cali_idx: 3, setting_id: null },
+  { type_id: T.JADE, printer_id: H2C.printer_id, extruder: 0, nozzle_diameter: '0.4', nozzle_type: 'hardened_steel', k_value: '0.020', name: 'Jade White 0.4', cali_idx: 3, setting_id: null, source: 'person' },
 ]
 
 // -- spools ---------------------------------------------------------------------------
@@ -508,7 +508,7 @@ function events(): S['SpoolEvent'][] {
 /** `migrated` marks a row the #6262 migration made from a spool's old preset: its first type drops it (`presets.drop_migrated`). */
 export type SpoolPreset = Omit<S['TypePreset'], 'type_id'> & { spool_id: string; migrated?: boolean }
 /** A spool's own K value row (`filament_spool_k_values`). */
-export type SpoolKValue = Omit<S['TypeKValue'], 'type_id'> & { spool_id: string }
+export type SpoolKValue = Omit<S['TypeKValue'], 'type_id' | 'source'> & { spool_id: string }
 
 /** The whole seed, fresh: `index.ts`'s `reset` takes a new one. */
 export function seed() {
