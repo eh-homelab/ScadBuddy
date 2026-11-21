@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 import trimesh
 
+from scadbuddy.bambuddy import send
 from scadbuddy.bambuddy import tower_check as tower_check_module
 from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice
 from scadbuddy.bambuddy.print_run import PrintRunRequest, check_tower
@@ -188,7 +189,7 @@ def test_a_second_check_of_the_same_file_and_printer_does_not_lay_it_out_again(
     """#6796: the dialog checks on every setting change. The laid-out file is kept by
     the payload's digest and the printer, so only a new file or printer lays it out."""
     payload = _author_file(tmp_path, ("200", "150"))
-    real = tower_check_module._laid_out_for
+    real = send._laid_out_for  # tower_check calls it by the name it imports
     calls: list[str | None] = []
 
     def counted(given: bytes, target: object) -> bytes:
