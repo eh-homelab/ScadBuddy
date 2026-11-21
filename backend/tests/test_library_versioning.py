@@ -48,6 +48,7 @@ def _library_state(revision: str, nudges: _Nudges | None = None) -> SimpleNamesp
     return SimpleNamespace(
         settings=SimpleNamespace(
             temporal_task_queue_library="library",
+            temporal_task_queue_bambuddy="bambuddy",
             revision=revision,
             spool_overlay_refresh_seconds=0,
         ),
