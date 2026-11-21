@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile 
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { BG_MONITOR_COMMAND, backgroundActivities } from '../src/background/activities.js'
 import { ensureSessionDir } from '../src/harness/stateDirs.js'

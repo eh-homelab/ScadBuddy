@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { ORPHAN_REASON, PendingInputSweep, type RunState } from '../src/gate/sweep.js'
 import { EventLog } from '../src/sessions/eventLog.js'

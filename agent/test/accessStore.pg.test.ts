@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AccessError, AccessStore } from '../src/access/store.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import type { AuditContext } from '../src/audit/log.js'
 import { MemoryAudit } from './support/memoryAudit.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'

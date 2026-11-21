@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { acceptList, accepts, type PickerSession } from '../src/routes/workspacePicker.js'
 import type { SessionManager } from '../src/sessions/manager.js'

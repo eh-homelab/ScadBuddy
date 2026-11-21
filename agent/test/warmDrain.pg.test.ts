@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { userMessage } from '../src/harness/inbox.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'

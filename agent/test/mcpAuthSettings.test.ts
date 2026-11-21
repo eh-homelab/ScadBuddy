@@ -7,7 +7,7 @@ import {
 } from '../src/auth/authenticate.js'
 import { defaultOidcConfig, type OidcConfig } from '../src/auth/oidc.js'
 import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { appFetch, MCP_URL, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 

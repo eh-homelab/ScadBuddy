@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import type { PgPayloadKeys } from '../src/temporal/payloadCodec.js'

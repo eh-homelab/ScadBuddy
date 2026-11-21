@@ -4,7 +4,7 @@ import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../src/auth/authenticate
 import { defaultOidcConfig, OIDC_SETTINGS_KEY, OidcProvider, SettingsOidcConfigRepo } from '../src/auth/oidc.js'
 import { PostgresTokenStore } from '../src/auth/tokens.js'
 import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { appFetch, connect, INGRESS, MCP_URL, testApp } from './helpers/mcp.js'
 import { type FakeIdp, startFakeIdp } from './support/fakeIdp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'

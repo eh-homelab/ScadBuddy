@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hashToken, liveTokenTiers, PostgresTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
-import { connectDatabase, type Database } from '../src/db.js'
+import { connectDatabase, type Database } from './support/database.js'
 import { migrate } from './support/migrations.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 

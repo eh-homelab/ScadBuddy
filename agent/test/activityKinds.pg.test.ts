@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { activityKindsOf, upsertActivityKinds } from '../src/activity/kinds.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // ai_activity_kinds: the agent's activity kinds as data (spec 2026-10-09 §4).

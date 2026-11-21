@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { QUEUED_DROPPED } from '../src/temporal/session/finishActivity.js'

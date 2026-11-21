@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
 import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Principal } from '../src/auth/principal.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { DurableUnavailable } from '../src/gate/durable.js'
 import { CLAIM_LEASE_S, EscalationError, Escalations, type EscalationDurable } from '../src/flows/escalations.js'
 import { durableRequestId } from '../src/gate/ids.js'

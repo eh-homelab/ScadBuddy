@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
-import { APPLICATION_NAME, connectDatabase, type Database } from '../src/db.js'
+import { APPLICATION_NAME, connectDatabase, type Database } from './support/database.js'
 import postgres from 'postgres'
 import {
   LEGACY_VERSIONS,

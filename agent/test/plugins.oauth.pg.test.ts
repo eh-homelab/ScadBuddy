@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AgentApp, createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import { PluginOAuth } from '../src/plugins/oauthStore.js'

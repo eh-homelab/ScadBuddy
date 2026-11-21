@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'

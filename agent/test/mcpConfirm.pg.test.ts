@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
 import { ApprovalService } from '../src/approvals/service.js'
 import { type Principal, tiersUpTo } from '../src/auth/principal.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { defineTool, json, runTool } from '../src/tools/registry.js'

@@ -1,7 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionVerdict, type UserQuestion } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import type { EventLog } from '../src/sessions/eventLog.js'

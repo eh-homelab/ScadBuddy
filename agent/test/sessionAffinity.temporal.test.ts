@@ -13,7 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Sql } from 'postgres'
 import { z } from 'zod'
 import { AuditLog } from '../src/audit/log.js'
-import { connectDatabase, type Database } from '../src/db.js'
+import { connectDatabase, type Database } from './support/database.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { runHarness } from '../src/harness/run.js'

@@ -9,7 +9,7 @@ import {
   MAX_CREDENTIALS,
   TOO_MANY_MESSAGE,
 } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { migrate, MIGRATIONS } from './support/migrations.js'
 import { CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { kekFromBase64, type KekStatus, sealSecret } from '../src/secrets.js'

@@ -1,7 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { attentionCard, type AttentionSpec, parseAttention } from '../src/harness/attention.js'
 import { ANSWER_MAX, ATTENTION_TOOL, QUESTION_TEXT_MAX, QUESTIONS_MAX, type QuestionVerdict } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'

@@ -1,7 +1,7 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ASK_USER_QUESTION } from '../src/harness/questions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'

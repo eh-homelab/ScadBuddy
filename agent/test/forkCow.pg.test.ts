@@ -1,7 +1,7 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { connectDatabase, type Database } from '../src/db.js'
+import { connectDatabase, type Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { HarnessPaths } from '../src/harness/options.js'
 import { ensureStateDirs, sessionWorkDir } from '../src/harness/stateDirs.js'

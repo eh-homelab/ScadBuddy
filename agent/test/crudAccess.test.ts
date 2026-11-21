@@ -5,7 +5,7 @@ import { CrudReadError } from '../src/api/crudRead.js'
 import { CrudPathError, SOURCES_PER_CALL } from '../src/api/crudStores.js'
 import type { AccessRow } from '../src/access/model.js'
 import type { AuditEntry } from '../src/audit/log.js'
-import { type LockClient, TEST_LOCK_CONNECTIONS } from '../src/db.js'
+import { type LockClient, TEST_LOCK_CONNECTIONS } from './support/database.js'
 import { CrudPluginSessions, endOwnSessions, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
 
 // The tool access, the tool listings and the plugin sessions through the API's CRUD routes

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool } from '../src/tools/registry.js'

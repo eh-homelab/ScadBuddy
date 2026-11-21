@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LISTING_CAPS, listedTool, type StoredTool, toStoredTools, ToolListings } from '../src/access/listings.js'
-import { type LockClient, TEST_LOCK_CONNECTIONS } from '../src/db.js'
-import type { Database } from '../src/db.js'
+import { type LockClient, TEST_LOCK_CONNECTIONS } from './support/database.js'
+import type { Database } from './support/database.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // A remote plugin's tools/list (#2171, #778): each entry stored once, as listed, with only

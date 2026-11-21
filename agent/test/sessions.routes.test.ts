@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { JSON_BODY_MAX } from '../src/routes/guard.js'
 import { MESSAGE_MAX } from '../src/sessions/clientProtocol.js'

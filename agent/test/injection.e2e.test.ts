@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { createBackendClient } from '../src/api/backend.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { respond } from '../src/routes/pendingInput.js'

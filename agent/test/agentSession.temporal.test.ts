@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import type { UserImage } from '../src/sessions/images.js'
