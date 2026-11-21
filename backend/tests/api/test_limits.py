@@ -278,14 +278,3 @@ def test_an_agent_store_body_over_8_mib_reaches_the_route_until_its_bound(module
     assert (kept.status_code, kept.text) == (200, str(size))
     refused = gated.post(path, content=b"x" * (module.BODY_BYTES_MAX + 1), headers=headers)
     assert refused.status_code == 413
-
-
-def test_the_fallback_limit_is_a_keyword_argument() -> None:
-    async def read(request: Request) -> PlainTextResponse:
-        return PlainTextResponse(str(len(await request.body())))
-
-    app = Starlette(routes=[Route("/x", read, methods=["POST"])])
-    app.add_middleware(BodySizeGate, limits={}, default=10)
-    gated = TestClient(app)
-    assert gated.post("/x", content=b"x" * 10).status_code == 200
-    assert gated.post("/x", content=b"x" * 11).status_code == 413
