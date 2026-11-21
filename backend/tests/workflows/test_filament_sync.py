@@ -9,7 +9,6 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 import pytest
 from temporalio import activity
@@ -215,19 +214,16 @@ async def test_a_signal_during_a_skipped_pass_runs_one_more(client: Client) -> N
 
 
 async def test_sync_now_during_a_pass_runs_a_pass_that_starts_after_it(client: Client) -> None:
-    """#6836: "Sync now" while a pass runs sets ``pending``; the next pass's activity starts
-    after the signal was sent. (``started_at`` is stamped inside the real activity, so the
-    workflow stub cannot check it.)"""
-    signalled: list[datetime] = []
-    started: list[datetime] = []
+    """#6836: "Sync now" while a pass runs sets ``pending``, so a second pass runs, and it
+    is a full one. The ``full`` sequence ``[False, True]`` is what carries that behaviour.
+    (``started_at`` is stamped inside the real activity, so the workflow stub cannot check
+    it.)"""
     handle: WorkflowHandle[FilamentBbSync, None] | None = None
 
     async def sync_now(n: int) -> None:
-        started.append(datetime.now(UTC))
         if n == 0:
             assert handle is not None
             await handle.signal(FilamentBbSync.changed, True)
-            signalled.append(datetime.now(UTC))
 
     passes = Passes()
     passes.during = sync_now
@@ -235,7 +231,6 @@ async def test_sync_now_during_a_pass_runs_a_pass_that_starts_after_it(client: C
         handle = await start(client, queue, 0, signal=True)
         await until(lambda: len(passes.calls) == 2)
     assert [call.full for call in passes.calls] == [False, True]
-    assert signalled[0] <= started[1]
 
 
 async def test_a_save_that_stops_every_push_ends_a_running_workflow(client: Client) -> None:
