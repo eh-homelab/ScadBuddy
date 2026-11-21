@@ -9,6 +9,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.render.pg_store import (
     LEGACY_VERSIONS,
@@ -818,3 +819,125 @@ def test_the_old_spool_tables_are_dropped(pg_conninfo: str) -> None:
             )
         }
     assert present == {"filament_spools"}
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            {"spools": "bb_to_sb", "tags": "off"},
+            {"spools": "bb_to_sb", "tags": "bb_to_sb"},
+        ),
+        ({"tags": "sb_to_bb"}, {"tags": "two_way"}),
+        ({"spools": "bb_to_sb", "tags": "two_way"}, {"spools": "bb_to_sb", "tags": "two_way"}),
+        (
+            {"spools": "off"},
+            {"spools": "off", "weights": "off", "tags": "off", "presets": "off"},
+        ),
+        (
+            {"spools": "off", "tags": "off", "weights": "bb_to_sb"},
+            {"spools": "off", "weights": "off", "tags": "off", "presets": "off"},
+        ),
+        (
+            {"spools": "off", "tags": "sb_to_bb"},
+            {"spools": "off", "weights": "off", "tags": "sb_to_bb", "presets": "off"},
+        ),
+        (None, None),
+    ],
+)
+def test_the_tags_migration_rewrites_the_old_values(
+    pg_conninfo: str, before: dict[str, str] | None, after: dict[str, str] | None
+) -> None:
+    """#6265 Decision 4: #6264's ``off`` (the pull binds BB's tags, nothing is pushed) is
+    now ``bb_to_sb``, its ``sb_to_bb`` (pull and push) ``two_way``; anything else stays.
+    A row whose ``spools`` is ``off`` skipped the whole pull before #6265, so it pulls
+    nothing after: ``weights``, ``presets`` and ``tags`` are ``off``, but a ``tags``
+    ``sb_to_bb`` (the push) stays. A second run changes nothing."""
+    at = _index("filament_sync_tags_values")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:at])
+        if before is not None:
+            conn.execute(
+                "INSERT INTO settings (name, value) VALUES ('filament_sync', %s)",
+                (Jsonb(before),),
+            )
+        assert MIGRATIONS[at].id in migrate(conn)
+        row = conn.execute("SELECT value FROM settings WHERE name = 'filament_sync'").fetchone()
+        assert (None if row is None else row[0]) == after
+        conn.execute(MIGRATIONS[at].sql.encode("utf-8"))
+        again = conn.execute("SELECT value FROM settings WHERE name = 'filament_sync'").fetchone()
+    assert (None if again is None else again[0]) == after
+
+
+def _table_columns(conn: psycopg.Connection[tuple[object, ...]], table: str) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = %s",
+            (table,),
+        )
+    }
+
+
+@pytest.mark.requires_postgres
+def test_the_bb_sync_migration_adds_the_sync_columns_and_tables(pg_conninfo: str) -> None:
+    """#6265 Task 3: the links' hashes and seen values, the BB ids of suppliers, locations
+    and spool types, the create intents and the push errors."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn)
+        assert {
+            "pushed_fields",
+            "bb_seen",
+            "bb_seen_at",
+            "bb_k_profiles",
+            "bb_seeded",
+            "pushed_hash",
+        } <= (_table_columns(conn, "filament_bb_links"))
+        for table, bb_id in (
+            ("filament_suppliers", "bb_supplier_id"),
+            ("filament_locations", "bb_location_id"),
+        ):
+            assert {bb_id, "bb_pushed", "bb_seen", "bb_seen_at"} <= _table_columns(conn, table)
+        assert {"bb_pushed", "bb_seen", "bb_seen_at"} <= _table_columns(
+            conn, "filament_insert_types"
+        )
+        assert {"bb_filament_id", "bb_pushed", "bb_seen", "bb_seen_at"} <= _table_columns(
+            conn, "filament_spool_types"
+        )
+        assert _table_columns(conn, "filament_bb_creates") == {
+            "kind",
+            "sb_id",
+            "started_at",
+            "sent",
+        }
+        assert _table_columns(conn, "filament_bb_push_errors") == {
+            "kind",
+            "sb_id",
+            "error",
+            "attempts",
+            "at",
+            "last_pass_id",
+        }
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO filament_bb_creates (kind, sb_id) VALUES ('tray', gen_random_uuid())"
+            )
+
+
+@pytest.mark.requires_postgres
+def test_one_sync_state_row(pg_conninfo: str) -> None:
+    """#6265 Decision 12, F6: the state row exists from the start, with no instance yet,
+    and there is never a second one."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn)
+        rows = conn.execute(
+            "SELECT id, instance, last_pass_at, last_ok_at, last_error, counts"
+            " FROM filament_bb_sync_state"
+        ).fetchall()
+        assert rows == [(True, None, None, None, None, {})]
+        with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+            conn.execute("INSERT INTO filament_bb_sync_state (id) VALUES (false)")
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            conn.execute("INSERT INTO filament_bb_sync_state DEFAULT VALUES")

@@ -155,7 +155,7 @@ describe('the Types tab', () => {
     await types()
     await user.click(screen.getByRole('button', { name: 'Fill from slicer profiles' }))
     const report = await screen.findByRole('region', { name: 'Fill from slicer profiles' })
-    expect(within(report).getByText(/Filled 15 fields on 3 types/)).toBeInTheDocument()
+    expect(within(report).getByText(/Filled 20 fields on 3 types/)).toBeInTheDocument()
     expect(within(report).getByRole('link', { name: 'BL-PLA-BASIC-JADE-WHITE' })).toBeInTheDocument()
     expect(within(report).getAllByText(/the type has no slicer preset/).length).toBeGreaterThan(0)
     const jade = (await listTypes()).find((type) => type.id === T.JADE)!

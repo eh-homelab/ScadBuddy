@@ -31,11 +31,11 @@ const BASE = '/api/v1/filament'
 
 /** #6714 — the slicer profiles the mock fills a type from, by preset id. */
 const PROFILES: Record<string, { name: string; values: Partial<Record<FillField, number | string>>; cost_hint: string }> = {
-  GFA00: { name: 'Bambu PLA Basic @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 190, nozzle_temp_max: 230, bed_temp_min: 35, bed_temp_max: 65, density_g_cm3: '1.26', diameter_mm: '1.75' }, cost_hint: '24.99' },
-  GFG02: { name: 'Bambu PETG HF @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 230, nozzle_temp_max: 260, bed_temp_min: 70, bed_temp_max: 80, density_g_cm3: '1.25', diameter_mm: '1.75' }, cost_hint: '19.99' },
+  GFA00: { name: 'Bambu PLA Basic @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 190, nozzle_temp_max: 230, bed_temp_min: 35, bed_temp_max: 65, density_g_cm3: '1.26', diameter_mm: '1.75', drying_temp_c: 55, drying_hours: '8' }, cost_hint: '24.99' },
+  GFG02: { name: 'Bambu PETG HF @BBL H2C 0.4 nozzle', values: { nozzle_temp_min: 230, nozzle_temp_max: 260, bed_temp_min: 70, bed_temp_max: 80, density_g_cm3: '1.25', diameter_mm: '1.75', drying_temp_c: 65, drying_hours: '8' }, cost_hint: '19.99' },
 }
 
-const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm', 'drying_temp_c', 'drying_hours'] as const
 type FillField = (typeof FILL_FIELDS)[number]
 
 /** The type's H2C 0.4 mm preset, else any 0.4 mm one, else the first, and its profile (R-6714-1). */
@@ -99,8 +99,9 @@ function kKey(rows: readonly S['TypeKValueCreate'][]): string {
   return JSON.stringify(rows.map(key).sort())
 }
 
+/** The fill's import from Bambuddy's spools says `profile` (R-6714-19). */
 const asTypeKValues = (typeId: string, rows: S['TypeKValueCreate'][]): S['TypeKValue'][] =>
-  rows.map((one) => ({ type_id: typeId, nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value) }))
+  rows.map((one) => ({ type_id: typeId, nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value), source: 'profile' }))
 
 /** Writes ``rows`` as the type's K values into ``result`` (`TypeFiller._write_k`). */
 function writeKValues(typeId: string, rows: S['TypeKValueCreate'][], result: S['TypeFill']): S['TypeFill'] {
@@ -144,8 +145,8 @@ const problem = (status: keyof typeof TITLES, detail: string, extensions: object
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
-  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'tdfp_id', 'note'],
-  spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
+  typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'tdfp_id', 'note'],
+  spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left'],
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
@@ -182,6 +183,8 @@ const OVERRIDABLE = [
   'nozzle_temp_max',
   'bed_temp_min',
   'bed_temp_max',
+  'drying_temp_c',
+  'drying_hours',
   'label_weight_g',
   'insert_type_id',
   'low_stock_pct',
@@ -264,7 +267,7 @@ function effectiveKValues(spoolId: string): S['EffectiveKValue'][] {
   const inherited = state.typeKValues.filter((one) => one.type_id === row?.type_id && !owned.has(key(one)))
   return [
     ...own.map(({ spool_id: _, ...rest }) => ({ ...rest, overridden: true })),
-    ...inherited.map(({ type_id: _, ...rest }) => ({ ...rest, overridden: false })),
+    ...inherited.map(({ type_id: _, source: _source, ...rest }) => ({ ...rest, overridden: false })),
   ]
 }
 
@@ -308,7 +311,27 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
     invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
     type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],
+    drying_defaults: dryingDefaults(row),
   }
+}
+
+/** `spools.py` `_drying_defaults` (#6720, R-6714-18): each field from the spool, else the type, else the subtype, else the material. */
+function dryingDefaults(row: SpoolRow): S['DryingDefaults'] {
+  const type = state.types.find((one) => one.id === row.type_id)
+  const subtype = state.catalogs.subtypes.find((one) => one.id === (row.subtype_id ?? type?.subtype_id))
+  const material = state.catalogs.materials.find((one) => one.id === (row.material_id ?? type?.material_id))
+  const levels = [
+    ['spool', row],
+    ['type', type],
+    ['subtype', subtype],
+    ['material', material],
+  ] as const
+  const out: S['DryingDefaults'] = { temp_c: null, hours: null, temp_from: null, hours_from: null }
+  for (const [level, source] of levels) {
+    if (out.temp_c == null && source?.drying_temp_c != null) Object.assign(out, { temp_c: source.drying_temp_c, temp_from: level })
+    if (out.hours == null && source?.drying_hours != null) Object.assign(out, { hours: source.drying_hours, hours_from: level })
+  }
+  return out
 }
 
 function addEvent(spoolId: string, kind: S['SpoolEvent']['kind'], values: Partial<S['SpoolEvent']> = {}): S['SpoolEvent'] {
@@ -786,6 +809,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     nozzle_temp_max: null,
     bed_temp_min: null,
     bed_temp_max: null,
+    drying_temp_c: null,
     insert_type_id: null,
     low_stock_pct: null,
     cost_per_kg: null,
@@ -795,6 +819,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     tdfp_id: null,
     diameter_mm: '1.75',
     ...body,
+    drying_hours: body.drying_hours ?? null,
     id: newId(),
     filament_id: null,
     archived_at: null,
@@ -1679,15 +1704,13 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.kValue)
     if (extra) return extra
-    const rows = (sent as S['TypeKValueCreate'][]).map((one) => ({
-      nozzle_type: null,
-      name: null,
-      cali_idx: null,
-      setting_id: null,
-      ...one,
-      k_value: String(one.k_value),
-      type_id: typeId,
-    }))
+    // A person's save: a row left as it was keeps its source, any other says `person` (R-6714-19).
+    const was = state.typeKValues.filter((one) => one.type_id === typeId)
+    const rows: S['TypeKValue'][] = (sent as S['TypeKValueCreate'][]).map((one) => {
+      const row = { nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value), type_id: typeId }
+      const same = was.find((old) => kKey([old]) === kKey([row]))
+      return { ...row, source: same?.source ?? 'person' }
+    })
     if (duplicated(rows, (row) => `${row.printer_id}|${row.extruder}|${row.nozzle_diameter}`)) return problem(422, REFUSED.rowsDuplicate)
     if (!state.types.some((one) => one.id === typeId)) return problem(404, `no spool type ${typeId}`)
     state.typeKValues = [...state.typeKValues.filter((one) => one.type_id !== typeId), ...rows]
@@ -1901,8 +1924,13 @@ export const handlers = [
         { status: 201 },
       )
     }
-    state.spools[at] = { ...row, last_dried_at: when, last_dried_temp_c: body.temp_c ?? null, last_dried_hours: body.hours ?? null }
-    return HttpResponse.json(addEvent(row.id, 'dried', { at: when, data: { temp_c: body.temp_c ?? null, hours: body.hours ?? null } }), { status: 201 })
+    // A field left out takes the spool's drying default; `null` records none (#6720).
+    const defaults = dryingDefaults(row)
+    const sent = raw as Record<string, unknown>
+    const temp = 'temp_c' in sent ? (body.temp_c ?? null) : defaults.temp_c
+    const hours = 'hours' in sent ? (body.hours ?? null) : defaults.hours
+    state.spools[at] = { ...row, last_dried_at: when, last_dried_temp_c: temp ?? null, last_dried_hours: hours ?? null }
+    return HttpResponse.json(addEvent(row.id, 'dried', { at: when, data: { temp_c: temp ?? null, hours: hours ?? null } }), { status: 201 })
   }),
   http.post(`${BASE}/spools/:id/move`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)
@@ -2054,6 +2082,7 @@ export const handlers = [
       reachable: true,
       archived_at: null,
       created_at: now(),
+      last_notification: null,
     }
     state.sensors.push(made)
     return HttpResponse.json(made, { status: 201 })
@@ -2122,6 +2151,11 @@ export const handlers = [
       rfid_duplicate_bb_ids: [],
       archived_deferred: 0,
       archived_deferred_bb_ids: [],
+      claimed: 0,
+      suppliers: 0,
+      locations: 0,
+      moved: 0,
+      conflicts: 0,
     } satisfies S['PullReport']),
   ),
 ]

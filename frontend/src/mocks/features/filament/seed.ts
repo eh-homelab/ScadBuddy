@@ -262,6 +262,8 @@ type TypeLook = {
   insert?: string | null
   lead_time_days?: number | null
   safety_margin_days?: number | null
+  drying_temp_c?: number | null
+  drying_hours?: string | null
 }
 
 function spoolType(look: TypeLook): S['SpoolType'] {
@@ -282,6 +284,8 @@ function spoolType(look: TypeLook): S['SpoolType'] {
     nozzle_temp_max: null,
     bed_temp_min: null,
     bed_temp_max: null,
+    drying_temp_c: look.drying_temp_c ?? null,
+    drying_hours: look.drying_hours ?? null,
     label_weight_g: look.label_weight_g ?? 1000,
     insert_type_id: look.insert ?? IT.BAMBU_REUSABLE,
     low_stock_pct: null,
@@ -314,7 +318,7 @@ function types(): S['SpoolType'][] {
   return [
     spoolType({ n: 1, code: 'BL-PLA-BASIC-JADE-WHITE', brand: B.BAMBU, material: M.PLA, subtype: ST.BASIC, colour_name: 'Jade White', rgba: '#FFFFFFFF', cost_per_kg: '15.91' }),
     // #6269 — its own lead time and safety margin: at #2's burn on 2026-11-18 it runs out on 2027-03-15, so its reorder day (120 days before) is past and it says "Reorder now".
-    spoolType({ n: 2, code: 'BL-PETG-HF-TRANSLUCENT-ORANGE', brand: B.BAMBU, material: M.PETG, subtype: ST.HF, effect: E.TRANSLUCENT, colour_name: 'Translucent Orange', rgba: '#FF6A1380', cost_per_kg: '19.99', lead_time_days: 30, safety_margin_days: 90 }),
+    spoolType({ n: 2, code: 'BL-PETG-HF-TRANSLUCENT-ORANGE', brand: B.BAMBU, material: M.PETG, subtype: ST.HF, effect: E.TRANSLUCENT, colour_name: 'Translucent Orange', rgba: '#FF6A1380', cost_per_kg: '19.99', lead_time_days: 30, safety_margin_days: 90, drying_temp_c: 70 }),
     spoolType({ n: 3, code: 'BL-PLA-BASIC-HOT-PINK', brand: B.BAMBU, material: M.PLA, subtype: ST.BASIC, colour_name: 'Hot Pink', rgba: '#F5547CFF', cost_per_kg: '15.91' }),
     spoolType({ n: 4, code: 'BL-PLA-BASIC-BLACK', brand: B.BAMBU, material: M.PLA, subtype: ST.BASIC, colour_name: 'Black', rgba: '#000000FF', cost_per_kg: '15.91' }),
     spoolType({ n: 5, code: 'PM-PETG-CLEAR', brand: B.POLYMAKER, material: M.PETG, effect: E.CLEAR, colour_name: 'Clear', rgba: '#FFFFFF10', cost_per_kg: '21.99', insert: IT.CARDBOARD }),
@@ -333,7 +337,7 @@ const typePresets = (): S['TypePreset'][] => [
 ]
 
 const typeKValues = (): S['TypeKValue'][] => [
-  { type_id: T.JADE, printer_id: H2C.printer_id, extruder: 0, nozzle_diameter: '0.4', nozzle_type: 'hardened_steel', k_value: '0.020', name: 'Jade White 0.4', cali_idx: 3, setting_id: null },
+  { type_id: T.JADE, printer_id: H2C.printer_id, extruder: 0, nozzle_diameter: '0.4', nozzle_type: 'hardened_steel', k_value: '0.020', name: 'Jade White 0.4', cali_idx: 3, setting_id: null, source: 'person' },
 ]
 
 // -- spools ---------------------------------------------------------------------------
@@ -504,7 +508,7 @@ function events(): S['SpoolEvent'][] {
 /** `migrated` marks a row the #6262 migration made from a spool's old preset: its first type drops it (`presets.drop_migrated`). */
 export type SpoolPreset = Omit<S['TypePreset'], 'type_id'> & { spool_id: string; migrated?: boolean }
 /** A spool's own K value row (`filament_spool_k_values`). */
-export type SpoolKValue = Omit<S['TypeKValue'], 'type_id'> & { spool_id: string }
+export type SpoolKValue = Omit<S['TypeKValue'], 'type_id' | 'source'> & { spool_id: string }
 
 /** The whole seed, fresh: `index.ts`'s `reset` takes a new one. */
 export function seed() {
@@ -553,11 +557,42 @@ function sensors(): S['Sensor'][] {
     reachable: true,
     archived_at: null,
     created_at: AT,
+    last_notification: null,
+    ...values,
+  })
+  // #6646: the shelf's alert went out through Bambuddy; the dry box's end did not (the key lacks the scope).
+  const notified = (values: Partial<S['SensorNotification']>): S['SensorNotification'] => ({
+    kind: 'started',
+    value: 0,
+    read_at: '2026-11-18T09:00:00Z',
+    channel: 'bambuddy',
+    state: 'sent',
+    channels: 2,
+    error: null,
+    queued_at: '2026-11-18T09:00:00Z',
+    sent_at: '2026-11-18T09:05:00Z',
     ...values,
   })
   return [
-    sensor(1, L.SHELF_A, { name: 'Shelf A humidity', entity_id: 'sensor.shelf_a_humidity', alert_above: 55, last_value: 62, last_at: '2026-11-18T09:45:00Z', alerting: true }),
-    sensor(2, L.DRY_BOX, { name: 'Dry box humidity', entity_id: 'sensor.dry_box_humidity', alert_above: 20, last_value: 11, last_at: '2026-11-18T09:45:00Z' }),
+    sensor(1, L.SHELF_A, {
+      name: 'Shelf A humidity',
+      entity_id: 'sensor.shelf_a_humidity',
+      alert_above: 55,
+      notify: true,
+      last_value: 62,
+      last_at: '2026-11-18T09:45:00Z',
+      alerting: true,
+      last_notification: notified({ value: 57 }),
+    }),
+    sensor(2, L.DRY_BOX, {
+      name: 'Dry box humidity',
+      entity_id: 'sensor.dry_box_humidity',
+      alert_above: 20,
+      notify: true,
+      last_value: 11,
+      last_at: '2026-11-18T09:45:00Z',
+      last_notification: notified({ kind: 'stopped', value: 18, state: 'failed', channels: null, error: 'scope' }),
+    }),
     sensor(3, L.DRY_BOX, { name: 'Dry box temperature', kind: 'temperature', entity_id: 'sensor.dry_box_temperature', unit: '°C', last_value: 38.5, last_at: '2026-11-18T09:45:00Z', reachable: false }),
     sensor(4, L.AMS_A, { name: 'AMS-A humidity', source: 'ams', printer_id: H2C.printer_id, ams_id: 0, last_value: 18, last_at: '2026-11-18T09:40:00Z' }),
   ]

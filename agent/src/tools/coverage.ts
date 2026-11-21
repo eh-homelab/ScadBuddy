@@ -21,6 +21,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },
   {
+    operation: 'GET /api/v1/filament/sync/reset-links',
+    reason:
+      "The dry run of a reset of the Bambuddy links (#6773), for Settings' confirm dialog. The assistant reads the links' instance in filament_sync_status, and filament_sync_reset_links with `expect_kept: true` keeps the links when the configured Bambuddy is proven the same one (409 `proof_changed` otherwise, #6845), so it needs no dry run.",
+  },
+  {
     operation: 'GET /api/v1/filament/spools/{spool_id}/k-values',
     reason: "A spool's effective pressure-advance values (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },

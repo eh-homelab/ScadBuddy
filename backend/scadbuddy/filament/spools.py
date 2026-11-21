@@ -78,6 +78,20 @@ class SpoolBambuddyLinkedError(ValueError):
         )
 
 
+class SpoolBambuddyCreatingError(SpoolBambuddyLinkedError):
+    """The sync's create of the spool in Bambuddy is open (#6265 review M9): its intent
+    exists, with or without an error row. A refusal, a timeout and a lost answer each
+    leave an error row, so an error row does not prove that Bambuddy made no row; a row
+    it made would come back from the pull as a new spool."""
+
+    def __init__(self) -> None:
+        ValueError.__init__(
+            self,
+            "the spool is being created in Bambuddy, which may already hold it, and the"
+            " next pull would bring it back; archive it instead",
+        )
+
+
 class SpoolTypelessError(ValueError):
     """A spool would name neither a type nor a material."""
 
@@ -286,6 +300,35 @@ def _low_stock(grams_left: float | None, values: m.EffectiveValues, default_pct:
     return grams_left / label * 100 < pct
 
 
+def _drying_defaults(conn: Conn, spool_id: UUID) -> m.DryingDefaults:
+    """The spool's drying defaults (#6720, R-6714-10, R-6714-18): each of temperature and
+    hours from its own override, else its type, else its subtype, else its material, the
+    subtype and material being the spool's own override, else its type's. The values are
+    its effective ones (`types.effective`); this names where each came from."""
+    row = conn.execute(
+        "SELECT s.drying_temp_c AS p_temp, s.drying_hours AS p_hours,"
+        " t.drying_temp_c AS t_temp, t.drying_hours AS t_hours,"
+        " st.drying_temp_c AS s_temp, st.drying_hours AS s_hours,"
+        " mt.drying_temp_c AS m_temp, mt.drying_hours AS m_hours"
+        " FROM filament_spools s"
+        " LEFT JOIN filament_spool_types t ON t.id = s.type_id"
+        " LEFT JOIN filament_subtypes st ON st.id = COALESCE(s.subtype_id, t.subtype_id)"
+        " LEFT JOIN filament_materials mt ON mt.id = COALESCE(s.material_id, t.material_id)"
+        " WHERE s.id = %s",
+        (spool_id,),
+    ).fetchone()
+    found: dict[str, Any] = {}
+    if row is None:
+        return m.DryingDefaults()
+    fields = (("temp_c", "temp_from", "temp"), ("hours", "hours_from", "hours"))
+    for field, origin, column in fields:
+        for level, prefix in (("spool", "p"), ("type", "t"), ("subtype", "s"), ("material", "m")):
+            if row[f"{prefix}_{column}"] is not None:
+                found[field], found[origin] = row[f"{prefix}_{column}"], level
+                break
+    return m.DryingDefaults.model_validate(found)
+
+
 class FilamentSpoolStore:
     """The spool and tag tables over a pool whose connections autocommit and return dict
     rows (the settings store's). Synchronous: callers run it in a thread."""
@@ -399,6 +442,7 @@ class FilamentSpoolStore:
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
+                    "drying_defaults": _drying_defaults(conn, spool_id),
                     "invoice": None
                     if line is None
                     else m.SpoolInvoiceRef.model_validate(
@@ -622,14 +666,17 @@ class FilamentSpoolStore:
         actor: str,
         ref_kind: str | None = None,
         ref_id: UUID | None = None,
+        at: datetime | None = None,
         invoice_line_id: UUID | None = None,
     ) -> bool:
         """`update` on ``conn``, in the caller's transaction (`filament/csv_import.py`);
         false for no such spool. A row it names that does not exist is the driver's
         `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``edited`` event
-        (an invoice line's, #6266); a retry of one pair books nothing twice. An
-        ``invoice_line_id`` (an invoice confirm's, #6269 Decision 12) that differs from
-        the spool's is set in the same UPDATE and is one more change of that event."""
+        (an invoice line's, #6266); a retry of one pair books nothing twice. ``at`` is when
+        an archive or restore happened (the pull's: Bambuddy's change time, #6265 review
+        M3); with none it is booked now. An ``invoice_line_id`` (an invoice confirm's,
+        #6269 Decision 12) that differs from the spool's is set in the same UPDATE and is
+        one more change of that event."""
         sent = [n for n in _WRITABLE if n in patch.model_fields_set]
         if patch.archived:
             # The tag before the spool, as every writer of bindings takes them.
@@ -680,7 +727,7 @@ class FilamentSpoolStore:
                 data={"changes": changes},
             )
         if patch.archived is not None:
-            self._archive(conn, current, patch.archived, actor)
+            self._archive(conn, current, patch.archived, actor, at)
         return True
 
     def presets(self, spool_id: UUID) -> _Presets | None:
@@ -780,10 +827,14 @@ class FilamentSpoolStore:
         return self.update(spool_id, m.SpoolPatch(archived=archived), actor=actor)
 
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
-        """Remove a spool that never printed, with its events and tag bindings; ``False``
-        for no such spool. `SpoolBambuddyLinkedError` when a Bambuddy link names it (the
-        next pull would make it again). `SpoolInUseError` when its ledger holds an event
-        of a kind in ``refusing`` (a ``print_started`` or ``print_ended`` one; the native
+        """Remove a spool that never printed, with its events, tag bindings and Bambuddy
+        sync error row; ``False`` for no such spool. `SpoolBambuddyLinkedError`
+        when a Bambuddy link names it (the next pull would make it again), and
+        `SpoolBambuddyCreatingError` while it has a create intent, with or without an
+        error row: a timeout or a lost answer also leaves an error row, and the Bambuddy
+        row such a create made would come back the same way. `SpoolInUseError`
+        when its ledger holds an event of a kind in ``refusing`` (a ``print_started`` or
+        ``print_ended`` one; the native
         API's delete refuses ``print_ended`` only, `spools/native.py`)."""
         with self._pool.connection() as conn, conn.transaction():
             found = conn.execute(
@@ -802,8 +853,19 @@ class FilamentSpoolStore:
                 "SELECT 1 FROM filament_bb_links WHERE spool_id = %s", (spool_id,)
             ).fetchone():
                 raise SpoolBambuddyLinkedError()
+            if conn.execute(
+                "SELECT 1 FROM filament_bb_creates WHERE kind = 'spool' AND sb_id = %s",
+                (spool_id,),
+            ).fetchone():
+                raise SpoolBambuddyCreatingError()
             for table in ("filament_spool_events", "filament_tag_bindings"):
                 conn.execute(f"DELETE FROM {table} WHERE spool_id = %s", (spool_id,))
+            # The Bambuddy sync's error row names the spool (#6265 R-T3-5); it has no
+            # intent here (review M9).
+            conn.execute(
+                "DELETE FROM filament_bb_push_errors WHERE kind = 'spool' AND sb_id = %s",
+                (spool_id,),
+            )
             conn.execute("DELETE FROM filament_spools WHERE id = %s", (spool_id,))
         return True
 
@@ -1031,13 +1093,10 @@ class FilamentSpoolStore:
     def add_event(
         self, spool_id: UUID, body: m.SpoolEventAdd, *, actor: str
     ) -> m.SpoolEvent | None:
-        """A person's weighing or drying; ``None`` for no such spool."""
+        """A person's weighing or drying; ``None`` for no such spool. A drying's
+        ``temp_c`` or ``hours`` left out (not sent) is the spool's drying default
+        (`_drying_defaults`, #6720)."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
-        if body.kind == "dried":
-            data |= {
-                "temp_c": body.temp_c,
-                "hours": None if body.hours is None else float(body.hours),
-            }
         with self._pool.connection() as conn, conn.transaction():
             if (
                 conn.execute(
@@ -1046,6 +1105,16 @@ class FilamentSpoolStore:
                 is None
             ):
                 return None
+            if body.kind == "dried":
+                sent = body.model_fields_set
+                defaults = (
+                    m.DryingDefaults()
+                    if {"temp_c", "hours"} <= sent
+                    else _drying_defaults(conn, spool_id)
+                )
+                temp = body.temp_c if "temp_c" in sent else defaults.temp_c
+                hours = body.hours if "hours" in sent else defaults.hours
+                data |= {"temp_c": temp, "hours": None if hours is None else float(hours)}
             return ledger.record(
                 conn,
                 spool_id,
@@ -1106,7 +1175,9 @@ class FilamentSpoolStore:
         _check_temps(spool.effective)
 
     @staticmethod
-    def _archive(conn: Conn, current: Row, archived: bool, actor: str) -> None:
+    def _archive(
+        conn: Conn, current: Row, archived: bool, actor: str, at: datetime | None = None
+    ) -> None:
         if (current["archived_at"] is not None) == archived:
             return
         if archived:
@@ -1121,6 +1192,7 @@ class FilamentSpoolStore:
                     current["id"],
                     "tag_unbound",
                     actor=actor,
+                    at=at,
                     data={"tag_id": closed["tag_id"], "reason": "archived"},
                 )
                 enqueue_tag(conn, closed["tag_id"])
@@ -1129,7 +1201,16 @@ class FilamentSpoolStore:
             " updated_at = now() WHERE id = %s",
             (archived, current["id"]),
         )
-        ledger.record(conn, current["id"], "archived" if archived else "restored", actor=actor)
+        if archived:
+            # #6265 R-T3-5: an archived spool's sync error leaves the status. Its create
+            # intent stays: a restore adopts the row a lost create made (Decision 10).
+            conn.execute(
+                "DELETE FROM filament_bb_push_errors WHERE kind = 'spool' AND sb_id = %s",
+                (current["id"],),
+            )
+        ledger.record(
+            conn, current["id"], "archived" if archived else "restored", actor=actor, at=at
+        )
 
     @staticmethod
     def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:

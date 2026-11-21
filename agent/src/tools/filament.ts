@@ -274,7 +274,8 @@ export const filamentTools: Tool[] = [
       '`lead_time_days` and `safety_margin_days` (days, `null` clears) set the type\'s own reorder timing. ' +
       '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
       "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
-      "fetches its slicer presets by. 409 when an unarchived type has the " +
+      "fetches its slicer presets by. `drying_temp_c` (whole °C) and `drying_hours` (a decimal) are the type's " +
+      "drying values, the default of a drying of its spools (filament_spool_add_event). 409 when an unarchived type has the " +
       'code; 422 when a minimum temperature is above its maximum. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
@@ -288,6 +289,19 @@ export const filamentTools: Tool[] = [
             .nullable()
             .optional()
             .describe("The type's filament id on 3dfilamentprofiles.com: a positive integer below 2^31, null clears it"),
+          drying_temp_c: z
+            .number()
+            .int()
+            .min(0)
+            .max(1000)
+            .nullable()
+            .optional()
+            .describe('The drying temperature in °C a drying of its spools defaults to; null clears it'),
+          drying_hours: z
+            .string()
+            .nullable()
+            .optional()
+            .describe('The drying time in hours a drying of its spools defaults to, a decimal such as `8`; null clears it'),
         })
         .catchall(z.unknown())
         .default({})
@@ -420,7 +434,7 @@ export const filamentTools: Tool[] = [
       "ScadBuddy's profile-fetch worker exports one Bambu Studio preset per printer model ScadBuddy's printers " +
       'have and per nozzle in the `profile_fetch_nozzles` setting; ScadBuddy imports them into Bambuddy\'s ' +
       "local presets and makes them the type's presets for those keys (its other presets stay), with K values " +
-      'where a printer has an exact match. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
+      'where a printer has an exact match, never over a K value a person, the fill or a printer calibration set. Answers at once with the run (`run.id`, `run.status` `running`) and ' +
       '`joined`: true when a fetch of the type was already running, which it joins instead of starting another. ' +
       'Follow it with filament_type_profile_fetch. 422 `no_tdfp_id` when the type has no `tdfp_id` ' +
       '(set it with filament_type_upsert), 422 `no_printer_models` when no printer has a model, 503 when the ' +
@@ -506,18 +520,26 @@ export const filamentTools: Tool[] = [
       "Fill a spool type's empty print values from its slicer filament profile (#6714): with `type_id` one type, " +
       'without it every unarchived type. The profile is the type preset for the H2C 0.4 mm nozzle, else any 0.4 mm ' +
       'one, else the first: a numeric id is a Bambuddy local preset, any other a Bambu Studio preset. It fills only ' +
-      'empty fields (nozzle and bed temperature ranges from the H2C plates, density; the diameter is never empty), ' +
-      'never the cost (`cost_hint` is only a hint), and a type with no K values takes those of its linked Bambuddy ' +
-      "spools. Each result names the fields `filled`, the `source` preset, and a `reason` when the profile could not " +
-      'be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
+      'empty fields (nozzle and bed temperature ranges from the H2C plates, density, drying temperature and hours ' +
+      "from the AMS HT's idle drying values, above an AMS 2 Pro's 65 °C for some; a drying value the type's subtype or " +
+      "material already sets is left empty, and only a refresh offers it; the diameter is never empty), never the cost (`cost_hint` is only a " +
+      'hint). A type with no K values takes those of its linked Bambuddy spools; then each Bambuddy-linked printer of a ' +
+      "preset's model gives its K calibrations for the preset's nozzle, and one whose `filament_id` is the preset's " +
+      '`slicer_filament` fills that printer, extruder and nozzle when the type has no K value there, or replaces an ' +
+      'earlier printer calibration there that differs (a K value a person, the fill or the 3DFP fetch set, its `source`, ' +
+      'is never overwritten; `k_reason` says what was not imported). Each result names the fields `filled`, the ' +
+      '`source` preset, and a `reason` when the profile could not be read. `refresh: true` answers the profile values that differ from the type (`filled`, with `previous`) ' +
       'and writes nothing. With `type_id`, `apply` writes the fields a refresh showed over the type (only after the ' +
       'user confirms them), and `k_values: true` the K values it showed, sent back as `shown_k_values`. 409 when the ' +
-      'profile no longer gives an applied value, or Bambuddy now gives other K values. Reads Bambuddy, writes ScadBuddy only.',
+      'profile no longer gives an applied value, or Bambuddy now gives other K values. Reads Bambuddy (GET only), writes ScadBuddy only.',
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit for every type"),
       refresh: z.boolean().default(false).describe('Answer the differences and write nothing'),
       apply: z
-        .partialRecord(z.enum(['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm']), z.union([z.number(), z.string()]))
+        .partialRecord(
+          z.enum(['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm', 'drying_temp_c', 'drying_hours']),
+          z.union([z.number(), z.string()]),
+        )
         .optional()
         .describe('The confirmed fields and values a refresh showed, to write over the type'),
       k_values: z.boolean().optional().describe('With `apply`: also write the K values the refresh showed'),
@@ -535,7 +557,7 @@ export const filamentTools: Tool[] = [
           }),
         )
         .optional()
-        .describe("With `k_values: true`: the refresh's `k_values`, each without `type_id`; `[]` when it showed none"),
+        .describe("With `k_values: true`: the refresh's `k_values` (`type_id` and `source` are dropped: the server sets the source); `[]` when it showed none"),
     }).refine((o) => o.k_values !== true || o.shown_k_values !== undefined, {
       message: "k_values needs shown_k_values: the refresh's K values ([] for none)",
     }),
@@ -602,8 +624,11 @@ export const filamentTools: Tool[] = [
       '`held_by` (the number of the spool that holds that tag now), its effective `presets` and `k_values`, the ' +
       '`basis` of `grams_left` (the anchor reading and the deltas taken off it), and `in_use` (it has printed, so ' +
       'it can be archived but not deleted), the `invoice` it was bought on (number, date, supplier, line and ' +
-      '`unit_cost`; `null` if none), and `type_suppliers` (the unarchived products of its type from unarchived suppliers, each with its ' +
-      'newest price and price per kg).',
+      '`unit_cost`; `null` if none), `type_suppliers` (the unarchived products of its type from unarchived suppliers, each with its ' +
+      'newest price and price per kg), and `drying_defaults`: the `temp_c` and `hours` a drying records when it leaves them out ' +
+      "(filament_spool_add_event), each from the spool's own `drying_temp_c`/`drying_hours`, else its type's, else its " +
+      "subtype's, else its material's, with `temp_from` and `hours_from` naming the level (`spool`, `type`, `subtype`, " +
+      '`material`; `null` when none sets it).',
     input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
     risk: 'read',
     source: SOURCE,
@@ -622,7 +647,8 @@ export const filamentTools: Tool[] = [
     label: 'Add or edit a spool',
     description:
       'Add a spool (no `spool_id`), or edit one: only the `fields` given change, and `null` on an override ' +
-      "clears it so the spool takes its type's value again. A new spool needs a `type_id` (filament_type_list) " +
+      "clears it so the spool takes its type's value again. `drying_temp_c` (whole °C) and `drying_hours` (a decimal " +
+      "string) override its type's drying values, which a drying that leaves them out records. A new spool needs a `type_id` (filament_type_list) " +
       'or, while it needs a type, a `material_id`; `grams_left` is its first reading. Each edit is one `edited` ' +
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
@@ -754,7 +780,8 @@ export const filamentTools: Tool[] = [
     label: 'Delete a spool',
     description:
       'Delete a spool that never printed (one added by mistake), with its ledger and tag bindings. 409 when its ' +
-      'ledger holds a print or Bambuddy links it (the next pull would make it again): use filament_spool_archive instead. Only when the user asks. Writes ScadBuddy only.',
+      'ledger holds a print, Bambuddy links it, or it is being created in Bambuddy (an open create, failed or ' +
+      'unanswered ones included; the next pull would make it again): use filament_spool_archive instead. Only when the user asks. Writes ScadBuddy only.',
     input: z.object({ spool_id: z.string().uuid() }),
     risk: 'write',
     source: SOURCE,
@@ -776,7 +803,7 @@ export const filamentTools: Tool[] = [
       'Bind an RFID or NFC tag to a spool, by its `tag_uid`, its `tray_uuid`, or both (as a tray reports them). ' +
       'A tag not seen before is made with `kind`. A tag on another spool moves to this one, and a tag this ' +
       "spool had comes off; both spools' ledgers record it. Only what the user says. Writes ScadBuddy; with " +
-      '`filament_sync.tags` `sb_to_bb` it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
+      'tag sync set to push (`sb_to_bb` or `two_way`) it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
     input: z.object({
       spool_id: z.string().uuid(),
       tag_uid: z.string().optional(),
@@ -815,7 +842,7 @@ export const filamentTools: Tool[] = [
     description:
       "Take a tag off the spool it is bound to; the spool's ledger records it. `tag_id` is a binding's " +
       '`tag_id`. 404 when the tag is on no spool. Only what the user says. Writes ScadBuddy and queues the clear for ' +
-      'Bambuddy. With `filament_sync.tags` `sb_to_bb` it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
+      'Bambuddy. With tag sync set to push (`sb_to_bb` or `two_way`) it also tells Bambuddy, for up to 2.5 s, and otherwise the refresh does.',
     input: z.object({ tag_id: z.string().uuid() }),
     risk: 'write',
     source: SOURCE,
@@ -1060,7 +1087,7 @@ export const filamentTools: Tool[] = [
     label: 'Reconcile RFID with Bambuddy now',
     description:
       "Run once what the spool refresh runs, in three steps: bring Bambuddy's auto-add of unknown RFID spools to " +
-      'the override mode; push the queued tag changes (only with `filament_sync.tags` `sb_to_bb`); then configure ' +
+      'the override mode; push the queued tag changes (only with tag sync set to push (`sb_to_bb` or `two_way`)); then configure ' +
       "the AMS slot of each override tag through Bambuddy's slot-configure route (a printer-control write). Each " +
       'step fails alone. Answers the mode status, the tag push counts (`tags`) and the slot counts (`slots`: ' +
       'configured, unchanged, no_preset, no_temps, no_nozzle, failed; null with no Bambuddy). Writes Bambuddy to ' +
@@ -1072,6 +1099,106 @@ export const filamentTools: Tool[] = [
     summarize: () => 'Reconcile RFID with Bambuddy',
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/filament/rfid/reconcile'), 'reconcile RFID with Bambuddy')),
+  }),
+
+  defineTool({
+    name: 'filament_sync_status',
+    label: 'Read the Bambuddy sync status',
+    description:
+      'How the ScadBuddy-to-Bambuddy filament sync stands. `directions` is the stored `filament_sync`: `off`, ' +
+      '`sb_to_bb`, `bb_to_sb` or `two_way` for each of `spools`, `weights`, `tags`, `presets`, `suppliers` and ' +
+      '`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or `two_way`, never for `tags` (the ' +
+      "spool refresh's tag drain sends those). `instance` is the Bambuddy the links belong to; `instance_changed` " +
+      'is true when that is not the configured Bambuddy, and the sync is then stopped until ' +
+      'filament_sync_reset_links resets the links. `last_pass_at` is when the ' +
+      "last pass ended, `last_pass_started_at` when it started, `last_error` its error (null when it worked), `last_ok_at` the last pass with no error (a skipped " +
+      "one too), `counts` the last pass's (`written`, `failed`, `deferred`, `conflicts`, `unmapped_k`). `errors` " +
+      'lists each item whose last write to Bambuddy failed, or was held back (`name_taken`: another Bambuddy row ' +
+      "has its name, so it was never sent), with `kind`, its ScadBuddy `sb_id`, its `label` (a spool's `#N`, a " +
+      "spool type's code, any other row's name; null when the item is gone), `error`, `attempts` and `at`, " +
+      'newest first: this is why a spool is not in Bambuddy. `skipped` says why no pass runs now: ' +
+      '`no_bambuddy` or `nothing_pushes` (no data type but `tags` is set to push); else null. Reads ScadBuddy only.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sync/status'],
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/sync/status'), 'read the Bambuddy sync status')),
+  }),
+
+  defineTool({
+    name: 'filament_sync_run',
+    label: 'Sync with Bambuddy now',
+    description:
+      'Ask for a full ScadBuddy-to-Bambuddy sync pass now. It runs in the background on the print worker: it reads ' +
+      'Bambuddy, then writes it only for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`), ' +
+      "never `tags` (the spool refresh's tag drain sends those); " +
+      'see filament_sync_status for the directions. Answers `{started: true}` once the pass is asked for; read ' +
+      'filament_sync_status afterwards for how it went. 409 `no_bambuddy` with no Bambuddy configured, ' +
+      '`nothing_pushes` when no data type but `tags` is set to push. 503 when the pass could not be asked for (the settings ' +
+      'read or the workflow service failed, or took over 5 s; `detail` ends in an error label, `internal` for a ' +
+      'failure outside Bambuddy): nothing started, so try again later. Writes Bambuddy to ' +
+      'match ScadBuddy, and ScadBuddy (the links and the sync status). Approved first.',
+    input: z.object({}),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/sync/run'],
+    summarize: () => 'Sync the filament data with Bambuddy now',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/sync/run'), 'sync with Bambuddy')),
+  }),
+
+  defineTool({
+    name: 'filament_sync_reset_links',
+    label: 'Reset the Bambuddy links',
+    description:
+      'After the Bambuddy URL changed, the links (Bambuddy ids) belong to the old Bambuddy and the sync is stopped: ' +
+      'filament_sync_status says `instance_changed: true`, and the pull is stopped too. Call it first with ' +
+      "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
+      'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
+      'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
+      'not be read, or it is another Bambuddy), it answers 409 `proof_changed` and deletes nothing. Only then, ' +
+      'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
+      'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
+      'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
+      'create intents, the error rows, the Bambuddy spools the pull ignores and the recorded instance; then the full ' +
+      'pass links the configured Bambuddy afresh. No ScadBuddy spool, type, supplier or location ' +
+      'is deleted. After a delete (`kept: false`) a spool is linked again only to the Bambuddy spool that holds its RFID tag; other ' +
+      'spools are created on the side the sync sends them to, so tell the user an untagged spool can end up twice. ' +
+      'Either way it asks for a full pass. ' +
+      '`confirm_instance` must be the instance the links belong to: filament_sync_status `instance`. Answers the ' +
+      'instance, `kept` and the counts deleted (`deleted`: `spools`, `suppliers`, `locations`, `insert_types`, ' +
+      '`filaments`, `intents`, `errors`, `ignored`). 409 `confirm_mismatch` when `confirm_instance` is not the ' +
+      "links' instance, `same_instance` when they belong to the configured Bambuddy, `nothing_to_reset` when no " +
+      'instance is recorded, `proof_changed` as above; each deletes nothing. Approved first.',
+    input: z.object({
+      confirm_instance: z
+        .string()
+        .min(1)
+        .max(64)
+        .describe('The instance the links belong to, as filament_sync_status `instance` gives it'),
+      expect_kept: z
+        .boolean()
+        .default(false)
+        .describe(
+          'true: keep the links only while the configured Bambuddy is proven the same one, else 409 ' +
+            '`proof_changed` with nothing deleted; false: delete the links without reading Bambuddy',
+        ),
+    }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/sync/reset-links'],
+    summarize: ({ confirm_instance, expect_kept }) =>
+      expect_kept
+        ? `Keep the Bambuddy links of instance ${confirm_instance} if the configured Bambuddy is the same one`
+        : `Delete the Bambuddy links of instance ${confirm_instance}`,
+    handler: async ({ confirm_instance, expect_kept }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/sync/reset-links', { body: { confirm_instance, expect_kept } }),
+          'reset the Bambuddy links',
+        ),
+      ),
   }),
 
   defineTool({
@@ -1136,7 +1263,7 @@ export const filamentTools: Tool[] = [
     description:
       "Read the spool's Bambuddy record after a write. When it holds a new OpenTag3D tag, bind it to the spool " +
       '(`bound: true`, `tag_uid`); otherwise `bound: false` and nothing changes, so call it again once the ' +
-      'write has finished. Only what the user says. Writes ScadBuddy; with `filament_sync.tags` `sb_to_bb` it also ' +
+      'write has finished. Only what the user says. Writes ScadBuddy; with tag sync set to push (`sb_to_bb` or `two_way`) it also ' +
       'tells Bambuddy of the new binding.',
     input: z.object({ spool_id: z.string().uuid() }),
     risk: 'write',
@@ -1186,15 +1313,16 @@ export const filamentTools: Tool[] = [
     label: 'Record a weighing or a drying',
     description:
       'Record on a spool a weighing (`kind: weighed`, `grams` = the filament left, without the empty spool; ' +
-      '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). Only what the user ' +
-      'says. Writes ScadBuddy only.',
+      '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). A drying that leaves ' +
+      "out `temp_c` or `hours` records the spool's `drying_defaults` (filament_spool_get: its own drying values, else its " +
+      "type's, else its subtype's, else its material's); `null` records none. Only what the user says. Writes ScadBuddy only.",
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried']),
       source: z.enum(['person', 'scale']).default('person'),
       grams: z.number().min(0).optional(),
-      temp_c: z.number().int().min(0).optional(),
-      hours: z.string().optional().describe('A decimal, e.g. `8`'),
+      temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
+      hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
     }),
     risk: 'write',
@@ -1374,7 +1502,10 @@ export const filamentTools: Tool[] = [
       'for a tag a linked spool holds, left alone), `catalog_failed` and `catalog_skipped` (Bambuddy\'s spool ' +
       'catalog), `names_skipped` (catalog names with no letter or digit, left out), and `usage_booked` and ' +
       '`usage_unlinked` (Bambuddy usage rows booked, and those of an unlinked spool). ' +
-      '409 when no Bambuddy is configured. Reads Bambuddy, writes ScadBuddy only.',
+      '409 when no Bambuddy is configured, or when the Bambuddy URL changed during the import (import again). ' +
+      '503 when the print worker did not finish in time: it may still be running, so check the spools before ' +
+      'importing again. 502 when ScadBuddy refused what the worker read (importing again gets the same answer). ' +
+      "ScadBuddy's print worker reads Bambuddy; this writes ScadBuddy only.",
     input: z.object({}),
     risk: 'write',
     source: SOURCE,
@@ -1407,7 +1538,9 @@ export const filamentTools: Tool[] = [
     label: 'List location sensors',
     description:
       'The humidity and temperature sensors of the places, by name, or of one place with `location_id`. Each has ' +
-      'its last value and time, `reachable` and `alerting` (the value is outside its alert band).',
+      'its last value and time, `reachable`, `alerting` (the value is outside its alert band) and `last_notification` ' +
+      '(the newest notification it queued when it started or stopped alerting with `notify` on: `kind`, `state`, ' +
+      '`channel`, `sent_at`, and `error` when Bambuddy did not deliver it; null for none).',
     input: z.object({ location_id: z.string().uuid().optional().describe("A place's `id` from filament_location_list") }),
     risk: 'read',
     source: SOURCE,
@@ -1454,7 +1587,10 @@ export const filamentTools: Tool[] = [
       "home_assistant`, `kind` (`humidity` or `temperature`), `entity_id` (from filament_ha_entities) and `name`. " +
       'Or edit one: only the `fields` given change (`location_id`, `name`, `unit`, `alert_below`, `alert_above`, ' +
       '`notify`), and `null` clears a nullable one. An AMS sensor cannot be made by hand: ScadBuddy makes it from ' +
-      'the printer report. Alerts are shown, not sent. Only what the user says. Writes ScadBuddy only.',
+      'the printer report. With `notify` on, ScadBuddy sends one notification through Bambuddy\'s notification ' +
+      'channels when the sensor starts alerting and one when it stops (after 10 minutes back inside its band), ' +
+      'within about a minute; turning `notify` off stops what is not sent yet. Only what the user says. Writes ' +
+      'ScadBuddy only.',
     input: z.object({
       sensor_id: z.string().uuid().optional().describe("A sensor's `id` from filament_sensors_list; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The sensor fields to set'),

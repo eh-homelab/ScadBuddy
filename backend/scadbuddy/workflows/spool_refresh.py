@@ -7,7 +7,11 @@ does now). A run keeps Bambuddy's local presets (``held_presets_refresh``, #4645
 `slicing/held_presets.py`), which a native run offers and slices from with no Bambuddy
 call (hot-path plan D5), then pulls Bambuddy's spools into ScadBuddy's own
 (``filament_bambuddy_pull``, #6261, `filament/bambuddy_pull.py`); with no Bambuddy, or
-Bambuddy down, each step logs and returns. It is never started, signalled or awaited by
+Bambuddy down, each step logs and returns. Since #6772 the pull's activity reads no
+Bambuddy: it starts ``FilamentBbPull`` on the ``bambuddy`` queue, whose activity on the
+print worker reads Bambuddy and sends the rows to the API's CRUD routes, and waits for it
+(`filament/bb_pull_apply.py` `execute_pull`). The activity's name, timeout and result did
+not change, so this workflow's commands did not. It is never started, signalled or awaited by
 the print dialog: the hot path never waits on Bambuddy. A step that fails is not retried
 within its run; the next tick is the retry, as it is for the sweeps.
 
@@ -73,7 +77,9 @@ PROVIDER_TIMEOUT = timedelta(seconds=90)
 SEEN_TIMEOUT = timedelta(minutes=2)
 #: One list of Bambuddy's local presets, then a read of each one edited since.
 HELD_TIMEOUT = timedelta(minutes=2)
-#: One list of Bambuddy's spools, then a transaction per spool.
+#: The wait for ``FilamentBbPull`` (#6772): the print worker's list of Bambuddy's
+#: spools, then the API's transaction per spool; the run itself is bounded under this
+#: (`bb_pull_apply.PULL_RUN_TIMEOUT`).
 FILAMENT_PULL_TIMEOUT = timedelta(minutes=5)
 #: Every printer's latest report, reconciled with the ledger in a transaction each.
 CAPTURE_TIMEOUT = timedelta(minutes=2)

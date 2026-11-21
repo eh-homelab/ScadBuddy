@@ -1034,9 +1034,35 @@ def test_a_storefront_mail_setting_out_of_bounds_is_refused(
     assert client.put("/api/v1/settings", json={name: value}).status_code == 422
 
 
+_DEFAULT_SYNC = {
+    "spools": "bb_to_sb",
+    "weights": "bb_to_sb",
+    "tags": "bb_to_sb",
+    "presets": "bb_to_sb",
+    "suppliers": "off",
+    "locations": "off",
+}
+_DIRECTIONS = ("off", "sb_to_bb", "bb_to_sb", "two_way")
+
+
+def test_filament_sync_defaults_keep_todays_behaviour() -> None:
+    """#6265 Decision 3: what the pull already did stays on (``bb_to_sb``); the new data
+    types start off."""
+    assert FilamentSync().model_dump() == _DEFAULT_SYNC
+
+
+def test_filament_sync_takes_every_direction_for_every_type(client: TestClient) -> None:
+    for key in _DEFAULT_SYNC:
+        for direction in _DIRECTIONS:
+            saved = client.put("/api/v1/settings", json={"filament_sync": {key: direction}})
+            assert saved.status_code == 200, (key, direction, saved.text)
+            read = client.get("/api/v1/settings").json()["filament_sync"]
+            assert read == _DEFAULT_SYNC | {key: direction}
+
+
 def test_filament_settings_round_trip(client: TestClient) -> None:
     body = client.get("/api/v1/settings").json()
-    assert body["filament_sync"] == {"spools": "bb_to_sb", "tags": "off", "weights": "bb_to_sb"}
+    assert body["filament_sync"] == _DEFAULT_SYNC
     assert body["filament_low_stock_pct"] == 20
     assert body["filament_default_cost_per_kg"] is None
     saved = client.put(
@@ -1049,7 +1075,7 @@ def test_filament_settings_round_trip(client: TestClient) -> None:
     )
     assert saved.status_code == 200, saved.text
     again = client.get("/api/v1/settings").json()
-    assert again["filament_sync"] == {"spools": "off", "tags": "off", "weights": "bb_to_sb"}
+    assert again["filament_sync"] == _DEFAULT_SYNC | {"spools": "off"}
     saved = client.put(
         "/api/v1/settings", json={"filament_sync": {"spools": "off", "weights": "off"}}
     )
@@ -1064,12 +1090,28 @@ def test_filament_settings_round_trip(client: TestClient) -> None:
         == 422
     )
     for bad in (
-        {"spools": "two_way"},
+        {"spools": "both"},
         {"spools": "off", "extra": 1},
-        {"tags": "bb_to_sb"},
-        {"weights": "sb_to_bb"},
+        {"tags": ""},
+        {"weights": None},
     ):
         assert client.put("/api/v1/settings", json={"filament_sync": bad}).status_code == 422
+
+
+def test_the_shopping_auto_add_switch_round_trips(client: TestClient) -> None:
+    """#6868: stored only, on by default, and a null puts the default back."""
+    name = "filament_shopping_auto_add_empty"
+    body = client.get("/api/v1/settings").json()
+    assert body[name] is True
+    assert name not in body["sources"]
+    assert client.put("/api/v1/settings", json={name: False}).status_code == 200
+    assert client.get("/api/v1/settings").json()[name] is False
+    with _state(client).settings_store.pool.connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE name = %s", (name,)).fetchone()
+    # `shopping.add_for_empty_on` reads this row as JSON `false` in the write's transaction.
+    assert row == {"value": False}
+    assert client.put("/api/v1/settings", json={name: None}).status_code == 200
+    assert client.get("/api/v1/settings").json()[name] is True
 
 
 def test_a_saved_sync_reads_back_as_a_filament_sync(client: TestClient) -> None:

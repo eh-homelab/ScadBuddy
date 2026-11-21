@@ -86,13 +86,28 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   uploads: ['asset_fetch_domains'],
   // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools and weights in, tags out.
   // #6625 — and the nozzles a 3DFP preset fetch exports.
-  filament: ['filament_sync', 'profile_fetch_nozzles'],
+  // #6868 — and whether an empty spool adds its type to the shopping list (stored only).
+  filament: ['filament_sync', 'profile_fetch_nozzles', 'filament_shopping_auto_add_empty'],
 }
 
-/** The form's value of `filament_sync`, `spools|tags|weights`, as its three choices. */
-export function syncParts(raw: string): [spools: 'off' | 'bb_to_sb', tags: 'off' | 'sb_to_bb', weights: 'off' | 'bb_to_sb'] {
-  const [spools, tags, weights] = raw.split('|')
-  return [spools === 'off' ? 'off' : 'bb_to_sb', tags === 'sb_to_bb' ? 'sb_to_bb' : 'off', weights === 'off' ? 'off' : 'bb_to_sb']
+/** #6265 — the six data types `filament_sync` gives a direction, in the form's order. */
+export const SYNC_KINDS = ['spools', 'weights', 'tags', 'suppliers', 'locations', 'presets'] as const
+export type SyncKind = (typeof SYNC_KINDS)[number]
+export type FilamentSync = NonNullable<Settings['filament_sync']>
+export type SyncDirection = FilamentSync[SyncKind]
+const DIRECTIONS: readonly string[] = ['off', 'sb_to_bb', 'bb_to_sb', 'two_way'] satisfies SyncDirection[]
+
+/** The form's value of `filament_sync`, the six directions joined by `|` in `SYNC_KINDS` order, as an object. */
+export function syncParts(raw: string): FilamentSync {
+  const parts = raw.split('|')
+  return Object.fromEntries(
+    SYNC_KINDS.map((kind, i) => [kind, DIRECTIONS.includes(parts[i] ?? '') ? parts[i] : 'off']),
+  ) as FilamentSync
+}
+
+/** `syncParts`'s inverse: the form's value of a stored `filament_sync`. A type it does not name is `off`. */
+export function syncValue(sync: Partial<FilamentSync> | null | undefined): string {
+  return SYNC_KINDS.map((kind) => sync?.[kind] ?? 'off').join('|')
 }
 
 export const SPECS: Record<string, FieldSpec> = Object.fromEntries(RUNTIME_FIELDS.map((spec) => [spec.name, spec]))
@@ -184,7 +199,10 @@ export function registryIdsValue(ids: readonly string[]): string {
 }
 
 export function baseline(settings: Settings, name: FieldName): string {
+  if (name === 'filament_sync') return syncValue(settings.filament_sync)
   if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
+  // #6868 — on until the settings say otherwise, as the backend's default.
+  if (name === 'filament_shopping_auto_add_empty') return settings.filament_shopping_auto_add_empty === false ? 'false' : 'true'
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
@@ -219,12 +237,9 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     name === 'slicer_backend'
   )
     return raw
-  if (name === 'store_s3_path_style' || name === 'print_auto_import') return raw === 'true'
-  // #6262 Task 13, #6264 — one data type per key: the form's `spools|tags|weights` string, split.
-  if (name === 'filament_sync') {
-    const [spools, tags, weights] = syncParts(raw)
-    return { spools, tags, weights }
-  }
+  if (name === 'store_s3_path_style' || name === 'print_auto_import' || name === 'filament_shopping_auto_add_empty') return raw === 'true'
+  // #6265 — one direction per data type: the form's six-part string, split.
+  if (name === 'filament_sync') return syncParts(raw)
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)

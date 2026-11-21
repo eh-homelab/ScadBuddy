@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from typing import Any
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from starlette.applications import Starlette
 from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
+from scadbuddy.api import crud_agent_events, crud_agent_transcripts, crud_agent_turns
 from scadbuddy.api.limits import (
+    BODY_LIMITS,
     INVOICE_FILE_UPLOAD_PATH,
     MAX_MULTIPART_BODY_BYTES,
     MAX_TEXT_BODY_BYTES,
     ORDER_ATTACHMENT_UPLOAD_PATH,
+    BodySizeGate,
     ClientGoneError,
+    RouteLimit,
     unless_the_client_leaves,
 )
 from tests.support.operations import press
@@ -164,3 +174,107 @@ def test_no_other_order_route_takes_the_media_limit(path: str) -> None:
 def test_an_invoice_file_upload_takes_the_media_limit() -> None:
     assert INVOICE_FILE_UPLOAD_PATH.match("/api/v1/filament/invoices/abc/file")
     assert not INVOICE_FILE_UPLOAD_PATH.match("/api/v1/filament/invoices/abc/lines")
+
+
+def test_a_json_body_with_no_content_type_is_capped_too(client: TestClient) -> None:
+    """#6861: FastAPI reads a body with no Content-Type as JSON, so a caller that left
+    the header out must not get past the cap the header would have met."""
+    body = b'{"source": "' + b"a" * MAX_TEXT_BODY_BYTES + b'"}'
+    response = client.post("/api/v1/models/check", content=body)
+    assert "content-type" not in response.request.headers
+    assert response.status_code == 413
+    assert "reads at most" in response.json()["detail"]
+
+
+def test_a_chunked_body_with_no_content_type_is_cut_off_too(client: TestClient) -> None:
+    def chunks() -> object:
+        yield b'{"source": "'
+        for _ in range(MAX_TEXT_BODY_BYTES // (1024 * 1024) + 4):
+            yield b"a" * (1024 * 1024)
+        yield b'"}'
+
+    response = client.post("/api/v1/models/check", content=chunks())
+    assert "content-type" not in response.request.headers
+    assert response.status_code == 413
+    assert "most this API reads" in response.json()["detail"]
+
+
+def _gated() -> TestClient:
+    async def read(request: Request) -> PlainTextResponse:
+        return PlainTextResponse(str(len(await request.body())))
+
+    app = Starlette(
+        routes=[Route("/plain", read, methods=["PUT"]), Route("/big", read, methods=["PUT"])]
+    )
+    app.add_middleware(
+        BodySizeGate,
+        limits=BODY_LIMITS,
+        routes=[
+            RouteLimit(
+                "PUT", re.compile(r"^/big$"), 3 * MAX_TEXT_BODY_BYTES, "a big upload", "fixed"
+            )
+        ],
+    )
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("kind", ["application/octet-stream", "model/3mf", None])
+def test_an_unknown_type_is_capped_unless_the_route_has_its_own_limit(kind: str | None) -> None:
+    """#6861: a route that reads a larger non-JSON body names its `RouteLimit`; the rest
+    get `MAX_TEXT_BODY_BYTES` however the body is typed."""
+    headers = {} if kind is None else {"Content-Type": kind}
+    size = MAX_TEXT_BODY_BYTES + 1
+    gated = _gated()
+    refused = gated.put("/plain", content=b"x" * size, headers=headers)
+    assert refused.status_code == 413
+    kept = gated.put("/big", content=b"x" * size, headers=headers)
+    assert (kept.status_code, kept.text) == (200, str(size))
+    assert gated.put("/plain", content=b"x" * 1024, headers=headers).text == "1024"
+
+
+_AGENT_STORE_MODULES = [crud_agent_transcripts, crud_agent_turns, crud_agent_events]
+
+
+def _bounded_paths(module: Any) -> list[str]:
+    paths = [
+        f"/api/v1{route.path}".replace("{session_id}", "s")
+        for route in module.router.routes
+        if isinstance(route, APIRoute)
+        and any(dep.call is module._bounded for dep in route.dependant.dependencies)
+    ]
+    assert paths
+    return paths
+
+
+@pytest.mark.parametrize("module", _AGENT_STORE_MODULES, ids=lambda m: m.__name__)
+def test_every_bounded_agent_store_route_has_its_declared_limit(module: Any) -> None:
+    """#6863: a route's declared `BODY_BYTES_MAX` above the gate's 8 MiB default is only
+    reachable through a `RouteLimit`, and the limit covers every route that declares it."""
+    assert module.BODY_BYTES_MAX > MAX_TEXT_BODY_BYTES
+    assert module.ROUTE_LIMIT.limit == module.BODY_BYTES_MAX
+    for path in _bounded_paths(module):
+        assert module.ROUTE_LIMIT.matches({"method": "POST", "path": path}), path
+
+
+def test_main_installs_the_agent_store_route_limits(client: TestClient) -> None:
+    gate = next(m for m in client.app.user_middleware if m.cls is BodySizeGate)  # type: ignore[attr-defined]
+    installed = gate.kwargs["routes"]
+    for module in _AGENT_STORE_MODULES:
+        assert module.ROUTE_LIMIT in installed
+
+
+@pytest.mark.parametrize("module", _AGENT_STORE_MODULES, ids=lambda m: m.__name__)
+def test_an_agent_store_body_over_8_mib_reaches_the_route_until_its_bound(module: Any) -> None:
+    async def read(request: Request) -> PlainTextResponse:
+        return PlainTextResponse(str(len(await request.body())))
+
+    path = _bounded_paths(module)[0]
+    app = Starlette(routes=[Route(path, read, methods=["POST"])])
+    app.add_middleware(BodySizeGate, limits=BODY_LIMITS, routes=[module.ROUTE_LIMIT])
+    gated = TestClient(app)
+    headers = {"Content-Type": "application/json"}
+    size = MAX_TEXT_BODY_BYTES + 1
+    kept = gated.post(path, content=b"x" * size, headers=headers)
+    assert (kept.status_code, kept.text) == (200, str(size))
+    refused = gated.post(path, content=b"x" * (module.BODY_BYTES_MAX + 1), headers=headers)
+    assert refused.status_code == 413

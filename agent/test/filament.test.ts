@@ -4,6 +4,9 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { tiersUpTo } from '../src/auth/principal.js'
+import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
+import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
+import { toolCallActivity } from '../src/temporal/toolCall.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -265,6 +268,29 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     expect(start).toContain('3dfilamentprofiles.com')
     expect(tool('filament_type_upsert').description).toContain('tdfp_id')
     expect(start).toMatch(/Approved first\.$/)
+  })
+
+  it('takes the drying values in the upsert fields (#6720)', () => {
+    const upsert = (fields: unknown) => tool('filament_type_upsert').parse({ fields })
+    expect(upsert({ drying_temp_c: 55, drying_hours: '8' }).fields).toEqual({ drying_temp_c: 55, drying_hours: '8' })
+    expect(upsert({ drying_temp_c: null, drying_hours: null }).fields).toEqual({ drying_temp_c: null, drying_hours: null })
+    for (const bad of [-1, 1.5, 1001]) expect(() => upsert({ drying_temp_c: bad })).toThrow()
+    expect(tool('filament_type_upsert').description).toContain('drying_hours')
+  })
+
+  it('records a drying with the spool defaults for what it leaves out (#6720)', () => {
+    const parsed = tool('filament_spool_add_event').parse({ spool_id: ROW, kind: 'dried' })
+    expect(parsed).not.toHaveProperty('temp_c')
+    expect(parsed).not.toHaveProperty('hours')
+    expect(tool('filament_spool_add_event').parse({ spool_id: ROW, kind: 'dried', temp_c: null }).temp_c).toBeNull()
+    expect(tool('filament_spool_add_event').description).toContain('drying_defaults')
+  })
+
+  it("names a spool's drying defaults and its own drying values (#6856)", () => {
+    const get = tool('filament_spool_get').description
+    for (const word of ['drying_defaults', 'temp_from', 'hours_from']) expect(get).toContain(word)
+    expect(tool('filament_spool_upsert').description).toContain('drying_temp_c')
+    expect(tool('filament_type_fill_from_profile').description).toContain('earlier printer calibration')
   })
 
   it('bounds tdfp_id in the upsert fields to a positive integer below 2^31, or null', () => {
@@ -625,14 +651,19 @@ describe('filament sensor and AMS weight tools (#6268)', () => {
     expect(tool(name).gated).toBe(false)
   })
 
-  it('says in its descriptions what the sync skips, that an AMS sensor is not made by hand, and that alerts are not sent', () => {
+  it('says in its descriptions what the sync skips, that an AMS sensor is not made by hand, and when alerts are sent', () => {
     expect(tool('filament_sync_ams_weights').description).toMatch(/locked/)
     expect(tool('filament_sync_ams_weights').description).toMatch(/printing/)
     expect(tool('filament_sync_ams_weights').description).toMatch(/RFID/)
     // #6679: the agent can name which printers had no fresh report.
     expect(tool('filament_sync_ams_weights').description).toMatch(/`stale_printers`.*`name`/)
     expect(tool('filament_sensor_save').description).toMatch(/AMS sensor cannot be made by hand/)
-    expect(tool('filament_sensor_save').description).toMatch(/shown, not sent/)
+    // #6646: notify sends through Bambuddy, once at the start and once at the end.
+    expect(tool('filament_sensor_save').description).toMatch(/starts alerting and one when it stops/)
+    // #6855 review: the hold before an alert closes, and notify off stops what is queued.
+    expect(tool('filament_sensor_save').description).toMatch(/after 10 minutes back inside its band/)
+    expect(tool('filament_sensor_save').description).toMatch(/turning `notify` off stops/)
+    expect(tool('filament_sensors_list').description).toMatch(/`last_notification`/)
   })
 
   it('syncs the AMS weights with one POST and no body', async () => {
@@ -832,6 +863,146 @@ describe('filament RFID tools (#6264)', () => {
   })
 })
 
+const SYNC = `${BACKEND}/api/v1/filament/sync`
+
+describe('filament Bambuddy sync tools (#6265)', () => {
+  it.each([
+    ['filament_sync_status', 'read', false],
+    // It writes Bambuddy, as filament_rfid_reconcile does: outward and approved first.
+    ['filament_sync_run', 'outward', true],
+    // #6773: it deletes the links and asks for a pass that writes Bambuddy.
+    ['filament_sync_reset_links', 'outward', true],
+  ])('%s is %s tier, gated: %s', (name, risk, gated) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(gated)
+  })
+
+  it('classifies the run and the reset as touching no recorded resource', () => {
+    expect(TOUCHES_NOTHING.has('filament_sync_run')).toBe(true)
+    expect(TOUCHES_NOTHING.has('filament_sync_reset_links')).toBe(true)
+  })
+
+  it('resets the links of the instance it names, and needs one', async () => {
+    let body: unknown
+    const deleted = { spools: 3, suppliers: 1, locations: 0, insert_types: 0, filaments: 2, intents: 0, errors: 1, ignored: 0 }
+    server.use(
+      http.post(`${SYNC}/reset-links`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ instance: '0ld0ld0ld0ld', kept: false, deleted })
+      }),
+    )
+    const t = tool('filament_sync_reset_links')
+    expect(() => t.parse({})).toThrow()
+    const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld' }), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld', expect_kept: false })
+    expect(firstText(result)).toEqual({ instance: '0ld0ld0ld0ld', kept: false, deleted })
+  })
+
+  it('sends expect_kept, and says a 409 proof_changed deleted nothing (#6845 R-6845-6)', async () => {
+    let body: unknown
+    const none = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+    server.use(
+      http.post(`${SYNC}/reset-links`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ instance: '0ld0ld0ld0ld', kept: true, deleted: none })
+      }),
+    )
+    const t = tool('filament_sync_reset_links')
+    const result = await t.execute(t.parse({ confirm_instance: '0ld0ld0ld0ld', expect_kept: true }), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ confirm_instance: '0ld0ld0ld0ld', expect_kept: true })
+    const description = t.description
+    expect(description).toContain('`expect_kept: true`')
+    expect(description).toContain('`proof_changed`')
+  })
+
+  it('says the links are kept when the Bambuddy is the same one at a new address (#6845)', () => {
+    const description = tool('filament_sync_reset_links').description
+    expect(description).toContain('`kept: true`')
+    expect(description).toContain('After a delete (`kept: false`)')
+  })
+
+  it('fails on a 409 and says why nothing was deleted', async () => {
+    const detail = 'confirm_instance is not the instance the links belong to'
+    server.use(
+      http.post(`${SYNC}/reset-links`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail, code: 'confirm_mismatch' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const t = tool('filament_sync_reset_links')
+    await expect(t.execute(t.parse({ confirm_instance: 'abcabcabcabc' }), ctx('outward'))).rejects.toThrow(detail)
+  })
+
+  it('both run in durable mode: activities of the agent-tools worker', () => {
+    const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
+    const activities = toolActivities(ALL_TOOLS, deps)
+    const calls = toolCallActivities(ALL_TOOLS, deps)
+    for (const name of ['filament_sync_status', 'filament_sync_run']) {
+      expect(activities[name]).toBeTypeOf('function')
+      expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
+    }
+  })
+
+  it('says tag sync pushes with sb_to_bb or two_way, never sb_to_bb alone', () => {
+    for (const t of ALL_TOOLS) expect(t.description).not.toContain('`filament_sync.tags` `sb_to_bb`')
+    expect(tool('filament_rfid_reconcile').description).toContain('`two_way`')
+    expect(tool('link_tray_spool').description).toContain('`two_way`')
+  })
+
+  it('reads the status', async () => {
+    const status = { instance: null, errors: [], skipped: 'no_bambuddy' }
+    server.use(http.get(`${SYNC}/status`, () => HttpResponse.json(status)))
+    expect(firstText(await runTool(tool('filament_sync_status'), {}, ctx()))).toEqual(status)
+  })
+
+  it('asks for a full pass with POST', async () => {
+    let posted = 0
+    server.use(
+      http.post(`${SYNC}/run`, () => {
+        posted += 1
+        return HttpResponse.json({ started: true }, { status: 202 })
+      }),
+    )
+    const t = tool('filament_sync_run')
+    const result = await t.execute(t.parse({}), ctx('outward'))
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual({ started: true })
+    expect(posted).toBe(1)
+  })
+
+  it('fails on the 503 when nothing started, and says so', async () => {
+    const detail = 'could not ask the sync workflow for a pass: internal'
+    server.use(
+      http.post(`${SYNC}/run`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Service Unavailable', status: 503, detail },
+          { status: 503, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    expect(tool('filament_sync_run').description).toContain('503')
+    const t = tool('filament_sync_run')
+    await expect(t.execute(t.parse({}), ctx('outward'))).rejects.toThrow(detail)
+  })
+
+  it('fails on the 409 with no Bambuddy, naming why', async () => {
+    server.use(
+      http.post(`${SYNC}/run`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'no Bambuddy is configured', code: 'no_bambuddy' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const t = tool('filament_sync_run')
+    await expect(t.execute(t.parse({}), ctx('outward'))).rejects.toThrow('no Bambuddy is configured')
+  })
+})
+
 describe('filament history and metrics tools', () => {
   const FIL = `${BACKEND}/api/v1/filament`
 
@@ -940,6 +1111,15 @@ describe('filament_type_fill_from_profile (#6714)', () => {
       { url: `${TYPES}/fill-from-profile`, body: { refresh: true } },
       { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown } },
     ])
+  })
+
+  it('applies the drying values and says it reads the printers K calibrations (#6720)', () => {
+    const parsed = tool('filament_type_fill_from_profile').parse({ type_id: ROW, apply: { drying_temp_c: 55, drying_hours: '8' } })
+    expect(parsed.apply).toEqual({ drying_temp_c: 55, drying_hours: '8' })
+    const description = tool('filament_type_fill_from_profile').description
+    expect(description).toMatch(/drying/)
+    expect(description).toMatch(/K calibrations/)
+    expect(description).toMatch(/never overwritten/)
   })
 
   it('refuses apply without a type', async () => {

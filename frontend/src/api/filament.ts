@@ -30,7 +30,7 @@ export type TypeKValue = Schemas['TypeKValue']
 export type TypeFill = Schemas['TypeFill']
 export type FillRequest = Schemas['FillRequest']
 /** The type fields a slicer profile fills (#6714, `filament/profile_fill.py` `Field`). */
-export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm'] as const
+export const FILL_FIELDS = ['nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'density_g_cm3', 'diameter_mm', 'drying_temp_c', 'drying_hours'] as const
 export type FillField = (typeof FILL_FIELDS)[number]
 export type Location = Schemas['Location']
 export type LocationNode = Schemas['LocationNode']
@@ -40,6 +40,7 @@ export type Sensor = Schemas['Sensor']
 export type SensorIn = Schemas['SensorIn']
 export type SensorPatch = Schemas['SensorPatch']
 export type SensorReading = Schemas['SensorReading']
+export type SensorNotification = Schemas['SensorNotification']
 export type HaEntity = Schemas['HaEntity']
 export type AmsSyncResult = Schemas['AmsSyncResult']
 export type TagRow = Schemas['TagRow']
@@ -167,6 +168,46 @@ export const setOverrideMode = (enabled: boolean) => request<RfidStatus>(`${BASE
 
 /** Runs once what the spool refresh Schedule runs: the mode, the pending tags, the override slots. */
 export const reconcileRfid = () => request<RfidReconcileReport>(`${BASE}/rfid/reconcile`, { method: 'POST' })
+
+// -- The Bambuddy sync (#6265) ----------------------------------------------------------
+
+export type SyncStatus = Schemas['SyncStatus']
+export type SyncError = Schemas['SyncError']
+
+/** The last pass, the last clean one, its counts, the items whose last write failed, and why no pass runs (`skipped`). */
+export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
+
+/**
+ * Asks for a full pass now; it runs in the background, and `getSyncStatus` shows how it went.
+ * 409 (`code` `no_bambuddy` or `nothing_pushes`) when no pass can run, 503 when it could not be asked for.
+ */
+export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
+
+export type LinksResetCounts = Schemas['LinksResetCounts']
+export type LinksResetPreview = Schemas['LinksResetPreview']
+export type LinksResetDone = Schemas['LinksResetDone']
+
+/**
+ * #6773 — what a reset of the Bambuddy links would delete, and the instance they belong to.
+ * #6845 — `same_bambuddy`: the Bambuddy set up now is the links' own, so a reset with `expectKept`
+ * keeps them. `bambuddy_unreadable`: that Bambuddy could not be read, so only the delete is offered.
+ * Reads ScadBuddy and the configured Bambuddy's spools.
+ */
+export const getResetPreview = () => request<LinksResetPreview>(`${BASE}/sync/reset-links`)
+
+/**
+ * #6773 — deletes the Bambuddy links of `confirmInstance` (the preview's `instance`), then a full pass
+ * links the configured Bambuddy afresh. #6845 — `expectKept` is the preview's `same_bambuddy`: true
+ * reads that Bambuddy again and, while it is still the links' own, deletes nothing (`kept`); false is
+ * the confirmed delete, which reads no Bambuddy. 409 with `code` `confirm_mismatch`, `same_instance`,
+ * `nothing_to_reset` or `proof_changed` (the Bambuddy could not be read or changed since the preview)
+ * when it deletes nothing.
+ */
+export const resetSyncLinks = (confirmInstance: string, expectKept: boolean) =>
+  request<LinksResetDone>(
+    `${BASE}/sync/reset-links`,
+    json('POST', { confirm_instance: confirmInstance, expect_kept: expectKept }),
+  )
 
 /**
  * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with

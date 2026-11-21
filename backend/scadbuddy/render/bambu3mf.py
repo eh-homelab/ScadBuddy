@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from array import array
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import MAX_CODE_DIGITS, PaintCodeError, states
+from scadbuddy.render.paint import MAX_CODE_DIGITS, DistinctCodes, states
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -1126,10 +1126,7 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
         return None
     if any(len(code) > MAX_CODE_DIGITS or not code.isascii() for code in codes):
         return None
-    painted: set[int] = set()
-    for code in codes:
-        if code:
-            painted.update(states(code.decode("ascii")))
+    painted = DistinctCodes().states(code.decode("ascii") for code in codes)
     return np.array([low, high]), frozenset(painted)
 
 
@@ -1162,6 +1159,7 @@ def _plate_geometry(
     highs: list[np.ndarray] = []
     floors: list[float] = []
     painted: set[int] = set()
+    decoder = DistinctCodes()
     for name in names:
         printed = name not in unprinted
         written = _written_extents(entries[name])
@@ -1180,9 +1178,7 @@ def _plate_geometry(
                 highs.append(points.max(axis=0))
                 if printed:
                     floors.append(float(points[:, 2].min()))
-            for code in set(mesh.paint or ()):
-                if code:
-                    painted.update(states(code))
+            painted |= decoder.states(mesh.paint or ())
     if not lows:
         raise ValueError("the 3MF has no object geometry to place")
     low = np.min(lows, axis=0)
@@ -1517,6 +1513,125 @@ def _pin_plates(model_settings: str, filament_map: FilamentMap) -> str:
     return _PLATE_OPEN.sub(
         lambda _: "<plate>\n" + lines, _PLATE_MAP_METADATA.sub("", model_settings)
     )
+
+
+#: Settings a print writes over its plates' own (#6820): each ``(key, value)`` as a
+#: ``<plate>`` of ``model_settings.config`` states it, sorted by key.
+PlateOverrides = tuple[tuple[str, str], ...]
+
+#: Every setting a ``<plate>`` of ``model_settings.config`` can state, by its process key:
+#: the key the plate writes it under, and how the value is written. These are the keys
+#: Bambu Studio v02.08.02.61 reads from a plate into the plate's config, and writes back
+#: (``src/libslic3r/Format/bbs_3mf.cpp``, ``_handle_start_config_metadata`` and
+#: ``_add_model_config_file_to_archive``,
+#: https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/src/libslic3r/Format/bbs_3mf.cpp,
+#: read 2026-11-20). The reader ignores any other key on a plate, so no other override
+#: can lose to one. The CLI applies the plate's config over the process file
+#: (``--load-settings``): ``new_print_config.apply(*part_plate->config())``,
+#: ``src/BambuStudio.cpp`` ~6890. Measured on 2026-11-20 with the prod slicer pod's
+#: binary: a plate's ``print_sequence`` "by object" beat the process file's "by layer"
+#: (#6820). This is not a list of allowed settings: every override still goes into the
+#: process file; these are only the ones a plate can also state.
+#: ``ints``: a list of numbers, split on blanks (``get_vector_from_string``), written
+#: space-separated; ``bool``: read with ``std::boolalpha``, so ``true``/``false``.
+PLATE_KEYS: dict[str, tuple[str, Literal["text", "ints", "bool"]]] = {
+    "curr_bed_type": ("bed_type", "text"),
+    "print_sequence": ("print_sequence", "text"),
+    "first_layer_print_sequence": ("first_layer_print_sequence", "ints"),
+    "other_layers_print_sequence": ("other_layers_print_sequence", "ints"),
+    "other_layers_print_sequence_nums": ("other_layers_print_sequence_nums", "text"),
+    "spiral_mode": ("spiral_mode", "bool"),
+    "filament_map_mode": ("filament_map_mode", "text"),
+    "filament_map": ("filament_maps", "ints"),
+    "filament_volume_map": ("filament_volume_maps", "ints"),
+}
+
+_LIST_SEPARATOR = re.compile(r"[,\s]+")
+
+
+def _plate_value(value: str | Sequence[str], kind: Literal["text", "ints", "bool"]) -> str:
+    """``value`` (as a process preset stores it: a string, or a list of strings) as a
+    plate writes it."""
+    items = [value] if isinstance(value, str) else list(value)
+    if kind == "ints":
+        return " ".join(
+            part for item in items for part in _LIST_SEPARATOR.split(item.strip()) if part
+        )
+    text = ",".join(items)
+    if kind == "bool":
+        return {"1": "true", "0": "false"}.get(text.strip().lower(), text.strip().lower())
+    return text
+
+
+def plate_overrides(overrides: Mapping[str, str | Sequence[str]]) -> PlateOverrides | None:
+    """The settings of ``overrides`` (a print's ``process_overrides``, #2998) that a
+    plate can state (:data:`PLATE_KEYS`), as the plate writes them, sorted; ``None`` for
+    none. A host-side key is never one of them."""
+    found = sorted(
+        (PLATE_KEYS[key][0], _plate_value(value, PLATE_KEYS[key][1]))
+        for key, value in overrides.items()
+        if key in PLATE_KEYS
+    )
+    return tuple(found) or None
+
+
+_PLATE_BLOCK = re.compile(r"(<plate\b[^<>]*+>)((?:(?!<plate\b|</plate>).)*+)(</plate>)", re.DOTALL)
+_ANY_VALUE_ATTRIBUTE = re.compile(r"""(\svalue=)(?:"[^"<>]*+"|'[^'<>]*+')""")
+
+
+def set_plate_settings(model_settings: str, settings: PlateOverrides) -> str:
+    """``model_settings`` with each ``<plate>``'s own value of a key in ``settings``
+    replaced (#6820). A key a plate does not state is left to the process file, so a file
+    whose plates state none of them comes back unchanged. Only the plates' own
+    ``<metadata>`` change; an object's or a part's key of the same name stays. Read back
+    with ElementTree; raises :class:`PartSettingsUnwritableError` for a file
+    :func:`_parsed_model_settings` refuses, or one whose plates did not take a value."""
+    _parsed_model_settings(model_settings)
+    wanted = dict(settings)
+
+    def metadata(tag: re.Match[str]) -> str:
+        text = tag.group(0)
+        key = _KEY_ATTRIBUTE.search(text)
+        value = wanted.get(key.group(1)) if key is not None else None
+        if value is None:
+            return text
+        return _ANY_VALUE_ATTRIBUTE.sub(
+            lambda found: found.group(1) + quoteattr(value), text, count=1
+        )
+
+    def plate(block: re.Match[str]) -> str:
+        head, body, tail = block.groups()
+        # The plate's own metadata only, not its model instances'.
+        own, instances, rest = body.partition("<model_instance")
+        return head + _METADATA_TAG.sub(metadata, own) + instances + rest + tail
+
+    written = _PLATE_BLOCK.sub(plate, model_settings)
+    for each in _parsed_model_settings(written).iter("plate"):
+        for entry in each.findall("metadata"):
+            key = entry.get("key", "")
+            if key in wanted and entry.get("value") != wanted[key]:
+                raise PartSettingsUnwritableError(f"a plate did not take {key}")
+    return written
+
+
+def with_plate_settings(payload: bytes, settings: PlateOverrides | None) -> bytes:
+    """``payload`` with :func:`set_plate_settings` applied to its
+    ``model_settings.config``; unchanged with no settings or no such file. Raises
+    :class:`PartSettingsUnwritableError` as :func:`with_part_settings` does."""
+    if not settings:
+        return payload
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if MODEL_SETTINGS_NAME not in archive.namelist():
+                return payload
+            raw = _read_capped(archive, MODEL_SETTINGS_NAME, MAX_MODEL_SETTINGS_BYTES)
+        text = raw.decode("utf-8")
+    except (zipfile.BadZipFile, ValueError) as error:
+        raise PartSettingsUnwritableError(str(error)) from error
+    written = set_plate_settings(text, settings)
+    if written == text:
+        return payload
+    return rezipped(payload, {MODEL_SETTINGS_NAME: written.encode("utf-8")})
 
 
 #: Process settings for the parts of one filament slot (#5571), by slot from 1: each
@@ -2299,40 +2414,13 @@ _ANY_ID = re.compile(rb'\sid="(\d+)"')
 #: The most digits of distinct paint codes :func:`hint_painted_slots` decodes in one
 #: file. Each distinct code is held and decoded once, so this bounds both; a file past
 #: it is left without hints (the slice is still checked, ``sliced_as_planned``). A real
-#: two-colour project's codes are a few thousand digits.
+#: two-colour project's codes are a few thousand digits. The by-object count
+#: (``bambuddy/clearance.py``) holds its own read of a file to it too, and past it
+#: counts no painting (#6823).
 MAX_HINT_PAINT_DIGITS = 4_000_000
 
 
-class _TooMuchPaintError(ValueError):
-    """More distinct painting than :data:`MAX_HINT_PAINT_DIGITS`."""
-
-
-class _Codes:
-    """Distinct paint codes, counted against :data:`MAX_HINT_PAINT_DIGITS` as they are
-    added, each decoded once."""
-
-    def __init__(self) -> None:
-        self.seen: dict[bytes, frozenset[int]] = {}
-        self.digits = 0
-
-    def states(self, codes: Iterable[bytes]) -> set[int]:
-        found: set[int] = set()
-        for code in codes:
-            known = self.seen.get(code)
-            if known is None:
-                self.digits += len(code)
-                if self.digits > MAX_HINT_PAINT_DIGITS:
-                    raise _TooMuchPaintError("the painting is past what is decoded for hints")
-                try:
-                    known = frozenset(states(code.decode("ascii")))
-                except PaintCodeError:
-                    known = frozenset()  # left out, never guessed at
-                self.seen[code] = known
-            found |= known
-        return found
-
-
-def _painted_states(archive: zipfile.ZipFile, name: str, codes: _Codes) -> set[int]:
+def _painted_states(archive: zipfile.ZipFile, name: str, codes: DistinctCodes) -> set[int]:
     """The extruders ``name``'s triangles are painted with, read as Bambu Studio reads
     a code (:func:`~scadbuddy.render.paint.states`), in windows overlapping by more
     than a code, so a code a window boundary splits is read whole from the next."""
@@ -2341,7 +2429,9 @@ def _painted_states(archive: zipfile.ZipFile, name: str, codes: _Codes) -> set[i
     with archive.open(name) as entry:
         while chunk := entry.read(_CHUNK):
             window = tail + chunk
-            found |= codes.states(set(_ANY_PAINT_CODE.findall(window)))
+            found |= codes.states(
+                code.decode("ascii") for code in set(_ANY_PAINT_CODE.findall(window))
+            )
             tail = window[-_CODE_OVERLAP:]
     return found
 
@@ -2351,7 +2441,7 @@ def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[in
     and each component's, whether in another model file or in the root. The root is
     read by :func:`parse_model`, its meshes as arrays."""
     model = parse_model(archive, ROOT_MODEL_NAME)
-    codes = _Codes()
+    codes = DistinctCodes(MAX_HINT_PAINT_DIGITS, skip_unreadable=True)
     objects = list(model.root.iter(f"{{{CORE_NS}}}object"))
     own: dict[str, set[int]] = {}
     for obj in objects:
@@ -2359,7 +2449,7 @@ def _object_slots(archive: zipfile.ZipFile, names: set[str]) -> dict[str, set[in
         for mesh in obj.iter(f"{{{CORE_NS}}}mesh"):
             arrays = model.meshes.get(mesh)
             if arrays is not None and arrays.paint:
-                found |= codes.states({code.encode("ascii") for code in arrays.paint if code})
+                found |= codes.states(arrays.paint)
         own[obj.get("id", "")] = found
     files: dict[str, set[int]] = {}
     slots: dict[str, set[int]] = {}
@@ -2433,8 +2523,9 @@ def hint_painted_slots(payload: bytes) -> bytes:
 
 #: Who laid a 3MF out, which decides how a print lays it out for the printer (#1752):
 #: ``scadbuddy`` is re-placed for the printer's plate (:func:`replate_3mf`), ``author``
-#: keeps its placement and states the nozzles (:func:`state_nozzles`), and ``as_is`` is
-#: sliced as it stands.
+#: keeps its plates, each moved as one group as Bambu Studio adapts a project made for
+#: another printer (``send`` ``objects_within_reach``, #6820), and states the nozzles
+#: (:func:`state_nozzles`), and ``as_is`` is sliced as it stands.
 Layout = Literal["scadbuddy", "author", "as_is"]
 
 

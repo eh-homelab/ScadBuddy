@@ -233,6 +233,20 @@ Children:
   name. BB parity with `SpoolFilamentPreset`.
 - `spool_type_k_values`: printer, extruder, nozzle diameter, nozzle type, K,
   name, `cali_idx`, `setting_id`. BB parity with `SpoolKProfile`.
+
+  As built in #6714 and #6720 (plan `docs/superpowers/plans/2026-11-20-filament-type-from-profile.md`,
+  R-6714-9 to R-6714-21): a type also has `drying_temp_c` and `drying_hours`, and a spool may
+  override both, as any value of its type. A spool's drying defaults are its own, else its
+  type's, else its subtype's, else its material's; each drying may still change them. The
+  slicer profile fill writes a type's empty print and drying values (the AMS HT's idle drying
+  pair, which can be above an AMS 2 Pro's 65 °C), except a drying value the type's subtype or
+  material already sets (only a refresh offers that one). It imports K values: its linked
+  Bambuddy spools' while it has none, then each linked printer's K calibrations whose
+  `filament_id` is a preset's `slicer_filament` (`GET /printers/{id}/kprofiles/`). Each K row
+  says who set it (`source`: `person`, `profile`, `printer_calibration`, `profile_fetch`;
+  rows from before are `person`). A calibration fills a key with no row, or replaces a
+  `printer_calibration` row of its key that differs; it never replaces a person's, the
+  fill's or the fetch's. A person's save tags each row it adds or changes `person`.
 - `supplier_products`: supplier, SKU or article number, product URL, pack size
   (spools per order line), note.
 - `price_points`: supplier product, price, currency, price per kg, date, source
@@ -414,9 +428,21 @@ BB has a flat list (`/inventory/locations`) plus location sensors
   Bambuddy's `/location-ha-sensors/entities`, so SB holds no HA token. The AMS sensors
   are made from the first report that shows a number, with an AMS-unit location as the
   parent of the unit's tray locations. The humidity is the report's `humidity_raw`, the
-  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI, and is not
-  sent: follow-up issue #6646 adds the notification, and `notify` is kept for it. The
+  percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI. The
   plan's Decisions 4 to 7 have the details.
+  As built in #6646: with `notify` on, a sensor sends one notification when it starts
+  alerting and one when it stops, never one per reading. A reading outside the band opens
+  the alert at once; it closes only once the readings have stayed inside for 10 minutes,
+  so a value that flaps across a limit sends one start. The reading that opens or closes
+  it queues the notification, with its message, under the sensor's row lock
+  (`filament_sensor_notifications`). The print worker sends it at most once through
+  Bambuddy's `POST /notifications/app-message`, a pass a minute, claiming and ending the
+  rows through CRUD routes, so it reaches the channels the owner set up in Bambuddy and
+  the CRUD service makes no Bambuddy call for it. Only a sensor's newest queued
+  notification is sent, and none after `notify` is turned off. The sensor shows its
+  newest notification: sent, waiting, or failed and why. Notification rows older than 30
+  days are pruned, except each sensor's newest. The plan's Decisions 29 to 50 have the
+  details.
 - A move writes a `moved` event (from, to) in the spool's ledger. A scan of a
   location QR, then of a spool tag or label, moves the spool.
 - Time spent outside dry storage counts toward "needs drying" for hygroscopic
@@ -525,6 +551,13 @@ holds each decision and what it costs if wrong.
   nothing.
 - **Shopping list statuses.** An item is `pending` or `purchased`; a repeat keeps the first
   `purchased_at`. The list shows newest first, pending above purchased.
+- **An empty spool adds its type (#6868).** A spool whose grams move from above 0 to 0, by
+  any ledger write, or that is archived, adds a `pending` item for its type in the same
+  transaction, unless one is already pending for that type; a spool with no type adds a text
+  item. The item names the spool (`empty_spool_id`) and its note says when. The stored
+  setting `filament_shopping_auto_add_empty` (Settings → Filament, on by default) turns it
+  off. It orders nothing, so "stock reorder automation" above stays out of scope. The
+  rulings are in `docs/superpowers/plans/2026-11-17-filament-suppliers.md`.
 - **Draft bounds and archived suppliers.** A line's quantity is at most 1,000; a line may
   not fill more spools than its quantity, and its total must fit `numeric(12,4)`; each is a
   422. A draft for an archived supplier is a 422, and confirming an invoice whose supplier
@@ -560,7 +593,7 @@ holds each decision and what it costs if wrong.
   (`/spoolbuddy/scale/reading`). With BB→SB sync of weights on, SB reads
   `last_scale_weight` and `last_weighed_at` changes and writes `weighed`.
   As built in #6268: the setting is `filament_sync.weights` (`off` or `bb_to_sb`,
-  on by default). With `off`, the pull books no `bb_scale` weighing and no `bb` weight
+  on by default; #6265 widened it to the four values of §8). With `off`, the pull books no `bb_scale` weighing and no `bb` weight
   reading for a spool SB already tracks. A spool SB has never seen keeps its first `bb`
   reading, because it needs a start weight. A `bb_dried` event is not a weight and is
   still booked. The plan's Decision 3 has the reason.
@@ -614,7 +647,7 @@ holds each decision and what it costs if wrong.
     checked against the stored kind (422 otherwise). Binding with it locks the spool's weight, and
     unbinding never unlocks it; a move ("Move it here") sends `override: false`. Every binding
     change queues the tag in `filament_bb_tag_pending`; the push to Bambuddy (`link-tag`, a 409
-    `tag_already_linked` moves it) runs only with `filament_sync.tags` `sb_to_bb`, SB first and
+    `tag_already_linked` moves it) runs only when `pushes(tags)` (`sb_to_bb` or `two_way`, #6265), SB first and
     Bambuddy second, comparing state before each write. Override mode is one row
     (`filament_rfid_state`), set by `PUT /filament/rfid/override-mode`; `GET /filament/rfid/status`
     reports it, with `blocked` when Bambuddy's auth refuses the setting write. The spool refresh
@@ -655,8 +688,9 @@ else SB proposes a new type for a person to confirm.
 - A Temporal workflow per BB instance. SB events signal it, so a push leaves
   within seconds of the event. A pull runs on a schedule (BB has no webhooks
   for spools in the measured spec).
-- Each push is idempotent: it compares the hash of the fields it owns with the
-  last pushed hash.
+- Each push is idempotent: it compares the fields it owns with Bambuddy's current
+  values; the hash of the last push only lets an event-driven pass skip an item (as
+  built in #6265, Decision 7).
 - Two-way conflicts: the newer change wins, per field. The owner reports no
   conflicts in practice; this rule is enough. BB has one `updated_at` per spool,
   so "newer" compares SB's event time with that value.
@@ -728,6 +762,117 @@ else SB proposes a new type for a person to confirm.
     stopped at a 60 s read timeout and is not used.
 - The sync runs in a worker and calls CRUD routes for SB data, with a service
   credential (§3).
+
+**As built in #6265** (plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`,
+"Decisions this plan makes" and "Decisions made while building"; the decision numbers
+below are the plan's):
+
+- Worker (Decisions 1, 2, 18). The push is the workflow `FilamentBbSync` and its pass
+  activity, on the `bambuddy` queue of the print worker (`scadbuddy-print`). SB's side
+  goes through the API's CRUD area `filament-sync`; the worker holds no database secret
+  (`backend/scadbuddy/workflows/filament_sync.py`, `filament/bb_sync_run.py`). A new
+  workflow type on that queue needs a `Recreate` roll of `scadbuddy-print` (README, "A
+  release that needs `Recreate`"). A Bambuddy key with auth on needs
+  `can_manage_inventory`.
+- Settings (Decisions 3, 4). `filament_sync` holds six data types (`spools`, `weights`,
+  `tags`, `suppliers`, `locations`, `presets`), each `off`, `sb_to_bb`, `bb_to_sb` or
+  `two_way`. `pulls(d)` is `bb_to_sb` or `two_way`; `pushes(d)` is `sb_to_bb` or `two_way`
+  (`core/settings.py` `FilamentSync`). `spools`, `weights`, `tags` and `presets` default to
+  `bb_to_sb`, `suppliers` and `locations` to `off`. A migration rewrote #6264's stored
+  `tags` once: `off` became `bb_to_sb`, `sb_to_bb` became `two_way`
+  (`migrations/20261118T1907Z_filament_sync_tags_values.sql`). A row with `spools` `off`
+  is the exception: before #6265 it skipped the whole pull, so it still pulls nothing.
+  Its `weights`, `presets` and `tags` became `off`, except a `tags` `sb_to_bb`, which
+  stayed `sb_to_bb` (the push it was).
+- Pull (Decision 5, then #6772, Decisions 172-186). BB to SB is still `SpoolRefresh`'s pull
+  (`filament/bambuddy_pull.py`), gated per data type, and now also takes archive state,
+  K values, suppliers and locations. Since #6772 its Bambuddy reads run on the print
+  worker: the spool refresh's activity, and the import route, start `FilamentBbPull` on
+  the `bambuddy` queue and wait for it. Its activity (`filament/bb_pull_run.py`) reads
+  Bambuddy and sends the rows to the CRUD area `filament-pull`
+  (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`), which
+  applies them (`filament/bb_pull_apply.py`). The CRUD service makes no Bambuddy call for
+  the pull. The worker never names the actor the events are booked to: a person's import
+  is kept by the API under the run's id (`filament_pull_actors`), else `bambuddy`.
+  `SpoolRefresh`'s commands did not change; the push (`FilamentBbSync`) stays a
+  workflow of its own.
+- Tags (Decision 6). The tag queue and drain of #6264 (`filament_bb_tag_pending`,
+  `rfid_push.drain_tags`) are kept and gated by `pushes(tags)`. The engine never sends
+  `tag_uid` or `tray_uuid`; a new link queues the spool's open tags.
+- Plan (Decisions 7, 8). The plan is state-based: each link keeps `pushed_fields` and the
+  hash only lets an event-driven pass skip an item. A full pass (the timer, or "Sync
+  now") compares with Bambuddy's current rows. Under `two_way` a field is pushed when SB's
+  value differs and Bambuddy still holds what SB last saw there (`bb_seen`), or SB's change
+  time (`bb_sync_plan.sb_changed_at`) is strictly after BB's `updated_at`; ties go to
+  Bambuddy. Under `sb_to_bb` a differing field is always pushed. The pull uses the same
+  `sb_changed_at`.
+- Echo (Decision 9). SB's own write is stored as `bb_seen` and booked as one
+  `synced_from_bb` event with `pushed: true` and no changes, so the pull does not read it
+  as a Bambuddy change.
+- Creates (Decision 10). A create of a spool, supplier, location or catalog entry first
+  stores an intent in `filament_bb_creates`. A later plan adopts a matching Bambuddy row
+  made after the intent started, in place of a second create; the pull skips a BB spool
+  an intent can claim.
+- Bounds (Decision 11). A pass makes at most 4 plan rounds and 200 writes, and the plan
+  route returns at most `200 - written` writes. With work left, the next pass starts at
+  once.
+- Instance (Decision 12). The workflow id carries a hash of the normalised Bambuddy URL.
+  `filament_bb_sync_state.instance` records the instance the links belong to. A pass for
+  another instance plans nothing and reports `instance_changed`, and the sync stays
+  stopped until the links are reset.
+- Reset of the links (#6773, Decisions 165-170). `POST /filament/sync/reset-links` takes
+  `confirm_instance`, which must be the recorded instance (409 `confirm_mismatch`), and
+  answers 409 `same_instance` when the links belong to the configured Bambuddy and
+  `nothing_to_reset` when no instance is recorded. In one transaction it deletes the spool
+  links, the supplier, location, insert type and spool type links (their Bambuddy ids,
+  hashes and seen copies), the create intents, the error rows, `filament_bb_ignored` and the
+  recorded instance, answers the counts, then nudges a full pass. No SB spool, type,
+  supplier or location is deleted. `GET` on the same path is its dry run. The status reports
+  `instance_changed`; Settings → Filament then offers "Reset Bambuddy links" with a confirm
+  dialog, and the agent has `filament_sync_reset_links` (outward). A plan or results call
+  for another instance than the configured Bambuddy's does nothing. After a reset that
+  deletes, a spool is linked again only by its RFID tag (the pull, step 2): Decision 10's
+  adoption needs an intent, which the reset deletes, so an untagged spool is created again
+  on the side its direction sends it to.
+- Reset to the same Bambuddy (#6845, Decisions 193-199). Bambuddy has no instance id, so a
+  new URL to the same Bambuddy is another instance. The dry run reads the configured
+  Bambuddy's spools; when it holds every linked BB spool id, none older than its link's
+  `bb_updated_at`, at least one exactly that, and at least half the links timed on both
+  sides (`same_bambuddy`), the reset with `expect_kept: true` reads them again and, while
+  that still holds, deletes nothing, records the configured instance and answers
+  `kept: true`, so no spool is made twice. When it no longer holds, or the read fails, it
+  is 409 `proof_changed` and deletes nothing. A dry run that cannot read Bambuddy answers
+  `bambuddy_unreadable: true` and offers the delete; the delete (`expect_kept: false`)
+  reads no Bambuddy. The pull (the Schedule's and the import) does nothing while the links
+  belong to another instance.
+- Lifecycle (Decision 13). A spool is created in Bambuddy only when it is unarchived and
+  `pushes(spools)`. Archive and restore are pushed. A 404 on a linked spool, or on the
+  probe of one a complete listing lacks, deletes the link; a partial listing never does.
+  A linked supplier, location, insert type or filament entry a complete listing lacks is
+  probed too; its 404 deletes the link, and the next round creates the row again under
+  its direction (#6688, plan Decisions 187-192, 200 and 201).
+- Fields (Decisions 14, 15). The fields each data type carries are in Decision 14. Not
+  pushed: SKU settings (#6270 owns them) and `last_scale_weight`. Supplier links and
+  prices go to Bambuddy only, and are never pulled.
+- Child types (Decision 16). Weights, presets, suppliers per spool and a spool's location
+  act only on spools already linked.
+- Pull widened (Decisions 138-152). The pull reads archived spools and takes BB's archive
+  state, K values, suppliers and locations. It seeds a link's seen archive state (`bb_seen.archived_at`) on its first pull, and its
+  seen location (`bb_seen.location_id`) on the first pull where BB's place is null or maps
+  to an open SB location in no printer's place, with BB's value and moves nothing on that
+  pull, so a link seen before #6265 is not archived or moved on the first pull (Decisions
+  150, 152, 164 and 171). A seen location of a BB place SB has never mapped (in any
+  state) counts as absent and is seeded again; one SB mapped once stays seen. It never
+  moves a spool out of a printer place.
+- SB writes that do not nudge (Decision 17). The API nudges the workflow after a write
+  on `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py`, and after
+  a settings save that changes `filament_sync`. Capture and `sync_ams_weights`
+  (`filament/capture.py`), the Bambuddy import and the RFID scan (Decision 163) and the
+  print worker's CRUD `filament` writes
+  (`…/print-uses/settle`, `bb-to-sb`) do not. They reach Bambuddy on the timer only,
+  against "SB events signal it" above.
+- Status (Decision 19). `GET /filament/sync/status` and `POST /filament/sync/run` show and
+  start a pass; the state is in `filament_bb_sync_state` and `filament_bb_push_errors`.
 
 ## 9. Invoice import flow
 
@@ -925,7 +1070,7 @@ that block it (GitHub's blocked-by links hold the same graph).
 | 6 | [#6269](https://github.com/eh-homelab/ScadBuddy/issues/6269) | History timeline, metrics, Grafana panel (§5.7) | [#6263](https://github.com/eh-homelab/ScadBuddy/issues/6263) |
 | 6 | [#6270](https://github.com/eh-homelab/ScadBuddy/issues/6270) | Parity sweep against §11 | all of the above |
 
-As built in #6264: `filament_sync.tags` takes `off` (the default) and `sb_to_bb`. #6265 widens it to the four values of §8.
+As built in #6264: `filament_sync.tags` took `off` (the default) and `sb_to_bb`. As built in #6265: every data type takes the four values of §8 (§8.2, "As built in #6265"), and #6264's stored `tags` values were rewritten once (`off` to `bb_to_sb`, `sb_to_bb` to `two_way`).
 
 [#6209](https://github.com/eh-homelab/ScadBuddy/issues/6209) (the price book keeps alpha, colour stops and effect) landed in
 [#6211](https://github.com/eh-homelab/ScadBuddy/pull/6211) before [#6261](https://github.com/eh-homelab/ScadBuddy/issues/6261); #6261's types write the book's alpha, stops and effect from it.

@@ -72,9 +72,19 @@ from scadbuddy.crud.render import (
     RemoteJobProjection,
 )
 from scadbuddy.crud.wire import PREFIX
-from scadbuddy.filament.component import FILAMENT
+from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.component import FILAMENT, Filament
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.invoices import InvoiceStore
+from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.presets import PoolSpoolPresets
+from scadbuddy.filament.rfid_mode import RfidModeStore
+from scadbuddy.filament.sensors import SensorStore
+from scadbuddy.filament.shopping import ShoppingStore
+from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.suppliers import SuppliersStore
+from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
@@ -99,6 +109,7 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobRef, BlobStat
 from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
@@ -608,6 +619,26 @@ def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient
     )
 
 
+def filament_on(pool: Pool) -> Filament:
+    """The API's `Filament` on ``pool``."""
+    types = SpoolTypeStore(pool)
+    spools = FilamentSpoolStore(pool)
+    return Filament(
+        catalog=CatalogStore(pool),
+        types=types,
+        spools=spools,
+        locations=LocationStore(pool),
+        sensors=SensorStore(pool),
+        inventory=FilamentInventory(pool),
+        presets=PoolSpoolPresets(pool),
+        rfid=RfidModeStore(pool),
+        suppliers=SuppliersStore(pool, lambda: "USD"),
+        invoices=InvoiceStore(pool, lambda: "USD", spools, types),
+        shopping=ShoppingStore(pool),
+        metrics=MetricsStore(pool, spools, MetricsSettings),
+    )
+
+
 def print_crud_app(
     store: SettingsStore,
     credentials: ServiceCredentialStore,
@@ -657,10 +688,9 @@ def print_crud_app(
         SLICING: SimpleNamespace(
             store=NativeSliceStore(store.pool), held=HeldPresetStore(store.pool)
         ),
-        # A native run's SB spools (#6262 Task 6): the API's own reads on ``store``'s pool.
-        FILAMENT: SimpleNamespace(
-            inventory=FilamentInventory(store.pool), presets=PoolSpoolPresets(store.pool)
-        ),
+        # A native run's SB spools (#6262 Task 6) and the Bambuddy sync's plan and results
+        # (#6265 Task 6): the API's own stores on ``store``'s pool.
+        FILAMENT: filament_on(store.pool),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -740,25 +770,8 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = [
-        "settings",
-        "runs",
-        "operations",
-        "events",
-        "printer-ensure",
-        "reprints",
-        "uploads",
-        "previews",
-        "copy-leases",
-        "links",
-        "lan-imports",
-        "printers",
-        "rack",
-        "spools",
-        "transfer-urls",
-        "access-codes",
-        "filament",
-    ]
+    # Every area the print worker waits for, so a new one never leaves it waiting (#6855).
+    areas = sorted(PRINT_CRUD_AREAS)
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):

@@ -78,6 +78,25 @@ describe('the type page', () => {
     expect((await getType(T.JADE)).k_values[0]).toMatchObject({ cali_idx: 3, name: 'Jade White 0.4' })
   })
 
+  it('shows and saves the drying values (#6720)', async () => {
+    const { user } = render(`/filament/types/${T.ORANGE}`)
+    const temp = await screen.findByLabelText('Drying temperature (°C)')
+    expect(temp).toHaveValue('70')
+    const hours = screen.getByLabelText('Drying time (h)')
+    expect(hours).toHaveValue('')
+    await user.type(hours, '7.5')
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect((await getType(T.ORANGE)).drying_hours).toMatch(/^7\.5/))
+    expect((await getType(T.ORANGE)).drying_temp_c).toBe(70)
+  })
+
+  it('refuses drying hours that are not a number', async () => {
+    const { user } = render(`/filament/types/${T.ORANGE}`)
+    await user.type(await screen.findByLabelText('Drying time (h)'), 'soon')
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    expect(await screen.findAllByText('Enter the drying hours as a number, such as 1.24.')).not.toHaveLength(0)
+  })
+
   it('shows the server refusal and keeps the edits', async () => {
     const { user } = render(`/filament/types/${T.JADE}`)
     await user.type(await screen.findByLabelText('Bed temperature, min (°C)'), '90')
@@ -378,12 +397,16 @@ describe('the prices panel', () => {
     expect(within(diff).queryByRole('row', { name: /Diameter/ })).toBeNull()
     expect(within(dialog).getByText(/24.99/)).toBeInTheDocument()
     await user.click(within(density).getByRole('checkbox'))
-    await user.click(within(dialog).getByRole('button', { name: 'Apply 4 changes' }))
+    // The drying values come from the profile too (#6720).
+    expect(within(diff).getByRole('row', { name: /Drying temperature/ })).toHaveTextContent('55')
+    await user.click(within(dialog).getByRole('button', { name: 'Apply 6 changes' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     const type = await getType(T.JADE)
     expect([type.nozzle_temp_min, type.nozzle_temp_max, type.bed_temp_min, type.bed_temp_max, type.density_g_cm3]).toEqual([190, 230, 35, 65, null])
+    expect([type.drying_temp_c, type.drying_hours]).toEqual([55, '8'])
     expect(screen.getByLabelText('Nozzle temperature, min (°C)')).toHaveValue('190')
-    expect(await screen.findByText('Filled 4 fields from Bambu PLA Basic @BBL H2C 0.4 nozzle.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Drying temperature (°C)')).toHaveValue('55')
+    expect(await screen.findByText('Filled 6 fields from Bambu PLA Basic @BBL H2C 0.4 nozzle.')).toBeInTheDocument()
   })
 
   it('says why a type cannot be filled from a profile', async () => {

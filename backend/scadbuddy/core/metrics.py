@@ -731,12 +731,10 @@ class FilamentCollector(Collector):
     replaces the one reference to the whole tuple, so a scrape sees the old snapshot or
     the new one, never a mix, and a failed export leaves the old one whole."""
 
-    def __init__(self, families: Iterable[Metric] | None = None) -> None:
+    def __init__(self) -> None:
         # Empty families to start, so `# HELP` and `# TYPE` show before the first snapshot.
-        self._families = tuple(
-            families
-            if families is not None
-            else (GaugeMetricFamily(n, d, labels=ls) for n, d, ls in FILAMENT_SERIES)
+        self._families: tuple[Metric, ...] = tuple(
+            GaugeMetricFamily(n, d, labels=ls) for n, d, ls in FILAMENT_SERIES
         )
 
     def swap(self, families: Iterable[Metric]) -> None:

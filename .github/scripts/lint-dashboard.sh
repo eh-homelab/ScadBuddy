@@ -151,8 +151,15 @@ for node in ast.walk(tree):
             print("MALFORMED_ROW line %d" % row.lineno)
             continue
         name, _, labels = row.elts
-        names = [e.value for e in getattr(labels, "elts", []) if isinstance(e, ast.Constant)]
-        print(" ".join([name.value, *names]))
+        if not (
+            isinstance(labels, (ast.Tuple, ast.List))
+            and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in labels.elts
+            )
+        ):
+            print("MALFORMED_ROW line %d" % row.lineno)
+            continue
+        print(" ".join([name.value, *(e.value for e in labels.elts)]))
 for call in ast.walk(tree):
     if not isinstance(call, ast.Call):
         continue
@@ -175,7 +182,7 @@ PY
 # A FILAMENT_SERIES row the parse above could not read is an error, never skipped.
 while IFS= read -r bad; do
   problem "backend/scadbuddy/core/metrics.py" \
-    "FILAMENT_SERIES row at ${bad#MALFORMED_ROW } is not a (\"scadbuddy_...\", help, labels) tuple"
+    "FILAMENT_SERIES row at ${bad#MALFORMED_ROW } is not a (\"scadbuddy_...\", help, (\"label\", ...)) tuple"
 done < <(grep '^MALFORMED_ROW ' <<< "$exposed" || true)
 exposed=$(grep -v '^MALFORMED_ROW ' <<< "$exposed" || true)
 [ -n "$exposed" ] \

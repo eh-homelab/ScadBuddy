@@ -100,21 +100,47 @@ DEFAULT_CRUD_PORT = 8082
 _ADDRESS = re.compile(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+")
 
 
+#: Which way one kind of filament data moves (#6265 Decision 3): ``off`` not at all,
+#: ``sb_to_bb`` ScadBuddy to Bambuddy, ``bb_to_sb`` Bambuddy to ScadBuddy, ``two_way`` both.
+SyncDirection = Literal["off", "sb_to_bb", "bb_to_sb", "two_way"]
+
+
+def pulls(direction: SyncDirection) -> bool:
+    """True when ``direction`` moves Bambuddy's data into ScadBuddy."""
+    return direction in ("bb_to_sb", "two_way")
+
+
+def pushes(direction: SyncDirection) -> bool:
+    """True when ``direction`` moves ScadBuddy's data into Bambuddy."""
+    return direction in ("sb_to_bb", "two_way")
+
+
 class FilamentSync(BaseModel, extra="forbid"):
     """Which way each kind of filament data moves between ScadBuddy and Bambuddy (spec
-    2026-11-14 §8). ``spools``: ``off`` leaves Bambuddy's spools and usage rows alone;
-    ``bb_to_sb`` pulls them into ScadBuddy's own on the refresh Schedule. ``tags``: ``off``
-    writes no tag to Bambuddy; ``sb_to_bb`` pushes the tags queued by a binding change
-    (#6264). It does not gate the override mode or the AMS slot configure, which write
-    Bambuddy whatever it says. ``weights``: ``off`` books no Bambuddy scale weighing
-    (``bb_scale``) for any spool, a new one too, and no ``bb`` weight reading on a spool
-    ScadBuddy already tracks (an update or a link). Only a new spool keeps its first ``bb``
-    reading, as it needs a starting weight. ``bb_to_sb`` books them all (#6268). #6265
-    adds data types and the values ``sb_to_bb`` and ``two_way``."""
+    2026-11-14 §8, #6265): a `SyncDirection` per data type, read through `pulls` and
+    `pushes`. The defaults keep what the pull did before #6265 (Decision 3): ``spools``,
+    ``weights``, ``tags`` and ``presets`` pull, ``suppliers`` and ``locations`` are off.
 
-    spools: Literal["off", "bb_to_sb"] = "bb_to_sb"
-    tags: Literal["off", "sb_to_bb"] = "off"
-    weights: Literal["off", "bb_to_sb"] = "bb_to_sb"
+    ``spools``: the pull of a spool's own fields, of new BB spools (made or linked) and of
+    the spool catalog (insert types). ``weights``: BB's ``bb`` weight readings, scale
+    weighings, dryings and weight lock on a spool ScadBuddy already tracks (a new spool
+    always keeps its first reading, as it needs a starting weight, #6268). BB's usage rows
+    book while ``spools`` or ``weights`` pulls, on linked spools only. ``tags``: the pull
+    binds a linked spool to a tag BB names (a new BB spool takes its tags whatever this
+    says: they are what it is); the push drains the tags a binding change queued (#6264).
+    It does not gate the override mode or the AMS slot configure, which write Bambuddy
+    whatever it says.
+    ``presets``: the pull of BB's ``slicer_filament`` into a spool's ``migrated`` presets.
+    ``suppliers`` and ``locations`` move their own rows. Child data types act only on
+    spools linked already (Decision 16). A data type switched to pull later takes what BB
+    changed while it did not pull."""
+
+    spools: SyncDirection = "bb_to_sb"
+    weights: SyncDirection = "bb_to_sb"
+    tags: SyncDirection = "bb_to_sb"
+    presets: SyncDirection = "bb_to_sb"
+    suppliers: SyncDirection = "off"
+    locations: SyncDirection = "off"
 
 
 class Settings(BaseSettings):
@@ -748,11 +774,10 @@ class Settings(BaseSettings):
     spool_overlay_refresh_seconds: int = Field(default=300, ge=0)
     # SCADBUDDY_FILAMENT_SYNC (JSON), _FILAMENT_LOW_STOCK_PCT and
     # _FILAMENT_DEFAULT_COST_PER_KG (#6262 Task 13): the Filament section's settings.
-    # `filament_sync.spools` "off" turns the pull of Bambuddy's spools and the booking of its
-    # usage rows off; a spool that sets no low-stock percentage is low under
-    # `filament_low_stock_pct` of its label weight; `filament_default_cost_per_kg`, in the
-    # shop's `orders_currency`, values a spool with no cost in the inventory summary
-    # (`filament/spools.py` `summary`).
+    # `filament_sync` sets a direction per data type (`FilamentSync`); a spool that sets
+    # no low-stock percentage is low under `filament_low_stock_pct` of its label weight;
+    # `filament_default_cost_per_kg`, in the shop's `orders_currency`, values a spool with
+    # no cost in the inventory summary (`filament/spools.py` `summary`).
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = Field(default=20, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)

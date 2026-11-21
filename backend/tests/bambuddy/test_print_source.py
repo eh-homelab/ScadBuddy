@@ -60,7 +60,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
     write_plates_3mf,
 )
-from scadbuddy.render.plate import DEFAULT_PLATE
+from scadbuddy.render.plate import DEFAULT_PLATE, plate_for
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 from tests.bambuddy.conftest import BASE_URL, recording
@@ -469,8 +469,10 @@ def _scadbuddy_3mf(tmp_path: Path) -> bytes:
 
 
 def _authors_3mf(tmp_path: Path, *, covers: bool = False) -> bytes:
-    """A two-plate project its author saved in Bambu Studio: their placement, their
-    plates, a real printer preset, and with ``covers`` each plate's cover images."""
+    """A two-plate project its author saved in Bambu Studio for the H2C: their
+    placement, their plates, a real printer preset, and with ``covers`` each plate's
+    cover images. It is laid out on the H2C's own bed, so a print on the H2C keeps its
+    placement (#6820: a file from another bed size is moved, as Bambu Studio moves it)."""
     tray = ColourPart(1, "Tray", "#FF6AC1", trimesh.creation.box(extents=(30, 30, 4)))
     lid = ColourPart(2, "Lid", "#1F6FEB", trimesh.creation.box(extents=(12, 12, 2)))
     out = tmp_path / "maze.3mf"
@@ -482,6 +484,7 @@ def _authors_3mf(tmp_path: Path, *, covers: bool = False) -> bytes:
         if covers
         else None,
         model_name="maze",
+        plate=plate_for("H2C"),
     )
     with zipfile.ZipFile(out) as archive:
         entries = [(name, archive.read(name)) for name in archive.namelist()]

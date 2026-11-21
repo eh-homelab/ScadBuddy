@@ -31,6 +31,7 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_SWEEPS,
     SWEEPS,
 )
+from tests.test_library_versioning import _Nudges
 from tests.test_print_worker_task import StubWorker
 
 
@@ -71,13 +72,17 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(
-            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+            temporal_task_queue_library="library",
+            temporal_task_queue_bambuddy="bambuddy",
+            revision="test",
+            spool_overlay_refresh_seconds=0,
         ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=0),
         previews=None,
         components=SimpleNamespace(get=lambda key: SimpleNamespace(store=None, kinds={})),
         settings_store=None,
+        filament_sync=_Nudges(),
     )
     stop = asyncio.Event()
     with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
@@ -184,6 +189,11 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "ensure_spool_schedule", no_spool_schedule)
+
+    async def no_notify_schedule(client: object, queue: str) -> None:
+        pass
+
+    monkeypatch.setattr(main, "ensure_sensor_notify_schedule", no_notify_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
 
     async def no_triggers() -> None:
@@ -192,7 +202,10 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(
-            temporal_task_queue_library="library", revision="test", spool_overlay_refresh_seconds=0
+            temporal_task_queue_library="library",
+            temporal_task_queue_bambuddy="bambuddy",
+            revision="test",
+            spool_overlay_refresh_seconds=0,
         ),
         temporal=object(),
         config=SimpleNamespace(asset_sweep_interval=600.0),
@@ -203,6 +216,7 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
             content=object(), remote_assets=SimpleNamespace(backfill=backfill), fonts=None
         ),
         assets=object(),
+        filament_sync=_Nudges(),
     )
     stop = asyncio.Event()
     task = asyncio.create_task(main._run_library_worker(state, stop))  # type: ignore[arg-type]
@@ -484,6 +498,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             push_all=slow_push,
             # #4975: the expired signed-in sessions, one delete.
             sessions=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
+            # #6646 Decision 49: the sensors' old notification rows, one delete.
+            sensors=SimpleNamespace(prune_notifications=lambda: time.sleep(0.1)),
             # Phase 6: the spent delegation codes and long-dead access tokens.
             delete_spent_delegations=lambda: time.sleep(0.1),
             tokens=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),

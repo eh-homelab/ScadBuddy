@@ -58,6 +58,25 @@ describe('PrintPicker · prime tower before the slice (#6758)', () => {
     })
   })
 
+  it("Remember leaves out the tower place, which belongs to this file's layout (#6796)", async () => {
+    const run = vi.spyOn(api, 'runPrint')
+    const remember = vi.spyOn(api, 'putModelChoices')
+    renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await chooseNoSparseLayers()
+    fireEvent.click(await screen.findByRole('button', { name: 'Move the prime tower' }))
+    await screen.findByTestId('tower-moved')
+
+    const print = screen.getByRole('button', { name: /^Print$/ })
+    await waitFor(() => expect(print).toBeEnabled())
+    fireEvent.click(print)
+    await waitFor(() => expect(run).toHaveBeenCalled())
+    expect(run.mock.calls[0]?.[1]).toMatchObject({
+      process_overrides: { wipe_tower_x: ['157.243'], wipe_tower_y: ['5'] },
+    })
+    await waitFor(() => expect(remember).toHaveBeenCalled())
+    expect(remember.mock.calls.at(-1)?.[1].process_overrides ?? null).toBeNull()
+  })
+
   it('Undo takes the move out again', async () => {
     const check = vi.spyOn(api, 'checkPrint')
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)

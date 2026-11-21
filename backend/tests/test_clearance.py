@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -24,8 +25,9 @@ from scadbuddy.bambuddy.print_run import PreparedRun, PrintRunRequest, _sequence
 from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.render import bambu3mf
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.paint import single_code
 from scadbuddy.render.read_budget import ReadBudget
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, Paint
 
 H2C = clearance_for("H2C")
 
@@ -339,6 +341,257 @@ def test_one_colour_objects_and_plates_of_several_objects_say_nothing_of_it(
     _, warnings = check_plates(payload, [1, 2], None)
 
     assert warnings == []
+
+
+def _painted_part(painted: bool) -> ColourPart:
+    """One part of filament 1 whose first faces are painted with filament 2, or left
+    unpainted (#6797)."""
+    part = _part(1)
+    faces = len(part.mesh.faces)
+    codes = tuple(single_code(2) if painted and face < 4 else "" for face in range(faces))
+    return replace(part, paint=Paint(codes, ("#FF6AC1", "#00AEEF")))
+
+
+def test_a_one_part_object_painted_in_a_second_colour_warns(tmp_path: Path) -> None:
+    """#6797: a single part whose second colour comes from painting prints layer by
+    layer just as two colour parts do, so by object has no effect on it either."""
+    payload = _plate_3mf(tmp_path / "painted.3mf", [PlateParts((_painted_part(True),), (1,))])
+
+    _, warnings = check_plates(payload, [1], None)
+
+    [warning] = warnings
+    assert warning.kind == "by-object-one-object"
+    assert "2 colours" in warning.message
+
+
+def test_an_unpainted_one_colour_object_says_nothing_of_it(tmp_path: Path) -> None:
+    """#6797: a part with paint codes that name no other filament stays one colour."""
+    payload = _plate_3mf(tmp_path / "plain.3mf", [PlateParts((_painted_part(False),), (1,))])
+
+    _, warnings = check_plates(payload, [1], None)
+
+    assert warnings == []
+
+
+def test_a_part_stating_extruder_zero_prints_in_its_objects_filament(tmp_path: Path) -> None:
+    """claude-review on #6803: in Bambu Studio a part's ``extruder`` 0 means the
+    object's own, as `objects3mf._extruder` reads it. An object of filament 1 whose
+    parts state "1" and "0" is one colour, so it gets no by-object warning."""
+    payload = one_object_two_colours_3mf(tmp_path / "menorah.3mf")
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = archive.read(bambu3mf.MODEL_SETTINGS_NAME).decode()
+    stated = settings.replace(
+        '<metadata key="extruder" value="2"/>', '<metadata key="extruder" value="0"/>'
+    )
+    assert stated != settings
+    zeroed = bambu3mf.rezipped(payload, {bambu3mf.MODEL_SETTINGS_NAME: stated.encode()})
+
+    _, warnings = check_plates(zeroed, [1], None)
+
+    assert warnings == []
+
+
+def _settings_edited(payload: bytes, old: str, new: str) -> bytes:
+    """``payload`` with every ``old`` in its ``model_settings.config`` made ``new``."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings = archive.read(bambu3mf.MODEL_SETTINGS_NAME).decode()
+    edited = settings.replace(old, new)
+    assert edited != settings
+    return bambu3mf.rezipped(payload, {bambu3mf.MODEL_SETTINGS_NAME: edited.encode()})
+
+
+def test_painting_past_the_digit_budget_is_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6823: decoding a paint code costs a pure-Python step per bit, so the distinct
+    codes' digits are capped as the slot hints cap them. Past the cap the painting is
+    left out, and only the stated filaments count."""
+    payload = _plate_3mf(tmp_path / "painted.3mf", [PlateParts((_painted_part(True),), (1,))])
+    monkeypatch.setattr(clearance, "MAX_HINT_PAINT_DIGITS", 0)
+
+    by_plate, warnings = check_plates(payload, [1], None)
+
+    assert warnings == []
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1})]
+
+
+def test_painting_decoded_before_the_budget_ran_out_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claude-review on #6832: the object whose codes pass the budget, and every object
+    after it, count their stated filaments only; an object decoded before keeps its
+    painting. Plate 1's object is painted with filament 2 (code "8", one digit); plate
+    2's with filament 3 (code "0C", two more), past a budget of one digit."""
+    first = _painted_part(True)
+    second = _part(1)
+    faces = len(second.mesh.faces)
+    codes = tuple(single_code(3) if face < 4 else "" for face in range(faces))
+    colours = ("#FF6AC1", "#00AEEF", "#FFD700")
+    second = replace(second, paint=Paint(codes, colours))
+    out = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts((first,), (1,)), PlateParts((second,), (1,))],
+        list(colours),
+        out,
+        thumbnails=None,
+        model_name="menorah",
+    )
+    payload = out.read_bytes()
+    monkeypatch.setattr(clearance, "MAX_HINT_PAINT_DIGITS", len(single_code(2)))
+
+    by_plate, _ = check_plates(payload, [1, 2], None)
+
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})]
+    assert [obj.extruders for obj in by_plate[2]] == [frozenset({1})]
+
+
+def test_on_one_plate_the_object_decoded_first_keeps_its_painting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude-review on #6837: within one plate too, the first object keeps its
+    painting (filament 2, code "8", one digit) and the second, whose code "0C" passes a
+    one-digit budget, counts only what the file states, which here is nothing. With no
+    ``model_settings.config`` the one plate holds every build item."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+
+    def painted(object_id: int, x: int, code: str) -> str:
+        return (
+            f'<object id="{object_id}" type="model"><mesh><vertices>'
+            f'<vertex x="{x}" y="0" z="0"/><vertex x="{x + 10}" y="0" z="0"/>'
+            f'<vertex x="{x}" y="10" z="5"/></vertices><triangles>'
+            f'<triangle v1="0" v2="1" v3="2" paint_color="{code}"/>'
+            "</triangles></mesh></object>"
+        )
+
+    root = (
+        f'<model xmlns="{core}" unit="millimeter"><resources>'
+        f"{painted(1, 0, single_code(2))}{painted(2, 50, single_code(3))}"
+        '</resources><build><item objectid="1"/><item objectid="2"/></build></model>'
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("3D/3dmodel.model", root)
+    monkeypatch.setattr(clearance, "MAX_HINT_PAINT_DIGITS", len(single_code(2)))
+
+    by_plate, _ = check_plates(buffer.getvalue(), [1], None)
+
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2}), frozenset()]
+
+
+def test_a_painted_object_stating_no_extruder_prints_its_own_in_filament_1(
+    tmp_path: Path,
+) -> None:
+    """#6823: with no ``extruder`` stated, Bambu Studio prints a part in filament 1. A
+    part painted with filament 2 then prints in 1 and 2: two colours, not one."""
+    payload = _plate_3mf(tmp_path / "painted.3mf", [PlateParts((_painted_part(True),), (1,))])
+    unstated = _settings_edited(payload, '<metadata key="extruder" value="1"/>', "")
+
+    _, warnings = check_plates(unstated, [1], None)
+
+    [warning] = warnings
+    assert warning.kind == "by-object-one-object"
+    assert "2 colours" in warning.message
+
+
+@pytest.mark.parametrize("subtype", ["modifier_part", "negative_part", "support_blocker"])
+def test_the_painting_of_a_part_that_prints_nothing_is_not_counted(
+    tmp_path: Path, subtype: str
+) -> None:
+    """#6823: only printed parts (no subtype, or ``normal_part``) count, as their
+    ``extruder`` does. A modifier's or a negative part's painting is never printed
+    (`objects3mf.py` drops it too)."""
+    plate = PlateParts((_part(1), _painted_part(True)), (1, 1))
+    payload = _plate_3mf(tmp_path / "modifier.3mf", [plate])
+    assert len(check_plates(payload, [1], None)[1]) == 1
+    unprinted = _settings_edited(
+        payload, '<part id="2" subtype="normal_part">', f'<part id="2" subtype="{subtype}">'
+    )
+
+    by_plate, warnings = check_plates(unprinted, [1], None)
+
+    assert warnings == []
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1})]
+
+
+def test_painting_in_a_component_s_own_model_file_counts() -> None:
+    """#6823: Bambu Studio writes each part's mesh in ``3D/Objects/*.model``, so the
+    painting reaches the build item's object only through a component naming that
+    file. With no ``model_settings.config`` the part prints in filament 1."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    production = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    root = (
+        f'<model xmlns="{core}" xmlns:p="{production}" unit="millimeter"><resources>'
+        '<object id="2" type="model"><components>'
+        '<component p:path="/3D/Objects/object_1.model" objectid="1"/>'
+        '</components></object></resources><build><item objectid="2"/></build></model>'
+    )
+    part = (
+        f'<model xmlns="{core}" unit="millimeter"><resources>'
+        '<object id="1" type="model"><mesh><vertices>'
+        '<vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="5"/>'
+        "</vertices><triangles>"
+        f'<triangle v1="0" v2="1" v3="2" paint_color="{single_code(2)}"/>'
+        "</triangles></mesh></object></resources><build/></model>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("3D/3dmodel.model", root)
+        archive.writestr("3D/Objects/object_1.model", part)
+
+    by_plate, warnings = check_plates(buffer.getvalue(), [1], None)
+
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})]
+    [warning] = warnings
+    assert warning.kind == "by-object-one-object"
+
+
+def test_painting_reached_deeper_than_the_box_walk_met_it_counts() -> None:
+    """claude-review on #6837: `box` may meet an object first through a modifier, at
+    depth 1, while the painted walk skips modifiers and meets it at the end of a
+    normal part's chain of eight components, at depth 9. Its painting still counts.
+    A chain of 2,000 components, each one also a modifier of the root so `box` meets
+    it at depth 1, is walked without running out of Python's stack."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+
+    def file(chain: int) -> bytes:
+        mesh = (
+            '<mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/>'
+            '<vertex x="0" y="10" z="5"/></vertices><triangles>'
+            f'<triangle v1="0" v2="1" v3="2" paint_color="{single_code(2)}"/>'
+            "</triangles></mesh>"
+        )
+        objects = [f'<object id="9000" type="model">{mesh}</object>']
+        for n in range(1, chain + 1):
+            target = 9000 if n == chain else n + 1
+            objects.append(
+                f'<object id="{n}" type="model"><components>'
+                f'<component objectid="{target}"/></components></object>'
+            )
+        # Deepest first, so `box` meets each one at depth 1 before the chain does.
+        modifiers = ["9000", *(str(n) for n in range(chain, 1, -1))]
+        components = "".join(f'<component objectid="{m}"/>' for m in modifiers)
+        objects.append(
+            f'<object id="9999" type="model"><components>{components}'
+            '<component objectid="1"/></components></object>'
+        )
+        root = (
+            f'<model xmlns="{core}" unit="millimeter"><resources>{"".join(objects)}'
+            '</resources><build><item objectid="9999"/></build></model>'
+        )
+        parts = "".join(f'<part id="{m}" subtype="modifier_part"/>' for m in modifiers)
+        settings = (
+            f'<config><object id="9999">{parts}<part id="1" subtype="normal_part"/>'
+            "</object></config>"
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("3D/3dmodel.model", root)
+            archive.writestr(bambu3mf.MODEL_SETTINGS_NAME, settings)
+        return buffer.getvalue()
+
+    for chain in (8, 2000):
+        by_plate, _ = check_plates(file(chain), [1], None)
+        assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2})], chain
 
 
 async def test_only_a_by_object_print_gets_the_one_object_warning(tmp_path: Path) -> None:

@@ -64,6 +64,10 @@ settle (`filament/print_uses.py` `PrintUses`), each of which takes an
 ``Idempotency-Key`` of its own, a new UUID per call: each answers what that call
 booked.
 
+`RemoteSensorNotifications` (area ``sensor-notify``, #6646) claims the sensors' queued
+alert notifications and ends each after its Bambuddy call: the claim under an
+``Idempotency-Key`` of its own per call, the end natural.
+
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
@@ -121,6 +125,7 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+from pydantic import BaseModel
 
 from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
 from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail, SpoolAssignment
@@ -149,6 +154,7 @@ from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.client import (
     CrudClient,
     CrudRefusedError,
@@ -158,7 +164,35 @@ from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
 from scadbuddy.crud.wire import NOT_CONFIGURED
-from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayView
+from scadbuddy.filament.bb_pull_models import (
+    INSTANCE_CHANGED,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    TraysBody,
+    TraysReconciled,
+    UsageBody,
+    UsageBooked,
+)
+from scadbuddy.filament.bb_sync_models import (
+    BbSnapshot,
+    BbWrite,
+    BbWriteResult,
+    PlanRequest,
+    ResultsReport,
+    ResultsRequest,
+    SyncPassResult,
+    SyncPlan,
+)
+from scadbuddy.filament.models import (
+    ClaimedNotification,
+    EffectivePreset,
+    FilamentInventorySpool,
+    NotificationClaim,
+    NotificationEnd,
+    TrayView,
+)
 from scadbuddy.filament.print_uses import SlotUse
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
@@ -1420,6 +1454,117 @@ class RemoteFilamentTrays:
             "POST", f"{BASE}/filament/bb-to-sb", json={"ids": sorted(set(ids))}
         )
         return {int(bb_id): int(number) for bb_id, number in response.json().items()}
+
+
+class RemoteFilamentSync:
+    """`filament/bb_sync_models.py` `FilamentSyncApi` over ``…/print/filament/sync`` (area
+    ``filament-sync``, #6265 Task 6): the plan, what Bambuddy answered, and a pass's
+    state row. Each is natural, so each is sent again on the client's retries: a plan
+    finds the intent it recorded, results sent again carry the plan's ``pass_id`` and add
+    no attempt (R-T6-5), and the pass row is set, not added to."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def directions(self) -> FilamentSync:
+        response = await self._client.request("GET", f"{BASE}/filament/sync/directions")
+        return FilamentSync.model_validate(response.json())
+
+    async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
+        body = PlanRequest(snapshot=snap, limit=limit).model_dump(mode="json")
+        response = await self._client.request("POST", f"{BASE}/filament/sync/plan", json=body)
+        return SyncPlan.model_validate(response.json())
+
+    async def results(
+        self,
+        instance: str,
+        writes: Sequence[BbWrite],
+        results: Sequence[BbWriteResult],
+        pass_id: str | None,
+    ) -> ResultsReport:
+        body = ResultsRequest(
+            instance=instance, writes=list(writes), results=list(results), pass_id=pass_id
+        ).model_dump(mode="json")
+        response = await self._client.request("POST", f"{BASE}/filament/sync/results", json=body)
+        return ResultsReport.model_validate(response.json())
+
+    async def record_pass(self, result: SyncPassResult) -> None:
+        body = result.model_dump(mode="json")
+        if result.started_at is None:
+            # The API's model forbids extra keys: one from before #6836 refuses the key.
+            del body["started_at"]
+        await self._client.request("POST", f"{BASE}/filament/sync/pass", json=body)
+
+
+class RemoteBbPull:
+    """`filament/bb_pull_models.py` `BbPullApi` over ``…/print/filament/pull`` (area
+    ``filament-pull``, #6772): what the print worker read of Bambuddy for the pull, applied
+    by the API. Each is natural, so each is sent again on the client's retries: a pull of
+    the same rows changes nothing the first did not, a usage row is booked once (its
+    ``bb_usage`` event names it), a Home Assistant reading of the same value within 15
+    minutes is not stored again, and a tray already set right is left alone. The API's
+    409 ``instance_changed`` (the body's Bambuddy is no longer the configured one) is
+    `PullInstanceChangedError`."""
+
+    #: The pull applies one transaction per BB spool, so a large inventory takes longer
+    #: than the client's default; under ``FilamentBbPull``'s activity timeout.
+    APPLY_TIMEOUT = 180.0
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def _post(self, path: str, body: BaseModel, timeout: float | None = None) -> Any:
+        try:
+            response = await self._client.request(
+                "POST",
+                f"{BASE}/filament/pull{path}",
+                json=body.model_dump(mode="json"),
+                timeout=timeout,
+            )
+        except CrudRefusedError as refused:
+            if refused.status == 409 and refused.problem.get("reason") == INSTANCE_CHANGED:
+                raise PullInstanceChangedError(str(refused)) from refused
+            raise
+        return response.json() if response.content else None
+
+    async def apply(self, body: PullBody) -> PullApplied:
+        return PullApplied.model_validate(await self._post("", body, self.APPLY_TIMEOUT))
+
+    async def book_usage(self, body: UsageBody) -> UsageBooked:
+        return UsageBooked.model_validate(await self._post("/usage", body, self.APPLY_TIMEOUT))
+
+    async def ha_states(self, body: HaBody) -> None:
+        await self._post("/ha-states", body)
+
+    async def reconcile_trays(self, body: TraysBody) -> int:
+        return TraysReconciled.model_validate(await self._post("/trays", body)).moved
+
+
+class RemoteSensorNotifications:
+    """`filament/sensor_notify.py` `SensorNotificationsApi` over
+    ``…/print/filament/sensor-notifications`` (area ``sensor-notify``, #6646): a claim
+    takes an ``Idempotency-Key`` of its own, a new UUID per call, which the client sends
+    again on its retries, so a claim whose answer was lost answers the rows it claimed; an
+    end is natural."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def claim(self, limit: int) -> list[ClaimedNotification]:
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/filament/sensor-notifications/claim",
+            json=NotificationClaim(limit=limit).model_dump(mode="json"),
+            idempotency_key=uuid.uuid4().hex,
+        )
+        return [ClaimedNotification.model_validate(row) for row in response.json()]
+
+    async def end(self, row_id: UUID, end: NotificationEnd) -> None:
+        await self._client.request(
+            "POST",
+            f"{BASE}/filament/sensor-notifications/{row_id}/end",
+            json=end.model_dump(mode="json", exclude_none=True),
+        )
 
 
 class RemotePrintUses:

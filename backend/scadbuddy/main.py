@@ -31,6 +31,10 @@ from scadbuddy.activity.index import (
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
+    crud_agent_events,
+    crud_agent_transcripts,
+    crud_agent_turns,
+    crud_print,
     health,
     internal_blobs,
     internal_library,
@@ -93,9 +97,16 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
+from scadbuddy.filament.bb_pull_run import FilamentPullActivities
+from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync, adopt_instance
+from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.print_uses import PoolPrintUses
+from scadbuddy.filament.sensor_notify import SensorNotifyActivities
+from scadbuddy.filament.sensors import PoolSensorNotifications
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -238,6 +249,7 @@ from scadbuddy.workflows.previews import (
 )
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.printer_watch import ensure_watches
+from scadbuddy.workflows.sensor_notify import ensure_sensor_notify_schedule
 from scadbuddy.workflows.slicing import VersionedSliceWorkflow
 from scadbuddy.workflows.slicing_activities import slice_activities
 from scadbuddy.workflows.spool_refresh import VersionedSpoolRefresh, ensure_spool_schedule
@@ -893,6 +905,21 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
 VP_BOOT_TIMEOUT = 60.0
 
 
+async def _adopt_bb_instance_logged(state: AppState) -> None:
+    """The filament links #6261's pull made before the sync's state row belong to the
+    configured Bambuddy (`adopt_instance`, #6265 Decision 12). Nothing without a
+    Bambuddy. A failure is logged, never raised: the boot goes on, and the first pass
+    or pull that links anything records the instance itself."""
+    try:
+        read = await asyncio.to_thread(state.settings_store.read, {"bambuddy_url"})
+        if read["bambuddy_url"]:
+            await asyncio.to_thread(
+                adopt_instance, state.components.get(FILAMENT), instance_for(read["bambuddy_url"])
+            )
+    except Exception:
+        logger.exception("could not record the Bambuddy the filament links belong to")
+
+
 async def _adopt_virtual_rows_logged(state: AppState) -> None:
     """#5236: the boot's virtual-printer pass. A row made by hand before the sync existed,
     with a Bambuddy virtual printer's serial, stayed ``physical`` while the full sync was
@@ -1022,6 +1049,16 @@ async def _sweep_activity_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not prune activity")
         failed = True
+    # #6646 Decision 49: the sensors' old notification rows, in this activity so the
+    # workflow's history is unchanged.
+    try:
+        pruned = await asyncio.to_thread(state.components.get(FILAMENT).sensors.prune_notifications)
+    except Exception:
+        logger.exception("could not prune the sensor notifications")
+        failed = True
+    else:
+        if pruned:
+            logger.info("pruned sensor notifications", extra={"count": pruned})
     if failed:
         raise RuntimeError("the activity sweep failed")
 
@@ -1720,7 +1757,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         uses=PoolPrintUses(state.settings_store.pool),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
-    activities = [
+    activities: list[Callable[..., Any]] = [
         *PrintActivities(deps).all(),
         *LanActivities(lan).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
@@ -1732,6 +1769,24 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(PRINT_LIBRARY).serving_native,
             StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
         ).lan_auto_import,
+        # The filament sync's pass (#6265) on this process's own stores, as the CRUD
+        # routes run it for the print worker.
+        FilamentSyncActivities(
+            LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
+            settings_loader(state.settings_store.load),
+        ).sync_pass,
+        # The Bambuddy pull's reads (#6772) on this process's own stores, as the CRUD
+        # routes apply them for the print worker.
+        FilamentPullActivities(
+            LocalBbPull(state.components.get(FILAMENT), state.settings_store.load),
+            settings_loader(state.settings_store.load),
+        ).pull_read,
+        # The sensors' alert notifications (#6646) on this process's own pool, as the
+        # CRUD routes claim and end them for the print worker.
+        SensorNotifyActivities(
+            PoolSensorNotifications(state.settings_store.pool),
+            settings_loader(state.settings_store.load),
+        ).deliver,
     ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
@@ -1854,6 +1909,9 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     client = await _connect_until(state, stop, "library")
     if client is None:
         return
+    # #6265 Decision 17: once Temporal answers, a full filament sync pass, for what
+    # changed while no replica nudged.
+    boot_nudge = asyncio.create_task(state.filament_sync.nudge(full=True))
     settings = state.settings
     queue = settings.temporal_task_queue_library
     build_id = settings.revision
@@ -1873,6 +1931,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.previews.timeout if state.previews is not None else None,
             stop,
             spool_refresh=settings.spool_overlay_refresh_seconds,
+            print_queue=settings.temporal_task_queue_bambuddy,
         )
         if paused and state.store.content is not None:
             # Its sweep would backfill the uploads (review #1095 2); paused, the start does.
@@ -1891,11 +1950,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # The retired spool-provider activities, for runs opened before
         # spool-providers-gone (#6262 Task 12).
         *spool_activities(),
-        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
+        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule:
+        # read by the print worker, which sends the rows to the CRUD routes (#6772).
         filament_pull_activity(
             state.components.get(FILAMENT),
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
+            partial(execute_pull, client, settings.temporal_task_queue_bambuddy),
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
         capture_backstop_activity(state.components.get(PRINTERS)),
@@ -1946,6 +2007,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     finally:
         current.cancel()
         schedules.cancel()
+        boot_nudge.cancel()
         await stop_triggers()
 
 
@@ -1981,19 +2043,24 @@ async def _set_up_housekeeping(
     stop: asyncio.Event,
     *,
     spool_refresh: float,
+    print_queue: str | None = None,
 ) -> bool:
     """The housekeeping Schedules, the spool refresh (Bambuddy's kept presets and its
     spools pulled and the filament capture backstop, every ``spool_refresh`` seconds; 0:
-    none, #3818, #6262, #6263) and the
+    none, #3818, #6262, #6263), the sensor notifications' pass on ``print_queue`` (the
+    ``bambuddy`` queue, every minute, #6646) and the
     preview backfill's (``previews``: the scheduler's render bound; None, previews off:
     none), retried until Temporal takes them: a frontend can answer the connect before
     it can create one. Each set-up triggers its Schedule, so the preview one comes last:
     a retry after the housekeeping ones failed does not run the backfill twice (a refresh
-    run twice is only a refresh). True when the sweeps' one is paused."""
+    or a notification pass run twice is only a pass). True when the sweeps' one is
+    paused."""
     while not stop.is_set():
         try:
             paused = await ensure_schedules(client, queue, interval)
             await ensure_spool_schedule(client, queue, spool_refresh)
+            if print_queue is not None:
+                await ensure_sensor_notify_schedule(client, print_queue)
             await ensure_preview_schedule(client, queue, previews)
             return paused
         except Exception:
@@ -2210,6 +2277,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the bus are up. One that fails exits those already running and fails the
         # boot; closed below, before the queue it may be using.
         await components.enter_async_context(state.components.running())
+        # #6265 Decision 12: before the first nudge, so before any write.
+        await _adopt_bb_instance_logged(state)
         if state.temporal is not None:
             deps = worker_deps_from_state(state)
             task = asyncio.create_task(
@@ -2410,6 +2479,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             internal_blobs.PUT_ROUTE_LIMIT,
             # A native run's per-print copy from the print worker (#3818 tier A Task 4).
             internal_library.PUT_ROUTE_LIMIT,
+            # The Bambuddy pull's bodies from the print worker (#6772, #6861).
+            crud_print.PULL_ROUTE_LIMIT,
+            # The agent store's transcript, turn and event-log writes, at their declared
+            # bounds, which are above the 8 MiB text default (#6863).
+            crud_agent_transcripts.ROUTE_LIMIT,
+            crud_agent_turns.ROUTE_LIMIT,
+            crud_agent_events.ROUTE_LIMIT,
         ],
     )
     # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).

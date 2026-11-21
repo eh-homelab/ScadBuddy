@@ -294,7 +294,7 @@ class InsertType(_Catalog):
     empty_weight_g: int
     insert_material_id: UUID | None
     note: str | None
-    #: Bambuddy's spool catalog entry this type is (the pull sets it; read only).
+    #: Bambuddy's spool catalog entry this type is (the pull and the sync's results set it, #6265).
     bb_catalog_id: int | None = None
 
 
@@ -454,6 +454,103 @@ class SensorPatch(_Patch):
         return self
 
 
+#: Why a send failed, as the print worker records it (`filament/sensor_notify.py`
+#: `failure_of`): Bambuddy refused the key (401, ``unauthorized``), the key lacks "Send
+#: notifications" (403, ``scope``), Bambuddy has no app-message route (404, older than
+#: 1.3.1, ``not_found``), it refused it for its rate limit, could not be reached, refused it
+#: for another reason, took it into no channel, Bambuddy is not configured, or the send
+#: broke in ScadBuddy.
+SendError = Literal[
+    "unauthorized",
+    "scope",
+    "not_found",
+    "rate_limited",
+    "unavailable",
+    "rejected",
+    "no_channel",
+    "not_configured",
+    "internal",
+    "interrupted",
+]
+
+#: Why a notification was not delivered: a send's `SendError`, or what a claim decided
+#: (`filament/sensors.py` `claim_on`): the sensor's ``notify`` was turned off or it was
+#: archived before the send (``cancelled``), a newer change of the sensor was queued
+#: (``superseded``), or a send was cut off before its end was recorded (``interrupted``:
+#: it may have reached Bambuddy, and it is never sent again).
+NotificationError = Literal[
+    "unauthorized",
+    "scope",
+    "not_found",
+    "rate_limited",
+    "unavailable",
+    "rejected",
+    "no_channel",
+    "not_configured",
+    "internal",
+    "cancelled",
+    "superseded",
+    "interrupted",
+]
+
+#: The most rows one claim takes: Bambuddy takes 20 app messages a minute per key.
+CLAIM_MAX = 20
+
+
+class NotificationClaim(_In):
+    """``POST …/print/filament/sensor-notifications/claim``'s body (#6646)."""
+
+    limit: int = Field(ge=1, le=CLAIM_MAX)
+
+
+class ClaimedNotification(BaseModel):
+    """A row a claim marked ``sending``: what to send (made when it was queued)."""
+
+    id: UUID
+    title: str
+    message: str
+
+
+class NotificationEnd(_In):
+    """How a send ended: ``channels`` (how many Bambuddy channels took it) when Bambuddy
+    answered, else ``error``. An answer of 0 channels is ended ``no_channel``."""
+
+    channels: int | None = Field(default=None, ge=0)
+    error: SendError | None = None
+    #: Hand a claimed row back to ``queued``: the pass ran out of time before it tried it.
+    requeue: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> NotificationEnd:
+        if self.requeue:
+            if self.error is not None or self.channels is not None:
+                raise ValueError("a row handed back has neither channels nor error")
+            return self
+        if self.error is None and not self.channels:
+            raise ValueError("a sent message needs channels above 0; else give error")
+        if self.error not in (None, "no_channel") and self.channels is not None:
+            raise ValueError("a failed send has no channels")
+        return self
+
+
+class SensorNotification(BaseModel):
+    """A notification a sensor queued when it started (`started`) or stopped (`stopped`)
+    alerting (#6646). ``read_at`` and ``value`` are the reading that changed it; ``state``
+    goes ``queued``, ``sending``, then ``sent`` or ``failed`` (a row a claim skipped goes
+    from ``queued`` to ``failed``); ``sent_at`` is when it was ended; ``channels`` how many
+    of Bambuddy's channels took it."""
+
+    kind: Literal["started", "stopped"]
+    value: float
+    read_at: datetime
+    channel: Literal["bambuddy"]
+    state: Literal["queued", "sending", "sent", "failed"]
+    channels: int | None
+    error: NotificationError | None
+    queued_at: datetime
+    sent_at: datetime | None
+
+
 class Sensor(BaseModel):
     id: UUID
     location_id: UUID
@@ -473,6 +570,8 @@ class Sensor(BaseModel):
     created_at: datetime
     archived_at: datetime | None
     alerting: bool = False
+    #: The newest notification this sensor queued, whatever its state (#6646).
+    last_notification: SensorNotification | None = None
 
     @model_validator(mode="after")
     def _alerting(self) -> Sensor:
@@ -514,6 +613,8 @@ class SpoolTypeCreate(_In):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -541,6 +642,8 @@ class SpoolTypePatch(_Patch):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -568,6 +671,8 @@ class SpoolType(_Row):
     nozzle_temp_max: int | None
     bed_temp_min: int | None
     bed_temp_max: int | None
+    drying_temp_c: int | None
+    drying_hours: Decimal | None
     label_weight_g: int
     insert_type_id: UUID | None
     low_stock_pct: int | None
@@ -612,6 +717,16 @@ class TypeKValueCreate(_In):
     setting_id: Text | None = None
 
 
+class ShownKValue(TypeKValueCreate):
+    """A K value row a fill's refresh showed, sent back as ``shown_k_values`` to compare.
+    It takes the refresh's ``type_id`` and ``source`` too, so a client may echo the rows as
+    it got them, and drops both (#6859, R-6714-22): only the server sets a row's source,
+    and the comparison and the write never read them."""
+
+    type_id: Annotated[UUID | None, Field(exclude=True)] = None
+    source: Annotated[str | None, Field(exclude=True)] = None
+
+
 class TypeKValuePatch(_Patch):
     not_null = frozenset({"k_value"})
     nozzle_type: Text | None = None
@@ -619,6 +734,12 @@ class TypeKValuePatch(_Patch):
     name: Text | None = None
     cali_idx: CaliIdx | None = None
     setting_id: Text | None = None
+
+
+#: Who set a type's K value (#6856, R-6714-19): a person (an edit, and every row made
+#: before the column), the profile fill from its linked Bambuddy spools, a printer's
+#: calibration, or the 3DFP profile fetch (#6625).
+KSource = Literal["person", "profile", "printer_calibration", "profile_fetch"]
 
 
 class TypeKValue(BaseModel):
@@ -631,6 +752,8 @@ class TypeKValue(BaseModel):
     name: str | None
     cali_idx: int | None
     setting_id: str | None
+    #: Who set it; a write never takes it from a body (R-6714-19).
+    source: KSource = "person"
 
 
 class SpoolTypeDetail(SpoolType):
@@ -814,6 +937,8 @@ class EffectiveValues(BaseModel):
     nozzle_temp_max: int | None = None
     bed_temp_min: int | None = None
     bed_temp_max: int | None = None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
     label_weight_g: int | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: int | None = None
@@ -838,6 +963,8 @@ class SpoolCreate(_In):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -872,6 +999,8 @@ class SpoolPatch(_Patch):
     nozzle_temp_max: Temp | None = None
     bed_temp_min: Temp | None = None
     bed_temp_max: Temp | None = None
+    drying_temp_c: Temp | None = None
+    drying_hours: Hours | None = None
     label_weight_g: LabelWeight | None = None
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
@@ -910,6 +1039,8 @@ class Spool(_Row):
     nozzle_temp_max: int | None
     bed_temp_min: int | None
     bed_temp_max: int | None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
     label_weight_g: int | None
     insert_type_id: UUID | None
     low_stock_pct: int | None
@@ -1301,7 +1432,9 @@ class SpoolEvent(BaseModel):
 
 class SpoolEventAdd(_In):
     """What a person records on a spool: a weighing (``grams`` is the filament left,
-    without the empty spool) or a drying (its temperature and hours)."""
+    without the empty spool) or a drying (its temperature and hours). A drying that leaves
+    out ``temp_c`` or ``hours`` takes the spool's `DryingDefaults` for it; ``null`` records
+    none (#6720)."""
 
     kind: Literal["weighed", "dried"]
     source: Literal["person", "scale"] = "person"
@@ -1416,9 +1549,25 @@ class SpoolTypeSupplier(BaseModel):
     price_per_kg: Decimal | None
 
 
+DryingFrom = Literal["spool", "type", "subtype", "material"]
+
+
+class DryingDefaults(BaseModel):
+    """What a drying of the spool records when it does not say (#6720, R-6714-10,
+    R-6714-18): each field from the spool's own override, else its type, else its subtype,
+    else its material; ``*_from`` names which. ``None`` when none of them sets it."""
+
+    temp_c: int | None = None
+    hours: Decimal | None = None
+    temp_from: DryingFrom | None = None
+    hours_from: DryingFrom | None = None
+
+
 class SpoolDetail(Spool):
     """A spool with what its page shows: its tags, effective presets and K values, the
-    basis of its grams and whether it ever printed."""
+    basis of its grams, whether it ever printed and its drying defaults."""
+
+    drying_defaults: DryingDefaults = Field(default_factory=DryingDefaults)
 
     #: The tag bound to it now.
     tag: Tag | None = None

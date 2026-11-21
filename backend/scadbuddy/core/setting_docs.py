@@ -379,22 +379,35 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         # -- Filament (#6262) -----------------------------------------------------------
         "filament_sync": SettingDoc(
             "Spools",
-            "Off, Bambuddy's spools are never pulled, its usage rows are never booked and"
-            " ScadBuddy's own spools are the only ones."
-            " Bambuddy \u2192 ScadBuddy copies Bambuddy's spools in on the schedule below."
-            " Weights is off or bb_to_sb. Off stops every Bambuddy scale weighing, also for a"
-            " new spool, and Bambuddy weight readings on spools ScadBuddy already tracks."
-            " Only a new spool still gets its first Bambuddy weight reading. Tags is sb_to_bb:"
-            " each tag binding is sent to Bambuddy. Override mode and the"
-            " AMS slots of override tags are written to Bambuddy whatever this says.",
+            "A direction for each kind of filament data: spools, weights, tags, presets,"
+            " suppliers and locations. Each one is off, sb_to_bb (ScadBuddy \u2192 Bambuddy),"
+            " bb_to_sb (Bambuddy \u2192 ScadBuddy, on the schedule below) or two_way."
+            " Spools moves a spool's own fields, new spools and the spool catalog. Weights"
+            " moves Bambuddy's weight readings, scale weighings, dryings and weight lock on"
+            " spools ScadBuddy already tracks; a new spool still gets its first Bambuddy"
+            " weight reading."
+            " Bambuddy's usage rows are booked while spools or weights pulls."
+            " Tags moves tag bindings; a new Bambuddy spool takes its tags whatever this says."
+            " Presets moves Bambuddy's filament preset into a spool's presets."
+            " With spools off, no spool is created or linked, so weights, presets, suppliers"
+            " per spool and a spool's location move only on spools linked earlier."
+            " A kind switched to pull later takes what Bambuddy changed while it was off."
+            " Override mode and the AMS slots of override tags are written to Bambuddy"
+            " whatever this says.",
         ),
         "spool_overlay_refresh_seconds": SettingDoc(
             "Pull from Bambuddy every",
             "How often Bambuddy's spools are pulled and its local presets kept, on a schedule"
             " of their own so a print never waits on Bambuddy. The same run reconciles each"
-            " printer's report with the filament ledger (the capture backstop). 0 turns all"
-            " three off. A change"
-            " applies at the next start.",
+            " printer's report with the filament ledger (the capture backstop) and reads the"
+            " Home Assistant sensors. A sensor's alert notification does not wait for it:"
+            " it goes out within about a minute of the reading that starts or stops the"
+            " alert, whatever this says. It is also"
+            " how often the Bambuddy sync runs a full pass of what ScadBuddy sends to"
+            " Bambuddy. 0 turns the pull, the presets and the backstop off, and stops the"
+            " sync's timer: the sync then runs only after a filament change or Sync now."
+            " A change applies to the pull at the next start, and to the sync after its"
+            " next pass.",
         ),
         "filament_low_stock_pct": SettingDoc(
             "Low stock below, percent",
@@ -405,6 +418,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Default cost per kg",
             "What a kilogram of filament costs when its spool and type name no cost, in the"
             " shop's currency, such as 24.50. Empty sets none.",
+        ),
+        "filament_shopping_auto_add_empty": SettingDoc(
+            "Add empty spools to the shopping list",
+            "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
+            " shopping list, with a note that names the spool. Nothing is added while an item"
+            " for that type is still to buy. It orders nothing.",
         ),
         "filament_burn_window_days": SettingDoc(
             "Burn window, days",

@@ -167,6 +167,26 @@ check 'the malformed row message names the table' \
   "yes" "$(grep -q 'metrics.py: FILAMENT_SERIES row at line [0-9]* is not' <<< "$msg" && echo yes || echo no)"
 
 good
+sed -i '0,/("material", "brand", "location_kind"),/s//"material",/' "$r/backend/scadbuddy/core/metrics.py"
+msg="$("$script" "$r" 2>&1 || true)"
+check 'a FILAMENT_SERIES row whose labels are not a tuple fails and is named (#6814)' \
+  "yes" "$(grep -q 'metrics.py: FILAMENT_SERIES row at line [0-9]* is not' <<< "$msg" && echo yes || echo no)"
+
+good
+sed -i '0,/("material", "brand", "location_kind"),/s//("material", brand_label, "location_kind"),/' "$r/backend/scadbuddy/core/metrics.py"
+msg="$("$script" "$r" 2>&1 || true)"
+check 'a FILAMENT_SERIES row with a label that is not a string constant fails and is named (#6814)' \
+  "yes" "$(grep -q 'metrics.py: FILAMENT_SERIES row at line [0-9]* is not' <<< "$msg" && echo yes || echo no)"
+
+good
+sed -i 's/^FILAMENT_SERIES: .* = ($/&\n    ("scadbuddy_filament_label_less", "A gauge with no labels.", ()),/' "$r/backend/scadbuddy/core/metrics.py"
+jq '(.panels[] | select(.id == 2) | .targets[0]) |= (.expr = "sum(scadbuddy_filament_label_less)" | .legendFormat = "total")' \
+  "$r/deploy/grafana/scadbuddy-filament.json" > "$r/filament.new"
+mv "$r/filament.new" "$r/deploy/grafana/scadbuddy-filament.json"
+check 'a FILAMENT_SERIES row with () labels is declared, and a query with no by() on it passes (#6814)' \
+  '0:' "$(run)"
+
+good
 edit '(.panels[] | select(.id == 6) | .targets[0].expr) |= sub("by \\(le, stage\\)"; "by (le, stages)")'
 check 'a by() label the metric does not declare fails' \
   "1:$f: panel 6 target A: by (le, stages): \"stages\" is not a label of the series the query reads" \

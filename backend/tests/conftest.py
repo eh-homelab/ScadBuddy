@@ -37,6 +37,7 @@ from scadbuddy import main as scadbuddy_main
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
 from scadbuddy.bambuddy.catalogue import forget_catalogues
 from scadbuddy.bambuddy.print_run import forget_out_of_memory_logs
+from scadbuddy.bambuddy.tower_check import forget_laid_out
 from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
@@ -99,6 +100,15 @@ def _forget_catalogues() -> Iterator[None]:
     forget_catalogues()
     yield
     forget_catalogues()
+
+
+@pytest.fixture(autouse=True)
+def _forget_laid_out() -> Iterator[None]:
+    """The tower check keeps laid-out files by payload digest and printer (#6796); a
+    test's stubbed layout must not answer another test's check of the same bytes (#6833)."""
+    forget_laid_out()
+    yield
+    forget_laid_out()
 
 
 @pytest.fixture(autouse=True)

@@ -419,3 +419,9 @@ Added for #6264 (Bambuddy 1.3.1):
 | File | Source |
 |---|---|
 | `openapi/rfid-routes.json` | `GET /openapi.json` of `https://bambuddy.internal.nullreference.io` on 2026-11-17 (200, `info.version` 1.3.1, no key): the RFID routes (link-tag, by-tag, spool PATCH, settings, configure, the `nfc/*` routes, cancel-write, devices, ws-token) and every schema they reference, copied unchanged. `routes`, `conflict_409`, `ws_events`, `data_origin_values` and the permissions are read from the Bambuddy source at tag `v1.3.1`, each with its file and line. `measured_2026-11-17` holds the read-only answers (auth status, the setting, the device list, by-tag 404 and 400, the WebSocket's first frames). Writes were never called; the 409 body and the write answers are from the source only. |
+
+Added for #6265 (Bambuddy 1.3.1):
+
+| File | Source |
+|---|---|
+| `openapi/sync-routes.json` | `GET /openapi.json` of `https://bambuddy.internal.nullreference.io` on 2026-11-18 (200, 1,245,373 bytes, `info.version` 1.3.1, no key): the filament sync's routes (spool create, update, archive, restore, the K-profile, preset and supplier list PUTs, supplier and location list/create/update, spool catalog create/update, filament catalog create/update) and every schema they reference, copied unchanged. `routes` carries each one's `Permission` with its line in the Bambuddy source at tag `v1.3.1`, the API-key flag `_APIKEY_SCOPE_BY_PERMISSION` maps it to (none for the filament catalog's writes: `core/auth.py` lines 300-301), and ScadBuddy's `Scope`. `write_semantics` is read from the same source. `measured_2026-11-18` holds the read-only counts (106 spools, none with a K-profile, 4 with suppliers; 3 suppliers; 0 locations; 91 catalog entries; 0 filaments). Writes were never called. |

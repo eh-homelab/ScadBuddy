@@ -38,12 +38,16 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.print import (
+    RemoteBbPull,
+    RemoteFilamentSync,
     RemoteFilamentTrays,
     RemoteHeldPresets,
     RemoteNativeSlices,
     RemotePrinterStore,
     RemotePrintUses,
+    RemoteSensorNotifications,
 )
+from scadbuddy.filament.bb_pull_models import PULL_READ_ACTIVITY
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.kinds import OperationKind
@@ -149,6 +153,31 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
         assert settings.secret_key_file is None
         blobs = lan.__self__.d.blobs  # type: ignore[attr-defined]
         assert isinstance(blobs, RemoteBlobs) and blobs._crud is deps.crud
+        # The filament sync's pass reaches SB through the API's routes (#6265).
+        [sync_pass] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "filament_bb_sync_pass"
+        ]
+        api = sync_pass.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(api, RemoteFilamentSync) and api._client is deps.crud
+        # The Bambuddy pull's reads send SB's side through the API's routes (#6772).
+        [pull_read] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == PULL_READ_ACTIVITY
+        ]
+        pull_api = pull_read.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(pull_api, RemoteBbPull) and pull_api._client is deps.crud
+        # The sensors' notifications are claimed and ended through the API's routes (#6646).
+        [notify] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "sensor_notify_send"
+        ]
+        notify_api = notify.__self__.api  # type: ignore[attr-defined]
+        assert isinstance(notify_api, RemoteSensorNotifications)
+        assert notify_api._client is deps.crud
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

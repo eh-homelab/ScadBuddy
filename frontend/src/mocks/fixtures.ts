@@ -1084,8 +1084,8 @@ export const settingsDefaults = {
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
   spool_overlay_refresh_seconds: 300,
-  // #6262 Task 13 — the Filament section's settings.
-  filament_sync: { spools: 'bb_to_sb', tags: 'off', weights: 'bb_to_sb' },
+  // #6262 Task 13 — the Filament section's settings; #6265 — `filament_sync` is the six-key default.
+  filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
   filament_low_stock_pct: 20,
   filament_default_cost_per_kg: null,
   filament_burn_window_days: 30,
@@ -1186,6 +1186,8 @@ export const settings: Settings = {
   print_auto_import_sources: ['archive', 'archive_source', 'library'],
   print_auto_import_skip_printers: [],
   print_auto_import_skip_lan_printers: [],
+  // #6868: an empty spool adds its type to the shopping list; stored only, on by default.
+  filament_shopping_auto_add_empty: true,
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,

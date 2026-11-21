@@ -107,6 +107,12 @@ id an older plan names; reads, Task 7), and ``…/filament/print-uses`` and
 spools' row locks). Each write runs whole in one transaction with its ledger row, once
 per ``Idempotency-Key``: each answers what it booked, which a resend would not repeat.
 
+The sensors' alert notifications (area ``sensor-notify``, #6646) are
+``…/filament/sensor-notifications/claim`` (the queued rows marked ``sending``, once per
+``Idempotency-Key``, after the rows no claim sends are ended) and ``…/{id}/end`` (natural),
+`filament/sensors.py` `claim_on` and `end_on`: the print worker sends them to Bambuddy,
+so the API makes no Bambuddy call for them.
+
 A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
 ``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
 `RemoteBlobs`: the worker holds no key to sign one. Only a key the content index holds,
@@ -158,8 +164,9 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
@@ -180,6 +187,7 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, RouteLimit
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.bambuddy.copy_leases import (
@@ -211,6 +219,7 @@ from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import (
     MaybeIdempotencyKey,
@@ -223,13 +232,35 @@ from scadbuddy.crud.idempotency import (
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.crud.print import (
     ACCESS_CODE_UNREADABLE,
+    BASE,
     NO_ACCESS_CODE,
     NO_SUCH_PRINTER,
     SERIAL_TAKEN,
     SLICE_SUBJECT,
 )
 from scadbuddy.crud.wire import NOT_CONFIGURED
-from scadbuddy.filament import print_uses
+from scadbuddy.filament import models as m
+from scadbuddy.filament import print_uses, sensors
+from scadbuddy.filament.bb_pull_apply import LocalBbPull
+from scadbuddy.filament.bb_pull_models import (
+    INSTANCE_CHANGED,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    TraysBody,
+    TraysReconciled,
+    UsageBody,
+    UsageBooked,
+)
+from scadbuddy.filament.bb_sync_models import (
+    PlanRequest,
+    ResultsReport,
+    ResultsRequest,
+    SyncPassResult,
+    SyncPlan,
+)
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayView
 from scadbuddy.filament.print_uses import SlotUse
@@ -268,6 +299,17 @@ from scadbuddy.spools.models import SeenTray
 from scadbuddy.store.content_models import content_index_key
 
 logger = logging.getLogger(__name__)
+
+#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's four routes, whatever the
+#: content type. The gate counts only a type in its table, and FastAPI reads a body with
+#: no Content-Type as JSON, so without this a header left out would skip the cap.
+PULL_ROUTE_LIMIT = RouteLimit(
+    "POST",
+    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays)?$"),
+    MAX_TEXT_BODY_BYTES,
+    "a Bambuddy pull",
+    "fixed, api/limits.py MAX_TEXT_BODY_BYTES",
+)
 
 router = crud_router("print")
 # The `Operation` records of the Bambuddy kinds the worker runs (Q9).
@@ -1851,6 +1893,224 @@ async def settle_print_uses(
         write,
     )
     return PrintUsesSettled.model_validate(answer)
+
+
+def _sync(filament: FilamentDep, settings: SettingsStoreDep) -> LocalFilamentSync:
+    return LocalFilamentSync(filament, settings)
+
+
+SyncDep = Annotated[LocalFilamentSync, Depends(_sync)]
+
+
+@router.get(
+    "/filament/sync/directions",
+    name="crud_print_filament_sync_directions",
+    summary="Which way each kind of filament data moves",
+    description=(
+        "The stored `filament_sync` (#6265 R-T8-2): a pass reads it before Bambuddy, and"
+        " skips the pass when no data type pushes."
+    ),
+)
+async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
+    return await sync.directions()
+
+
+@router.post(
+    "/filament/sync/plan",
+    name="crud_print_filament_sync_plan",
+    summary="The writes SB wants Bambuddy to take next",
+    description=(
+        "What SB wants Bambuddy to hold, from the `snapshot` the print worker read of it,"
+        " at most `limit` writes (#6265): a pass's rounds together stay within 200. The"
+        " route reads `filament_sync` and the timer's interval itself. A kept create"
+        " records its intent in this call, so a plan sent again plans the same create"
+        " from that intent. A snapshot of another Bambuddy than the configured one plans"
+        " nothing and answers `instance_changed` (#6773)."
+    ),
+)
+async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> SyncPlan:
+    """Natural: a plan sent again finds the intent it recorded."""
+    return await sync.plan(body.snapshot, body.limit)
+
+
+@router.post(
+    "/filament/sync/results",
+    name="crud_print_filament_sync_results",
+    summary="Record what Bambuddy answered to a plan's writes",
+    description=(
+        "Records the answers to `writes` (#6265): each is checked against SB's links, and"
+        " a result whose write names no SB item, or another Bambuddy row, is ignored. A"
+        ' list `PUT`\'s answer is `{"k_profiles": rows}` or `{"suppliers": rows}`. Answers'
+        " the counts of items linked, updated, failed and unlinked. Results for another"
+        " Bambuddy than the configured one are all ignored (#6773)."
+    ),
+)
+async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsReport:
+    """Natural: a result sent again finds its item linked or recorded and is ignored, and a
+    refusal sent again with the plan's `pass_id` adds no attempt (R-T6-5)."""
+    return await sync.results(body.instance, body.writes, body.results, body.pass_id)
+
+
+@router.post(
+    "/filament/sync/pass",
+    name="crud_print_filament_sync_pass",
+    summary="Record what one sync pass did",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "Writes the sync's state row (#6265): the pass's time and counts, its error, and"
+        " the time of the last clean pass only when `error` is null."
+    ),
+)
+async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
+    """Natural: the row is set, not added to."""
+    await sync.record_pass(body)
+
+
+def _pull(filament: FilamentDep, settings: SettingsStoreDep) -> LocalBbPull:
+    return LocalBbPull(filament, settings.load)
+
+
+PullDep = Annotated[LocalBbPull, Depends(_pull)]
+
+
+async def _for_configured[T](write: Awaitable[T]) -> T:
+    try:
+        return await write
+    except PullInstanceChangedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the body was read from another Bambuddy than the configured one, or the"
+            " Bambuddy links belong to another one",
+            reason=INSTANCE_CHANGED,
+        ) from None
+
+
+@router.post(
+    "/filament/pull",
+    name="crud_print_filament_pull",
+    summary="Pull what the print worker read of Bambuddy into SB",
+    description=(
+        "The Bambuddy pull's SB side (#6772): the spools, usage rows, suppliers, locations"
+        " and spool catalog the print worker read, pulled into SB's tables as the spool"
+        " refresh pulled them (`filament/bambuddy_pull.py`); the API calls no Bambuddy."
+        " Answers the pull's report and the date from which the worker reads Bambuddy's"
+        " archives for the usage rows not booked yet. 409 `instance_changed` for a read of"
+        " another Bambuddy than the configured one, or while the links belong to another"
+        " Bambuddy (#6845)."
+    ),
+)
+async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
+    """Natural: a pull of the same rows changes nothing the first did not."""
+    return await _for_configured(sync.apply(body))
+
+
+@router.post(
+    "/filament/pull/usage",
+    name="crud_print_filament_pull_usage",
+    summary="Book Bambuddy's usage rows the print worker read",
+    description=(
+        "BB's usage rows booked on linked spools, matched to the archives the worker read"
+        " (#6772, `filament/bambuddy_usage.py`). 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
+    """Natural: a row's ``bb_usage`` event names it, so it is booked once."""
+    return await _for_configured(sync.book_usage(body))
+
+
+@router.post(
+    "/filament/pull/ha-states",
+    name="crud_print_filament_pull_ha_states",
+    summary="Record Bambuddy's Home Assistant states as sensor readings",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "Each state a reading of the Home Assistant sensor naming its entity (#6268, #6772);"
+        " `states` null (the read failed) marks every such sensor unreachable. 409"
+        " `instance_changed` for a read of another Bambuddy than the configured one; the"
+        " links' instance does not stop it, as sensors are not spool data (#6845)."
+    ),
+)
+async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
+    """Natural: a reading of the same value within 15 minutes is not stored again."""
+    await _for_configured(sync.ha_states(body))
+
+
+@router.post(
+    "/filament/pull/trays",
+    name="crud_print_filament_pull_trays",
+    summary="Set the untagged trays right by Bambuddy's assignments",
+    description=(
+        "Each untagged tray whose placed spool disagrees with the printer's report takes"
+        " the spool Bambuddy assigns it, when that one agrees (#6713, #6772). Answers how"
+        " many trays moved. 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_trays(body: TraysBody, sync: PullDep) -> TraysReconciled:
+    """Natural: a tray already set right is left alone."""
+    return TraysReconciled(moved=await _for_configured(sync.reconcile_trays(body)))
+
+
+# -- a sensor's alert notifications (area ``sensor-notify``, #6646) ----------------------
+
+CLAIM_NOTIFICATIONS_ROUTE = "POST /filament/sensor-notifications/claim"
+
+
+@router.post(
+    "/filament/sensor-notifications/claim",
+    name="crud_print_sensor_notifications_claim",
+    summary="Claim the sensor notifications to send",
+    description=(
+        "Up to `limit` (at most 20) queued sensor notifications marked `sending`, oldest"
+        " reading first, each with its title and message (#6646). First it ends the rows"
+        " no claim sends: `sending` for over 10 minutes (`interrupted`), a sensor's whose"
+        " `notify` is off or that or its place is archived (`cancelled`), and each but the"
+        " newest of a sensor (`superseded`). Once per `Idempotency-Key`: a claim sent again"
+        " answers the rows it claimed."
+    ),
+)
+async def claim_sensor_notifications(
+    body: m.NotificationClaim,
+    settings: SettingsStoreDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> list[m.ClaimedNotification]:
+    key = required_key(idempotency_key)
+
+    def write(conn: Connection[DictRow]) -> list[dict[str, Any]]:
+        return [row.model_dump(mode="json") for row in sensors.claim_on(conn, body.limit)]
+
+    answer = await asyncio.to_thread(
+        _once_on,
+        settings.pool,
+        key,
+        CLAIM_NOTIFICATIONS_ROUTE,
+        body.model_dump(mode="json"),
+        write,
+    )
+    return [m.ClaimedNotification.model_validate(row) for row in answer]
+
+
+@router.post(
+    "/filament/sensor-notifications/{notification_id}/end",
+    name="crud_print_sensor_notification_end",
+    summary="Record how a sensor notification's send ended",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "A claimed notification ended `sent` (`channels`, how many Bambuddy channels took"
+        " it), `failed` (`error`, a fixed code of the send) or handed back (`requeue`: the"
+        " pass never tried it, so it is `queued` again). A row no longer `sending` is left"
+        " as it is."
+    ),
+)
+async def end_sensor_notification(
+    notification_id: UUID, body: m.NotificationEnd, settings: SettingsStoreDep
+) -> None:
+    """Natural: an end sent again finds the row ended and changes nothing."""
+
+    def write() -> None:
+        with settings.pool.connection() as conn, conn.transaction():
+            sensors.end_on(conn, notification_id, body)
+
+    await asyncio.to_thread(write)
 
 
 @router.get("/held-presets", name="crud_print_held_presets")

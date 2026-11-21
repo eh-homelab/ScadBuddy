@@ -254,7 +254,8 @@ same way, `vite.config.ts`).
   shop's currency and `reconciles`. A confirmed invoice keeps only its note and file. A unit test
   that uploads a file answers the `/file` part itself (jsdom's `FormData` does not reach msw;
   `InvoiceUpload.test.tsx`). The Shopping list tab (`ShoppingListTab`) adds an item from a type or by
-  text, marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
+  text, marks an item an empty spool added "Auto" with its note linked to that spool (#6868; the switch
+  is Settings → Filament's `filament_shopping_auto_add_empty`), marks it purchased (it sorts below the pending ones) or removes it, and confirms "Clear
   purchased" and "Clear all"; the last quantity is remembered (`QUANTITY_KEY`). The Types tab's row
   and `TypePage` add a type to it as one pending spool (one click at a time: the button is off
   while its request is out). `useMoney.format` shows the bare decimal, with no symbol, while the
@@ -269,11 +270,31 @@ same way, `vite.config.ts`).
   button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
   the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind; `NtagPanel` writes an NTAG through a SpoolBuddy
   reader and polls `confirmNtag` every 2 s for 60 s, says `Bound tag <uid>`, offers Cancel after the 60 s too and drops a queued write when the page unmounts, #6264) and `/filament/types/:id`
-  (`TypePage`; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
+  (`TypePage`; its Drying section, the temperature and hours a spool's drying form starts
+  from unless the spool overrides them in Storage, the spool page saying where they came from
+  and that a profile's are the AMS HT's (#6720, R-6714-18); its K table says who set each saved
+  row, and nothing on a row edited since, `KValueTable` `saved`, R-6714-19, R-6714-22; its "3DFP id" and "Fetch from 3DFP", `components/filament/ProfileFetchPanel.tsx`, #6625: the fetch uses the saved id, reads the run again every 10 s while it is `running`, lists the printer models and nozzles with no preset yet (`gaps`) when no run is going, and the page shows the presets it set unless they hold unsaved edits; the nozzles are Settings → Printing → Filament's `profile_fetch_nozzles`). `/filament/labels` (`LabelsPage`, `Label`, `labelSheet.ts`, #6264) prints 50 x 25 mm labels from a copy in `#label-print-root`: a QR code of `scadbuddy:spool:<id>` (`labelPayload`) with a quiet zone of 4 modules; the layout (`roll` or `sheet`) is kept in `localStorage` under `scadbuddy.labels.layout`. The Spools tab imports a CSV (`SpoolImport`: a dry run, Import is off while any
   line is an error). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
-  configuration (`pages/settings/sections/filament.tsx`: also "Tags to Bambuddy", which saves
-  `filament_sync.tags` with "Save Filament", and the "RFID override mode" switch with "Apply now", #6264); the old anchors `#native-spools` and
+  configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
+  `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
+  Bambuddy" has one `ChoiceSelect` row per data type (spools and types, weights, tags,
+  suppliers and prices, locations, presets and K values; `SYNC_ROWS`, `SYNC_KINDS` in
+  `pages/settings/values.ts`) with Off, ScadBuddy → Bambuddy, Bambuddy → ScadBuddy or Both
+  ways (newer change wins), saved with "Save Filament" as `filament_sync`; the sync status
+  (`getSyncStatus`, `GET /filament/sync/status`: the last pass, why none runs, and each
+  item whose last write failed or was held back, with `syncErrorText`); and "Sync now"
+  (`runSync`, `POST /filament/sync/run`), after which the status is read again until a
+  pass has started at or after the run's `requested_at` (R-T11-2, #6836). While the status says
+  `instance_changed` it offers "Reset Bambuddy links" (#6773, `ResetLinks`: a dry run's
+  counts in a confirm dialog, then `resetSyncLinks` with the dry run's `instance`; the mock's
+  `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the
+  Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
+  `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
+  says why, `loseSameBambuddy`; a dry run that cannot read Bambuddy notes it and offers the
+  delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264;
+  the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
+  `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
   `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
@@ -281,7 +302,7 @@ same way, `vite.config.ts`).
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
   call), `settings.spec.ts` and `page-titles.spec.ts`. Sensors and weights (#6268):
-  `LocationSensors` and `SensorChart` on the Locations tab, `NeedsDrying` and `outsideDry.ts`,
+  `LocationSensors` and `SensorChart` on the Locations tab (#6646: the "Notify me through Bambuddy" box in the add and edit forms, and the newest `last_notification` under the sensor: sent, waiting (within about a minute while a Bambuddy URL is set, else "once Bambuddy is connected in Settings"; no promise before settings load), or not sent ("may not have been sent" for `interrupted`) with `NOTIFY_FAILURE`'s reason for each `error` code; the seed's shelf sent one, the dry box's failed `scope`), `NeedsDrying` and `outsideDry.ts`,
   and the Spools tab button "Sync weights from AMS". Type proposals (#6701): `TypeProposals` ("Create types") shows on the Needs-type filter, over
   `GET /filament/type-proposals` and its confirm; the mocks group the seed's untyped spools (#6 is one
   group, #7 lacks a label weight).

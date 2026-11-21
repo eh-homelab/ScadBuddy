@@ -128,10 +128,10 @@ def test_an_unbind_and_an_archive_queue_the_tag(pg_pool: PgPool) -> None:
     assert _pending(pg_pool) == {one.tag_id, two.tag_id}
 
 
-def test_filament_sync_tags_defaults_off_and_refuses_other_values() -> None:
-    assert FilamentSync().tags == "off"
+def test_filament_sync_tags_defaults_to_the_pull_and_refuses_other_values() -> None:
+    assert FilamentSync().tags == "bb_to_sb"
     assert FilamentSync(tags="sb_to_bb").tags == "sb_to_bb"
-    for bad in ("bb_to_sb", "two_way", ""):
+    for bad in ("push", "both", ""):
         with pytest.raises(ValidationError):
             FilamentSync.model_validate({"tags": bad})
 

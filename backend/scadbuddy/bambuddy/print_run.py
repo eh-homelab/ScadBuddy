@@ -219,6 +219,7 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartSettingsUnwritableError,
     part_settings_slots,
+    plate_overrides,
     stated_tower_off,
 )
 from scadbuddy.render.plate import plate_for
@@ -2025,8 +2026,9 @@ async def _sequence_clearance(
 ) -> tuple[int | None, list[FilamentWarning]]:
     """#956: for a by-object print (chosen here, else the template's default), the
     objects on each plate printed, and what the toolhead or the gantry would hit, as
-    warnings, never a refusal. Only then is the file read for its objects; an unreadable
-    one says nothing, and the slicer still has the last word."""
+    warnings, never a refusal. A plate that is one object of several filaments gets a
+    warning too (#6781): by object has no effect there. Only then is the file read for
+    its objects; an unreadable one says nothing, and the slicer still has the last word."""
     sequence = (
         request.overrides().get("print_sequence")
         or request.print_sequence
@@ -3705,6 +3707,19 @@ async def plan_run(
         # the template's own under the request's (#5626).
         part_settings=overrides_of(await run_part_settings(source, request, client)),
         tower_on=stated_off and asked is True,
+        # #6820: the slicer applies a plate's own settings over the process file, so
+        # the request's choices a plate can state are written over the plates' too, the
+        # explicit override over the `print_sequence` shorthand, as in the plan below.
+        plate_settings=plate_overrides(
+            {
+                **(
+                    {}
+                    if request.print_sequence is None
+                    else {"print_sequence": request.print_sequence}
+                ),
+                **request.overrides(),
+            }
+        ),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last

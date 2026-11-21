@@ -61,7 +61,9 @@ from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
+    RemoteBbPull,
     RemoteEvents,
+    RemoteFilamentSync,
     RemoteFilamentTrays,
     RemoteHeldPresets,
     RemoteLanImports,
@@ -75,6 +77,7 @@ from scadbuddy.crud.print import (
     RemoteRackUsage,
     RemoteReports,
     RemoteReprints,
+    RemoteSensorNotifications,
     RemoteSettingsStore,
     RemoteUploadStore,
 )
@@ -90,7 +93,10 @@ from scadbuddy.crud.render import (
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
 )
+from scadbuddy.filament.bb_pull_run import FilamentPullActivities
+from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.print_uses import print_use_hook
+from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.operations import flow_kinds
 from scadbuddy.library.assets import RemoteAssetStore
@@ -1446,6 +1452,21 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             LanImportActivities(
                 printers, settings_store.load, partial(_given, library), RemoteLanImports(crud)
             ).lan_auto_import,
+            # The ScadBuddy-to-Bambuddy filament sync's pass (#6265): SB's side through
+            # the API's ``filament-sync`` routes, never this worker's SQL.
+            FilamentSyncActivities(
+                RemoteFilamentSync(crud), settings_loader(settings_store.load)
+            ).sync_pass,
+            # The Bambuddy pull's reads (#6772): Bambuddy read here, SB's side through the
+            # API's ``filament-pull`` routes, so the API reads no Bambuddy for the pull.
+            FilamentPullActivities(
+                RemoteBbPull(crud), settings_loader(settings_store.load)
+            ).pull_read,
+            # The sensors' alert notifications (#6646): claimed and ended through the
+            # API's ``sensor-notify`` routes, sent to Bambuddy from here.
+            SensorNotifyActivities(
+                RemoteSensorNotifications(crud), settings_loader(settings_store.load)
+            ).deliver,
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
         library=library,
@@ -1490,6 +1511,9 @@ PRINT_CRUD_AREAS = frozenset(
         "transfer-urls",
         "access-codes",
         "filament",
+        "filament-sync",
+        "filament-pull",
+        "sensor-notify",
     }
 )
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from typing import Annotated, Any
 
@@ -38,8 +39,9 @@ from scadbuddy.agent_data.payload_keys import KeyNotHeldError
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.workspace import Keks
 from scadbuddy.api.deps import StateDep
+from scadbuddy.api.limits import RouteLimit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.guard import PREFIX, crud_router
 
 router = crud_router("agent")
 
@@ -57,6 +59,17 @@ ENTRIES_MAX = 1000
 #: (30 MiB) a request and sends a larger entry alone, so the body's cap holds one such entry.
 ENTRY_CHARS_MAX = 48 * 1024 * 1024
 BODY_BYTES_MAX = 64 * 1024 * 1024
+
+#: For ``main.py``'s `BodySizeGate` (#6863): the gate refuses a JSON body over 8 MiB unless the
+#: route has a limit of its own, so without this ``BODY_BYTES_MAX`` is never reached. The path is
+#: the mounted one; the route's own `_bounded` still answers 411 and 413 for the same bound.
+ROUTE_LIMIT = RouteLimit(
+    "POST",
+    re.compile(rf"^/api/v1{PREFIX}/agent/sessions/[^/]+/(?:entries(?:/delete)?|transcript/moved)$"),
+    BODY_BYTES_MAX,
+    "a transcript request",
+    "fixed, api/crud_agent_transcripts.py BODY_BYTES_MAX",
+)
 #: The uuids a warm process wrote itself, which ``moved`` leaves out (the agent's ``own``);
 #: past this the agent recycles the process instead of asking.
 OWN_MAX = 20_000

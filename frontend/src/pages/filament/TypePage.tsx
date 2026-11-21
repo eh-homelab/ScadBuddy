@@ -19,7 +19,7 @@ import {
 } from '../../api/filament'
 import { addShopping } from '../../api/filamentPurchasing'
 import { KValueTable } from '../../components/filament/KValueTable'
-import { kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
+import { keyOf, kValueRowsError, type KPrinter } from '../../components/filament/kValueRows'
 import { PresetTable } from '../../components/filament/PresetTable'
 import { ProfileFetchPanel } from '../../components/filament/ProfileFetchPanel'
 import { ProfileFillDialog } from '../../components/filament/ProfileFillDialog'
@@ -61,6 +61,9 @@ interface Draft {
   nozzle_temp_max: string
   bed_temp_min: string
   bed_temp_max: string
+  /** The default of a spool's drying (#6720). */
+  drying_temp_c: string
+  drying_hours: string
   /** 3dfilamentprofiles.com's filament id (#6625). */
   tdfp_id: string
   note: string
@@ -90,6 +93,8 @@ const BLANK: Draft = {
   nozzle_temp_max: '',
   bed_temp_min: '',
   bed_temp_max: '',
+  drying_temp_c: '',
+  drying_hours: '',
   tdfp_id: '',
   note: '',
   presets: [],
@@ -121,10 +126,13 @@ function draftOf(type: SpoolTypeDetail): Draft {
     nozzle_temp_max: str(type.nozzle_temp_max),
     bed_temp_min: str(type.bed_temp_min),
     bed_temp_max: str(type.bed_temp_max),
+    drying_temp_c: str(type.drying_temp_c),
+    drying_hours: str(type.drying_hours),
     tdfp_id: str(type.tdfp_id),
     note: str(type.note),
     presets: type.presets.map(({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name }) => ({ printer_model, nozzle_diameter, slicer_filament, slicer_filament_name })),
-    k_values: type.k_values.map(({ type_id: _type, ...row }) => row),
+    // `source` is the server's to set (R-6714-19): a save never sends it.
+    k_values: type.k_values.map(({ type_id: _type, source: _source, ...row }) => row),
   }
 }
 
@@ -174,6 +182,7 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
     nozzle_temp_max: whole('maximum nozzle temperature', draft.nozzle_temp_max),
     bed_temp_min: whole('minimum bed temperature', draft.bed_temp_min),
     bed_temp_max: whole('maximum bed temperature', draft.bed_temp_max),
+    drying_temp_c: whole('drying temperature', draft.drying_temp_c),
     lead_time_days: whole('lead time in days', draft.lead_time_days),
     safety_margin_days: whole('safety margin in days', draft.safety_margin_days),
   }
@@ -187,7 +196,11 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
   const diameter = decimal('filament diameter', draft.diameter_mm)
   const density = decimal('density', draft.density_g_cm3)
   const cost = decimal('cost per kg', draft.cost_per_kg)
-  for (const value of [diameter, density, cost]) if (value !== null && !DECIMAL.test(value)) return value
+  const dryingHours = decimal('drying hours', draft.drying_hours)
+  for (const value of [diameter, density, cost, dryingHours]) if (value !== null && !DECIMAL.test(value)) return value
+  // `filament/models.py` `Temp` and `Hours`, as the columns hold them.
+  if (typeof fields.drying_temp_c === 'number' && fields.drying_temp_c > 1000) return 'Enter the drying temperature as at most 1000 °C.'
+  if (dryingHours !== null && Number(dryingHours) >= 1000) return 'Enter the drying hours as less than 1000.'
   if (diameter === null) return 'Enter the filament diameter, such as 1.75.'
   return {
     code: draft.code.trim(),
@@ -203,6 +216,7 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
     diameter_mm: diameter,
     density_g_cm3: density,
     cost_per_kg: cost,
+    drying_hours: dryingHours,
     tdfp_id: tdfp,
     note: draft.note.trim() || null,
     ...(fields as {
@@ -212,6 +226,7 @@ function bodyOf(draft: Draft): SpoolTypeCreate | string {
       nozzle_temp_max: number | null
       bed_temp_min: number | null
       bed_temp_max: number | null
+      drying_temp_c: number | null
       lead_time_days: number | null
       safety_margin_days: number | null
     }),
@@ -581,6 +596,16 @@ export function TypePage() {
               {text('bed_temp_max', 'Bed temperature, max (°C)', { mode: 'numeric' })}
             </div>
           </section>
+          <section aria-label="Drying" className="flex flex-col gap-3">
+            <h2 className="text-sm font-semibold tracking-tight">Drying</h2>
+            <div className="grid grid-cols-2 gap-3">
+              {text('drying_temp_c', 'Drying temperature (°C)', { mode: 'numeric' })}
+              {text('drying_hours', 'Drying time (h)', { mode: 'decimal' })}
+            </div>
+            <p className="text-[12px] text-muted-foreground">
+              A spool of this type fills its drying form with these. Empty, it takes the subtype's or the material's.
+            </p>
+          </section>
           <Field label="Note" htmlFor="type-note">
             <Textarea id="type-note" rows={3} value={draft.note} onChange={(e) => set('note', e.target.value)} />
           </Field>
@@ -614,7 +639,7 @@ export function TypePage() {
       <section aria-label="Pressure advance" className="mt-6 flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">K values</h2>
         <p className="text-[12px] text-muted-foreground">Pressure advance, by printer, extruder and nozzle.</p>
-        <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} />
+        <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} saved={new Map((saved?.k_values ?? []).map((row) => [keyOf(row), row]))} />
       </section>
 
       {!creating && (

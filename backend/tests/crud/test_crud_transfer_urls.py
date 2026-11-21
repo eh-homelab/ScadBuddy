@@ -225,9 +225,14 @@ async def _read(blobs: RemoteBlobs, key: str) -> bytes:
 
 def test_the_area_is_served_and_awaited() -> None:
     assert "transfer-urls" in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's; #6262's
-    # ``filament`` came after it.
-    assert CRUD_AREAS["print"][-3:] == ["transfer-urls", "access-codes", "filament"]
+    # Appended, so an older API's list is a prefix of a newer one's: each came after the one before.
+    # Check the order, not the list's tail, which every new area extends.
+    areas = CRUD_AREAS["print"]
+    positions = [
+        areas.index(area)
+        for area in ["transfer-urls", "access-codes", "filament", "filament-sync", "filament-pull"]
+    ]
+    assert positions == sorted(positions)
 
 
 async def test_an_unknown_key_is_refused(tmp_path: Path) -> None:

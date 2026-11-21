@@ -5,11 +5,49 @@ description: Manage ScadBuddy's own filament inventory - spool types, spools, ta
 
 # Filament inventory and invoice import
 
-ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy that SB pulls.
-SB writes no spool records to BB yet; that push is planned in
-[#6265](https://github.com/eh-homelab/ScadBuddy/issues/6265) (filament spec §8). Tag pushes
-(`filament_sync.tags` set to `sb_to_bb`), override mode, AMS slot setup and NTAG writes do
-write BB.
+ScadBuddy (SB) owns the spool inventory. Bambuddy (BB) keeps a copy. The setting
+`filament_sync` gives each of six data types (`spools`, `weights`, `tags`, `suppliers`,
+`locations`, `presets`) one direction: `off`, `sb_to_bb`, `bb_to_sb` or `two_way`. SB
+writes BB only for a type set to `sb_to_bb` or `two_way`. The sync pass never sends
+`tags`: tags reach BB through the spool refresh's tag drain, so `tags` alone set to push
+gives `nothing_pushes`. The defaults pull `spools`,
+`weights`, `tags` and `presets` and leave `suppliers` and `locations` off
+(`backend/scadbuddy/core/settings.py` `FilamentSync`; plan
+`docs/superpowers/plans/2026-11-18-filament-bb-sync.md`, Decision 3). Override mode, AMS
+slot setup and NTAG writes write BB whatever `filament_sync` says.
+
+## Sync with Bambuddy
+
+- `filament_sync_status` reads how the sync stands: the directions, the last pass, its
+  error, and each item whose last write to BB failed or was held back. Use it to explain
+  why a spool is not in BB. An error `name_taken` means another BB row has the item's name,
+  so SB never sent it. `skipped` says why no pass runs: `no_bambuddy` or `nothing_pushes`.
+  `last_ok_at` is the last pass with no error, a skipped pass too, so do not report it as
+  the last sync (plan Decision 19; `agent/src/tools/filament.ts`).
+- `filament_sync_run` asks for a full pass now. It writes BB, so it needs approval. It
+  answers `started: true` at once; read `filament_sync_status` afterwards. A 409
+  `no_bambuddy` or `nothing_pushes` means there is nothing to run: say so, and do not
+  change `filament_sync` for the person.
+- `instance_changed: true` in `filament_sync_status` means the links belong to another
+  Bambuddy than the one set up now (its URL changed), so the sync and the pull are stopped.
+  Call `filament_sync_reset_links` with `expect_kept: true` first: it reads the configured
+  Bambuddy's spools, and when it holds every linked spool as ScadBuddy last saw it (the
+  same Bambuddy at a new address), the reset deletes nothing and answers `kept: true`: the
+  links now belong to it (plan Decisions 193-199, #6845). When it cannot prove that
+  (Bambuddy could not be read, or it is another one), it answers 409 `proof_changed` and
+  deletes nothing. Only then call it with `expect_kept: false`, which reads no Bambuddy and
+  deletes the links, intents and error rows of that old instance (`kept: false`). Either
+  way it asks for a full pass, and it never deletes an SB spool, type, supplier or
+  location. It writes, so it needs approval. Pass `confirm_instance` as the status's
+  `instance`; a 409 `confirm_mismatch`, `same_instance`, `nothing_to_reset` or
+  `proof_changed` deleted nothing.
+  Before you ask for the delete, tell the person that when the Bambuddy is another one, a spool is
+  linked again only by its RFID tag, so an untagged spool can end up twice (plan Decisions
+  165-170).
+- Child data types (weights, presets, suppliers per spool, a spool's location) move only
+  on spools that are linked to a BB spool already (plan Decision 16).
+- A spool deleted in BB comes back under `sb_to_bb` or `two_way` with `spools` set to
+  push (plan Decision 13).
 
 Sources, relative to the root of
 [eh-homelab/ScadBuddy](https://github.com/eh-homelab/ScadBuddy):
@@ -148,6 +186,9 @@ printer model that SB's printers have and per nozzle in the setting
 local presets, sets them as the type's presets for those keys, and sets K values
 from the printers' K tables where one matches exactly. An old K value of a fetched
 key that the new preset does not match is removed, and the run's `notes` name it.
+The fetch writes and removes only K values an earlier fetch set (`source`
+`profile_fetch`): a K value a person, the fill or a printer calibration set stays, and
+the `notes` name each one it kept (README "Profile-fetch worker").
 The fetched keys replace the type's presets for those keys. The type's other presets stay. A spool's own presets
 still win.
 

@@ -51,7 +51,7 @@ export function ProfileFillDialog({ typeId, open, onClose, onApplied }: { typeId
       const apply = Object.fromEntries(rows.filter(([field]) => kept.has(field)))
       const withKValues = withK && diff.k_values.length > 0
       // The K values the refresh showed go back, so a change since is refused (R-6714-g).
-      const shown = withKValues ? diff.k_values.map(({ type_id: _type, ...row }) => row) : undefined
+      const shown = withKValues ? diff.k_values.map(({ type_id: _type, source: _source, ...row }) => row) : undefined
       const done = await fillTypeFromProfile(typeId, { apply, k_values: withKValues, ...(shown ? { shown_k_values: shown } : {}) })
       onApplied(done)
     } catch (cause) {
@@ -125,10 +125,10 @@ export function ProfileFillDialog({ typeId, open, onClose, onApplied }: { typeId
         {diff && diff.k_values.length > 0 && (
           <label className="flex items-center gap-2 text-[13px]">
             <Checkbox checked={withK} onCheckedChange={(on) => setWithK(on === true)} />
-            Add {diff.k_values.length} {diff.k_values.length === 1 ? 'K value' : 'K values'} from its Bambuddy spools
+            Add {diff.k_values.length} {diff.k_values.length === 1 ? 'K value' : 'K values'} from its Bambuddy spools and printers
           </label>
         )}
-        {diff?.k_reason && <p className="text-[12px] text-muted-foreground">K values were not read: {diff.k_reason}.</p>}
+        {diff?.k_reason && <p className="text-[12px] text-muted-foreground">Some K values were not imported: {diff.k_reason}.</p>}
         {diff?.cost_hint && <p className="text-[12px] text-muted-foreground">The profile prices it at {diff.cost_hint} per kg. The cost is never filled from it.</p>}
         <DialogFooter>
           <Button type="button" variant="ghost" onClick={onClose}>

@@ -17,7 +17,7 @@ from psycopg.rows import DictRow
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import TagAlreadyLinkedError
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.settings import FilamentSync
+from scadbuddy.core.settings import FilamentSync, pushes
 from scadbuddy.filament.models import TagPushReport
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -51,7 +51,7 @@ def error_label(exc: ApiError) -> str:
     return exc.type if code is None else f"{exc.type}:{code}"
 
 
-def _label(exc: Exception) -> str:
+def failure_label(exc: Exception) -> str:
     """`error_label` for a Bambuddy problem, else one fixed word: an exception's class
     would leak what failed inside (a database driver's error, say)."""
     return error_label(exc) if isinstance(exc, ApiError) else "internal"
@@ -170,7 +170,7 @@ async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50
         try:
             await _push_one(store, client, tag_id, report)
         except Exception as error:
-            label = _label(error)
+            label = failure_label(error)
             logger.warning(
                 "could not push a tag to Bambuddy",
                 extra={"tag_id": str(tag_id), "error": label},
@@ -183,9 +183,9 @@ async def drain_tags(store: Filament, client: BambuddyClient, *, limit: int = 50
 async def push_pending(
     store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
 ) -> TagPushReport:
-    """`drain_tags` when ``filament_sync.tags`` is ``sb_to_bb`` and a Bambuddy is
-    configured; otherwise nothing, and the rows stay queued."""
-    if (await asyncio.to_thread(sync)).tags != "sb_to_bb":
+    """`drain_tags` when ``filament_sync.tags`` pushes (``sb_to_bb`` or ``two_way``) and a
+    Bambuddy is configured; otherwise nothing, and the rows stay queued."""
+    if not pushes((await asyncio.to_thread(sync)).tags):
         return TagPushReport()
     settings = await asyncio.to_thread(load)
     if not settings.bambuddy_url:

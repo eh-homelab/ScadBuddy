@@ -456,9 +456,6 @@ export function serverValue(settings: Settings, name: FieldName): string {
     name === 'storefront_turnstile_secret'
   )
     return ''
-  // #6262 Task 13, #6264 — `filament_sync` is one object per data type; the form holds the
-  // spools, tags and weights choices as one string, `spools|tags|weights` (`syncParts`).
-  if (name === 'filament_sync') return `${settings.filament_sync?.spools ?? 'bb_to_sb'}|${settings.filament_sync?.tags ?? 'off'}|${settings.filament_sync?.weights ?? 'bb_to_sb'}`
   const value = (settings as Record<string, unknown>)[name]
   if (value === null || value === undefined) return ''
   return String(value)

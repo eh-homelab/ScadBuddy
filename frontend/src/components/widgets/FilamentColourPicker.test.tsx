@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { FilamentInventorySpool, Param, TrayPlace } from '../../api/types'
 import { spoolColour } from '../../lib/filamentColour'
 import { inventoryRows } from '../../mocks/features/filament'
@@ -15,9 +15,9 @@ const param: Param = { group: 'Colours', name: 'body_color', type: 'color', init
 const ROUTE = '/api/v1/filament/inventory'
 
 /** An SB spool of Bambu Lab PLA Basic with this number, colour name and `#RRGGBBAA`. */
-function row(number: number, colour_name: string, rgba: string, grams_left = 800, loaded: TrayPlace | null = null): FilamentInventorySpool {
+function row(number: number, colour_name: string, rgba: string, grams_left = 800, loaded: TrayPlace | null = null, material = 'PLA'): FilamentInventorySpool {
   const id = `62620000-0000-4000-8000-${String(number).padStart(12, '0')}`
-  const spool = sbSpool({ id, number, material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name, rgba, grams_left, cost_per_kg: null })
+  const spool = sbSpool({ id, number, material, subtype: 'Basic', brand: 'Bambu Lab', colour_name, rgba, grams_left, cost_per_kg: null })
   return { spool, loaded, bb_spool_id: null, presets: [] }
 }
 
@@ -31,6 +31,105 @@ function setup(value = '#1B6CA8') {
   render(<ColorWidget param={param} value={value} onChange={onChange} />)
   return { onChange, user }
 }
+
+const EAST: TrayPlace = { printer_id: '00000000-0000-4000-8000-0000000000e2', printer_name: 'H2C-East', bambuddy_printer_id: null, ams_id: 1, tray_id: 0 }
+
+// The filters are remembered in this browser: each test starts with none.
+beforeEach(() => localStorage.clear())
+
+describe('the colour picker filters', () => {
+  async function openList(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    return screen.findByRole('listbox', { name: 'Filaments for Plate' })
+  }
+  const names = (list: HTMLElement) => within(list).getAllByRole('option').map((option) => option.textContent)
+
+  it('searches by colour name even with only a few spools', async () => {
+    server.use(inventory(row(50, 'Shelf Blue', '#0086D6FF'), row(51, 'Loaded Orange', '#FF6A13FF')))
+    const { user } = setup()
+    const list = await openList(user)
+    await user.type(screen.getByPlaceholderText('Search filaments'), 'orange')
+    expect(names(list)).toEqual(['Bambu Lab PLA Basic — Loaded Orange#51 · 800 g'])
+  })
+
+  it('shows only the spools loaded in a printer, and remembers it', async () => {
+    server.use(inventory(row(50, 'Shelf Blue', '#0086D6FF', 1000), row(51, 'Loaded Orange', '#FF6A13FF', 120, EAST)))
+    const { user } = setup()
+    let list = await openList(user)
+    await user.click(screen.getByRole('checkbox', { name: 'Loaded in a printer' }))
+    expect(names(list)).toEqual(['Bambu Lab PLA Basic — Loaded Orange#51 · H2C-East · AMS-B · slot 1 · 120 g'])
+    // Closed and opened again: the choice stays.
+    await user.keyboard('{Escape}')
+    list = await openList(user)
+    expect(screen.getByRole('checkbox', { name: 'Loaded in a printer' })).toBeChecked()
+    expect(names(list)).toHaveLength(1)
+  })
+
+  it('shows one material at a time, and All shows every one again', async () => {
+    server.use(inventory(row(50, 'Blue', '#0086D6FF', 1000, null, 'PLA'), row(51, 'Black', '#000000FF', 900, null, 'PETG'), row(52, 'Red', '#FF0000FF', 800, null, 'TPU')))
+    const { user } = setup()
+    const list = await openList(user)
+    const materials = screen.getByRole('group', { name: 'Material' })
+    expect(within(materials).getAllByRole('button').map((b) => b.textContent)).toEqual(['All', 'PETG', 'PLA', 'TPU'])
+    await user.click(within(materials).getByRole('button', { name: 'PETG' }))
+    expect(within(materials).getByRole('button', { name: 'PETG' })).toHaveAttribute('aria-pressed', 'true')
+    expect(names(list)).toEqual(['Bambu Lab PETG Basic — Black#51 · 900 g'])
+    await user.click(within(materials).getByRole('button', { name: 'All' }))
+    expect(names(list)).toHaveLength(3)
+  })
+
+  it('keeps the spool of the colour now on the list when a filter would hide it (#6818 review)', async () => {
+    localStorage.setItem('scadbuddy.colourPicker.filters', JSON.stringify({ material: null, loadedOnly: true }))
+    server.use(inventory(row(50, 'Shelf Blue', '#0086D6FF', 1000), row(51, 'Loaded Orange', '#FF6A13FF', 120, EAST)))
+    const { user } = setup('#0086D6')
+    const list = await openList(user)
+    expect(names(list)).toEqual([
+      'Bambu Lab PLA Basic — Loaded Orange#51 · H2C-East · AMS-B · slot 1 · 120 g',
+      'Bambu Lab PLA Basic — Shelf Blue#50 · 1000 g(the colour now)',
+    ])
+  })
+
+  it('keeps the spool of the colour now on the list under a material filter (#6827 review)', async () => {
+    localStorage.setItem('scadbuddy.colourPicker.filters', JSON.stringify({ material: 'PETG', loadedOnly: false }))
+    server.use(inventory(row(50, 'Blue', '#0086D6FF', 1000, null, 'PLA'), row(51, 'Black', '#000000FF', 900, null, 'PETG')))
+    const { user } = setup('#0086D6')
+    const list = await openList(user)
+    expect(names(list)).toEqual(['Bambu Lab PLA Basic — Blue#50 · 1000 g(the colour now)', 'Bambu Lab PETG Basic — Black#51 · 900 g'])
+  })
+
+  it('offers "Loaded in a printer" only when a spool is loaded, and ignores a remembered tick (#6818 review)', async () => {
+    localStorage.setItem('scadbuddy.colourPicker.filters', JSON.stringify({ material: null, loadedOnly: true }))
+    server.use(inventory(row(50, 'Shelf Blue', '#0086D6FF'), row(52, 'Shelf Red', '#FF0000FF')))
+    const { user } = setup()
+    const list = await openList(user)
+    expect(screen.queryByRole('checkbox', { name: 'Loaded in a printer' })).toBeNull()
+    expect(names(list)).toHaveLength(2)
+  })
+
+  it('opens with the remembered filters, and a material no spool has reads as All (#6818 review)', async () => {
+    localStorage.setItem('scadbuddy.colourPicker.filters', JSON.stringify({ material: 'PETG', loadedOnly: false }))
+    server.use(inventory(row(50, 'Blue', '#0086D6FF', 1000, null, 'PLA'), row(51, 'Black', '#000000FF', 900, null, 'PETG')))
+    const { user } = setup()
+    let list = await openList(user)
+    expect(screen.getByRole('button', { name: 'PETG' })).toHaveAttribute('aria-pressed', 'true')
+    expect(names(list)).toEqual(['Bambu Lab PETG Basic — Black#51 · 900 g'])
+    await user.keyboard('{Escape}')
+
+    localStorage.setItem('scadbuddy.colourPicker.filters', JSON.stringify({ material: 'ASA', loadedOnly: false }))
+    list = await openList(user)
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true')
+    expect(names(list)).toHaveLength(2)
+  })
+
+  it('says so when the filters leave nothing', async () => {
+    server.use(inventory(row(50, 'Shelf Blue', '#0086D6FF', 1000, null, 'PLA'), row(51, 'Loaded Black', '#000000FF', 900, EAST, 'PETG')))
+    const { user } = setup()
+    await openList(user)
+    await user.click(screen.getByRole('checkbox', { name: 'Loaded in a printer' }))
+    await user.click(screen.getByRole('button', { name: 'PLA' }))
+    expect(screen.getByText('No filament matches.')).toBeInTheDocument()
+  })
+})
 
 describe('a colour from a filament (#1026)', () => {
   it("lists the seed's SB spools by number, loaded first, and takes the chosen one's colour (#6262 Task 9)", async () => {
