@@ -26,7 +26,7 @@ from scadbuddy.filament.bb_sync_models import (
     SyncPassResult,
     SyncPlan,
 )
-from scadbuddy.filament.bb_sync_results import LocalFilamentSync
+from scadbuddy.filament.bb_sync_results import LocalFilamentSync, sync_status
 from scadbuddy.filament.models import Material, SpoolCreate
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.worker import PRINT_CRUD_AREAS
@@ -249,6 +249,25 @@ async def test_a_list_put_answer_names_its_field(store: SettingsStore, crud: Cru
     response = await crud.request("POST", RESULTS, json=sent)
     assert response.status_code == 200, response.text
     ResultsReport.model_validate(response.json())
+
+
+@pg
+async def test_the_pass_records_when_it_started_and_the_status_returns_it(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """#6836: ``last_pass_started_at`` is the pass's own start through the pass route, not
+    the record's time; without one (a build before it) it is the record's."""
+    remote = RemoteFilamentSync(crud)
+    started = datetime(2026, 11, 20, 7, 0, tzinfo=UTC)
+    await remote.record_pass(_pass(started_at=started))
+    state = _state(store)
+    assert state["last_pass_started_at"] == started
+    assert state["last_pass_at"] > started  # type: ignore[operator]
+    status = sync_status(filament_on(store.pool), FilamentSync(), None)
+    assert status.last_pass_started_at == started
+
+    await remote.record_pass(_pass())
+    assert _state(store)["last_pass_started_at"] > started  # type: ignore[operator]
 
 
 @pg

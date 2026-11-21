@@ -476,9 +476,10 @@ def _row(
 
 
 def record_pass(store: Filament, result: SyncPassResult) -> None:
-    """Write the state row for one pass (Decision 19): ``last_pass_at`` and the counts
-    always, ``last_error`` from ``result.error``, and ``last_ok_at`` only when it is
-    ``None``, so a failed pass keeps the last clean one's time."""
+    """Write the state row for one pass (Decision 19): ``last_pass_at``,
+    ``last_pass_started_at`` (the pass's own start, #6836) and the counts always,
+    ``last_error`` from ``result.error``, and ``last_ok_at`` only when it is ``None``, so a
+    failed pass keeps the last clean one's time."""
     counts = {
         "written": result.written,
         "failed": result.failed,
@@ -489,9 +490,10 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
     with store.spools.transaction() as conn:
         conn.execute(
             "UPDATE filament_bb_sync_state SET last_pass_at = now(),"
+            " last_pass_started_at = COALESCE(%s, now()),"
             " last_ok_at = CASE WHEN %s THEN now() ELSE last_ok_at END,"
             " last_error = %s, counts = %s",
-            (result.error is None, result.error, Jsonb(counts)),
+            (result.started_at, result.error is None, result.error, Jsonb(counts)),
         )
 
 
@@ -530,7 +532,7 @@ def sync_status(
     directions and the skip reason the caller read from the settings."""
     with store.spools.transaction() as conn:
         state = conn.execute(
-            "SELECT instance, last_pass_at, last_ok_at, last_error, counts"
+            "SELECT instance, last_pass_at, last_pass_started_at, last_ok_at, last_error, counts"
             " FROM filament_bb_sync_state"
         ).fetchone()
         errors = conn.execute(
@@ -543,6 +545,7 @@ def sync_status(
     return SyncStatus(
         instance=state["instance"],
         last_pass_at=state["last_pass_at"],
+        last_pass_started_at=state["last_pass_started_at"],
         last_ok_at=state["last_ok_at"],
         last_error=state["last_error"],
         counts=state["counts"],

@@ -653,8 +653,9 @@ async def put_settings(
     timer_after = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     old_url = timer_before.get("bambuddy_url")
     if old_url and timer_after.get("bambuddy_url") != old_url:
-        # Decision 161: the old Bambuddy's workflow is told now, so its next pass is
-        # `instance_changed` and it ends, even with no timer. None running is nothing.
+        # Decision 161: the old Bambuddy's workflow is told now, so its next pass ends it,
+        # even with no timer: `instance_changed` for another URL, the `no_bambuddy` skip
+        # when the save cleared it. None running is nothing.
         state.filament_sync.signal_running_soon(old_url)
     if sync_touched and snapshot.runtime.filament_sync != sync_before:
         if pushes_anything(snapshot.runtime.filament_sync):

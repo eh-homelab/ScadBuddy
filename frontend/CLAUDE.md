@@ -281,7 +281,7 @@ same way, `vite.config.ts`).
   (`getSyncStatus`, `GET /filament/sync/status`: the last pass, why none runs, and each
   item whose last write failed or was held back, with `syncErrorText`); and "Sync now"
   (`runSync`, `POST /filament/sync/run`), after which the status is read again until a
-  pass later than the run's answer lands (R-T11-2). It also has the "RFID override mode" switch with "Apply now", #6264;
+  pass has started at or after the run's `requested_at` (R-T11-2, #6836). It also has the "RFID override mode" switch with "Apply now", #6264;
   the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:

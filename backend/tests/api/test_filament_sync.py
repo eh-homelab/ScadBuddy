@@ -57,9 +57,11 @@ def test_status_lists_errors_and_directions(client: TestClient, pg_conninfo: str
     with psycopg.connect(pg_conninfo) as conn:
         conn.execute(
             "UPDATE filament_bb_sync_state SET instance = 'abcdef012345',"
-            " last_pass_at = %s, last_ok_at = %s, last_error = 'bambuddy-down', counts = %s",
+            " last_pass_at = %s, last_pass_started_at = %s, last_ok_at = %s,"
+            " last_error = 'bambuddy-down', counts = %s",
             (
                 datetime(2026, 11, 20, 10, tzinfo=UTC),
+                datetime(2026, 11, 20, 9, 59, tzinfo=UTC),
                 datetime(2026, 11, 20, 9, tzinfo=UTC),
                 Jsonb({"written": 2, "failed": 1, "deferred": 0, "conflicts": 0, "unmapped_k": 0}),
             ),
@@ -82,6 +84,7 @@ def test_status_lists_errors_and_directions(client: TestClient, pg_conninfo: str
     assert body["instance"] == "abcdef012345"
     assert body["last_error"] == "bambuddy-down"
     assert body["last_pass_at"].startswith("2026-11-20T10:00")
+    assert body["last_pass_started_at"].startswith("2026-11-20T09:59")
     assert body["last_ok_at"].startswith("2026-11-20T09:00")
     assert body["counts"] == {
         "written": 2,
@@ -162,10 +165,15 @@ def test_run_nudges_full(
     configure(client, filament_sync={"spools": "two_way"})
     filament_nudges.clear()
 
+    before = datetime.now(UTC)
     ran = client.post(f"{SYNC}/run")
+    after = datetime.now(UTC)
 
     assert ran.status_code == 202, ran.text
-    assert ran.json() == {"started": True}
+    body = ran.json()
+    assert body["started"] is True
+    # #6836: the server's own time, taken before it asked for the pass.
+    assert before <= datetime.fromisoformat(body["requested_at"]) <= after
     assert temporal.starts == [[True]]
     # The route nudges itself: `nudge_after_write` adds no plain nudge after it.
     assert filament_nudges == []

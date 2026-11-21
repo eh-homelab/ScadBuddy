@@ -114,7 +114,8 @@ class FilamentSyncNudger:
         workflow's next pass is ``nothing_pushes`` and it ends (R-T8-4), even with no
         timer. With ``url`` it signals that Bambuddy's workflow instead, without reading the
         settings: a save that changes ``bambuddy_url`` tells the old one, whose next pass is
-        ``instance_changed`` (Decision 161). No workflow (or no ``bambuddy_url``) is
+        ``instance_changed`` for another URL, or the ``no_bambuddy`` skip when the save
+        cleared it (Decision 161). No workflow (or no ``bambuddy_url``) is
         nothing; another failure is logged, never raised."""
         try:
             async with asyncio.timeout(NUDGE_TIMEOUT):

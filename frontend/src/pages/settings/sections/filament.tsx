@@ -239,14 +239,15 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
   const [pending, setPending] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [problem, setProblem] = useState<ReactNode>(null)
-  /** While a pass asked for has not landed: when the run's 202 arrived, as an ISO string. */
-  const [waiting, setWaiting] = useState<{ since: string } | null>(null)
+  /** While a pass asked for has not landed: the server's `requested_at` from the run's 202, as an ISO string. */
+  const [waiting, setWaiting] = useState<{ requestedAt: string } | null>(null)
   const data = status.data
   const { setData } = status
 
   // R-T11-2 — the pass runs in the background: read the status every SYNC_POLL_MS until
-  // `last_pass_at` is later than the run's answer, for at most SYNC_POLL_LIMIT_MS. A timer
-  // pass or an earlier nudge's pass that lands first does not end it (Decision 162).
+  // a pass has started at or after the run's `requested_at` (both the server's clock, never the
+  // browser's), for at most SYNC_POLL_LIMIT_MS. A timer pass or an earlier nudge's pass that
+  // started before the request does not end it (Decision 162).
   // Unmounting stops it.
   useEffect(() => {
     if (!waiting) return
@@ -259,7 +260,7 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
         const next = await getSyncStatus()
         if (stopped) return
         setData(next, { supersede: true })
-        if (next.last_pass_at && new Date(next.last_pass_at) > new Date(waiting.since)) {
+        if (next.last_pass_started_at && new Date(next.last_pass_started_at) >= new Date(waiting.requestedAt)) {
           setNote('Sync finished.')
           setWaiting(null)
           return
@@ -286,9 +287,9 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
     setNote(null)
     setProblem(null)
     try {
-      await runSync()
+      const run = await runSync()
       setNote('Sync started. It runs in the background; this status updates when the pass is done.')
-      setWaiting({ since: new Date().toISOString() })
+      setWaiting({ requestedAt: run.requested_at })
     } catch (cause) {
       setProblem(runProblem(cause))
     } finally {

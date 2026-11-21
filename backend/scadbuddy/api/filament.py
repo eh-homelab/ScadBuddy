@@ -1732,7 +1732,8 @@ async def reconcile_rfid(
         "`locations`; the sync writes Bambuddy only for a type set to `sb_to_bb` or "
         "`two_way`, and never for `tags`, which reach Bambuddy through the spool refresh's "
         "tag drain. `instance` is the Bambuddy the links belong to. `last_pass_at` is the "
-        "last pass, `last_error` its error label (null when it worked), and `last_ok_at` the "
+        "last pass, `last_pass_started_at` when it started (by the worker's clock), "
+        "`last_error` its error label (null when it worked), and `last_ok_at` the "
         "last pass with no error, a skipped one too. `counts` is the last pass's: `written`, "
         "`failed`, `deferred`, `conflicts` and `unmapped_k`. `errors` holds one row per item "
         "whose last write failed (Bambuddy refused it or did not answer) or was held back "
@@ -1763,8 +1764,9 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
         "Asks for a full sync pass now: the print worker reads Bambuddy, then writes it only "
         "for the data types `filament_sync` sets to push (`sb_to_bb` or `two_way`); a type "
         "set to `off` or `bb_to_sb` is never written, and nor is `tags` (the spool "
-        'refresh\'s tag drain sends tags). Answers 202 `{"started": true}` '
-        "once the pass is asked for; it runs in the background, and "
+        'refresh\'s tag drain sends tags). Answers 202 `{"started": true, "requested_at": ...}` '
+        "once the pass is asked for (`requested_at` is the server's time; the pass for this "
+        "request has `last_pass_started_at` at or after it); it runs in the background, and "
         "`GET /filament/sync/status` shows how it went. 409 with `code` `no_bambuddy` when "
         "no Bambuddy is configured, and `nothing_pushes` when no data type but `tags` is set "
         "to push. "
@@ -1774,6 +1776,8 @@ async def get_filament_sync_status(filament: FilamentDep, store: SettingsStoreDe
     ),
 )
 async def run_filament_sync(state: StateDep) -> SyncRun:
+    # Before the nudge, so a pass it starts has begun at or after this (#6836).
+    requested_at = datetime.now(UTC)
     try:
         reason = await state.filament_sync.nudge(full=True, raise_errors=True)
     except Exception as exc:
@@ -1793,7 +1797,7 @@ async def run_filament_sync(state: StateDep) -> SyncRun:
             " go with the refresh)",
             code=reason,
         )
-    return SyncRun()
+    return SyncRun(requested_at=requested_at)
 
 
 @router.post(
