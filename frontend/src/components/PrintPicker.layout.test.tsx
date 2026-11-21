@@ -163,6 +163,31 @@ describe('PrintPicker · Advanced sections (#6885)', () => {
     expect(tower).toHaveTextContent('Print sequence by object')
   })
 
+  it("follows the options' own saves in a closed section's header", async () => {
+    let stored: Record<string, unknown> = { manual_start: true }
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({ ...fixtures.printOptions, global_options: stored }),
+      ),
+      http.put('/api/v1/settings/print-options', async ({ request }) => {
+        stored = ((await request.json()) as { options: Record<string, unknown> }).options
+        return HttpResponse.json({ ...fixtures.printOptions, global_options: stored })
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    const section = screen.getByRole('region', { name: 'Filing and copies' })
+    const chip = await within(section).findByTestId('holding-manual_start')
+    await user.click(within(chip).getByRole('button', { name: 'Stop remembering' }))
+    await waitFor(() => expect(within(section).queryByTestId('holding-manual_start')).toBeNull())
+
+    const filing = screen.getByRole('button', { name: 'Filing and copies' })
+    await user.click(filing)
+    expect(filing).toHaveAttribute('aria-expanded', 'false')
+    expect(filing).not.toHaveTextContent('Waits for a manual start')
+  })
+
   it('keeps the plate swap reminder in sight while "Quality and plate" is closed', async () => {
     window.localStorage.setItem(SECTIONS_KEY, JSON.stringify({ quality: false }))
     const { user } = renderPicker()

@@ -171,13 +171,6 @@ import { Link } from 'react-router'
  */
 
 /**
- * The notes about the nozzle step, shown in Advanced mode only (#772): the rack's
- * `not-installed`. A side the slice may use with a nozzle of the chosen size mounted in
- * the other flow (`hf-mounted`, #797, #484) is not one of them, so Simple shows it.
- */
-const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['not-installed'])
-
-/**
  * #2672 — the dialog as one step of a batch print: Back, Skip and Next in place of Print,
  * the step strip above the choices, and the choices it opens on.
  */
@@ -1411,13 +1404,11 @@ export function PrintPicker({
   }, [pickOffered])
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   /**
-   * #772 — Simple mode hides the notes about the nozzle step, which only Advanced shows.
-   * The mounted High Flow warning (#723, #797) is shown in both, and never holds Print.
+   * Every warning, in both modes: since #6885 Simple has the nozzle step too, so the
+   * rack's `not-installed` note (once Advanced only, #772) shows there as well. The
+   * mounted High Flow warning (#723, #797) never holds Print.
    */
-  const shown = (warnings: FilamentWarning[] | undefined) =>
-    picker.advanced
-      ? (warnings ?? [])
-      : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
+  const shown = (warnings: FilamentWarning[] | undefined) => warnings ?? []
   /**
    * #2365 — the background slice's grams, for the plate the slots describe: the one
    * chosen to print, when its result is of that plate. The result is kept, stale, while
@@ -1942,10 +1933,10 @@ export function PrintPicker({
           ? // #3818 — the hot path: ScadBuddy's own slicer, and the printer over the LAN.
             picker.advanced
             ? 'Choose the trays, nozzles, quality and plate. ScadBuddy slices it and sends it to the printer over the LAN.'
-            : 'Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.'
+            : 'Choose the trays, and the nozzle, bed plate and quality in the summary row. ScadBuddy slices it and sends it to the printer over the LAN.'
           : picker.advanced
             ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
-            : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+            : 'Choose the spools, and the nozzle, bed plate and quality in the summary row. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
   const split = (choices || source) && !result && unanswered === null
   const footer = quoting ? (
           <>

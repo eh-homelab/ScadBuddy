@@ -1229,7 +1229,7 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('print-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
-  it('shows the mounted High Flow warning in Simple and Advanced, and never holds Print on it (#797)', async () => {
+  it('shows the mounted High Flow and not-installed warnings in Simple and Advanced, and never holds Print on them (#797, #6885)', async () => {
     const highFlow =
       'The left nozzle is High Flow and this print is sliced for Standard flow, so if it ' +
       'prints on the left, the printer pauses at the first layer.'
@@ -1246,11 +1246,11 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     )
     renderPicker()
     await loaded()
-    // Simple mode: the mounted High Flow warning, and no nozzle-step note.
+    // Simple mode: both, since Simple has the nozzle step too (#6885).
     const simple = await screen.findAllByTestId('print-verdict-warning')
-    expect(simple).toHaveLength(1)
+    expect(simple).toHaveLength(2)
     expect(simple[0]).toHaveTextContent('The left nozzle is High Flow')
-    expect(screen.queryByText(/No 0.6 mm nozzle is installed/)).toBeNull()
+    expect(simple[1]).toHaveTextContent('No 0.6 mm nozzle is installed')
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
 
     await showAdvanced()
@@ -5320,7 +5320,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     const analyses = watch('POST', '/run', '/api/v1/analyzers/')
     const { user } = renderPicker()
     await loaded()
-    await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Choose the trays, and the nozzle, bed plate and quality in the summary row. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
     expect(within(screen.getByTestId('filament-slot-1')).getByRole('radio', { name: /PLA Blue in AMS-A slot 1/ })).toBeInTheDocument()
     expect(screen.getByText('Filed under:')).toHaveTextContent('the template’s folder')
     expect(screen.queryByText(NO_BAMBUDDY)).not.toBeInTheDocument()
@@ -5339,7 +5339,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     setHotPath(true)
     renderPicker()
     await loaded()
-    await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Choose the trays, and the nozzle, bed plate and quality in the summary row. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
     expect(screen.queryByRole('switch', { name: /wait for the right colour/i })).toBeNull()
   })
 
@@ -5365,7 +5365,7 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     await user.click(await screen.findByRole('button', { name: 'Print on H2C over the LAN' }))
     await loaded()
     expect(
-      screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.'),
+      screen.getByText('Choose the trays, and the nozzle, bed plate and quality in the summary row. ScadBuddy slices it and sends it to the printer over the LAN.'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Print on H2C over the LAN' })).toBeNull()
   })

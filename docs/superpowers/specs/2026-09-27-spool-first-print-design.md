@@ -246,7 +246,7 @@ manual rack pick (the flow it states is not read). The warning is advisory only,
 a refusal, and it changes nothing the run sends, since a print may be set up before its
 nozzle is fitted. An unreadable printer status gives no warning rather than assuming a
 side. The dialog shows `hf-mounted` in Simple and Advanced mode alike, and it never holds
-Print; the nozzle step's own note (`not-installed`) stays Advanced only.
+Print; the nozzle step's own note (`not-installed`) shows in both modes too, since Simple has the nozzle step (#6885).
 
 That print was sliced in desktop Bambu Studio 02.08.02.61 ("Name Keychain (H2C)",
 project Raegan): printer `Bambu Lab H2C 0.2 nozzle`, process `0.08mm High Quality @BBL
