@@ -1534,7 +1534,7 @@ def test_a_double_lost_answer_still_adopts(pg_pool: PgPool) -> None:
     assert (write.op, write.bb_id, write.body) == ("update", 60, {})
 
 
-# -- linked rows Bambuddy deleted (#6688, decisions 172-177) ------------------------------
+# -- linked rows Bambuddy deleted (#6688, decisions 187-192) ------------------------------
 
 #: Every data type that a row kind follows pushes.
 _ROWS_PUSH = SPOOLS.model_copy(update={"suppliers": "sb_to_bb", "locations": "sb_to_bb"})

@@ -656,7 +656,7 @@ async def test_a_catalog_update_of_the_weight_takes_the_name_read() -> None:
     assert (result.written, result.failed) == (1, 1)
 
 
-# -- probes of rows Bambuddy may have deleted (#6688, decisions 172-177) -------------------
+# -- probes of rows Bambuddy may have deleted (#6688, decisions 187-192) -------------------
 
 
 @respx.mock

@@ -908,7 +908,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     409 for a second supplier or location of one name, so a create would fail on every
     pass. Cost: a BB row of the same name that a person made becomes SB's. Task 5 must take
     an `update` on an unlinked item with an open intent as an adoption, for spools too.
-42. (changed by 62, replaced by 172-177 for #6688) Task 4: a linked supplier, location, catalog or filament entry missing from BB's
+42. (changed by 62, replaced by 187-192 for #6688) Task 4: a linked supplier, location, catalog or filament entry missing from BB's
     listing gets no write; only spools are probed (Decision 13). Why: the brief's probe is
     `spool_row`. Cost: such a row stays linked to a row Bambuddy deleted until a later
     task handles it.
