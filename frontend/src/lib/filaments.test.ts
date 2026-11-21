@@ -548,6 +548,9 @@ describe('tileGroups (#6885)', () => {
       spool({ spool_id, loaded: loaded({ printer_id, printer_name: `P${printer_id}`, ams_id, tray_id: 0 }) })
     const groups = tileGroups([at(1, 2, 0), at(2, 1, 1), at(3, 1, 0), at(4, 2, 1)], { slot_id: 1, colour_matches: [] }, null)
     expect(groups.map((group) => group.label)).toEqual(['P1 · AMS-A', 'P1 · AMS-B', 'P2 · AMS-A', 'P2 · AMS-B'])
+    // By number: printer 2 before printer 10.
+    const ten = tileGroups([at(5, 10, 0), at(6, 2, 0)], { slot_id: 1, colour_matches: [] }, null)
+    expect(ten.map((group) => group.label)).toEqual(['P2 · AMS-A', 'P10 · AMS-A'])
   })
 
   it('puts a spool loaded in another printer apart', () => {
