@@ -84,7 +84,7 @@ class PlacedObject:
     #: printed parts' ``paint_color`` codes paint with (#6797) beside each painted
     #: part's own (filament 1 where none is stated, #6823); empty when the file states
     #: none and paints none. Past :data:`MAX_HINT_PAINT_DIGITS` the painting is left
-    #: out.
+    #: out of the object whose codes passed it and of every object read after it.
     extruders: frozenset[int] = frozenset()
 
     @property
@@ -187,10 +187,10 @@ class _Bounds:
         stack: list[tuple[tuple[str, str], bool]] = [(start, False)]
         while stack:
             key, children_done = stack.pop()
+            if not children_done and key in self.painted:
+                continue  # read already, or in progress: skip before the lookup's scan
             found = self.object(*key)
             if not children_done:
-                if key in self.painted:
-                    continue
                 self.painted[key] = frozenset()  # a cycle reads as unpainted
                 stack.append((key, True))
                 if found is not None:

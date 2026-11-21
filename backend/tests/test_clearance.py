@@ -445,6 +445,39 @@ def test_painting_decoded_before_the_budget_ran_out_is_kept(
     assert [obj.extruders for obj in by_plate[2]] == [frozenset({1})]
 
 
+def test_on_one_plate_the_object_decoded_first_keeps_its_painting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude-review on #6837: within one plate too, the first object keeps its
+    painting (filament 2, code "8", one digit) and the second, whose code "0C" passes a
+    one-digit budget, counts only what the file states, which here is nothing. With no
+    ``model_settings.config`` the one plate holds every build item."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+
+    def painted(object_id: int, x: int, code: str) -> str:
+        return (
+            f'<object id="{object_id}" type="model"><mesh><vertices>'
+            f'<vertex x="{x}" y="0" z="0"/><vertex x="{x + 10}" y="0" z="0"/>'
+            f'<vertex x="{x}" y="10" z="5"/></vertices><triangles>'
+            f'<triangle v1="0" v2="1" v3="2" paint_color="{code}"/>'
+            "</triangles></mesh></object>"
+        )
+
+    root = (
+        f'<model xmlns="{core}" unit="millimeter"><resources>'
+        f"{painted(1, 0, single_code(2))}{painted(2, 50, single_code(3))}"
+        '</resources><build><item objectid="1"/><item objectid="2"/></build></model>'
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("3D/3dmodel.model", root)
+    monkeypatch.setattr(clearance, "MAX_HINT_PAINT_DIGITS", len(single_code(2)))
+
+    by_plate, _ = check_plates(buffer.getvalue(), [1], None)
+
+    assert [obj.extruders for obj in by_plate[1]] == [frozenset({1, 2}), frozenset()]
+
+
 def test_a_painted_object_stating_no_extruder_prints_its_own_in_filament_1(
     tmp_path: Path,
 ) -> None:
