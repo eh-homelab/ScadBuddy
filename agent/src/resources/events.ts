@@ -27,8 +27,8 @@ const SETTLED = ['scadbuddy://print/history', 'scadbuddy://print/stats', 'scadbu
 
 /**
  * Resources announced by NOTIFY-only kinds (the agent's `session.*`, not in
- * the backend's replay log: sessions/busEvents.ts). After the LISTEN
- * connection comes back, every subscription under these is told to re-read
+ * the backend's replay log: sessions/busEvents.ts). After the change
+ * stream comes back, every subscription under these is told to re-read
  * (hub.ts `onReconnect`).
  */
 export const NOTIFY_ONLY_PREFIXES: readonly string[] = ['scadbuddy://sessions']

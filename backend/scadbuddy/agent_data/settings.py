@@ -12,7 +12,7 @@ warm process cache's eviction (``scadbuddy_warm_evict``, payload ``*``,
 ``agent/src/sessions/warmEvict.ts``) and the runtime settings' re-read
 (``scadbuddy_settings``, payload ``session-runtime``, ``sessions/runtimeSettings.ts``).
 The agent says which a write needs: which keys a warm process was spawned by is its own
-knowledge. The LISTEN side is unchanged (the change stream is #5299 step 11).
+knowledge. The agent hears both over its change stream (`agent_changes/hub.py`, #5299 step 11).
 """
 
 from __future__ import annotations

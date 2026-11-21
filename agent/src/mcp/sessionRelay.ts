@@ -50,8 +50,9 @@ import { MCP_CHANNEL, RelayBodyTooLargeError, type RelayRows } from './relayRows
 // 404. A stall fires an interval once however long it lasted, so it costs one
 // silent tick, not the SILENT_AFTER_BEATS that make a peer gone.
 //
-// The channel is `scadbuddy_mcp`, LISTENed on the event listener's own
-// connection (events/pgListener.ts `listenAlso`).
+// The channel is `scadbuddy_mcp`, heard on the API's change stream
+// (events/changeStream.ts `listenAlso`, #5299 D4), in the order Postgres
+// delivered it to the API's LISTEN connection.
 //
 // Session ids are credentials (mcp/http.ts): the directory and every relay
 // message carry the id's SHA-256, never the id.
@@ -188,7 +189,7 @@ type Waiting = {
 }
 
 export type SharedMcpSessionRelayOptions = {
-  /** LISTEN on MCP_CHANNEL (events/pgListener.ts `listenAlso`). */
+  /** Hears MCP_CHANNEL (events/changeStream.ts `listenAlso`). */
   listen: (channel: string, onNotify: (payload: string) => void) => void
   ackTimeoutMs?: number
   beatMs?: number
