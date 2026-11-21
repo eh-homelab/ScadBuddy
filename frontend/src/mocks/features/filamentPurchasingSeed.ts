@@ -190,10 +190,10 @@ export function seedInput() {
     },
   ]
   const shopping = [
-    { id: ITEM.PINK, type_id: T.PINK, material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Hot Pink', quantity_spools: 2, note: null, status: 'pending' as const, purchased_at: null },
-    { id: ITEM.ORANGE, type_id: T.ORANGE, material: 'PETG', subtype: 'HF', brand: 'Bambu Lab', colour_name: 'Translucent Orange', quantity_spools: 1, note: 'Waiting for the sale.', status: 'pending' as const, purchased_at: null },
-    { id: ITEM.TPU, type_id: null, material: 'TPU', subtype: '95A', brand: null, colour_name: 'White', quantity_spools: 1, note: null, status: 'pending' as const, purchased_at: null },
-    { id: ITEM.CLEAR, type_id: T.POLY_CLEAR, material: 'PETG', subtype: null, brand: 'Polymaker', colour_name: 'Clear', quantity_spools: 1, note: null, status: 'purchased' as const, purchased_at: '2026-11-10T16:20:00Z' },
+    { id: ITEM.PINK, type_id: T.PINK, material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Hot Pink', quantity_spools: 2, note: 'Spool #3 ran out on 2026-11-14 18:42 UTC.', status: 'pending' as const, purchased_at: null, empty_spool_id: spoolId(3) },
+    { id: ITEM.ORANGE, type_id: T.ORANGE, material: 'PETG', subtype: 'HF', brand: 'Bambu Lab', colour_name: 'Translucent Orange', quantity_spools: 1, note: 'Waiting for the sale.', status: 'pending' as const, purchased_at: null, empty_spool_id: null },
+    { id: ITEM.TPU, type_id: null, material: 'TPU', subtype: '95A', brand: null, colour_name: 'White', quantity_spools: 1, note: null, status: 'pending' as const, purchased_at: null, empty_spool_id: null },
+    { id: ITEM.CLEAR, type_id: T.POLY_CLEAR, material: 'PETG', subtype: null, brand: 'Polymaker', colour_name: 'Clear', quantity_spools: 1, note: null, status: 'purchased' as const, purchased_at: '2026-11-10T16:20:00Z', empty_spool_id: null },
   ]
   return { suppliers, products, manualPrices, invoices, shopping }
 }

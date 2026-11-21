@@ -61,6 +61,7 @@ from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
+    RemoteBbPull,
     RemoteEvents,
     RemoteFilamentSync,
     RemoteFilamentTrays,
@@ -91,6 +92,7 @@ from scadbuddy.crud.render import (
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
 )
+from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.print_uses import print_use_hook
 from scadbuddy.flows.keys import approval_key
@@ -1453,6 +1455,11 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             FilamentSyncActivities(
                 RemoteFilamentSync(crud), settings_loader(settings_store.load)
             ).sync_pass,
+            # The Bambuddy pull's reads (#6772): Bambuddy read here, SB's side through the
+            # API's ``filament-pull`` routes, so the API reads no Bambuddy for the pull.
+            FilamentPullActivities(
+                RemoteBbPull(crud), settings_loader(settings_store.load)
+            ).pull_read,
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
         library=library,
@@ -1498,6 +1505,7 @@ PRINT_CRUD_AREAS = frozenset(
         "access-codes",
         "filament",
         "filament-sync",
+        "filament-pull",
     }
 )
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { listTypes, type SpoolType } from '../../api/filament'
 import { addShopping, clearShopping, listShopping, patchShopping, removeShopping, type ShoppingItem, type ShoppingItemCreate } from '../../api/filamentPurchasing'
+import { AppLink } from '../../components/AppLink'
 import { TD, TH } from '../../components/filament/formClasses'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { EntityLink } from '../../components/filament/EntityLink'
@@ -16,6 +17,7 @@ import { message } from '../../components/filament/purchasing/priceFormat'
 export const QUANTITY_KEY = 'scadbuddy.filament.shopping.quantity'
 
 const NO_TYPE = '__none__'
+const LINK = 'underline underline-offset-2 hover:text-foreground'
 const QUANTITY = /^\d+$/
 
 
@@ -47,7 +49,9 @@ type Bulk = 'purchased' | 'all'
 /**
  * #6266 — the Shopping list tab: what to buy next. An item is added from a type or typed by
  * hand, marked purchased (it moves below the pending ones), or removed. "Clear purchased"
- * and "Clear all" ask first. The last quantity used is remembered.
+ * and "Clear all" ask first. The last quantity used is remembered. #6868: a spool that runs
+ * out or is archived adds its type (Settings → Filament, `filament_shopping_auto_add_empty`);
+ * such an item carries an "Auto" mark, and its note links to that spool.
  */
 export function ShoppingListTab() {
   const [items, setItems] = useState<ShoppingItem[] | null>(null)
@@ -235,6 +239,13 @@ export function ShoppingListTab() {
           </Button>
         </div>
       </div>
+      <p className="-mt-2 text-[13px] text-muted-foreground">
+        A spool that runs out adds its type here, unless the type is already on the list. Turn it off in{' '}
+        <AppLink href="/settings/printing#filament" className={LINK}>
+          Settings
+        </AppLink>
+        .
+      </p>
       {error && (
         <p role="alert" className="text-[13px] text-warn">
           {error}
@@ -274,7 +285,18 @@ export function ShoppingListTab() {
                     <td className={TD}>{item.brand}</td>
                     <td className={TD}>{item.colour_name}</td>
                     <td className={`${TD} text-right tabular-nums`}>{item.quantity_spools}</td>
-                    <td className={TD}>{item.note}</td>
+                    <td className={TD}>
+                      {item.empty_spool_id && (
+                        <span title="Added when a spool ran out or was archived" className="mr-1.5 inline-block rounded-sm border px-1 text-[11px] leading-4 text-muted-foreground">
+                          Auto
+                        </span>
+                      )}
+                      {item.empty_spool_id && item.note ? (
+                        <EntityLink to={filamentLinks.spool(item.empty_spool_id)}>{item.note}</EntityLink>
+                      ) : (
+                        item.note
+                      )}
+                    </td>
                     <td className={TD}>{bought ? 'Purchased' : 'Pending'}</td>
                     <td className={`${TD} whitespace-nowrap text-right`}>
                       <Button

@@ -1,6 +1,6 @@
 """The spool refresh's activities, on the ``library`` worker (`main._run_library_worker`):
-Bambuddy's spools pulled into ScadBuddy's own (`filament_pull_activity`, #6261). The
-kept presets' activity is `slicing/held_presets.py`'s.
+Bambuddy's spools pulled into ScadBuddy's own (`filament_pull_activity`, #6261; read on the
+print worker since #6772). The kept presets' activity is `slicing/held_presets.py`'s.
 
 The spool providers, their overlay and the trays it recorded are gone (#6262 Task 12).
 Their three activities stay registered for a run opened before ``spool-providers-gone``
@@ -11,7 +11,7 @@ no refresh, and no trays to record.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,7 +19,8 @@ from temporalio import activity
 
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import capture
-from scadbuddy.filament.bambuddy_pull import scheduled_pull
+from scadbuddy.filament.bb_pull_apply import pull_start
+from scadbuddy.filament.bb_pull_models import PullOutcome, PullStart
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.rfid_mode import BUSY, NO_BAMBUDDY, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
@@ -59,19 +60,36 @@ def spool_activities() -> list[Callable[..., Any]]:
 
 
 def filament_pull_activity(
-    filament: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
+    filament: Filament,
+    load: Callable[[], StoredSettings],
+    sync: Callable[[], FilamentSync],
+    execute: Callable[[PullStart], Awaitable[PullOutcome]],
 ) -> Callable[[], Any]:
-    """``filament_bambuddy_pull``: Bambuddy's spools into ScadBuddy's own
-    (`filament/bambuddy_pull.py`). It runs on the ``library`` worker, in the API process,
-    which holds the store (`main._run_library_worker`), so it writes it directly. When no
-    data type of ``filament_sync`` pulls (``sync`` reads it), with no Bambuddy, or with
-    Bambuddy down, it pulls nothing: it logs and returns, so the run never fails on it.
-    Before that gate, whenever Bambuddy is configured, it reads the Home Assistant sensors
-    and writes their readings, even when nothing pulls."""
+    """``filament_bambuddy_pull``: Bambuddy's spools into ScadBuddy's own. It runs on the
+    ``library`` worker, in the API process, and reads no Bambuddy (#6772): it decides what
+    the pull reads (`bb_pull_apply.pull_start`) and has the print worker read it,
+    through ``execute`` (`bb_pull_apply.execute_pull`: ``FilamentBbPull`` on the
+    ``bambuddy`` queue, which sends what it read to the API's CRUD routes). With no
+    Bambuddy, or when no data type of ``filament_sync`` pulls (``sync`` reads it) and no
+    Home Assistant sensor is set up, it starts nothing and answers ``skipped``. Whenever
+    Bambuddy is configured and a Home Assistant sensor is set up, the worker reads the
+    sensors' states, even when nothing pulls. It answers the worker's ``pulled``,
+    ``skipped`` or ``failed``, and ``failed`` when the settings could not be read or the run
+    could not be started or ended (logged): it never raises, so the run never fails on it."""
 
     @activity.defn(name=FILAMENT_PULL_ACTIVITY)
     async def filament_bambuddy_pull() -> str:
-        return await scheduled_pull(filament, load, sync)
+        try:
+            start = await pull_start(filament, load, sync)
+            if start is None:
+                return "skipped"
+            outcome = await execute(start)
+        except Exception as error:
+            activity.logger.warning(
+                "could not pull Bambuddy's spools", extra={"error": type(error).__name__}
+            )
+            return "failed"
+        return outcome.outcome
 
     return filament_bambuddy_pull
 

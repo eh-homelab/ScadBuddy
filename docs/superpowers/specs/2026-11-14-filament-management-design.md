@@ -539,6 +539,13 @@ holds each decision and what it costs if wrong.
   nothing.
 - **Shopping list statuses.** An item is `pending` or `purchased`; a repeat keeps the first
   `purchased_at`. The list shows newest first, pending above purchased.
+- **An empty spool adds its type (#6868).** A spool whose grams move from above 0 to 0, by
+  any ledger write, or that is archived, adds a `pending` item for its type in the same
+  transaction, unless one is already pending for that type; a spool with no type adds a text
+  item. The item names the spool (`empty_spool_id`) and its note says when. The stored
+  setting `filament_shopping_auto_add_empty` (Settings → Filament, on by default) turns it
+  off. It orders nothing, so "stock reorder automation" above stays out of scope. The
+  rulings are in `docs/superpowers/plans/2026-11-17-filament-suppliers.md`.
 - **Draft bounds and archived suppliers.** A line's quantity is at most 1,000; a line may
   not fill more spools than its quantity, and its total must fit `numeric(12,4)`; each is a
   422. A draft for an archived supplier is a 422, and confirming an invoice whose supplier
@@ -765,9 +772,18 @@ below are the plan's):
   is the exception: before #6265 it skipped the whole pull, so it still pulls nothing.
   Its `weights`, `presets` and `tags` became `off`, except a `tags` `sb_to_bb`, which
   stayed `sb_to_bb` (the push it was).
-- Pull stays in the API (Decision 5). BB to SB is still `SpoolRefresh`'s pull
+- Pull (Decision 5, then #6772, Decisions 172-186). BB to SB is still `SpoolRefresh`'s pull
   (`filament/bambuddy_pull.py`), gated per data type, and now also takes archive state,
-  K values, suppliers and locations. Its Bambuddy reads stay in the CRUD service's pod.
+  K values, suppliers and locations. Since #6772 its Bambuddy reads run on the print
+  worker: the spool refresh's activity, and the import route, start `FilamentBbPull` on
+  the `bambuddy` queue and wait for it. Its activity (`filament/bb_pull_run.py`) reads
+  Bambuddy and sends the rows to the CRUD area `filament-pull`
+  (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`), which
+  applies them (`filament/bb_pull_apply.py`). The CRUD service makes no Bambuddy call for
+  the pull. The worker never names the actor the events are booked to: a person's import
+  is kept by the API under the run's id (`filament_pull_actors`), else `bambuddy`.
+  `SpoolRefresh`'s commands did not change; the push (`FilamentBbSync`) stays a
+  workflow of its own.
 - Tags (Decision 6). The tag queue and drain of #6264 (`filament_bb_tag_pending`,
   `rfid_push.drain_tags`) are kept and gated by `pushes(tags)`. The engine never sends
   `tag_uid` or `tray_uuid`; a new link queues the spool's open tags.

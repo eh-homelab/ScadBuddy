@@ -343,3 +343,6 @@ class ShoppingItem(_Row):
     note: str | None
     status: ShoppingStatus
     purchased_at: datetime | None
+    #: #6868: the spool whose move into empty added this item (its grams reached 0, or it
+    #: was archived); ``None`` for an item a person added, or once that spool is deleted.
+    empty_spool_id: UUID | None = None

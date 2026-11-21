@@ -1095,3 +1095,27 @@ def test_a_profile_fetch_merge_writes_one_row_per_key(
         )
     assert [(r.nozzle_diameter, r.k_value) for r in written] == [("0.40", Decimal("0.03"))]
     assert [r.k_value for r in types.k_values(type_id)] == [Decimal("0.0300")]
+
+
+def test_a_profile_fetch_merge_keeps_one_row_per_key(
+    types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """#6866: two fetched rows of a key a person's row holds (``0.4`` and ``0.40``) answer
+    one kept row, the last, so the run names the key once."""
+    printer = _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+
+    def row(nozzle: str, k: str) -> TypeKValueCreate:
+        return TypeKValueCreate(
+            printer_id=printer, extruder=0, nozzle_diameter=nozzle, k_value=Decimal(k)
+        )
+
+    types.set_k_values(type_id, _rows(type_id, [row("0.4", "0.05")]), actor="ann")
+    with pg_pool.connection() as conn, conn.transaction():
+        written, kept = SpoolTypeStore.merge_k_values(
+            conn, type_id, _rows(type_id, [row("0.4", "0.02"), row("0.40", "0.03")])
+        )
+    assert written == []
+    assert [(r.nozzle_diameter, r.k_value, old["source"]) for r, old in kept] == [
+        ("0.40", Decimal("0.03"), "person")
+    ]

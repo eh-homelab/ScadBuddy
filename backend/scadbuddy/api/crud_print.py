@@ -158,8 +158,9 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
@@ -180,6 +181,7 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, RouteLimit
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.bambuddy.copy_leases import (
@@ -224,6 +226,7 @@ from scadbuddy.crud.idempotency import (
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.crud.print import (
     ACCESS_CODE_UNREADABLE,
+    BASE,
     NO_ACCESS_CODE,
     NO_SUCH_PRINTER,
     SERIAL_TAKEN,
@@ -231,6 +234,18 @@ from scadbuddy.crud.print import (
 )
 from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.filament import print_uses
+from scadbuddy.filament.bb_pull_apply import LocalBbPull
+from scadbuddy.filament.bb_pull_models import (
+    INSTANCE_CHANGED,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    TraysBody,
+    TraysReconciled,
+    UsageBody,
+    UsageBooked,
+)
 from scadbuddy.filament.bb_sync_models import (
     PlanRequest,
     ResultsReport,
@@ -277,6 +292,17 @@ from scadbuddy.spools.models import SeenTray
 from scadbuddy.store.content_models import content_index_key
 
 logger = logging.getLogger(__name__)
+
+#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's four routes, whatever the
+#: content type. The gate counts only a type in its table, and FastAPI reads a body with
+#: no Content-Type as JSON, so without this a header left out would skip the cap.
+PULL_ROUTE_LIMIT = RouteLimit(
+    "POST",
+    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays)?$"),
+    MAX_TEXT_BODY_BYTES,
+    "a Bambuddy pull",
+    "fixed, api/limits.py MAX_TEXT_BODY_BYTES",
+)
 
 router = crud_router("print")
 # The `Operation` records of the Bambuddy kinds the worker runs (Q9).
@@ -1931,6 +1957,87 @@ async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsR
 async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
     """Natural: the row is set, not added to."""
     await sync.record_pass(body)
+
+
+def _pull(filament: FilamentDep, settings: SettingsStoreDep) -> LocalBbPull:
+    return LocalBbPull(filament, settings.load)
+
+
+PullDep = Annotated[LocalBbPull, Depends(_pull)]
+
+
+async def _for_configured[T](write: Awaitable[T]) -> T:
+    try:
+        return await write
+    except PullInstanceChangedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the body was read from another Bambuddy than the configured one",
+            reason=INSTANCE_CHANGED,
+        ) from None
+
+
+@router.post(
+    "/filament/pull",
+    name="crud_print_filament_pull",
+    summary="Pull what the print worker read of Bambuddy into SB",
+    description=(
+        "The Bambuddy pull's SB side (#6772): the spools, usage rows, suppliers, locations"
+        " and spool catalog the print worker read, pulled into SB's tables as the spool"
+        " refresh pulled them (`filament/bambuddy_pull.py`); the API calls no Bambuddy."
+        " Answers the pull's report and the date from which the worker reads Bambuddy's"
+        " archives for the usage rows not booked yet. 409 `instance_changed` for a read of"
+        " another Bambuddy than the configured one."
+    ),
+)
+async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
+    """Natural: a pull of the same rows changes nothing the first did not."""
+    return await _for_configured(sync.apply(body))
+
+
+@router.post(
+    "/filament/pull/usage",
+    name="crud_print_filament_pull_usage",
+    summary="Book Bambuddy's usage rows the print worker read",
+    description=(
+        "BB's usage rows booked on linked spools, matched to the archives the worker read"
+        " (#6772, `filament/bambuddy_usage.py`). 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
+    """Natural: a row's ``bb_usage`` event names it, so it is booked once."""
+    return await _for_configured(sync.book_usage(body))
+
+
+@router.post(
+    "/filament/pull/ha-states",
+    name="crud_print_filament_pull_ha_states",
+    summary="Record Bambuddy's Home Assistant states as sensor readings",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description=(
+        "Each state a reading of the Home Assistant sensor naming its entity (#6268, #6772);"
+        " `states` null (the read failed) marks every such sensor unreachable. 409"
+        " `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
+    """Natural: a reading of the same value within 15 minutes is not stored again."""
+    await _for_configured(sync.ha_states(body))
+
+
+@router.post(
+    "/filament/pull/trays",
+    name="crud_print_filament_pull_trays",
+    summary="Set the untagged trays right by Bambuddy's assignments",
+    description=(
+        "Each untagged tray whose placed spool disagrees with the printer's report takes"
+        " the spool Bambuddy assigns it, when that one agrees (#6713, #6772). Answers how"
+        " many trays moved. 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_trays(body: TraysBody, sync: PullDep) -> TraysReconciled:
+    """Natural: a tray already set right is left alone."""
+    return TraysReconciled(moved=await _for_configured(sync.reconcile_trays(body)))
 
 
 @router.get("/held-presets", name="crud_print_held_presets")

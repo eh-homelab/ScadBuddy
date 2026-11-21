@@ -1338,8 +1338,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   503 `store_unavailable`, which the worker retries. The worker signs nothing. It does
   not `LISTEN`. It waits until the API lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
   `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
-  `lan-imports`, `printers`, `rack`, `spools`, `transfer-urls`, `access-codes` and
-  `filament`) before
+  `lan-imports`, `printers`, `rack`, `spools`, `transfer-urls`, `access-codes`,
+  `filament`, `filament-sync` and `filament-pull`) before
   it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
@@ -1417,6 +1417,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   "A release that needs `Recreate`" below). A job start during the roll can reach an old
   build that does not register it; that run's workflow task fails until the new build is
   current.
+- **Upgrading to the release with #6772** adds one workflow type, `FilamentBbPull` (the
+  Bambuddy pull's reads, which the API's spool refresh and `POST
+  /filament/bambuddy/import` start, `backend/scadbuddy/workflows/filament_pull.py`), to the
+  `bambuddy` queue, and the CRUD area `filament-pull`, which the worker waits for. Roll
+  `scadbuddy-print` out with `Recreate` (see "A release that needs `Recreate`" below). A
+  pull started during the roll can reach an old build that does not register it; its
+  workflow task fails until the new build is current, at most the run's 4.5 minutes, and
+  the next tick of the spool refresh pulls again.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
@@ -2288,7 +2296,8 @@ checked per run from the settings as they are then (`printers/hot_path.py`
 
 `bambuddy_url` may stay set. A native run never builds a Bambuddy client; what still
 calls Bambuddy are the housekeeping sweeps and the spool refresh, which pulls Bambuddy's
-spools into ScadBuddy's own (the `scadbuddy-spool-providers-<queue>` Schedule,
+spools into ScadBuddy's own (the print worker reads Bambuddy for it and the API applies the
+rows, #6772; the `scadbuddy-spool-providers-<queue>` Schedule,
 `spool_overlay_refresh_seconds` (restart), 300 s by default; it is also the timer of the
 sync's full pass to Bambuddy, which takes a change after its next pass, not at a restart, and
 0 leaves that pass to filament changes and Sync now; Settings → Printing → Filament, where

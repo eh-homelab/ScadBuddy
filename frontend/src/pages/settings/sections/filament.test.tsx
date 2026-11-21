@@ -563,6 +563,19 @@ describe('Filament (#6262)', () => {
     expect(mockSettings().filament_default_cost_per_kg).toBe('24.50')
   })
 
+  it('switches off adding empty spools to the shopping list, with Save Filament (#6868)', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    const toggle = within(filament).getByRole('switch', { name: /Add a spool's type when it runs out/ })
+    expect(toggle).toBeChecked()
+    expect(within(filament).getByText('Add empty spools to the shopping list')).toBeInTheDocument()
+    await user.click(toggle)
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_shopping_auto_add_empty).toBe(false))
+    expect(within(filament).getByRole('switch', { name: /Add a spool's type when it runs out/ })).not.toBeChecked()
+  })
+
   it('saves the 3DFP fetch nozzles with Save Filament, and shows them again on the next visit (#6625)', async () => {
     const first = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()

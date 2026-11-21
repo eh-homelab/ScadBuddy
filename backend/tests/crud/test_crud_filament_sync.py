@@ -55,7 +55,7 @@ def test_the_print_areas_list_filament_sync() -> None:
     """The routes are an area of their own, appended last, so a new worker waits for an
     API that serves them (`wait_for_areas`) rather than planning into a 404."""
     assert "filament-sync" in PRINT_CRUD_AREAS
-    assert CRUD_AREAS["print"][-1] == "filament-sync"
+    assert CRUD_AREAS["print"][-2:] == ["filament-sync", "filament-pull"]
     assert set(CRUD_AREAS["print"]) == PRINT_CRUD_AREAS
 
 

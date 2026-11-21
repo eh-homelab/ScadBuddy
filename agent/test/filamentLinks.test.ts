@@ -105,6 +105,12 @@ describe('filament ui paths (#6869)', () => {
     expect(row!.product.ui_path).toBe(`/filament/suppliers/${SUPPLIER}#product-${PRODUCT}`)
   })
 
+  it("links an automatic shopping item to the spool that ran out", () => {
+    const [item] = withUiPaths([{ id: LINE, material: 'PLA', empty_spool_id: SPOOL, type_id: TYPE }], 'shopping_item') as Record<string, unknown>[]
+    expect(item!.empty_spool_ui_path).toBe(`/filament/spools/${SPOOL}`)
+    expect(item!.type_ui_path).toBe(`/filament/types/${TYPE}`)
+  })
+
   it('links a sync error to its item, and a gone one to nothing', () => {
     const status = withUiPaths({
       errors: [

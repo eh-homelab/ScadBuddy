@@ -17,7 +17,7 @@ import {
 } from '../../../api/filament'
 import { AppLink } from '../../../components/AppLink'
 import { filamentLinks } from '../../../lib/filamentLinks'
-import { ChoiceSelect } from '../../../components/settings/form'
+import { ChoiceSelect, SwitchField } from '../../../components/settings/form'
 import { shortId, timeAgo } from '../../../lib/format'
 import { useAsync, type AsyncState } from '../../../lib/useAsync'
 import {
@@ -529,6 +529,29 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
 }
 
 /**
+ * #6868 — whether a spool that reaches 0 g, or is archived, adds its type to the shopping
+ * list. A stored choice (no environment value, so no badge), on by default, saved with
+ * "Save Filament".
+ */
+function AutoShoppingRow({ form }: { form: BackendSettings }) {
+  return (
+    <FieldRow
+      id="setting-filament_shopping_auto_add_empty"
+      {...docOf(form.settings, 'filament_shopping_auto_add_empty')}
+      error={form.errors.filament_shopping_auto_add_empty}
+    >
+      <SwitchField
+        id="setting-filament_shopping_auto_add_empty"
+        label="Add a spool's type when it runs out"
+        userOnly={false}
+        checked={form.value('filament_shopping_auto_add_empty') === 'true'}
+        onCheckedChange={(checked) => form.setField('filament_shopping_auto_add_empty', checked ? 'true' : 'false')}
+      />
+    </FieldRow>
+  )
+}
+
+/**
  * #6625 — the nozzles a 3DFP preset fetch exports for each printer model, one checkbox
  * each. `profile_fetch_nozzles` is held in the form comma-joined and saved with "Save
  * Filament"; none ticked is refused before the save.
@@ -654,6 +677,7 @@ export function Component() {
       <SyncStatusRow status={syncStatus} />
       <OverrideRow />
       <FetchNozzlesRow form={form} />
+      <AutoShoppingRow form={form} />
       <FieldRow
         id="filament-currency"
         label="Currency"

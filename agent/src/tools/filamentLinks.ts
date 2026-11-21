@@ -83,6 +83,7 @@ const NESTED: Partial<Record<LinkKind, Record<string, LinkKind>>> = {
 const FOREIGN: Record<string, (id: string) => string> = {
   spool_id: filamentPaths.spool,
   sb_spool_id: filamentPaths.spool,
+  empty_spool_id: filamentPaths.spool,
   type_id: filamentPaths.type,
   supplier_id: filamentPaths.supplier,
   invoice_id: filamentPaths.invoice,
