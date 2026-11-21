@@ -596,10 +596,13 @@ export function FilamentPicker({
                   onValueChange={(next) => choose(slot.slot_id, Number(next))}
                   className={cn('gap-2.5', !trays && listOpen && 'max-h-96 overflow-y-auto pr-1')}
                 >
-                  {(listOpen ? tileGroups(rows, slot, options.printer_id) : [{ key: 'chosen', label: '', spools: rows }]).map(
+                  {/* Closed, the chosen tile stays in the group it has when open, its heading
+                      hidden: the same keys keep the same tile, so the focus and the radio
+                      stay put when a pick closes the grid. */}
+                  {tileGroups(rows, slot, options.printer_id).map(
                     (group) => (
                       <div key={group.key} className="grid gap-1" data-testid={`slot-${slot.slot_id}-group-${group.key}`}>
-                        {group.label && (
+                        {listOpen && (
                           <p className="text-[11px] font-medium text-muted-foreground">{group.label}</p>
                         )}
                         {/* Tiles of at least 9.5rem: two across in the dialog's column, one on a
