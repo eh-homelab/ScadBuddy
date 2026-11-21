@@ -1312,6 +1312,14 @@ class SpoolUsage(BambuddyModel):
         return as_utc(value)
 
 
+class AppMessageResult(BambuddyModel):
+    """``POST /api/v1/notifications/app-message``'s answer (#6646): how many channels the
+    message was handed to. Bambuddy 1.3.1's ``AppMessageResult``, read from its OpenAPI
+    on 2026-11-21."""
+
+    channels: int
+
+
 class HaEntity(BambuddyModel):
     """A row of ``GET /api/v1/location-ha-sensors/entities`` (#6268): Bambuddy's
     ``HADisplayEntity``, a Home Assistant entity and its state as text (``unavailable``,

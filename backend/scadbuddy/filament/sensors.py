@@ -28,7 +28,20 @@ _Readings = list[m.SensorReading]
 
 SAME_VALUE_EVERY = timedelta(minutes=15)
 
-_COLUMNS = ", ".join(n for n in m.Sensor.model_fields if n != "alerting")
+#: The sensor's newest notification (#6646), as the one JSON value `m.SensorNotification`
+#: reads; a scalar subquery, so it fits a SELECT and an UPDATE's RETURNING alike.
+_LAST_NOTIFICATION = (
+    "(SELECT to_jsonb(n) - 'id' - 'sensor_id' FROM filament_sensor_notifications n"
+    " WHERE n.sensor_id = filament_location_sensors.id ORDER BY n.queued_at DESC LIMIT 1)"
+    " AS last_notification"
+)
+
+_COLUMNS = ", ".join(
+    [
+        *(n for n in m.Sensor.model_fields if n not in ("alerting", "last_notification")),
+        _LAST_NOTIFICATION,
+    ]
+)
 
 
 class SensorExistsError(ValueError):
@@ -171,11 +184,15 @@ class SensorStore:
         reading and the row's last value must change together. Nothing is stored for a
         value that is not finite, or an ``at`` not newer than the last stored reading (a
         poll that arrived out of order). A stored or repeated value marks the sensor
-        reachable. ``False`` when nothing was stored (or the sensor is gone)."""
+        reachable. A stored value that takes the sensor into or out of its alert band
+        (`alert_open`, as this reading sees the band) queues one notification when
+        ``notify`` is on (#6646); the row lock makes that once per change, however many
+        readings arrive at once. ``False`` when nothing was stored (or the sensor is gone)."""
         if not math.isfinite(value):
             return False
         row = conn.execute(
-            "SELECT last_value, last_at FROM filament_location_sensors WHERE id = %s FOR UPDATE",
+            "SELECT last_value, last_at, alert_above, alert_below, alert_open, notify"
+            " FROM filament_location_sensors WHERE id = %s FOR UPDATE",
             (sensor_id,),
         ).fetchone()
         if row is None:
@@ -193,12 +210,24 @@ class SensorStore:
             "INSERT INTO filament_sensor_readings (sensor_id, at, value) VALUES (%s, %s, %s)",
             (sensor_id, at, value),
         )
+        opened = outside_band(value, row["alert_below"], row["alert_above"])
         conn.execute(
             "UPDATE filament_location_sensors SET reachable = true, last_value = %s,"
-            " last_at = %s WHERE id = %s",
-            (value, at, sensor_id),
+            " last_at = %s, alert_open = %s WHERE id = %s",
+            (value, at, opened, sensor_id),
         )
+        if opened != row["alert_open"] and row["notify"]:
+            conn.execute(
+                "INSERT INTO filament_sensor_notifications (sensor_id, kind, value, read_at)"
+                " VALUES (%s, %s, %s, %s)",
+                (sensor_id, "started" if opened else "stopped", value, at),
+            )
         return True
+
+
+def outside_band(value: float, below: float | None, above: float | None) -> bool:
+    """Whether ``value`` is outside the alert band, as `m.Sensor.alerting` says."""
+    return (above is not None and value > above) or (below is not None and value < below)
 
 
 #: A state Home Assistant gives as a plain number: no unit, no text, no ``nan``.

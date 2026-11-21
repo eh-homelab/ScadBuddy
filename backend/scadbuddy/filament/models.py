@@ -454,6 +454,32 @@ class SensorPatch(_Patch):
         return self
 
 
+#: Why a notification was not delivered (`filament/sensor_notify.py`): Bambuddy's key
+#: lacks "Send notifications", Bambuddy refused it for its rate limit, could not be
+#: reached, refused it for another reason, took it into no channel, or the send broke in
+#: ScadBuddy.
+NotificationError = Literal[
+    "scope", "rate_limited", "unavailable", "rejected", "no_channel", "not_configured", "internal"
+]
+
+
+class SensorNotification(BaseModel):
+    """A notification a sensor queued when it started (`started`) or stopped (`stopped`)
+    alerting (#6646). ``read_at`` and ``value`` are the reading that changed it; ``state``
+    goes ``queued``, ``sending``, then ``sent`` or ``failed``; ``sent_at`` is when the
+    send ended; ``channels`` how many of Bambuddy's channels took it."""
+
+    kind: Literal["started", "stopped"]
+    value: float
+    read_at: datetime
+    channel: Literal["bambuddy"]
+    state: Literal["queued", "sending", "sent", "failed"]
+    channels: int | None
+    error: NotificationError | None
+    queued_at: datetime
+    sent_at: datetime | None
+
+
 class Sensor(BaseModel):
     id: UUID
     location_id: UUID
@@ -473,6 +499,8 @@ class Sensor(BaseModel):
     created_at: datetime
     archived_at: datetime | None
     alerting: bool = False
+    #: The newest notification this sensor queued, whatever its state (#6646).
+    last_notification: SensorNotification | None = None
 
     @model_validator(mode="after")
     def _alerting(self) -> Sensor:

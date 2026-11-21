@@ -134,7 +134,7 @@ from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core import settings as core_settings
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import bambuddy_usage, ledger, sensors
+from scadbuddy.filament import bambuddy_usage, ledger, sensor_notify, sensors
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import BbLinked, json_form, seen_row
 from scadbuddy.filament.bb_sync_nudge import instance_for
@@ -2303,6 +2303,20 @@ async def read_ha_sensors(store: Filament, settings: StoredSettings, now: dateti
             _failed("could not mark the Home Assistant sensors unreachable", again)
 
 
+async def send_notifications(store: Filament, settings: StoredSettings) -> None:
+    """The sensors' queued alert notifications sent (`sensor_notify.deliver_pending`).
+    It never fails the pull: a failure is logged with its type only."""
+    try:
+        report = await sensor_notify.deliver_pending(store, settings)
+    except Exception as error:
+        _failed("could not send the sensor notifications", error)
+        return
+    if report.sent or report.failed:
+        logger.info(
+            "sent sensor notifications", extra={"sent": report.sent, "failed": report.failed}
+        )
+
+
 def _apply_ha(store: Filament, states: dict[str, str | None], now: datetime) -> None:
     with store.spools.transaction() as conn:
         sensors.apply_ha_states_on(conn, states, now)
@@ -2317,11 +2331,14 @@ async def scheduled_pull(
     else ``pulled``. ``sync`` reads the setting as it is now (#6262 Task 13). Whenever a
     BB URL is set, it first reads the Home Assistant sensors (`read_ha_sensors`), before
     the spools gate and whatever ``sync`` says: sensors are not spool data. After a pull
-    it reconciles the untagged trays with Bambuddy's assignments (`reconcile_trays`)."""
+    it reconciles the untagged trays with Bambuddy's assignments (`reconcile_trays`).
+    After the sensors it sends their queued alert notifications (`send_notifications`,
+    #6646), whatever ``sync`` says too."""
     settings = await asyncio.to_thread(load)
     if settings.bambuddy_url:
         # Sensors are not spool data: read whatever ``filament_sync`` says.
         await read_ha_sensors(store, settings, datetime.now(UTC))
+        await send_notifications(store, settings)
     filament_sync = await asyncio.to_thread(sync)
     if not any(core_settings.pulls(d) for d in filament_sync.model_dump().values()):
         logger.info("Bambuddy's spools are not pulled: no Filament sync pulls")

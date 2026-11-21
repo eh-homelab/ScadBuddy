@@ -1474,8 +1474,11 @@ async def patch_location(
         "The unarchived humidity and temperature sensors of the unarchived places, by name; "
         "of one place with `location_id`. A sensor on an archived place is left out. Each "
         "carries its last stored value and time, `reachable` "
-        "(false when its last read had no number), and `alerting` (the last value is "
-        "outside `alert_below` / `alert_above`)."
+        "(false when its last read had no number), `alerting` (the last value is "
+        "outside `alert_below` / `alert_above`) and `last_notification`: the newest "
+        "notification it queued when it started or stopped alerting with `notify` on "
+        "(`kind`, the reading, `state`, `channel` `bambuddy`, how many Bambuddy channels "
+        "took it, and `error` when it failed), or null."
     ),
 )
 async def list_sensors(filament: FilamentDep, location_id: UUID | None = None) -> list[m.Sensor]:
@@ -1507,7 +1510,8 @@ async def list_ha_entities(store: SettingsStoreDep, search: str | None = None) -
         "A `home_assistant` sensor reads the state of an `entity_id` through Bambuddy (the "
         "pull reads it) and is put on a place; it has a `kind` (`humidity` or "
         "`temperature`), a `name`, an optional `unit`, an alert band (`alert_below`, "
-        "`alert_above`) and `notify`. An `ams` sensor is made by ScadBuddy from the "
+        "`alert_above`) and `notify` (send a notification through Bambuddy's channels "
+        "when it starts and when it stops alerting). An `ams` sensor is made by ScadBuddy from the "
         "printer's report, never by hand (422). 422 for a bad field or a place that does "
         "not exist or is archived."
     ),
