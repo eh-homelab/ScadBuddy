@@ -51,6 +51,7 @@ import { downloadBlob } from '../../lib/embed'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 interface Loaded {
   spools: Spool[]
@@ -75,7 +76,7 @@ const GROUPS: { id: SpoolsGroup; title: string }[] = [
 ]
 
 /** Each filter a chip shows and clears. */
-const CHIPS: { key: keyof SpoolsQuery; title: (q: SpoolsQuery) => string }[] = [
+const CHIPS: { key: keyof SpoolsQuery; title: (q: SpoolsQuery, place: string) => string }[] = [
   { key: 'needsType', title: (q) => (q.needsType ? 'Needs type' : 'Has a type') },
   { key: 'lowStock', title: (q) => (q.lowStock ? 'Low stock' : 'Not low') },
   { key: 'used', title: (q) => (q.used ? 'Used' : 'Unused') },
@@ -85,6 +86,7 @@ const CHIPS: { key: keyof SpoolsQuery; title: (q: SpoolsQuery) => string }[] = [
   { key: 'brand', title: (q) => `Brand: ${q.brand}` },
   { key: 'insertType', title: (q) => `Insert: ${q.insertType}` },
   { key: 'location', title: (q) => `Location: ${q.location}` },
+  { key: 'place', title: (_q, place) => `Location: ${place}` },
 ]
 
 /** The filters picked by name: the spool's names they match, and the query key each sets. */
@@ -236,6 +238,8 @@ export function SpoolsTab() {
   }
 
   const chips = CHIPS.filter((chip) => q[chip.key] !== undefined)
+  /** The `place` filter's path (a tray's, from a spool in it), so two places of one name read apart. */
+  const placeName = (q.place && (data?.places.find((one) => one.id === q.place)?.path ?? data?.spools.find((spool) => spool.location_id === q.place)?.names?.location)) || 'one place'
 
   return (
     <div className="space-y-3">
@@ -376,7 +380,7 @@ export function SpoolsTab() {
         )}
         <div className="ml-auto flex flex-wrap gap-2">
           <Button size="sm" asChild>
-            <Link to="/filament/spools/new">
+            <Link to={filamentLinks.newSpool}>
               <PlusIcon /> New spool
             </Link>
           </Button>
@@ -399,10 +403,10 @@ export function SpoolsTab() {
               <button
                 type="button"
                 onClick={() => update({ [chip.key]: undefined })}
-                aria-label={`Clear filter ${chip.title(q)}`}
+                aria-label={`Clear filter ${chip.title(q, placeName)}`}
                 className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[12px] hover:bg-muted"
               >
-                {chip.title(q)} <XIcon className="size-3" />
+                {chip.title(q, placeName)} <XIcon className="size-3" />
               </button>
             </li>
           ))}

@@ -42,15 +42,18 @@ _PRODUCT_COUNT = (
     " (SELECT count(*) FROM filament_supplier_products p"
     " WHERE p.supplier_id = s.id AND p.archived_at IS NULL)::int AS product_count"
 )
-#: A price point's columns, with what ``price_per_kg`` needs of its product and type.
+#: A price point's columns, with what ``price_per_kg`` needs of its product and type, and
+#: the invoice its line is on (#6869: the UI links an invoice's price to that invoice).
 _PRICE_COLUMNS = (
     "pp.id, pp.product_id, pp.price, pp.currency, pp.on_date, pp.source,"
-    " pp.invoice_line_id, pp.created_at, pp.updated_at, p.pack_size, t.label_weight_g"
+    " pp.invoice_line_id, il.invoice_id, pp.created_at, pp.updated_at, p.pack_size,"
+    " t.label_weight_g"
 )
 _PRICE_FROM = (
     " FROM filament_price_points pp"
     " JOIN filament_supplier_products p ON p.id = pp.product_id"
     " JOIN filament_spool_types t ON t.id = p.type_id"
+    " LEFT JOIN filament_invoice_lines il ON il.id = pp.invoice_line_id"
 )
 _PRICE_SELECT = f"SELECT {_PRICE_COLUMNS}{_PRICE_FROM}"
 _PRICE_ORDER = " ORDER BY pp.on_date DESC, pp.created_at DESC, pp.id"

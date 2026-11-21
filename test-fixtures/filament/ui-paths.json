@@ -1,0 +1,9 @@
+[
+  { "kind": "spool", "key": "6f1c2b9e-0d4a-4e57-9a51-1d2f3c4b5a60", "path": "/filament/spools/6f1c2b9e-0d4a-4e57-9a51-1d2f3c4b5a60" },
+  { "kind": "type", "key": "a1b2c3d4-0000-4000-8000-000000000001", "path": "/filament/types/a1b2c3d4-0000-4000-8000-000000000001" },
+  { "kind": "supplier", "key": "s-1", "path": "/filament/suppliers/s-1" },
+  { "kind": "invoice", "key": "inv 7/2", "path": "/filament/invoices/inv%207%2F2" },
+  { "kind": "location", "key": "loc 1/a&b", "path": "/filament/spools?place=loc+1%2Fa%26b" },
+  { "kind": "catalog", "key": "materials", "path": "/filament/catalog" },
+  { "kind": "catalog", "key": "insert-types", "path": "/filament/catalog?kind=insert-types" }
+]

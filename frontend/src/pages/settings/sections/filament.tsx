@@ -16,7 +16,7 @@ import {
   type SyncStatus,
 } from '../../../api/filament'
 import { AppLink } from '../../../components/AppLink'
-import { spoolPath } from '../../../components/filament/spoolsQuery'
+import { filamentLinks } from '../../../lib/filamentLinks'
 import { ChoiceSelect, SwitchField } from '../../../components/settings/form'
 import { shortId, timeAgo } from '../../../lib/format'
 import { useAsync, type AsyncState } from '../../../lib/useAsync'
@@ -157,19 +157,19 @@ const KIND_LABELS: Record<SyncError['kind'], string> = {
   filament: 'Spool type',
 }
 
-/** Where an item that failed to sync is shown, or null for one with no page. */
-function itemHref(error: SyncError): string | null {
+/** Where an item that failed to sync is shown (`lib/filamentLinks.ts`), from its id. */
+function itemHref(error: SyncError): string {
   switch (error.kind) {
     case 'spool':
-      return spoolPath({ id: error.sb_id })
+      return filamentLinks.spool(error.sb_id)
     case 'supplier':
-      return `/filament/suppliers/${encodeURIComponent(error.sb_id)}`
+      return filamentLinks.supplier(error.sb_id)
     case 'filament':
-      return `/filament/types/${encodeURIComponent(error.sb_id)}`
+      return filamentLinks.type(error.sb_id)
     case 'location':
-      return '/filament/locations'
-    default:
-      return null
+      return filamentLinks.location(error.sb_id)
+    case 'insert_type':
+      return filamentLinks.catalog('insert-types')
   }
 }
 
@@ -485,18 +485,19 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
         {data && data.errors.length > 0 && (
           <ul aria-label="Items not synced" className="flex flex-col gap-2">
             {data.errors.map((error) => {
-              const href = itemHref(error)
-              // The item's own name (a spool's `#N`); its id only when the item is gone.
+              // The item's own name (a spool's `#N`); its id and "(deleted)" when the item is gone (R-6869-5).
               const name = `${KIND_LABELS[error.kind]} ${error.label ?? shortId(error.sb_id)}`
               return (
                 <li key={`${error.kind}:${error.sb_id}`} className="flex flex-col gap-0.5">
                   <span className="font-medium">
-                    {href ? (
-                      <AppLink href={href} className={LINK}>
+                    {error.label == null ? (
+                      <>
+                        {name} <span className="font-normal text-muted-foreground">(deleted)</span>
+                      </>
+                    ) : (
+                      <AppLink href={itemHref(error)} className={LINK}>
                         {name}
                       </AppLink>
-                    ) : (
-                      name
                     )}
                   </span>
                   <span className="text-warn">{syncErrorText(error.error)}</span>
@@ -664,7 +665,7 @@ export function Component() {
       description={
         <>
           Spools, types and tags are in{' '}
-          <AppLink href="/filament" className={LINK}>
+          <AppLink href={filamentLinks.spools} className={LINK}>
             Filament
           </AppLink>
           .

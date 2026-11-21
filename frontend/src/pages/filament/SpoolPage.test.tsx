@@ -4,7 +4,7 @@ import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
-import { INVOICE } from '../../mocks/features/filamentPurchasingSeed'
+import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
@@ -427,12 +427,13 @@ describe('the spool page', () => {
     expect(temp).toHaveValue('300')
   })
 
-  it("links the invoice the spool was bought on, and lists the type's suppliers", async () => {
+  it("links the invoice line the spool was bought on and its supplier, and lists the type's suppliers (#6869)", async () => {
     open(1)
     await heading(1)
-    const link = await screen.findByRole('link', { name: /Invoice US-441907 · Bambu Lab/ })
-    expect(link).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_A}`)
-    expect(link.parentElement).toHaveTextContent(/line 1/)
+    const link = await screen.findByRole('link', { name: 'Invoice US-441907' })
+    expect(link).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_A}#line-${LINE.CONFIRMED_A1}`)
+    expect(link.parentElement).toHaveTextContent(/from Bambu Lab \(line 1/)
+    expect(within(link.parentElement!).getByRole('link', { name: 'Bambu Lab' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.BAMBU}`)
     const purchasing = screen.getByText('Purchasing').parentElement!
     expect(purchasing).toHaveTextContent('Bambu Lab')
     expect(purchasing).toHaveTextContent('A00-W1')

@@ -125,7 +125,7 @@ describe('Filament (#6262)', () => {
     expect(within(region('Filament')).getByText(/No pass runs: no data type but tags is set to send to Bambuddy/)).toBeInTheDocument()
   })
 
-  it('names an item that is gone by its id', async () => {
+  it('names an item that is gone by its id, as deleted and with no link (#6869)', async () => {
     const gone = '0badc0de-0000-4000-8000-000000000001'
     server.use(
       http.get('*/api/v1/filament/sync/status', () =>
@@ -145,7 +145,30 @@ describe('Filament (#6262)', () => {
     renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
-    expect(within(failed).getByRole('link', { name: 'Location 0badc0de' })).toBeInTheDocument()
+    expect(within(failed).queryByRole('link')).toBeNull()
+    expect(within(failed).getByRole('listitem')).toHaveTextContent('Location 0badc0de (deleted)')
+  })
+
+  it('links a failed place to the spools in it (#6869)', async () => {
+    server.use(
+      http.get('*/api/v1/filament/sync/status', () =>
+        HttpResponse.json({
+          instance: null,
+          last_pass_at: null,
+          last_pass_started_at: null,
+          last_ok_at: null,
+          last_error: null,
+          counts: {},
+          errors: [{ kind: 'location', sb_id: '0badc0de-0000-4000-8000-000000000002', label: 'Dry box', error: 'internal', attempts: 1, at: '2026-11-15T07:00:00Z' }],
+          directions: DEFAULT_SYNC,
+          skipped: null,
+        }),
+      ),
+    )
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const failed = await within(region('Filament')).findByRole('list', { name: 'Items not synced' })
+    expect(within(failed).getByRole('link', { name: 'Location Dry box' })).toHaveAttribute('href', expect.stringContaining('/filament/spools?place=0badc0de-0000-4000-8000-000000000002'))
   })
 
   /** The sync status reads made so far, counted from msw's request events. */
