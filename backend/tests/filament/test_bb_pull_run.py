@@ -12,12 +12,16 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy.errors import UpstreamAnswer
+from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.filament.bambuddy_pull import PullReport, Pulls
 from scadbuddy.filament.bb_pull_models import (
     HaBody,
     PullApplied,
     PullBody,
     PullInstanceChangedError,
+    PullProblem,
     PullStart,
     TraysBody,
     UsageBody,
@@ -46,17 +50,23 @@ ARCHIVE = {"id": 40, "printer_id": 1, "completed_at": "2026-11-14T10:00:00", "pr
 
 class FakeApi:
     """`BbPullApi` recording each body; ``since`` is what `apply` answers as the archives'
-    date, ``changed`` makes `apply` refuse as for another Bambuddy."""
+    date, ``changed`` makes `apply` refuse as for another Bambuddy, ``refused`` makes it
+    raise that error (SB's refusal of the body)."""
 
-    def __init__(self, since: date | None = None, changed: bool = False) -> None:
+    def __init__(
+        self, since: date | None = None, changed: bool = False, refused: Exception | None = None
+    ) -> None:
         self.since = since
         self.changed = changed
+        self.refused = refused
         self.calls: list[tuple[str, Any]] = []
 
     async def apply(self, body: PullBody) -> PullApplied:
         self.calls.append(("apply", body))
         if self.changed:
             raise PullInstanceChangedError(body.instance)
+        if self.refused is not None:
+            raise self.refused
         return PullApplied(report=PullReport(created=1), archives_since=self.since)
 
     async def book_usage(self, body: UsageBody) -> UsageBooked:
@@ -214,6 +224,67 @@ async def test_an_import_answers_bambuddys_refusal() -> None:
     assert outcome.error is not None and outcome.error.status == outcome.error.error().status
     assert outcome.error.status >= 400
     assert api.calls == []
+
+
+GATE_413 = CrudRefusedError(
+    413, {"detail": "the body declares 9000000 bytes and this API reads at most 8388608"}
+)
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [GATE_413, CrudRefusedError(422, {"detail": "spools: at most 20000 items"})],
+)
+async def test_an_import_answers_sbs_refusal_as_a_502_not_a_retry(
+    refused: CrudRefusedError, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SB refused the body (the gate's 413, a cap's or the schema's 422): sending it again
+    gets the same answer, so an import is told so as a 502 naming the refusal, never the
+    route's 503 "try again"; the Schedule's pull logs it as any failure."""
+    with respx.mock(assert_all_called=False) as router:
+        _bambuddy(router)
+        strict = await run_pull(FakeApi(refused=refused), _load, _start(strict=True))
+        scheduled = await run_pull(FakeApi(refused=refused), _load, _start())
+    assert strict.outcome == "failed"
+    assert strict.error is not None
+    assert strict.error.status == 502
+    assert f"{refused.status}: {refused.problem['detail']}" in strict.error.detail
+    assert (scheduled.outcome, scheduled.error) == ("failed", None)
+    assert "could not pull Bambuddy's spools" in caplog.text
+
+
+async def test_an_import_raises_a_busy_answer_from_sb() -> None:
+    """A 429 is not the body's fault: the import's run fails (the route's 503)."""
+    busy = CrudRefusedError(429, {"detail": "busy"}, retry_after="5")
+    with respx.mock(assert_all_called=False) as router:
+        _bambuddy(router)
+        with pytest.raises(CrudRefusedError):
+            await run_pull(FakeApi(refused=busy), _load, _start(strict=True))
+
+
+def test_a_problem_keeps_its_headers_and_upstream() -> None:
+    """The import answers Bambuddy's refusal as it did when the API read Bambuddy: its
+    headers (a Retry-After) and what Bambuddy itself answered cross the workflow too."""
+    error = ApiError(503, "Bambuddy is busy", headers={"Retry-After": "7"}, reason="busy")
+    error.upstream = UpstreamAnswer(status=503, retry_after="7", detail="later")
+    crossed = PullProblem.model_validate_json(PullProblem.of(error).model_dump_json())
+    again = crossed.error()
+    assert again.headers == {"Retry-After": "7"}
+    assert again.upstream == error.upstream
+    assert (again.status, again.detail, again.extensions) == (
+        503,
+        "Bambuddy is busy",
+        {"reason": "busy"},
+    )
+
+
+def test_a_start_with_a_field_of_a_later_build_is_read() -> None:
+    """A start written by a newer API while an older print worker still takes the queue
+    (a rolling deploy) is read, its unknown field dropped."""
+    start = PullStart.model_validate(
+        {"instance": INSTANCE, "pull_id": PULL_ID, "pulls": None, "later": True}
+    )
+    assert start.pull_id == PULL_ID
 
 
 async def test_another_bambuddy_reads_nothing() -> None:

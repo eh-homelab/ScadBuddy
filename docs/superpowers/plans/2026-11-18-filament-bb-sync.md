@@ -1819,12 +1819,14 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 174. #6772: the person's import (`POST /filament/bambuddy/import`) runs the same workflow
     with `strict`. The route answers 409 for no Bambuddy URL as before, starts
     `FilamentBbPull` and waits. A Bambuddy refusal of the spool listing comes back as its
-    problem (`PullProblem`: status, type, title, detail and extensions), so the route
-    answers what it answered when it read Bambuddy itself. New: a run that did not finish
-    (Temporal out of reach, the worker down, the run timed out) is 503 "the print worker
-    did not finish the import; try again", and a Bambuddy URL changed between the route
-    and the read is 409 "the Bambuddy URL changed during the import; import again". The
-    answer is the same `PullReport`.
+    problem (`PullProblem`: status, type, title, detail, extensions, headers and what
+    Bambuddy itself answered, Decision 185), so the route answers what it answered when it
+    read Bambuddy itself. New: a run that did not finish (Temporal out of reach, the worker
+    down, the run or its read timed out) is 503 "the print worker did not finish the
+    import in time; it may still be running, so check the spools before importing again"
+    (Decision 183), SB refusing what the worker read is 502 (Decision 184), and a Bambuddy
+    URL changed between the route and the read is 409 "the Bambuddy URL changed during the
+    import; import again". The answer is the same `PullReport`.
 175. #6772: what crosses, in the order the pull read it before. (1) Home Assistant's states,
     only when the start says a sensor is set up (`…/pull/ha-states`; `states` null when the
     read failed, so the sensors are marked unreachable). (2) One body with the spool rows
@@ -1853,11 +1855,12 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     it again on its retries: a pull of the same rows changes nothing the first did not, a
     usage row is booked once (its `bb_usage` event names it), a Home Assistant reading of
     the same value within 15 minutes is not stored again, and a tray already set right is
-    left alone. Each route needs a `Content-Length` (411 without one) of at most 32 MiB
-    (`PULL_BODY_BYTES_MAX`, 413 before the body is read), and its model forbids extra
-    keys, caps each listing at 20,000 rows (archives at 2,000), checks the instance's form
+    left alone. A body is at most 8 MiB: the app's `BodySizeGate` refuses a larger
+    `application/json` body with 413 on its headers (Decision 182; the routes have no cap of
+    their own). Each model forbids extra keys, caps each listing at 20,000 rows (archives at 2,000), checks the instance's form
     and the run's id (`filament-bb-pull-<32 hex>`). No body names an actor (Decision 181).
-179. #6772: `FilamentBbPull` runs its activity once (start-to-close 4 min, no retry): the
+179. #6772: `FilamentBbPull` runs its activity once (start-to-close and, since Decision 183,
+    schedule-to-close 4 min, no retry): the
     Schedule's next tick is the retry, as it was for the API's activity, and a person
     imports again. No heartbeat: the apply of a large inventory is one long CRUD call (its
     own client timeout is 180 s, `RemoteBbPull.APPLY_TIMEOUT`). Each run has an id of its
@@ -1882,13 +1885,72 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     actor, and their models forbid extra keys, so a body with `actor` is a 422. For an
     import a person started, the API keeps the person under that id before it starts the
     run (`remember_actor`, table `filament_pull_actors`, migration
-    `20261121T0911Z_filament_pull_actors.sql`) and deletes the row once the run ends
-    (`forget_actor`); the routes read the actor there (`LocalBbPull._actor`), and an id
+    `20261121T0911Z_filament_pull_actors.sql`) and deletes the row once the read answered
+    (`forget_actor`; Decision 183); the routes read the actor there (`LocalBbPull._actor`), and an id
     with no row (the Schedule's pull) books as `bambuddy`. A row an API that died mid-run
     left is deleted by the next `remember_actor` once it is an hour old (`ACTOR_KEPT`).
     Tests: `test_crud_filament_pull.py` refuses a body with `actor` on the pull and usage
     routes, and `test_the_events_name_the_actor_the_api_kept_never_the_workers` checks the
     events name the kept person.
+182. PR #6858 review (Blocking): the pull's routes had a cap of their own,
+    `PULL_BODY_BYTES_MAX` (32 MiB) with a 411 for no `Content-Length`, checked in a
+    dependency. Neither held: the CRUD listener serves the same app, whose `BodySizeGate`
+    (`api/limits.py`, `main.py`) refuses an `application/json` body past
+    `MAX_TEXT_BODY_BYTES` (8 MiB) on its headers first, and counts a chunked one as it
+    arrives; and FastAPI reads the body before it runs a route's dependencies. Ruling: the
+    gate's 8 MiB is the cap. `_pull_bounded` and `PULL_BODY_BYTES_MAX` are gone, and so is
+    the 411 (a chunked body is counted by the gate, not refused).
+    `test_a_body_past_the_gate_is_413_on_its_headers` sends a 9 MiB body to each route
+    through `create_app`'s CRUD listener with a real print credential and gets the gate's
+    413. A body past it is never silent: the worker's `CrudRefusedError` 413 is logged
+    ("could not pull Bambuddy's spools", with the detail) on the Schedule's pull, and an
+    import answers 502 naming it (Decision 184). Estimate (JSON as sent,
+    `model_dump(mode="json")`): a Bambuddy spool row is about 0.93 KiB (mean of the 12 rows
+    in `tests/bambuddy/recordings/inventory-spools.json`, the largest 979 B), a usage row
+    219 B, an archive as the usage body sends it 232 B, a catalog entry about 52 B. The
+    pull's body is spools + usage + catalog (+ suppliers and locations, small): 1,000
+    spools and 10,000 usage rows are about 0.9 + 2.1 = 3 MiB; it reaches 8 MiB at about
+    6,500 spools with 10,000 usage rows, or 8,800 spools alone. The usage body is at most
+    20,000 × 219 B + 2,000 × 232 B = 4.6 MiB, under the gate at its caps. The models' caps
+    (20,000 rows a listing) allow more than the gate (20,000 spools are about 18 MiB), so
+    the gate, not the cap, binds a very large inventory. The usage rows grow with every
+    print (Bambuddy's listing is not paged), so a farm that prints for years is the one
+    that nears it; prod's counts were not measured for this ruling. Either way, past
+    the gate the pull fails loudly every tick, as above, and a later change
+    can page the usage rows.
+183. PR #6858 review: the actor was lost when the read outlived the import route. The
+    route ran `forget_actor` in a `finally`, so on a 503 the row went while the worker could
+    still send bodies, which then booked as `bambuddy`; and the read's start-to-close counts
+    from the worker's pickup, so a late pickup let the run's 4.5 min timeout fire mid-apply.
+    Ruling: the read has a `schedule_to_close_timeout` too (`PULL_READ_TIMEOUT`, 4 min,
+    inside `PULL_RUN_TIMEOUT`), and the route deletes the actor row only once the read
+    answered (a report, or a problem); when the run raised or the read failed or timed out
+    (`failed` with no problem) the row stays, and the next `remember_actor` drops it once it
+    is `ACTOR_KEPT` (1 h) old. Temporal's timeout does not stop an activity with no
+    heartbeat, so a read past its timeout may still write, under the kept person. The 503
+    says "the print worker did not finish the import in time; it may still be running, so
+    check the spools before importing again", never that it failed. Tests:
+    `test_the_read_ends_within_the_runs_bound_however_late_it_starts`,
+    `test_a_finished_import_drops_its_kept_actor`,
+    `test_an_import_that_did_not_finish_keeps_its_actor_and_says_it_may_run_on`. The
+    agent's `filament_bambuddy_import` lists the 409s, this 503 and the 502 of Decision 184,
+    and says the print worker reads Bambuddy.
+184. PR #6858 review: an import's `run_pull` re-raised every failure but `ApiError`, so SB
+    refusing the body (`CrudRefusedError`: the gate's 413, a listing past its cap or the
+    schema's 422) became the route's 503 "try again", which would fail the same way every
+    time. Ruling: in strict mode a `CrudRefusedError` other than a 429 is a `PullProblem`
+    502 "ScadBuddy refused what the print worker read of Bambuddy (<status>: <detail>);
+    importing again gets the same answer", logged; a 429 still raises (503). The Schedule's
+    pull logs it as before. Test: `test_an_import_answers_sbs_refusal_as_a_502_not_a_retry`.
+185. PR #6858 review: `PullProblem` dropped `ApiError.headers` (a `Retry-After`) and
+    `upstream` (what Bambuddy itself answered). Ruling: it carries both (`upstream` when it
+    is an `UpstreamAnswer`), and `error()` sets them again, so the import answers what it
+    answered when the API read Bambuddy. Test: `test_a_problem_keeps_its_headers_and_upstream`.
+186. PR #6858 review: `PullStart` is a Temporal input, so with `extra="forbid"` a field a
+    later build adds would fail the read on an older print worker during a roll. Ruling:
+    `PullStart` ignores unknown fields; the CRUD bodies keep `forbid` (a body with `actor`
+    is still a 422, Decision 181). Test:
+    `test_a_start_with_a_field_of_a_later_build_is_read`.
 
 ## Self-review
 

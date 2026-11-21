@@ -1,5 +1,5 @@
 """``FilamentBbPull``: one Bambuddy pull, read on the print worker (#6772, plan
-`docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 172-180).
+`docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 172-186).
 
 The API starts it on the ``bambuddy`` queue and waits for its outcome
 (`filament/bb_pull_apply.py` `execute_pull`): the spool refresh's ``filament_bambuddy_pull``
@@ -32,7 +32,9 @@ with workflow.unsafe.imports_passed_through():
     )
 
 #: The reads and SB's writes, as the API's activity had 5 min for them, less the margin
-#: the run's own timeout (`bb_pull_apply.PULL_RUN_TIMEOUT`) leaves.
+#: the run's own timeout (`bb_pull_apply.PULL_RUN_TIMEOUT`) leaves. It is both the
+#: start-to-close and the schedule-to-close (Decision 183): a start-to-close alone counts
+#: from the worker's pickup, so a late pickup would outlive the run.
 PULL_READ_TIMEOUT = timedelta(minutes=4)
 _ONCE = RetryPolicy(maximum_attempts=1)
 
@@ -49,6 +51,7 @@ class FilamentBbPull:
                 start,
                 result_type=PullOutcome,
                 start_to_close_timeout=PULL_READ_TIMEOUT,
+                schedule_to_close_timeout=PULL_READ_TIMEOUT,
                 retry_policy=_ONCE,
             )
         except ActivityError:

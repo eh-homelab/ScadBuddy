@@ -234,7 +234,6 @@ from scadbuddy.filament import print_uses
 from scadbuddy.filament.bb_pull_apply import LocalBbPull
 from scadbuddy.filament.bb_pull_models import (
     INSTANCE_CHANGED,
-    PULL_BODY_BYTES_MAX,
     HaBody,
     PullApplied,
     PullBody,
@@ -1946,18 +1945,6 @@ async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
     await sync.record_pass(body)
 
 
-async def _pull_bounded(request: Request) -> None:
-    """The pull's bodies are capped (#6772): a ``Content-Length`` is required and at most
-    `PULL_BODY_BYTES_MAX`, checked before the body is read."""
-    length = request.headers.get("content-length")
-    if length is None or not length.isdigit():
-        raise ApiError(status.HTTP_411_LENGTH_REQUIRED, "a body names its Content-Length")
-    if int(length) > PULL_BODY_BYTES_MAX:
-        raise ApiError(
-            status.HTTP_413_CONTENT_TOO_LARGE, f"a body is at most {PULL_BODY_BYTES_MAX} bytes"
-        )
-
-
 def _pull(filament: FilamentDep, settings: SettingsStoreDep) -> LocalBbPull:
     return LocalBbPull(filament, settings.load)
 
@@ -1980,7 +1967,6 @@ async def _for_configured[T](write: Awaitable[T]) -> T:
     "/filament/pull",
     name="crud_print_filament_pull",
     summary="Pull what the print worker read of Bambuddy into SB",
-    dependencies=[Depends(_pull_bounded)],
     description=(
         "The Bambuddy pull's SB side (#6772): the spools, usage rows, suppliers, locations"
         " and spool catalog the print worker read, pulled into SB's tables as the spool"
@@ -1999,7 +1985,6 @@ async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
     "/filament/pull/usage",
     name="crud_print_filament_pull_usage",
     summary="Book Bambuddy's usage rows the print worker read",
-    dependencies=[Depends(_pull_bounded)],
     description=(
         "BB's usage rows booked on linked spools, matched to the archives the worker read"
         " (#6772, `filament/bambuddy_usage.py`). 409 `instance_changed` as the pull's."
@@ -2015,7 +2000,6 @@ async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
     name="crud_print_filament_pull_ha_states",
     summary="Record Bambuddy's Home Assistant states as sensor readings",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(_pull_bounded)],
     description=(
         "Each state a reading of the Home Assistant sensor naming its entity (#6268, #6772);"
         " `states` null (the read failed) marks every such sensor unreachable. 409"
@@ -2031,7 +2015,6 @@ async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
     "/filament/pull/trays",
     name="crud_print_filament_pull_trays",
     summary="Set the untagged trays right by Bambuddy's assignments",
-    dependencies=[Depends(_pull_bounded)],
     description=(
         "Each untagged tray whose placed spool disagrees with the printer's report takes"
         " the spool Bambuddy assigns it, when that one agrees (#6713, #6772). Answers how"

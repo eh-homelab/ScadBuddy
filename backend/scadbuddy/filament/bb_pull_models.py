@@ -1,5 +1,5 @@
 """The Bambuddy pull's wire (#6772, plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`
-Decisions 172-180): what the print worker read of Bambuddy, sent to the CRUD service, which
+Decisions 172-186): what the print worker read of Bambuddy, sent to the CRUD service, which
 applies it to SB's tables and makes no Bambuddy call.
 
 The API starts ``FilamentBbPull`` (`workflows/filament_pull.py`) on the ``bambuddy`` queue
@@ -21,6 +21,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from scadbuddy.bambuddy.errors import UpstreamAnswer
 from scadbuddy.bambuddy.models import (
     Archive,
     BbLocation,
@@ -36,8 +37,6 @@ from scadbuddy.core.settings import FilamentSync
 FILAMENT_BB_PULL_WORKFLOW = "FilamentBbPull"
 PULL_READ_ACTIVITY = "filament_bb_pull_read"
 
-#: The routes refuse a body past this many bytes (413) before they read it.
-PULL_BODY_BYTES_MAX = 32 * 1024 * 1024
 #: At most this many rows of one listing in a body (422 past it).
 ROWS_MAX = 20_000
 #: Bambuddy's archives a usage booking matches: `bb_pull_run._read_archives` reads at most
@@ -177,7 +176,10 @@ class PullStart(BaseModel):
     under that id (`bb_pull_apply.remember_actor`) and the routes look it up there, else
     ``bambuddy`` (Decision 181)."""
 
-    model_config = ConfigDict(extra="forbid")
+    # A Temporal input, not a CRUD body: a start written by a newer API may reach an older
+    # print worker during a rolling deploy, so a field it does not know is dropped, never a
+    # failed run (Decision 186). The CRUD bodies keep ``forbid``.
+    model_config = ConfigDict(extra="ignore")
 
     instance: Instance
     pull_id: PullId
@@ -188,28 +190,42 @@ class PullStart(BaseModel):
 
 
 class PullProblem(BaseModel):
-    """An `ApiError`'s problem, carried back to the import route."""
+    """An `ApiError`'s problem, carried back to the import route: with its response
+    headers (a ``Retry-After``) and what Bambuddy itself answered (``upstream``), so the
+    route answers what it answered when it read Bambuddy itself (Decision 185)."""
 
     status: int
     detail: str
     title: str | None = None
     type: str = "about:blank"
     extensions: dict[str, Any] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    upstream: UpstreamAnswer | None = None
 
     @classmethod
     def of(cls, error: ApiError) -> PullProblem:
+        upstream = error.upstream if isinstance(error.upstream, UpstreamAnswer) else None
         return cls(
             status=error.status,
             detail=error.detail,
             title=error.title,
             type=error.type,
             extensions=dict(error.extensions),
+            headers=dict(error.headers),
+            upstream=upstream,
         )
 
     def error(self) -> ApiError:
-        return ApiError(
-            self.status, self.detail, title=self.title, type_=self.type, **self.extensions
+        error = ApiError(
+            self.status,
+            self.detail,
+            title=self.title,
+            type_=self.type,
+            headers=self.headers,
+            **self.extensions,
         )
+        error.upstream = self.upstream
+        return error
 
 
 class PullOutcome(BaseModel):

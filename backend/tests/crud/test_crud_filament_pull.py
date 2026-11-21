@@ -12,13 +12,16 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from fastapi.testclient import TestClient
 
-from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
+from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
+from scadbuddy.crud.listener import crud_listener_port
 from scadbuddy.crud.print import BASE, RemoteBbPull
 from scadbuddy.filament.bambuddy_pull import ACTOR, Pulls
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, forget_actor, remember_actor
@@ -31,6 +34,7 @@ from scadbuddy.filament.bb_pull_models import (
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
+from scadbuddy.main import create_app
 from scadbuddy.worker import PRINT_CRUD_AREAS
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import (
@@ -135,33 +139,28 @@ async def test_the_routes_need_the_print_credential(store: SettingsStore) -> Non
 
 
 @pg
-async def test_a_body_past_the_cap_is_413_unread(
-    store: SettingsStore, crud: CrudClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(crud_print, "PULL_BODY_BYTES_MAX", 64)
-    for path in PATHS:
-        with pytest.raises(CrudRefusedError) as refused:
-            await crud.request("POST", path, json=_body().model_dump(mode="json"))
-        assert refused.value.status == 413, path
-    assert filament_on(store.pool).spools.list() == []
-
-
-async def _chunked() -> AsyncIterator[bytes]:
-    yield b"{}"
-
-
-@pg
-async def test_a_body_with_no_length_is_411(store: SettingsStore) -> None:
-    async with served_print_crud(store) as crud:
-        for path in PATHS:
-            with pytest.raises(CrudRefusedError) as refused:
-                await crud.request(
-                    "POST",
-                    path,
-                    content=_chunked(),  # type: ignore[arg-type]  # no Content-Length
-                    headers={"Content-Type": "application/json"},
-                )
-            assert refused.value.status == 411, path
+def test_a_body_past_the_gate_is_413_on_its_headers(settings: Settings) -> None:
+    """Decision 178, revised by Decision 182: the routes have no cap of their own. The CRUD
+    listener serves the same app, whose `BodySizeGate` refuses an ``application/json`` body
+    past `MAX_TEXT_BODY_BYTES` (8 MiB) on its Content-Length, before any route reads it.
+    Through the real app, with the print worker's real credential."""
+    app = create_app(settings.model_copy(update={"crud_port": 0}))
+    over = b"[" + b" " * MAX_TEXT_BODY_BYTES + b"]"
+    with TestClient(app):
+        store = getattr(app.state, STATE_ATTR).settings_store
+        issued = ServiceCredentialStore(store.pool).issue("print", "bootstrap", rate_limited=False)
+        assert issued.token is not None
+        headers = {"Authorization": f"Bearer {issued.token}", "Content-Type": "application/json"}
+        port = crud_listener_port(app)
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", headers=headers) as crud:
+            for path in PATHS:
+                refused = crud.post(path, content=over)
+                assert refused.status_code == 413, (path, refused.text)
+                assert refused.json()["detail"] == (
+                    f"the body declares {len(over)} bytes and this API reads at most"
+                    f" {MAX_TEXT_BODY_BYTES}"
+                ), path
+        assert filament_on(store.pool).spools.list() == []
 
 
 @pg

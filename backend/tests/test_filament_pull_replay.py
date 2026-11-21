@@ -26,10 +26,10 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Replayer, Worker
 
 from scadbuddy.filament.bambuddy_pull import PullReport, Pulls
-from scadbuddy.filament.bb_pull_apply import execute_pull
+from scadbuddy.filament.bb_pull_apply import PULL_RUN_TIMEOUT, execute_pull
 from scadbuddy.filament.bb_pull_models import PULL_READ_ACTIVITY, PullOutcome, PullStart
 from scadbuddy.workflows.client import sandboxed_runner
-from scadbuddy.workflows.filament_pull import FilamentBbPull
+from scadbuddy.workflows.filament_pull import PULL_READ_TIMEOUT, FilamentBbPull
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "filament_pull_histories"
@@ -100,6 +100,24 @@ async def test_the_run_answers_its_activitys_outcome(temporal: str) -> None:
     outcome, _ = await _run(temporal, _read(pulled))
     assert outcome == PullOutcome(outcome="pulled", report=PullReport(created=2))
     assert starts == [START]
+
+
+@pytest.mark.requires_temporal
+async def test_the_read_ends_within_the_runs_bound_however_late_it_starts(temporal: str) -> None:
+    """Decision 183: the read's start-to-close counts from its pickup, so a worker that
+    takes it late would outlive the run; a schedule-to-close inside the run's bound
+    (`PULL_RUN_TIMEOUT`) ends it first, so the run answers the read's own outcome."""
+    _, history = await _run(
+        temporal, _read(lambda start: PullOutcome(outcome="pulled", report=PullReport()))
+    )
+    (scheduled,) = [
+        event.activity_task_scheduled_event_attributes
+        for event in history.events
+        if event.HasField("activity_task_scheduled_event_attributes")
+    ]
+    bound = scheduled.schedule_to_close_timeout.ToTimedelta()
+    assert bound == PULL_READ_TIMEOUT
+    assert bound < PULL_RUN_TIMEOUT
 
 
 @pytest.mark.requires_temporal

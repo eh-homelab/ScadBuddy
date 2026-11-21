@@ -1627,6 +1627,14 @@ async def move_spool(
     return moved
 
 
+#: The import's 503 when the route did not see the print worker's read end: it may still
+#: be pulling, so a person checks before importing again (Decision 183).
+IMPORT_UNFINISHED = (
+    "the print worker did not finish the import in time; it may still be running, so check"
+    " the spools before importing again"
+)
+
+
 @router.post(
     "/bambuddy/import",
     response_model=PullReport,
@@ -1654,7 +1662,10 @@ async def move_spool(
         "spool (Bambuddy's archive time, what is left, its usage rows), counted in `created` "
         "and in `archived_created`; Bambuddy archiving a linked spool changes nothing. "
         "The print worker reads Bambuddy and ScadBuddy pulls what it read, so the import "
-        "waits for it (at most 4.5 minutes); 503 when the worker did not finish it. "
+        "waits for it (at most 4.5 minutes); 503 when the worker did not finish it in time "
+        "(it may still be running: check the spools before importing again); 502 when "
+        "ScadBuddy refused what the worker read (importing again gets the same answer); 409 "
+        "when the Bambuddy URL changed during the import. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
         "still needing a type and archived, the BB spool ids it could not pull, the count "
         "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "
@@ -1685,26 +1696,25 @@ async def import_bambuddy(
     try:
         outcome = await execute_pull(nudger.client_getter(), nudger.task_queue, start)
     except Exception as error:
+        # The run did not answer (timed out, Temporal out of reach): its read may still be
+        # sending bodies, so the person stays kept for them; `ACTOR_KEPT` drops the row.
         logger.warning("the Bambuddy import did not finish", extra={"error": type(error).__name__})
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "the print worker did not finish the import; try again",
-        ) from error
-    finally:
-        try:
-            await asyncio.to_thread(forget_actor, filament, start.pull_id)
-        except Exception as error:
-            # A row left is deleted by a later import (`ACTOR_KEPT`).
-            logger.warning(
-                "could not drop an import's kept actor", extra={"error": type(error).__name__}
-            )
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED) from error
+    if outcome.outcome == "failed" and outcome.error is None:
+        # The read raised or timed out (Temporal's timeout does not stop it): kept as above.
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
+    # The read answered, so no body of this run is still to come (Decision 183).
+    try:
+        await asyncio.to_thread(forget_actor, filament, start.pull_id)
+    except Exception as error:
+        # A row left is deleted by a later import (`ACTOR_KEPT`).
+        logger.warning(
+            "could not drop an import's kept actor", extra={"error": type(error).__name__}
+        )
     if outcome.error is not None:
         raise outcome.error.error()
     if outcome.report is None:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "the print worker did not finish the import; try again",
-        )
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
     return outcome.report
 
 

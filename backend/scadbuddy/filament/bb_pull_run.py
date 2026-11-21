@@ -1,5 +1,5 @@
 """The Bambuddy pull's reads, on the print worker (#6772, plan
-`docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 172-180).
+`docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 172-186).
 
 The print worker holds the Bambuddy key and reads Bambuddy for the push already
 (`bb_sync_run.py`). ``FilamentBbPull``'s activity (`FilamentPullActivities`) reads what the
@@ -26,6 +26,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import date
 
+from fastapi import status
 from temporalio import activity
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -39,6 +40,7 @@ from scadbuddy.bambuddy.models import (
     SpoolUsage,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.filament.bambuddy_pull import try_assignments
 from scadbuddy.filament.bb_pull_models import (
     PULL_READ_ACTIVITY,
@@ -79,7 +81,8 @@ async def run_pull(
     the key): when their Bambuddy is not ``start.instance``'s, nothing is read or written
     (``skipped``; an import's error says so). A Schedule's pull never raises: Bambuddy or
     SB failing is ``failed``, logged. An import (``strict``) answers Bambuddy's refusal of
-    the spool listing as ``error``, and raises any other failure."""
+    the spool listing as ``error``, and SB's refusal of the body (a 4xx but a 429) as a
+    502 ``error``; it raises any other failure."""
     settings = await load()
     url = settings.bambuddy_url
     if not url or instance_for(url) != start.instance:
@@ -101,6 +104,13 @@ async def run_pull(
             return PullOutcome(outcome="failed", error=PullProblem.of(error))
         _failed("could not pull Bambuddy's spools", error)
         return PullOutcome(outcome="failed")
+    except CrudRefusedError as refused:
+        if start.strict and refused.status != status.HTTP_429_TOO_MANY_REQUESTS:
+            return PullOutcome(outcome="failed", error=_refused(refused))
+        if start.strict:
+            raise
+        _failed("could not pull Bambuddy's spools", refused)
+        return PullOutcome(outcome="failed")
     except Exception as error:
         if start.strict:
             raise
@@ -114,6 +124,20 @@ async def run_pull(
     if start.reconcile:
         await reconcile_trays(api, settings, start.instance)
     return PullOutcome(outcome="pulled", report=report)
+
+
+def _refused(refused: CrudRefusedError) -> PullProblem:
+    """SB refused what the worker read (the API's body gate, a listing past its cap, the
+    schema): the same read gets the same answer, so an import is answered 502 naming the
+    refusal rather than a 503 to try again (Decision 184). Logged too."""
+    _failed("ScadBuddy refused the Bambuddy pull's body", refused)
+    return PullProblem(
+        status=status.HTTP_502_BAD_GATEWAY,
+        detail=(
+            f"ScadBuddy refused what the print worker read of Bambuddy ({refused}); importing"
+            " again gets the same answer"
+        ),
+    )
 
 
 def _skipped(start: PullStart) -> PullOutcome:

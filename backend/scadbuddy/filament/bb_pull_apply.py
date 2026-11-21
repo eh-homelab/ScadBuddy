@@ -1,5 +1,5 @@
 """The Bambuddy pull's SB side, in the CRUD service (#6772, plan
-`docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 172-180).
+`docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 172-186).
 
 The print worker reads Bambuddy (`filament/bb_pull_run.py`) and sends what it read here:
 `LocalBbPull` applies it to SB's tables with `bambuddy_pull.pull`, `bambuddy_usage`,

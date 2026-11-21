@@ -751,7 +751,7 @@ below are the plan's):
   is the exception: before #6265 it skipped the whole pull, so it still pulls nothing.
   Its `weights`, `presets` and `tags` became `off`, except a `tags` `sb_to_bb`, which
   stayed `sb_to_bb` (the push it was).
-- Pull (Decision 5, then #6772, Decisions 172-181). BB to SB is still `SpoolRefresh`'s pull
+- Pull (Decision 5, then #6772, Decisions 172-186). BB to SB is still `SpoolRefresh`'s pull
   (`filament/bambuddy_pull.py`), gated per data type, and now also takes archive state,
   K values, suppliers and locations. Since #6772 its Bambuddy reads run on the print
   worker: the spool refresh's activity, and the import route, start `FilamentBbPull` on
