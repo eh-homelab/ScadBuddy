@@ -752,3 +752,44 @@ fewer clicks; the builder cites the Bambu Studio source they compare against.
 - Task 19 (ruling): the picker's "Needs type" badge links to the spool page in a new tab and stops the click, so it never toggles the row's radio.
 - Task 20 (ruling): Task 20 writes the e2e specs and docs and commits; the controller opens the PR after the final review. The backend's full pytest and e2e-stack run in CI (machine load, Docker). The native `<select>` in four Filament files (Tasks 17-19) fails `ui-guard.test.ts`, so Task 20 switches them to the shared Select. The six tab routes are literal `path="filament/..."` routes, as the page-titles tripwire requires.
 - Final review (rulings): the API caches Bambuddy's tray assignments for 5 s, and for 30 s after a failed read it serves "no assignments" without asking, so a hung Bambuddy cannot stall every Filament page (cost: up to 5 s stale; a changed API key is seen up to 5 s late). `FilamentPlan.ids` keeps its `"bb"` default for old raw clients, documented on the field and in the print skill. An unexpected database error in a CSV import write stays a 500 with nothing written (no input found that reaches it). CSV cells cap at 200 characters, `note` at 2000. The move pickers leave out AMS tray places: loading a tray is the tray's job. The CSV import dialog stays open while its write runs. The rollback caveats (an old worker's settle 404, the 0706Z CHECK, the 0034Z plan rewrite) are in the PR body.
+
+### #6872: the rack preview's Glow check finds the spool the plan names
+
+The owner's print dialog (2026-11-21, printer 3DP-31B-598, library file 1000000763) said
+"A spool is not in the inventory, so Glow could not be checked." The Temporal history of
+`print-1e3d8e87…` (read with `.claude/skills/scadbuddy-run-forensics`) shows its plan:
+`{"slots": [{"slot_id": 2, "spool_id": -2049}], "ids": "sb"}`, HT-A chosen for itself on
+the native path. `rack_preview` looked every id up among SB spool numbers, and the native
+check passed it no inventory. So Decision 2's negative tray id was never found.
+
+15. R-6872-1: `rack_preview` finds each slot's spool by the id the plan carries
+    (`print_run._chosen_spools`). A positive id is an SB number, found in the inventory
+    rows. A negative id is a tray chosen for itself (`tray_spool_id`), and it names the SB
+    spool that tray holds: on the native check, the trays' view (`route_trays`, passed as
+    `held`); on Bambuddy's path, the inventory row placed at that tray on the plan's
+    Bambuddy printer. Why: Decision 2 keeps tray ids in plans, so a lookup by number alone
+    calls every tray choice "not in the inventory", and the Glow test never sees the spool.
+16. R-6872-2: `RackPickView.unchecked` names each slot that Glow could not be checked on
+    (`RackUncheckedSlot`: the slot, the reason, the SB number or the tray, and the tray's
+    or the slot's material and colour). The dialog shows one line per slot. A
+    `not_in_inventory` line links the Filament page's Spools tab with a plain router link
+    (`/filament/spools`), until #6869's shared link helper is on main. `glow_unchecked`
+    stays, so an older client still shows its one line. Why: issue ruling 2; a line that
+    names no slot or spool cannot be acted on.
+17. R-6872-3: three reasons, each said in its own words. `no_spool`: a rack-side slot of
+    the nozzle plan that the filament plan gives no spool. `empty_tray`: a tray chosen for
+    itself that reports no filament. `not_in_inventory`: an SB number the inventory does
+    not have, or a filled tray that holds no SB spool. The reasons live in `print_run.py`
+    (`UncheckedReason`, `_unfound_reason`); `rank.py` is unchanged (R-6872-5). Why: issue
+    ruling 3; a slot with no spool is not "not in the inventory".
+18. R-6872-4: the run's ranking on a native run judges Glow on the tray option, whose
+    material is the tray's reported `tray_type` and whose subtype is empty, not on the SB
+    spool's subtype. That is a separate gap, filed as #6876, not changed here. Why: it is
+    the run's choice, not the dialog's lookup, and its fix touches the picker's labels and
+    the profile resolution.
+28. R-6872-5: `rank.rack_groups` gets no `chosen` parameter and `RackGroup` no per-slot
+    reasons in #6872; `RackGroup.glow_unchecked` stays a plain field. The per-slot reasons
+    for the run's own ranking come with #6876 and reuse `print_run._unfound_reason`'s tray
+    check. Why: claude-review on #6877 found that no production caller passed `chosen`, so
+    its reasons ran only in tests, and that it called every unfound tray id empty while the
+    preview checks the tray's report. (19-27 are #6869's.)
