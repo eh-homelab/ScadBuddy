@@ -417,12 +417,17 @@ BB has a flat list (`/inventory/locations`) plus location sensors
   percent; the report's `humidity` is Bambu's 1-5 level and is never stored as a percent. An alert is shown in the API and the UI. The
   plan's Decisions 4 to 7 have the details.
   As built in #6646: with `notify` on, a sensor sends one notification when it starts
-  alerting and one when it stops, never one per reading. The reading that changes the side
-  of the band queues it under the sensor's row lock (`filament_sensor_notifications`), and
-  the spool refresh's pull sends it at most once through Bambuddy's
-  `POST /notifications/app-message`, so it reaches the channels the owner set up in
-  Bambuddy. The sensor shows its newest notification: sent, waiting, or failed and why.
-  The plan's Decisions 29 to 38 have the details.
+  alerting and one when it stops, never one per reading. A reading outside the band opens
+  the alert at once; it closes only once the readings have stayed inside for 10 minutes,
+  so a value that flaps across a limit sends one start. The reading that opens or closes
+  it queues the notification, with its message, under the sensor's row lock
+  (`filament_sensor_notifications`). The print worker sends it at most once through
+  Bambuddy's `POST /notifications/app-message`, a pass a minute, claiming and ending the
+  rows through CRUD routes, so it reaches the channels the owner set up in Bambuddy and
+  the CRUD service makes no Bambuddy call for it. Only a sensor's newest queued
+  notification is sent, and none after `notify` is turned off. The sensor shows its
+  newest notification: sent, waiting, or failed and why. The plan's Decisions 29 to 46
+  have the details.
 - A move writes a `moved` event (from, to) in the spool's ledger. A scan of a
   location QR, then of a spool tag or label, moves the spool.
 - Time spent outside dry storage counts toward "needs drying" for hygroscopic

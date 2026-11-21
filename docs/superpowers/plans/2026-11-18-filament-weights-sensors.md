@@ -99,7 +99,7 @@ Settings "weight-sync policy"), §12 row #6268. Earlier plans whose rulings bind
    AMS-unit location (`printer_id`, `ams_id`, `tray_id IS NULL`, kind `ams`) as the parent
    of that unit's tray locations, and one humidity and one temperature sensor on it.
    A new partial unique index keeps one unit location per `(printer_id, ams_id)`.
-7. **Alerts are shown, not sent.** A reading outside `alert_above` / `alert_below` marks
+7. **Alerts are shown, not sent.** Superseded by Decisions 29–38 (#6646). A reading outside `alert_above` / `alert_below` marks
    the sensor alerting in the API and the UI. Sending a notification has no backend channel
    today; it is filed as #6646, linked from #6270, and the `notify` flag is kept
    for it.
@@ -303,7 +303,7 @@ Load `frontend-design` first.
    LocationSensors history test depended on the clock (93 against 96 readings), and
    `7cde321` fixed it. The SettingsPage test "does not call this tab own Test connection"
    fails locally on branches based on main and passes in CI. It is not from this branch.
-10. **Follow-up.** Decision 7 stays as made: alerts are shown, not sent. Issue #6646,
+10. **Follow-up.** Superseded by Decisions 29–38 (#6646). Decision 7 stayed as made: alerts are shown, not sent. Issue #6646,
     "send a notification when a location sensor alerts" (a sub-issue of #6260, linked from
     #6270), tracks the notification.
 11. **AMS humidity is the percent, `humidity_raw` (final review).** The LAN report's
@@ -431,12 +431,17 @@ Load `frontend-design` first.
     writes the new side, and queues one row of `filament_sensor_notifications`
     (`started` or `stopped`) when the side changed and `notify` is on. So a reading that
     arrives twice, or several at once, queues one row. Only a stored reading is judged:
-    a band changed by a PATCH is judged at the next stored reading, at most 15 minutes
-    later (`SAME_VALUE_EVERY`).
+    a band changed by a PATCH is judged at the next stored reading. That comes when a
+    reading arrives that changed, or 15 minutes after the last stored one
+    (`SAME_VALUE_EVERY`); a Home Assistant sensor is read only on the spool refresh
+    (`spool_overlay_refresh_seconds`, none at 0), an AMS sensor on each printer report.
+    So 15 minutes is no bound. Decision 39 adds a hold before an alert closes.
 32. **`notify` off still tracks the side.** With `notify` off nothing is queued, but
     `alert_open` moves. So turning `notify` on during an alert sends no "started"; the
     alert's end sends "stopped".
-33. **The spool refresh's pull sends.** `bambuddy_pull.scheduled_pull` calls
+33. **The spool refresh's pull sends.** Superseded by Decision 40: the print worker
+    sends, and the API makes no Bambuddy call for a notification. As first built,
+    `bambuddy_pull.scheduled_pull` called
     `send_notifications` after it reads the Home Assistant sensors, whatever
     `filament_sync` says, inside the existing activity: the API process (the `library`
     worker) holds the store and already calls Bambuddy, so no worker gets SQL and
@@ -444,13 +449,15 @@ Load `frontend-design` first.
     change waits for the next pull (`spool_overlay_refresh_seconds`, 300 s by default).
     With no Bambuddy URL the rows stay `queued` until one is set.
 34. **At most once.** A pass claims up to 10 rows (`PASS_LIMIT`, under Bambuddy's 20 a
-    minute) by setting `sending` in one committed statement (`FOR UPDATE SKIP LOCKED`),
-    sends each, then sets `sent` or `failed` with `sent_at`. A failed send is not tried
-    again, and a row a crash left `sending` stays so. The cost is a lost notification
+    minute) by setting `sending` in one committed transaction (`sensors.claim_on`, under a
+    transaction advisory lock), sends each, then sets `sent` or `failed` with `sent_at`.
+    A failed send is not tried again; a row a crash left `sending` is ended
+    `interrupted` (Decision 42). The cost is a lost notification
     when Bambuddy is down at that pass; the sensor shows that it failed and why.
-35. **A failure is a fixed code.** `error` is one of `scope`, `rate_limited`,
-    `unavailable`, `rejected`, `no_channel`, `not_configured` or `internal`
-    (`m.NotificationError`), never Bambuddy's text. An answer of 0 channels is `failed`
+35. **A failure is a fixed code.** `error` is one of `unauthorized`, `scope`,
+    `not_found`, `rate_limited`, `unavailable`, `rejected`, `no_channel`, `not_configured`
+    or `internal` (`m.SendError`, Decision 45), or a claim's `cancelled`, `superseded` or
+    `interrupted` (`m.NotificationError`), never Bambuddy's text. An answer of 0 channels is `failed`
     with `no_channel`: nothing reached anyone.
 36. **The message.** The title is "<sensor>: above the limit", "<sensor>: below the
     limit" or "<sensor>: back within its limits". The text names the kind, the value and
@@ -468,3 +475,66 @@ Load `frontend-design` first.
     notifications", and whether a channel takes app messages, was not read
     (`GET /notifications/app-message/channels` needs that key). The first alert after the
     deploy shows it on the sensor: a `scope` or `no_channel` failure names the fix.
+
+## Decisions made in the review of #6855
+
+39. **An alert closes only after a 10-minute hold.** A reading outside the band opens the
+    alert at once. An open alert closes only at a reading still inside the band at least
+    `sensors.ALERT_CLEAR_AFTER` (10 minutes) after the first inside reading
+    (`alert_clear_since`; `sensors.next_alert`). A reading outside meanwhile clears the
+    hold. A margin in the sensor's unit was the other choice; it was not taken, because
+    one margin cannot fit both a percent and a temperature in °C or °F. A repeated value
+    is stored when it closes the alert, so a settled value closes it at its first reading
+    past the hold, before `SAME_VALUE_EVERY`. The AMS stores each changed `humidity_raw`,
+    so 20, 21, 20, 21 around a limit of 20 queued a row each time before; now it queues
+    one "started" (`test_a_flapping_reading_sends_at_most_one_start`).
+40. **The print worker sends; the CRUD service makes no Bambuddy call for it.** The
+    controller's ruling for #6855, for the reason #6772 moves the pull's reads: the CRUD
+    service holds the database and calls no outside service for work that can run
+    elsewhere. The print worker already holds the Bambuddy key. Two CRUD routes in a new
+    area `sensor-notify` take only the print worker's credential (`crud.print`):
+    `POST …/print/filament/sensor-notifications/claim` (`{limit}`, at most 20, under an
+    `Idempotency-Key`, so a claim sent again answers its rows) answers each claimed row's
+    id, title and message; `POST …/{id}/end` takes `channels` or a `SendError` code and
+    is natural. The activity `sensor_notify_send` (`filament/sensor_notify.py`
+    `SensorNotifyActivities`, client `crud/print.py` `RemoteSensorNotifications`) claims,
+    calls `BambuddyClient.send_app_message` and ends each row. The API's in-process print
+    worker runs it on its own pool (`sensors.PoolSensorNotifications`).
+    `bambuddy_pull.scheduled_pull` no longer sends.
+41. **Its own Schedule, a pass a minute.** `FilamentBbSync` was not used: it ends when no
+    data type pushes, which is the default, so it is no timer for this. The workflow
+    `SensorNotifyPass` (`workflows/sensor_notify.py`) runs on the `bambuddy` queue from
+    the Schedule `scadbuddy-sensor-notify-<queue>` every minute (overlap SKIP, a 3-minute
+    run timeout, one activity attempt of at most 2 minutes), which the API sets up at
+    boot beside the spool refresh's. So a notification waits about a minute whatever
+    `spool_overlay_refresh_seconds` is, 0 included. On the versioned print worker it is
+    AUTO_UPGRADE (the worker's default), and a change to its commands goes behind
+    `workflow.patched`. It is a new workflow type on the queue, so the release rolls
+    `scadbuddy-print` with `Recreate` (README, "A release that needs `Recreate`"). A run
+    an old build takes meanwhile fails its workflow task until its run timeout, and the
+    next tick sends what it would have: no row is claimed by it.
+42. **A row left `sending` is ended `interrupted`.** At the start of each claim, a row
+    `sending` for over `sensors.INTERRUPTED_AFTER` (10 minutes, past the activity's
+    2-minute timeout) is ended `failed` with `interrupted` (a crash between the claim and
+    the end, a cancelled activity, an end that never reached the API). It may have
+    reached Bambuddy, so it is never sent again: at most once holds. The UI says "may not
+    have been sent".
+43. **The newest notification is by `read_at`.** `record_on` keeps each sensor's
+    `read_at` increasing (a reading not newer than the last stored one is refused), so it
+    orders a sensor's rows. `queued_at` now defaults to `clock_timestamp()`, but it is
+    when a writer's statement ran, and a writer that waited on the row lock can still
+    insert after a newer one. `last_notification` and the claim order by `read_at`.
+44. **The message is made when the row is queued.** `record_on` builds the title and text
+    (`sensors.message_of`) from the sensor's name, unit, place and band of that moment,
+    and stores them (`title`, `message`). A band edited before the send no longer makes the
+    title disagree with the reading. The reading's time is written in UTC
+    (`astimezone(UTC)`).
+45. **A 401, a 403 and a 404 are told apart.** A 401 is `unauthorized` ("Bambuddy refused
+    ScadBuddy's API key. Check the key in Settings."), a 403 `scope` ("Give the key the
+    Send notifications permission in Bambuddy."), and a 404 `not_found` ("Bambuddy must be
+    1.3.1 or later": an older Bambuddy has no app-message route).
+46. **A claim sends only what still stands.** Before it claims, it ends `failed`: a queued
+    row of a sensor whose `notify` is off, or that or its place is archived
+    (`cancelled`), and every queued row of a sensor but its newest (`superseded`). Turning
+    `notify` off stops what was queued, and a backlog sends one row per sensor, the
+    newest, rather than a "started" long after the alert ended.
