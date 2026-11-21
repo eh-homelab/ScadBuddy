@@ -868,7 +868,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
   least half the links timed on both sides), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
-  `kept: true`; else 409 `proof_changed`, nothing written. `expect_kept: false` deletes
+  `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
+  true when every linked spool is there but each changed since its link (none exactly as seen), so the dialog can say why no keep is offered. `expect_kept: false` deletes
   without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward). A new
   workflow type: roll `scadbuddy-print` with `Recreate` (README, "A release that needs
   `Recreate`").

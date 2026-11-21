@@ -360,6 +360,12 @@ function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
           </AlertDialogHeader>
           {preview && !same && (
             <div className="flex flex-col gap-2 text-sm">
+              {preview.changed_since_pull && (
+                <p className="text-warn">
+                  Every linked spool changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same
+                  Bambuddy. Only the reset is offered. Reset only if it is another Bambuddy.
+                </p>
+              )}
               {preview.bambuddy_unreadable && (
                 <p className="text-warn">
                   The Bambuddy set up now could not be read, so ScadBuddy cannot tell whether it is the same one at a new
@@ -463,7 +469,7 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
     setProblem(null)
     if (done.kept) {
       setNote('Links kept. A full pass now syncs with the Bambuddy at its new address.')
-      if (data) setData({ ...data, instance_changed: false }, { supersede: true })
+      if (data) setData({ ...data, instance: done.configured_instance ?? data.instance, instance_changed: false }, { supersede: true })
     } else {
       const deleted = RESET_ROWS.slice(0, 5).reduce((sum, row) => sum + done.deleted[row.key], 0)
       setNote(`${plural(deleted, 'link', 'links')} reset. A full pass now links the new Bambuddy.`)

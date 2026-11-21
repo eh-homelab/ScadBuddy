@@ -19,7 +19,12 @@ from scadbuddy.filament import bb_sync_plan
 from scadbuddy.filament.bambuddy_pull import Pulls, pull
 from scadbuddy.filament.bb_sync_models import BbWrite, BbWriteResult, Kind, Op, ResultsReport
 from scadbuddy.filament.bb_sync_plan import UNSEEN_KEY, field_hash
-from scadbuddy.filament.bb_sync_results import adopt_instance, apply_results, same_bambuddy
+from scadbuddy.filament.bb_sync_results import (
+    adopt_instance,
+    apply_results,
+    changed_since_pull,
+    same_bambuddy,
+)
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.models import (
     InsertTypeCreate,
@@ -1073,3 +1078,35 @@ def test_the_proof_of_the_same_bambuddy(
     every linked spool, none older than its link's `bb_updated_at`, one exactly that,
     and at least half the links have a time on both sides (Decision 199)."""
     assert same_bambuddy(links, rows, bad) is same
+
+
+@pytest.mark.parametrize(
+    ("links", "rows", "bad", "changed"),
+    [
+        # Every linked spool was edited since the last pull: none matches exactly.
+        (
+            {11: SEEN, 12: SEEN},
+            [_held(11, SEEN + timedelta(hours=1)), _held(12, SEEN + timedelta(hours=2))],
+            [],
+            True,
+        ),
+        # One is exactly as seen: the proof holds, so there is nothing to explain.
+        ({11: SEEN, 12: SEEN}, [_held(11), _held(12, SEEN + timedelta(hours=1))], [], False),
+        # A row older than its link contradicts the proof: not a pull-time edit.
+        ({11: SEEN}, [_held(11, SEEN - timedelta(hours=1))], [], False),
+        # A linked spool this Bambuddy lacks: another Bambuddy.
+        ({11: SEEN, 12: SEEN}, [_held(11, SEEN + timedelta(hours=1))], [], False),
+        # Links with no time were never compared: no claim about an edit.
+        ({11: None}, [_held(11, SEEN)], [], False),
+        # An unparsed row, or no link at all, proves and explains nothing.
+        ({11: SEEN}, [_held(11, SEEN + timedelta(hours=1))], [None], False),
+        ({}, [_held(11)], [], False),
+    ],
+)
+def test_why_the_proof_is_missing(
+    links: dict[int, datetime | None], rows: list[BbSpool], bad: list[int | None], changed: bool
+) -> None:
+    """#6845 review: `changed_since_pull` names the case where every linked spool is
+    there and none older than its link, but none exactly as last seen."""
+    assert changed_since_pull(links, rows, bad) is changed
+    assert not (changed and same_bambuddy(links, rows, bad))

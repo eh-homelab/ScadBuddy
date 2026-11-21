@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { api } from '../../../api/client'
-import { getSyncStatus } from '../../../api/filament'
+import { getResetPreview, getSyncStatus, resetSyncLinks } from '../../../api/filament'
 import { describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
 import { linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
@@ -426,6 +426,37 @@ describe('Filament (#6262)', () => {
       await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
       await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
       expect((await getSyncStatus()).instance_changed).toBe(false)
+    })
+
+    it('says why there is no keep when every linked spool changed since the last pull (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { changed: true })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      expect(dialog).toHaveTextContent(
+        'Every linked spool changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same Bambuddy.',
+      )
+      expect(dialog).not.toHaveTextContent('could not be read')
+      expect(within(dialog).queryByRole('button', { name: 'Keep links' })).toBeNull()
+      expect(within(dialog).getByRole('button', { name: 'Reset links' })).toBeInTheDocument()
+    })
+
+    it('does not give that reason for a Bambuddy that proves nothing else (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld')
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      expect(dialog).not.toHaveTextContent('changed in Bambuddy since the last pull')
+    })
+
+    it('answers a kept reset with the instance the links belong to now (#6845)', async () => {
+      linkOtherBambuddy('0ld0ld0ld0ld', { same: true })
+      const preview = await getResetPreview()
+      expect(preview.changed_since_pull).toBe(false)
+      const done = await resetSyncLinks('0ld0ld0ld0ld', true)
+      expect(done.kept).toBe(true)
+      expect(done.configured_instance).toBe(preview.configured_instance)
+      expect(done.configured_instance).not.toBeNull()
     })
 
     it('keeps everything when the person cancels', async () => {

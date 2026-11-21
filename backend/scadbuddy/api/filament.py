@@ -1926,7 +1926,12 @@ async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
         "RFID tag, a supplier, location or insert type by its name), so every untagged "
         "spool is made again on the side its direction sends it to. Reads ScadBuddy and "
         "the configured Bambuddy's spools (`GET`). When Bambuddy cannot be read the answer "
-        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. The "
+        "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. "
+        "`changed_since_pull` is true when `same_bambuddy` is false although the "
+        "configured Bambuddy holds every linked spool and none is older than its link: "
+        "every linked spool was edited in Bambuddy since the last pull, so none matches "
+        "exactly and ScadBuddy cannot prove it is the same Bambuddy; only the delete is "
+        "then offered. The "
         "counts are approximate: they are read without a lock, so a pass that runs "
         "meanwhile can change them. The answer of the `POST` gives the counts it deleted."
     ),
