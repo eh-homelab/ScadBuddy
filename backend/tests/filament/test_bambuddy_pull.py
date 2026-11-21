@@ -780,7 +780,8 @@ async def test_the_spool_refresh_activity_reads_no_bambuddy(pg_pool: PgPool) -> 
         assert await run() == "pulled"
         assert not router.calls
     (start,) = execute.starts
-    assert (start.instance, start.actor, start.pulls) == (instance_for(BB), "bambuddy", Pulls())
+    assert (start.instance, start.pulls) == (instance_for(BB), Pulls())
+    assert start.pull_id.startswith("filament-bb-pull-")
     assert (start.ha, start.reconcile, start.strict) == (False, True, False)
 
 

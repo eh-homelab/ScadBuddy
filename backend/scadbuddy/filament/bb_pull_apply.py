@@ -73,6 +73,15 @@ class LocalBbPull:
         self.load = load
         self.clock = clock
 
+    def _actor(self, pull_id: str) -> str:
+        """Who the run's events name: the person whose import started it, as the API kept
+        it (`remember_actor`), else ``bambuddy``. Never the worker's word (Decision 181)."""
+        with self.filament.spools.transaction() as conn:
+            row = conn.execute(
+                "SELECT actor FROM filament_pull_actors WHERE pull_id = %s", (pull_id,)
+            ).fetchone()
+        return str(row["actor"]) if row is not None else ACTOR
+
     def _check(self, instance: str) -> None:
         url = self.load().bambuddy_url
         if not url or instance_for(url) != instance:
@@ -91,7 +100,7 @@ class LocalBbPull:
             self.filament,
             spools,
             now=self.clock(),
-            actor=body.actor,
+            actor=self._actor(body.pull_id),
             catalog=body.catalog or (),
             pulls=body.pulls,
             usage=body.usage,
@@ -125,7 +134,9 @@ class LocalBbPull:
         self._check(body.instance)
         archives: Sequence[Archive] = body.archives
         with self.filament.spools.transaction() as conn:
-            booked = bambuddy_usage.book_usage(conn, body.usage, archives, actor=body.actor)
+            booked = bambuddy_usage.book_usage(
+                conn, body.usage, archives, actor=self._actor(body.pull_id)
+            )
         return UsageBooked(booked=booked.booked, unlinked=booked.unlinked)
 
     async def ha_states(self, body: HaBody) -> None:
@@ -144,6 +155,34 @@ class LocalBbPull:
             return len(self.filament.inventory.reconcile_trays(body.assignments))
 
         return await asyncio.to_thread(run)
+
+
+#: How long a kept actor may stay once its run should have ended (an API that died
+#: mid-import never deleted it); a later `remember_actor` deletes the older ones.
+ACTOR_KEPT = timedelta(hours=1)
+
+
+def new_pull_id() -> str:
+    """A ``FilamentBbPull`` run's id, its workflow id."""
+    return f"filament-bb-pull-{uuid.uuid4().hex}"
+
+
+def remember_actor(store: Filament, pull_id: str, actor: str) -> None:
+    """Keep who started the run ``pull_id`` (a person's import), for the routes to name
+    in its events (Decision 181); first delete the rows older than `ACTOR_KEPT`."""
+    with store.spools.transaction() as conn:
+        conn.execute(
+            "DELETE FROM filament_pull_actors WHERE created_at < now() - %s", (ACTOR_KEPT,)
+        )
+        conn.execute(
+            "INSERT INTO filament_pull_actors (pull_id, actor) VALUES (%s, %s)", (pull_id, actor)
+        )
+
+
+def forget_actor(store: Filament, pull_id: str) -> None:
+    """Drop the run's kept actor once it ended."""
+    with store.spools.transaction() as conn:
+        conn.execute("DELETE FROM filament_pull_actors WHERE pull_id = %s", (pull_id,))
 
 
 def _has_ha_sensors(store: Filament) -> bool:
@@ -179,7 +218,7 @@ async def pull_start(
             return None
     return PullStart(
         instance=instance_for(settings.bambuddy_url),
-        actor=ACTOR,
+        pull_id=new_pull_id(),
         pulls=pulls,
         ha=ha,
         reconcile=pulls is not None,
@@ -188,13 +227,14 @@ async def pull_start(
 
 async def execute_pull(client: Client, task_queue: str, start: PullStart) -> PullOutcome:
     """Run ``FilamentBbPull`` on ``task_queue`` (the ``bambuddy`` queue) and wait for its
-    outcome, at most `PULL_RUN_TIMEOUT`. Each run has an id of its own: the Schedule's
+    outcome, at most `PULL_RUN_TIMEOUT`. Its workflow id is ``start.pull_id``
+    (`new_pull_id`), so each run has an id of its own: the Schedule's
     pull and a person's import may run at once, as they could before (each BB spool is
     taken under its own advisory lock, `bambuddy_pull.pull`)."""
     result: PullOutcome = await client.execute_workflow(
         FILAMENT_BB_PULL_WORKFLOW,
         start,
-        id=f"filament-bb-pull-{uuid.uuid4().hex}",
+        id=start.pull_id,
         task_queue=task_queue,
         execution_timeout=PULL_RUN_TIMEOUT,
         result_type=PullOutcome,

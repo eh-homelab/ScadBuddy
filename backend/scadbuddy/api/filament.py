@@ -54,7 +54,12 @@ from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
 from scadbuddy.filament.bambuddy_pull import PullReport, Pulls, try_assignments
-from scadbuddy.filament.bb_pull_apply import execute_pull
+from scadbuddy.filament.bb_pull_apply import (
+    execute_pull,
+    forget_actor,
+    new_pull_id,
+    remember_actor,
+)
 from scadbuddy.filament.bb_pull_models import PullStart
 from scadbuddy.filament.bb_sync_models import (
     LinksResetDone,
@@ -1657,11 +1662,12 @@ async def move_spool(
     ),
 )
 async def import_bambuddy(
-    state: StateDep, store: SettingsStoreDep, caller: CallerDep
+    state: StateDep, filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep
 ) -> PullReport:
     """The print worker reads Bambuddy (``FilamentBbPull``, #6772) and the CRUD routes pull
     what it read; this route calls no Bambuddy. Bambuddy's refusal of the spool listing is
-    answered as it comes, as when the API read it."""
+    answered as it comes, as when the API read it. The caller is kept under the run's id
+    for the routes to name (`remember_actor`, Decision 181), never sent to the worker."""
     settings = await asyncio.to_thread(store.load)
     if not settings.bambuddy_url:
         raise not_configured("no Bambuddy URL is configured; set one in Settings")
@@ -1670,10 +1676,11 @@ async def import_bambuddy(
     pulls = dataclasses.replace(Pulls.of(sync), spools=True)
     start = PullStart(
         instance=instance_for(settings.bambuddy_url),
-        actor=actor(caller),
+        pull_id=new_pull_id(),
         pulls=pulls,
         strict=True,
     )
+    await asyncio.to_thread(remember_actor, filament, start.pull_id, actor(caller))
     nudger = state.filament_sync
     try:
         outcome = await execute_pull(nudger.client_getter(), nudger.task_queue, start)
@@ -1683,6 +1690,14 @@ async def import_bambuddy(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "the print worker did not finish the import; try again",
         ) from error
+    finally:
+        try:
+            await asyncio.to_thread(forget_actor, filament, start.pull_id)
+        except Exception as error:
+            # A row left is deleted by a later import (`ACTOR_KEPT`).
+            logger.warning(
+                "could not drop an import's kept actor", extra={"error": type(error).__name__}
+            )
     if outcome.error is not None:
         raise outcome.error.error()
     if outcome.report is None:

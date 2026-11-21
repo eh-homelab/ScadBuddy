@@ -25,7 +25,7 @@ from temporalio.client import Client, WorkflowHistory
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Replayer, Worker
 
-from scadbuddy.filament.bambuddy_pull import ACTOR, PullReport, Pulls
+from scadbuddy.filament.bambuddy_pull import PullReport, Pulls
 from scadbuddy.filament.bb_pull_apply import execute_pull
 from scadbuddy.filament.bb_pull_models import PULL_READ_ACTIVITY, PullOutcome, PullStart
 from scadbuddy.workflows.client import sandboxed_runner
@@ -33,7 +33,9 @@ from scadbuddy.workflows.filament_pull import FilamentBbPull
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "filament_pull_histories"
-START = PullStart(instance="0123456789ab", actor=ACTOR, pulls=Pulls(), reconcile=True)
+START = PullStart(
+    instance="0123456789ab", pull_id=f"filament-bb-pull-{'c' * 32}", pulls=Pulls(), reconcile=True
+)
 
 
 @pytest.mark.parametrize("name", ["v1"])

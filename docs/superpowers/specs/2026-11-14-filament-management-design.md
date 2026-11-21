@@ -751,7 +751,7 @@ below are the plan's):
   is the exception: before #6265 it skipped the whole pull, so it still pulls nothing.
   Its `weights`, `presets` and `tags` became `off`, except a `tags` `sb_to_bb`, which
   stayed `sb_to_bb` (the push it was).
-- Pull (Decision 5, then #6772, Decisions 172-180). BB to SB is still `SpoolRefresh`'s pull
+- Pull (Decision 5, then #6772, Decisions 172-181). BB to SB is still `SpoolRefresh`'s pull
   (`filament/bambuddy_pull.py`), gated per data type, and now also takes archive state,
   K values, suppliers and locations. Since #6772 its Bambuddy reads run on the print
   worker: the spool refresh's activity, and the import route, start `FilamentBbPull` on
@@ -759,7 +759,9 @@ below are the plan's):
   Bambuddy and sends the rows to the CRUD area `filament-pull`
   (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`), which
   applies them (`filament/bb_pull_apply.py`). The CRUD service makes no Bambuddy call for
-  the pull. `SpoolRefresh`'s commands did not change; the push (`FilamentBbSync`) stays a
+  the pull. The worker never names the actor the events are booked to: a person's import
+  is kept by the API under the run's id (`filament_pull_actors`), else `bambuddy`.
+  `SpoolRefresh`'s commands did not change; the push (`FilamentBbSync`) stays a
   workflow of its own.
 - Tags (Decision 6). The tag queue and drain of #6264 (`filament_bb_tag_pending`,
   `rfid_push.drain_tags`) are kept and gated by `pushes(tags)`. The engine never sends

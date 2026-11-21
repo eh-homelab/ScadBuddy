@@ -47,7 +47,8 @@ ARCHIVES_MAX = 2_000
 INSTANCE_CHANGED = "instance_changed"
 
 Instance = Annotated[str, Field(pattern=r"^[0-9a-f]{12}$")]
-Actor = Annotated[str, Field(min_length=1, max_length=256)]
+#: A run's id, which is its workflow id (`bb_pull_apply.new_pull_id`).
+PullId = Annotated[str, Field(pattern=r"^filament-bb-pull-[0-9a-f]{32}$")]
 
 
 #: The snapshot fields of a data type other than ``spools`` (#6265 Decision 14): each is
@@ -169,12 +170,17 @@ class PullStart(BaseModel):
     Bambuddy's assignments after the pull (the Schedule's pull, not an import). ``strict``
     is a person's import: a Bambuddy refusal of the spool listing, or a Bambuddy URL changed
     since the start, comes back as `PullOutcome.error`, for the route to answer as the
-    import answered before #6772; any other failure fails the activity."""
+    import answered before #6772; any other failure fails the activity.
+
+    ``pull_id`` is the run's own workflow id. The worker sends it back with the rows; the
+    actor the events name is never in the start or a body: the API keeps a person's import
+    under that id (`bb_pull_apply.remember_actor`) and the routes look it up there, else
+    ``bambuddy`` (Decision 181)."""
 
     model_config = ConfigDict(extra="forbid")
 
     instance: Instance
-    actor: Actor
+    pull_id: PullId
     pulls: Pulls | None
     ha: bool = False
     reconcile: bool = False
@@ -227,7 +233,7 @@ class PullBody(_Body):
     (``usage_failed``: the read failed, so no archived BB spool is made), its suppliers and
     locations (None: not read), and its spool catalog (None: the read failed)."""
 
-    actor: Actor
+    pull_id: PullId
     pulls: Pulls
     spools: list[Any] = Field(max_length=ROWS_MAX)
     usage: list[SpoolUsage] = Field(default_factory=list, max_length=ROWS_MAX)
@@ -250,7 +256,7 @@ class UsageBody(_Body):
     """BB's usage rows to book on linked spools, with the archives read for them (only
     ``id``, ``printer_id`` and ``completed_at`` are used, `bambuddy_usage.match_archive`)."""
 
-    actor: Actor
+    pull_id: PullId
     usage: list[SpoolUsage] = Field(max_length=ROWS_MAX)
     archives: list[Archive] = Field(default_factory=list, max_length=ARCHIVES_MAX)
 

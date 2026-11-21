@@ -11,7 +11,12 @@ from datetime import datetime
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bb_pull_run
 from scadbuddy.filament.bambuddy_pull import ACTOR, EVERY, PullReport, Pulls
-from scadbuddy.filament.bb_pull_apply import LocalBbPull, pull_start
+from scadbuddy.filament.bb_pull_apply import (
+    LocalBbPull,
+    new_pull_id,
+    pull_start,
+    remember_actor,
+)
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.component import Filament
 from scadbuddy.library.settings_store import StoredSettings
@@ -20,12 +25,16 @@ from scadbuddy.library.settings_store import StoredSettings
 async def read_and_pull(
     store: Filament, settings: StoredSettings, *, actor: str = ACTOR, pulls: Pulls = EVERY
 ) -> PullReport:
-    """`bb_pull_run.read_and_pull` of ``settings``' Bambuddy into ``store``."""
+    """`bb_pull_run.read_and_pull` of ``settings``' Bambuddy into ``store``; an
+    ``actor`` other than the Schedule's is kept as the import route keeps it."""
+    pull_id = new_pull_id()
+    if actor != ACTOR:
+        remember_actor(store, pull_id, actor)
     return await bb_pull_run.read_and_pull(
         LocalBbPull(store, lambda: settings),
         settings,
         instance=instance_for(settings.bambuddy_url or ""),
-        actor=actor,
+        pull_id=pull_id,
         pulls=pulls,
     )
 

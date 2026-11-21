@@ -12,7 +12,7 @@ import httpx
 import pytest
 import respx
 
-from scadbuddy.filament.bambuddy_pull import ACTOR, PullReport, Pulls
+from scadbuddy.filament.bambuddy_pull import PullReport, Pulls
 from scadbuddy.filament.bb_pull_models import (
     HaBody,
     PullApplied,
@@ -30,6 +30,7 @@ from scadbuddy.library.settings_store import StoredSettings
 BB = "https://bambuddy.test"
 API = f"{BB}/api/v1"
 INSTANCE = instance_for(BB)
+PULL_ID = f"filament-bb-pull-{'a' * 32}"
 SETTINGS = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
 SPOOL = {"id": 7, "material": "PLA", "label_weight": 1000, "weight_used": 100.0}
 USAGE = {
@@ -82,7 +83,7 @@ async def _load() -> StoredSettings:
 
 def _start(**over: Any) -> PullStart:
     return PullStart.model_validate(
-        {"instance": INSTANCE, "actor": ACTOR, "pulls": Pulls(), "reconcile": True} | over
+        {"instance": INSTANCE, "pull_id": PULL_ID, "pulls": Pulls(), "reconcile": True} | over
     )
 
 
@@ -107,7 +108,9 @@ async def test_the_worker_reads_bambuddy_and_sends_sb_one_body() -> None:
     assert outcome.report.usage_booked == 1
     assert api.names() == ["apply", "usage", "trays"]
     body: PullBody = api.body("apply")
-    assert (body.instance, body.actor) == (INSTANCE, ACTOR)
+    # The run's id goes back with the rows; no actor does (Decision 181).
+    assert (body.instance, body.pull_id) == (INSTANCE, PULL_ID)
+    assert "actor" not in body.model_dump()
     assert body.spools == [SPOOL, ["not", "a", "spool"]]
     assert [u.id for u in body.usage] == [3]
     assert body.catalog is not None and [c.id for c in body.catalog] == [5]

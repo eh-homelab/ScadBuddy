@@ -116,7 +116,7 @@ Each says why, and what it costs if wrong.
    Why: moving it into the worker would rewrite #6261-#6268's tested code for no user-visible
    gain. Cost: Bambuddy reads for the pull stay in the CRUD service's pod; Task 12 files a
    follow-up issue to move them to the worker through a CRUD route. That issue, #6772,
-   moved them: Decisions 172-180.
+   moved them: Decisions 172-181.
 6. **Tags keep #6264's queue and drain** (`filament_bb_tag_pending`, `rfid_push.drain_tags`,
    with its 409 move rule), gated by `pushes(tags)`. The engine never sends `tag_uid` or
    `tray_uuid`; when `results` links a new BB spool, it queues the spool's open tags. Why: the
@@ -1856,9 +1856,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     left alone. Each route needs a `Content-Length` (411 without one) of at most 32 MiB
     (`PULL_BODY_BYTES_MAX`, 413 before the body is read), and its model forbids extra
     keys, caps each listing at 20,000 rows (archives at 2,000), checks the instance's form
-    and takes an actor of 1 to 256 characters. The actor comes from the body: the worker
-    is a trusted service (F13), and it sends back the actor the API's start named
-    (`bambuddy`, or the person who imported).
+    and the run's id (`filament-bb-pull-<32 hex>`). No body names an actor (Decision 181).
 179. #6772: `FilamentBbPull` runs its activity once (start-to-close 4 min, no retry): the
     Schedule's next tick is the retry, as it was for the API's activity, and a person
     imports again. No heartbeat: the apply of a large inventory is one long CRUD call (its
@@ -1878,6 +1876,19 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Schedule, the kept presets refresh, NTAG, MakerWorld, the Home Assistant entity list,
     the print dialog's reads and Bambuddy's print path), so no manifest change follows for
     the key.
+181. #6772, the actor (security review, decided as the most secure option): the worker never
+    names who a pull's events are booked to. `PullStart`, `PullBody` and `UsageBody` carry
+    the run's id (`pull_id`, also its workflow id, `bb_pull_apply.new_pull_id`), never an
+    actor, and their models forbid extra keys, so a body with `actor` is a 422. For an
+    import a person started, the API keeps the person under that id before it starts the
+    run (`remember_actor`, table `filament_pull_actors`, migration
+    `20261121T0911Z_filament_pull_actors.sql`) and deletes the row once the run ends
+    (`forget_actor`); the routes read the actor there (`LocalBbPull._actor`), and an id
+    with no row (the Schedule's pull) books as `bambuddy`. A row an API that died mid-run
+    left is deleted by the next `remember_actor` once it is an hour old (`ACTOR_KEPT`).
+    Tests: `test_crud_filament_pull.py` refuses a body with `actor` on the pull and usage
+    routes, and `test_the_events_name_the_actor_the_api_kept_never_the_workers` checks the
+    events name the kept person.
 
 ## Self-review
 

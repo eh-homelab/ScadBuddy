@@ -21,7 +21,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.print import BASE, RemoteBbPull
 from scadbuddy.filament.bambuddy_pull import ACTOR, Pulls
-from scadbuddy.filament.bb_pull_apply import LocalBbPull
+from scadbuddy.filament.bb_pull_apply import LocalBbPull, forget_actor, remember_actor
 from scadbuddy.filament.bb_pull_models import (
     HaBody,
     PullBody,
@@ -44,6 +44,7 @@ pg = pytest.mark.requires_postgres
 
 BB = "https://bambuddy.test"
 INSTANCE = instance_for(BB)
+PULL_ID = f"filament-bb-pull-{'b' * 32}"
 PULL = f"{BASE}/filament/pull"
 PATHS = (PULL, f"{PULL}/usage", f"{PULL}/ha-states", f"{PULL}/trays")
 SPOOL = {
@@ -70,7 +71,7 @@ def _usage(**over: Any) -> SpoolUsage:
 def _body(**over: Any) -> PullBody:
     fields: dict[str, Any] = {
         "instance": INSTANCE,
-        "actor": ACTOR,
+        "pull_id": PULL_ID,
         "pulls": Pulls(),
         "spools": [SPOOL],
         "catalog": [],
@@ -169,7 +170,10 @@ async def test_a_body_with_no_length_is_411(store: SettingsStore) -> None:
     [
         (PULL, {"instance": "not-hex"}),
         (PULL, {"extra": 1}),
-        (PULL, {"actor": ""}),
+        # The worker never names the actor (Decision 181).
+        (PULL, {"actor": "someone-else"}),
+        (f"{PULL}/usage", {"actor": "someone-else"}),
+        (PULL, {"pull_id": "not-a-run"}),
         (PULL, {"spools": [SPOOL] * 20_001}),
         (f"{PULL}/usage", {"usage": [{"id": "x"}]}),
         (f"{PULL}/ha-states", {"states": {"a": 5}}),
@@ -181,7 +185,7 @@ async def test_a_malformed_body_is_422(
 ) -> None:
     base: dict[str, Any] = {
         PULL: _body().model_dump(mode="json"),
-        f"{PULL}/usage": UsageBody(instance=INSTANCE, actor=ACTOR, usage=[]).model_dump(
+        f"{PULL}/usage": UsageBody(instance=INSTANCE, pull_id=PULL_ID, usage=[]).model_dump(
             mode="json"
         ),
         f"{PULL}/ha-states": {"instance": INSTANCE, "states": {}},
@@ -204,7 +208,7 @@ async def test_a_read_of_another_bambuddy_is_409_and_writes_nothing(
         with pytest.raises(CrudRefusedError) as refused:
             body = {
                 PULL: _body().model_dump(mode="json"),
-                f"{PULL}/usage": {"instance": INSTANCE, "actor": ACTOR, "usage": []},
+                f"{PULL}/usage": {"instance": INSTANCE, "pull_id": PULL_ID, "usage": []},
                 f"{PULL}/ha-states": {"instance": INSTANCE, "states": None},
                 f"{PULL}/trays": {"instance": INSTANCE, "assignments": []},
             }[path]
@@ -265,7 +269,7 @@ async def test_usage_rows_name_the_archives_date_then_book(
     applied = await remote.apply(_body(usage=usage))
     assert applied.archives_since == ended.date() - timedelta(days=1)
     archive = Archive(id=40, printer_id=1, completed_at=datetime(2026, 11, 14, 10, tzinfo=UTC))
-    body = UsageBody(instance=INSTANCE, actor=ACTOR, usage=usage, archives=[archive])
+    body = UsageBody(instance=INSTANCE, pull_id=PULL_ID, usage=usage, archives=[archive])
     booked = await remote.book_usage(body)
     assert (booked.booked, booked.unlinked) == (1, 0)
     assert (await remote.book_usage(body)).booked == 0
@@ -299,3 +303,25 @@ async def test_remote_and_local_give_the_same_report(
         remote.report.model_dump(exclude={"created_ids", "needs_type_ids"})
     )
     assert len(local.report.created_ids) == len(remote.report.created_ids) == 1
+
+
+@pg
+async def test_the_events_name_the_actor_the_api_kept_never_the_workers(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """Decision 181: the route names the person the API kept under the run's id (an
+    import), and ``bambuddy`` for a run with none; the body carries no actor at all."""
+    filament = filament_on(store.pool)
+    remember_actor(filament, PULL_ID, "person:ann")
+    kept = await RemoteBbPull(crud).apply(_body(spools=[SPOOL | {"id": 11}]))
+    other = await RemoteBbPull(crud).apply(
+        _body(pull_id=f"filament-bb-pull-{'d' * 32}", spools=[SPOOL | {"id": 12}])
+    )
+    (made,) = kept.report.created_ids
+    (scheduled,) = other.report.created_ids
+    assert {e.actor for e in filament.spools.events(made)} == {"person:ann"}
+    assert {e.actor for e in filament.spools.events(scheduled)} == {ACTOR}
+    forget_actor(filament, PULL_ID)
+    again = await RemoteBbPull(crud).apply(_body(spools=[SPOOL | {"id": 13}]))
+    (late,) = again.report.created_ids
+    assert {e.actor for e in filament.spools.events(late)} == {ACTOR}

@@ -91,7 +91,7 @@ async def run_pull(
         return PullOutcome(outcome="skipped")
     try:
         report = await read_and_pull(
-            api, settings, instance=start.instance, actor=start.actor, pulls=start.pulls
+            api, settings, instance=start.instance, pull_id=start.pull_id, pulls=start.pulls
         )
     except PullInstanceChangedError:
         logger.info("the Bambuddy URL changed during the pull; nothing is pulled")
@@ -122,7 +122,7 @@ def _skipped(start: PullStart) -> PullOutcome:
 
 
 async def read_and_pull(
-    api: BbPullApi, settings: StoredSettings, *, instance: str, actor: str, pulls: Pulls
+    api: BbPullApi, settings: StoredSettings, *, instance: str, pull_id: str, pulls: Pulls
 ) -> PullReport:
     """Read BB's spools, the archived ones too (#6707), and send them to SB to pull
     (``pulls`` the data types taken); SB skips a malformed row and counts it ``invalid``.
@@ -167,7 +167,7 @@ async def read_and_pull(
     applied = await api.apply(
         PullBody(
             instance=instance,
-            actor=actor,
+            pull_id=pull_id,
             pulls=pulls,
             spools=list(rows),
             usage=usage,
@@ -190,7 +190,7 @@ async def read_and_pull(
             booked = await api.book_usage(
                 UsageBody(
                     instance=instance,
-                    actor=actor,
+                    pull_id=pull_id,
                     usage=usage,
                     # Only what the booking matches by (`bambuddy_usage.match_archive`).
                     archives=[
