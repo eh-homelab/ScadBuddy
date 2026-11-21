@@ -41,6 +41,12 @@ ALERT_CLEAR_AFTER = timedelta(minutes=10)
 #: 42): the print worker's send activity ends within 2 minutes, so it is no live send.
 INTERRUPTED_AFTER = timedelta(minutes=10)
 
+#: How long a sensor's notification rows are kept (#6646, plan Decision 49): the prune
+#: (`SensorStore.prune_notifications`, in the housekeeping's activity sweep) deletes a row
+#: whose reading is older than this, except each sensor's newest (the one the sensor
+#: shows) and a row ``sending`` (a claim ends it).
+NOTIFICATION_TTL = timedelta(days=30)
+
 #: The sensor's newest notification (#6646), as the one JSON value `m.SensorNotification`
 #: reads; a scalar subquery, so it fits a SELECT and an UPDATE's RETURNING alike. Newest by
 #: the reading's time, which `record_on` keeps increasing per sensor; `queued_at` is when a
@@ -79,6 +85,20 @@ class SensorStore:
 
     def __init__(self, pool: ConnectionPool[Conn]) -> None:
         self._pool = pool
+
+    def prune_notifications(self, ttl: timedelta = NOTIFICATION_TTL) -> int:
+        """Delete the notification rows whose reading is older than ``ttl`` (Decision 49),
+        keeping each sensor's newest and every row ``sending``. Answers how many went."""
+        with self._pool.connection() as conn, conn.transaction():
+            # Under the claim's lock, so a claim never answers a row this deletes.
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_CLAIM_LOCK,))
+            return conn.execute(
+                "DELETE FROM filament_sensor_notifications n"
+                " WHERE n.read_at < now() - %s AND n.state <> 'sending'"
+                " AND EXISTS (SELECT 1 FROM filament_sensor_notifications newer"
+                " WHERE newer.sensor_id = n.sensor_id AND newer.read_at > n.read_at)",
+                (ttl,),
+            ).rowcount
 
     def list(self, location_id: UUID | None) -> list[m.Sensor]:
         """The unarchived sensors on unarchived places, of one place or of all, by name. A

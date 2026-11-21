@@ -1043,6 +1043,16 @@ async def _sweep_activity_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not prune activity")
         failed = True
+    # #6646 Decision 49: the sensors' old notification rows, in this activity so the
+    # workflow's history is unchanged.
+    try:
+        pruned = await asyncio.to_thread(state.components.get(FILAMENT).sensors.prune_notifications)
+    except Exception:
+        logger.exception("could not prune the sensor notifications")
+        failed = True
+    else:
+        if pruned:
+            logger.info("pruned sensor notifications", extra={"count": pruned})
     if failed:
         raise RuntimeError("the activity sweep failed")
 

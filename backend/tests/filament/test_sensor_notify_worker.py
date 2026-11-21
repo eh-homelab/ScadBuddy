@@ -110,6 +110,28 @@ async def test_with_no_bambuddy_a_notification_waits(pg_pool: PgPool) -> None:
     assert _rows(pg_pool, sensor)[0]["state"] == "queued"
 
 
+async def test_a_client_that_cannot_be_built_claims_nothing(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 50: the client is built before the claim, so a failure there leaves the
+    row queued for the next pass, not ``sending`` until a claim ends it ``interrupted``."""
+    sensor = _sensor(pg_pool, alert_above=50, notify=True)
+    _record(pg_pool, sensor, 60.0, T0)
+
+    def broken(settings: StoredSettings) -> Any:
+        raise RuntimeError("no client")
+
+    monkeypatch.setattr(sensor_notify, "client_for", broken)
+    with pytest.raises(RuntimeError, match="no client"):
+        await sensor_notify.deliver_pending(PoolSensorNotifications(pg_pool), _settings)
+    assert _rows(pg_pool, sensor) == [{"state": "queued", "channels": None, "error": None}]
+    monkeypatch.undo()
+    with respx.mock() as router:
+        router.post(SEND).respond(json={"channels": 1})
+        report = await sensor_notify.deliver_pending(PoolSensorNotifications(pg_pool), _settings)
+    assert (report.sent, report.failed) == (1, 0)
+
+
 async def test_the_activity_sends_through_the_api_it_was_given(pg_pool: PgPool) -> None:
     sensor = _sensor(pg_pool, alert_above=50, notify=True)
     _record(pg_pool, sensor, 60.0, T0)

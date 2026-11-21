@@ -440,8 +440,9 @@ BB has a flat list (`/inventory/locations`) plus location sensors
   rows through CRUD routes, so it reaches the channels the owner set up in Bambuddy and
   the CRUD service makes no Bambuddy call for it. Only a sensor's newest queued
   notification is sent, and none after `notify` is turned off. The sensor shows its
-  newest notification: sent, waiting, or failed and why. The plan's Decisions 29 to 46
-  have the details.
+  newest notification: sent, waiting, or failed and why. Notification rows older than 30
+  days are pruned, except each sensor's newest. The plan's Decisions 29 to 50 have the
+  details.
 - A move writes a `moved` event (from, to) in the spool's ledger. A scan of a
   location QR, then of a spool tag or label, moves the spool.
 - Time spent outside dry storage counts toward "needs drying" for hygroscopic

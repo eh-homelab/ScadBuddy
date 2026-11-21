@@ -557,3 +557,22 @@ Load `frontend-design` first.
     sent again), a connect timeout `unavailable` (nothing was sent). Tests
     `test_a_slow_bambuddy_hands_the_unsent_rows_back` and
     `test_a_timeout_after_the_request_went_is_interrupted`.
+49. **Notification rows are kept for 30 days.** `SensorStore.prune_notifications` deletes a
+    row of `filament_sensor_notifications` whose reading is older than `NOTIFICATION_TTL`
+    (30 days), except each sensor's newest (the `last_notification` the sensor shows) and a
+    row `sending` (a claim ends it). It runs under the claim's advisory lock, in the
+    housekeeping's activity sweep (`main._sweep_activity_logged`), which is on the prune
+    Schedule, so it runs with the sweeps off too. It is a step of that activity, not a new
+    sweep, so the `Housekeeping` workflow's history is unchanged (as
+    `_sweep_auth_sessions_logged` adds its steps). A TTL, not "the newest N per sensor":
+    the rows are an audit of what was sent, and a time bound matches the activity
+    record's own (`activity_ttl_seconds`, 30 days by default). A failed prune fails the
+    sweep after the activity's own prune ran. Cost: a sensor that flips often keeps 30
+    days of rows; the 10-minute clear hold (Decision 39) bounds that to a few per hour.
+    Tests `test_the_prune_keeps_each_sensors_newest_and_a_row_sending` and
+    `test_the_sweep_prunes_the_sensor_notifications_too`.
+50. **The pass builds its Bambuddy client before it claims.** `deliver_pending` enters
+    `client_for(settings)` first and claims inside it. A client that cannot be built
+    raises before any row is `sending`, so the rows stay `queued` for the next pass,
+    rather than waiting 10 minutes to be ended `interrupted` (Decision 42) unsent. Test
+    `test_a_client_that_cannot_be_built_claims_nothing`.

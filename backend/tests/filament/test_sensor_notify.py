@@ -1,12 +1,12 @@
 """A location sensor's alert notifications, queued (#6646): one when it starts alerting and
 one when it stops, queued under the sensor's row lock with the message made then, and
-claimed and ended for the print worker (plan Decisions 29-46). The send itself is the print
+claimed and ended for the print worker (plan Decisions 29-50). The send itself is the print
 worker's: `tests/filament/test_sensor_notify_worker.py`."""
 
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -340,3 +340,51 @@ def test_a_claim_ends_a_row_left_sending_as_interrupted(pg_pool: PgPool) -> None
     assert _claim(pg_pool) == []
     (row,) = _rows(pg_pool, sensor)
     assert (row["state"], row["error"]) == ("failed", "interrupted")
+
+
+def test_the_prune_keeps_each_sensors_newest_and_a_row_sending(pg_pool: PgPool) -> None:
+    """Decision 49: a row whose reading is older than the TTL goes, except the sensor's
+    newest (the one it shows) and a row ``sending`` (a claim ends it)."""
+    old = datetime.now(UTC) - sensors.NOTIFICATION_TTL - timedelta(days=1)
+    recent = datetime.now(UTC) - timedelta(days=1)
+    busy = _sensor(pg_pool, alert_above=50, notify=True)
+    _record(pg_pool, busy, 60.0, old)
+    _record(pg_pool, busy, 30.0, old + timedelta(minutes=1))
+    _record(pg_pool, busy, 31.0, old + timedelta(minutes=1) + CLEAR)
+    _record(pg_pool, busy, 70.0, old + timedelta(minutes=2) + CLEAR)
+    _record(pg_pool, busy, 30.0, recent)
+    _record(pg_pool, busy, 31.0, recent + CLEAR)
+    first, *_ = _rows(pg_pool, busy)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_sensor_notifications SET state = 'sending', claimed_at = now()"
+            " WHERE id = %s",
+            (first["id"],),
+        )
+    (made,) = SensorStore(pg_pool).list(None)
+    quiet = (
+        SensorStore(pg_pool)
+        .create(
+            SensorIn.model_validate(
+                {
+                    "location_id": made.location_id,
+                    "source": "home_assistant",
+                    "kind": "temperature",
+                    "entity_id": "sensor.box_t",
+                    "name": "Box T",
+                    "alert_above": 50,
+                    "notify": True,
+                }
+            ),
+            actor="ann",
+        )
+        .id
+    )
+    _record(pg_pool, quiet, 60.0, old)
+    assert SensorStore(pg_pool).prune_notifications() == 2
+    assert [(r["kind"], r["state"]) for r in _rows(pg_pool, busy)] == [
+        ("started", "sending"),
+        ("stopped", "queued"),
+    ]
+    assert len(_rows(pg_pool, quiet)) == 1
+    assert SensorStore(pg_pool).prune_notifications() == 0

@@ -1,5 +1,5 @@
 """A location sensor's alert notifications, sent by the print worker (#6646; plan
-`docs/superpowers/plans/2026-11-18-filament-weights-sensors.md` Decisions 29-48).
+`docs/superpowers/plans/2026-11-18-filament-weights-sensors.md` Decisions 29-50).
 
 `sensors.SensorStore.record_on` queues a row of `filament_sensor_notifications`, with its
 title and message, when a stored reading opens or closes the alert of a sensor with
@@ -106,19 +106,22 @@ async def deliver_pending(
     phase_timeout: float = SEND_PHASE_TIMEOUT,
 ) -> DeliveryReport:
     """Send up to ``limit`` queued notifications through Bambuddy. With no Bambuddy URL
-    nothing is claimed: the rows wait for one. A row whose send fails is ended ``failed``
-    with its code; the others are still sent. A failed end (SB out of reach) raises: the
-    rows claimed and not ended are ended ``interrupted`` by a later claim. The pass starts no
-    send after ``budget`` seconds; the rows it did not try go back to ``queued``."""
+    nothing is claimed: the rows wait for one. The Bambuddy client is built before the
+    claim, so a client that cannot be built claims nothing. A row whose send fails is
+    ended ``failed`` with its code; the others are still sent. A failed end (SB out of
+    reach) raises: the rows claimed and not ended are ended ``interrupted`` by a later
+    claim. The pass starts no send after ``budget`` seconds; the rows it did not try go
+    back to ``queued``."""
     settings = await load()
     if not settings.bambuddy_url:
         return DeliveryReport(sent=0, failed=0)
-    rows = await api.claim(limit)
-    if not rows:
-        return DeliveryReport(sent=0, failed=0)
     sent = failed = 0
-    deadline = time.monotonic() + budget
+    # The client is built before the claim (Decision 50): a client that cannot be built
+    # leaves every row queued for the next pass, never ``sending`` until it is ended
+    # ``interrupted``.
     async with client_for(settings) as client:
+        rows = await api.claim(limit)
+        deadline = time.monotonic() + budget
         for row in rows:
             if time.monotonic() >= deadline:
                 await api.end(row.id, NotificationEnd(requeue=True))
