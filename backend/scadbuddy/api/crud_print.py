@@ -159,7 +159,7 @@ import dataclasses
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
@@ -231,6 +231,19 @@ from scadbuddy.crud.print import (
 )
 from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.filament import print_uses
+from scadbuddy.filament.bb_pull_apply import LocalBbPull
+from scadbuddy.filament.bb_pull_models import (
+    INSTANCE_CHANGED,
+    PULL_BODY_BYTES_MAX,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    TraysBody,
+    TraysReconciled,
+    UsageBody,
+    UsageBooked,
+)
 from scadbuddy.filament.bb_sync_models import (
     PlanRequest,
     ResultsReport,
@@ -1931,6 +1944,103 @@ async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsR
 async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
     """Natural: the row is set, not added to."""
     await sync.record_pass(body)
+
+
+async def _pull_bounded(request: Request) -> None:
+    """The pull's bodies are capped (#6772): a ``Content-Length`` is required and at most
+    `PULL_BODY_BYTES_MAX`, checked before the body is read."""
+    length = request.headers.get("content-length")
+    if length is None or not length.isdigit():
+        raise ApiError(status.HTTP_411_LENGTH_REQUIRED, "a body names its Content-Length")
+    if int(length) > PULL_BODY_BYTES_MAX:
+        raise ApiError(
+            status.HTTP_413_CONTENT_TOO_LARGE, f"a body is at most {PULL_BODY_BYTES_MAX} bytes"
+        )
+
+
+def _pull(filament: FilamentDep, settings: SettingsStoreDep) -> LocalBbPull:
+    return LocalBbPull(filament, settings.load)
+
+
+PullDep = Annotated[LocalBbPull, Depends(_pull)]
+
+
+async def _for_configured[T](write: Awaitable[T]) -> T:
+    try:
+        return await write
+    except PullInstanceChangedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the body was read from another Bambuddy than the configured one",
+            reason=INSTANCE_CHANGED,
+        ) from None
+
+
+@router.post(
+    "/filament/pull",
+    name="crud_print_filament_pull",
+    summary="Pull what the print worker read of Bambuddy into SB",
+    dependencies=[Depends(_pull_bounded)],
+    description=(
+        "The Bambuddy pull's SB side (#6772): the spools, usage rows, suppliers, locations"
+        " and spool catalog the print worker read, pulled into SB's tables as the spool"
+        " refresh pulled them (`filament/bambuddy_pull.py`); the API calls no Bambuddy."
+        " Answers the pull's report and the date from which the worker reads Bambuddy's"
+        " archives for the usage rows not booked yet. 409 `instance_changed` for a read of"
+        " another Bambuddy than the configured one."
+    ),
+)
+async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
+    """Natural: a pull of the same rows changes nothing the first did not."""
+    return await _for_configured(sync.apply(body))
+
+
+@router.post(
+    "/filament/pull/usage",
+    name="crud_print_filament_pull_usage",
+    summary="Book Bambuddy's usage rows the print worker read",
+    dependencies=[Depends(_pull_bounded)],
+    description=(
+        "BB's usage rows booked on linked spools, matched to the archives the worker read"
+        " (#6772, `filament/bambuddy_usage.py`). 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
+    """Natural: a row's ``bb_usage`` event names it, so it is booked once."""
+    return await _for_configured(sync.book_usage(body))
+
+
+@router.post(
+    "/filament/pull/ha-states",
+    name="crud_print_filament_pull_ha_states",
+    summary="Record Bambuddy's Home Assistant states as sensor readings",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(_pull_bounded)],
+    description=(
+        "Each state a reading of the Home Assistant sensor naming its entity (#6268, #6772);"
+        " `states` null (the read failed) marks every such sensor unreachable. 409"
+        " `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
+    """Natural: a reading of the same value within 15 minutes is not stored again."""
+    await _for_configured(sync.ha_states(body))
+
+
+@router.post(
+    "/filament/pull/trays",
+    name="crud_print_filament_pull_trays",
+    summary="Set the untagged trays right by Bambuddy's assignments",
+    dependencies=[Depends(_pull_bounded)],
+    description=(
+        "Each untagged tray whose placed spool disagrees with the printer's report takes"
+        " the spool Bambuddy assigns it, when that one agrees (#6713, #6772). Answers how"
+        " many trays moved. 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_trays(body: TraysBody, sync: PullDep) -> TraysReconciled:
+    """Natural: a tray already set right is left alone."""
+    return TraysReconciled(moved=await _for_configured(sync.reconcile_trays(body)))
 
 
 @router.get("/held-presets", name="crud_print_held_presets")

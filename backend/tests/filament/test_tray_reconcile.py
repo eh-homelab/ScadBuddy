@@ -15,7 +15,6 @@ import respx
 
 from scadbuddy.bambuddy.models import SpoolAssignment
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament.bambuddy_pull import scheduled_pull
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import (
     RECONCILE_ACTOR,
@@ -37,6 +36,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.spools.models import SeenTray
 from tests.conftest import PgPool
+from tests.filament.pull_support import scheduled_pull
 from tests.filament.test_bambuddy_pull import BB, _filament
 
 pytestmark = pytest.mark.requires_postgres

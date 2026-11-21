@@ -1,0 +1,202 @@
+"""The Bambuddy pull's SB side, in the CRUD service (#6772, plan
+`docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 172-180).
+
+The print worker reads Bambuddy (`filament/bb_pull_run.py`) and sends what it read here:
+`LocalBbPull` applies it to SB's tables with `bambuddy_pull.pull`, `bambuddy_usage`,
+`sensors` and `FilamentInventory.reconcile_trays`, and makes no Bambuddy call. The CRUD
+routes (`api/crud_print.py`, ``…/print/filament/pull*``) and the API's in-process print
+worker both run it. `pull_start` and `execute_pull` are the API's side of a run: what the
+Schedule's pull or a person's import asks the worker to read, and the start of
+``FilamentBbPull`` on the ``bambuddy`` queue.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from collections.abc import Callable, Sequence
+from datetime import UTC, date, datetime, timedelta
+
+from temporalio.client import Client
+
+from scadbuddy.bambuddy.models import Archive, SpoolUsage
+from scadbuddy.core import settings as core_settings
+from scadbuddy.core.settings import FilamentSync
+from scadbuddy.filament import bambuddy_usage, sensors
+from scadbuddy.filament.bambuddy_pull import ACTOR, parse_rows, pull
+from scadbuddy.filament.bb_pull_models import (
+    FILAMENT_BB_PULL_WORKFLOW,
+    HaBody,
+    PullApplied,
+    PullBody,
+    PullInstanceChangedError,
+    PullOutcome,
+    Pulls,
+    PullStart,
+    TraysBody,
+    UsageBody,
+    UsageBooked,
+)
+from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.component import Filament
+from scadbuddy.library.settings_store import StoredSettings
+
+logger = logging.getLogger(__name__)
+
+#: How long before its usage row an archive may have been made. The archive window is on
+#: its ``created_at`` (the dispatch), and the row comes when the print ends; a day covers
+#: a print that long, and the window is on dates.
+ARCHIVE_LEAD = timedelta(days=1)
+#: A ``FilamentBbPull`` run's bound: under the spool refresh's activity
+#: (`workflows/spool_refresh.py` ``FILAMENT_PULL_TIMEOUT``, 5 min), which waits for it.
+PULL_RUN_TIMEOUT = timedelta(minutes=4, seconds=30)
+
+
+def _failed(message: str, error: Exception) -> None:
+    logger.warning(message, extra={"error": type(error).__name__}, exc_info=True)
+
+
+class LocalBbPull:
+    """`bb_pull_models.BbPullApi` on the API's own stores. ``load`` reads the stored
+    settings (blocking): a body of another Bambuddy than ``bambuddy_url``'s is refused.
+    ``clock`` is the pull's time (the links' ``bb_seen_at``) and the Home Assistant
+    readings'."""
+
+    def __init__(
+        self,
+        filament: Filament,
+        load: Callable[[], StoredSettings],
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self.filament = filament
+        self.load = load
+        self.clock = clock
+
+    def _check(self, instance: str) -> None:
+        url = self.load().bambuddy_url
+        if not url or instance_for(url) != instance:
+            raise PullInstanceChangedError(instance)
+
+    async def apply(self, body: PullBody) -> PullApplied:
+        return await asyncio.to_thread(self._apply, body)
+
+    def _apply(self, body: PullBody) -> PullApplied:
+        """The pull as `read_and_pull` ran it before #6772, from the worker's read: the
+        rows parsed, `pull`, then which usage rows would book and are not booked yet, for
+        the archives the worker reads next. That check fails alone, logged."""
+        self._check(body.instance)
+        spools, bad = parse_rows(body.spools)
+        report = pull(
+            self.filament,
+            spools,
+            now=self.clock(),
+            actor=body.actor,
+            catalog=body.catalog or (),
+            pulls=body.pulls,
+            usage=body.usage,
+            defer_archived=body.usage_failed,
+            suppliers=body.suppliers,
+            locations=body.locations,
+            instance=body.instance,
+        )
+        report.catalog_failed = report.catalog_failed or body.catalog is None
+        report.invalid = len(bad)
+        report.invalid_bb_ids = [i for i in bad if i is not None]
+        since: date | None = None
+        try:
+            pending = self._unbooked(body.usage) if body.usage else set()
+        except Exception as error:
+            _failed("could not find Bambuddy's unbooked usage rows", error)
+            pending = set()
+        if pending:
+            since = min(row.created_at for row in body.usage if row.id in pending).date()
+            since -= ARCHIVE_LEAD
+        return PullApplied(report=report, archives_since=since)
+
+    def _unbooked(self, usage: Sequence[SpoolUsage]) -> set[int]:
+        with self.filament.spools.transaction() as conn:
+            return bambuddy_usage.unbooked(conn, usage)
+
+    async def book_usage(self, body: UsageBody) -> UsageBooked:
+        return await asyncio.to_thread(self._book_usage, body)
+
+    def _book_usage(self, body: UsageBody) -> UsageBooked:
+        self._check(body.instance)
+        archives: Sequence[Archive] = body.archives
+        with self.filament.spools.transaction() as conn:
+            booked = bambuddy_usage.book_usage(conn, body.usage, archives, actor=body.actor)
+        return UsageBooked(booked=booked.booked, unlinked=booked.unlinked)
+
+    async def ha_states(self, body: HaBody) -> None:
+        await asyncio.to_thread(self._ha_states, body)
+
+    def _ha_states(self, body: HaBody) -> None:
+        """A state is a reading now (`sensors.apply_ha_states_on`); no states (the read
+        failed) marks every Home Assistant sensor on a live place unreachable."""
+        self._check(body.instance)
+        with self.filament.spools.transaction() as conn:
+            sensors.apply_ha_states_on(conn, body.states or {}, self.clock())
+
+    async def reconcile_trays(self, body: TraysBody) -> int:
+        def run() -> int:
+            self._check(body.instance)
+            return len(self.filament.inventory.reconcile_trays(body.assignments))
+
+        return await asyncio.to_thread(run)
+
+
+def _has_ha_sensors(store: Filament) -> bool:
+    """Whether a Home Assistant sensor is set up, so the worker reads Bambuddy's states.
+    A failed read says yes (logged): the worker then reads them, and the states route
+    marks what it can, as `read_ha_sensors` did before #6772."""
+    try:
+        return any(s.source == "home_assistant" for s in store.sensors.list(None))
+    except Exception as error:
+        _failed("could not list the Home Assistant sensors", error)
+        return True
+
+
+async def pull_start(
+    store: Filament, load: Callable[[], StoredSettings], sync: Callable[[], FilamentSync]
+) -> PullStart | None:
+    """The Schedule's pull (`SpoolRefresh`), decided in the API: None (skipped) with no BB
+    URL, or when no data type of ``filament_sync`` pulls (#6265 F1) and no Home Assistant
+    sensor is set up. Else the start, whose ``pulls`` is None when only the Home Assistant
+    states are read: sensors are not spool data, so they are read whatever ``sync`` says
+    (#6268). ``sync`` reads the setting as it is now (#6262 Task 13)."""
+    settings = await asyncio.to_thread(load)
+    if not settings.bambuddy_url:
+        logger.info("no Bambuddy configured; its spools are not pulled")
+        return None
+    ha = await asyncio.to_thread(_has_ha_sensors, store)
+    filament_sync = await asyncio.to_thread(sync)
+    pulls: Pulls | None = Pulls.of(filament_sync)
+    if not any(core_settings.pulls(d) for d in filament_sync.model_dump().values()):
+        logger.info("Bambuddy's spools are not pulled: no Filament sync pulls")
+        pulls = None
+        if not ha:
+            return None
+    return PullStart(
+        instance=instance_for(settings.bambuddy_url),
+        actor=ACTOR,
+        pulls=pulls,
+        ha=ha,
+        reconcile=pulls is not None,
+    )
+
+
+async def execute_pull(client: Client, task_queue: str, start: PullStart) -> PullOutcome:
+    """Run ``FilamentBbPull`` on ``task_queue`` (the ``bambuddy`` queue) and wait for its
+    outcome, at most `PULL_RUN_TIMEOUT`. Each run has an id of its own: the Schedule's
+    pull and a person's import may run at once, as they could before (each BB spool is
+    taken under its own advisory lock, `bambuddy_pull.pull`)."""
+    result: PullOutcome = await client.execute_workflow(
+        FILAMENT_BB_PULL_WORKFLOW,
+        start,
+        id=f"filament-bb-pull-{uuid.uuid4().hex}",
+        task_queue=task_queue,
+        execution_timeout=PULL_RUN_TIMEOUT,
+        result_type=PullOutcome,
+    )
+    return result

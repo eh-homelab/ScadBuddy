@@ -93,6 +93,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
+from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync, adopt_instance
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
@@ -1756,6 +1758,12 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
             settings_loader(state.settings_store.load),
         ).sync_pass,
+        # The Bambuddy pull's reads (#6772) on this process's own stores, as the CRUD
+        # routes apply them for the print worker.
+        FilamentPullActivities(
+            LocalBbPull(state.components.get(FILAMENT), state.settings_store.load),
+            settings_loader(state.settings_store.load),
+        ).pull_read,
     ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every
@@ -1918,11 +1926,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # The retired spool-provider activities, for runs opened before
         # spool-providers-gone (#6262 Task 12).
         *spool_activities(),
-        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule.
+        # Bambuddy's spools pulled into ScadBuddy's own (#6261), on the spools' Schedule:
+        # read by the print worker, which sends the rows to the CRUD routes (#6772).
         filament_pull_activity(
             state.components.get(FILAMENT),
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
+            partial(execute_pull, client, settings.temporal_task_queue_bambuddy),
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
         capture_backstop_activity(state.components.get(PRINTERS)),

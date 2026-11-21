@@ -115,7 +115,8 @@ Each says why, and what it costs if wrong.
    plan gates it per data type and adds archive, K values, suppliers and locations to it.
    Why: moving it into the worker would rewrite #6261-#6268's tested code for no user-visible
    gain. Cost: Bambuddy reads for the pull stay in the CRUD service's pod; Task 12 files a
-   follow-up issue to move them to the worker through a CRUD route.
+   follow-up issue to move them to the worker through a CRUD route. That issue, #6772,
+   moved them: Decisions 172-180.
 6. **Tags keep #6264's queue and drain** (`filament_bb_tag_pending`, `rfid_push.drain_tags`,
    with its 409 move rule), gated by `pushes(tags)`. The engine never sends `tag_uid` or
    `tray_uuid`; when `results` links a new BB spool, it queues the spool's open tags. Why: the
@@ -1794,6 +1795,89 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_a_place_mapping_only_to_an_archived_location_is_not_seeded`,
     `test_a_place_mapping_only_to_a_printers_place_is_not_seeded`,
     `test_a_seed_of_a_place_archived_since_still_counts`.
+172. #6772 (replaces Decision 5's place; its cost note asked for this): the pull's Bambuddy
+    reads run on the print worker, and the CRUD service makes no Bambuddy call for the
+    pull. A new workflow type, `FilamentBbPull` (`workflows/filament_pull.py`), on the
+    `bambuddy` queue runs one activity, `filament_bb_pull_read` (`filament/bb_pull_run.py`).
+    It reads Bambuddy with the key the worker already holds and sends each read to a new
+    CRUD area, `filament-pull` (`api/crud_print.py`; client `crud/print.py`
+    `RemoteBbPull`), which applies it (`filament/bb_pull_apply.py` `LocalBbPull`, which
+    runs `bambuddy_pull.pull`, `bambuddy_usage`, `sensors` and `reconcile_trays` as before).
+    The routes require the print service credential from this first PR (the CRUD router's
+    guard). Rule: `CLAUDE.md` "Database access (#5295)". Where the API serves the
+    `bambuddy` queue itself (dev, tests), the same activity runs on `LocalBbPull`.
+173. #6772: `SpoolRefresh` keeps its commands. Its `filament_bambuddy_pull` activity keeps its
+    name, timeout (5 min) and result, so no `workflow.patched` is needed and the committed
+    `spool_refresh_histories` replay as they are. The activity now reads no Bambuddy: it
+    decides the start (`pull_start`) and waits for `FilamentBbPull` (`execute_pull`, its
+    run bounded at 4.5 min, under the activity's 5). The pull still runs on the spool
+    refresh's Schedule, in the same place among the steps (kept presets, pull, capture
+    backstop, RFID), and a tick still never fails on it. `FilamentBbSync` (the push) stays
+    a workflow of its own: it ends when nothing pushes (R-T8-2), runs on its own timer and
+    signals, and the pull must run when nothing pushes. Neither waits on the other. Cost:
+    a tick where both run reads Bambuddy's spool listing twice, as before #6772.
+174. #6772: the person's import (`POST /filament/bambuddy/import`) runs the same workflow
+    with `strict`. The route answers 409 for no Bambuddy URL as before, starts
+    `FilamentBbPull` and waits. A Bambuddy refusal of the spool listing comes back as its
+    problem (`PullProblem`: status, type, title, detail and extensions), so the route
+    answers what it answered when it read Bambuddy itself. New: a run that did not finish
+    (Temporal out of reach, the worker down, the run timed out) is 503 "the print worker
+    did not finish the import; try again", and a Bambuddy URL changed between the route
+    and the read is 409 "the Bambuddy URL changed during the import; import again". The
+    answer is the same `PullReport`.
+175. #6772: what crosses, in the order the pull read it before. (1) Home Assistant's states,
+    only when the start says a sensor is set up (`…/pull/ha-states`; `states` null when the
+    read failed, so the sensors are marked unreachable). (2) One body with the spool rows
+    as Bambuddy sent them (the API validates each with `parse_rows`, so a malformed row is
+    still counted `invalid` there), the usage rows and whether their read failed, the
+    suppliers and locations (null: not read) and the spool catalog (null: the read failed)
+    (`…/pull`). The API answers the report and `archives_since`, the date from which the
+    archives are needed for the usage rows that would book and are not booked yet (the
+    query `read_and_pull` ran between the pull and the archive read). (3) The usage rows
+    with the archives read for them, only `id`, `printer_id` and `completed_at`
+    (`bambuddy_usage.match_archive`'s fields) (`…/pull/usage`). (4) After the Schedule's
+    pull, Bambuddy's tray assignments (`…/pull/trays`). Each read but the spools still
+    fails alone, logged.
+176. #6772: the API decides what the worker reads, because it needs SB's tables. No
+    Bambuddy URL: skipped, no run. A Home Assistant sensor set up: `ha`. No data type
+    pulls: `pulls` is null, and with no Home Assistant sensor there is no run either
+    (`skipped`, as before). A failed read of the sensor list counts as "a sensor is set
+    up", so the worker reads the states and the route marks what it can, as the old
+    `read_ha_sensors` did. `reconcile` is set for the Schedule's pull only.
+177. #6772 (as Decision 168 for the push): every body names the Bambuddy instance the worker
+    read (`instance_for` of its URL). The routes and `LocalBbPull` refuse a body of
+    another instance than the configured Bambuddy's with 409 `instance_changed` and write
+    nothing; the worker then answers `skipped`. The worker also compares the start's
+    instance with the settings it loads and reads nothing when they differ.
+178. #6772: the routes take no `Idempotency-Key`; each is natural, so the CRUD client sends
+    it again on its retries: a pull of the same rows changes nothing the first did not, a
+    usage row is booked once (its `bb_usage` event names it), a Home Assistant reading of
+    the same value within 15 minutes is not stored again, and a tray already set right is
+    left alone. Each route needs a `Content-Length` (411 without one) of at most 32 MiB
+    (`PULL_BODY_BYTES_MAX`, 413 before the body is read), and its model forbids extra
+    keys, caps each listing at 20,000 rows (archives at 2,000), checks the instance's form
+    and takes an actor of 1 to 256 characters. The actor comes from the body: the worker
+    is a trusted service (F13), and it sends back the actor the API's start named
+    (`bambuddy`, or the person who imported).
+179. #6772: `FilamentBbPull` runs its activity once (start-to-close 4 min, no retry): the
+    Schedule's next tick is the retry, as it was for the API's activity, and a person
+    imports again. No heartbeat: the apply of a large inventory is one long CRUD call (its
+    own client timeout is 180 s, `RemoteBbPull.APPLY_TIMEOUT`). Each run has an id of its
+    own (`filament-bb-pull-<uuid>`): the Schedule's pull and an import may run at once, as
+    before; each BB spool is still taken under its own advisory lock. The workflow is
+    AUTO_UPGRADE on the print worker, and `tests/test_filament_pull_replay.py` replays the
+    committed `filament_pull_histories/v1.json`.
+180. #6772, the rollout: `FilamentBbPull` is a new workflow type on the `bambuddy` queue, so
+    the release rolls `scadbuddy-print` with `Recreate` (README, "A release that needs
+    `Recreate`"), through a clusters PR merged before the deploy PR and a second one that
+    restores `RollingUpdate`. The worker waits for the API to serve `filament-pull`
+    (`PRINT_CRUD_AREAS`). A pull started while the old print build is still current waits
+    (its workflow task fails) until the new build takes the queue, at most the run's 4.5
+    min; the next tick retries. The API still needs the Bambuddy key for other work (the
+    inventory view's tray assignments, the RFID mode, tag push and slot steps of the same
+    Schedule, the kept presets refresh, NTAG, MakerWorld, the Home Assistant entity list,
+    the print dialog's reads and Bambuddy's print path), so no manifest change follows for
+    the key.
 
 ## Self-review
 

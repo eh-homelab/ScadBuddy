@@ -2,9 +2,9 @@
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
 over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
 their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Some routes reach
-Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`,
-`filament/bambuddy_pull.py`), the list of Home Assistant entities
-(`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
+Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`, whose Bambuddy reads
+the print worker makes since #6772, `filament/bambuddy_pull.py`), the list of Home Assistant
+entities (`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
 Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind,
 and the NTAG confirm,
 `filament/rfid_push.py`, #6264) tells Bambuddy only while ``filament_sync.tags`` pushes
@@ -40,6 +40,7 @@ from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.models import HaEntity, SpoolAssignment
 from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
 from scadbuddy.crud.idempotency import (
@@ -52,7 +53,9 @@ from scadbuddy.filament import capture, ntag, rfid_mode, type_proposals
 from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
-from scadbuddy.filament.bambuddy_pull import PullReport, Pulls, read_and_pull, try_assignments
+from scadbuddy.filament.bambuddy_pull import PullReport, Pulls, try_assignments
+from scadbuddy.filament.bb_pull_apply import execute_pull
+from scadbuddy.filament.bb_pull_models import PullStart
 from scadbuddy.filament.bb_sync_models import (
     LinksResetDone,
     LinksResetPreview,
@@ -1645,6 +1648,8 @@ async def move_spool(
         "A Bambuddy spool Bambuddy archived before any pull linked it becomes an archived "
         "spool (Bambuddy's archive time, what is left, its usage rows), counted in `created` "
         "and in `archived_created`; Bambuddy archiving a linked spool changes nothing. "
+        "The print worker reads Bambuddy and ScadBuddy pulls what it read, so the import "
+        "waits for it (at most 4.5 minutes); 503 when the worker did not finish it. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
         "still needing a type and archived, the BB spool ids it could not pull, the count "
         "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "
@@ -1652,13 +1657,40 @@ async def move_spool(
     ),
 )
 async def import_bambuddy(
-    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep
+    state: StateDep, store: SettingsStoreDep, caller: CallerDep
 ) -> PullReport:
+    """The print worker reads Bambuddy (``FilamentBbPull``, #6772) and the CRUD routes pull
+    what it read; this route calls no Bambuddy. Bambuddy's refusal of the spool listing is
+    answered as it comes, as when the API read it."""
     settings = await asyncio.to_thread(store.load)
+    if not settings.bambuddy_url:
+        raise not_configured("no Bambuddy URL is configured; set one in Settings")
     sync = (await asyncio.to_thread(store.read, {"filament_sync"}))["filament_sync"]
     # A person's import pulls the spools whatever `spools` says; the rest follow the setting.
     pulls = dataclasses.replace(Pulls.of(sync), spools=True)
-    return await read_and_pull(filament, settings, actor=actor(caller), pulls=pulls)
+    start = PullStart(
+        instance=instance_for(settings.bambuddy_url),
+        actor=actor(caller),
+        pulls=pulls,
+        strict=True,
+    )
+    nudger = state.filament_sync
+    try:
+        outcome = await execute_pull(nudger.client_getter(), nudger.task_queue, start)
+    except Exception as error:
+        logger.warning("the Bambuddy import did not finish", extra={"error": type(error).__name__})
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "the print worker did not finish the import; try again",
+        ) from error
+    if outcome.error is not None:
+        raise outcome.error.error()
+    if outcome.report is None:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "the print worker did not finish the import; try again",
+        )
+    return outcome.report
 
 
 @router.get(
