@@ -157,7 +157,7 @@ describe('BatchPrintDialog (#2672)', () => {
     const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
     await step(1, 3)
     await loaded()
-    await screen.findByText('No spool loaded for slot 2.')
+    expect(await screen.findByTestId('print-verdict-error')).toHaveTextContent('No spool loaded for slot 2.')
     // Flagged, not held: the review lists it, and Queue all lets the run refuse it.
     await user.click(screen.getByTestId('batch-next'))
     await step(2, 3)

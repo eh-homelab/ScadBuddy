@@ -21,13 +21,17 @@ test.describe('print dialog', () => {
 
   test('opens in Simple mode on the spools and Print alone, and prints (#768)', async ({ page }) => {
     const dialog = await openDialog(page)
-    // No pipelines any more, and no nozzle, quality, plate, options, project or copies
-    // until Advanced is on.
+    // No pipelines any more, and no options, project or copies until Advanced is on. The
+    // summary row names the nozzle, bed plate and quality, whose steps stay shut (#6885).
     await expect(dialog.getByText(/pipeline/i)).toHaveCount(0)
+    await expect(dialog.getByTestId('print-summary-plate')).toHaveText('Textured PEI Plate')
+    await expect(dialog.getByTestId('print-summary-quality')).toHaveText('0.20mm Standard @BBL H2C')
     await expect(dialog.getByRole('group', { name: 'Nozzles' })).toHaveCount(0)
     await expect(dialog.getByLabel('Copies')).toHaveCount(0)
     await expect(dialog.getByLabel('Plate')).toHaveCount(0)
     await expect(dialog.getByTestId('print-checks')).toBeVisible()
+    // The footer keeps the estimate beside Print.
+    await expect(dialog.getByTestId('footer-time')).toBeVisible({ timeout: 15_000 })
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
@@ -127,10 +131,10 @@ test.describe('print dialog', () => {
   // #3628 — a multi-colour print with the prime tower on and "No sparse layers".
   test('turns the prime tower on with No sparse layers in Advanced, and prints with them', async ({ page }) => {
     const dialog = await openDialog(page)
-    await expect(dialog.getByLabel('Prime tower')).toHaveCount(0)
+    await expect(dialog.getByLabel('Prime tower', { exact: true })).toHaveCount(0)
 
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
-    const tower = dialog.getByLabel('Prime tower')
+    const tower = dialog.getByLabel('Prime tower', { exact: true })
     await choose(page, tower, 'Off')
     await expect(dialog.getByRole('checkbox', { name: /No sparse layers/ })).toHaveCount(0)
     await expect(dialog.getByText(/Without a tower/)).toBeVisible()
