@@ -221,7 +221,8 @@ describe('the spool page', () => {
     await user.clear(screen.getByLabelText('Drying temperature (°C)'))
     await user.type(screen.getByLabelText('Drying temperature (°C)'), '55')
     await user.click(screen.getByRole('button', { name: 'Record drying' }))
-    await waitFor(() => expect(posts).toEqual([{ kind: 'dried', temp_c: 55, hours: null }]))
+    // The hours come from the material's drying default (#6720).
+    await waitFor(() => expect(posts).toEqual([{ kind: 'dried', temp_c: 55, hours: '8' }]))
   })
 
   it('names the colour group by its label', async () => {

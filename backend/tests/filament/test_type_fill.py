@@ -98,6 +98,9 @@ async def test_only_empty_fields_are_filled_from_the_h2c_04_preset(
         "bed_temp_min": 55,
         "bed_temp_max": 60,
         "density_g_cm3": Decimal("1.32"),
+        # The profile's drying values (#6720, R-6714-9).
+        "drying_temp_c": 45,
+        "drying_hours": Decimal("12"),
     }
     assert (done.written, done.cost_hint) == (True, "21.99")
     row = types.get(type_id)
@@ -109,6 +112,7 @@ async def test_only_empty_fields_are_filled_from_the_h2c_04_preset(
         60,
     )
     assert row.density_g_cm3 == Decimal("1.32")
+    assert (row.drying_temp_c, row.drying_hours) == (45, Decimal("12"))
 
     again = await filler.fill(UNLINKED, [type_id], actor=ACTOR)
     assert (again[0].filled, again[0].written) == ({}, False)
@@ -179,7 +183,13 @@ async def test_a_range_set_meanwhile_skips_only_its_pair_and_the_rest_are_filled
     first, second = await filler.fill(UNLINKED, [raced, later], actor=ACTOR)
 
     assert first.written
-    assert set(first.filled) == {"bed_temp_min", "bed_temp_max", "density_g_cm3"}
+    assert set(first.filled) == {
+        "bed_temp_min",
+        "bed_temp_max",
+        "density_g_cm3",
+        "drying_temp_c",
+        "drying_hours",
+    }
     assert set(first.skipped) == {"nozzle_temp_min"}
     assert all("changed meanwhile" in why for why in first.skipped.values())
     row = types.get(raced)
@@ -389,7 +399,15 @@ async def test_a_local_preset_is_read_once_for_every_type_that_names_it(
 async def test_a_refresh_answers_the_diff_and_writes_nothing(
     filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
 ) -> None:
-    type_id = _type(types, pg_pool, density_g_cm3="1.3", nozzle_temp_min=190, diameter_mm="2.85")
+    type_id = _type(
+        types,
+        pg_pool,
+        density_g_cm3="1.3",
+        nozzle_temp_min=190,
+        diameter_mm="2.85",
+        drying_temp_c=45,
+        drying_hours="12.00",
+    )
     _presets(types, type_id, ("H2C", "0.4", "GFA05"))
 
     (diff,) = await filler.fill(UNLINKED, [type_id], actor=ACTOR, refresh=True)
@@ -637,3 +655,250 @@ def test_fill_k_values_checks_under_the_lock_that_set_k_values_takes(
     thread.join(timeout=30)
     assert answers == [None]
     assert [k.k_value for k in types.k_values(type_id)] == [Decimal("0.02")]
+
+
+# -- printer K calibrations (#6720) -----------------------------------------------------
+
+
+def _h2c(pool: PgPool, serial: str = "TEST00000006720", bb_id: int = 1) -> UUID:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO printers (id, serial, name, model, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), %s, 'H2C', 'H2C', %s) RETURNING id",
+            (serial, bb_id),
+        ).fetchone()
+    assert row is not None
+    found: UUID = row["id"]
+    return found
+
+
+def _cal(
+    extruder: int, filament: str, k: str, nozzle_id: str = "HS00-0.4", slot: int = 1
+) -> dict[str, Any]:
+    """A row of ``GET /printers/{id}/kprofiles/`` (Bambuddy's ``KProfile``)."""
+    return {
+        "slot_id": slot,
+        "extruder_id": extruder,
+        "nozzle_id": nozzle_id,
+        "nozzle_diameter": "0.4",
+        "filament_id": filament,
+        "name": f"cal {filament} {extruder}",
+        "k_value": k,
+        "n_coef": "0.000000",
+        "ams_id": 0,
+        "tray_id": 0,
+        "setting_id": f"S{filament}",
+    }
+
+
+def _k_table(*rows: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(200, json={"profiles": list(rows), "nozzle_diameter": "0.4"})
+
+
+@respx.mock
+async def test_a_printer_calibration_of_the_preset_filament_is_imported(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """R-6714-12: each calibration whose ``filament_id`` is a preset's ``slicer_filament``
+    becomes the type's K value for that printer, extruder and nozzle, with the nozzle type
+    and slot it names."""
+    printer = _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    route = respx.get(f"{API}/printers/1/kprofiles/").mock(
+        return_value=_k_table(
+            _cal(0, "GFA05", "0.020", slot=4),
+            _cal(1, "GFA05", "0.025", nozzle_id="HH00-0.4", slot=5),
+            _cal(0, "GFG99", "0.040"),
+        )
+    )
+
+    (preview,) = await filler.fill(LINKED, [type_id], actor=ACTOR, refresh=True)
+    assert [(r.extruder, r.k_value, r.nozzle_type) for r in preview.k_values] == [
+        (0, Decimal("0.020"), "HS00-0.4"),
+        (1, Decimal("0.025"), "HH00-0.4"),
+    ]
+    assert types.k_values(type_id) == []
+    assert route.calls.last.request.url.params["nozzle_diameter"] == "0.4"
+
+    (done,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
+    assert done.k_reason is None
+    saved = types.k_values(type_id)
+    assert [
+        (r.printer_id, r.extruder, r.nozzle_diameter, r.nozzle_type, r.k_value, r.cali_idx)
+        for r in saved
+    ] == [
+        (printer, 0, "0.4", "HS00-0.4", Decimal("0.02"), 4),
+        (printer, 1, "0.4", "HH00-0.4", Decimal("0.025"), 5),
+    ]
+    assert (saved[0].name, saved[0].setting_id) == ("cal GFA05 0", "SGFA05")
+    assert len(done.k_values) == 2
+    assert done.written
+
+
+@respx.mock
+async def test_a_printer_calibration_never_overwrites_a_k_value_a_person_set(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """R-6714-13: a key the type has a row for keeps it, however the nozzle is spelled;
+    the calibration fills only the keys with none."""
+    printer = _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    own = TypeKValueCreate(
+        printer_id=printer, extruder=0, nozzle_diameter="0.40", k_value=Decimal("0.05")
+    )
+    types.set_k_values(type_id, _rows(type_id, [own]), actor="ann")
+    respx.get(f"{API}/printers/1/kprofiles/").mock(
+        return_value=_k_table(_cal(0, "GFA05", "0.020"), _cal(1, "GFA05", "0.030"))
+    )
+
+    (done,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
+
+    assert [(r.extruder, r.k_value) for r in done.k_values] == [(1, Decimal("0.030"))]
+    saved = types.k_values(type_id)
+    assert [(r.extruder, r.nozzle_diameter, r.k_value) for r in saved] == [
+        (0, "0.40", Decimal("0.05")),
+        (1, "0.4", Decimal("0.03")),
+    ]
+
+    # Filled once, the next fill has nothing to add.
+    (again,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
+    assert (again.k_values, again.written) == ([], False)
+
+
+def test_add_k_values_skips_every_key_the_type_has(types: SpoolTypeStore, pg_pool: PgPool) -> None:
+    """R-6714-13, in the store: the check is under the type's row lock, and ``0.40`` is
+    ``0.4``."""
+    printer = _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    own = TypeKValueCreate(
+        printer_id=printer, extruder=0, nozzle_diameter="0.40", k_value=Decimal("0.05")
+    )
+    types.set_k_values(type_id, _rows(type_id, [own]), actor="ann")
+    new = own.model_copy(update={"nozzle_diameter": "0.4", "k_value": Decimal("0.01")})
+    other = own.model_copy(update={"extruder": 1, "k_value": Decimal("0.02")})
+
+    added = types.add_k_values(type_id, _rows(type_id, [new, other]), actor=ACTOR)
+
+    assert added is not None
+    assert [(r.extruder, r.k_value) for r in added] == [(1, Decimal("0.02"))]
+    assert [(r.extruder, r.k_value) for r in types.k_values(type_id)] == [
+        (0, Decimal("0.05")),
+        (1, Decimal("0.02")),
+    ]
+    assert types.add_k_values(UUID(int=1), [], actor=ACTOR) is None
+
+
+@respx.mock
+async def test_calibrations_that_disagree_for_one_extruder_are_skipped_with_a_reason(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """R-6714-14: the table holds one row per printer, extruder and nozzle; two calibrations
+    of the filament there that differ (in K or nozzle type) are not guessed between."""
+    _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    respx.get(f"{API}/printers/1/kprofiles/").mock(
+        return_value=_k_table(
+            _cal(0, "GFA05", "0.020", slot=1),
+            _cal(0, "GFA05", "0.030", slot=2),
+            _cal(1, "GFA05", "0.025", slot=3),
+            _cal(1, "GFA05", "0.0250", slot=4),
+        )
+    )
+
+    (done,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
+
+    # Extruder 1's two rows agree, so one is taken.
+    assert [(r.extruder, r.k_value) for r in done.k_values] == [(1, Decimal("0.025"))]
+    assert "extruder 0" in (done.k_reason or "")
+    assert "2 calibrations" in (done.k_reason or "")
+
+
+@respx.mock
+async def test_a_k_table_read_that_fails_is_a_k_reason_and_the_fields_still_fill(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    respx.get(f"{API}/printers/1/kprofiles/").mock(return_value=httpx.Response(503))
+
+    (done,) = await filler.fill(LINKED, [type_id], actor=ACTOR)
+
+    assert done.filled["nozzle_temp_min"] == 190
+    assert done.k_values == []
+    assert (done.k_reason or "").startswith("H2C did not give its 0.4 mm K table")
+
+
+@respx.mock
+async def test_only_printers_of_the_preset_model_are_asked_once_per_nozzle(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    _h2c(pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, model, bambuddy_printer_id)"
+            " VALUES (gen_random_uuid(), 'TEST0000000X1C1', 'X1C', 'X1C', 2)"
+        )
+    one, two = _type(types, pg_pool, code="ONE"), _type(types, pg_pool, code="TWO")
+    _presets(types, one, ("H2C", "0.4", "GFA05"))
+    _presets(types, two, ("H2C", "0.40", "GFA05"))
+    h2c = respx.get(f"{API}/printers/1/kprofiles/").mock(
+        return_value=_k_table(_cal(0, "GFA05", "0.020"))
+    )
+    x1c = respx.get(f"{API}/printers/2/kprofiles/").mock(return_value=_k_table())
+
+    done = await filler.fill(LINKED, [one, two], actor=ACTOR, refresh=True)
+
+    assert (h2c.call_count, x1c.call_count) == (1, 0)
+    assert [[r.k_value for r in d.k_values] for d in done] == [[Decimal("0.020")]] * 2
+
+
+@respx.mock
+async def test_a_spool_k_value_wins_over_a_calibration_of_the_same_key(
+    filler: TypeFiller, types: SpoolTypeStore, pg_pool: PgPool
+) -> None:
+    """R-6714-15: a type with none takes its linked spools' K values first (R-6714-5); the
+    printer's calibrations fill only the keys those leave."""
+    _h2c(pg_pool)
+    type_id = _type(types, pg_pool)
+    _presets(types, type_id, ("H2C", "0.4", "GFA05"))
+    spool = FilamentSpoolStore(pg_pool).create(SpoolCreate(type_id=type_id), actor="ann").id
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_bb_links (spool_id, bb_spool_id, linked_at)"
+            " VALUES (%s, 40, now())",
+            (spool,),
+        )
+    k = {"printer_id": 1, "extruder": 0, "nozzle_diameter": "0.4", "k_value": 0.03}
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 40, "material": "PLA", "k_profiles": [k]}])
+    )
+    respx.get(f"{API}/printers/1/kprofiles/").mock(
+        return_value=_k_table(_cal(0, "GFA05", "0.020"), _cal(1, "GFA05", "0.025"))
+    )
+
+    (preview,) = await filler.fill(LINKED, [type_id], actor=ACTOR, refresh=True)
+    assert [(r.extruder, r.k_value) for r in preview.k_values] == [
+        (0, Decimal("0.03")),
+        (1, Decimal("0.025")),
+    ]
+
+    shown = [
+        TypeKValueCreate.model_validate(r.model_dump(exclude={"type_id"})) for r in preview.k_values
+    ]
+    done = await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=shown)
+    assert done is not None
+    assert done.written
+    assert [(r.extruder, r.k_value) for r in types.k_values(type_id)] == [
+        (0, Decimal("0.03")),
+        (1, Decimal("0.025")),
+    ]
+
+    # The calibration changed since the refresh: refused, as a spool's is (R-6714-g).
+    respx.get(f"{API}/printers/1/kprofiles/").mock(return_value=_k_table(_cal(1, "GFA05", "0.026")))
+    types.set_k_values(type_id, [], actor="ann")
+    with pytest.raises(ProfileChangedError, match="K values"):
+        await filler.apply(LINKED, type_id, {}, actor=ACTOR, k_values=shown)
