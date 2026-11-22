@@ -906,10 +906,9 @@ caller. A write that is not idempotent by itself takes an `Idempotency-Key`; its
 kept 24 h in `crud_requests`, written in the write's own transaction, and a retry with the
 same key gets it back (another body under the same key is `422`).
 
-**Each caller's own database role (#5210).** This is today's state, not the target
-(see the next paragraph). Each caller should connect as a role of its own, so it holds
-exactly the tables it touches and its credential's view, never the API's settings
-store or another caller's credential:
+**The callers' old database roles (#5210).** #5210 gave each caller a role of its own.
+Those roles are retired: no caller connects as one, and the API only revokes what they
+held (see the next paragraph). Each caller today:
 
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|

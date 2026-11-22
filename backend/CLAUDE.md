@@ -52,7 +52,7 @@ credential, falling back to its view on a 404 while it has a database URL; other
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
 (the projects, render and print workers, #5298) takes `exchange_source` instead: the exchange
 only, with no view, and no proof refuses its start. The agent's `ExchangeCredential` reads no
-view on a 404 either (#6501); without a proof it still reads its view until #5299 step 12.
+view on a 404 either (#6501); without a proof it still reads its view until the agent PR of #5299 step 12.
 `ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds

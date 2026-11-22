@@ -1240,10 +1240,13 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
             states: list[RetiredState] = []
             try:
                 revoked = revoke_retired(conn)
-                states = retired_state(conn)
             except Exception:
                 # A revoke that fails must not cost the start its credentials' rotation.
                 logger.exception("could not revoke the retired callers' roles")
+            try:
+                states = retired_state(conn)
+            except Exception:
+                logger.exception("could not read what the retired callers' roles still have")
         if revoked:
             logger.info("revoked the retired callers' roles", extra={"roles": revoked})
         for left in states:
