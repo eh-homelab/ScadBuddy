@@ -231,6 +231,19 @@ describe('the spool page', () => {
     expect(screen.getByRole('group', { name: 'Colour' })).toContainElement(screen.getByLabelText('Colour (hex)'))
   })
 
+  it('overrides the colour and the extra colours with a catalog colour (#6912)', async () => {
+    const patches = recorded('PATCH', /\/spools\//)
+    const { user } = open(1)
+    await heading(1)
+    await user.click(screen.getByRole('button', { name: 'From the catalog' }))
+    await user.type(screen.getByRole('combobox', { name: 'Search the colour catalog' }), 'galaxy')
+    await user.click(await screen.findByRole('option', { name: /Galaxy Duo/ }))
+    expect(screen.getByLabelText('Extra colours')).toHaveValue('#2E8B57FF')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(patches).toEqual([{ rgba: '#1B3A8CFF', extra_colours: ['#2E8B57FF'] }])
+  })
+
   it('jumps to the same section twice from the select', async () => {
     const scroll = vi.fn()
     Element.prototype.scrollIntoView = scroll

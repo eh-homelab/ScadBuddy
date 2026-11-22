@@ -299,7 +299,9 @@ same way, `vite.config.ts`).
   configuration (`pages/settings/sections/filament.tsx`). The Catalog tab's Colours (#6907) adds
   `ColourSources` ("Sync from filamentcolors", "Add Bambu Lab colours", each run's progress read
   while it runs) and a server search (`q`, at most `SHOWN_MAX` rows drawn, no re-order); mocks in
-  `mocks/features/filament/index.ts` (`MOCK_SYNC_COLOURS`). #6265 (plan
+  `mocks/features/filament/index.ts` (`MOCK_SYNC_COLOURS`). The type and spool pages'
+  `RgbaColourField` has "From the catalog" (`CatalogColourPick`, #6912, R-6912-1 to 5): the
+  same server search, and a pick sets the whole `#RRGGBBAA` and the extra colours. #6265 (plan
   `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
   Bambuddy" has one `ChoiceSelect` row per data type (spools and types, weights, tags,
   suppliers and prices, locations, presets and K values; `SYNC_ROWS`, `SYNC_KINDS` in
