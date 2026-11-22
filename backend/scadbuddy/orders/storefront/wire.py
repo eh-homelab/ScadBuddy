@@ -179,7 +179,7 @@ class ListingSnapshot(BaseModel):
 #: A sha256, lowercase hex: a file listing's pinned content (#6710).
 SHA256: Final = r"^[0-9a-f]{64}$"
 #: A file listing's picture ids (#6710 §4.1): plate ``n``'s own picture (from 1), or a
-#: picture the shop uploaded to the listing (`listings.py` `upload_picture`).
+#: picture the shop uploaded to the listing (``upload:<sha256>``, spec §5.4).
 FILE_PICTURE_ID: Final = re.compile(r"plate:([1-9][0-9]{0,3})|upload:([0-9a-f]{64})")
 
 

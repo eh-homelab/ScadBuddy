@@ -16,13 +16,14 @@ import dataclasses
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, File, Path, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.storefront.file_listings import pinned_plate_image, upload_picture
 from scadbuddy.orders.storefront.listings import (
     change_media,
     listing_not_found,
@@ -166,6 +167,47 @@ async def set_listing_media(
     # A republish is a new version: its variants have new keys (#6922).
     await warm_default(state, listing)
     return listing
+
+
+class UploadedPicture(BaseModel):
+    """A picture the shop uploaded to a file listing: its id for ``media_ids``."""
+
+    id: str
+
+
+@router.post(
+    "/listings/{listing_id}/pictures",
+    response_model=UploadedPicture,
+    summary="Upload a picture to a file listing",
+)
+async def post_listing_picture(
+    listing_id: str, orders: OrdersDep, state: StateDep, file: Annotated[UploadFile, File()]
+) -> UploadedPicture:
+    """A picture for a file listing (#6710 §5.4), which has no template media to upload
+    into: an image (PNG, JPEG or WebP by its bytes; 415 otherwise) of at most 10 MB (413),
+    kept for the listing and answered as its id ``upload:<sha256>``, which the editor adds
+    to ``media_ids``. A save or a pictures change that no longer names it lets it go, once
+    an hour has passed since its upload. 404 ``listing_not_found``; 422
+    ``listing_source_invalid`` for a template listing."""
+    return UploadedPicture(id=await upload_picture(state, orders.listings, listing_id, file))
+
+
+@router.get(
+    "/listings/{listing_id}/plates/{plate}.png",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+    summary="A plate picture of a file listing's published version",
+)
+async def get_listing_plate(
+    listing_id: str, plate: Annotated[int, Path(ge=1, le=9999)], orders: OrdersDep, state: StateDep
+) -> Response:
+    """Plate ``plate``'s picture in the copy of the file the listing pins (#6710 §9.3):
+    the picture publish copies for ``plate:<n>``, also once the file is gone from the
+    library. 404 for a listing with no pin, or a plate with no picture."""
+    image = await pinned_plate_image(state, orders.listings, listing_id, plate)
+    if image is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no picture of plate {plate}")
+    return Response(content=image, media_type="image/png")
 
 
 @router.post(

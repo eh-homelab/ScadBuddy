@@ -2145,7 +2145,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `of_version`), so a held copy and a live copy, recorded under one `library:<id>`, are
   never reused, read or superseded for each other. A file's used slots (from 0) reach the
   slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
-  Only tests reach the file subject until a listing names a file (spec 2026-11-21 §12). The variant is sliced with the
+  A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
+  copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
+  the listing's pin; its price read and cart come in a later PR (spec 2026-11-21 §12). The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a
