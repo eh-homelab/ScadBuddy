@@ -1145,13 +1145,15 @@ def test_a_resend_gets_the_first_model_after_the_printer_file_is_gone(
     listing = respx.get(f"{API}/printers/1/files", params={"path": "/cache"}).mock(
         return_value=httpx.Response(200, json={"path": "/cache", "files": [], "warnings": []})
     )
+    # respx reuses `bambuddy()`'s route of the same pattern, with the first send's call.
+    listed = listing.call_count
 
     again = from_mesh(client, body, **key)
 
     assert again.status_code == 201, again.text
     assert again.json()["slug"] == first.json()["slug"] == "from-the-printer"
     assert download.call_count == 1
-    assert not listing.called
+    assert listing.call_count == listed
 
 
 @respx.mock
