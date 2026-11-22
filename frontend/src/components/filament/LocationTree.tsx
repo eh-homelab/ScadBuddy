@@ -29,8 +29,8 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
   return (
     <li data-place={node.id}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
-        {/* A place's page is the spools in it (R-6869-6). */}
-        <EntityLink to={filamentLinks.location(node.id)} className={archived ? 'font-medium text-muted-foreground line-through' : 'font-medium'}>
+        {/* The name opens the place's own page (#6955); the spools in it are `filamentLinks.location`. */}
+        <EntityLink to={filamentLinks.locationPage(node.id)} className={archived ? 'font-medium text-muted-foreground line-through' : 'font-medium'}>
           {node.name}
         </EntityLink>
         {tree.kinds.has(node.kind_id) && (

@@ -49,6 +49,10 @@ export const filamentLinks = {
   locations: `${BASE}/locations`,
   /** A place has no page: the spools in it (the Spools tab's `place` filter, by id, so two places of one name stay apart). */
   location: (id: string) => query(spools, { place: id }),
+  /** #6955 — a place's own page, the target of `/x/L-<n>`; `location` above is the spools in it. */
+  locationPage: (id: string) => at(`${BASE}/locations`, id),
+  /** #6955 — the labels page for one place. */
+  locationLabel: (id: string) => `${BASE}/labels?locations=${encodeURIComponent(id)}`,
   /** A catalog entry's list (the Catalog tab opens on materials). */
   catalog: (kind: CatalogKind) => (kind === 'materials' ? catalog : query(catalog, { kind })),
   shoppingList,
