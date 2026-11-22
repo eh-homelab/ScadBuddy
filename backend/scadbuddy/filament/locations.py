@@ -250,6 +250,8 @@ class LocationStore:
             root = LocationStore._printer_parent(conn, printer_id) if ams_id == EXTERNAL else None
             found = conn.execute(select, key).fetchone()
             if found is not None and found["parent_id"] is not None:
+                if ams_id != EXTERNAL:
+                    LocationStore.hang_orphans_on(conn, printer_id)
                 return m.Location.model_validate(found)
             try:
                 unit = (
@@ -405,6 +407,25 @@ class LocationStore:
             raise CatalogRefError() from None
         place: UUID = found["id"]
         return place
+
+    @staticmethod
+    def hang_orphans_on(conn: Conn, printer_id: UUID) -> None:
+        """Make the printer's place (`ensure_printer_on`) when one of its AMS unit places
+        or its external holder has no parent or an archived one, so an install made before
+        printer places gets its root and its units hung under it on the next capture
+        (`filament/capture.py` `reconcile`). One read when nothing is orphaned; with no
+        ``printer`` kind it does nothing (`_printer_parent`)."""
+        orphan = conn.execute(
+            "SELECT 1 FROM filament_locations l WHERE l.printer_id = %s"
+            " AND l.archived_at IS NULL AND NOT l.printer_root"
+            " AND ((l.ams_id IS NOT NULL AND l.tray_id IS NULL)"
+            " OR (l.ams_id = %s AND l.tray_id IS NOT NULL))"
+            " AND NOT EXISTS (SELECT 1 FROM filament_locations p"
+            " WHERE p.id = l.parent_id AND p.archived_at IS NULL) LIMIT 1",
+            (printer_id, EXTERNAL),
+        ).fetchone()
+        if orphan is not None:
+            LocationStore._printer_parent(conn, printer_id)
 
     @staticmethod
     def _printer_parent(conn: Conn, printer_id: UUID) -> UUID | None:
