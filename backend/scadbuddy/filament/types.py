@@ -291,6 +291,20 @@ class SpoolTypeStore:
         """Take a type off the lists (``True``), freeing its code, or put it back."""
         return self.update(type_id, m.SpoolTypePatch(archived=archived), actor=actor)
 
+    def set_tdfp_id(self, type_id: UUID, tdfp_id: int) -> bool:
+        """Give the type ``tdfp_id`` when it has none (#7025, R-7025-14): one conditional
+        UPDATE, so of two sets that race, the second finds the first's id and writes
+        nothing. Whether the type holds ``tdfp_id`` after it (true when it already did);
+        false for no such type. ``tdfp_id`` is no `OVERRIDABLE` or priced field, so no
+        spool event and no price-book link follow, as with `update`."""
+        with self._orders.transaction() as conn:
+            row = conn.execute(
+                "UPDATE filament_spool_types SET tdfp_id = %s, updated_at = now()"
+                " WHERE id = %s AND (tdfp_id IS NULL OR tdfp_id = %s) RETURNING id",
+                (tdfp_id, type_id, tdfp_id),
+            ).fetchone()
+        return row is not None
+
     def set_presets(self, type_id: UUID, rows: _Presets, *, actor: str) -> _Presets | None:
         """The type's presets, replaced by ``rows``; ``None`` for no such type. A change
         writes one ``edited`` event (``changes.presets``), as ``actor``, on each

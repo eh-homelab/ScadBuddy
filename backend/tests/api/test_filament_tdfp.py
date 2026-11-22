@@ -9,8 +9,10 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import filament as filament_api
+from scadbuddy.api.operations import TEMPORAL_REFUSED_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.profile_fetch.wire import (
     CreateAnswer,
     CreateAsk,
@@ -169,6 +171,47 @@ def test_a_type_with_a_tdfp_id_is_refused(client: TestClient, runner: FakeTdfp) 
     r = client.post(f"{URL}/tdfp/filaments", json={**BODY, "type_id": type_id}, headers=KEY)
     assert (r.status_code, r.json()["code"]) == (409, "type_has_tdfp_id")
     assert runner.creates == []
+
+
+async def _temporal_down(*args: object, **kwargs: object) -> Any:
+    raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+
+async def _temporal_refuses(*args: object, **kwargs: object) -> Any:
+    raise RPCError("request unauthorized", RPCStatusCode.PERMISSION_DENIED, b"")
+
+
+def test_a_type_check_temporal_does_not_answer_is_503(client: TestClient, runner: FakeTdfp) -> None:
+    """R-7025-15: the resend check of a type with an id asks Temporal; when it does not
+    answer, the route says so as every route does, never a bare 500."""
+    type_id = _type(client, code="PLA-WHT", tdfp_id=30173)
+    runner.started = _temporal_down  # type: ignore[method-assign]
+    r = client.post(f"{URL}/tdfp/filaments", json={**BODY, "type_id": type_id}, headers=KEY)
+    assert r.status_code == 503, r.text
+    assert r.json()["type"] == TEMPORAL_UNAVAILABLE_PROBLEM
+    assert r.headers["Retry-After"] == "5"
+    assert r.json()["may_have_started"] is False
+    assert runner.creates == []
+
+
+def test_a_type_check_temporal_refuses_is_its_problem(client: TestClient, runner: FakeTdfp) -> None:
+    type_id = _type(client, code="PLA-WHT", tdfp_id=30173)
+    runner.started = _temporal_refuses  # type: ignore[method-assign]
+    r = client.post(f"{URL}/tdfp/filaments", json={**BODY, "type_id": type_id}, headers=KEY)
+    assert (r.status_code, r.json()["type"]) == (500, TEMPORAL_REFUSED_PROBLEM)
+
+
+def test_a_search_or_create_temporal_does_not_answer_is_503(
+    client: TestClient, runner: FakeTdfp
+) -> None:
+    runner.search = _temporal_down  # type: ignore[method-assign]
+    runner.create = _temporal_down  # type: ignore[method-assign]
+    search = client.post(f"{URL}/tdfp/search", json={"brand": "SUNLU"})
+    assert (search.status_code, search.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
+    create = client.post(f"{URL}/tdfp/filaments", json=BODY, headers=KEY)
+    assert (create.status_code, create.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
+    # The start may have reached Temporal: the same key joins it.
+    assert create.json()["may_have_started"] is True
 
 
 def test_a_type_that_took_another_id_meanwhile_keeps_it(
