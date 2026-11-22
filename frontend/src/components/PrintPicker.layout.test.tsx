@@ -26,8 +26,10 @@ beforeEach(() => {
 })
 afterEach(() => vi.restoreAllMocks())
 
-function renderPicker() {
-  return renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
+function renderPicker(queue = false) {
+  return renderPage(
+    <PrintPicker open queue={queue} source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+  )
 }
 
 async function loaded() {
@@ -251,7 +253,10 @@ describe('PrintPicker · the footer (#6885)', () => {
 })
 
 describe('PrintPicker · an empty slot (#6885)', () => {
-  it('says a slot is empty only once Print is pressed, sends nothing, and stops once it is filled', async () => {
+  it.each([
+    ['Print', false],
+    ['Queue', true],
+  ])('says a slot is empty only once %s is pressed, sends nothing, and stops once it is filled', async (_name, queue) => {
     server.use(
       http.get('/api/v1/print/outputs/:id/choices', () =>
         HttpResponse.json({
@@ -261,7 +266,7 @@ describe('PrintPicker · an empty slot (#6885)', () => {
       ),
     )
     const run = vi.spyOn(api, 'runPrint').mockResolvedValue(queuedResult)
-    const { user } = renderPicker()
+    const { user } = renderPicker(queue)
     await loaded()
     await screen.findByTestId('filament-slot-2')
     expect(screen.queryByText(/has no filament chosen/)).toBeNull()

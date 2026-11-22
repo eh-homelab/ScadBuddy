@@ -626,9 +626,9 @@ export function PrintPicker({
   )
 
   /**
-   * #6885 — a slot with no filament is no fault until the user acts. Print (or Next, or
-   * Quote) pressed while a slot is empty sends nothing and turns the picker's "Slot N has
-   * no filament chosen" on; it stays on until every slot has a filament.
+   * #6885 — a slot with no filament is no fault until the user acts. Print (or Queue)
+   * pressed while a slot is empty sends nothing and turns the picker's "Slot N has no
+   * filament chosen" on; it stays on until every slot has a filament.
    */
   const firstEmpty = (filaments?.slots ?? []).find((slot) => !plan.some((choice) => choice.slot_id === slot.slot_id))
   const [missingShown, setMissingShown] = useState(false)
