@@ -3635,7 +3635,7 @@ export const api = {
   getPluginFeed: (feed: string) => request<PluginFeedView>(`/ai/plugin-feeds/${seg(feed)}`),
 
   /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
-  getMcpAuth:() => request<McpAuthSetting>('/ai/mcp/auth'),
+  getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),
 
   setMcpAuth: (body: McpAuthUpdate) =>
     request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),

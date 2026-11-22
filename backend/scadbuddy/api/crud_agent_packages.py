@@ -28,8 +28,9 @@ latest version's row (``plugin`` null when there is none), and
 ``hosted-version-not-found``).
 
 Area ``plugin-feeds`` (#6933): ``GET …/plugin-feeds/{feed}`` the feed's name and owner and
-every package it lists, each at its current pin with whether that pin is approved, and for a
-hosted package the version that pin is (``feed`` null for a slug no feed has).
+every package it lists (only the one ``?package=`` names, when given), each at its current
+pin with whether that pin is approved, and for a hosted package the version that pin is
+(``feed`` null for a slug no feed has).
 
 A package that is not there is 404 ``package-not-found``. Each refusal's text is the
 agent's ``PluginError``'s, which the agent raises again with the route's status.
@@ -535,7 +536,9 @@ async def hosted_plugin_zip(
 # Marketplace feeds (#6933, spec 2026-11-21 §6.4, area ``plugin-feeds``): the packages a feed
 # lists, for the agent, which serves ``marketplace.json`` and the version zips from them. The
 # agent decides what an outside client is given: only an approved pin, and a hosted one by the
-# version whose content hash is that pin's.
+# version whose content hash is that pin's. Each version's plugin.json names its number, so
+# no two versions of a plugin share a content hash when publish made them; the schema does not
+# forbid it, so the read still takes one version per package, the newest with the pin's hash.
 
 #: ``ai_plugin_feeds.slug``'s CHECK.
 FEED_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
@@ -586,8 +589,12 @@ SELECT p.name, p.source_kind, p.fetch_url, p.fetch_path, p.commit_sha, p.content
   FROM ai_plugin_feed_packages fp
   JOIN ai_plugin_packages p ON p.name = fp.package_name
   LEFT JOIN ai_hosted_plugins h ON p.source_kind = 'hosted' AND h.name = p.name
-  LEFT JOIN ai_hosted_plugin_versions v ON v.plugin_id = h.id AND v.content_hash = p.content_hash
- WHERE fp.feed_id = %s
+  LEFT JOIN LATERAL (
+        SELECT version, zip_sha256 FROM ai_hosted_plugin_versions
+         WHERE plugin_id = h.id AND content_hash = p.content_hash
+         ORDER BY version DESC LIMIT 1
+       ) v ON true
+ WHERE fp.feed_id = %s AND (%s::text IS NULL OR p.name = %s)
  ORDER BY p.name
 """
 
@@ -613,15 +620,19 @@ def _feed_package(p: Any) -> FeedPackage:
 
 @router.get("/plugin-feeds/{feed}", name="crud_agent_plugin_feed")
 async def plugin_feed(
-    feed: Annotated[str, Path(pattern=FEED_PATTERN)], state: StateDep
+    feed: Annotated[str, Path(pattern=FEED_PATTERN)],
+    state: StateDep,
+    package: Annotated[str | None, Query(max_length=64)] = None,
 ) -> PluginFeedAnswer:
+    """The feed and its packages; with ``package``, only that one (a zip request's read)."""
+
     def run(conn: psycopg.Connection[Any]) -> PluginFeedAnswer:
         row = conn.execute(
             "SELECT id, slug, name, owner FROM ai_plugin_feeds WHERE slug = %s", (feed,)
         ).fetchone()
         if row is None:
             return PluginFeedAnswer(feed=None, packages=[])
-        rows = conn.execute(_FEED_PACKAGES, (row["id"],)).fetchall()
+        rows = conn.execute(_FEED_PACKAGES, (row["id"], package, package)).fetchall()
         return PluginFeedAnswer(
             feed=PluginFeed(slug=row["slug"], name=row["name"], owner=row["owner"]),
             packages=[_feed_package(p) for p in rows],

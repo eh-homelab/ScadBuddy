@@ -4,6 +4,7 @@ agent serves ``marketplace.json`` and the version zips from."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -115,11 +116,7 @@ def test_a_deleted_package_leaves_the_feed(client: TestClient, db: Any) -> None:
 
 
 def test_a_hosted_package_names_the_version_its_pin_is(client: TestClient, db: Any) -> None:
-    """The `hosted` source kind is #6934's; until it lands the test makes the CHECK allow it,
-    in this test's own schema."""
-    db.execute(
-        "ALTER TABLE ai_plugin_packages DROP CONSTRAINT ai_plugin_packages_source_kind_check"
-    )
+    _allow_hosted(db)
     assert client.post(HOSTED, json={"name": "greeter", "description": "Hi"}).status_code == 201
     put = client.put(f"{HOSTED}/greeter/files/skills/hello/SKILL.md", content=SKILL)
     assert put.status_code == 200, put.text
@@ -134,6 +131,65 @@ def test_a_hosted_package_names_the_version_its_pin_is(client: TestClient, db: A
     [entry] = client.get(f"{CRUD}/default", headers=token(client)).json()["packages"]
     assert entry["source_kind"] == "hosted"
     assert entry["hosted"] == {"version": 1, "zip_sha256": v1["zip_sha256"]}
+
+
+def _allow_hosted(db: Any) -> None:
+    """The `hosted` source kind is #6934's; until it lands the CHECK is dropped, in this test's
+    own schema."""
+    db.execute(
+        "ALTER TABLE ai_plugin_packages DROP CONSTRAINT ai_plugin_packages_source_kind_check"
+    )
+
+
+def test_a_hosted_plugin_published_back_to_old_files_is_listed_once(
+    client: TestClient, db: Any
+) -> None:
+    """Publish A, B, then A again: versions 1 and 3 have the same draft files. Each version's
+    plugin.json names its own number, so their content hashes differ, and the pin names one
+    version; the feed lists the package once, at that version, and its zip is served."""
+    _allow_hosted(db)
+    agent = token(client)
+    assert client.post(HOSTED, json={"name": "greeter", "description": "Hi"}).status_code == 201
+    assert client.put(f"{HOSTED}/greeter/files/skills/hello/SKILL.md", content=SKILL).is_success
+    v1 = client.post(f"{HOSTED}/greeter/publish").json()
+    assert client.put(f"{HOSTED}/greeter/files/commands/wave.md", content=b"Wave.\n").is_success
+    assert client.post(f"{HOSTED}/greeter/publish").json()["version"] == 2
+    assert client.delete(f"{HOSTED}/greeter/files/commands/wave.md").status_code == 204
+    v3 = client.post(f"{HOSTED}/greeter/publish").json()
+    assert v3["version"] == 3
+    assert v3["content_hash"] != v1["content_hash"]
+    _package(db, "greeter", kind="hosted", content_hash=v3["content_hash"])
+    _list(db, "greeter")
+
+    [entry] = client.get(f"{CRUD}/default", headers=agent).json()["packages"]
+    assert entry["hosted"] == {"version": 3, "zip_sha256": v3["zip_sha256"]}
+    zipped = client.get(
+        "/api/v1/internal/crud/agent/hosted-plugins/greeter/versions/3.zip", headers=agent
+    )
+    assert zipped.status_code == 200
+    assert hashlib.sha256(zipped.content).hexdigest() == v3["zip_sha256"]
+
+    # The schema does not make a content hash unique per plugin: a second version row with the
+    # pin's hash still gives one entry, the newest such version.
+    db.execute(
+        "INSERT INTO ai_hosted_plugin_versions (plugin_id, version, zip_sha256, content_hash,"
+        " files, published_by) SELECT plugin_id, 4, zip_sha256, content_hash, files, published_by"
+        " FROM ai_hosted_plugin_versions WHERE version = 3"
+    )
+    [entry] = client.get(f"{CRUD}/default", headers=agent).json()["packages"]
+    assert entry["hosted"]["version"] == 4
+
+
+def test_a_feed_read_can_name_one_package(client: TestClient, db: Any) -> None:
+    agent = token(client)
+    _package(db, "one")
+    _package(db, "two")
+    _list(db, "one", "two")
+    answer = client.get(f"{CRUD}/default", params={"package": "two"}, headers=agent).json()
+    assert [p["name"] for p in answer["packages"]] == ["two"]
+    assert answer["feed"]["slug"] == "default"
+    none = client.get(f"{CRUD}/default", params={"package": "three"}, headers=agent).json()
+    assert none["packages"] == [] and none["feed"] is not None
 
 
 def test_the_table_refuses_a_package_that_is_not_installed(client: TestClient, db: Any) -> None:

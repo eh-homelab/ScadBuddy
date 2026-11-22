@@ -240,7 +240,7 @@ entry is:
       "version": "<N>.0.0",
       "source": {
         "source": "archive",
-        "url": "<public_url>/api/v1/ai/plugin-feeds/<feed>/plugins/<plugin>/versions/<N>.zip",
+        "url": "<request origin>/api/v1/ai/plugin-feeds/<feed>/plugins/<plugin>/versions/<N>.zip",
         "sha256": "<zip_sha256>"
       }
     }
@@ -252,8 +252,16 @@ An outside package's entry is in section 6.7.
 
 - `GET …/plugins/{name}/versions/{N}.zip` serves the zip bytes. A version never changes,
   so it is served with a long `Cache-Control: immutable`.
-- URLs use the configured `public_url`: these links leave the browser (memory: UI URLs
-  come from the Host header, `public_url` only for links that leave the browser).
+- Each zip URL uses the origin the `marketplace.json` request came on: its `Host`, or a
+  trusted proxy's `X-Forwarded-Proto` and `X-Forwarded-Host`, read as the agent's origin
+  checks read them (`agent/src/http/origins.ts` `effectiveRequest`). It does not use
+  `public_url`. Claude Code sends a marketplace `url` source's `headers` only to archive
+  downloads on the marketplace URL's own origin (same scheme, host and port)
+  ([host-marketplace, "Authenticate archive downloads"](https://code.claude.com/docs/en/plugins/host-marketplace.md#authenticate-archive-downloads),
+  read 2026-11-22). Prod's `public_url` is the Pomerium SSO host, which needs a browser
+  sign-in, so a zip there would get no token and fail. With the request's origin, the zips
+  are on the host the client reached with its token, and the front door needs no change
+  (controller's ruling on PR #7042).
 - Readers are outside callers, not only the owner (owner, 2026-11-21: "outward calls").
 - Auth is the `/mcp` auth, unchanged (owner, 2026-11-21: "same auth as mcp"; operating.md
   §4.1, §6a, §10):
@@ -266,9 +274,13 @@ An outside package's entry is in section 6.7.
     token as every MCP call does, including `last_used_at`, and revoking it stops reading
     at once.
   - The feed's settings sit in Settings → MCP access, beside the tokens and the auth mode
-    (owner: "settings also"): which packages are in the feed, and a copyable setup snippet
-    (the `/plugin marketplace add` line and an `extraKnownMarketplaces` entry with
-    `Authorization: Bearer sbmcp_…` in `headers`).
+    (owner: "settings also"): which packages are in the feed, and a copyable setup snippet.
+    In `bearer` and `oidc` mode the snippet is an `extraKnownMarketplaces` entry for
+    `~/.claude/settings.json` with the literal `Authorization: Bearer sbmcp_…` in `headers`,
+    then the `/plugin install` line. It has no `/plugin marketplace add` line, because that
+    command sends no headers and would get 401. In `disabled` mode the snippet is the
+    `/plugin marketplace add` line, then the `/plugin install` line (controller's ruling on
+    PR #7042).
   - OIDC: Claude Code's marketplace fetch sends only static `headers` or a
     `headersHelper` (section 4), and it cannot run an OAuth sign-in. An OIDC user
     therefore needs a `headersHelper` that prints a current token, or an `sbmcp_` token.

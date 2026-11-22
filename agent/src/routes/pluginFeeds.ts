@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import type { AppDeps } from '../app.js'
-import { authenticate, mcpAuthResolver, type McpAuthMode, mcpTransportProblem, type OidcRuntime } from '../auth/authenticate.js'
+import {
+  authenticate,
+  mcpAuthResolver,
+  type McpAuthMode,
+  type McpAuthSettings,
+  mcpTransportProblem,
+  type OidcRuntime,
+} from '../auth/authenticate.js'
 import { hasTier } from '../auth/principal.js'
 import { FEED_SLUG, feedEntry, marketplaceOf, marketplaceUrl, PACKAGE_NAME, type PluginFeedReader } from '../plugins/feed.js'
+import { effectiveRequest, requestOrigin } from '../http/origins.js'
 import { requestFacts, uiReadProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -23,8 +31,13 @@ import { ready, type RouteModule } from './module.js'
 // version that is not its approved pin) is 404 on these paths. The feed is `private,
 // max-age=60`, so `/plugin marketplace update` sees a new pin within a minute; a version's zip
 // never changes and is `private, max-age=31536000, immutable`. `private`, so no shared cache in
-// front (Cloudflare) keeps an authenticated answer. Every URL in the feed is made from
-// SCADBUDDY_PUBLIC_URL: these links leave the browser. Without it the feed is 503.
+// front (Cloudflare) keeps an authenticated answer. A hosted zip's URL is made from the origin the
+// `marketplace.json` request came on (its Host, or a trusted proxy's X-Forwarded-Proto and
+// X-Forwarded-Host, as http/origins.ts `effectiveRequest` reads them), not SCADBUDDY_PUBLIC_URL:
+// Claude Code sends the marketplace's `headers` only to archive downloads on the marketplace URL's
+// own origin (https://code.claude.com/docs/en/plugins/host-marketplace.md#authenticate-archive-downloads),
+// and prod's public URL is the SSO host, which a bearer token cannot pass. A zip request reads only
+// its one package of the feed.
 //
 //   GET /api/v1/ai/plugin-feeds/{feed}
 //
@@ -43,7 +56,6 @@ const ZIP_FILE = /^([1-9][0-9]{0,8})\.zip$/
 const FEED_CACHE = 'private, max-age=60'
 const ZIP_CACHE = 'private, max-age=31536000, immutable'
 const NOT_FOUND = 'no such plugin feed, plugin or version'
-const NO_PUBLIC_URL = 'SCADBUDDY_PUBLIC_URL is not set, so the feed has no address to give its plugins'
 
 /** A package of the feed, as Settings shows it. */
 export type PluginFeedPackageView = {
@@ -70,6 +82,15 @@ export type PluginFeedView = {
   packages: PluginFeedPackageView[]
 }
 
+/** The auth mode /mcp applies; null when the settings cannot be read. */
+async function authModeOf(read: () => McpAuthSettings | Promise<McpAuthSettings>): Promise<McpAuthMode | null> {
+  try {
+    return (await read()).mode
+  } catch {
+    return null
+  }
+}
+
 function missing(c: Context) {
   return c.json({ error: NOT_FOUND }, 404, { 'Cache-Control': 'no-store' })
 }
@@ -94,8 +115,13 @@ export const route: RouteModule = {
       const auth = await authenticate(c.req.raw, { settings, tokens, clientAddress: facts.peer, oidc })
       if (!auth.ok) return auth.response
       if (!hasTier(auth.principal, 'read')) return c.json({ error: 'reading the feed needs the read tier' }, 403)
-      if (!publicUrl) return c.json({ error: NO_PUBLIC_URL }, 503)
       return undefined
+    }
+
+    /** The origin the request came on; the transport gate has already passed it. */
+    function originOf(c: Context): string | undefined {
+      const effective = effectiveRequest(requestFacts(c, deps.remoteAddress), deps.origins)
+      return effective.scheme ? requestOrigin(effective.scheme, effective.host) : undefined
     }
 
     app.get(`${BASE}/:feed/marketplace.json`, async (c) => {
@@ -103,9 +129,11 @@ export const route: RouteModule = {
       if (stop) return stop
       const slug = c.req.param('feed')
       if (!FEED_SLUG.test(slug)) return missing(c)
+      const origin = originOf(c)
+      if (!origin) return c.json({ error: 'the request names no host to make the feed\'s URLs from' }, 400)
       const read = await feeds!.read(slug)
       if (!read.feed) return missing(c)
-      return c.json(marketplaceOf(read.feed, read.packages, publicUrl!), 200, { 'Cache-Control': FEED_CACHE })
+      return c.json(marketplaceOf(read.feed, read.packages, origin), 200, { 'Cache-Control': FEED_CACHE })
     })
 
     app.get(`${BASE}/:feed/plugins/:name/versions/:file`, async (c) => {
@@ -116,9 +144,10 @@ export const route: RouteModule = {
       const file = ZIP_FILE.exec(c.req.param('file'))
       if (!FEED_SLUG.test(slug) || !PACKAGE_NAME.test(name) || !file) return missing(c)
       const version = Number(file[1])
-      const read = await feeds!.read(slug)
+      const read = await feeds!.read(slug, name)
       const row = read.feed ? read.packages.find((p) => p.name === name) : undefined
-      const entry = row ? feedEntry(row, publicUrl!, slug) : undefined
+      // Only whether and how it is listed matters here, not its URL.
+      const entry = row ? feedEntry(row, '', slug) : undefined
       if (!entry?.listed || entry.kind !== 'hosted' || entry.version !== version) return missing(c)
       const zip = await feeds!.zip(name, version)
       if (!zip) return missing(c)
@@ -144,16 +173,13 @@ export const route: RouteModule = {
       if (!FEED_SLUG.test(slug)) return c.json({ detail: NOT_FOUND }, 404)
       const read = await feeds.read(slug)
       if (!read.feed) return c.json({ detail: NOT_FOUND }, 404)
-      const authMode: McpAuthMode | null = mcp
-        ? await (async () => (await mcp.authSettings()).mode)().catch(() => null)
-        : null
-      const base = publicUrl ?? ''
+      const authMode = mcp ? await authModeOf(mcp.authSettings) : null
       const view: PluginFeedView = {
         ...read.feed,
         marketplace_url: publicUrl ? marketplaceUrl(publicUrl, slug) : null,
         auth_mode: authMode,
         packages: read.packages.map((p) => {
-          const e = feedEntry(p, base, slug)
+          const e = feedEntry(p, '', slug)
           return {
             name: p.name,
             listed: e.listed,

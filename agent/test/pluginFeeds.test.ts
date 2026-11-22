@@ -6,8 +6,8 @@ import type { PluginFeedView } from '../src/routes/pluginFeeds.js'
 import { appFetch, INGRESS, testApp, UNTRUSTED } from './helpers/mcp.js'
 
 // The marketplace feed (#6933, spec 2026-11-21 §6.4, routes/pluginFeeds.ts): served on /mcp's
-// auth to Claude Code sessions outside ScadBuddy, listing only approved pins, with URLs made from
-// SCADBUDDY_PUBLIC_URL. The reads are a fake of the CRUD routes (backend
+// auth to Claude Code sessions outside ScadBuddy, listing only approved pins, with zip URLs made from
+// the origin the feed was asked on. The reads are a fake of the CRUD routes (backend
 // tests/api/test_crud_agent_plugin_feeds.py covers those).
 
 const PUBLIC = 'https://scadbuddy.test'
@@ -47,10 +47,13 @@ const PACKAGES: FeedPackageRow[] = [
 ]
 
 class FakeFeeds implements PluginFeedReader {
-  zips = new Map<string, FeedZip>([['greeter@3', { bytes: ZIP, sha256: ZIP_SHA }]])
-  async read(feed: string): Promise<FeedRead> {
+  zips = new Map<string, FeedZip>([['greeter@3', { bytes: ZIP }]])
+  reads: (string | undefined)[] = []
+  async read(feed: string, name?: string): Promise<FeedRead> {
+    this.reads.push(name)
     if (feed !== 'default') return { feed: null, packages: [] }
-    return { feed: { slug: 'default', name: 'scadbuddy', owner: 'ScadBuddy' }, packages: PACKAGES }
+    const packages = name === undefined ? PACKAGES : PACKAGES.filter((p) => p.name === name)
+    return { feed: { slug: 'default', name: 'scadbuddy', owner: 'ScadBuddy' }, packages }
   }
   async zip(name: string, version: number): Promise<FeedZip | undefined> {
     return this.zips.get(`${name}@${version}`)
@@ -76,7 +79,7 @@ function made(
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` })
 
 describe('the feed on the /mcp auth', () => {
-  it('serves a token of every tier the approved pins, with URLs from the public URL', async () => {
+  it('serves a token of every tier the approved pins', async () => {
     const { tokens, get } = made()
     for (const tier of ['read', 'write', 'outward'] as const) {
       const { token } = await tokens.mint({ name: tier, tier })
@@ -143,20 +146,41 @@ describe('the feed on the /mcp auth', () => {
     expect((await get(`${FEED}/marketplace.json`, { ...bearer(token), origin: 'https://evil.test' })).status).toBe(403)
   })
 
-  it('answers 503 with no public URL to make links from, or before the CRUD areas are served', async () => {
+  it('makes each zip URL from the origin the feed was asked on, not the public URL', async () => {
+    // Claude Code sends a marketplace's headers only to its own origin, and the public URL may be
+    // an SSO host a token cannot pass, so the zips are on whatever host the client reached.
+    const { tokens, get, app } = made()
+    const { token } = await tokens.mint({ name: 'x', tier: 'read' })
+    const zipOf = async (res: Response) =>
+      ((await res.json()) as { plugins: { name: string; source: { url?: string } }[] }).plugins.find((p) => p.name === 'greeter')
+        ?.source.url
+    const lan = 'https://scadbuddy.lan.test/api/v1/ai/plugin-feeds/default'
+    expect(await zipOf(await get(`${lan}/marketplace.json`, bearer(token)))).toBe(`${lan}/plugins/greeter/versions/3.zip`)
+    // A trusted proxy's X-Forwarded-Host (and its port) is honoured, as the origin checks honour it.
+    const forwarded = await get(`${FEED}/marketplace.json`, { ...bearer(token), 'x-forwarded-host': 'feed.lan.test:8443' })
+    expect(await zipOf(forwarded)).toBe('https://feed.lan.test:8443/api/v1/ai/plugin-feeds/default/plugins/greeter/versions/3.zip')
+    // A loopback peer with no proxy is plain HTTP to its Host.
+    const local = await appFetch(app, { headers: bearer(token) })('http://localhost:8081/api/v1/ai/plugin-feeds/default/marketplace.json')
+    expect(await zipOf(local)).toBe('http://localhost:8081/api/v1/ai/plugin-feeds/default/plugins/greeter/versions/3.zip')
+  })
+
+  it('needs no public URL, and answers 503 before the CRUD areas are served', async () => {
     const noUrl = made({ publicUrl: null })
     const { token } = await noUrl.tokens.mint({ name: 'x', tier: 'read' })
-    expect((await noUrl.get(`${FEED}/marketplace.json`, bearer(token))).status).toBe(503)
+    expect((await noUrl.get(`${FEED}/marketplace.json`, bearer(token))).status).toBe(200)
+    expect((await noUrl.get(`${FEED}/plugins/greeter/versions/3.zip`, bearer(token))).status).toBe(200)
     const early = made({ ready: false })
     const t2 = await early.tokens.mint({ name: 'x', tier: 'read' })
     expect((await early.get(`${FEED}/marketplace.json`, bearer(t2.token))).status).toBe(503)
   })
 
   it('serves the listed version of a hosted plugin as an immutable zip', async () => {
-    const { tokens, get } = made()
+    const { tokens, get, feeds } = made()
     const { token } = await tokens.mint({ name: 'x', tier: 'read' })
     const res = await get(`${FEED}/plugins/greeter/versions/3.zip`, bearer(token))
     expect(res.status).toBe(200)
+    // It reads only its own package of the feed.
+    expect(feeds.reads).toEqual(['greeter'])
     expect(res.headers.get('content-type')).toBe('application/zip')
     expect(res.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(ZIP)
@@ -165,7 +189,7 @@ describe('the feed on the /mcp auth', () => {
   it('answers 404 for whatever the feed does not list', async () => {
     const { tokens, get, feeds } = made()
     const { token } = await tokens.mint({ name: 'x', tier: 'read' })
-    feeds.zips.set('greeter@2', { bytes: ZIP, sha256: ZIP_SHA })
+    feeds.zips.set('greeter@2', { bytes: ZIP })
     for (const path of [
       // Another feed, or not a feed's name at all.
       '/api/v1/ai/plugin-feeds/other/marketplace.json',
@@ -189,7 +213,7 @@ describe('the feed on the /mcp auth', () => {
   it('serves no zip whose bytes differ from the recorded sha256', async () => {
     const { tokens, get, feeds } = made()
     const { token } = await tokens.mint({ name: 'x', tier: 'read' })
-    feeds.zips.set('greeter@3', { bytes: new Uint8Array([1, 2, 3]), sha256: ZIP_SHA })
+    feeds.zips.set('greeter@3', { bytes: new Uint8Array([1, 2, 3]) })
     expect((await get(`${FEED}/plugins/greeter/versions/3.zip`, bearer(token))).status).toBe(502)
   })
 })

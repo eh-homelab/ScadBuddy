@@ -11,7 +11,8 @@ import { crudCall, type CrudTarget, crudOf, segment } from '../api/crudStores.js
 // bytes an admin reviewed:
 //
 // - a hosted package (`source_kind` `hosted`, #6934) as an `archive` of the version its pin
-//   is, served by this agent under the feed's own URL, with the zip's sha256;
+//   is, served by this agent under the feed's own URL (the origin the feed was asked on), with
+//   the zip's sha256;
 // - a git package (a git URL or a marketplace entry) as a `url` source, or a `git-subdir`
 //   source when the plugin is a folder of its repository, with `sha` set to the pinned commit.
 //   Claude Code's `sha` takes a 40-character commit only, so a SHA-256 repository's pin is not
@@ -45,11 +46,12 @@ export type FeedPackageRow = {
 export type FeedRead = { feed: FeedRow | null; packages: FeedPackageRow[] }
 
 /** A version's zip, as published. */
-export type FeedZip = { bytes: Uint8Array; sha256: string | null }
+export type FeedZip = { bytes: Uint8Array }
 
 /** What the feed routes read. */
 export interface PluginFeedReader {
-  read(feed: string): Promise<FeedRead>
+  /** The feed and its packages; with `name`, only that package (a zip request's read). */
+  read(feed: string, name?: string): Promise<FeedRead>
   /** The zip of a hosted plugin's version; undefined when there is none. */
   zip(name: string, version: number): Promise<FeedZip | undefined>
 }
@@ -64,15 +66,17 @@ export class CrudPluginFeeds implements PluginFeedReader {
     this.#crud = crudOf(target)
   }
 
-  read(feed: string): Promise<FeedRead> {
-    return this.#crud<FeedRead>('a plugin feed read', `/plugin-feeds/${segment(feed, FEED_SLUG, 'a feed')}`)
+  read(feed: string, name?: string): Promise<FeedRead> {
+    const path = `/plugin-feeds/${segment(feed, FEED_SLUG, 'a feed')}`
+    const only = name === undefined ? '' : `?package=${segment(name, PACKAGE_NAME, 'a package name')}`
+    return this.#crud<FeedRead>('a plugin feed read', `${path}${only}`)
   }
 
   async zip(name: string, version: number): Promise<FeedZip | undefined> {
     const path = `/hosted-plugins/${segment(name, PACKAGE_NAME, 'a package name')}/versions/${version}.zip`
     try {
       const response = await crudCall(this.#target.fetch ?? globalThis.fetch, this.#target.baseUrl, 'a hosted plugin zip read', path)
-      return { bytes: new Uint8Array(await response.arrayBuffer()), sha256: response.headers.get('x-scadbuddy-zip-sha256') }
+      return { bytes: new Uint8Array(await response.arrayBuffer()) }
     } catch (err) {
       if (err instanceof CrudReadError && err.fromRoute && err.status === 404) return undefined
       throw err
@@ -90,23 +94,29 @@ export type FeedEntry =
 
 const GIT_SHA = /^[0-9a-f]{40}$/
 
-/** `<public URL>/api/v1/ai/plugin-feeds/<feed>`: the feed's own base, for links that leave the browser. */
-export function feedBase(publicUrl: string, feed: string): string {
-  return `${publicUrl.replace(/\/+$/, '')}/api/v1/ai/plugin-feeds/${encodeURIComponent(feed)}`
+/** `<origin>/api/v1/ai/plugin-feeds/<feed>`: the feed's own base. */
+export function feedBase(origin: string, feed: string): string {
+  return `${origin.replace(/\/+$/, '')}/api/v1/ai/plugin-feeds/${encodeURIComponent(feed)}`
 }
 
 /** The marketplace's address: what `/plugin marketplace add` takes. */
-export function marketplaceUrl(publicUrl: string, feed: string): string {
-  return `${feedBase(publicUrl, feed)}/marketplace.json`
+export function marketplaceUrl(origin: string, feed: string): string {
+  return `${feedBase(origin, feed)}/marketplace.json`
 }
 
-/** A hosted version's zip, as the feed lists it. */
-export function zipUrl(publicUrl: string, feed: string, name: string, version: number): string {
-  return `${feedBase(publicUrl, feed)}/plugins/${encodeURIComponent(name)}/versions/${version}.zip`
+/**
+ * A hosted version's zip, as the feed lists it, on `origin`: the origin the `marketplace.json`
+ * request came on. Claude Code sends a marketplace's `headers` only to the marketplace URL's own
+ * origin (scheme, host and port), so a zip on another host (the SSO host SCADBUDDY_PUBLIC_URL
+ * names in prod) would get no token
+ * ([Authenticate archive downloads](https://code.claude.com/docs/en/plugins/host-marketplace.md#authenticate-archive-downloads)).
+ */
+export function zipUrl(origin: string, feed: string, name: string, version: number): string {
+  return `${feedBase(origin, feed)}/plugins/${encodeURIComponent(name)}/versions/${version}.zip`
 }
 
-/** How the feed shows `row`: its marketplace entry, or why it has none. */
-export function feedEntry(row: FeedPackageRow, publicUrl: string, feed: string): FeedEntry {
+/** How the feed shows `row`: its marketplace entry (zip URLs on `origin`), or why it has none. */
+export function feedEntry(row: FeedPackageRow, origin: string, feed: string): FeedEntry {
   if (!row.approved) return { name: row.name, listed: false, reason: 'not-approved' }
   const described = row.description ? { description: row.description } : {}
   if (row.source_kind === 'hosted') {
@@ -121,7 +131,7 @@ export function feedEntry(row: FeedPackageRow, publicUrl: string, feed: string):
         name: row.name,
         ...described,
         version: `${version}.0.0`,
-        source: { source: 'archive', url: zipUrl(publicUrl, feed, row.name, version), sha256: zip_sha256 },
+        source: { source: 'archive', url: zipUrl(origin, feed, row.name, version), sha256: zip_sha256 },
       },
     }
   }
@@ -135,10 +145,10 @@ export function feedEntry(row: FeedPackageRow, publicUrl: string, feed: string):
   return { name: row.name, listed: true, kind: 'git', commit: row.commit_sha, entry: { name: row.name, ...described, source } }
 }
 
-/** The feed's `marketplace.json` (spec §6.4), its packages in name order. */
-export function marketplaceOf(feed: FeedRow, packages: readonly FeedPackageRow[], publicUrl: string): Record<string, unknown> {
+/** The feed's `marketplace.json` (spec §6.4), its packages in name order, zip URLs on `origin`. */
+export function marketplaceOf(feed: FeedRow, packages: readonly FeedPackageRow[], origin: string): Record<string, unknown> {
   const plugins = packages
-    .map((p) => feedEntry(p, publicUrl, feed.slug))
+    .map((p) => feedEntry(p, origin, feed.slug))
     .flatMap((e) => (e.listed ? [e.entry] : []))
   return { name: feed.name, owner: { name: feed.owner }, plugins }
 }
