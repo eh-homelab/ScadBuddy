@@ -204,7 +204,7 @@ crudAreas.start()
 const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
 // The approvals' and the audit log's input-hash key, released by the API (api/agentKeys.ts): a
 // hash asked for before then throws KeyNotReleasedError. So this process is not ready until it
-// holds the key, and no Temporal worker of it polls before then (`untilKey`): an activity, a route
+// holds the key, and no Temporal worker of it polls before then (`untilReady`): an activity, a route
 // and /mcp hash a call's input after it ran. Once released it is kept for the process's life.
 const inputHashKey = new InputHashKey(crudTarget)
 inputHashKey.start()
@@ -215,6 +215,8 @@ const untilKey = (): Promise<void> => inputHashKey.released()
 const dataHealth = dataHealthOf(crudAreas, undefined, () => inputHashKey.isReleased())
 // The work this process does once at start waits for the API to list every area.
 const untilAreas = (): Promise<void> => crudAreas.whenComplete()
+/** Ready: every area listed and the key released; what a Temporal worker waits for before it polls. */
+const untilReady = (): Promise<void> => untilAreas().then(untilKey)
 // The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py), and its pending
 // input and responses beyond its writers (area `pending-input`).
 const gateRoutes = new CrudGate(crudTarget)
@@ -487,7 +489,7 @@ if (backgroundClient && backgroundTasks) {
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
-const runtime = await readStartSettings({ database: dataHealth, settings }, console.log)
+const runtime = await readStartSettings({ areas: untilAreas, settings }, console.log)
 // Automatic Hindsight memory's hook knobs for every turn (SessionManager, #2420).
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
@@ -904,7 +906,7 @@ const versionedQueues = (): string[] => [
 const temporalWorker =
   role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
-        before: untilKey,
+        before: untilReady,
         address: temporal.address,
         namespace: config.temporalNamespace,
         // Polled as this replica: a poller listing names it (affinity.ts `liveHostQueues`, pluginSessions.ts).
@@ -961,7 +963,7 @@ eager.worker = temporalWorker
 const sessionWorker =
   role.sharedWorkers && temporal
     ? AgentWorker.start({
-        before: untilKey,
+        before: untilReady,
         address: temporal.address,
         namespace: config.temporalNamespace,
         taskQueue: SESSION_QUEUE,
@@ -984,7 +986,7 @@ const sessionWorker =
 const hostWorkers =
   temporal && operationStore && turnToolDeps
     ? startHostWorkers({
-        before: untilKey,
+        before: untilReady,
         address: temporal.address,
         namespace: config.temporalNamespace,
         identity: replicaIdentity(),
@@ -1231,7 +1233,8 @@ const health = role.http
         ),
       ready: () => {
         if (!temporalClient) return Promise.resolve('SCADBUDDY_TEMPORAL_ADDRESS is needed to run turns')
-        // Its workers poll only once the API has released the key (`untilKey`).
+        // Its workers poll only once the API lists every area and has released the key (`untilReady`).
+        if (!crudAreas.complete) return Promise.resolve("the API does not list every one of the agent's CRUD areas yet; its start log says which")
         if (!inputHashKey.isReleased()) return Promise.resolve('the API has not released the input-hash key yet; its start log says why')
         // A worker this process never started (it lacked what its start log names) is said so, not waited for.
         const queues: PolledQueue[] = [

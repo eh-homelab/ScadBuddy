@@ -44,7 +44,7 @@ Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` f
 not ready: `/mcp` and the data routes answer 503. It is not ready either until the API has
 released the input-hash key (`InputHashKey.isReleased`, `dataHealthOf`'s `keyReleased`): a tool
 call hashes its input for the audit log after it ran, so no Temporal worker polls before then
-(`AgentWorker`'s `before`), the worker's `/readyz` names the key, and `ai` says
+(`AgentWorker`'s `before`), the worker's `/readyz` names the missing areas or the key, and `ai` says
 `unavailable (waiting for the API's input-hash key)` once the API holds its KEK. `/healthz`'s `database` is `ok` once the API
 lists and answers the areas (`src/api/dataHealth.ts` `dataHealthOf`, `CrudAreas.answers`),
 else `unreachable`, and `ai` then says `unavailable (the API does not answer the agent's CRUD

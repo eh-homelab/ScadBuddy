@@ -177,6 +177,7 @@ export class CrudAreas {
     void this.#poll(this.#firstMs)
   }
 
+  /** Ends the reads. `whenComplete` stays pending: what waits on it (a warm-up, a sweep) must not run at shutdown. */
   stop(): void {
     this.#stopped = true
     clearTimeout(this.#timer)

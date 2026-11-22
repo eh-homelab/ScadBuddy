@@ -30,24 +30,28 @@ const credential = { kind: 'anthropic_api_key' as const, secret: 'sk-ant-test' }
 describe('readStartSettings', () => {
   const settings = { get: <T>(key: string) => Promise.resolve((key === 'warm_max_per_replica' ? 3 : undefined) as T) }
 
-  it('reads the stored settings once the database is ready', async () => {
+  it('waits for the areas the API lists a moment after start, then reads the stored settings', async () => {
     const log = vi.fn()
-    expect(await readStartSettings({ database: { ready: () => Promise.resolve(true) }, settings }, log)).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 3 })
+    let listed!: () => void
+    const areas = new Promise<void>((resolve) => (listed = resolve))
+    setTimeout(listed, 20)
+    expect(await readStartSettings({ areas: () => areas, settings }, log, 5_000)).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 3 })
     expect(log).not.toHaveBeenCalled()
   })
 
-  it('has the defaults, silently, with no database', async () => {
+  it('has the defaults, silently, with no settings store', async () => {
     const log = vi.fn()
-    expect(await readStartSettings({ database: undefined, settings: undefined }, log)).toEqual(RUNTIME_DEFAULTS)
+    expect(await readStartSettings({ areas: undefined, settings: undefined }, log)).toEqual(RUNTIME_DEFAULTS)
     expect(log).not.toHaveBeenCalled()
   })
 
-  it('logs the defaults it falls back to when the database is not ready, or the read throws', async () => {
+  it('logs the defaults it falls back to when the API lists no areas in time, or the read throws', async () => {
     const log = vi.fn()
-    expect(await readStartSettings({ database: { ready: () => Promise.resolve(false) }, settings }, log)).toEqual(RUNTIME_DEFAULTS)
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining('not ready'))
+    expect(await readStartSettings({ areas: () => new Promise<void>(() => undefined), settings }, log, 10)).toEqual(RUNTIME_DEFAULTS)
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining('the API does not list'))
+    expect(log).not.toHaveBeenLastCalledWith(expect.stringContaining('database'))
     const broken = { get: () => Promise.reject(new Error('no table')) }
-    expect(await readStartSettings({ database: { ready: () => Promise.resolve(true) }, settings: broken }, log)).toEqual(RUNTIME_DEFAULTS)
+    expect(await readStartSettings({ areas: () => Promise.resolve(), settings: broken }, log)).toEqual(RUNTIME_DEFAULTS)
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining('no table'))
     expect(log).toHaveBeenCalledTimes(2)
   })
