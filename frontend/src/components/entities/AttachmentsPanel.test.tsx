@@ -99,4 +99,21 @@ describe('AttachmentsPanel (#6950)', () => {
     await user.upload(screen.getByLabelText('Attach files'), photo())
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('receipt.png: the file is larger than the upload limit'))
   })
+
+  it('keeps the caption when every upload failed, to send again', async () => {
+    entityMock.refuseNextUpload = 'the store is moving'
+    const { user } = renderPage(<AttachmentsPanel entity={SPOOL} />)
+    await screen.findByText('No files yet.')
+    await user.type(screen.getByLabelText('Caption for new files'), 'Bought in March')
+    await user.upload(screen.getByLabelText('Attach files'), photo())
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('receipt.png: the store is moving'))
+    expect(screen.getByLabelText('Caption for new files')).toHaveValue('Bought in March')
+  })
+
+  it("shows a file Bambuddy keeps as a print's only on a print archive", async () => {
+    seedEntityAttachment(SPOOL, { filename: 'odd.png', source: 'bambuddy', sha256: null })
+    renderPage(<AttachmentsPanel entity={SPOOL} />)
+    const card = await screen.findByRole('listitem', { name: 'odd.png' })
+    expect(within(card).queryByRole('link', { name: 'Open the print' })).not.toBeInTheDocument()
+  })
 })

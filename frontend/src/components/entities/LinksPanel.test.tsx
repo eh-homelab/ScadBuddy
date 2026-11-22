@@ -37,6 +37,16 @@ describe('LinksPanel (#6950)', () => {
     expect(entityMock.links.get(TYPE) ?? []).toHaveLength(0)
   })
 
+  it('shows a stored link that is not a web page as text, never as an anchor', async () => {
+    seedEntityLink(TYPE, { url: 'javascript:alert(1)', kind: 'manual', title: 'Bad' })
+    seedEntityLink(TYPE, { url: 'https://a.example/ok', kind: 'manual', title: 'Good' })
+    const { container } = renderPage(<LinksPanel entity={TYPE} />)
+    const group = await screen.findByRole('list', { name: 'Manual' })
+    expect(within(group).getAllByRole('link').map((a) => a.textContent)).toEqual(['Good'])
+    expect(within(group).getByText('Bad')).toBeInTheDocument()
+    expect(container.querySelector('a[href^="javascript:" i]')).toBeNull()
+  })
+
   it('groups the links by kind, names an unknown kind as it is, and moves one within its group', async () => {
     seedEntityLink(TYPE, { url: 'https://a.example/one', kind: 'manual', title: 'One' })
     seedEntityLink(TYPE, { url: 'https://a.example/two', kind: 'manual', title: 'Two' })

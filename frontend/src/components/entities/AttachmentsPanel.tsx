@@ -59,6 +59,7 @@ export const AttachmentsPanel = memo(function AttachmentsPanel({ entity, title =
         .map((file) => (file.size === 0 ? `${file.name} is empty.` : `${file.name} is larger than the ${formatMegabytes(most)} upload limit.`)),
     )
     const fields = { role, caption: caption.trim() || undefined }
+    let added = 0
     for (const file of fine) {
       const id = (nextUpload.current += 1)
       setUploads((now) => [...now, { id, name: file.name, fraction: 0 }])
@@ -66,6 +67,7 @@ export const AttachmentsPanel = memo(function AttachmentsPanel({ entity, title =
         await entityApi.addAttachment(entity, file, fields, (fraction) =>
           setUploads((now) => now.map((upload) => (upload.id === id ? { ...upload, fraction } : upload))),
         )
+        added += 1
         list.refresh()
       } catch (caught) {
         setErrors((now) => [...now, `${file.name}: ${failure(caught)}`])
@@ -73,7 +75,8 @@ export const AttachmentsPanel = memo(function AttachmentsPanel({ entity, title =
         setUploads((now) => now.filter((upload) => upload.id !== id))
       }
     }
-    setCaption('')
+    // Kept when nothing was added, so the person can send the files again with it.
+    if (added > 0) setCaption('')
   }
 
   function dropped(event: DragEvent<HTMLDivElement>) {
@@ -165,7 +168,7 @@ export const AttachmentsPanel = memo(function AttachmentsPanel({ entity, title =
       ) : (
         <ul aria-label={title} className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-3">
           {items.map((attachment) =>
-            attachment.source === 'bambuddy' ? (
+            ofPrint ? (
               <PrintFile key={attachment.id} attachment={attachment} archiveId={ref} />
             ) : (
               <FileTile key={attachment.id} entity={entity} attachment={attachment} readOnly={readOnly} onChanged={() => list.refresh()} />

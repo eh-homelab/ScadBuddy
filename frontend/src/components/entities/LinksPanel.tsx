@@ -32,6 +32,16 @@ function hostOf(url: string): string {
   }
 }
 
+/** Only an `http` or `https` URL becomes an anchor; anything else is shown as text. */
+function isWebUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url)
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 /** What a link is called on the page: its title, else its host. */
 const nameOf = (link: EntityLink) => link.title || hostOf(link.url)
 
@@ -258,11 +268,15 @@ function LinkRow({
     <li className="flex flex-wrap items-start gap-x-2 gap-y-1 px-2.5 py-1.5 text-[13px]">
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="flex min-w-0 items-baseline gap-2">
-          <a href={link.url} {...NEW_TAB} className="truncate font-medium underline-offset-4 hover:underline">
-            {name}
-          </a>
+          {isWebUrl(link.url) ? (
+            <a href={link.url} {...NEW_TAB} className="truncate font-medium underline-offset-4 hover:underline">
+              {name}
+            </a>
+          ) : (
+            <span className="truncate font-medium">{name}</span>
+          )}
           {link.title && <span className="truncate text-[12px] text-muted-foreground">{hostOf(link.url)}</span>}
-          <ExternalLinkIcon aria-hidden="true" className="size-3 shrink-0 self-center text-muted-foreground" />
+          {isWebUrl(link.url) && <ExternalLinkIcon aria-hidden="true" className="size-3 shrink-0 self-center text-muted-foreground" />}
         </span>
         {link.note && <span className="text-[12px] text-muted-foreground">{link.note}</span>}
         {error && (
