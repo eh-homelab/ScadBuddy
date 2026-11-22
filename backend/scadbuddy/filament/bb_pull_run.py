@@ -65,6 +65,7 @@ from scadbuddy.filament.bb_pull_models import (
     PullStart,
     TraysBody,
     UsageBody,
+    UsageMark,
 )
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.library.settings_store import StoredSettings
@@ -293,11 +294,22 @@ async def _book_usage(
 ) -> None:
     """Book ``usage`` in bodies of `USAGE_BODY_ROWS` (`usage_bodies`), oldest first, adding
     up what each booked. A body that fails is logged and ends the booking: its rows and the
-    newer ones wait for the next pull, which reads them again (R-6860-3)."""
-    for rows, matched in usage_bodies(usage, archives, USAGE_BODY_ROWS):
+    newer ones wait for the next pull, which reads them again (R-6860-3). The last body
+    carries ``read_to``, the newest row read, so the instance's usage mark moves only once
+    the whole read is booked, in that body's transaction (R-7002-6)."""
+    bodies = usage_bodies(usage, archives, USAGE_BODY_ROWS)
+    newest = max(usage, key=lambda row: (row.created_at, row.id))
+    for i, (rows, matched) in enumerate(bodies):
+        last = i == len(bodies) - 1
         try:
             booked = await api.book_usage(
-                UsageBody(instance=instance, pull_id=pull_id, usage=rows, archives=matched)
+                UsageBody(
+                    instance=instance,
+                    pull_id=pull_id,
+                    usage=rows,
+                    archives=matched,
+                    read_to=UsageMark(at=newest.created_at, id=newest.id) if last else None,
+                )
             )
         except Exception as error:
             _failed("could not book Bambuddy's usage rows", error)

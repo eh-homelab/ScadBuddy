@@ -141,13 +141,47 @@ def match_archive(row: SpoolUsage, archives: Sequence[Archive]) -> int | None:
     return None if best is None else best[1]
 
 
+#: A usage row's place in Bambuddy's order: its ``created_at``, then its ``id``.
+Mark = tuple[datetime, int]
+
+
+def usage_mark(conn: Conn, instance: str) -> Mark | None:
+    """The newest usage row a pull of ``instance`` has read and booked whole (R-7002-6);
+    ``None`` when none is recorded, or it was read from another instance."""
+    row = conn.execute(
+        "SELECT usage_read_at, usage_read_id FROM filament_bb_sync_state"
+        " WHERE usage_read_instance = %s",
+        (instance,),
+    ).fetchone()
+    if row is None or row["usage_read_at"] is None or row["usage_read_id"] is None:
+        return None
+    return (row["usage_read_at"], row["usage_read_id"])
+
+
+def advance_mark(conn: Conn, instance: str, mark: Mark) -> None:
+    """Record ``mark`` as ``instance``'s usage mark; never moves it back for one instance."""
+    at, row_id = mark
+    conn.execute(
+        "UPDATE filament_bb_sync_state SET usage_read_instance = %s, usage_read_at = %s,"
+        " usage_read_id = %s WHERE usage_read_instance IS DISTINCT FROM %s"
+        " OR usage_read_at IS NULL OR (usage_read_at, usage_read_id) < (%s, %s)",
+        (instance, at, row_id, instance, at, row_id),
+    )
+
+
 def book_usage(
-    conn: Conn, rows: Sequence[SpoolUsage], archives: Sequence[Archive], *, actor: str
+    conn: Conn,
+    rows: Sequence[SpoolUsage],
+    archives: Sequence[Archive],
+    *,
+    actor: str,
+    mark: Mark | None = None,
 ) -> UsageReport:
     """Book ``rows`` on ``conn``'s transaction, as the module says (`_books`). A row of
-    a BB spool with no link is counted ``unlinked`` when it is newer than every row of
-    ``rows`` that was booked before this call, so a row a pull read before is not counted
-    again (R-7002-4); a row of an archived SB spool is counted neither way. Each row is
+    a BB spool with no link is counted ``unlinked`` only when it is later than ``mark``,
+    the newest row an earlier pull read and booked whole (`usage_mark`), by ``created_at``
+    then ``id``; with no mark every such row counts. So a row an earlier pull read is not
+    counted again (R-7002-6). A row of an archived SB spool is counted neither way. Each row is
     booked, and its estimate covered (`_cover`), in one savepoint: a row whose booking or
     cover fails is logged and skipped, nothing of it is kept, and the next pull retries
     both; the rest are booked. A row a `ledger.BB_USAGE` event names already is left out
@@ -166,12 +200,11 @@ def book_usage(
     spools = {link.spool_id for _, link in todo}
     if spools:
         capture.lock(conn, sorted(spools))
-    seen = max((row.created_at for row, _ in wanted if row.id in done), default=None)
     for row in rows:
         if (
             row.weight_used > 0
             and links.get(row.spool_id) is None
-            and (seen is None or row.created_at > seen)
+            and (mark is None or (row.created_at, row.id) > mark)
         ):
             report.unlinked += 1
     for i, (row, link) in enumerate(todo):

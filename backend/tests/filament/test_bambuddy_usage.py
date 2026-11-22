@@ -21,6 +21,7 @@ from scadbuddy.filament.bambuddy_usage import book_usage
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, new_pull_id
 from scadbuddy.filament.bb_pull_models import UsageBody, UsageBooked
 from scadbuddy.filament.bb_sync_nudge import instance_for
+from scadbuddy.filament.bb_sync_results import reset_links
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import FilamentInventory
@@ -184,24 +185,154 @@ def test_a_usage_row_of_an_unlinked_bb_spool_is_counted_unlinked(pg_pool: PgPool
     assert (report.booked, report.unlinked) == (0, 1)
 
 
-def test_an_unlinked_row_counts_only_when_newer_than_the_rows_booked_before(
-    pg_pool: PgPool,
-) -> None:
-    """#7002 R-7002-4: the pull sends the whole read every time, so an unlinked row a
-    pull read before (no newer than a row booked before this call) is not counted again;
-    one newer than every such row is."""
+def test_an_unlinked_row_counts_only_past_the_mark(pg_pool: PgPool) -> None:
+    """#7002 R-7002-6: `book_usage` counts an unlinked row only when it is later than the
+    mark, by ``created_at`` then ``id``; with no mark every unlinked row counts."""
     f = _filament(pg_pool)
     _linked(f)
-    old = usage(id=10, print_name="a", created_at=_naive(T1))
-    old_unlinked = usage(id=11, spool_id=99, print_name="a", created_at=_naive(T1))
-    assert _book(f, [old, old_unlinked]).unlinked == 1
-    later = T1 + timedelta(minutes=5)
-    new = usage(id=12, print_name="b", created_at=_naive(later))
-    new_unlinked = usage(id=13, spool_id=99, print_name="b", created_at=_naive(later))
-    report = _book(f, [old, old_unlinked, new, new_unlinked])
-    assert (report.booked, report.unlinked) == (1, 1)
-    again = _book(f, [old, old_unlinked, new, new_unlinked])
-    assert (again.booked, again.unlinked) == (0, 0)
+    rows = [
+        usage(id=11, spool_id=99, created_at=_naive(T1)),
+        usage(id=12, spool_id=99, created_at=_naive(T1)),
+        usage(id=13, spool_id=99, created_at=_naive(T1 + timedelta(minutes=1))),
+    ]
+    with f.spools.transaction() as conn:
+        assert book_usage(conn, rows, [], actor="bambuddy").unlinked == 3
+        assert book_usage(conn, rows, [], actor="bambuddy", mark=(T1, 11)).unlinked == 2
+        later = T1 + timedelta(minutes=1)
+        assert book_usage(conn, rows, [], actor="bambuddy", mark=(later, 13)).unlinked == 0
+
+
+def _mark(f: Filament) -> tuple[Any, Any, Any]:
+    with f.spools.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT usage_read_instance, usage_read_at, usage_read_id FROM filament_bb_sync_state"
+        ).fetchone()
+    assert row is not None
+    return (row["usage_read_instance"], row["usage_read_at"], row["usage_read_id"])
+
+
+async def _pull_rows(
+    f: Filament, rows: list[SpoolUsage], spools: list[BbSpool] | None = None
+) -> Any:
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(
+            json=[s.model_dump(mode="json") for s in (spools if spools is not None else [bb()])]
+        )
+        router.get(f"{BB}/api/v1/inventory/usage").mock(side_effect=_newest(rows))
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        return await read_and_pull(f, settings)
+
+
+async def test_an_unlinked_row_after_the_last_linked_one_counts_once(pg_pool: PgPool) -> None:
+    """#7002 R-7002-6, case (a): an unlinked row newer than every linked row counts on the
+    pull that first reads it, not on the next; a newer one counts on its own pull."""
+    f = _filament(pg_pool)
+    _linked(f)
+    rows = [
+        usage(id=10, print_name="a", created_at=_naive(T1)),
+        usage(id=11, spool_id=99, print_name="b", created_at=_naive(T1 + timedelta(minutes=5))),
+    ]
+    first = await _pull_rows(f, rows)
+    assert (first.usage_booked, first.usage_unlinked) == (1, 1)
+    second = await _pull_rows(f, rows)
+    assert (second.usage_booked, second.usage_unlinked) == (0, 0)
+    rows.append(
+        usage(id=12, spool_id=99, print_name="c", created_at=_naive(T1 + timedelta(minutes=9)))
+    )
+    third = await _pull_rows(f, rows)
+    assert (third.usage_booked, third.usage_unlinked) == (0, 1)
+    assert _mark(f) == (instance_for(BB), T1 + timedelta(minutes=9), 12)
+
+
+async def test_with_no_linked_rows_a_second_pull_counts_no_unlinked_row(pg_pool: PgPool) -> None:
+    """#7002 R-7002-6, case (b): no row is booked, and still a row is counted once."""
+    f = _filament(pg_pool)
+    rows = [
+        usage(
+            id=10 + i,
+            spool_id=99,
+            print_name=f"job-{i}",
+            created_at=_naive(T1 + timedelta(minutes=i)),
+        )
+        for i in range(3)
+    ]
+    first = await _pull_rows(f, rows, spools=[])
+    assert (first.usage_booked, first.usage_unlinked) == (0, 3)
+    second = await _pull_rows(f, rows, spools=[])
+    assert (second.usage_booked, second.usage_unlinked) == (0, 0)
+
+
+async def test_no_unlinked_row_counts_twice_across_bodies(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7002 R-7002-6, case (c): with several bodies, every body counts against the mark
+    from before the read, which moves only with the last body."""
+    monkeypatch.setattr(bb_pull_run, "USAGE_BODY_ROWS", 2)
+    f = _filament(pg_pool)
+    _linked(f)
+    rows = [
+        usage(
+            id=10 + i,
+            spool_id=7 if i % 2 else 99,
+            weight_used=1.0,
+            print_name=f"job-{i}",
+            created_at=_naive(T1 + timedelta(minutes=i)),
+        )
+        for i in range(7)
+    ]
+    first = await _pull_rows(f, rows)
+    assert (first.usage_booked, first.usage_unlinked) == (3, 4)
+    second = await _pull_rows(f, rows)
+    assert (second.usage_booked, second.usage_unlinked) == (0, 0)
+
+
+async def test_a_failed_body_does_not_move_the_mark(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7002 R-7002-6: the mark moves only in the read's last body, so a body that fails
+    leaves it where it was; the next whole read moves it."""
+    monkeypatch.setattr(bb_pull_run, "USAGE_BODY_ROWS", 1)
+    f = _filament(pg_pool)
+    _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [
+        usage(
+            id=10 + i,
+            spool_id=99,
+            print_name=f"job-{i}",
+            created_at=_naive(T1 + timedelta(minutes=i)),
+        )
+        for i in range(3)
+    ]
+    calls = 0
+
+    class FailingSecond(LocalBbPull):
+        async def book_usage(self, body: UsageBody, cancel: Any = None) -> UsageBooked:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("SB went away")
+            return await super().book_usage(body, cancel)
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").mock(side_effect=_newest(rows))
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        await bb_pull_run.read_and_pull(
+            FailingSecond(f, lambda: settings),
+            settings,
+            instance=instance_for(BB),
+            pull_id=new_pull_id(),
+            pulls=EVERY,
+        )
+    assert calls == 2
+    assert _mark(f) == (None, None, None)
+    again = await _pull_rows(f, rows)
+    assert again.usage_unlinked == 3
+    assert _mark(f) == (instance_for(BB), T1 + timedelta(minutes=2), 12)
 
 
 def test_a_mix_of_booked_and_new_rows_locks_and_books_only_the_new(
@@ -1057,3 +1188,16 @@ async def test_two_runs_of_one_job_in_one_read_pair_oldest_first(pg_pool: PgPool
     assert (cover.ref_id, cover.data["covered_by"]) == (run_1, str(zevent.id))
     ended = [e for e in f.spools.events(w) if e.kind == "print_ended"]
     assert [e.ref_kind for e in ended] == [ledger.BB_USAGE]
+
+
+async def test_a_reset_that_deletes_the_links_clears_the_mark(pg_pool: PgPool) -> None:
+    """#7002 R-7002-6: the delete reset forgets the old Bambuddy's usage mark with its
+    links, so the next Bambuddy's rows count from none."""
+    f = _filament(pg_pool)
+    _linked(f)
+    await _pull_rows(f, [usage(id=11, spool_id=99, created_at=_naive(T1))])
+    assert _mark(f)[0] == instance_for(BB)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (instance_for(BB),))
+    reset_links(f, instance_for(BB), instance_for("https://new.test"), None, expect_kept=False)
+    assert _mark(f) == (None, None, None)
