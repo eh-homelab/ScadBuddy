@@ -432,10 +432,28 @@ def test_rehanging_never_makes_a_cycle_through_the_root(pg_pool: PgPool) -> None
     store.update(unit, LocationPatch(parent_id=None))
     store.update(root, LocationPatch(parent_id=unit))
     assert store.ensure_printer(printer) == root
+    with pg_pool.connection() as conn:
+        assert LocationStore.ensure_ams_unit_on(conn, printer, 0) == unit
+    store.ensure_ams(printer, 0, 1, label="T1")
     left = store.get(unit)
     assert left is not None and left.parent_id is None
     detail = store.detail(root)
     assert detail is not None and [p.id for p in detail.path] == [unit]
+
+
+def test_the_external_holder_never_makes_a_cycle_through_the_root(pg_pool: PgPool) -> None:
+    """The same for the external holder, which hangs straight under the printer's place."""
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    holder = store.ensure_ams(printer, EXTERNAL, 0, label="Ext")
+    root = store.ensure_printer(printer)
+    store.update(holder.id, LocationPatch(parent_id=None))
+    store.update(root, LocationPatch(parent_id=holder.id))
+    again = store.ensure_ams(printer, EXTERNAL, 0, label="Ext")
+    assert again.id == holder.id and again.parent_id is None
+    assert store.ensure_printer(printer) == root
+    left = store.get(holder.id)
+    assert left is not None and left.parent_id is None
 
 
 def test_the_place_page_reads_through_a_cycle(pg_pool: PgPool) -> None:

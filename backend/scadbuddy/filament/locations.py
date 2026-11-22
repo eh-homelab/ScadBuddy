@@ -73,6 +73,17 @@ class MoveTargetError(ValueError):
         )
 
 
+#: A guard for every UPDATE that hangs a place under ``%s``: never one of that place's
+#: own ancestors (itself included), or a person's edits (the printer's place hung under
+#: its unit) and the rehang would make a cycle (review of #7038).
+_NOT_ABOVE = (
+    " AND l.id NOT IN (WITH RECURSIVE up AS ("
+    " SELECT id, parent_id FROM filament_locations WHERE id = %s"
+    " UNION SELECT a.id, a.parent_id FROM filament_locations a"
+    " JOIN up ON a.id = up.parent_id) SELECT id FROM up)"
+)
+
+
 class LocationStore:
     """The location tables over a pool whose connections autocommit and return dict rows
     (the settings store's). Synchronous: callers run it in a thread."""
@@ -296,11 +307,14 @@ class LocationStore:
             if found is None:
                 found = conn.execute(select, key).fetchone()
             if unit is not None and found is not None and found["parent_id"] is None:
-                found = conn.execute(
-                    "UPDATE filament_locations SET parent_id = %s, updated_at = now()"
-                    f" WHERE id = %s RETURNING {_COLUMNS}",
-                    (unit, found["id"]),
-                ).fetchone()
+                found = (
+                    conn.execute(
+                        "UPDATE filament_locations l SET parent_id = %s, updated_at = now()"
+                        f" WHERE l.id = %s{_NOT_ABOVE} RETURNING {_COLUMNS}",
+                        (unit, found["id"], unit),
+                    ).fetchone()
+                    or found
+                )
         except errors.UniqueViolation:
             raise LocationExistsError() from None
         except errors.ForeignKeyViolation:
@@ -356,11 +370,15 @@ class LocationStore:
             if found is not None and found["orphan"]:
                 parent = LocationStore._printer_parent(conn, printer_id)
                 if parent is not None:
-                    found = conn.execute(
-                        "UPDATE filament_locations SET parent_id = %s, updated_at = now()"
-                        " WHERE id = %s RETURNING id, parent_id, false AS orphan",
-                        (parent, found["id"]),
-                    ).fetchone()
+                    found = (
+                        conn.execute(
+                            "UPDATE filament_locations l SET parent_id = %s, updated_at = now()"
+                            f" WHERE l.id = %s{_NOT_ABOVE}"
+                            " RETURNING id, parent_id, false AS orphan",
+                            (parent, found["id"], parent),
+                        ).fetchone()
+                        or found
+                    )
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
         assert found is not None
@@ -414,13 +432,7 @@ class LocationStore:
                 " AND ((l.ams_id IS NOT NULL AND l.tray_id IS NULL)"
                 " OR (l.ams_id = %s AND l.tray_id IS NOT NULL))"
                 " AND NOT EXISTS (SELECT 1 FROM filament_locations p"
-                " WHERE p.id = l.parent_id AND p.archived_at IS NULL)"
-                # Never the root's own ancestors: a person may have hung the root under a
-                # unit place, and moving that unit under the root would make a cycle.
-                " AND l.id NOT IN (WITH RECURSIVE up AS ("
-                " SELECT id, parent_id FROM filament_locations WHERE id = %s"
-                " UNION SELECT a.id, a.parent_id FROM filament_locations a"
-                " JOIN up ON a.id = up.parent_id) SELECT id FROM up)",
+                " WHERE p.id = l.parent_id AND p.archived_at IS NULL)" + _NOT_ABOVE,
                 (found["id"], printer_id, EXTERNAL, found["id"]),
             )
         except errors.ForeignKeyViolation:
