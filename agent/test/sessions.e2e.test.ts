@@ -813,10 +813,10 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
   })
 
   it('charges a turn stopped mid-reply for the request it cut off, once, across the resumed turn (#991)', async () => {
-    // Measured: Claude Code prices the cut-off request at nothing (its
-    // `aborted_streaming` result reports 0), and the next resumed query's
-    // total leaves it out too. The manager prices it from the stream
-    // (STALL_COST_USD).
+    // Measured on SDK 0.3.327: Claude Code closes the cut-off request and
+    // prices it (STALL_COST_USD), in its `aborted_streaming` result and in the
+    // next resumed query's total. Through SDK 0.3.314 it priced it at nothing
+    // and the manager priced it from the stream (sessions/unpricedSpend.ts).
     const cut = STALL_COST_USD
     let stall = true
     script = () => (stall ? STALL : { text: 'OK' })

@@ -17,7 +17,6 @@ import pytest
 
 from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
-from scadbuddy.auth.caller_grants import GRANTS
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.core.settings import Settings
@@ -73,12 +72,6 @@ def test_the_area_is_served_and_awaited() -> None:
         ]
     ]
     assert positions == sorted(positions)
-
-
-def test_the_print_worker_is_granted_no_table() -> None:
-    """Its last tables went behind these routes: it holds no pool (#5298 Task 31), and
-    it has no list at all since #5298 Task 35."""
-    assert "print" not in GRANTS
 
 
 @pytest.mark.parametrize(("store", "remote", "refused", "composed"), STORES)

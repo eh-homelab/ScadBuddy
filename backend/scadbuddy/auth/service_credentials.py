@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import psycopg
 from psycopg import Connection, sql
-from psycopg.rows import dict_row, tuple_row
+from psycopg.rows import dict_row
 
 from scadbuddy.auth.models import Service
 from scadbuddy.auth.service_auth import (
@@ -106,17 +106,6 @@ SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "intake": frozenset({"crud.intake"}),
     "profile-fetch": frozenset({"crud.profile-fetch"}),
 }
-#: The Postgres role of each caller, granted its view when the deployment made it.
-ROLES: Mapping[ServiceCaller, str] = {
-    "agent": "scadbuddy_agent",
-}
-
-#: The views a caller reads besides its own credentials': the agent checks a person's
-#: session on its own routes (#4975 phase 5, spec §5.6).
-VIEWS: Mapping[ServiceCaller, tuple[str, ...]] = {
-    "agent": ("service_credentials_agent", "auth_sessions_agent"),
-}
-
 PREFIX = "sbsvc_"
 LIFETIME = timedelta(days=30)
 ROTATE_BEFORE = timedelta(days=7)
@@ -502,31 +491,6 @@ class ServiceCredentialStore:
                 {"legacy": at - older_than, "exchanged": at - exchanged_older_than},
             )
         return cur.rowcount
-
-
-def grant_caller_views(conn: Connection[Any]) -> list[str]:
-    """Grants each caller's role, where the deployment made it, its own views only
-    (:data:`VIEWS`); the roles granted. Idempotent and never revokes, as
-    `auth/caller_grants.py` `grant_role`."""
-    granted = []
-    for caller, role in ROLES.items():
-        if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
-            continue
-        schema = conn.cursor(row_factory=tuple_row).execute("SELECT current_schema()").fetchone()
-        assert schema is not None
-        conn.execute(
-            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
-                sql.Identifier(str(schema[0])), sql.Identifier(role)
-            )
-        )
-        for view in VIEWS[caller]:
-            conn.execute(
-                sql.SQL("GRANT SELECT ON {} TO {}").format(
-                    sql.Identifier(view), sql.Identifier(role)
-                )
-            )
-        granted.append(role)
-    return granted
 
 
 #: How often a caller reads its view again (§7.2: at start and every hour).

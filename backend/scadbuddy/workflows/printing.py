@@ -55,6 +55,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.library.outputs import PlateSend
     from scadbuddy.printers.lan_models import LanStarted, LanStopped
     from scadbuddy.workflows.follow import FOLLOW_WORKFLOW, POKE_SIGNAL, follow_id
+    from scadbuddy.workflows.handlers import handler_wait
     from scadbuddy.workflows.print_models import (
         ACCEPTED_UPDATE,
         FAILED,
@@ -610,7 +611,7 @@ class PrintRunWorkflow(_PlateStarts):
     async def accepted(self) -> AcceptAnswer:
         self.updates += 1
         repeated = self.updates > 1
-        await workflow.wait_condition(lambda: self.row is not None or self.refusal is not None)
+        await handler_wait(lambda: self.row is not None or self.refusal is not None)
         if self.refusal is not None:
             return AcceptAnswer(refusal=self.refusal, repeated=repeated)
         return AcceptAnswer(run=self.row, repeated=repeated)
