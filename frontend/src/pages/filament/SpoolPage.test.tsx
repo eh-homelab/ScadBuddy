@@ -37,10 +37,10 @@ function recorded(method: string, match: RegExp) {
 }
 
 describe('the spool page', () => {
-  it('has the six sections, each a landmark with a heading, and an index', async () => {
+  it('has the seven sections, each a landmark with a heading, and an index', async () => {
     open(1)
     await heading(1)
-    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'History']) {
+    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'Files and links', 'History']) {
       expect(screen.getByRole('region', { name })).toBeInTheDocument()
       expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
       expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${name.toLowerCase().replace(/ /g, '-')}`)

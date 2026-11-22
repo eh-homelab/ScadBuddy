@@ -34,6 +34,8 @@ from scadbuddy.workflows.housekeeping import (
     BANK_DEPOSITS_SWEEP,
     BANK_DEPOSITS_TIMEOUT,
     CLAIMS_TIMEOUT,
+    ENTITY_ORPHANS_SWEEP,
+    ENTITY_ORPHANS_TIMEOUT,
     GIT_REMOTE_SWEEP,
     GIT_REMOTE_TIMEOUT,
     GIT_SWEEP,
@@ -154,6 +156,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         GIT_SWEEP: GIT_TIMEOUT,
         ACTIVITY_SWEEP: ACTIVITY_TIMEOUT,
         ATTACHMENTS_SWEEP: ATTACHMENTS_TIMEOUT,
+        ENTITY_ORPHANS_SWEEP: ENTITY_ORPHANS_TIMEOUT,
         LIBRARY_SWEEP: LIBRARY_TIMEOUT,
         NATIVE_SLICES_SWEEP: NATIVE_SLICES_TIMEOUT,
         LOST_NATIVE_SLICES_SWEEP: LOST_NATIVE_SLICES_TIMEOUT,
@@ -195,6 +198,14 @@ def test_the_print_watcher_is_on_both_schedules() -> None:
     the sweeps off, behind its own patch."""
     assert SWEEPS[-2] == PRUNE_SWEEPS[-2] == AUTO_IMPORT_SWEEP
     assert sweep_timeout(AUTO_IMPORT_SWEEP) == AUTO_IMPORT_TIMEOUT
+
+
+def test_the_entity_orphans_sweep_follows_the_print_attachments_on_the_sweeps_schedule() -> None:
+    """#6950 (spec D4, phase 1): the entities whose owner is gone go on the sweeps'
+    Schedule only, behind their own patch."""
+    assert SWEEPS[SWEEPS.index(ATTACHMENTS_SWEEP) + 1] == ENTITY_ORPHANS_SWEEP
+    assert ENTITY_ORPHANS_SWEEP not in PRUNE_SWEEPS
+    assert sweep_timeout(ENTITY_ORPHANS_SWEEP) == ENTITY_ORPHANS_TIMEOUT
 
 
 def test_the_maintenance_import_follows_the_deposit_sync_on_the_sweeps_schedule() -> None:

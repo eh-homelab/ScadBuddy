@@ -35,6 +35,7 @@ from scadbuddy.api import (
     crud_agent_transcripts,
     crud_agent_turns,
     crud_print,
+    entity_attachments,
     health,
     internal_blobs,
     internal_library,
@@ -56,6 +57,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import (
     ATTACHMENT_UPLOAD_PATH,
     BODY_LIMITS,
+    ENTITY_ATTACHMENT_UPLOAD_PATH,
     INVOICE_FILE_UPLOAD_PATH,
     LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
@@ -95,6 +97,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
+from scadbuddy.entities.component import ENTITIES
+from scadbuddy.entities.sweep import sweep_orphan_entities
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_nudge import instance_for
@@ -209,6 +213,7 @@ from scadbuddy.workflows.housekeeping import (
     AUTO_IMPORT_SWEEP,
     BACKFILL_SWEEP,
     BANK_DEPOSITS_SWEEP,
+    ENTITY_ORPHANS_SWEEP,
     FLOWS_SWEEP,
     GIT_REMOTE_SWEEP,
     GIT_SWEEP,
@@ -709,6 +714,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_print_attachments() -> None:
         await _heartbeating(_sweep_print_attachments_logged(state))
 
+    @activity.defn(name=ENTITY_ORPHANS_SWEEP)
+    async def sweep_entity_orphans() -> None:
+        await _heartbeating(_sweep_entity_orphans_logged(state))
+
     @activity.defn(name=LIBRARY_SWEEP)
     async def sweep_print_library() -> None:
         await _heartbeating(_sweep_print_library_logged(state))
@@ -795,6 +804,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         maintain_models_git,
         sweep_activity,
         sweep_print_attachments,
+        sweep_entity_orphans,
         sweep_print_library,
         sweep_native_slice_rows,
         prune_transfer_puts,
@@ -1020,6 +1030,21 @@ async def _sweep_print_attachments_logged(state: AppState) -> None:
             logger.info("forgot the attachments of deleted archives", extra={"count": gone})
 
     await _with_bambuddy(state, sweep)
+
+
+async def _sweep_entity_orphans_logged(state: AppState) -> None:
+    """#6950 (spec D4, phase 1): the entities whose owner's row is gone, with their files
+    and links."""
+    entities = state.components.get(ENTITIES)
+    try:
+        removed = await asyncio.to_thread(
+            sweep_orphan_entities, entities.store, entities.attachments
+        )
+    except Exception:
+        logger.exception("could not sweep the entities whose owner is gone")
+        raise
+    if removed:
+        logger.info("removed entities whose owner is gone", extra={"count": removed})
 
 
 async def _sweep_activity_logged(state: AppState) -> None:
@@ -2489,6 +2514,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             RouteLimit(
                 "POST",
+                ENTITY_ATTACHMENT_UPLOAD_PATH,
+                lambda: state.settings.media_upload_max_bytes,
+                "an entity's attachment",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
                 INVOICE_FILE_UPLOAD_PATH,
                 lambda: state.settings.media_upload_max_bytes,
                 "an invoice's file",
@@ -2558,6 +2590,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         print_attachments.PrintAttachmentUpload,
         order_attachments.OrderAttachmentUpload,
         order_attachments.RevisionAttachmentUpload,
+        entity_attachments.EntityAttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

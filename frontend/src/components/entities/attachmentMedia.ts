@@ -1,7 +1,11 @@
 import { API_BASE, api } from '../../api/client'
 import type { OrderAttachment, OrderAttachmentRole, OrderItem } from '../../api/types'
+import { entityApi, type EntityAttachment } from './api'
 
-/** #4251 — what the order page knows about an attached file and an item's picture. */
+/**
+ * #4251 — what the order page knows about an attached file and an item's picture; #6950 —
+ * the same media rules for any entity's files (`AttachmentsPanel`).
+ */
 
 /** Why a file is kept (`AttachmentRole`), as a person reads it. */
 export const ROLE_LABELS: Record<OrderAttachmentRole, string> = {
@@ -35,6 +39,31 @@ export function attachmentImageUrl(orderId: string, attachment: OrderAttachment)
   return THUMBNAILED.has(attachment.media_type)
     ? api.orderAttachmentThumbnailUrl(orderId, attachment.id)
     : api.orderAttachmentUrl(orderId, attachment.id)
+}
+
+/**
+ * #6950 — an entity file's role as a person reads it: open text on the server (spec 6.2's
+ * known values), so a role outside this list is shown as it is (`roleLabel`).
+ */
+export const ENTITY_ROLE_LABELS: Record<string, string> = {
+  ...ROLE_LABELS,
+  receipt: 'Receipt',
+  invoice: 'Invoice',
+  manual: 'Manual',
+  photo: 'Photo',
+  label: 'Label',
+}
+/** What a person files an entity's file under; the order roles stay on the order routes. */
+export const ENTITY_ROLES = ['photo', 'receipt', 'invoice', 'manual', 'label', 'other'] as const
+
+export function roleLabel(role: string): string {
+  return ENTITY_ROLE_LABELS[role] ?? role
+}
+
+/** An entity's photo's smallest URL the browser can draw, or null when it cannot draw it. */
+export function entityImageUrl(entity: string, attachment: EntityAttachment): string | null {
+  if (attachment.source !== 'store' || attachment.kind !== 'image' || !SHOWN_IMAGES.has(attachment.media_type)) return null
+  return THUMBNAILED.has(attachment.media_type) ? entityApi.attachmentThumbnailUrl(entity, attachment.id) : entityApi.attachmentUrl(entity, attachment.id)
 }
 
 type Source = { url: string; label: string; delivered: boolean; finished?: boolean }

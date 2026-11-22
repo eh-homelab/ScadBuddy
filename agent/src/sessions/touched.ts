@@ -352,6 +352,12 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
+  // An entity's files and links (#6950) are records of their own, shown on the entity's page.
+  entity_attachment_update: () => [],
+  entity_attachment_delete: () => [],
+  entity_link_add: () => [],
+  entity_link_update: () => [],
+  entity_link_delete: () => [],
   // A storefront listing (#6131) is a record of its own, on the Storefront page; the draft's
   // answer links it there.
   storefront_listing_draft: () => [],
