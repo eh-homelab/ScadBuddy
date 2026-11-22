@@ -2373,7 +2373,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Measured with `tests/filament/bb_sync_scale.counting` on the pull after the one that
     made them: 12 linked spools (2 archived), each with a weighing, a drying, a preset and
     a K-profile, took 259 statements in 13 transactions before, and 19 statements in 2
-    transactions after; 4 spools took 75 in 5 before and 19 in 2 after.
+    transactions after; 4 spools took 75 in 5 before and 19 in 2 after (20 since 238).
 235. R-6768-3: the skip's reads are not under each spool's advisory lock. A write that
     lands after them (a person's edit, the push's results, another pull) is taken by the
     next pull. A skipped spool writes nothing, so it can never overwrite that write.
@@ -2389,7 +2389,10 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     never quiet.
 238. R-6768-6 (PR #7013 review): a spool whose insert type a person edited after the link
     is quiet, as `_backfill_insert_type` never sets it again; the batch reads those
-    `edited` events once for every spool (`_insert_edited_since_link`'s condition).
+    `edited` events once for every spool (`_insert_edited_since_link`'s condition). That
+    read is one more statement: a quiet pull is now 20 statements in 2 transactions (234's
+    19 was before it), the bound `test_an_unchanged_pull_reads_in_a_fixed_number_of_queries`
+    pins exactly; a new batch read raises it there, on purpose.
 
 ## Self-review
 
