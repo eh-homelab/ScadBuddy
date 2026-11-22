@@ -1207,7 +1207,7 @@ export const filamentTools: Tool[] = [
       "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
       'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
       'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
-      'not be read, or it is another Bambuddy, or every linked spool was edited in Bambuddy since the last pull so ' +
+      'not be read, or it is another Bambuddy, or every linked spool ScadBuddy could compare (a time on both sides) was edited in Bambuddy since the last pull so ' +
       'none matches what ScadBuddy saw and the proof has nothing to stand on), it answers 409 `proof_changed` and ' +
       'deletes nothing; tell the user which case it is if you know (the dry run `GET /filament/sync/reset-links` ' +
       'has `changed_since_pull`). Only then, ' +

@@ -1156,6 +1156,15 @@ def test_the_proof_of_the_same_bambuddy(
         ({11: SEEN}, [_held(11, SEEN - timedelta(hours=1))], [], False),
         # A linked spool this Bambuddy lacks: another Bambuddy.
         ({11: SEEN, 12: SEEN}, [_held(11, SEEN + timedelta(hours=1))], [], False),
+        # Timed links all changed, an untimed one is skipped: still explained.
+        (
+            {11: SEEN, 12: SEEN, 13: None},
+            [_held(11, SEEN + timedelta(hours=1)), _held(12, SEEN + timedelta(hours=2)), _held(13)],
+            [],
+            True,
+        ),
+        # A timed link as last seen beside an untimed one: the proof holds, nothing to explain.
+        ({11: SEEN, 12: None}, [_held(11), _held(12)], [], False),
         # Links with no time were never compared: no claim about an edit.
         ({11: None}, [_held(11, SEEN)], [], False),
         # An unparsed row, or no link at all, proves and explains nothing.

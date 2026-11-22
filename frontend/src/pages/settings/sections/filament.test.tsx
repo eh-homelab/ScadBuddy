@@ -428,13 +428,13 @@ describe('Filament (#6262)', () => {
       expect((await getSyncStatus()).instance_changed).toBe(false)
     })
 
-    it('says why there is no keep when every linked spool changed since the last pull (#6845)', async () => {
+    it('says why there is no keep when every comparable linked spool changed since the last pull (#6845)', async () => {
       linkOtherBambuddy('0ld0ld0ld0ld', { changed: true })
       const { user, filament } = await withSync()
       await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
       const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
       expect(dialog).toHaveTextContent(
-        'Every linked spool changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same Bambuddy.',
+        'Every linked spool ScadBuddy could compare (a time on both sides) changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same Bambuddy.',
       )
       expect(dialog).not.toHaveTextContent('could not be read')
       expect(within(dialog).queryByRole('button', { name: 'Keep links' })).toBeNull()

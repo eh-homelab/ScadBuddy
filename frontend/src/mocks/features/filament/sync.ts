@@ -52,7 +52,7 @@ let otherInstance: string | null = null
 let unlinked = false
 /** #6845 — the configured Bambuddy holds the linked spools: a reset keeps the links. */
 let sameBambuddy = false
-/** #6845 — every linked spool changed in Bambuddy since the last pull: no proof, so no keep. */
+/** #6845 — every linked spool with a time on both sides changed in Bambuddy since the last pull: no proof, so no keep. */
 let changedSincePull = false
 /** #6845 — the configured Bambuddy cannot be read. */
 let unreadable = false
@@ -76,8 +76,8 @@ export function reset() {
 /**
  * #6773 — the links now belong to `instance`, not the configured Bambuddy, so the sync is stopped.
  * #6845 — `same`: the configured Bambuddy is that one at a new address, so a reset keeps the links;
- * `unreadable`: the configured Bambuddy cannot be read; `changed`: it holds every linked spool but each
- * changed since the last pull, so nothing proves it the links' own.
+ * `unreadable`: the configured Bambuddy cannot be read; `changed`: it holds every linked spool but each one
+ * with a time on both sides changed since the last pull, so nothing proves it the links' own.
  */
 export function linkOtherBambuddy(
   instance = '0ld0ld0ld0ld',
