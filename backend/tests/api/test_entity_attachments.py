@@ -149,8 +149,8 @@ def test_order_entities_are_read_here_and_written_on_the_order_routes(
 @pytest.mark.requires_git
 def test_an_order_route_does_not_reach_another_entitys_file(client: TestClient) -> None:
     order, item = shop(client)
-    spool = _supplier(client)
-    added = upload(client, spool, png(), "shelf.png").json()
+    supplier = _supplier(client)
+    added = upload(client, supplier, png(), "shelf.png").json()
     base = f"/api/v1/orders/{order['id']}/attachments/{added['id']}"
     assert client.get(f"{base}/content").status_code == 404
     assert client.get(f"{base}/thumbnail").status_code == 404
@@ -160,7 +160,8 @@ def test_an_order_route_does_not_reach_another_entitys_file(client: TestClient) 
     refused = client.put(delivered, json={"attachment_id": added["id"]}, headers=press())
     assert refused.status_code == 422, refused.text
     # Still there, on its own entity.
-    assert client.get(f"/api/v1/entities/{spool}/attachments/{added['id']}/content").status_code == 200
+    kept = client.get(f"/api/v1/entities/{supplier}/attachments/{added['id']}/content")
+    assert kept.status_code == 200
 
 
 def test_references_that_name_nothing(client: TestClient) -> None:

@@ -982,9 +982,7 @@ def test_the_entities_migration_keeps_order_attachments_for_the_previous_build(
             ("during", "order", "o"),
             ("item", "order_item", "i9"),
         ]
-        assert conn.execute("SELECT count(*) FROM entities WHERE kind = 'order'").fetchone() == (
-            1,
-        )
+        assert conn.execute("SELECT count(*) FROM entities WHERE kind = 'order'").fetchone() == (1,)
         # Another entity's file is not the previous build's to read.
         conn.execute("INSERT INTO entities (kind, ref) VALUES ('supplier', 's')")
         conn.execute(
