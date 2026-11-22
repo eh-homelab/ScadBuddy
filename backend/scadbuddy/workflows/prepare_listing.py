@@ -24,9 +24,31 @@ activity reads the listing again, builds the combination at that index and submi
 - ``end``: no combination has that index, or the listing is not published any more.
 
 ``prepare_listing_settled`` answers which of the open jobs are still open; the run reads it
-with a backoff from `POLL_FIRST` to `POLL_MAX`. The run ends when every combination was
-submitted and settled. It continues as new every `CONTINUE_EVERY` submits, or when its
-history passes `HISTORY_LIMIT` events, with the next index and the open jobs.
+with a backoff from `POLL_FIRST` to `POLL_MAX`. Once every combination was submitted and
+settled, the run prices them (#6922, behind `WARM_PATCH`): ``prepare_listing_warm`` asks
+for each index's storefront slice price through the visitor's own path (`slice_price.py`
+`slice_estimate`), one index at a time, with at most one of its slices running, so the
+rest of `storefront_slices_concurrent` stays free for visitors. Its answer:
+
+- ``settled``: the variant has a price, or none can be had (a failed render, no shop slice
+  profile, a failed slice). The run goes to the next index.
+- ``running``: its slice runs (this ask's, or one started before). The run waits for it,
+  and asks for the same index again.
+- ``waiting``: no room for its slice yet (`storefront_slices_concurrent`), or its files are
+  still being fetched. The run waits and asks for the same index again.
+- ``end``: no combination has that index, or the listing is not published any more.
+
+A wait is from `POLL_FIRST` to `WARM_POLL_MAX`. After `WARM_TRIES` asks of one index the
+run goes on without its price (a slice stuck past `LOST_AFTER`, files never fetched): a
+visitor's read still starts it.
+
+The run ends after the last price. It continues as new every `CONTINUE_EVERY` submits, or
+when its history passes `HISTORY_LIMIT` events, with the next index and the open jobs (in
+the price phase, with ``warm_index``).
+
+Publish starts a run of its own for the listing's default combination only
+(``default_only``, id ``prepare-listing-default:<listing id>``): the same steps for that one
+combination, so the default variant is rendered and priced before a visitor asks.
 
 On the versioned ``library`` worker it is AUTO_UPGRADE (`VersionedPrepareListing`), so a
 change to the commands ``run`` issues goes behind ``workflow.patched``.
@@ -45,8 +67,13 @@ from temporalio.exceptions import ActivityError
 PREPARE_LISTING_WORKFLOW = "PrepareListing"
 SUBMIT_ACTIVITY = "prepare_listing_submit"
 SETTLED_ACTIVITY = "prepare_listing_settled"
+WARM_ACTIVITY = "prepare_listing_warm"
 #: The workflow id's prefix: one run per listing.
 WORKFLOW_PREFIX = "prepare-listing:"
+#: The prefix of a publish's run, of the default combination only (#6922).
+DEFAULT_PREFIX = "prepare-listing-default:"
+#: Once the renders settle, the run prices each combination (#6922).
+WARM_PATCH = "prepare-warm-prices"
 #: The memo key of the indices whose submit failed (not a full queue), which
 #: `GET …/prepare` reads. A run from before `FAILED_INDICES_PATCH` holds a count there.
 FAILED_MEMO = "failed_to_start"
@@ -64,6 +91,14 @@ POLL_FIRST = timedelta(seconds=2)
 POLL_MAX = timedelta(seconds=30)
 #: One submit reads the listing and the price book and waits for the render's accept.
 SUBMIT_TIMEOUT = timedelta(minutes=2)
+#: The longest wait before a price with no room yet is asked for again: a slice takes
+#: minutes.
+WARM_POLL_MAX = timedelta(seconds=30)
+#: The most asks of one index's price, about 2 hours at `WARM_POLL_MAX`: past a slice's
+#: `LOST_AFTER` (`slice_price.py`, about 95 minutes), after which its row is freed.
+WARM_TRIES = 240
+#: One price ask reads the listing, the price book and the printer, and starts a slice.
+WARM_TIMEOUT = timedelta(minutes=2)
 #: One read of the open jobs' rows.
 SETTLED_TIMEOUT = timedelta(seconds=30)
 #: A submit retries a few times; one that still fails counts as ``failed``.
@@ -82,6 +117,7 @@ SETTLED_RETRY = RetryPolicy(
 )
 
 Outcome = Literal["open", "settled", "failed", "busy", "end"]
+WarmOutcome = Literal["settled", "running", "waiting", "end"]
 
 
 class OpenJob(BaseModel):
@@ -101,11 +137,17 @@ class PrepareListingStart(BaseModel):
     failed_to_start: int = 0
     failed_indices: list[int] = []
     open_jobs: list[OpenJob] = []
+    #: A publish's run: the default combination only (#6922).
+    default_only: bool = False
+    #: Set once the renders settled: the next index to price (#6922).
+    warm_index: int | None = None
 
 
 class SubmitAsk(BaseModel):
     listing_id: str
     index: int
+    #: Index 0 is the listing's default combination, and there is no other (#6922).
+    default_only: bool = False
 
 
 class Submitted(BaseModel):
@@ -114,6 +156,12 @@ class Submitted(BaseModel):
 
     outcome: Outcome
     job: OpenJob | None = None
+
+
+class Warmed(BaseModel):
+    """What `prepare_listing_warm` did with one combination's price (#6922)."""
+
+    outcome: WarmOutcome
 
 
 class PrepareListingResult(BaseModel):
@@ -127,10 +175,18 @@ def workflow_id(listing_id: str) -> str:
     return f"{WORKFLOW_PREFIX}{listing_id}"
 
 
+def default_workflow_id(listing_id: str) -> str:
+    """A publish's run of the listing's default combination (#6922)."""
+    return f"{DEFAULT_PREFIX}{listing_id}"
+
+
 @workflow.defn(name=PREPARE_LISTING_WORKFLOW)
 class PrepareListing:
     @workflow.run
     async def run(self, start: PrepareListingStart) -> PrepareListingResult:
+        if start.warm_index is not None:
+            # Only a run past `WARM_PATCH` continues as new with it set.
+            return await self._warm(start, start.warm_index)
         index = start.next_index
         failed = start.failed_to_start
         failed_indices = list(start.failed_indices)
@@ -143,7 +199,11 @@ class PrepareListing:
                 try:
                     answer: Submitted = await workflow.execute_activity(
                         SUBMIT_ACTIVITY,
-                        SubmitAsk(listing_id=start.listing_id, index=index),
+                        SubmitAsk(
+                            listing_id=start.listing_id,
+                            index=index,
+                            default_only=start.default_only,
+                        ),
                         result_type=Submitted,
                         start_to_close_timeout=SUBMIT_TIMEOUT,
                         retry_policy=SUBMIT_RETRY,
@@ -172,6 +232,16 @@ class PrepareListing:
                 elif answer.outcome == "open" and answer.job is not None:
                     open_jobs.append(answer.job)
             if ended and not open_jobs:
+                if workflow.patched(WARM_PATCH):
+                    settled = start.model_copy(
+                        update={
+                            "next_index": index,
+                            "failed_to_start": failed,
+                            "failed_indices": failed_indices,
+                            "open_jobs": [],
+                        }
+                    )
+                    return await self._warm(settled, 0)
                 return PrepareListingResult(submitted=index, failed_to_start=failed)
             if (
                 submitted >= CONTINUE_EVERY
@@ -202,6 +272,47 @@ class PrepareListing:
                     continue
             await workflow.sleep(wait)
             wait = min(wait * 2, POLL_MAX)
+
+    async def _warm(self, start: PrepareListingStart, index: int) -> PrepareListingResult:
+        """The price phase (#6922): each combination's price asked for from ``index`` on,
+        one at a time: the next index is asked for only once this one settled, so at most
+        one of the run's slices runs. ``start`` holds the render phase's counts, which the
+        result reports."""
+        wait = POLL_FIRST
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                answer: Warmed = await workflow.execute_activity(
+                    WARM_ACTIVITY,
+                    SubmitAsk(
+                        listing_id=start.listing_id, index=index, default_only=start.default_only
+                    ),
+                    result_type=Warmed,
+                    start_to_close_timeout=WARM_TIMEOUT,
+                    retry_policy=SUBMIT_RETRY,
+                )
+            except ActivityError:
+                # The step failed each attempt: this price is left to a visitor's read.
+                answer = Warmed(outcome="settled")
+            if answer.outcome == "end":
+                return PrepareListingResult(
+                    submitted=start.next_index, failed_to_start=start.failed_to_start
+                )
+            if answer.outcome in ("waiting", "running") and tries < WARM_TRIES:
+                # Its slice runs, or waits for room: ask for this index again.
+                await workflow.sleep(wait)
+                wait = min(wait * 2, WARM_POLL_MAX)
+            else:
+                index += 1
+                tries = 0
+                wait = POLL_FIRST
+            if workflow.info().get_current_history_length() > HISTORY_LIMIT:
+                carried = start.model_copy(update={"warm_index": index})
+                if start.failed_indices:
+                    # The next run shows the failed indices from its start.
+                    workflow.continue_as_new(carried, memo={FAILED_MEMO: start.failed_indices})
+                workflow.continue_as_new(carried)
 
 
 @workflow.defn(name=PREPARE_LISTING_WORKFLOW, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
