@@ -64,7 +64,8 @@ export function statusReason(ai: AiStatus, recoversAt?: string): string | undefi
 
 export function registerStatusRoute(app: Hono, deps: AppDeps): void {
   app.get('/api/v1/ai/status', async (c) => {
-    const { ai, recoversAt } = await aiStatus(deps, await deps.database.ping())
+    const [dataOk, ready] = await Promise.all([deps.database.ping(), deps.database.ready()])
+    const { ai, recoversAt } = await aiStatus(deps, dataOk, ready)
     const chat = deps.sessions !== undefined && deps.upgradeWebSocket !== undefined
     const state = ai === 'enabled' ? 'enabled' : ai.startsWith('disabled') ? 'disabled' : 'unavailable'
     const refused = uiReadProblem(c, deps.origins, deps.remoteAddress, 'The assistant')

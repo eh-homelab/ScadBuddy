@@ -254,8 +254,8 @@ document's claim and the code. These specs and docs were not changed in this PR.
   `agent/src/routes/`.
 - settings-and-tool-access `:264-274` access sources / also `builtin:claude-code`
   (`agent/src/access/model.ts:27`).
-- `docs/ai/README.md:60` `agent/src/db/migrations.ts` / no such file; the agent waits in
-  `agent/src/db/schema.ts`.
+- `docs/ai/README.md:60` `agent/src/db/migrations.ts` / no such file; the API applies the
+  agent's migrations and the agent waits for no ledger (#5299 step 12).
 - `docs/ai/README.md:50-51` tools run in-process / a `ToolCall` workflow per call when
   Temporal is set (`agent/src/tools/projections.ts:136-147`).
 - `docs/ai/operating.md:385-389` Claude Code's env is `CLAUDE_CONFIG_DIR`, `HOME`, `PATH` /

@@ -143,7 +143,13 @@ describe("health's probe of the agent's data", () => {
     expect(await health.ready()).toBe(false)
     // The API answers, so /healthz says the data is reachable.
     expect(await health.ping()).toBe(true)
+    // `ai` names the wait once the API holds its KEK.
+    const credentials = { list: async () => [], opener: async () => ({ ok: true, kek: { id: 'k' } }) }
+    expect((await aiStatus({ credentials } as never, await health.ping(), await health.ready())).ai).toBe(
+      "unavailable (waiting for the API's input-hash key)",
+    )
     released = true
     expect(await health.ready()).toBe(true)
+    expect((await aiStatus({ credentials } as never, await health.ping(), await health.ready())).ai).toBe('disabled (no Claude credential)')
   })
 })

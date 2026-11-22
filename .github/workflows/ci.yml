@@ -889,8 +889,11 @@ jobs:
             exit 1
           fi
           # No SQL client ships in the image: `postgres` is a test dependency only.
-          if docker run --rm --entrypoint node scadbuddy-agent:ci -e "import('postgres').then(() => process.exit(0), () => process.exit(3))"; then
-            echo "::error::the agent image can load the postgres client"
+          # Exit 3 is the failed import; any other code (0, or a docker run that failed) fails the job.
+          rc=0
+          docker run --rm --entrypoint node scadbuddy-agent:ci -e "import('postgres').then(() => process.exit(0), () => process.exit(3))" || rc=$?
+          if [ "$rc" -ne 3 ]; then
+            echo "::error::the postgres import exited $rc, not 3: the image can load the client, or the check did not run"
             exit 1
           fi
           docker run -d --name scadbuddy-agent-ci-old-env --read-only \

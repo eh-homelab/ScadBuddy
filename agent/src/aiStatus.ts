@@ -18,6 +18,7 @@ export type AiStatus =
   | 'unavailable (the API did not answer for its key-encryption key)'
   | 'unavailable (the API timed out answering for its key-encryption key)'
   | `disabled (no key-encryption key: ${string})`
+  | "unavailable (waiting for the API's input-hash key)"
   | 'disabled (no Claude credential)'
   | 'unavailable (stored credential was sealed with a different key-encryption key)'
   | 'unavailable (stored credential is in an outdated format; save it again)'
@@ -49,11 +50,15 @@ const UNANSWERED = "unavailable (the API does not answer the agent's CRUD areas)
  * (routes/status.ts) reports too. In its own module, not app.ts, because a route
  * module must not import a value from app.ts: app.ts loads routes/index.ts, which
  * imports each route module, so that import would be a cycle through a top-level await.
- * The agent's data is the API's (#5299 step 12): `dataOk` is api/dataHealth.ts's `ping`.
+ * The agent's data is the API's (#5299 step 12): `dataOk` is api/dataHealth.ts's `ping`, and
+ * `ready` its `ready`, which also waits for the input-hash key the API releases. With the areas
+ * answering but no key, the routes and /mcp answer 503, and `ai` says so once the API holds its
+ * KEK (with none, the key never comes and `ai` names the missing KEK instead).
  */
 export async function aiStatus(
   deps: Pick<AppDeps, 'credentials' | 'healthTimeoutMs'>,
   dataOk: boolean,
+  ready = true,
 ): Promise<{ ai: AiStatus; credential: CredentialState; recoversAt?: string }> {
   if (!dataOk) return { ai: UNANSWERED, credential: 'unknown' }
   // Each step is bounded: a liveness probe must answer well inside its own timeout.
@@ -76,6 +81,7 @@ export async function aiStatus(
   if (opener === TIMED_OUT) return { ai: 'unavailable (the API timed out answering for its key-encryption key)', credential }
   const kek: OpenerStatus = opener
   if (!kek.ok) return { ai: `disabled (no key-encryption key: ${kek.reason})`, credential }
+  if (!ready) return { ai: "unavailable (waiting for the API's input-hash key)", credential }
   const kekId = kek.kek.id
   if (!list.length) return { ai: 'disabled (no Claude credential)', credential }
   const opening = list.filter((c) => opensWith(c, kek))

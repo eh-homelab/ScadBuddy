@@ -188,8 +188,8 @@ export function createApp(deps: AppDeps): AgentApp {
   // Liveness: always 200 while the process serves HTTP. An unreachable API is
   // REPORTED, not failed on, so an API restart does not restart the container.
   app.get('/healthz', async (c) => {
-    const [dataOk, backendOk] = await Promise.all([deps.database.ping(), deps.backend()])
-    const { ai, credential } = await aiStatus(deps, dataOk)
+    const [dataOk, ready, backendOk] = await Promise.all([deps.database.ping(), deps.database.ready(), deps.backend()])
+    const { ai, credential } = await aiStatus(deps, dataOk, ready)
     const body: Health = {
       status: 'ok',
       ai,
