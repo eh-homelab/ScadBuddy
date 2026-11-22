@@ -104,19 +104,27 @@ uncosted one has an empty own cost too; a costed one has its own cost:
 1. `filament_invoice_get`: the draft as it stands.
 2. `filament_bambu_colour` with the five-digit `code` of a Bambu SKU: `name`,
    `rgba`, `fila_type`, `fila_id`. A 404 means the table does not have the code.
-   Say so and ask the person for the colour. A 503 means this install has no
-   table. Never invent an RGBA.
-3. `filament_invoice_candidates`: for each line, the spools whose own cost
+   Look the colour up in the catalog (step 3) before you ask the person. A 503
+   means this install has no table. Never invent an RGBA.
+3. `filament_catalog_list` with kind `colours` and `q`, for a line that makes a
+   new type: the maker and the colour name, for example `polymaker galaxy black`
+   (every word must match a row's name, maker, `material_name` or `#RRGGBBAA`;
+   `GET /api/v1/filament/catalog/{kind}` in `backend/scadbuddy/api/filament.py`,
+   #6907). For a Bambu Lab line, only when step 2 gave no colour. When exactly
+   one row fits the line by maker, name and material, take its `rgba` as it is
+   (a translucent row keeps its alpha) and its `extra_colours`. Ask the person
+   only when no row fits or more than one does (#6912).
+4. `filament_invoice_candidates`: for each line, the spools whose own cost
    is empty and which match the line's type (or proposed type) by material and
    RGBA exactly, and the spools that have a cost already. A costed spool names
    its `invoice_line_id`, if it has one. Archived (used-up) spools are listed
    too, with `archived: true`. A line may fill an archived spool: the spool
    takes its cost and invoice line, and stays archived. A spent spool was still
    bought, so fill it when the invoice is that purchase.
-4. `filament_invoice_upsert`: write the draft (the header, the lines, each
+5. `filament_invoice_upsert`: write the draft (the header, the lines, each
    line's type and `update_spool_ids`). Edit the draft you were given. Never make
    a second invoice.
-5. `filament_invoice_confirm`: only after the person says yes to a summary of what
+6. `filament_invoice_confirm`: only after the person says yes to a summary of what
    will be created and updated. It needs approval.
 
 ### Rules
@@ -162,7 +170,8 @@ uncosted one has an empty own cost too; a costed one has its own cost:
    - A multi-colour silk's subtype follows the SKU: `A05-M*` is Dual Color and
      `A05-T*` is Tri Color.
 5. **Other brands:** propose a new type with its 3dfilamentprofiles.com (3DFP)
-   id set as `tdfp_id` and its hex as the RGBA. Confirm starts the preset fetch
+   id set as `tdfp_id`. Its RGBA is the catalog row's (tool step 3); use the
+   3DFP hex only when no catalog row fits. Confirm starts the preset fetch
    for each new type that has a `tdfp_id` (see "Profiles"). Without a `tdfp_id`
    no fetch starts.
 6. **Never confirm for the person.** Show the totals, the spools to create, and

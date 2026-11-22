@@ -826,7 +826,7 @@ export function SpoolPage() {
 
           <Section id="colour-and-cost" title="Colour and cost">
             <OverrideField name="rgba" label="Colour" group value={draft.rgba ?? ''} overridden={own('rgba')} hasType={hasType} onChange={() => {}} onReset={() => void reset('rgba')}>
-              <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} inherited={hasType ? eff('rgba') || null : null} />
+              <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} inherited={hasType ? eff('rgba') || null : null} catalog onExtraColours={(extras) => set('extra_colours', extras.join(', '))} />
             </OverrideField>
             <div className="grid gap-3 sm:grid-cols-2">
               {field('colour_name', 'Colour name')}

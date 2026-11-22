@@ -552,7 +552,7 @@ export function TypePage() {
             <Pick label="Insert type" value={draft.insert_type_id} onChange={(next) => set('insert_type_id', next)} options={lists.insertTypes} />
           </div>
           <Field label="Colour">
-            <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} />
+            <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} catalog onExtraColours={(extras) => set('extra_colours', extras.join(', '))} />
           </Field>
           {text('colour_name', 'Colour name')}
           {text('extra_colours', 'Extra colours', { hint: 'For multi-colour filament: #RRGGBB or #RRGGBBAA, separated by commas.' })}

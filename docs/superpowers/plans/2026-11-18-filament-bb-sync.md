@@ -2284,6 +2284,40 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     between products, so they stay rows of their own. Compared by a script over both
     files (each Bambuddy row's upper-cased name and material against each code's English
     name and `fila_type`).
+224. R-6912-1: the RGBA field's catalog pick (`frontend/src/components/filament/CatalogColourPick.tsx`,
+    "From the catalog" beside the presets) searches on the server, as the Colours tab does
+    (Decision 215): `GET /filament/catalog/colours?q=`, every word in the name, maker,
+    material label or `#RRGGBBAA`, any case, a hex with or without its `#`. It asks 200 ms
+    after the last key, drops an answer to an older query, and draws at most 50 rows
+    ("50 of N, type more to narrow"). It lists nothing until a word is typed. Why: a synced
+    catalog holds thousands of rows (2,256 filamentcolors swatches alone, Decision 212), and
+    the quick find's client-side `lib/filamentSearch.ts` would need the whole catalog read at
+    every open. The one difference from that search: a hex word of 1 or 2 characters also
+    matches the `#RRGGBBAA` on the server.
+225. R-6912-2: a row shows its swatch (the alpha over the checkerboard, and up to three extra
+    colours behind it), its name, its maker, its material (the maker's `material_name`, else
+    the materials catalog's name of `material_id`), "translucent" or "clear" by its alpha, and
+    its `#RRGGBBAA`. The material catalog's name is shown but not searched: the route does
+    not search it.
+226. R-6912-3: a pick sets the field to the row's whole `#RRGGBBAA`: the catalog colour keeps
+    its own alpha, so a translucent row stays translucent (`80`, Decision 214). Why: the
+    alpha is part of the maker's colour, and a later preset or slider still changes it. The
+    value stays the field's own: typing any RGBA, the picker or a preset replace it, and
+    nothing links the type or spool to the catalog row.
+227. R-6912-4: a pick replaces the form's extra colours with the row's, and clears them for a
+    row with none. On a spool, cleared extra colours are not an override, so the spool shows
+    its type's (the data has no "no extra colours" override). The colour name is not filled:
+    #6912 asks for the RGBA and the extra colours only.
+228. R-6912-5: the pick is offered where the form asks for it (`RgbaColourField` `catalog`):
+    the type page and the spool page. The Catalog tab's own rows do not offer it.
+229. R-6912-6: an invoice import that makes a type looks the line's colour up with
+    `filament_catalog_list` kind `colours` and `q` (the maker and the colour name). For a
+    Bambu Lab line it does so only when `filament_bambu_colour` gives no colour for the code;
+    Bambu's table stays first, as the exact source (Decision 214). One row that fits by maker,
+    name and material gives the RGBA as it is and its extra colours, before a hex from
+    3dfilamentprofiles.com; none or several fitting rows are asked about. The prompt
+    (`agent/src/filament/invoiceImportPrompt.ts`) and the `filament` skill (tools step 3,
+    rule 5) say the same; the plugin is 0.1.53.
 
 ## Self-review
 

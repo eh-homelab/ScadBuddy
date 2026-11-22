@@ -137,6 +137,19 @@ describe('the type page', () => {
     expect(made.label_weight_g).toBe(1000)
   })
 
+  it('fills the colour and the extra colours from a catalog colour, and saves them (#6912)', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'From the catalog' }))
+    await user.type(screen.getByRole('combobox', { name: 'Search the colour catalog' }), 'galaxy')
+    await user.click(await screen.findByRole('option', { name: /Galaxy Duo/ }))
+    expect(screen.getByRole('textbox', { name: 'Colour (hex)' })).toHaveValue('#1B3A8CFF')
+    expect(screen.getByLabelText('Extra colours')).toHaveValue('#2E8B57FF')
+    await user.click(screen.getByRole('button', { name: 'Save type' }))
+    await waitFor(async () => expect((await getType(T.JADE)).extra_colours).toEqual(['#2E8B57FF']))
+    expect((await getType(T.JADE)).rgba).toBe('#1B3A8CFF')
+  })
+
   it('says a type is gone for a 404', async () => {
     render('/filament/types/62620000-0000-4000-8000-0000000000ff')
     expect(await screen.findByText(/That type is gone/)).toBeInTheDocument()
