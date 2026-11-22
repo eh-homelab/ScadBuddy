@@ -1556,10 +1556,12 @@ jobs:
       # and 44993200454 of PRs), so `faulthandler_timeout`'s dump of a hung test was lost
       # with it.
       # SIGINT stops pytest, which prints its summary, and the job ends with its log. The
-      # step took 23 to 36 minutes on 2026-11-22 (runs 44987295838, 44999390630).
+      # step took 23 to 36 minutes on 2026-11-22 (runs 44987295838, 44999390630). 45
+      # minutes and the 2-minute `--kill-after` leave 8 of the 55 for setup, which
+      # includes pulling the LFS fixtures (about 290 MB) when the cache restore misses.
       - name: pytest
         run: >-
-          timeout --signal=INT --kill-after=2m 47m
+          timeout --signal=INT --kill-after=2m 45m
           docker run --rm --network host --shm-size=1g
           -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"

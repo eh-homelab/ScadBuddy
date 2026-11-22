@@ -39,7 +39,9 @@ CALLER_GONE = "caller_gone"
 def _read_end(future: asyncio.Future[Any]) -> None:
     """Read a future nobody awaits, so its exception is not logged as never retrieved.
     The cancel's own ends (`CancelledError`, ``QueryCanceled``) are expected; any other
-    error, such as a cancel that could not reach the server, is logged (#6957 review)."""
+    error is logged, such as the work's own failure (an `ApiError`, or psycopg's
+    ``OperationalError``) (#6957 review). A cancel that could not reach the server never
+    shows here: `CancelToken.cancel` logs that itself."""
     if future.cancelled():
         return
     error = future.exception()
