@@ -1085,6 +1085,14 @@ async def test_a_library_files_quote_takes_slot_presets_and_colours(
         )
     assert seen["slot_presets"] is presets
     assert seen["slot_colours"] == {1: "#123456"}
+    # A back-office quote reads the library; a file listing's price its held copy (#6710).
+    assert seen["held"] is None
+    held: Any = object()
+    with pytest.raises(_StopError):
+        await order_operations.PreviewSlicer(core, components).start_library(
+            41, quote, "s", slot_presets=presets, held=held
+        )
+    assert seen["held"] is held
 
 
 async def test_every_plates_slice_takes_slot_colours(monkeypatch: pytest.MonkeyPatch) -> None:
