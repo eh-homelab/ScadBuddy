@@ -41,6 +41,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRunError
     from scadbuddy.operations.store import Operation
+    from scadbuddy.workflows.handlers import handler_wait
     from scadbuddy.workflows.operation_models import (
         DEFER_CHECK_PATCH,
         DEFER_RUN_PATCH,
@@ -147,7 +148,7 @@ class OperationWorkflow:
     async def accepted(self) -> OperationAnswer:
         self.updates += 1
         repeated = self.updates > 1
-        await workflow.wait_condition(
+        await handler_wait(
             lambda: self.done is not None or self.refusal is not None or self.running is not None
         )
         return OperationAnswer(
