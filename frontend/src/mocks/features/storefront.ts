@@ -142,8 +142,10 @@ function storedBounds(params: Record<string, ListingBound>): Record<string, List
 
 function fields(body: StorefrontListingInput) {
   return {
-    slug: body.slug,
-    commit: body.commit,
+    source: body.source ?? 'template',
+    slug: body.slug ?? null,
+    commit: body.commit ?? null,
+    library_file: body.library_file ? { ...body.library_file, repin: body.library_file.repin ?? false } : null,
     title: body.title,
     description: body.description ?? '',
     params: storedBounds(body.params ?? {}),
@@ -204,15 +206,15 @@ function page(url: URL): StorefrontListingPage {
   const materialOf = new Map(orders.state.filaments.map((f) => [f.id, f.material.toUpperCase()]))
   const matched = ordered.filter(
     (l) =>
-      (!q || l.title.toLowerCase().includes(q) || l.slug.toLowerCase().includes(q)) &&
+      (!q || l.title.toLowerCase().includes(q) || (l.slug ?? '').toLowerCase().includes(q)) &&
       (!status || l.published === (status === 'published')) &&
-      (slugs.length === 0 || slugs.includes(l.slug)) &&
+      (slugs.length === 0 || slugs.includes(l.slug ?? '')) &&
       (materials.length === 0 || l.colours.some((id) => materials.includes(materialOf.get(id) ?? ''))),
   )
   const sort = get('sort') || 'position'
   const dir = get('dir') === 'desc' ? -1 : 1
   const key = (l: StorefrontListing): string | number =>
-    sort === 'title' ? l.title.toLowerCase() : sort === 'slug' ? l.slug : sort === 'updated' ? l.updated_at : l.position
+    sort === 'title' ? l.title.toLowerCase() : sort === 'slug' ? (l.slug ?? '') : sort === 'updated' ? l.updated_at : l.position
   // As the backend's `_SORTS`: a slug sort breaks ties by position, then every sort by id.
   const tie = (a: StorefrontListing, b: StorefrontListing) => (sort === 'slug' ? a.position - b.position : 0)
   const by = [...matched].sort((a, b) => {
@@ -222,6 +224,7 @@ function page(url: URL): StorefrontListingPage {
   return {
     items: by.slice(offset, offset + limit).map((l) => ({
       id: l.id,
+      source: l.source,
       slug: l.slug,
       commit: l.commit,
       title: l.title,
@@ -345,9 +348,10 @@ export const handlers = [
       published_at: at,
       updated_at: at,
       snapshot: {
+        kind: 'template',
         schema: EMPTY_SCHEMA,
         pipeline: false,
-        template_name: found.slug,
+        template_name: found.slug ?? '',
         libraries: [],
         snapshot_key: `src-${found.slug}-${found.commit}`,
         // The backend fills every unnamed parameter's default in here; the mock has no schema.

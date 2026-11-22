@@ -433,8 +433,7 @@ async def checked_choice(
 
 def _is_colour(listing: Listing, name: str) -> bool:
     """Whether ``name`` is a ``// color`` parameter of the published ``listing``."""
-    assert listing.snapshot is not None
-    return any(p.name == name and p.type == "color" for p in listing.snapshot.schema_.parameters)
+    return any(p.name == name and p.type == "color" for p in listing.design[2].schema_.parameters)
 
 
 def _colour_values(listing: Listing, choice: ResolvedChoice) -> dict[str, ParamValue]:
@@ -465,7 +464,7 @@ async def start_render(
     runtime = await asyncio.to_thread(_runtime, state)
     listing, resolved, choice = await checked_choice(orders, body, runtime.storefront_materials)
     reference = resolved.reference
-    assert listing.snapshot is not None
+    snapshot = listing.design[2]
     variant = variant_key(listing, choice, body.colours)
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     limits = _limits(state)
@@ -540,7 +539,7 @@ async def start_render(
             params if isinstance(params, dict) else {},
             model_version=reference.commit,
             inputs=reference.inputs,
-            whole_inputs=listing.snapshot.pipeline,
+            whole_inputs=snapshot.pipeline,
             request_id=key,
             reuse_finished=True,
         )
@@ -651,7 +650,7 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
         raise _unavailable("The price is ready once the render is done.")
     orders = _orders(state)
     listing = await asyncio.to_thread(orders.listings.get, owned.listing_id)
-    if listing is None or listing.snapshot is None:
+    if listing is None or listing.template_snapshot is None:
         return NO_PRICE
     return await estimate_of(
         state, listing, job, owned.colours, owned.material, variant_key=owned.variant_key
@@ -709,17 +708,14 @@ async def variant_of(
 
 def reference_of(listing: Listing, job: Job) -> Reference:
     """The reference of ``job``, a render of the published ``listing``."""
-    snapshot = listing.snapshot
-    assert snapshot is not None
+    slug, commit, snapshot = listing.design
     return Reference(
-        slug=listing.slug,
-        commit=listing.commit,
+        slug=slug,
+        commit=commit,
         inputs=job.inputs,
         libraries=list(snapshot.libraries),
         template_name=snapshot.template_name,
-        render_key=render_key_of(
-            listing.slug, job.inputs, listing.commit, pipeline=snapshot.pipeline
-        ),
+        render_key=render_key_of(slug, job.inputs, commit, pipeline=snapshot.pipeline),
     )
 
 
