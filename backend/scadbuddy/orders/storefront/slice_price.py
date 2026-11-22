@@ -37,6 +37,7 @@ that line by hand.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -181,6 +182,15 @@ class PriceRow(BaseModel):
     failure: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
+    #: The variant key of the render a ``done`` row priced (#6921, `renders.py`
+    #: `variant_key`), and the price-book filament of each of its slots (from 0), so the
+    #: instant read can build its price key again. None on a row written before.
+    variant_key: str | None = None
+    slot_filaments: list[str] | None = None
+    #: Each slot's colour, and the output the slice saved ("Storefront: ...", which
+    #: outlives the render prune): the instant read shows its preview (#6921).
+    slot_colours: list[str] | None = None
+    output_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,7 +209,8 @@ _COLUMNS: Final = (
     "price_key, model_sha256, status, attempt, claim_key, operation_key, currency,"
     " unit_price_minor,"
     " total_minor, unit_cost_minor, lines, print_seconds, grams, plates, printer,"
-    " machine_rate_breakdown, failure, started_at, finished_at"
+    " machine_rate_breakdown, failure, started_at, finished_at, variant_key, slot_filaments,"
+    " slot_colours, output_id"
 )
 
 
@@ -315,9 +326,20 @@ class SlicePrices:
             )
 
     def finish(
-        self, price_key: str, model_sha256: str, currency: str, sliced: SlicedPrice
+        self,
+        price_key: str,
+        model_sha256: str,
+        currency: str,
+        sliced: SlicedPrice,
+        *,
+        variant_key: str | None = None,
+        slot_filaments: Sequence[str] | None = None,
+        slot_colours: Sequence[str] | None = None,
+        output_id: str | None = None,
     ) -> PriceRow:
-        """The price written once the slice is done."""
+        """The price written once the slice is done, with the variant key of the render it
+        priced, the filament and colour of each of its slots and the output it saved
+        (#6921)."""
         grams: dict[int, Decimal] = {}
         for plate in sliced.plates:
             for used in plate.filaments:
@@ -327,9 +349,10 @@ class SlicePrices:
             found = conn.execute(
                 "INSERT INTO storefront_slice_prices (price_key, model_sha256, status,"
                 " currency, unit_price_minor, total_minor, unit_cost_minor, lines,"
-                " print_seconds, grams, plates, printer, machine_rate_breakdown, finished_at)"
-                " VALUES (%s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
-                " clock_timestamp())"
+                " print_seconds, grams, plates, printer, machine_rate_breakdown, variant_key,"
+                " slot_filaments, slot_colours, output_id, finished_at)"
+                " VALUES (%s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                " %s, clock_timestamp())"
                 " ON CONFLICT (price_key) DO UPDATE SET status = 'done',"
                 " currency = EXCLUDED.currency, unit_price_minor = EXCLUDED.unit_price_minor,"
                 " total_minor = EXCLUDED.total_minor,"
@@ -338,6 +361,8 @@ class SlicePrices:
                 " plates = EXCLUDED.plates,"
                 " printer = EXCLUDED.printer,"
                 " machine_rate_breakdown = EXCLUDED.machine_rate_breakdown, failure = NULL,"
+                " variant_key = EXCLUDED.variant_key, slot_filaments = EXCLUDED.slot_filaments,"
+                " slot_colours = EXCLUDED.slot_colours, output_id = EXCLUDED.output_id,"
                 " finished_at = EXCLUDED.finished_at"
                 f" RETURNING {_COLUMNS}",
                 (
@@ -353,11 +378,39 @@ class SlicePrices:
                     Jsonb([plate.model_dump(mode="json") for plate in sliced.plates]),
                     None if sliced.rate is None else sliced.rate.printer,
                     None if sliced.rate is None else Jsonb(sliced.rate.model_dump(mode="json")),
+                    variant_key,
+                    None if slot_filaments is None else Jsonb(list(slot_filaments)),
+                    None if slot_colours is None else Jsonb(list(slot_colours)),
+                    output_id,
                 ),
             ).fetchone()
         row = _row(found)
         assert row is not None
         return row
+
+    def adopt(self, price_key: str, variant_key: str, slot_filaments: Sequence[str]) -> None:
+        """A ``done`` row with no variant key (written before #6921) takes ``variant_key``,
+        the key of a render whose estimate read it, so the instant read finds it. A row
+        that has a key keeps it: one variant's price never moves to another's."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE storefront_slice_prices SET variant_key = %s, slot_filaments = %s"
+                " WHERE price_key = %s AND status = 'done' AND variant_key IS NULL",
+                (variant_key, Jsonb(list(slot_filaments)), price_key),
+            )
+
+    def newest_done(self, variant_key: str, *, with_output: bool = False) -> PriceRow | None:
+        """The newest ``done`` row of ``variant_key`` (#6921), or None; with
+        ``with_output``, the newest that names the output its slice saved."""
+        output = " AND output_id IS NOT NULL" if with_output else ""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                f"SELECT {_COLUMNS} FROM storefront_slice_prices"
+                f" WHERE variant_key = %s AND status = 'done'{output}"
+                " ORDER BY finished_at DESC LIMIT 1",
+                (variant_key,),
+            ).fetchone()
+        return _row(found)
 
     def fail(self, price_key: str, model_sha256: str, failure: str) -> PriceRow:
         """No price for the variant, and why."""
@@ -487,6 +540,9 @@ class SliceVariant(BaseModel):
     #: run never reads the rate again, so the key and the price use one rate (#6153).
     #: None prices machine time at the book's rate.
     machine_rate: MachineRateBreakdown | None = None
+    #: The variant key of the render whose estimate started the slice (#6921), which the
+    #: ``done`` row records. None on an operation started before.
+    variant_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 def subject_of(key: str) -> str:
@@ -577,7 +633,17 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             raise SliceUnavailableError(error.detail) from error
         return await _failed(run, variant, error.detail)
     return await asyncio.to_thread(
-        run.prices.finish, key, variant.model_sha256, variant.currency, sliced
+        functools.partial(
+            run.prices.finish,
+            key,
+            variant.model_sha256,
+            variant.currency,
+            sliced,
+            variant_key=variant.variant_key,
+            slot_filaments=variant.slot_filaments,
+            slot_colours=rendered.colours,
+            output_id=rendered.output_id,
+        )
     )
 
 
@@ -610,6 +676,7 @@ def plan_variant(
     machine_rate: MachineRateBreakdown | None,
     printer: PrinterOpening,
     type_presets: Mapping[UUID, Sequence[EffectivePreset]],
+    variant_key: str | None = None,
 ) -> Planned | None:
     """The variant of ``reference``'s render with ``filaments`` on its slots (from 0),
     sliced with the choices the print dialog opens on for the model on the profile's
@@ -658,6 +725,7 @@ def plan_variant(
             currency=currency,
             slot_presets=presets,
             machine_rate=machine_rate,
+            variant_key=variant_key,
         ),
     )
 
@@ -703,6 +771,7 @@ async def _planned(
     reference: Reference,
     model_sha256: str,
     filaments: Sequence[Filament] | None,
+    variant_key: str | None = None,
 ) -> Planned | None:
     """The variant's key and its operation's request, as the shop's settings, the price
     book, the live machine rate, the printer's status and the filament types' presets
@@ -736,6 +805,7 @@ async def _planned(
         machine_rate=rate,
         printer=opening,
         type_presets=type_presets,
+        variant_key=variant_key,
     )
 
 
@@ -799,21 +869,31 @@ async def slice_estimate(
     reference: Reference,
     model_sha256: str,
     filaments: Sequence[Filament] | None,
+    variant_key: str | None = None,
 ) -> StoreEstimate:
     """The firm price of the render on screen (#6153): the cached price of its variant,
     else its slice started (the read starts it, and a re-read joins it) while fewer than
     ``storefront_slices_concurrent`` run, else pending. ``filaments`` are the price-book
     filament of each slot of the render, or None when a slot has none: then, and with no
     shop slice profile, no preset for a slot's material or no printer status, there is no
-    price."""
+    price. ``variant_key`` is the render's (#6921): the slice's ``done`` row records it,
+    and a ``done`` row from before #6921 takes it (:meth:`SlicePrices.adopt`)."""
     planned = await _planned(
-        state, reference=reference, model_sha256=model_sha256, filaments=filaments
+        state,
+        reference=reference,
+        model_sha256=model_sha256,
+        filaments=filaments,
+        variant_key=variant_key,
     )
     if planned is None:
         return NO_PRICE
     prices = _orders(state).slice_prices
     row = await asyncio.to_thread(prices.get, planned.key)
     if row is not None and row.status == "done":
+        if variant_key is not None and row.variant_key is None:
+            await asyncio.to_thread(
+                prices.adopt, planned.key, variant_key, planned.variant.slot_filaments
+            )
         return answer_of(row)
     await _settle_ended(state, prices)
     limit = (await asyncio.to_thread(state.settings_store.snapshot)).runtime
@@ -826,6 +906,61 @@ async def slice_estimate(
     assert claim.row is not None and claim.row.claim_key is not None
     await _start(state, prices, planned, claim.row.claim_key, claim.previous)
     return pending(planned.key)
+
+
+def last_answer(row: PriceRow) -> StoreEstimate:
+    """A ``done`` row as the instant read answers it when its key is not today's
+    (#6921): the variant's last price, which the page shows marked as updating. Never a
+    cart line's price (`line_prices.py` reads `firm_price` only)."""
+    assert row.currency is not None
+    return StoreEstimate(
+        source="last",
+        price_minor=row.total_minor,
+        currency=row.currency,
+        minor_exponent=minor_exponent(row.currency),
+        price_key=row.price_key,
+    )
+
+
+async def instant_price(
+    state: AppState, *, reference: Reference, variant_key: str
+) -> StoreEstimate:
+    """The price of a visitor's choices before any render (#6921), read only: it starts no
+    render and no slice. The newest ``done`` row of ``variant_key`` gives the 3MF's sha256
+    and the filament of each slot; with the shop's settings now (the same `_planned` inputs
+    as the estimate: the book, the live rate, the profile, the printer's opening and the
+    type presets) they give today's price key. When that key has a ``done`` row, it is the
+    firm price (``slice``). Else the newest row's price is the last price (``last``). With
+    no ``done`` row of the variant, ``none``."""
+    orders = _orders(state)
+    prices = orders.slice_prices
+    newest = await asyncio.to_thread(prices.newest_done, variant_key)
+    if newest is None or newest.currency is None or newest.total_minor is None:
+        return NO_PRICE
+    filaments = (
+        None
+        if newest.slot_filaments is None
+        else await asyncio.to_thread(_book_filaments, orders, newest.slot_filaments)
+    )
+    planned = await _planned(
+        state, reference=reference, model_sha256=newest.model_sha256, filaments=filaments
+    )
+    if planned is not None:
+        if planned.key == newest.price_key:
+            return answer_of(newest)
+        row = await asyncio.to_thread(prices.get, planned.key)
+        if row is not None and row.status == "done" and row.currency is not None:
+            return answer_of(row)
+    return last_answer(newest)
+
+
+def _book_filaments(orders: OrdersComponent, ids: Sequence[str]) -> list[Filament] | None:
+    """The price-book filament of each id, or None when one is gone or archived. Blocking:
+    call it in a thread."""
+    found = [orders.store.filament(filament_id) for filament_id in ids]
+    if any(record is None or record.archived_at is not None for record in found):
+        return None
+    return [record for record in found if record is not None]
 
 
 async def _start(

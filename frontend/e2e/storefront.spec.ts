@@ -45,6 +45,29 @@ test.describe('the public storefront', () => {
     await expect(page.locator('.sf-item')).toHaveCount(0)
   })
 
+  test('shows the preview and price of choices priced before at once, with no render (#6921)', async ({ page }) => {
+    await page.goto('/store/l/l1')
+    const name = page.getByLabel('Name', { exact: true })
+    await name.fill('Ada')
+    await expect(page.getByText('$12.40 for one')).toBeVisible()
+    await name.fill('Bo')
+    await expect(page.getByText('Updating this price…')).toBeVisible()
+    await expect(page.getByText('Updating this price…')).toBeHidden()
+    const renders: string[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/renders')) renders.push(request.url())
+    })
+    const read = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/listings/l1/variant'))
+    await name.fill('Ada')
+    await read
+    await expect(page.getByText('$12.40 for one')).toBeVisible()
+    await expect(page.getByText('Updating this price…')).toBeHidden()
+    await expect(page.locator('canvas')).toBeVisible()
+    await page.getByRole('button', { name: 'Add to order' }).click()
+    await expect(page.getByText('Added to your order.')).toBeVisible()
+    expect(renders).toEqual([])
+  })
+
   test("opens the customer's order from its link, accepts the design and sees Pay", async ({ page }) => {
     // #5283 (spec §5.6): the token is the URL fragment, which no request carries.
     const paths: string[] = []

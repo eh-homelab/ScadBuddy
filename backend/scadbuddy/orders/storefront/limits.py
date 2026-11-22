@@ -80,6 +80,9 @@ class OwnedRender:
     listing_id: str
     colours: dict[int, str]
     material: str | None = None
+    #: The variant key of the visitor's choices (#6921, `renders.py` `variant_key`); None
+    #: for a row made before.
+    variant_key: str | None = None
 
 
 def _seconds_until(leaves: datetime, at: datetime) -> int:
@@ -102,12 +105,13 @@ class RenderLimits:
         colours: Mapping[int, str],
         material: str | None,
         at: datetime | None,
+        variant_key: str | None,
     ) -> int:
         row = conn.execute(
             "INSERT INTO storefront_renders"
             " (visitor_id, client, listing_id, render_key, counted, colours, material,"
-            " created_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, coalesce(%s, clock_timestamp()))"
+            " variant_key, created_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, coalesce(%s, clock_timestamp()))"
             " RETURNING id",
             (
                 visitor_id,
@@ -117,6 +121,7 @@ class RenderLimits:
                 counted,
                 Jsonb({str(slot): f for slot, f in colours.items()}),
                 material,
+                variant_key,
                 at,
             ),
         ).fetchone()
@@ -160,6 +165,7 @@ class RenderLimits:
         now: datetime | None = None,
         colours: Mapping[int, str] | None = None,
         material: str | None = None,
+        variant_key: str | None = None,
     ) -> int:
         """A counted row for a render that costs a run, and its id; `RenderLimited` when
         the visitor, the client or the open renders are at their limit. ``visitor_id``
@@ -177,6 +183,7 @@ class RenderLimits:
                 colours=colours or {},
                 material=material,
                 at=now,
+                variant_key=variant_key,
             )
 
     def count(self, row_id: int, visitor_id: str, client: str, *, settings: Settings) -> None:
@@ -240,6 +247,7 @@ class RenderLimits:
         render_key: str,
         colours: Mapping[int, str] | None = None,
         material: str | None = None,
+        variant_key: str | None = None,
     ) -> int:
         """A row for a render the visitor shares with another: it costs nothing, and it
         lets the visitor read the job. Its id."""
@@ -253,6 +261,7 @@ class RenderLimits:
             colours=colours or {},
             material=material,
             at=None,
+            variant_key=variant_key,
         )
 
     def attach(self, row_id: int, job_id: str) -> None:
@@ -306,14 +315,19 @@ class RenderLimits:
         for that job."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT listing_id, colours, material FROM storefront_renders"
+                "SELECT listing_id, colours, material, variant_key FROM storefront_renders"
                 " WHERE visitor_id = %s AND job_id = %s ORDER BY id DESC LIMIT 1",
                 (visitor_id, job_id),
             ).fetchone()
         if row is None:
             return None
         colours = {int(slot): str(f) for slot, f in row["colours"].items()}
-        return OwnedRender(listing_id=row["listing_id"], colours=colours, material=row["material"])
+        return OwnedRender(
+            listing_id=row["listing_id"],
+            colours=colours,
+            material=row["material"],
+            variant_key=row["variant_key"],
+        )
 
     def job_of(self, visitor_id: str, render_key: str) -> str | None:
         """The job of the visitor's newest row for ``render_key`` that names one, or None

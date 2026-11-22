@@ -24,6 +24,9 @@ export type PublicParam = Listing['params'][string]
 export type Filament = Schemas['PublicFilament']
 export type StoreRender = Schemas['StoreRender']
 export type StoreEstimate = Schemas['StoreEstimate']
+/** What the shop holds of a visitor's choices at once (#6921): the instant price, a cached preview, the visitor's live render. */
+export type StoreVariant = Schemas['StoreVariant']
+export type VariantPreview = Schemas['VariantPreview']
 export type Draft = Schemas['DraftView']
 export type DraftItem = Schemas['DraftItem']
 export type TurnstileSiteKey = Schemas['TurnstileSiteKey']
@@ -172,6 +175,13 @@ export const store = {
     return call<Listings>(text ? `/listings?${text}` : '/listings')
   },
   listing: (id: string) => call<Listing>(`/listings/${encodeURIComponent(id)}`),
+  /**
+   * #6921: what the shop holds of these choices, at once. A read: no `Idempotency-Key`, and
+   * it starts no render and no slice. Its price is `slice` (firm), `last` (shown as updating,
+   * never firm) or `none`.
+   */
+  variant: (input: RenderInput) =>
+    call<StoreVariant>(`/listings/${encodeURIComponent(input.listing_id)}/variant`, { method: 'POST', json: input }),
   startRender: (input: RenderInput, key: string) => call<StoreRender>('/renders', { method: 'POST', json: input, key }),
   render: (jobId: string) => call<StoreRender>(`/renders/${encodeURIComponent(jobId)}`),
   estimate: (jobId: string) => call<StoreEstimate>(`/renders/${encodeURIComponent(jobId)}/estimate`),
