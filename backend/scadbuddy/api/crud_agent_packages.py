@@ -22,6 +22,18 @@ hashes a package; the API stores the pin it was given.
 - ``POST …/{name}/enabled`` the switch (409 ``package-unapproved`` before an approval);
 - ``POST …/{name}/delete`` the uninstall, with every access row and listing of the package.
 
+A pin is a commit (``pin_kind`` ``commit``, a repository source) or bytes (``bytes``, #6935:
+an archive or npm package, or a marketplace entry of either, pinned to the sha256 of the
+file the agent fetched). A bytes pin is stored only while its mirror is held (409
+``mirror-missing``); the agent sends the file first to area ``package-mirrors``:
+
+- ``PUT …/package-mirrors/{sha256}`` the raw bytes, at most `MAX_MIRROR_BYTES`, named by
+  their sha256 (422 otherwise), kept as a blob and held (`agent_data/package_mirrors.py`);
+  204;
+- ``GET …/package-mirrors/{sha256}`` the bytes, or 404 ``mirror-not-found``.
+
+Every package write also releases the holds of mirrors no pin names, past their grace.
+
 A package that is not there is 404 ``package-not-found``. Each refusal's text is the
 agent's ``PluginError``'s, which the agent raises again with the route's status.
 """
@@ -29,19 +41,26 @@ agent's ``PluginError``'s, which the agent raises again with the route's status.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
+import tempfile
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 import psycopg
-from fastapi import Path, Query, status
+from fastapi import Path, Query, Request, status
+from fastapi.responses import FileResponse
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from scadbuddy.agent_data import package_mirrors
 from scadbuddy.agent_data.access import notify_warm_evict
+from scadbuddy.agent_data.package_mirrors import MAX_MIRROR_BYTES
 from scadbuddy.agent_data.packages import forget_package, prune_stale_rows
 from scadbuddy.api.deps import StateDep
+from scadbuddy.api.limits import RouteLimit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 
@@ -51,6 +70,7 @@ router = crud_router("agent")
 NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
 COMMIT_PATTERN = r"^([0-9a-f]{40}|[0-9a-f]{64})$"
 HASH_PATTERN = r"^sha256:[0-9a-f]{64}$"
+SHA256_PATTERN = r"^[0-9a-f]{64}$"
 URL_MAX = 2048
 TEXT_MAX = 1024
 #: The largest JSON text of a pin's file list and of its review.
@@ -65,8 +85,45 @@ PACKAGE_NAME_DIFFERS = "package-name-differs"
 PIN_MISMATCH = "pin-mismatch"
 REFUSED_NEEDS_ALLOW = "refused-needs-allow"
 PACKAGE_UNAPPROVED = "package-unapproved"
+MIRROR_MISSING = "mirror-missing"
+MIRROR_NOT_FOUND = "mirror-not-found"
 
 Name = Annotated[str, Path(pattern=NAME_PATTERN)]
+Sha256 = Annotated[str, Path(pattern=SHA256_PATTERN)]
+
+#: Where a package comes from (the table's CHECK). ``hosted`` is the schema's only (#6934).
+SourceKind = Literal["git", "marketplace", "marketplace-url", "archive", "npm", "hosted"]
+#: The kinds an install here may name.
+InstallKind = Literal["git", "marketplace", "marketplace-url", "archive", "npm"]
+PinKind = Literal["commit", "bytes"]
+#: The kinds that name a marketplace entry.
+MARKETPLACE_KINDS = frozenset({"marketplace", "marketplace-url"})
+#: The kinds whose ref names what was asked for (a branch, tag or commit), never empty.
+REF_KINDS = frozenset({"git", "marketplace"})
+
+
+def pin_fits(source_kind: str, pin_kind: str) -> bool:
+    """The table's ``ai_plugin_packages_source_pin_check``: which pin a source can have."""
+    match source_kind:
+        case "git":
+            return pin_kind == "commit"
+        case "archive" | "npm":
+            return pin_kind == "bytes"
+        case "hosted":
+            return pin_kind == "version"
+        case _:
+            return pin_kind in ("commit", "bytes")
+
+
+#: For ``main.py``'s `BodySizeGate`: a mirror's PUT, whatever its content type, refused on
+#: its Content-Length or, without one, as the body streams.
+MIRROR_ROUTE_LIMIT = RouteLimit(
+    "PUT",
+    re.compile(r"^/api/v1/internal/crud/agent/package-mirrors/"),
+    MAX_MIRROR_BYTES,
+    "a plugin package's archive",
+    "fixed, agent_data/package_mirrors.py MAX_MIRROR_BYTES",
+)
 
 
 class _Body(BaseModel):
@@ -83,13 +140,16 @@ class PackageRow(BaseModel):
     """One ``ai_plugin_packages`` row, every column."""
 
     name: str
-    source_kind: Literal["git", "marketplace"]
+    source_kind: SourceKind
     source_url: str
     source_ref: str
     marketplace_entry: str | None
     fetch_url: str
     fetch_path: str
-    commit_sha: str
+    pin_kind: Literal["commit", "bytes", "version"]
+    commit_sha: str | None
+    bytes_sha256: str | None
+    version: int | None
     content_hash: str
     files: dict[str, Any]
     review: dict[str, Any]
@@ -99,7 +159,10 @@ class PackageRow(BaseModel):
     pending_ref: str | None
     pending_fetch_url: str | None
     pending_fetch_path: str | None
+    pending_pin_kind: Literal["commit", "bytes", "version"] | None
     pending_commit_sha: str | None
+    pending_bytes_sha256: str | None
+    pending_version: int | None
     pending_content_hash: str | None
     pending_files: dict[str, Any] | None
     pending_review: dict[str, Any] | None
@@ -147,6 +210,33 @@ def _refused(review: dict[str, Any]) -> list[str]:
     return list(refused) if isinstance(refused, list) else []
 
 
+def _pin_id(row: Any, prefix: str = "") -> str | None:
+    """The row's (or with ``pending_``, its re-pin's) commit or bytes sha256."""
+    kind = row[f"{prefix}pin_kind"]
+    if kind == "commit":
+        return row[f"{prefix}commit_sha"]  # type: ignore[no-any-return]
+    if kind == "bytes":
+        return row[f"{prefix}bytes_sha256"]  # type: ignore[no-any-return]
+    return None
+
+
+def _mirror_held(conn: psycopg.Connection[Any], body: Pin) -> None:
+    """A bytes pin is stored only while its mirror is held: a load reads that copy."""
+    if body.bytes_sha256 is not None and not package_mirrors.held(conn, body.bytes_sha256):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"no mirror of the bytes {body.bytes_sha256} is kept; send them first",
+            reason=MIRROR_MISSING,
+        )
+
+
+def _written(conn: psycopg.Connection[Any]) -> None:
+    """What every package write ends with: the warm-evict NOTIFY, and the release of the
+    mirrors no pin names any more."""
+    package_mirrors.release_unnamed(conn)
+    notify_warm_evict(conn)
+
+
 def _locked(conn: psycopg.Connection[Any], name: str) -> Any:
     row = conn.execute(
         "SELECT * FROM ai_plugin_packages WHERE name = %s FOR UPDATE", (name,)
@@ -177,11 +267,13 @@ async def plugin_package(name: Name, state: StateDep) -> Package:
 
 
 class Pin(_Body):
-    """A fetched, vetted and hashed commit, as the agent prepared it."""
+    """A fetched, vetted and hashed commit or file, as the agent prepared it."""
 
     fetch_url: str = Field(min_length=1, max_length=URL_MAX)
     fetch_path: str = Field(max_length=TEXT_MAX)
-    commit_sha: str = Field(pattern=COMMIT_PATTERN)
+    pin_kind: PinKind = "commit"
+    commit_sha: str | None = Field(default=None, pattern=COMMIT_PATTERN)
+    bytes_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     content_hash: str = Field(pattern=HASH_PATTERN)
     files: dict[str, Any]
     review: dict[str, Any]
@@ -196,13 +288,31 @@ class Pin(_Body):
     def _review(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _bounded(value, REVIEW_JSON_MAX, "review")
 
+    @model_validator(mode="after")
+    def _one_pin(self) -> Self:
+        commit = self.pin_kind == "commit"
+        if commit != (self.commit_sha is not None) or commit == (self.bytes_sha256 is not None):
+            field = "commit_sha" if commit else "bytes_sha256"
+            raise ValueError(f"a {self.pin_kind} pin names its {field} only")
+        return self
+
 
 class Install(Pin):
     name: str = Field(pattern=NAME_PATTERN)
-    source_kind: Literal["git", "marketplace"]
+    source_kind: InstallKind
     source_url: str = Field(min_length=1, max_length=URL_MAX)
-    source_ref: str = Field(min_length=1, max_length=TEXT_MAX)
+    #: The ref asked for: a branch, tag or commit for a repository; an npm version or
+    #: dist-tag (empty for a tarball link); an archive's expected ``sha256:`` or empty.
+    source_ref: str = Field(max_length=TEXT_MAX)
     marketplace_entry: str | None = Field(default=None, max_length=TEXT_MAX)
+
+    @model_validator(mode="after")
+    def _fits(self) -> Self:
+        if not pin_fits(self.source_kind, self.pin_kind):
+            raise ValueError(f"a {self.source_kind} source cannot have a {self.pin_kind} pin")
+        if self.source_kind in REF_KINDS and not self.source_ref:
+            raise ValueError(f"a {self.source_kind} source names its ref")
+        return self
 
 
 @router.post(
@@ -219,20 +329,24 @@ async def plugin_package_install(body: Install, state: StateDep) -> PackageRow:
         )
 
     def run(conn: psycopg.Connection[Any]) -> PackageRow:
+        _mirror_held(conn, body)
         row = conn.execute(
             "INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref,"
-            " marketplace_entry, fetch_url, fetch_path, commit_sha, content_hash, files, review)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " marketplace_entry, fetch_url, fetch_path, pin_kind, commit_sha, bytes_sha256,"
+            " content_hash, files, review)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             " ON CONFLICT (name) DO NOTHING RETURNING *",
             (
                 body.name,
                 body.source_kind,
                 body.source_url,
                 body.source_ref,
-                body.marketplace_entry if body.source_kind == "marketplace" else None,
+                body.marketplace_entry if body.source_kind in MARKETPLACE_KINDS else None,
                 body.fetch_url,
                 body.fetch_path,
+                body.pin_kind,
                 body.commit_sha,
+                body.bytes_sha256,
                 body.content_hash,
                 Jsonb(body.files),
                 Jsonb(body.review),
@@ -246,14 +360,14 @@ async def plugin_package_install(body: Install, state: StateDep) -> PackageRow:
             )
         # What an older replica's remove left: a re-install starts at the defaults.
         forget_package(conn, body.name)
-        notify_warm_evict(conn)
+        _written(conn)
         return _row(row)
 
     return await _in_tx(state, run)
 
 
 class Pending(Pin):
-    ref: str = Field(min_length=1, max_length=TEXT_MAX)
+    ref: str = Field(max_length=TEXT_MAX)
 
 
 @router.post("/plugin-packages/{name}/pending", name="crud_agent_plugin_package_pending")
@@ -266,29 +380,44 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
             reason=PACKAGE_NAME_DIFFERS,
         )
 
+    pin_id = body.commit_sha or body.bytes_sha256
+
     def run(conn: psycopg.Connection[Any]) -> PackageRow:
         current = _locked(conn, name)
+        kind = current["source_kind"]
+        if not pin_fits(kind, body.pin_kind):
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"a {kind} source cannot have a {body.pin_kind} pin",
+            )
+        if kind in REF_KINDS and not body.ref:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"a {kind} source names its ref")
+        _mirror_held(conn, body)
         if (
-            current["commit_sha"] == body.commit_sha
+            current["pin_kind"] == body.pin_kind
+            and _pin_id(current) == pin_id
             and current["content_hash"] == body.content_hash
             and current["fetch_url"] == body.fetch_url
             and current["fetch_path"] == body.fetch_path
         ):
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                f'"{name}" is already pinned to {body.commit_sha}',
+                f'"{name}" is already pinned to {pin_id}',
                 reason=PACKAGE_PINNED,
             )
         row = conn.execute(
             "UPDATE ai_plugin_packages SET pending_ref = %s, pending_fetch_url = %s,"
-            " pending_fetch_path = %s, pending_commit_sha = %s, pending_content_hash = %s,"
+            " pending_fetch_path = %s, pending_pin_kind = %s, pending_commit_sha = %s,"
+            " pending_bytes_sha256 = %s, pending_version = NULL, pending_content_hash = %s,"
             " pending_files = %s, pending_review = %s, updated_at = now()"
             " WHERE name = %s RETURNING *",
             (
                 body.ref,
                 body.fetch_url,
                 body.fetch_path,
+                body.pin_kind,
                 body.commit_sha,
+                body.bytes_sha256,
                 body.content_hash,
                 Jsonb(body.files),
                 Jsonb(body.review),
@@ -297,7 +426,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
         ).fetchone()
         assert row is not None
         prune_stale_rows(conn, name, row["review"])
-        notify_warm_evict(conn)
+        _written(conn)
         return _row(row)
 
     return await _in_tx(state, run)
@@ -308,7 +437,8 @@ async def plugin_package_discard(name: Name, state: StateDep) -> PackageRow:
     def run(conn: psycopg.Connection[Any]) -> PackageRow:
         row = conn.execute(
             "UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL,"
-            " pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,"
+            " pending_fetch_path = NULL, pending_pin_kind = NULL, pending_commit_sha = NULL,"
+            " pending_bytes_sha256 = NULL, pending_version = NULL, pending_content_hash = NULL,"
             " pending_files = NULL, pending_review = NULL, updated_at = now()"
             " WHERE name = %s RETURNING *",
             (name,),
@@ -316,16 +446,33 @@ async def plugin_package_discard(name: Name, state: StateDep) -> PackageRow:
         if row is None:
             raise _not_found(name)
         prune_stale_rows(conn, name, row["review"])
-        notify_warm_evict(conn)
+        _written(conn)
         return _row(row)
 
     return await _in_tx(state, run)
 
 
 class Approve(_Body):
-    commit_sha: str = Field(pattern=COMMIT_PATTERN)
+    """The pin the review showed: its commit, or for a bytes pin its bytes' sha256."""
+
+    commit_sha: str | None = Field(default=None, pattern=COMMIT_PATTERN)
+    bytes_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     content_hash: str = Field(pattern=HASH_PATTERN)
     allow_refused: bool = False
+
+    @model_validator(mode="after")
+    def _one(self) -> Self:
+        if (self.commit_sha is None) == (self.bytes_sha256 is None):
+            raise ValueError("name the pin by commit_sha or by bytes_sha256, not both")
+        return self
+
+    @property
+    def kind(self) -> str:
+        return "commit" if self.commit_sha is not None else "bytes"
+
+    @property
+    def pin_id(self) -> str:
+        return self.commit_sha or self.bytes_sha256 or ""
 
 
 @router.post("/plugin-packages/{name}/approve", name="crud_agent_plugin_package_approve")
@@ -333,11 +480,13 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
     def run(conn: psycopg.Connection[Any]) -> PackageRow:
         current = _locked(conn, name)
         is_pending = (
-            current["pending_commit_sha"] == body.commit_sha
+            current["pending_pin_kind"] == body.kind
+            and _pin_id(current, "pending_") == body.pin_id
             and current["pending_content_hash"] == body.content_hash
         )
         is_current = (
-            current["commit_sha"] == body.commit_sha
+            current["pin_kind"] == body.kind
+            and _pin_id(current) == body.pin_id
             and current["content_hash"] == body.content_hash
         )
         if not is_pending and not is_current:
@@ -368,18 +517,22 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
             row = conn.execute(
                 "UPDATE ai_plugin_packages SET enabled = enabled AND NOT %s,"
                 " source_ref = pending_ref, fetch_url = pending_fetch_url,"
-                " fetch_path = pending_fetch_path, commit_sha = pending_commit_sha,"
+                " fetch_path = pending_fetch_path, pin_kind = pending_pin_kind,"
+                " commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,"
+                " version = pending_version,"
                 " content_hash = pending_content_hash, files = pending_files,"
                 " review = pending_review, approved_at = now(), allow_refused = %s,"
                 " pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,"
-                " pending_commit_sha = NULL, pending_content_hash = NULL,"
+                " pending_pin_kind = NULL, pending_commit_sha = NULL,"
+                " pending_bytes_sha256 = NULL, pending_version = NULL,"
+                " pending_content_hash = NULL,"
                 " pending_files = NULL, pending_review = NULL, updated_at = now()"
                 " WHERE name = %s RETURNING *",
                 (moved, allow, name),
             ).fetchone()
             assert row is not None
             prune_stale_rows(conn, name, row["review"])
-            notify_warm_evict(conn)
+            _written(conn)
             return _row(row)
         if current["approved_at"] is not None and current["allow_refused"] == allow:
             if prune_stale_rows(conn, name, current["review"]):
@@ -392,7 +545,7 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
         ).fetchone()
         assert row is not None
         prune_stale_rows(conn, name, row["review"])
-        notify_warm_evict(conn)
+        _written(conn)
         return _row(row)
 
     return await _in_tx(state, run)
@@ -419,7 +572,7 @@ async def plugin_package_enabled(name: Name, body: Enabled, state: StateDep) -> 
         ).fetchone()
         assert row is not None
         prune_stale_rows(conn, name, row["review"])
-        notify_warm_evict(conn)
+        _written(conn)
         return _row(row)
 
     return await _in_tx(state, run)
@@ -432,7 +585,59 @@ async def plugin_package_delete(name: Name, state: StateDep) -> Done:
         if gone == 0:
             return False
         forget_package(conn, name)
-        notify_warm_evict(conn)
+        _written(conn)
         return True
 
     return Done(done=await _in_tx(state, run))
+
+
+@router.put(
+    "/package-mirrors/{sha256}",
+    name="crud_agent_package_mirror_put",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def package_mirror_put(sha256: Sha256, request: Request, state: StateDep) -> None:
+    too_large = ApiError(
+        status.HTTP_413_CONTENT_TOO_LARGE,
+        f"a plugin package's archive is at most {MAX_MIRROR_BYTES} bytes",
+    )
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_MIRROR_BYTES:
+        raise too_large
+    with tempfile.TemporaryFile() as spool:
+        digest = hashlib.sha256()
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_MIRROR_BYTES:
+                raise too_large
+            digest.update(chunk)
+            await asyncio.to_thread(spool.write, chunk)
+        if digest.hexdigest() != sha256:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "a mirror's name is its bytes' sha256"
+            )
+        await package_mirrors.keep(state.store.blobs, spool, sha256)
+
+    def run(conn: psycopg.Connection[Any]) -> None:
+        package_mirrors.hold(conn, sha256)
+        package_mirrors.release_unnamed(conn)
+
+    await _in_tx(state, run)
+
+
+@router.get(
+    "/package-mirrors/{sha256}",
+    name="crud_agent_package_mirror",
+    response_class=FileResponse,
+    responses={200: {"content": {"application/octet-stream": {}}}},
+)
+async def package_mirror(sha256: Sha256, state: StateDep) -> FileResponse:
+    path = await package_mirrors.path_of(state.store.blobs, sha256)
+    if path is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            f"no mirror of the bytes {sha256} is kept",
+            reason=MIRROR_NOT_FOUND,
+        )
+    return FileResponse(path, media_type="application/octet-stream")

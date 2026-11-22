@@ -406,5 +406,9 @@
   {
     "id": "20261118T0811Z_session_blobs_pdf",
     "sha256": "441887ac5ead59fc0907a09563f6eec7c0d3e83ebbd7fde3b65646f65eb13124"
+  },
+  {
+    "id": "20261122T0323Z_plugin_package_pins",
+    "sha256": "7468aec87f4aadbe99d72c42cebc6d84001a39526d37ad5aeaf8a88705c5d3de"
   }
 ]

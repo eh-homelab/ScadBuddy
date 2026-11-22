@@ -32,6 +32,7 @@ from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.agent_data.rotation import rotate as rotate_agent_secrets
 from scadbuddy.api import (
     crud_agent_events,
+    crud_agent_packages,
     crud_agent_transcripts,
     crud_agent_turns,
     crud_print,
@@ -2495,6 +2496,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             crud_agent_transcripts.ROUTE_LIMIT,
             crud_agent_turns.ROUTE_LIMIT,
             crud_agent_events.ROUTE_LIMIT,
+            # A plugin package's archive or npm tarball, mirrored by the agent (#6935).
+            crud_agent_packages.MIRROR_ROUTE_LIMIT,
         ],
     )
     # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).
