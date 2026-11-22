@@ -123,7 +123,7 @@ describe('QueuedPanel · a LAN run of several plate copies', () => {
   it("offers the run's controls while its progress says prints are still to start", () => {
     const progress: PrintProgress = {
       ...lanProgress,
-      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: true, queued: false },
+      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: true, queued: false, queued_for_print: false },
     }
     render(
       <QueuedPanel result={{ ...queuedResult, path: 'native', copies: 2, lan_waiting: [1] }} printerName="H2C" progress={progress} polling />,
@@ -167,7 +167,9 @@ describe('QueuedPanel · a run queued on a busy printer', () => {
     expect(items).toHaveTextContent(
       'ScadBuddy sends it once the printer has finished and someone says the plate is clear.',
     )
-    expect(screen.getByTestId('lan-queued-place')).toHaveTextContent('Place 2 in the queue for H2C.')
+    expect(screen.getByTestId('lan-queued-place')).toHaveTextContent(
+      '1 earlier run waits for H2C. The run whose plate is said clear first starts first.',
+    )
     expect(screen.getByRole('link', { name: 'Open the queue' })).toHaveAttribute('href', '/prints')
     expect(items).not.toHaveTextContent('Sliced and sent')
     expect(items).not.toHaveTextContent('may still have been queued')
@@ -178,6 +180,7 @@ describe('QueuedPanel · a run queued on a busy printer', () => {
     expect(screen.getByTestId('queued-items')).toHaveTextContent(
       'Queued for H2C: its plate must be cleared first, so nothing was sent to it yet.',
     )
+    expect(screen.getByTestId('lan-queued-place')).toHaveTextContent('No earlier ScadBuddy run waits for H2C.')
   })
 
   it('names no place when it could not be read', () => {
