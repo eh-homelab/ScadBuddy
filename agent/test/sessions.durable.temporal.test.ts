@@ -2,7 +2,7 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import type { Client } from '@temporalio/client'
+import { ApplicationFailure, type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import type { Sql } from 'postgres'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AttachmentStore } from './support/sql/attachments.js'
@@ -360,6 +360,22 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       }
     }, 30_000)
   }
+
+  it('a send whose second try, after the ending run closed, meets a run ending again is refused `unavailable` (#7031)', async () => {
+    // A second archive races the retry: both tries are refused `ended`. Nothing took the message.
+    const m = await durableManager({ sendTimeoutMs: 5_000, describe: async () => 'closed' })
+    const ended = () => new WorkflowUpdateFailedError('refused', ApplicationFailure.create({ type: 'ended', message: 'the session ended' }))
+    const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart').mockImplementation(() => Promise.reject(ended()))
+    try {
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      await expect(m.send(session.id, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/did not take the message/) })
+      expect(spy).toHaveBeenCalledTimes(2)
+      const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
+      expect(row).toEqual({ status: 'idle', durable_turn_id: null })
+    } finally {
+      spy.mockRestore()
+    }
+  }, 30_000)
 
   it('sends nothing again when the turn ended while its workflow was described (#6353 review)', async () => {
     // The workflow took the first Update after all, finished the turn (releasing the row) and

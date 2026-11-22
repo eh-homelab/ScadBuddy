@@ -202,7 +202,9 @@ function queueRefusal(err: unknown, id: string, what: string): SessionError {
   if (cause instanceof ApplicationFailure) {
     if (cause.type === QUEUE_FULL) return new SessionError('queue_full', cause.message)
     if (cause.type === NOT_QUEUED) return new SessionError('not_queued', cause.message)
-    if (cause.type === 'ended') return new SessionError('closed', `session ${id} is done`)
+    // The row refuses a done session first (manager.ts `mayQueue`): a run refuses `ended` only while
+    // it closes after an `end` (an archive, #7031, or a done whose edit has not landed).
+    if (cause.type === ENDED) return new SessionError('unavailable', `session ${id}'s workflow is ending; send the message again in a moment`)
     if (cause.type === 'invalid') return new SessionError('invalid', cause.message)
   }
   if (err instanceof WorkflowNotFoundError) return new SessionError('unavailable', `session ${id}'s workflow is not running; send the message again once its turn has ended`)
@@ -409,7 +411,8 @@ export class DurableTurns {
     } catch (err) {
       const refusal = queueRefusal(err, id, 'queue the message')
       // Refused, it was never queued: what its write made goes. Any other failure may have queued it.
-      if (refusal.code === 'queue_full' || refusal.code === 'closed') {
+      const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
+      if (refusal.code === 'queue_full' || (cause instanceof ApplicationFailure && cause.type === ENDED)) {
         for (const write of made) {
           await this.#blobs.delete(id, write).catch(() => {
             console.warn(`durable send: session ${id}: a refused message's images were not deleted`)
@@ -563,8 +566,11 @@ export class DurableTurns {
     })
     // The turn id as the update id: a re-send of the same turn is the same Update.
     const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
+    // One deadline for the whole send: the Update, and, when it meets a run that is ending, the
+    // wait for that run to close and the Update once more.
+    const deadline = Date.now() + this.#sendTimeoutMs
     const send = () =>
-      this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
+      this.#client.withDeadline(deadline, () =>
         this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
           SEND_MESSAGE_UPDATE,
           { ...update, startWorkflowOperation: operation() },
@@ -580,9 +586,9 @@ export class DurableTurns {
         // did not land) and is closing. The claim passed, so the row is not done: once that run
         // closes, the same Update starts a new one. The closing run refused it, so it never took it.
         const workflowId = sessionWorkflowId(session.id)
-        await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () => this.#client.workflow.getHandle(workflowId).result()).catch(() => undefined)
-        const state = await this.#describe(workflowId).catch(() => 'open' as const)
-        // Still closing past the wait: nothing took the message, so the claim is given back.
+        await this.#client.withDeadline(deadline, () => this.#client.workflow.getHandle(workflowId).result()).catch(() => undefined)
+        const state = Date.now() < deadline ? await this.#describe(workflowId).catch(() => 'open' as const) : 'open'
+        // Still closing, or no time left for the Update: nothing took the message, so the claim is given back.
         if (state !== 'closed' && state !== 'not_found') throw new SessionError('unavailable', `session ${session.id}'s workflow is still ending; send the message again in a moment`)
         await send()
       }
