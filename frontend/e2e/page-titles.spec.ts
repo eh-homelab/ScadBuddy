@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
-import { spoolId, T } from '../src/mocks/features/filament/seed'
+import { L, spoolId, T } from '../src/mocks/features/filament/seed'
 import { INVOICE, SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
 
 // #2454 review — every routed page names its tab from its <h1> (usePageTitle). A page
@@ -59,6 +59,9 @@ const PAGES = [
   '/filament/invoices',
   `/filament/invoices/${INVOICE.CONFIRMED_A}`,
   '/filament/locations',
+  // A place's page and a scanned code (#6955): the code opens the place, slot 1 of AMS-A.
+  `/filament/locations/${L.AMS_A1}`,
+  '/x/L-4',
   '/filament/catalog',
   '/filament/metrics',
   '/filament/shopping-list',
