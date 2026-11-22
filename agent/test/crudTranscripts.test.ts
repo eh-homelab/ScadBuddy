@@ -1,6 +1,6 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
-import { describe, expect, it } from 'vitest'
-import { CrudReadError } from '../src/api/crudRead.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CrudReadError, RETRY_DELAYS_MS, backendDropped } from '../src/api/crudRead.js'
 import { APPEND_ENTRIES_MAX, CrudTranscriptRows, OWN_MAX, appendBatches } from '../src/sessions/crudTranscripts.js'
 import { TranscriptStore } from '../src/sessions/store.js'
 import { SubjectForgotten } from '../src/temporal/payloadCodec.js'
@@ -177,5 +177,99 @@ describe('a transcript over the CRUD routes', () => {
     ])
     const posted = api.seen.filter((s) => s.method === 'POST').map((s) => (s.body as { entries: string[] }).entries)
     expect(posted).toEqual([['{"type":"a"}'], ['{"type":"b"}']])
+  })
+
+  describe('a connection the API drops mid-rollout (#6994)', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** Node's fetch as it rejects when undici's socket closes under it (`UND_ERR_SOCKET`, `ECONNRESET` ...). */
+    const dropped = (code: string) => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code }) })
+
+    /** `api`, its first `drops` calls rejected as a dropped connection of `code`, each one still recorded. */
+    function dropping(api: FakeApi, drops: number, code = 'UND_ERR_SOCKET'): { fetch: typeof fetch; calls: () => number } {
+      let calls = 0
+      return {
+        calls: () => calls,
+        fetch: async (input, init) => {
+          calls += 1
+          if (calls <= drops) throw dropped(code)
+          return api.fetch(input, init)
+        },
+      }
+    }
+
+    it('loads the transcript once the read is sent again after a socket reset', async () => {
+      const api = new FakeApi().answer(`GET /sessions/${SESSION}/transcript`, { entries: ['{"type":"x"}'] })
+      const net = dropping(api, 2)
+      const store = new TranscriptStore(new CrudTranscriptRows(BASE, { fetch: net.fetch }))
+      expect(await store.load(KEY)).toEqual([{ type: 'x' }])
+      expect(net.calls()).toBe(3)
+    })
+
+    it.each(['UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'ECONNRESET', 'EPIPE'])('sends a read again after %s', async (code) => {
+      const api = new FakeApi().answer(`GET /sessions/${SESSION}/transcript/head`, { exists: true, since: '7' })
+      const net = dropping(api, 1, code)
+      expect(await new CrudTranscriptRows(BASE, { fetch: net.fetch }).head(SESSION)).toEqual({ exists: true, since: '7' })
+      expect(net.calls()).toBe(2)
+    })
+
+    it("sends the tail check again, a read the route takes a body for", async () => {
+      const api = new FakeApi().answer(`POST /sessions/${SESSION}/transcript/moved`, { moved: false })
+      const net = dropping(api, 1)
+      expect(await new CrudTranscriptRows(BASE, { fetch: net.fetch }).moved(SESSION, '1', ['u1'])).toBe(false)
+      expect(net.calls()).toBe(2)
+    })
+
+    it('never sends an append twice: a write whose answer was lost may have landed, and the fence decides the next placement', async () => {
+      const net = dropping(new FakeApi(), 1)
+      const error = await new CrudTranscriptRows(BASE, { fetch: net.fetch })
+        .append(KEY, [{ type: 'x' }] as unknown as SessionStoreEntry[], { attempt: 'run:1', turnId: 'turn-1' })
+        .catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(CrudReadError)
+      expect((error as CrudReadError).message).toBe(`the backend could not be reached (the transcript of session ${SESSION}: UND_ERR_SOCKET)`)
+      expect(backendDropped(error)).toBe(true)
+      expect(net.calls()).toBe(1)
+    })
+
+    it('gives a read up after its bounded retries, as a dropped connection the turn can place again', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+      const net = dropping(new FakeApi(), Infinity, 'ECONNRESET')
+      const read = new CrudTranscriptRows(BASE, { fetch: net.fetch }).transcript(SESSION).catch((e: unknown) => e)
+      await vi.runAllTimersAsync()
+      const error = await read
+      expect(net.calls()).toBe(RETRY_DELAYS_MS.length + 1)
+      expect(error).toBeInstanceOf(CrudReadError)
+      expect(backendDropped(new Error('the load failed', { cause: error }))).toBe(true)
+    })
+
+    it('leaves a refused connection to the caller: nothing listens yet, and the turn is placed again once it waited', async () => {
+      const net = dropping(new FakeApi(), 1, 'ECONNREFUSED')
+      const error = await new CrudTranscriptRows(BASE, { fetch: net.fetch }).transcript(SESSION).catch((e: unknown) => e)
+      expect(net.calls()).toBe(1)
+      expect((error as CrudReadError).message).toBe(`the backend is not up yet (the transcript of session ${SESSION}: ECONNREFUSED)`)
+      expect(backendDropped(error)).toBe(true)
+    })
+
+    it('never sends a read again after a timeout or an answer: only a dropped connection is transient', async () => {
+      const api = new FakeApi().answer(`GET /sessions/${SESSION}/transcript`, { detail: 'boom' }, 500)
+      let calls = 0
+      const counted: typeof fetch = async (input, init) => {
+        calls += 1
+        return api.fetch(input, init)
+      }
+      const refused = await new CrudTranscriptRows(BASE, { fetch: counted }).transcript(SESSION).catch((e: unknown) => e)
+      expect(calls).toBe(1)
+      expect(backendDropped(refused)).toBe(false)
+      const timedOut: typeof fetch = async () => {
+        calls += 1
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+      }
+      calls = 0
+      const late = await new CrudTranscriptRows(BASE, { fetch: timedOut }).transcript(SESSION).catch((e: unknown) => e)
+      expect(calls).toBe(1)
+      expect(backendDropped(late)).toBe(false)
+    })
   })
 })

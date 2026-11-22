@@ -56,7 +56,10 @@ areas)` (`src/aiStatus.ts`). There is no migration wait: the tests' ledger wait 
 `test/support/schema.ts`, and their file list `test/support/expected-migrations.json`. Backend
 `api/crud_agent_start.py` (#6501; test `test/crudStart.test.ts`) serves area `auth-sessions`.
 A route's answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's
-error path (a lookup failure the activity retries, a 500, a resync). Each area, its client
+error path (a lookup failure the activity retries, a 500, a resync). A GET, or a call marked
+`idempotent`, whose connection drops (`crudRead.ts` `TRANSIENT_KINDS`, not a refusal, which its caller
+waits out) is sent again after `RETRY_DELAYS_MS`; a write never is. A turn that still fails on one is placed again
+(`BackendUnreachable`, #6994). Each area, its client
 and its backend module:
 
 - `auth-sessions`: a signed-in person's session (`src/auth/browserSession.ts`,

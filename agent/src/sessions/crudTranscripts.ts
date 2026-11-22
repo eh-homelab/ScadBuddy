@@ -53,12 +53,14 @@ export class CrudTranscriptRows implements TranscriptRows {
     this.#fetch = options.fetch ?? globalThis.fetch
   }
 
-  async #call<T>(step: string, path: string, init: { body?: unknown; timeoutMs?: number } = {}): Promise<T> {
+  /** A GET is tried again when the connection drops (crudRead.ts `crudFetch`), and a POST only when `idempotent`: an append never is. */
+  async #call<T>(step: string, path: string, init: { body?: unknown; timeoutMs?: number; idempotent?: boolean } = {}): Promise<T> {
     try {
       return await crudRead<T>(this.#fetch, this.#base, step, path, {
         // Well-formed: the API refuses a lone surrogate, which postgres.js wrote as U+FFFD (crudRead.ts).
         ...(init.body === undefined ? {} : { method: 'POST' as const, body: wellFormed(init.body) }),
         ...(init.timeoutMs === undefined ? {} : { timeoutMs: init.timeoutMs }),
+        ...(init.idempotent ? { idempotent: true } : {}),
       })
     } catch (error) {
       // A forgotten session: as a payload key's lookup answers one.
@@ -161,7 +163,8 @@ export class CrudTranscriptRows implements TranscriptRows {
     // More than the route takes: the process is spawned again rather than its tail read in part.
     if (own.length > OWN_MAX) return true
     const path = this.#path(sessionId, '/transcript/moved')
-    return (await this.#call<{ moved: boolean }>(`the transcript tail of session ${sessionId}`, path, { body: { since, own } })).moved
+    // A read the route takes a body for: sent again when the connection drops.
+    return (await this.#call<{ moved: boolean }>(`the transcript tail of session ${sessionId}`, path, { body: { since, own }, idempotent: true })).moved
   }
 
   async userLanded(sessionId: string, mark: number): Promise<boolean> {

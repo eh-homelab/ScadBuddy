@@ -22,7 +22,7 @@ import { TASK_QUEUE } from '../src/temporal/names.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import type { BeginOutcome, BeginTurnInput, FinishTurnInput, Message, OpenInputArgs, QueueAnswer, QueueChangedInput, QueuedMessage, QueueState, SessionStart, SessionTurnInput, SessionTurnResult } from '../src/temporal/session/models.js'
 import { QUEUE_MAX } from '../src/temporal/session/models.js'
-import { ACQUIRE_WORKER_ACTIVITY, EDIT_QUEUED_UPDATE, NO_CAPACITY, QUEUE_MESSAGE_UPDATE, QUEUE_QUERY, REMOVE_QUEUED_UPDATE, SESSION_BEGIN_TURN_ACTIVITY, SESSION_QUEUE_CHANGED_ACTIVITY, OPEN_INPUT_UPDATE, TAB_RECONNECTED_UPDATE, OWNER_CHANGED_SIGNAL, PLACEMENT_MOVED, SESSION_GATE_ACTIVITIES as GATE, SESSION_GONE, RELEASE_WORKER_ACTIVITY, SEND_MESSAGE_UPDATE, SESSION_FINISH_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, SESSION_TURN_ACTIVITY, SESSION_WORKFLOW, sessionHostQueue, TURN_QUERY } from '../src/temporal/session/names.js'
+import { ACQUIRE_WORKER_ACTIVITY, BACKEND_UNREACHABLE, EDIT_QUEUED_UPDATE, NO_CAPACITY, QUEUE_MESSAGE_UPDATE, QUEUE_QUERY, REMOVE_QUEUED_UPDATE, SESSION_BEGIN_TURN_ACTIVITY, SESSION_QUEUE_CHANGED_ACTIVITY, OPEN_INPUT_UPDATE, TAB_RECONNECTED_UPDATE, OWNER_CHANGED_SIGNAL, PLACEMENT_MOVED, SESSION_GATE_ACTIVITIES as GATE, SESSION_GONE, RELEASE_WORKER_ACTIVITY, SEND_MESSAGE_UPDATE, SESSION_FINISH_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, SESSION_TURN_ACTIVITY, SESSION_WORKFLOW, sessionHostQueue, TURN_QUERY } from '../src/temporal/session/names.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
@@ -694,6 +694,32 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  it('a placement that lost the API (BackendUnreachable) is placed again after a wait, restarted, on the same live home, and the turn ends done: nothing shown (#6994)', async () => {
+    const id = randomUUID()
+    let dropped = false
+    runTurn = async (input) => {
+      if (dropped) return { status: 'done', hostQueue: HOST }
+      dropped = true
+      throw ApplicationFailure.retryable(
+        `session ${input.sessionId}'s placement ${input.attempt} could not reach the backend: the backend could not be reached (the transcript of session ${input.sessionId}: UND_ERR_SOCKET)`,
+        BACKEND_UNREACHABLE,
+      )
+    }
+    const placed = (turnId: string) => turns.filter((t) => t.turnId === turnId).map((t) => [t.attempt?.split(':')[1], t.continuation?.kind])
+    await send(env.client, id, message('t1'))
+    const t1Run = await runIdOf(id)
+    // The first wait of PLACEMENT_BACKOFF (10 s) on the dev server's clock.
+    await expect.poll(() => finished.map((f) => f.outcome), { timeout: 40_000 }).toEqual(['done'])
+    expect(placed('t1')).toEqual([['0', undefined], ['1', 'restarted']])
+    // The API was lost, not the home: no acquire steers the turn away from it.
+    expect(excluded.flat()).toEqual([])
+    expect(finished[0]?.message).toBeUndefined()
+    await poll(async () => handleOf(id).query(TURN_QUERY), null)
+    await record('backend_unreachable', id, t1Run)
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
   it('a placement whose turn ended (SessionGone) is never placed again: the turn fails with the cause, never "Activity task failed" (#6387)', async () => {
     const id = randomUUID()
     runTurn = async (input) => {
@@ -1065,7 +1091,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
     const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
-    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record', 'placement_moved', 'queue', 'queue_publish']))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record', 'placement_moved', 'queue', 'queue_publish', 'backend_unreachable']))
     const fixtures = await Promise.all(
       names.map(async (name) => ({
         workflowId: `fixture-${name}`,

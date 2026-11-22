@@ -1,5 +1,6 @@
 import type { SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { context as otelContext } from '@opentelemetry/api'
+import { backendDropped } from '../api/crudRead.js'
 import type { AuditDeps } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import type { Credential } from '../credentials.js'
@@ -163,6 +164,8 @@ export type CoreTurnRun = {
   failure?: string
   /** `failure` in the words the person sees (#3710): with the credential's name, never logged. */
   failureShown?: string
+  /** The failure was a CRUD call whose connection to the API dropped (crudRead.ts `backendDropped`, #6994): the turn may be placed again. */
+  backendDropped?: boolean
   secrets: readonly string[]
   /** What the attempts' results priced (warmTurn.ts `spentUsd`). */
   spentUsd: number
@@ -241,6 +244,8 @@ export class CoreTurn {
     let failure: string | undefined
     /** `failure` with the credential's name, for the person only (#3710). */
     let failureShown: string | undefined
+    /** Whether `failure` was the API's connection dropping (#6994). */
+    let dropped = false
     /** Each move to another credential (#3710), logged before the next attempt's messages. */
     const fallbacks: ServerEvent[] = []
     /** The model request the turn is cut off in, if no message_stop closed it: Claude Code never prices it (#991). */
@@ -417,6 +422,7 @@ export class CoreTurn {
       // result is what counts then.
       if (!result && !signal.aborted) {
         failure = redact(describe(cause), secrets)
+        dropped = backendDropped(cause)
         if (cause instanceof NoUsableCredentialError || cause instanceof CredentialFailedError) {
           failureShown = redact(cause.shown, secrets)
         }
@@ -433,6 +439,7 @@ export class CoreTurn {
       ...(refused ? { refused } : {}),
       ...(failure !== undefined ? { failure } : {}),
       ...(failureShown !== undefined ? { failureShown } : {}),
+      ...(dropped ? { backendDropped: true } : {}),
       secrets,
       spentUsd: attempts?.spentUsd() ?? 0,
       cutUsd: unpriced.usd(),
