@@ -13,9 +13,10 @@ and a spool's colour is not the visitor's; a type's preset is neither. The profi
 no copy of a preset: a change to the type's presets is the next price's.
 
 The profile holds no process, support, bed or nozzle setting. As in the back office, the
-template gives the support and process settings, and the print dialog's opening choices
+template (or a file listing's file, #6710) gives the support and process settings, and
+the print dialog's opening choices and the setup it seeds from the remembered choices
 give the rest (owner decision of 2026-11-14 on #6153: "Quoting should be no different
-than slicing and printing in back office")."""
+than slicing and printing in back office"; #6710 §7.2, decided 2026-11-21)."""
 
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ from scadbuddy.orders.storefront.wire import is_support
 if TYPE_CHECKING:
     from scadbuddy.bambuddy.resolver import PrintChoices
     from scadbuddy.filament.models import EffectivePreset
+    from scadbuddy.library.settings_store import ModelPrintChoices
     from scadbuddy.orders.quote import SliceQuoteRequest
 
 #: The most materials a profile names.
@@ -98,19 +100,32 @@ def slot_presets(
     return {index + 1: list(presets.get(type_id, ())) for index, type_id in enumerate(types)}
 
 
-def slice_request(profile: StorefrontSliceProfile, choices: PrintChoices) -> SliceQuoteRequest:
+def slice_request(
+    profile: StorefrontSliceProfile,
+    choices: PrintChoices,
+    remembered: ModelPrintChoices | None,
+) -> SliceQuoteRequest:
     """The slice quote's request for a variant: the profile's printer, the dialog's
     ``choices`` and no spool. Each slot's filament type's presets go beside it
     (:func:`slot_presets`), so each slot is sliced with its type's preset in the render's
-    own colour (#6574). It sets no path, so the slice takes the run's own route, and no
-    supports, prime tower, print sequence or part settings, so the template's apply."""
+    own colour (#6574). From the ``remembered`` entry of the subject's scope it takes what
+    the print dialog seeds from it (#6710 §7.2, ``usePrintChoices.ts`` ``seedDialog``): the
+    print sequence, the process overrides (any Bambu Studio key, #2998) and the settings
+    per part. It sets no path, so the slice takes the run's own route, and no supports or
+    prime tower; with nothing remembered it sets none of the three either, so the
+    template's (or the file's own) settings apply."""
     # Here, not at the top: the settings store imports this module, and the quote's
     # imports reach the settings store.
     from scadbuddy.bambuddy.filaments import FilamentPlan
     from scadbuddy.orders.quote import SliceQuoteRequest
 
     return SliceQuoteRequest(
-        printer=profile.printer, filament_plan=FilamentPlan(ids="sb"), choices=choices
+        printer=profile.printer,
+        filament_plan=FilamentPlan(ids="sb"),
+        choices=choices,
+        print_sequence=None if remembered is None else remembered.print_sequence,
+        process_overrides=None if remembered is None else remembered.process_overrides,
+        part_settings=None if remembered is None else remembered.part_settings,
     )
 
 

@@ -33,7 +33,14 @@ import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.models import LibraryFile
-from scadbuddy.bambuddy.send import Printable, Target, _copy_lock, _hinted, _laid_out_for
+from scadbuddy.bambuddy.send import (
+    Printable,
+    Target,
+    _copy_lock,
+    _hinted,
+    _laid_out_for,
+    versioned,
+)
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
@@ -159,7 +166,7 @@ async def ensure_native_copy(
     one copy. ``source_id`` is the native library file the 3MF came from, never taken
     for an earlier attempt's copy. ``attempt_since`` is when the run's first attempt was
     scheduled (`left_unrecorded`'s ``since``); without it no earlier upload is taken."""
-    target_key = _hinted(target.key, len(printable.colours))
+    target_key = versioned(_hinted(target.key, len(printable.colours)), printable.version)
     lock = (f"{NATIVE_LOCK}{printable.key}", folder_id)
     async with _copy_lock(lock), uploads.copy_lock(f"{lock[0]}:{folder_id}") as lease:
         for copy in await uploads.for_output(printable.key, native=True):

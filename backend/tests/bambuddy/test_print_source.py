@@ -1526,3 +1526,124 @@ async def test_a_refused_part_slots_read_is_kept_and_raised_again(
         with pytest.raises(PartSettingsUnwritableError):
             await source.part_slots(None)
     assert len(reads) == 1
+
+
+# --- #6710: a file listing's held copy ---------------------------------------------------
+
+
+def _held_reads(payload: bytes, *, file_type: str = "3mf") -> _NativeReads:
+    """A held copy's reads (`orders/storefront/held_file.py` `HeldFile`), in memory: the
+    listed Bambuddy file and a native one, both of these bytes."""
+    name = f"critter.{file_type}"
+    return _NativeReads({ORIGIN: (name, file_type, payload), NATIVE_ID: (name, file_type, payload)})
+
+
+async def _load_held(
+    file_id: int, reads: _NativeReads, bambuddy: _Bambuddy, uploads: _Copies
+) -> LibrarySource:
+    return await LibrarySource.load(
+        cast(BambuddyClient, bambuddy),
+        file_id,
+        files=reads,
+        uploads=uploads,  # type: ignore[arg-type]
+        settings=StoredSettings(library_folder_id=INBOX),
+        read_own=True,
+        held=True,
+    )
+
+
+def _version(payload: bytes) -> str:
+    return f"v={hashlib.sha256(payload).hexdigest()}|"
+
+
+async def test_a_held_bambuddy_file_has_no_origin_and_names_its_version() -> None:
+    """#6710 §7.3.1: a held source reads its held copy only, has no origin (so Bambuddy's
+    path never slices the live file in place), and names the pinned sha256 as its
+    version. A live source names none."""
+    payload = _sliced_3mf()
+    reads, bambuddy = _held_reads(payload), _NativeBambuddy()
+    source = await _load_held(ORIGIN, reads, bambuddy, _Copies())
+    assert source.origin_id is None
+    assert source.version == hashlib.sha256(payload).hexdigest()
+    assert await source.fetch_3mf(cast(BambuddyClient, bambuddy)) == payload
+    assert set(reads.downloads) == {ORIGIN}
+    live = await LibrarySource.load(
+        cast(BambuddyClient, bambuddy),
+        ORIGIN,
+        files=reads,
+        uploads=_Copies(),  # type: ignore[arg-type]
+    )
+    assert (live.origin_id, live.version) == (ORIGIN, None)
+
+
+async def test_a_held_bambuddy_file_is_never_printed_in_place() -> None:
+    """#6710 §7.3.1: the live file prints as it is when nothing would change it; its held
+    copy never does: its bytes go up as a copy named by its version, and the slot read
+    takes that copy, never the live file's id."""
+    payload = _sliced_3mf()
+    bambuddy, uploads = _NativeBambuddy(), _Copies()
+    client = cast(BambuddyClient, bambuddy)
+    held = await _load_held(ORIGIN, _held_reads(payload), bambuddy, uploads)
+
+    assert await held.file_read_already(client) is None
+    printed = await _print(held, bambuddy)
+
+    [(_, copy, folder)] = bambuddy.uploaded
+    assert printed.id == 101 != ORIGIN
+    assert (copy, folder) == (payload, INBOX)
+    [recorded] = uploads.copies["library:41"]
+    assert recorded.target_key.startswith(_version(payload))
+    read = await held.file_to_read(client)
+    assert read.id == 101
+
+
+async def test_a_held_copy_and_a_live_copy_are_never_taken_for_each_other(
+    tmp_path: Path,
+) -> None:
+    """#6710 §7.3.1: both are recorded under `library:41`, so the held one's target key
+    carries its version: a held slice never reuses a copy of the live file (other bytes,
+    maybe), a back-office slice never reuses a held copy, and neither supersedes the
+    other in the inbox."""
+    live_bytes = _scadbuddy_3mf(tmp_path)
+    held_bytes = _sliced_3mf()
+    bambuddy, uploads = _Bambuddy(live_bytes), _Copies()
+    client = cast(BambuddyClient, bambuddy)
+
+    assert (await _print(_library(uploads), bambuddy)).id == 101
+    held = await _load_held(ORIGIN, _held_reads(held_bytes), bambuddy, uploads)
+    assert (await held.file_read_already(client)) is None
+    assert (await _print(held, bambuddy)).id == 102
+    keys = {copy.id: copy.target_key for copy in uploads.copies["library:41"]}
+    assert not keys[101].startswith("v=")
+    assert keys[102] == _version(held_bytes) + keys[101]
+
+    # Each reuses its own, and the slot read of each takes its own.
+    assert (await _print(_library(uploads), bambuddy)).id == 101
+    again = await _load_held(ORIGIN, _held_reads(held_bytes), bambuddy, uploads)
+    assert (await _print(again, bambuddy)).id == 102
+    assert len(bambuddy.uploaded) == 2
+    live_read = await _library(uploads).file_read_already(client)
+    assert live_read is not None and live_read.id == 101
+    held_read = await again.file_read_already(client)
+    assert held_read is not None and held_read.id == 102
+    # A held copy of another version is not this one's.
+    other = await _load_held(ORIGIN, _held_reads(live_bytes), bambuddy, uploads)
+    assert (await _print(other, bambuddy)).id == 103
+
+
+async def test_a_held_raw_copy_names_its_version() -> None:
+    """#6710 §7.3.1: a held STL that will not wrap goes up as it is, recorded as a raw
+    copy of its version; a live raw copy recorded under `library:41` is neither taken nor
+    superseded."""
+    stl = b"solid lump\nnot a mesh at all\n"
+    bambuddy, uploads = _NativeBambuddy(), _Copies()
+    uploads.copies["library:41"] = [LibraryCopy(id=77, folder_id=INBOX, target_key="raw")]
+    bambuddy.files.append(LibraryFile(id=77, filename="lump (ScadBuddy).stl", folder_id=INBOX))
+    held = await _load_held(ORIGIN, _held_reads(stl, file_type="stl"), bambuddy, uploads)
+
+    printed = await _print(held, bambuddy)
+
+    assert printed.id == 101
+    keys = {copy.id: copy.target_key for copy in uploads.copies["library:41"]}
+    assert keys == {77: "raw", 101: _version(stl) + "raw"}
+    assert bambuddy.deleted == []

@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from psycopg.types.json import Jsonb
 
+from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.models import MachineRateBreakdown
 from scadbuddy.orders.storefront import slice_price
@@ -309,6 +310,39 @@ def test_a_finish_with_no_variant_keeps_what_the_row_recorded(
     assert all(value is not None for value in before.values())
     finish(_state(crud.api).components.get(ORDERS).slice_prices, *args)
     assert rows(crud, columns, est["price_key"]) == [before]
+
+
+def test_a_remembered_setup_keys_the_slice_the_instant_read_and_the_checkout_alike(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#6710 §7.2, §7.4: the key holds the setup the dialog seeds from the model's
+    remembered choices. The instant read and the cart's firm price build their keys from
+    those same choices (`_planned`), so with a remembered process override a priced variant
+    is still `slice` at once, its line is firm, and the checkout charges that price."""
+    _state(crud.api).settings_store.set_model_choices(
+        listing["slug"], ModelPrintChoices(process_overrides={"enable_support": "1"})
+    )
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 58})
+    est = priced(crud, job["id"])
+    assert est["source"] == "slice"
+    [request] = rows(
+        crud,
+        "SELECT o.request FROM operations o JOIN storefront_slice_prices p"
+        " ON p.operation_key = o.operation_key WHERE p.price_key = %s",
+        est["price_key"],
+    )
+    assert request["request"]["slice"]["process_overrides"] == {"enable_support": "1"}
+    price = instant_price(crud, listing, {"width": 58}, token=TOKEN_B)
+    assert (price["source"], price["price_minor"]) == ("slice", est["price_minor"])
+    r = add(crud, listing, 58, token=TOKEN_B)
+    assert r.status_code == 200, r.text
+    draft = r.json()
+    [item] = draft["items"]
+    assert (item["price"], item["unit_price_minor"]) == ("firm", est["price_minor"])
+    body = {"draft_id": draft["id"], "name": "Ada", "email": "ada@example.com"}
+    r = crud.post("/draft/submit", json=body, key=uuid.uuid4().hex, token=TOKEN_B)
+    assert r.status_code == 200, r.text
+    assert r.json()["pay_now"] is True
 
 
 def test_the_price_shown_and_the_price_charged_are_of_one_row(

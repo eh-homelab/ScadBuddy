@@ -4,6 +4,9 @@ the quote tests' fakes; the rows are Postgres."""
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,21 +14,26 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from scadbuddy.bambuddy.choices import PrinterOpening
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
+from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import EffectivePreset
 from scadbuddy.library.settings_store import ModelPrintChoices, PrinterPlate, StoredSettings
-from scadbuddy.orders.models import MachineRateBreakdown, PricingPolicy
+from scadbuddy.orders.models import Filament, MachineRateBreakdown, PricingPolicy
 from scadbuddy.orders.quote import QuoteRun, SlicedPlate, SliceQuoteRequest, quote_run
 from scadbuddy.orders.rendering import RenderedOutput
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.storefront.held_file import PricedFile
 from scadbuddy.orders.storefront.slice_price import (
     FILAMENT_GONE,
+    FILE_GONE,
     GEOMETRY_DIFFERS,
+    KEY_VERSION,
     SLICE_PRICE_KIND,
     SlicePrices,
     SliceRun,
@@ -38,11 +46,14 @@ from scadbuddy.orders.storefront.slice_price import (
     price_variant,
 )
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
+from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
 from tests.orders.test_quote import (
     BY,
+    NOW,
     POLICY,
     Book,
     FakeMachineRate,
@@ -53,6 +64,7 @@ from tests.orders.test_quote import (
     run_of,
     sliced_plate,
 )
+from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -91,6 +103,14 @@ RATE = MachineRateBreakdown(
     depreciation_per_hour="0.89",
     intervals="typed",
 )
+
+#: The key's subject and setup of a template variant with nothing remembered (#6710).
+TEMPLATE: dict[str, str] = {"kind": "template"}
+NO_SETUP: dict[str, Any] = {
+    "print_sequence": None,
+    "process_overrides": None,
+    "part_settings": None,
+}
 
 
 @pytest.fixture
@@ -281,19 +301,21 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
     assert pla is not None and petg is not None
     base: dict[str, Any] = {
         "model_sha256": SHA,
-        "filaments": [pla, petg],
+        "filaments": {0: pla, 1: petg},
         "profile": PROFILE,
         "choices": CHOICES,
         "presets": SLOT_PRESETS,
         "currency": "USD",
         "policy": POLICY,
         "machine_rate": "0.89",
+        "subject": TEMPLATE,
+        "setup": NO_SETUP,
     }
     key = price_key(**base)
     assert key == price_key(**base)
     changed: list[dict[str, Any]] = [
         {"model_sha256": "f" * 64},
-        {"filaments": [petg, pla]},
+        {"filaments": {0: petg, 1: pla}},
         {
             "profile": PROFILE.model_copy(
                 update={"materials": {"pla": PETG_TYPE, "petg": PETG_TYPE}}
@@ -312,10 +334,89 @@ def test_the_key_changes_with_the_book_the_rate_the_filaments_and_the_profile(
     other = {**SLOT_PRESETS, 2: [*SLOT_PRESETS[2], _preset("0.6", "GFG99")]}
     assert price_key(**{**base, "presets": other}) == key
     dearer = pla.model_copy(update={"cost_per_kg": "25"})
-    assert price_key(**{**base, "filaments": [dearer, petg]}) != key
+    assert price_key(**{**base, "filaments": {0: dearer, 1: petg}}) != key
     # #6574: a slot's colour changes the purges, so it is in the key.
     recoloured = pla.model_copy(update={"colour": "#123456"})
-    assert price_key(**{**base, "filaments": [recoloured, petg]}) != key
+    assert price_key(**{**base, "filaments": {0: recoloured, 1: petg}}) != key
+
+
+def _pinned_filament(filament_id: str, material: str, colour: str) -> Filament:
+    return Filament(
+        id=filament_id,
+        material=material,
+        subtype=None,
+        brand=None,
+        colour_name=None,
+        colour=colour,
+        cost_per_kg="20",
+        density_g_cm3=None,
+        archived_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+#: A key's inputs, each fixed, so its digest is pinned (#6710 §7.4).
+PINNED: dict[str, Any] = {
+    "model_sha256": SHA,
+    "filaments": {
+        0: _pinned_filament("fil-pla", "PLA", "#FF0000"),
+        1: _pinned_filament("fil-petg", "PETG", "#00FF00"),
+    },
+    "profile": PROFILE,
+    "choices": CHOICES,
+    "presets": SLOT_PRESETS,
+    "currency": "USD",
+    "policy": POLICY,
+    "machine_rate": "0.89",
+    "subject": TEMPLATE,
+    "setup": NO_SETUP,
+}
+FILE_SUBJECT: dict[str, str] = {"kind": "library_file", "library": "native"}
+
+
+def test_the_key_is_version_4_and_its_digests_are_pinned() -> None:
+    """#6710 §7.4: `KEY_VERSION` 4, because the key's `model` now means the sha256 of the
+    file the slice reads, and it holds the subject's kind and the remembered setup. A
+    pinned digest per subject keeps a key from moving again by accident."""
+    assert KEY_VERSION == 4
+    assert price_key(**PINNED) == "b08ec9e212a909d32c1413614ac7dc6d217c36ff984404aa57c04bc5cfbf8f78"
+    assert (
+        price_key(**{**PINNED, "subject": FILE_SUBJECT})
+        == "812f183766e7e0c66dde1bedd8833ff85a2a5df559378eb227a0230df25a0c7b"
+    )
+
+
+def test_two_subjects_of_one_file_and_one_setup_differ_only_by_their_kind() -> None:
+    """#6710 §7.4: a template's render and a library file of the same bytes and setup
+    are two prices; the same kind, bytes and setup are one (two listings of one file
+    share a price)."""
+    template = price_key(**PINNED)
+    file = price_key(**{**PINNED, "subject": FILE_SUBJECT})
+    assert template != file
+    assert price_key(**{**PINNED, "subject": dict(FILE_SUBJECT)}) == file
+    bambuddy = price_key(**{**PINNED, "subject": {**FILE_SUBJECT, "library": "bambuddy"}})
+    assert bambuddy not in (template, file)
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        {"process_overrides": {"enable_support": "0"}},
+        {"print_sequence": "by object"},
+        {"part_settings": {"1": {"wall_loops": 4}}},
+    ],
+)
+def test_any_remembered_setup_is_another_key(setup: dict[str, Any]) -> None:
+    """#6710 §7.4: the setup the dialog seeds is what the slicer gets, so each change of
+    it is another key."""
+    supported = {**NO_SETUP, "process_overrides": {"enable_support": "1"}}
+    keys = {
+        price_key(**PINNED),
+        price_key(**{**PINNED, "setup": supported}),
+        price_key(**{**PINNED, "setup": {**NO_SETUP, **setup}}),
+    }
+    assert len(keys) == 3
 
 
 def test_a_variant_with_no_profile_type_or_type_preset_has_no_plan(
@@ -591,4 +692,202 @@ async def test_a_render_of_another_3mf_than_the_key_gets_no_price(
         slice_run(shop, prices, slicer, rendered=rendered), variant_of(shop, "8" * 64)
     )
     assert (row.status, row.failure, row.total_minor) == ("failed", GEOMETRY_DIFFERS, None)
+    assert slicer.subjects == []
+
+
+# -- a file listing's file (#6710 §7) ------------------------------------------------------
+
+#: A Bambuddy-range id: the live file Bambuddy holds at it may be other bytes since.
+FILE_ID = 41
+HELD = b"the held copy's bytes"
+HELD_SHA = hashlib.sha256(HELD).hexdigest()
+
+
+@pytest.fixture
+async def content(tmp_path: Path, pool: PgPool) -> AsyncIterator[ContentStore]:
+    store = local_content(tmp_path / "remote", pool)
+    try:
+        yield store
+    finally:
+        await store.aclose()
+
+
+def priced_file(**fields: Any) -> PricedFile:
+    return PricedFile.model_validate(
+        {
+            "id": FILE_ID,
+            "library": "bambuddy",
+            "filename": "keychain.3mf",
+            "sha256": HELD_SHA,
+            "copy_key": f"listing-file-{HELD_SHA}",
+            "file_type": "3mf",
+            "size": len(HELD),
+            "plates": [1],
+            # Three slots; the middle one prints no part.
+            "used": [0, 2],
+            **fields,
+        }
+    )
+
+
+async def hold(content: ContentStore) -> None:
+    await content.put(
+        "media", HELD, name="keychain.3mf", scope=BlobScope(), key=f"listing-file-{HELD_SHA}"
+    )
+
+
+def _file_plan(shop: Shop, settings: StoredSettings, file: PricedFile | None = None) -> Any:
+    pla = shop.rows.filament(shop.pla)
+    petg = shop.rows.filament(shop.petg)
+    assert pla is not None and petg is not None
+    return plan_variant(
+        settings=settings.model_copy(update={"storefront_slice_profile": PROFILE}),
+        library_file=file or priced_file(),
+        filaments=[pla, petg],
+        currency="USD",
+        policy=POLICY,
+        machine_rate=None,
+        printer=OPENING,
+        type_presets=TYPE_PRESETS,
+    )
+
+
+def test_a_variant_names_a_render_or_a_file_never_both(shop: Shop) -> None:
+    """#6710 §7.1: exactly one subject. An operation started before has a `reference` and
+    no `library_file`, so it still reads."""
+    body = variant_of(shop).model_dump(mode="json")
+    assert SliceVariant.model_validate(body).library_file is None
+    with pytest.raises(ValidationError):
+        SliceVariant.model_validate({**body, "library_file": priced_file().model_dump()})
+    with pytest.raises(ValidationError):
+        SliceVariant.model_validate({**body, "reference": None})
+    file = SliceVariant.model_validate(
+        {**body, "reference": None, "library_file": priced_file().model_dump()}
+    )
+    assert file.library_file == priced_file()
+
+
+def test_a_file_is_planned_on_its_own_slots_and_its_own_scope(shop: Shop) -> None:
+    """#6710 §7.1, §7.3.1: the used slots take the filaments in order, by slot id (from
+    1), with each filament's colour; the remembered choices are `library:<id>`'s, and the
+    key's model is the pinned sha256."""
+    remembered = ModelPrintChoices(
+        process_overrides={"enable_support": "1"},
+        print_sequence="by object",
+        part_settings={3: PartSettings(wall_loops=4)},
+    )
+    settings = StoredSettings(model_print_choices={f"library:{FILE_ID}": remembered})
+    planned = _file_plan(shop, settings)
+    assert planned is not None
+    variant = planned.variant
+    assert variant.reference is None and variant.library_file == priced_file()
+    assert variant.model_sha256 == HELD_SHA
+    # Slot 0's filament reaches the slicer as slot id 1, slot 2's as slot id 3.
+    assert variant.slot_presets == {1: TYPE_PRESETS[PLA_TYPE], 3: TYPE_PRESETS[PETG_TYPE]}
+    assert variant.slot_colours == {1: "#FF0000", 3: "#00FF00"}
+    assert variant.slot_filaments == [shop.pla, shop.petg]
+    request = variant.slice
+    assert request.process_overrides == {"enable_support": "1"}
+    assert request.print_sequence == "by object"
+    assert request.part_settings == {3: PartSettings(wall_loops=4)}
+    # The same request for the template's scope is another key: the subject's kind.
+    item = shop.get_item()
+    assert item.reference is not None
+    pla = shop.rows.filament(shop.pla)
+    petg = shop.rows.filament(shop.petg)
+    assert pla is not None and petg is not None
+    template = plan_variant(
+        settings=settings.model_copy(update={"storefront_slice_profile": PROFILE}),
+        reference=item.reference,
+        model_sha256=HELD_SHA,
+        filaments=[pla, petg],
+        currency="USD",
+        policy=POLICY,
+        machine_rate=None,
+        printer=OPENING,
+        type_presets=TYPE_PRESETS,
+    )
+    assert template is not None and template.key != planned.key
+    assert template.variant.slot_colours == {}
+
+
+def test_a_file_scope_with_no_entry_reads_the_copy_publish_took(shop: Shop) -> None:
+    """#6710 decision 4: `library:<id>` while it holds an entry (also after the file is
+    deleted), else the snapshot's `remembered`, else nothing."""
+    at_publish = ModelPrintChoices(process_overrides={"brim_width": "4"})
+    file = priced_file(remembered=at_publish.model_dump(mode="json"))
+    copied = _file_plan(shop, StoredSettings(), file)
+    assert copied.variant.slice.process_overrides == {"brim_width": "4"}
+    now = ModelPrintChoices(process_overrides={"enable_support": "1"})
+    live = _file_plan(shop, StoredSettings(model_print_choices={f"library:{FILE_ID}": now}), file)
+    assert live.variant.slice.process_overrides == {"enable_support": "1"}
+    assert live.key != copied.key
+    bare = _file_plan(shop, StoredSettings())
+    assert bare.variant.slice.process_overrides is None
+    assert len({bare.key, live.key, copied.key}) == 3
+
+
+def file_variant(shop: Shop, key: str = "f" * 64, **fields: Any) -> SliceVariant:
+    return SliceVariant(
+        price_key=key,
+        model_sha256=HELD_SHA,
+        library_file=priced_file(**fields),
+        slice=SliceQuoteRequest(
+            printer="p-1", filament_plan=FilamentPlan(ids="sb"), choices=CHOICES
+        ),
+        slot_filaments=[shop.pla, shop.petg],
+        currency="USD",
+        slot_presets={1: TYPE_PRESETS[PLA_TYPE], 3: TYPE_PRESETS[PETG_TYPE]},
+        slot_colours={1: "#FF0000", 3: "#00FF00"},
+        variant_key="9" * 64,
+    )
+
+
+async def test_a_file_variant_slices_its_held_copy_once_and_reads_no_library(
+    shop: Shop, prices: SlicePrices, content: ContentStore
+) -> None:
+    """#6710 §7.3: `start_library` once, with the slot presets, the slot colours and the
+    held copy, which answers the pinned bytes. The run has no library to read: a file
+    gone from the library, or holding other bytes, gives this same row. The middle slot
+    prints no part, so it is never asked to read grams."""
+    await hold(content)
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 0.0, 5.0])})
+    run = replace(slice_run(shop, prices, slicer), content=content)
+    row = await price_variant(run, file_variant(shop))
+    assert row.status == "done", row.failure
+    assert slicer.subjects == [f"storefront_price:{'f' * 64} file {FILE_ID}"]
+    [start] = slicer.library_starts
+    assert start["slot_presets"] == {1: TYPE_PRESETS[PLA_TYPE], 3: TYPE_PRESETS[PETG_TYPE]}
+    assert start["slot_colours"] == {1: "#FF0000", 3: "#00FF00"}
+    held = start["held"]
+    assert held is not None and held.file == priced_file()
+    async with aclosing(held.download_library_file(FILE_ID)) as chunks:
+        assert b"".join([chunk async for chunk in chunks]) == HELD
+    assert row.model_sha256 == HELD_SHA
+    assert row.grams == {"0": "10.0", "2": "5.0"}
+    # #6921: the done row keeps the variant key it was claimed for.
+    assert row.variant_key == "9" * 64
+    assert row.slot_filaments == [shop.pla, shop.petg]
+    assert row.output_id is None
+
+
+async def test_a_used_slot_at_zero_grams_gives_no_price(
+    shop: Shop, prices: SlicePrices, content: ContentStore
+) -> None:
+    """#6710 §7.3 step 4: a used slot no plate reads grams for was not sliced."""
+    await hold(content)
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0])})
+    run = replace(slice_run(shop, prices, slicer), content=content)
+    row = await price_variant(run, file_variant(shop, "e" * 64))
+    assert row.status == "failed"
+    assert row.failure is not None and "slot 2" in row.failure
+
+
+async def test_a_held_copy_missing_from_the_store_is_file_gone_and_never_slices(
+    shop: Shop, prices: SlicePrices, content: ContentStore
+) -> None:
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 0.0, 5.0])})
+    run = replace(slice_run(shop, prices, slicer), content=content)
+    row = await price_variant(run, file_variant(shop, "d" * 64))
+    assert (row.status, row.failure) == ("failed", FILE_GONE)
     assert slicer.subjects == []

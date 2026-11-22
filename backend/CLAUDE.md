@@ -2105,7 +2105,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
   is rendered to an output by `rendering.py` `output_for_reference` (saved as
   `library/outputs.py` `storefront_output_id(render_key)`, `source` `storefront`, #6371) and sliced by `operations.py` `PreviewSlicer`, so the
-  template gives the support and process settings. The variant is sliced with the
+  template gives the support and process settings. A variant names one subject
+  (`SliceVariant.reference` or `.library_file`, #6710 §7.1): a file listing's file is a
+  `held_file.py` `PricedFile`, sliced by `start_library` as a back-office quote of a
+  `library_file` item is, but over the listing's held copy (`HeldFile`, a `LibraryReads`
+  over `listing-file-<sha256>` in the content store, `SliceRun.content`; a missing copy is
+  `FILE_GONE`), never the live library file: `start_library_quote_preview(held=…)` loads
+  `LibrarySource(held=True)`, whose `origin_id` is None (never sliced in place) and whose
+  copies' `target_key` starts `v=<sha256>|` (`Printable.version`, `send.py` `versioned`,
+  `of_version`), so a held copy and a live copy, recorded under one `library:<id>`, are
+  never reused, read or superseded for each other. A file's used slots (from 0) reach the
+  slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
+  Only tests reach the file subject until a listing names a file (spec 2026-11-21 §12). The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a
@@ -2125,11 +2136,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `default_nozzles` of the printer's live status, read as the dialog reads it
   (`printer_opening`: the LAN report on a native route, else Bambuddy's status and last
   plate; `slice_price.py` `live_opening` keeps a read status `RATE_TTL`; the plate
-  remembered on the printer is read each time, `PrinterOpening.bed_type`). A status that
+  remembered on the printer is read each time, `PrinterOpening.bed_type`). The remembered
+  entry is the subject's scope's: the model's slug, or `library:<file id>`, else the copy
+  publish took (`PricedFile.remembered`). From it `slice_profile.py` `slice_request` also
+  takes what the dialog seeds (#6710 §7.2): `print_sequence`, `process_overrides` and
+  `part_settings`. A status that
   cannot be read gives no price (`STATUS_UNREAD`), never a standard-flow guess. One row
-  per variant in `storefront_slice_prices`, keyed by `price_key` (`KEY_VERSION` 3): a
-  sha256 of the render's 3MF content, the price-book filament per slot (id, material,
-  cost, colour, and its type's preset it is sliced with), the profile, the choices, and the
+  per variant in `storefront_slice_prices`, keyed by `price_key` (`KEY_VERSION` 4, #6710
+  §7.4): a sha256 of the file the slice reads (the render's 3MF content, or a file
+  listing's pinned sha256), the subject's kind (`key_subject`), the price-book filament per
+  slot (its slot, id, material, cost, colour, and its type's preset it is sliced with), the
+  profile, the choices, the remembered setup (`key_setup`), and the
   book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
   read again at most once a minute per process, `RATE_TTL`, and carried to the run,
   `SliceVariant.machine_rate`). Any change is a new

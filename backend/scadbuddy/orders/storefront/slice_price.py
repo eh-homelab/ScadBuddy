@@ -2,27 +2,37 @@
 through the back office's quote path.
 
 One pricing path (owner, 2026-11-14): the price is ``orders/quote.py``
-:func:`~scadbuddy.orders.quote.slice_and_price`, which a back-office quote runs too. The
-variant is rendered to an output (``orders/rendering.py`` ``output_for_reference``),
-sliced by the print dialog's background slice (``orders/operations.py``
-``PreviewSlicer``, the native slicer or Bambuddy's, as a quote routes it), and priced at
-the price book's policy and the machine rate of the profile's printer. The template gives
-the support and process settings, as for any output. The shop slice profile
+:func:`~scadbuddy.orders.quote.slice_and_price`, which a back-office quote runs too. A
+variant names its subject (#6710 §7.1): a template's render, or a file listing's library
+file. A render's variant is rendered to an output (``orders/rendering.py``
+``output_for_reference``); a file's is the listing's held copy of the file
+(``held_file.py``), which nothing renders. Either is sliced by the print dialog's
+background slice (``orders/operations.py`` ``PreviewSlicer``, the native slicer or
+Bambuddy's, as a quote routes it; a file through ``start_library``, as a back-office
+quote of a library file item slices it) and priced at the price book's policy and the
+machine rate of the profile's printer. The template, or the file itself, gives the
+support and process settings, as for any output or library file. The shop slice profile
 (``slice_profile.py``) gives only the printer and a filament type per material. The
-rest is what the print dialog opens on for the model on that printer
+rest is what the print dialog opens on for the subject on that printer
 (``bambuddy/choices.py`` :func:`~scadbuddy.bambuddy.choices.opening_choices`, #6574): the
-remembered choices, else the defaults from the printer's live status, read as the dialog
-reads it (:func:`~scadbuddy.bambuddy.choices.printer_opening`). A printer whose status
-cannot be read gives no price (`STATUS_UNREAD`): a default would guess the nozzle flow.
-Each slot has no spool: it is sliced with its material's filament type's preset for the
-H2C and the chosen nozzle, as a spool of that type would be, in the visitor's colour
-(``slice_profile.py`` ``slot_presets``, ``bambuddy/resolver.py`` ``resolve``). A type
-with no preset for that nozzle gives no price (`NO_TYPE_PRESET`).
+remembered choices of the subject's scope (the model's slug, or ``library:<file id>``),
+else the defaults from the printer's live status, read as the dialog reads it
+(:func:`~scadbuddy.bambuddy.choices.printer_opening`), and the print sequence, process
+overrides and settings per part the dialog seeds from those remembered choices
+(``slice_profile.py`` ``slice_request``, #6710 §7.2). A printer whose status cannot be
+read gives no price (`STATUS_UNREAD`): a default would guess the nozzle flow. Each slot
+has no spool: it is sliced with its material's filament type's preset for the H2C and
+the chosen nozzle, as a spool of that type would be, in the visitor's colour
+(``slice_profile.py`` ``slot_presets``, ``bambuddy/resolver.py`` ``resolve``: a render's
+3MF has the colours already, a file's slot takes its filament's colour as
+``slot_colours``). A type with no preset for that nozzle gives no price
+(`NO_TYPE_PRESET`).
 
-One price per variant (:func:`price_key`): the render's 3MF content, each slot's
-price-book filament, colour and preset, the profile, the choices, and the price book and
-the machine rate as they stand. A change to any of them is another key, so an old price
-is never read again.
+One price per variant (:func:`price_key`): the sha256 of the file the slice reads (the
+render's 3MF, or the file listing's pinned copy), the subject's kind, each slot's
+price-book filament, colour and preset, the profile, the choices and the remembered
+setup, and the price book and the machine rate as they stand. A change to any of them is
+another key, so an old price is never read again.
 A row is kept in ``storefront_slice_prices`` (:class:`SlicePrices`) by its key and holds no
 job id and no bytes, so it outlives the render prune.
 
@@ -55,9 +65,10 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.bambuddy.choices import PrinterOpening, opening_choices, printer_opening
+from scadbuddy.bambuddy.options import library_options_scope
 from scadbuddy.bambuddy.resolver import PRINTER_MODEL, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import EffectivePreset
@@ -93,6 +104,7 @@ from scadbuddy.orders.rendering import (
     Renders,
     output_for_reference,
 )
+from scadbuddy.orders.storefront.held_file import HeldFile, PricedFile
 from scadbuddy.orders.storefront.slice_profile import (
     ProfileMissingMaterialError,
     StorefrontSliceProfile,
@@ -105,6 +117,7 @@ from scadbuddy.orders.storefront.slice_profile import (
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
     from scadbuddy.orders.component import OrdersComponent
+    from scadbuddy.store.content import ContentStore
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +143,11 @@ GEOMETRY_DIFFERS: Final = (
     "the variant rendered to another 3MF than the one its key names, so its price would"
     " not be for the design the visitor sees"
 )
-#: Every digest of a price key changes when this does.
-KEY_VERSION: Final = 3
+FILE_GONE: Final = "the listing's copy of its file is missing"
+#: Every digest of a price key changes when this does. 4 (#6710 §7.4): ``model`` is the
+#: sha256 of the file the slice reads (a render's 3MF or a file listing's held copy), and
+#: the key holds the subject's kind and the remembered setup.
+KEY_VERSION: Final = 4
 #: How long the live machine rate a key holds is read again only after: a page
 #: reads its price every `PENDING_RETRY` seconds while the slice runs, and each
 #: live read may ask Bambuddy for the printer's tasks.
@@ -458,23 +474,46 @@ def _stands(row: PriceRow, now: datetime) -> bool:
 # -- the key -----------------------------------------------------------------------------------
 
 
+#: The remembered setup a slice request carries (#6710 §7.2), which the key holds.
+SETUP_FIELDS: Final = frozenset({"print_sequence", "process_overrides", "part_settings"})
+
+
+def key_subject(library_file: PricedFile | None) -> dict[str, str]:
+    """The key's ``subject`` (#6710 §7.4): a template's render, or a library file of its
+    library. Never a file id or a job id: two listings of one file share a price."""
+    if library_file is None:
+        return {"kind": "template"}
+    return {"kind": "library_file", "library": library_file.library}
+
+
+def key_setup(request: SliceQuoteRequest) -> dict[str, Any]:
+    """The key's ``setup`` (#6710 §7.4): the remembered print sequence, process overrides
+    and settings per part the request slices with."""
+    return request.model_dump(mode="json", include=set(SETUP_FIELDS))
+
+
 def price_key(
     *,
     model_sha256: str,
-    filaments: Sequence[Filament],
+    filaments: Mapping[int, Filament],
     profile: StorefrontSliceProfile,
     choices: PrintChoices,
     presets: Mapping[int, Sequence[EffectivePreset]],
     currency: str,
     policy: PricingPolicy,
     machine_rate: str | None,
+    subject: Mapping[str, str],
+    setup: Mapping[str, Any],
 ) -> str:
     """The sha256 of everything a variant's price rests on (owner, 2026-11-14; #6574: what
-    the slicer gets): the 3MF's content, each slot's price-book filament as it is priced,
-    with its colour and its filament type's preset for the H2C and the chosen nozzle
+    the slicer gets): the sha256 of the file the slice reads (``model_sha256``: a render's
+    3MF, or a file listing's pinned copy, #6710), the subject's kind (:func:`key_subject`),
+    each slot's price-book filament as it is priced (``filaments``, by slot from 0), with
+    its colour and its filament type's preset for the H2C and the chosen nozzle
     (``presets``, by slot id; a colour pair changes the purge), the profile, the dialog's
-    choices, and the price book's policy and the machine rate that prices it (the live
-    rate of the profile's printer, `MachineRates.for_quote`, #6153)."""
+    choices and the remembered setup (:func:`key_setup`), and the price book's policy and
+    the machine rate that prices it (the live rate of the profile's printer,
+    `MachineRates.for_quote`, #6153)."""
     size = choices.nozzles[0].size
 
     def preset_of(slot_id: int) -> dict[str, Any] | None:
@@ -486,18 +525,21 @@ def price_key(
     body = {
         "v": KEY_VERSION,
         "model": model_sha256,
+        "subject": dict(subject),
         "filaments": [
             {
+                "slot": slot,
                 "id": f.id,
                 "material": f.material,
                 "cost_per_kg": f.cost_per_kg,
                 "colour": f.colour.upper(),
-                "preset": preset_of(index + 1),
+                "preset": preset_of(slot + 1),
             }
-            for index, f in enumerate(filaments)
+            for slot, f in sorted(filaments.items())
         ],
         "profile": profile_digest(profile),
         "choices": choices.model_dump(mode="json"),
+        "setup": dict(setup),
         "currency": currency,
         "policy": policy.model_dump(mode="json"),
         "machine_rate": machine_rate,
@@ -543,9 +585,14 @@ class SliceVariant(BaseModel):
 
     price_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     model_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    reference: Reference
+    #: What it slices, one of two (#6710 §7.1): a template variant's render, or a file
+    #: listing's file, whose held copy the slice reads. An operation started before #6710
+    #: has a ``reference`` and no ``library_file``.
+    reference: Reference | None = None
+    library_file: PricedFile | None = None
     slice: SliceQuoteRequest
-    #: The price-book filament of each slot of the render, from 0.
+    #: The price-book filament of each slot, from 0: every slot of a render, or each used
+    #: slot of a file (``library_file.used``), in that order.
     slot_filaments: list[str]
     currency: str
     #: An operation started before #6574 names the profile's spools; they are not read.
@@ -562,6 +609,23 @@ class SliceVariant(BaseModel):
     variant_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     #: The listing the variant key was made for (#6921 review), which the row records.
     listing_id: str | None = None
+    #: Each spool-less slot's colour, by slot id (#6710): a file's slot takes its
+    #: filament's colour (``resolve``'s ``slot_colours``). Empty for a render, whose 3MF
+    #: holds the visitor's colours already.
+    slot_colours: dict[int, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _one_subject(self) -> SliceVariant:
+        if (self.reference is None) == (self.library_file is None):
+            raise ValueError("a variant names a reference or a library file, exactly one")
+        return self
+
+    @property
+    def slots(self) -> list[int]:
+        """The slot (from 0) each of :attr:`slot_filaments` is the filament of."""
+        if self.library_file is not None:
+            return list(self.library_file.used)
+        return list(range(len(self.slot_filaments)))
 
 
 def subject_of(key: str) -> str:
@@ -586,42 +650,85 @@ class SliceRun:
     #: None when that cannot be read (#6370 review).
     rendered_sha256: Callable[[RenderedOutput], Awaitable[str | None]]
     follow_every: float = FOLLOW_EVERY
+    #: Where a file listing's held copy is (#6710 §7.3.1); None where there is none, so a
+    #: file variant has no copy to slice (`FILE_GONE`).
+    content: ContentStore | None = None
 
 
 async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
     """The variant sliced and priced through :func:`slice_and_price`, and the price
     written. A row that is no longer ``running`` (an earlier attempt finished it) is the
-    answer as it is. No price, with the reason, when a slot's filament is gone or
-    archived, the render is of another 3MF than the key's (`GEOMETRY_DIFFERS`), the
-    slice fails (a preset that does not fit the nozzle among its causes), or a sliced
-    plate cannot be priced. A passing failure (:func:`_passing`) is raised as
-    :class:`SliceUnavailableError`, and any other failure as it is, so the operation
-    tries again and the row stays ``running``."""
+    answer as it is. A render's variant renders the reference and slices the saved output;
+    a file's slices the listing's held copy (#6710 §7.3), through ``start_library`` with
+    the copy in place of the library's reads, so the live library file is never read and
+    its state never changes the price. No price, with the reason, when a slot's filament
+    is gone or archived, the render is of another 3MF than the key's (`GEOMETRY_DIFFERS`),
+    the held copy is missing (`FILE_GONE`), the slice fails (a preset that does not fit the
+    nozzle among its causes), or a sliced plate cannot be priced (a slot it must use at
+    0 g). A passing failure (:func:`_passing`) is raised as :class:`SliceUnavailableError`,
+    and any other failure as it is, so the operation tries again and the row stays
+    ``running``."""
     key = variant.price_key
     stood = await asyncio.to_thread(run.prices.get, key)
     if stood is not None and stood.status != "running":
         return stood
+    subject = subject_of(key)
+    slots = variant.slots
     try:
         records = [await asyncio.to_thread(run.filament, f) for f in variant.slot_filaments]
         if any(record is None or record.archived_at is not None for record in records):
             return await _failed(run, variant, FILAMENT_GONE)
-        filaments = {slot: record for slot, record in enumerate(records) if record is not None}
-        rendered = await output_for_reference(
-            variant.reference,
-            outputs=run.outputs,
-            renders=run.renders,
-            create_output=run.create_output,
-            name=f"Storefront: {variant.reference.template_name}",
-            saved_as=storefront_output_id(variant.reference.render_key),
-            # #6371: kept out of the back office's Recent renders.
-            source=STOREFRONT,
-            follow_every=run.follow_every,
-        )
-        # Only the visitor's own geometry is priced (#6370 review): a render of another
-        # 3MF than the key's (the design moved under it) gets no firm price.
-        if await run.rendered_sha256(rendered) != variant.model_sha256:
-            return await _failed(run, variant, GEOMETRY_DIFFERS)
-        subject = subject_of(key)
+        filaments = {
+            slot: record for slot, record in zip(slots, records, strict=True) if record is not None
+        }
+        start: Callable[[], Awaitable[list[Any]]]
+        if variant.library_file is not None:
+            file = variant.library_file
+            content = run.content
+            # The held copy, not the library's file (§7.3 step 2): a hold keeps it, so it
+            # is gone only after a fault. Its key is its sha256, so its bytes are the key's.
+            if content is None or await content.stat(file.copy_key) is None:
+                return await _failed(run, variant, FILE_GONE)
+            held = HeldFile(file, content)
+
+            def start() -> Awaitable[list[Any]]:
+                return run.slicer.start_library(
+                    file.id,
+                    variant.slice,
+                    subject,
+                    slot_presets=variant.slot_presets,
+                    slot_colours=variant.slot_colours,
+                    held=held,
+                )
+
+            slot_colours = [record.colour for record in records if record is not None]
+            output_id = None
+        else:
+            reference = variant.reference
+            assert reference is not None
+            rendered = await output_for_reference(
+                reference,
+                outputs=run.outputs,
+                renders=run.renders,
+                create_output=run.create_output,
+                name=f"Storefront: {reference.template_name}",
+                saved_as=storefront_output_id(reference.render_key),
+                # #6371: kept out of the back office's Recent renders.
+                source=STOREFRONT,
+                follow_every=run.follow_every,
+            )
+            # Only the visitor's own geometry is priced (#6370 review): a render of another
+            # 3MF than the key's (the design moved under it) gets no firm price.
+            if await run.rendered_sha256(rendered) != variant.model_sha256:
+                return await _failed(run, variant, GEOMETRY_DIFFERS)
+
+            def start() -> Awaitable[list[Any]]:
+                return run.slicer.start(
+                    rendered.output_id, variant.slice, subject, slot_presets=variant.slot_presets
+                )
+
+            slot_colours = rendered.colours
+            output_id = rendered.output_id
 
         async def machine_rate(
             _printer: str | None, _printer_id: int | None
@@ -629,14 +736,12 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             return variant.machine_rate
 
         async def priced_for(plates: list[Any]) -> PriceSlots:
-            sliced_slots(plates, range(len(filaments)))
+            sliced_slots(plates, slots)
             return PriceSlots(filaments=filaments, quantity=1)
 
         sliced = await slice_and_price(
             run.slicer,
-            lambda: run.slicer.start(
-                rendered.output_id, variant.slice, subject, slot_presets=variant.slot_presets
-            ),
+            start,
             subject,
             variant.slice,
             book=run.book,
@@ -661,8 +766,8 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             variant_key=variant.variant_key,
             listing_id=variant.listing_id,
             slot_filaments=variant.slot_filaments,
-            slot_colours=rendered.colours,
-            output_id=rendered.output_id,
+            slot_colours=slot_colours,
+            output_id=output_id,
         )
     )
 
@@ -688,63 +793,99 @@ class Planned:
 def plan_variant(
     *,
     settings: StoredSettings,
-    reference: Reference,
-    model_sha256: str,
     filaments: Sequence[Filament],
     currency: str,
     policy: PricingPolicy,
     machine_rate: MachineRateBreakdown | None,
     printer: PrinterOpening,
     type_presets: Mapping[UUID, Sequence[EffectivePreset]],
+    reference: Reference | None = None,
+    model_sha256: str | None = None,
+    library_file: PricedFile | None = None,
     variant_key: str | None = None,
     listing_id: str | None = None,
 ) -> Planned | None:
-    """The variant of ``reference``'s render with ``filaments`` on its slots (from 0),
-    sliced with the choices the print dialog opens on for the model on the profile's
-    printer (``printer``, as :func:`~scadbuddy.bambuddy.choices.printer_opening` read
-    it; #6574), each slot with its filament type's presets (``type_presets``, by type).
-    None when it has no slice price: no shop slice profile, a slot's material with no
-    type in it, a printer status that could not be read (`STATUS_UNREAD`), or a type with
-    no preset for the H2C and the chosen nozzle (`NO_TYPE_PRESET`)."""
+    """The variant of its subject with ``filaments`` on its slots, sliced with the choices
+    the print dialog opens on for the subject on the profile's printer (``printer``, as
+    :func:`~scadbuddy.bambuddy.choices.printer_opening` read it; #6574) and the setup the
+    dialog seeds from the subject's remembered choices (``slice_request``, #6710 §7.2),
+    each slot with its filament type's presets (``type_presets``, by type).
+
+    The subject is one of two (#6710 §7.1): ``reference``'s render, whose 3MF is
+    ``model_sha256``, ``filaments`` on its slots from 0, its choices remembered under the
+    model's slug; or ``library_file``, a file listing's file, ``filaments`` on its used
+    slots in order, keyed by its pinned sha256, its choices remembered under
+    ``library:<file id>`` while that scope holds an entry, else the copy publish took
+    (``library_file.remembered``). A file's slots take their filament's colour
+    (``slot_colours``, by slot id). None when it has no slice price: no shop slice
+    profile, a slot's material with no type in it, a printer status that could not be read
+    (`STATUS_UNREAD`), or a type with no preset for the H2C and the chosen nozzle
+    (`NO_TYPE_PRESET`)."""
+    if (reference is None) == (library_file is None):
+        raise ValueError("a variant names a reference or a library file, exactly one")
+    if library_file is not None:
+        remembered = settings.model_print_choices.get(
+            library_options_scope(library_file.id), library_file.remembered
+        )
+        slots = list(library_file.used)
+        model = library_file.sha256
+    else:
+        assert reference is not None
+        if model_sha256 is None:
+            raise ValueError("a render's variant names the sha256 of its 3MF")
+        remembered = settings.model_print_choices.get(reference.slug)
+        slots = list(range(len(filaments)))
+        model = model_sha256
+    if len(slots) != len(filaments):
+        raise ValueError("a variant names one filament for each slot it uses")
     profile = settings.storefront_slice_profile
     if profile is None or not filaments:
         return None
     if printer.status is None:
         logger.info("a storefront variant has no slice price: %s", STATUS_UNREAD)
         return None
-    choices = opening_choices(
-        settings.model_print_choices.get(reference.slug), printer.status, printer.bed_type(settings)
-    )
+    choices = opening_choices(remembered, printer.status, printer.bed_type(settings))
     try:
         types = slot_types(profile, [f.material for f in filaments])
     except ProfileMissingMaterialError:
         return None
-    presets = slot_presets(types, type_presets)
+    # By slot id (from 1): slot 0's filament is the slicer's slot 1 (§7.3.1).
+    by_position = slot_presets(types, type_presets)
+    presets = {slot + 1: by_position[index + 1] for index, slot in enumerate(slots)}
     size = choices.nozzles[0].size
     if any(preset_for(rows, PRINTER_MODEL, size) is None for rows in presets.values()):
         logger.info("a storefront variant has no slice price: %s", NO_TYPE_PRESET)
         return None
-    request = slice_request(profile, choices)
+    request = slice_request(profile, choices, remembered)
+    colours = (
+        {}
+        if library_file is None
+        else {slot + 1: f.colour for slot, f in zip(slots, filaments, strict=True)}
+    )
     key = price_key(
-        model_sha256=model_sha256,
-        filaments=filaments,
+        model_sha256=model,
+        filaments=dict(zip(slots, filaments, strict=True)),
         profile=profile,
         choices=request.choices,
         presets=presets,
         currency=currency,
         policy=policy,
         machine_rate=None if machine_rate is None else machine_rate.rate_per_hour,
+        subject=key_subject(library_file),
+        setup=key_setup(request),
     )
     return Planned(
         key=key,
         variant=SliceVariant(
             price_key=key,
-            model_sha256=model_sha256,
+            model_sha256=model,
             reference=reference,
+            library_file=library_file,
             slice=request,
             slot_filaments=[f.id for f in filaments],
             currency=currency,
             slot_presets=presets,
+            slot_colours=colours,
             machine_rate=machine_rate,
             variant_key=variant_key,
             listing_id=listing_id,
