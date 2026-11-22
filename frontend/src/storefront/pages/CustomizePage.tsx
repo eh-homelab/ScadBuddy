@@ -206,6 +206,11 @@ export function CustomizePage({
    * when the change away never rendered (#7000 review).
    */
   const startedKey = useRef<string | undefined>(undefined)
+  /**
+   * The choices of the latest render while it runs. A change away and back to them keeps it
+   * running rather than starting them again (#7007 review).
+   */
+  const runningKey = useRef<string | undefined>(undefined)
   const renderNow = useRef<(key: string, retry: boolean) => Promise<void>>(async () => undefined)
   /** The choices on screen, and whether the page refuses them: what a delayed retry checks. */
   const choicesNow = useRef({ key: '', blocked: true })
@@ -247,7 +252,7 @@ export function CustomizePage({
 
   useEffect(() => {
     if (blocked || startedKey.current !== current) startedKey.current = undefined
-    if (blocked || shown?.key === current || startedKey.current === current) return
+    if (blocked || shown?.key === current || startedKey.current === current || runningKey.current === current) return
     const timer = setTimeout(
       () => {
         started.current = true
@@ -385,6 +390,7 @@ export function CustomizePage({
     const body: RenderInput = { ...input(listing), colours: {} }
     const mine = ++latest.current
     startedKey.current = key
+    runningKey.current = key
     const live = () => alive.current && latest.current === mine
     setRendering(true)
     setRenderError(null)
@@ -442,7 +448,10 @@ export function CustomizePage({
         }, after)
       }
     } finally {
-      if (live()) setRendering(false)
+      if (live()) {
+        setRendering(false)
+        runningKey.current = undefined
+      }
     }
   }
   useEffect(() => {
