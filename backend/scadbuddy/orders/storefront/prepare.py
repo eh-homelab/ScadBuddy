@@ -560,7 +560,9 @@ async def warm_default(state: AppState, listing: Listing) -> None:
         await asyncio.wait_for(preparer(state).start_default(listing.id), WARM_START_TIMEOUT)
     except TimeoutError:
         logger.warning(
-            "gave up waiting for the default price run of listing %s to start", listing.id
+            "gave up waiting for the default price run of listing %s to start",
+            listing.id,
+            exc_info=True,
         )
     except Exception:
         logger.warning(

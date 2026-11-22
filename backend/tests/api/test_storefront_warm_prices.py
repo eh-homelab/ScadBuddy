@@ -245,4 +245,5 @@ def test_a_publish_answers_when_temporal_does_not(
     assert listing["published"] is True
     assert time.monotonic() - began < 30
     given_up = f"gave up waiting for the default price run of listing {listing['id']} to start"
-    assert given_up in [r.getMessage() for r in caplog.records]
+    [record] = [r for r in caplog.records if r.getMessage() == given_up]
+    assert record.exc_info is not None
