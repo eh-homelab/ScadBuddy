@@ -263,11 +263,6 @@ document's claim and the code. These specs and docs were not changed in this PR.
   (`agent/src/harness/options.ts:61`, `agent/src/harness/run.ts:515-521`).
 - `docs/ai/security.md:558`, `:985` the credential reaches Claude Code through `env` /
   Claude Code gets only a leased gateway token (`agent/src/gateway/server.ts:21-29`).
-- `agent/CLAUDE.md:9` "run no SQL on a backend table" / the agent still reads two backend
-  views over SQL as fallbacks: `auth_sessions_agent` until the API lists area
-  `auth-sessions`, and `service_credentials_agent` with no proof file
-  (`agent/src/auth/browserSession.ts:58`, `agent/src/api/serviceCredential.ts:71`). The
-  same file describes both fallbacks further down.
 
 **`docs/security/trust-boundaries.md`**
 

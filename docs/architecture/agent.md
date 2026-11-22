@@ -185,17 +185,16 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
 
 ## Workspace, plugins, credentials
 
-- **Workspace.** A session's files are sealed blobs in the backend's blob store. Once the
-  API lists area `workspace` it seals, stores and opens them (`CrudSessionFiles`,
-  `main.ts:548-562`); until then `SessionFiles` does it over SQL (`workspace/store.ts:511`). The working
-  directory is under `SCADBUDDY_SESSION_DIR` (`config.ts:61-66`).
+- **Workspace.** A session's files are sealed blobs in the backend's blob store. The API
+  seals, stores and opens them (area `workspace`, `workspace/crudStore.ts`
+  `CrudSessionFiles`); the agent sends and gets plaintext only. The working directory is
+  under `SCADBUDDY_SESSION_DIR` (`config.ts`).
 - **Plugins.** Remote MCP plugins (`ai_plugins`) through the loopback forwarder; packages
   pinned to a git commit (`ai_plugin_packages`), fetched with a stripped git environment
   (`plugins/packages/git.ts:1-29`). [User guide "Plugins"](../user-guide.md#plugins).
 - **Claude credentials.** Kinds `anthropic_api_key`, `claude_oauth_token` and `gateway`
-  (`credentials.ts:36`), sealed with a per-row key under the KEK; once the API lists area `credentials` it seals
-  and opens them with its own KEK and the agent reads them through that area
-  (`credentials.ts:935`, `:1050`).
+  (`credentials.ts`), each sealed with a per-row key under the API's KEK. The API seals and
+  opens them, and the agent reads them through area `credentials` (`CrudCredentials`).
 
 ## Tests and evals
 

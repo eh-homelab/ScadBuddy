@@ -44,6 +44,17 @@ describe('the input-hash key', () => {
     expect(logs.join('\n')).not.toContain(KEY.toString('base64'))
   })
 
+  it('ends its asking at stop(), during a back-off, and released() resolves with no key', async () => {
+    const api = fakeApi(['refused'])
+    const key = new InputHashKey({ baseUrl: BASE, fetch: api.fetch }, { firstMs: 60_000, maxMs: 60_000, log: () => undefined })
+    key.start()
+    await expect.poll(() => api.seen.length).toBe(1)
+    key.stop()
+    await key.released()
+    expect(key.isReleased()).toBe(false)
+    expect(api.seen).toHaveLength(1)
+  })
+
   it('refuses a key that is not 32 bytes and keeps asking', async () => {
     const api = fakeApi([{ status: 200, body: { key: Buffer.alloc(16).toString('base64') } }, { status: 200, body: { key: KEY.toString('base64') } }])
     const key = new InputHashKey({ baseUrl: BASE, fetch: api.fetch }, { firstMs: 1, maxMs: 2, log: () => undefined })

@@ -136,7 +136,7 @@ const BODY_MAX = 16 * 1024
 export const LEGACY_CREDENTIALS_DEPRECATED = '@1791936000'
 
 function cannotSave(kek: OpenerStatus): string | null {
-  // `reason` is the public one (no file path or errno; secrets.ts `loadKek`).
+  // `reason` is the API's public one (no file path or errno), from `credentials.opener()`.
   return kek.ok ? null : `no key-encryption key: ${kek.reason}`
 }
 

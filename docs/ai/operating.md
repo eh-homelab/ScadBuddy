@@ -446,6 +446,11 @@ kubectl -n scadbuddy create secret generic scadbuddy-kek \
   asks `GET …/crud/agent/credentials/key`), and `/healthz` reports
   `"ai": "disabled (no key-encryption key: …)"` (`aiStatus()` in
   [`agent/src/aiStatus.ts`](../../agent/src/aiStatus.ts)).
+- The API then never releases the approvals' input-hash key (`GET …/agent/keys/input-hash`
+  answers `503 kek-missing`), so the agent is never ready: `/mcp` and every data route
+  answer `503`, calls that hash nothing included, and no agent Temporal worker polls. That
+  is deliberate: every tool call's audit row carries a hash of its input made with that key,
+  and a call that cannot be audited does not run (#5299 step 12). Give the API its KEK.
 - **Keep a copy.** Each stored row records the KEK's id (the first 16 hex characters of
   SHA-256 over the key). A credential sealed under a lost key cannot be opened. `/healthz`
   then reports "stored credential was sealed with a different key-encryption key", and the
@@ -696,8 +701,9 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   stops the API's start.
 - **Readiness.** `CrudAreas` ([`agent/src/api/crudAreas.ts`](../../agent/src/api/crudAreas.ts))
   reads `GET …/crud/agent/areas` from the start, 1 s apart doubling to 30 s, until every
-  wanted area is listed. Until then the agent is not ready: `/mcp` and the data routes
-  answer `503`.
+  wanted area is listed, and asks for the input-hash key until the API releases it
+  (`agent/src/api/agentKeys.ts`). Until both, the agent is not ready: `/mcp` and the data
+  routes answer `503`, and no agent Temporal worker polls (§3.2).
 - `ai` is `"enabled"` only when every prerequisite holds. Otherwise it names the
   **first** one missing, in the order an operator has to fix them (`aiStatus()`, type
   `AiStatus` in [`agent/src/aiStatus.ts`](../../agent/src/aiStatus.ts)):
@@ -709,6 +715,7 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   | `unavailable (the API did not answer for its key-encryption key)` | `GET …/crud/agent/credentials/key` failed |
   | `unavailable (the API timed out answering for its key-encryption key)` | That read took longer than 2 s |
   | `disabled (no key-encryption key: <reason>)` | The API has no KEK; see §3.2 |
+  | `unavailable (waiting for the API's input-hash key)` | The API holds its KEK and lists every area, but has not released the input-hash key yet |
   | `disabled (no Claude credential)` | No row saved |
   | `unavailable (stored credential was sealed with a different key-encryption key)` | The row's `kek_id` does not match the API's key |
   | `unavailable (stored credential is in an outdated format; save it again)` | A #354-era v1 row (see [security.md](security.md#envelope-encryption-and-aad-binding)) |

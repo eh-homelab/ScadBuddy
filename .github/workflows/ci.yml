@@ -902,7 +902,8 @@ jobs:
             -e SCADBUDDY_DATABASE_URL=postgresql://u:never-used@db:5432/x -e SCADBUDDY_SECRET_KEY_FILE=/nonexistent/kek \
             scadbuddy-agent:ci
           for _ in $(seq 1 30); do
-            if docker logs scadbuddy-agent-ci-old-env 2>&1 | grep -q 'listening on'; then break; fi
+            docker logs scadbuddy-agent-ci-old-env > /tmp/old-env.log 2>&1
+            if grep -q 'listening on' /tmp/old-env.log; then break; fi
             sleep 1
           done
           logs="$(docker logs scadbuddy-agent-ci-old-env 2>&1)"
