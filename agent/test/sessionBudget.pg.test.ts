@@ -229,6 +229,22 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
       expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
     })
 
+    it('still charges a request Claude Code closed after the stop when the process dies before its result', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      next = { stall, closes: true }
+      await stopMidReply(session.id, 'write a long essay')
+      // A finished request no result priced: the turn's running spend counts it (turnHost.ts).
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+
+      // The next turn resumes on a fresh process, whose total never held it.
+      next = { reply: 'OK', costUsd: 0.05 }
+      const after = await (await m.send(session.id, browser, 'reply OK')).done
+      if (after.kind !== 'result') throw new Error(`next turn: ${JSON.stringify(after)}`)
+      expect(after.costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+    })
+
     it('counts it once when the interrupt still ends in a result', async () => {
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
       await turn!.done
