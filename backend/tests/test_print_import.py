@@ -1,6 +1,7 @@
 """The printer path a print import may read (#4698 review)."""
 
 import asyncio
+from typing import Any
 
 import httpx
 import pytest
@@ -51,10 +52,10 @@ def test_library_candidates_are_newest_first_and_undated_last() -> None:
 @pytest.mark.parametrize(
     ("status", "made", "says"),
     [
-        ("succeeded", True, "no longer the file the model 'trophy' was made from"),
+        ("succeeded", True, "made the model 'trophy', which stays"),
         ("succeeded", False, "made the model 'trophy', which was deleted since"),
         ("running", False, "operation op-1, `GET /api/v1/operations/op-1`"),
-        ("running", False, "if it never finishes, send the request with a new Idempotency-Key"),
+        ("running", False, "send the request with a new Idempotency-Key and another model name"),
         ("failed", False, "made no model: its operation op-1 failed"),
     ],
 )
@@ -72,7 +73,11 @@ def test_a_changed_retry_says_what_its_first_send_did(status: str, made: bool, s
         status=status,  # type: ignore[arg-type]
         created_at=datetime(2026, 11, 10, tzinfo=UTC),
     )
-    assert says in _source_changed("x.3mf", "trophy", first, made)
+    text = _source_changed("x.3mf", "trophy", first, made)
+    assert says in text
+    # #6984: the key may have named another print's file, so its model is never offered.
+    assert "first sent for another print file, name or description" in text
+    assert "import the print onto it" not in text
 
 
 # --- a mesh model from a print's file (#6916) ----------------------------------------
@@ -157,10 +162,12 @@ class _Operations:
 
     def __init__(self, first: object) -> None:
         self.first = first
-        self.asked: list[tuple[str, str, str]] = []
+        self.asked: list[tuple[str, str, str, dict[str, Any] | None]] = []
 
-    async def keyed_operation(self, kind: str, subject: str, key: str) -> object:
-        self.asked.append((kind, subject, key))
+    async def keyed_operation(
+        self, kind: str, subject: str, key: str, *, sent: dict[str, Any] | None = None
+    ) -> object:
+        self.asked.append((kind, subject, key, sent))
         return self.first
 
 
@@ -240,7 +247,12 @@ def test_a_resend_gets_the_first_model_and_reads_no_print_again() -> None:
     )
 
     assert isinstance(made, ModelRecord) and made.slug == "trophy"
-    assert ops.store.asked == [("mesh_model_create", "trophy", "k1")]  # type: ignore[attr-defined]
+    origin = {
+        "archive_id": ARCHIVE,
+        "source": {"kind": "printer", "library_file_id": None, "path": "/cache/demo_elan.3mf"},
+    }
+    sent = {"name": "Trophy", "description": "", "source": {"origin": origin}}
+    assert ops.store.asked == [("mesh_model_create", "trophy", "k1", sent)]  # type: ignore[attr-defined]
     assert not respx.calls
 
 

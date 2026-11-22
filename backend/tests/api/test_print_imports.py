@@ -762,6 +762,36 @@ def test_a_retry_whose_model_was_deleted_and_source_changed_links_nothing(
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
 
 
+@pytest.mark.requires_git
+@respx.mock
+def test_a_key_sent_again_with_another_body_links_no_model(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6984: the model a first send made is linked only for a resend of the same body.
+    The key sent again with another description, of the same file and bytes, reads the
+    source and is a 409 that offers no model: the first may be another print's."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    download = respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        return_value=httpx.Response(200, content=painted_3mf())
+    )
+    body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
+    key = press()
+    _lost_first_import(client, monkeypatch, body, key)
+    other = {**body, "new_model": {"name": "Trophy", "description": "another"}}
+
+    refused = import_print(client, other, **key)
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert "first sent for another print file, name or description" in detail
+    assert "import the print onto it" not in detail
+    assert download.call_count == 2
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+
 # --- the print watcher's activity row (#6029) -----------------------------------------
 
 
@@ -1154,6 +1184,57 @@ def test_a_resend_gets_the_first_model_after_the_printer_file_is_gone(
     assert again.json()["slug"] == first.json()["slug"] == "from-the-printer"
     assert download.call_count == 1
     assert listing.call_count == listed
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_key_sent_again_for_another_printer_file_is_no_resend(
+    client: TestClient, model: str
+) -> None:
+    """#6984: the first model answers a resend only when it names the same print file. A
+    key used again for another file of the same bytes reads that file and gets the #5979
+    409, never the first file's model."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    # Two copies of the print's file, in the two folders a print's file is looked for in.
+    paths = ("/cache/demo_elan.3mf", "/demo_elan.3mf")
+    bambuddy(printer_files={"path": "/cache", "files": [_on_printer(paths[0])], "warnings": []})
+    respx.get(f"{API}/printers/1/files", params={"path": "/"}).mock(
+        return_value=httpx.Response(
+            200, json={"path": "/", "files": [_on_printer(paths[1])], "warnings": []}
+        )
+    )
+    downloads = {
+        path: respx.get(f"{API}/printers/1/files/download", params={"path": path}).mock(
+            return_value=httpx.Response(200, content=painted_3mf())
+        )
+        for path in paths
+    }
+    key = press()
+
+    def send(path: str) -> httpx.Response:
+        body = {
+            "name": "From the printer",
+            "archive_id": ARCHIVE,
+            "archive_source": {"kind": "printer", "path": path},
+        }
+        return from_mesh(client, body, **key)
+
+    first = send(paths[0])
+    assert first.status_code == 201, first.text
+    _wait_finished(client, "from-the-printer", key["Idempotency-Key"])
+
+    other = send(paths[1])
+
+    assert other.status_code == 409, other.text
+    assert "first sent for another print file" in other.json()["detail"]
+    assert downloads[paths[1]].call_count == 1
+    assert downloads[paths[0]].call_count == 1
+
+
+def _on_printer(path: str) -> dict[str, Any]:
+    return {"name": path.rsplit("/", 1)[-1], "path": path, "size": 10}
 
 
 @respx.mock

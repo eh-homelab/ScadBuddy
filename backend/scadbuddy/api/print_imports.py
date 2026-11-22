@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Self
+from typing import Annotated, Any, Self
 
 from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -37,6 +37,7 @@ from scadbuddy.api.mesh_models import (
     MAX_NAME_CHARS,
     create_from_read,
     made_before,
+    print_file_origin,
 )
 from scadbuddy.api.models import _slug_from_name, require_model_exists
 from scadbuddy.api.operations import (
@@ -607,12 +608,20 @@ async def import_print(
                 " choose that folder in Settings first",
             )
         made: str | None = None
+        origin = print_file_origin(archive_id, body.source)
         if body.new_model is not None and source.kind != "printer":
             assert idempotency_key is not None
             # #6969: a resend after a lost answer links the model its first send made,
             # while it exists, and reads the source no more. A printer file is read again
             # all the same, to keep it, so other bytes there are named (`_source_changed`).
-            first = await made_before(ops, response, body.new_model.name, idempotency_key)
+            first = await made_before(
+                ops,
+                response,
+                idempotency_key,
+                name=body.new_model.name,
+                description=body.new_model.description,
+                origin=origin,
+            )
             if first is not None and catalogue.exists(first.slug):
                 made = first.slug
         read: SourceFile | None = None
@@ -623,7 +632,13 @@ async def import_print(
             if made is None:
                 assert read is not None
                 new = await _new_model(
-                    ops, response, catalogue, idempotency_key, body.new_model, read
+                    ops,
+                    response,
+                    catalogue,
+                    idempotency_key,
+                    body.new_model,
+                    read,
+                    origin,
                 )
                 if isinstance(new, JSONResponse):
                     return new
@@ -692,30 +707,29 @@ async def _record(
 
 
 def _source_changed(name: str, slug: str, first: Operation, made: bool) -> str:
-    """The 409 of a new-model retry whose source changed since its first send (#5979):
-    what that send's operation (``first``) did, and whether its model is there now."""
-    changed = f"{name} changed since this request was first sent"
-    again = (
-        "send the request with a new Idempotency-Key to make the model from the file as it"
-        " is now, or choose another source"
+    """The 409 of a new-model request under a key on record for another body (#5979,
+    #6984): the key was first sent for another print file, name or description, or the
+    file changed since. What that send's operation (``first``) did, and whether its model
+    is there now; never a link to it, since it may be another print's file."""
+    sent = (
+        "this Idempotency-Key was first sent for another print file, name or description,"
+        f" or {name} changed since"
     )
+    again = "send the request with a new Idempotency-Key"
     if first.status == "running":
         return (
-            f"{changed}, and the model {slug!r} that request started is still being made, as"
-            f" its record says (operation {first.id}, `GET /api/v1/operations/{first.id}`):"
-            " once it is done, import the print onto it with `slug`; if it never finishes,"
-            f" {again}"
+            f"{sent}; the model {slug!r} that request started is still being made, as its"
+            f" record says (operation {first.id}, `GET /api/v1/operations/{first.id}`);"
+            f" {again} and another model name"
         )
     if first.status == "failed":
-        return (
-            f"{changed}, and that request made no model: its operation {first.id} failed; {again}"
-        )
+        return f"{sent}; that request made no model: its operation {first.id} failed; {again}"
     if made:
         return (
-            f"{changed}, so it is no longer the file the model {slug!r} was made from: that"
-            " model stays; import the print onto it with `slug`, or choose another source"
+            f"{sent}; that request made the model {slug!r}, which stays; {again} and another"
+            " model name"
         )
-    return f"{changed}; that request made the model {slug!r}, which was deleted since; {again}"
+    return f"{sent}; that request made the model {slug!r}, which was deleted since; {again}"
 
 
 async def _new_model(
@@ -725,6 +739,7 @@ async def _new_model(
     idempotency_key: str | None,
     new_model: NewModel,
     read: SourceFile,
+    origin: dict[str, Any],
 ) -> str | JSONResponse:
     """Make the mesh model from the bytes read (`create_from_read`); its slug, or the 202
     while it is still being made."""
@@ -736,6 +751,7 @@ async def _new_model(
         name=new_model.name,
         description=new_model.description,
         read=read,
+        origin=origin,
         # A retry reads its source again, and a printer overwrites its files: a model the
         # first read made is no longer this file's, so it is named, never linked.
         changed=lambda first, made: _source_changed(
