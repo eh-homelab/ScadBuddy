@@ -245,6 +245,42 @@ describe('CustomizePage', () => {
     expect(refusal).toBeInTheDocument()
   })
 
+  it('keeps a running render of choices the visitor changed away from and back to (#7007 review)', async () => {
+    server.use(http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)))
+    const sent = renders()
+    // A long time limit: a render past it ends as too slow and would start again.
+    const { user } = show(CHARM_ID, { ...FAST, limitMs: 60_000 }, 300)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+    // Away and back before the debounce ends, while the render of these choices still runs.
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(sent).toHaveLength(2)
+  })
+
+  it('renders choices again after a change and back once their render ended as too slow (#7010 review)', async () => {
+    server.use(http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)))
+    const sent = renders()
+    const { user } = show(CHARM_ID, { ...FAST, limitMs: 200 }, 1_000)
+    await screen.findByRole('alert')
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await waitFor(() => expect(sent).toHaveLength(2), { timeout: 2_000 })
+    // Away while the render of Rust runs; it ends as too slow before the visitor comes back.
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument(), { timeout: 2_000 })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await waitFor(() => expect(sent).toHaveLength(3), { timeout: 2_000 })
+    expect(sent[2]).toEqual(sent[1])
+  })
+
   it('renders refused choices again after a change and back inside the debounce (#7000 review)', async () => {
     const sent = renders()
     const { user } = show(CHARM_ID, FAST, 300)
