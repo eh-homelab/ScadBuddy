@@ -471,12 +471,18 @@ class LinksResetPreview(BaseModel, extra="forbid"):
     saw them (`bb_sync_results.same_bambuddy`, #6845), so a reset with ``expect_kept``
     keeps every link and deletes nothing. ``bambuddy_unreadable``: the configured
     Bambuddy could not be read, so ``same_bambuddy`` is false and only the delete is
-    offered (Decision 198)."""
+    offered (Decision 198). ``changed_since_pull``: ``same_bambuddy`` is false although
+    Bambuddy holds every linked spool, none is older than its link, and at least half the
+    links have a time on both sides (Decision 199): every linked spool with a time on both
+    sides (untimed links are skipped) was edited in Bambuddy since the
+    last pull, so none matches exactly and the proof has nothing to stand on
+    (`bb_sync_results.changed_since_pull`, #6845 review)."""
 
     instance: str | None
     configured_instance: str | None
     counts: LinksResetCounts
     same_bambuddy: bool
+    changed_since_pull: bool = False
     bambuddy_unreadable: bool = False
 
 
@@ -495,8 +501,11 @@ class LinksResetRequest(BaseModel, extra="forbid"):
 class LinksResetDone(BaseModel, extra="forbid"):
     """``POST /filament/sync/reset-links``'s answer: the instance whose links were
     reset, whether they were ``kept`` (the configured Bambuddy is the same one, #6845:
-    nothing deleted, the links now belong to it), and what was deleted."""
+    nothing deleted, the links now belong to it), and what was deleted.
+    ``configured_instance``: the instance the links belong to now, which a kept reset has
+    just recorded (the configured Bambuddy's); null after a delete (#6845 review)."""
 
     instance: str
     kept: bool
+    configured_instance: str | None = None
     deleted: LinksResetCounts

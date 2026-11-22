@@ -72,3 +72,16 @@ def test_value_problems_name_the_path_and_the_keyword() -> None:
         ("house.name", "pattern"),
     ]
     assert [(p.path, p.keyword) for p in value_problems(schema, {})] == [("", "required")]
+
+
+def test_an_object_takes_no_pydantic_attribute_name() -> None:
+    """#6913 review: an object's own name is refused as a scalar's is (`json`, `copy` …)."""
+    problems = schema_problems(_top(json=HOUSE), objects=True)
+    assert problems == ["json: 'json' is reserved"]
+
+
+def test_an_objects_required_may_not_name_a_boolean() -> None:
+    """#6913 review: a boolean left out is false, so an object cannot require one."""
+    house = {**HOUSE, "properties": {**HOUSE["properties"], "flag": {"type": "boolean"}}}
+    problems = schema_problems(_top(house={**house, "required": ["flag"]}), objects=True)
+    assert problems == ["house: required names 'flag', a boolean, which is never missing"]

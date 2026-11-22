@@ -175,7 +175,10 @@ def declared_inputs_failures(template: Path, cases: list[dict[str, Any]]) -> lis
     name = declared.inputs
     if name is None:
         return []
-    schema = json.loads((template / name).read_text(encoding="utf-8"))
+    try:
+        schema = json.loads((template / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        return [f"{name}: cannot be read: {err}"]
     if problems := inputs_schema_problems(schema):
         return [f"{name}: {problem}" for problem in problems]
     failures: list[str] = []
