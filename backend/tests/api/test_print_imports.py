@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import time
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -1033,6 +1034,22 @@ def test_one_target_only(client: TestClient, model: str) -> None:
 # --- a mesh model from a print's file (#6916) ----------------------------------------
 
 
+def _wait_finished(client: TestClient, slug: str, key: str, timeout: float = 30) -> None:
+    """Wait until the ``mesh_model_create`` sent with ``key`` for ``slug`` has its
+    finished row, or fail after ``timeout`` seconds."""
+    from scadbuddy.api.deps import STATE_ATTR
+    from scadbuddy.operations.component import OPERATIONS
+
+    store = getattr(client.app.state, STATE_ATTR).components.get(OPERATIONS).store  # type: ignore[attr-defined]
+    deadline = time.monotonic() + timeout
+    while True:
+        op = asyncio.run(store.keyed_operation("mesh_model_create", slug, key))
+        if op is not None and op.status != "running":
+            return
+        assert time.monotonic() < deadline, f"the operation is still {op and op.status}"
+        time.sleep(0.1)
+
+
 def from_mesh(client: TestClient, body: dict[str, Any], **headers: str) -> httpx.Response:
     response: httpx.Response = client.post(
         "/api/v1/models/from-mesh", json=body, headers=headers or None
@@ -1122,6 +1139,9 @@ def test_a_resend_gets_the_first_model_after_the_printer_file_is_gone(
     key = press()
     first = from_mesh(client, body, **key)
     assert first.status_code == 201, first.text
+    # The 201 comes from the workflow's answer, before it writes the finished row; a
+    # resend after a lost answer comes later, so it reads the row finished.
+    _wait_finished(client, "from-the-printer", key["Idempotency-Key"])
     listing = respx.get(f"{API}/printers/1/files", params={"path": "/cache"}).mock(
         return_value=httpx.Response(200, json={"path": "/cache", "files": [], "warnings": []})
     )
