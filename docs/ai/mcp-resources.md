@@ -284,6 +284,18 @@ sequenceDiagram
   request. Without it a GET stream relayed through a replica that crashed (or was
   replaced in a rolling deploy) would stay held, and the transport, which allows one
   standalone stream per session, would answer the client's reconnect with 409.
+- **A slow channel is not a silent peer.** Each side counts a beat as missed only when it
+  heard one of its own messages for the request come back since its last tick (every
+  replica hears every message, its own too, in commit order). While the change stream
+  lags, nothing comes back, so neither side takes the other for gone; a peer that died
+  is still found, because the side that lives keeps hearing its own beats (#6563).
+- **A gap ends the relayed calls.** `scadbuddy_mcp` is NOTIFY-only, so a message sent
+  while a replica's change stream was down, or while the API sent `reconnected` (its
+  LISTEN dropped, or the reader fell behind), is gone. On the change stream's
+  `onReconnect`, the replica ends every relayed call it takes part in: one it waits on
+  answers 503 before its head, or its body ends with an error, and the owner is told to
+  stop; one it runs as owner is stopped. The client reconnects, and the owner's replay
+  log (`Last-Event-ID`) fills the gap. The session stays in the directory.
 - **Who may use it.** The replica the request reached runs every gate (HTTPS, Origin,
   auth) and relays the principal as authenticated; the owner ties it to the session
   (an anonymous caller's `anonymous:<session id>` is made there) and still refuses

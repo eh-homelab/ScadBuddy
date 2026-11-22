@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -378,6 +378,17 @@ class ServedLibrary:
 
     async def exists(self, file_id: int) -> bool:
         return await self.file(file_id) is not None
+
+    async def download(self, file_id: int) -> AsyncGenerator[bytes]:
+        """The file's bytes, from the library that serves (a storefront file listing's
+        publish, #6710 §5.1)."""
+        native = await self.native()
+        stored = await asyncio.to_thread(self.settings.load)
+        async with maybe_client(stored, native=native is not None) as client:
+            reads = served_reads(file_id, client, native)
+            async with aclosing(reads.download_library_file(file_id)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
 
     async def colours(self, file_id: int) -> dict[int, str]:
         """The file's slot colours by slot id (from 1), as its filament requirements name
