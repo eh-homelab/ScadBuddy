@@ -69,10 +69,11 @@ flowchart TB
     AW --> SBX
 ```
 
-The API is the CRUD service: the only process meant to hold SQL access. Today's code
-still gives the agent sidecar, the agent worker and agent-durable a database secret
-([trust-boundaries.md](../security/trust-boundaries.md#who-talks-to-the-database-today),
-#5299). Every other process is an HTTP client of the API with a short-lived service
+The API is the CRUD service: the only process that holds SQL access. No other pod holds a
+database secret: the agent sidecar, the agent worker and agent-durable lost theirs (#5299,
+eh-homelab/clusters#3965;
+[trust-boundaries.md](../security/trust-boundaries.md#who-talks-to-the-database-today)).
+Every other process is an HTTP client of the API with a short-lived service
 credential.
 
 ## Pages

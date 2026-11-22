@@ -748,10 +748,8 @@ This is a decision to run someone else's code **as the agent service itself**. I
 as the agent's user in its container, so it can read the Claude credential in its own
 environment. It can also read the service's environment (`/proc/<agent pid>/environ`) and
 its mounts: the service-credential proof, which gets the `agent` credential and every CRUD
-area it reaches, and the Temporal client's address (#5299 D10). The agent itself reads no
-database URL and no KEK (#5299 step 12), but while the deployment still sets
-`SCADBUDDY_DATABASE_URL` and mounts `SCADBUDDY_SECRET_KEY_FILE` in the agent's pods, the
-package can read those too. It can use or send any of them, and it can
+area it reaches, and the Temporal client's address (#5299 D10). The agent's pods hold no
+database URL and no KEK (#5299 step 12, eh-homelab/clusters#3965). It can use or send any of them, and it can
 decide tool calls itself (a `PreToolUse` or `PermissionRequest` hook). Its MCP tools stay `outward`, because they
 are not ScadBuddy's.
 
@@ -874,9 +872,8 @@ gets:
 ## Bash and PowerShell in a sandbox pod (#5864)
 
 Claude Code's own `Bash` and `PowerShell` run in its process, in the agent worker pod. That
-pod holds the `agent` service credential's proof and the Temporal client, and, until the
-eh-homelab/clusters change removes them, the database URL and the KEK that the agent
-ignores (#5299 step 12). Rule #5295 forbids untrusted code there. Claude
+pod holds the `agent` service credential's proof and the Temporal client, and no database
+URL or KEK (#5299 step 12, eh-homelab/clusters#3965). Rule #5295 forbids untrusted code there. Claude
 Code's sandbox cannot run there either (no bwrap; AppArmor refuses `unshare --mount`,
 measured 2026-11-01, `agent/src/access/nativeBuiltins.ts`). So the native tools stay `off`.
 When the deployment sets up a sandbox, every session gets ScadBuddy's own `Bash` and
@@ -1037,8 +1034,8 @@ so a name re-pointed between check and connect reaches nothing new.
 
 A session's `Workflow` (Claude Code's tool, `docs/ai/operating.md`) runs a script the
 model wrote. The call is `outward`, so the user approves it, and sees the script, first.
-The script then runs on an agent replica, which holds the `agent` service credential (and,
-while the deployment still sets them, the database URL and the KEK it ignores), so it never
+The script then runs on an agent replica, which holds the `agent` service credential (and no database URL or KEK since
+eh-homelab/clusters#3965), so it never
 runs in the service's own JavaScript. Node's `vm`, Temporal's
 workflow sandbox included, is not a boundary: a host object's `constructor` reaches the
 host's `Function`, and through it `process`. It runs in QuickJS compiled to WebAssembly

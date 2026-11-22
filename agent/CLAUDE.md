@@ -14,12 +14,11 @@ implementations of the stores as test-only fakes (`test/support/sql/`, over
 `test/support/database.ts`). The API owns the `ai_*` tables, applies their migrations at its
 start (#5299 D6; root CLAUDE.md "Migrations (#491)"), and revokes the agent's old role
 `scadbuddy_agent` at every start (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`, PR
-#6906). The deployment change that takes `SCADBUDDY_DATABASE_URL` and the KEK mount out of
-the sidecar and the agent-worker Deployment is in eh-homelab/clusters, after this.
-Claude Code, and any plugin package approved with `allow_refused`, runs in the
-agent's container, which holds no database URL and no KEK once eh-homelab/clusters
-removes them; the sidecar still shares the API's pod, whose API container holds both
-(#5296; `docs/ai/security.md`, "Plugin packages").
+#6906). eh-homelab/clusters#3965 took `SCADBUDDY_DATABASE_URL` and the KEK mount out of the sidecar
+and the agent-worker Deployment and dropped the role. Claude Code, and any plugin package
+approved with `allow_refused`, runs in the agent's container, which holds no database URL and
+no KEK; the sidecar still shares the API's pod, whose API container holds both (#5296;
+`docs/ai/security.md`, "Plugin packages").
 
 `src/config.ts` ignores `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_SECRET_KEY_FILE` and
 `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (`IGNORED_VARS`, `config.ignored`) with one warning:
