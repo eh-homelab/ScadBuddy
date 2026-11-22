@@ -34,6 +34,10 @@ COLOUR_EXTRA = "scadbuddy_colour"
 #: below 255. The material stays opaque: the viewer reads this one value
 #: (`frontend/src/lib/glbColor.ts` `designOpacityOf`), as the covers do.
 ALPHA_EXTRA = "scadbuddy_alpha"
+#: The mesh extra holding the file's filament slot a part prints in, from 0
+#: (`ColourPart.slot`), only when it is known: a file listing's page sets each mesh's
+#: colour from the customer's pick for that slot (#6710 §8.2). A render's GLB has none.
+SLOT_EXTRA = "scadbuddy_slot"
 
 
 def _srgb_to_linear(channel: float) -> float:
@@ -91,6 +95,8 @@ def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
         mesh.metadata[COLOUR_EXTRA] = part.colour
         if part.alpha < 255:
             mesh.metadata[ALPHA_EXTRA] = part.alpha
+        if part.slot is not None:
+            mesh.metadata[SLOT_EXTRA] = part.slot
         mesh.visual = trimesh.visual.TextureVisuals(
             material=trimesh.visual.material.PBRMaterial(
                 name=part.name,

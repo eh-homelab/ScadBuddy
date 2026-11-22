@@ -26,7 +26,11 @@ copy() {
     agent-durable/src/scadbuddy_durable/gate/validate.py \
     backend/scadbuddy/agent_data/gate_validate.py \
     agent-durable/src/scadbuddy_durable/gate/canonical.py \
-    backend/scadbuddy/agent_data/gate_canonical.py; do
+    backend/scadbuddy/agent_data/gate_canonical.py \
+    agent/test/fixtures/hosted-plugin-hash-vectors.json \
+    backend/tests/fixtures/hosted-plugin-hash-vectors.json \
+    agent/src/plugins/registry.ts \
+    backend/scadbuddy/hosted_plugins/rules.py; do
     mkdir -p "$work/r/$(dirname "$f")"
     cp "$root/$f" "$work/r/$f"
   done
@@ -42,6 +46,18 @@ copy
 sed -i 's/"self",/"own",/' "$work/r/backend/scadbuddy/agent_data/gate_validate.py"
 if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "gate_validate.py is not a copy" <<<"$out"; then
   echo "FAIL: a drifted gate validator passed: $out"; exit 1
+fi
+
+copy
+sed -i "s/'ide'/'idex'/" "$work/r/agent/src/plugins/registry.ts"
+if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "reserved plugin names differ" <<<"$out"; then
+  echo "FAIL: drifted reserved names passed: $out"; exit 1
+fi
+
+copy
+echo " " >>"$work/r/backend/tests/fixtures/hosted-plugin-hash-vectors.json"
+if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "hosted-plugin-hash-vectors.json is not a copy" <<<"$out"; then
+  echo "FAIL: a stale hash vectors copy passed: $out"; exit 1
 fi
 
 copy

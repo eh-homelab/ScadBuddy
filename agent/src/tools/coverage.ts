@@ -58,6 +58,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
   },
   {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/pictures',
+    reason: "A picture the shop uploads to a file listing (#6710 spec 2026-11-21 §5.4), a multipart image from the listing editor; the editor's file listing UI comes in a later PR of #6710.",
+  },
+  {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}/plates/{plate}.png',
+    reason: "A file listing's plate picture as image bytes (#6710 spec 2026-11-21 §9.3), for the listing editor's pictures; a tool gains nothing from a PNG the editor shows.",
+  },
+  {
     operation: 'GET /api/v1/storefront/listings/{listing_id}/prepare',
     reason: "The Storefront editor's \"Prepare every colour combination\" shows the count and the progress (#6237); a back-office action, as publish is on the page.",
   },
@@ -681,6 +689,28 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       '(2026-11-17-machine-rate-actuals §5): machine_rate_get already reads the log after its live task read, ' +
       'and the housekeeping sweep reads it on its Schedule (§3.7).',
   },
+  ...(
+    [
+      'POST /api/v1/hosted-plugins',
+      'GET /api/v1/hosted-plugins',
+      'GET /api/v1/hosted-plugins/{name}',
+      'PATCH /api/v1/hosted-plugins/{name}',
+      'DELETE /api/v1/hosted-plugins/{name}',
+      'GET /api/v1/hosted-plugins/{name}/files',
+      'GET /api/v1/hosted-plugins/{name}/files/{path}',
+      'PUT /api/v1/hosted-plugins/{name}/files/{path}',
+      'DELETE /api/v1/hosted-plugins/{name}/files/{path}',
+      'POST /api/v1/hosted-plugins/{name}/files/moves',
+      'GET /api/v1/hosted-plugins/{name}/draft-diff',
+      'POST /api/v1/hosted-plugins/{name}/publish',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A hosted plugin's draft and publish (#6932, spec 2026-11-21 §6.2). Its MCP tools (hosted_plugin_create, " +
+      '_list, _update, _file_read, _file_write, _file_delete and _publish) follow in #6938; until then the routes are ' +
+      "Settings' and an access token's.",
+  })),
 ]
 
 /**

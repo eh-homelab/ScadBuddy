@@ -22,6 +22,11 @@ hashes a package; the API stores the pin it was given.
 - ``POST …/{name}/enabled`` the switch (409 ``package-unapproved`` before an approval);
 - ``POST …/{name}/delete`` the uninstall, with every access row and listing of the package.
 
+Area ``hosted-plugins`` (#6932): ``GET …/hosted-plugins/{name}`` a hosted plugin with its
+latest version's row (``plugin`` null when there is none), and
+``GET …/hosted-plugins/{name}/versions/{N}.zip`` that version's zip, as published (404
+``hosted-version-not-found``).
+
 A package that is not there is 404 ``package-not-found``. Each refusal's text is the
 agent's ``PluginError``'s, which the agent raises again with the route's status.
 """
@@ -35,7 +40,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 import psycopg
-from fastapi import Path, Query, status
+from fastapi import Path, Query, Response, status
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -44,6 +49,8 @@ from scadbuddy.agent_data.packages import forget_package, prune_stale_rows
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.hosted_plugins import store as hosted_store
+from scadbuddy.hosted_plugins.blobs import blob_bytes
 
 router = crud_router("agent")
 
@@ -65,6 +72,7 @@ PACKAGE_NAME_DIFFERS = "package-name-differs"
 PIN_MISMATCH = "pin-mismatch"
 REFUSED_NEEDS_ALLOW = "refused-needs-allow"
 PACKAGE_UNAPPROVED = "package-unapproved"
+HOSTED_VERSION_NOT_FOUND = "hosted-version-not-found"
 
 Name = Annotated[str, Path(pattern=NAME_PATTERN)]
 
@@ -436,3 +444,85 @@ async def plugin_package_delete(name: Name, state: StateDep) -> Done:
         return True
 
     return Done(done=await _in_tx(state, run))
+
+
+# Hosted plugins (#6932, spec 2026-11-21 §6.5, area ``hosted-plugins``): the agent's reads of
+# what the API's ``/api/v1/hosted-plugins`` routes publish. The agent installs and re-pins a
+# hosted package from its latest version, and fetches a version's zip to materialise it.
+
+
+class HostedVersionRow(BaseModel):
+    """One ``ai_hosted_plugin_versions`` row: the pin is (``version``, ``content_hash``)."""
+
+    version: int
+    zip_sha256: str
+    content_hash: str
+    files: dict[str, Any]
+    published_at: datetime
+    published_by: str
+
+
+class HostedPluginRow(BaseModel):
+    name: str
+    description: str
+    category: str | None
+    tags: list[str]
+    latest_version: int | None
+    #: The latest version's row; null before the first publish.
+    latest: HostedVersionRow | None
+
+
+class HostedPluginAnswer(BaseModel):
+    plugin: HostedPluginRow | None
+
+
+@router.get("/hosted-plugins/{name}", name="crud_agent_hosted_plugin")
+async def hosted_plugin(name: Name, state: StateDep) -> HostedPluginAnswer:
+    def run(conn: psycopg.Connection[Any]) -> HostedPluginRow | None:
+        row = hosted_store.plugin(conn, name)
+        if row is None:
+            return None
+        latest = hosted_store.latest(conn, row)
+        return HostedPluginRow(
+            name=row["name"],
+            description=row["description"],
+            category=row["category"],
+            tags=list(row["tags"]),
+            latest_version=row["latest_version"],
+            latest=None if latest is None else HostedVersionRow.model_validate(dict(latest)),
+        )
+
+    return HostedPluginAnswer(plugin=await _in_tx(state, run))
+
+
+@router.get(
+    "/hosted-plugins/{name}/versions/{version}.zip",
+    name="crud_agent_hosted_plugin_zip",
+    response_class=Response,
+)
+async def hosted_plugin_zip(
+    name: Name, version: Annotated[int, Path(ge=1)], state: StateDep
+) -> Response:
+    """The version's zip, as published; its sha256 and content hash in the headers."""
+
+    def run(conn: psycopg.Connection[Any]) -> Any:
+        row = hosted_store.plugin(conn, name)
+        found = None if row is None else hosted_store.version(conn, row["id"], version)
+        if found is None:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND,
+                f'the hosted plugin "{name}" has no version {version}',
+                reason=HOSTED_VERSION_NOT_FOUND,
+            )
+        return found
+
+    found = await _in_tx(state, run)
+    data = await blob_bytes(state, found["zip_sha256"])
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "X-ScadBuddy-Zip-Sha256": found["zip_sha256"],
+            "X-ScadBuddy-Content-Hash": found["content_hash"],
+        },
+    )

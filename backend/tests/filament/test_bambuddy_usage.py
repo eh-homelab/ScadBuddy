@@ -915,3 +915,99 @@ async def test_a_failed_usage_body_leaves_it_and_the_newer_rows_for_the_next_pul
         again = await read_and_pull(f, settings)
     assert again.usage_booked == 2
     assert sorted(e.ref_id for e in _usage_events(f, spool)) == ["10", "11", "12"]
+
+
+def _newest(rows: list[SpoolUsage]) -> Any:
+    """Bambuddy's ``GET /inventory/usage``: the newest ``limit`` rows (100 when none is
+    given), newest first, with no offset or date (R-6860-1)."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        limit = int(request.url.params.get("limit", 100))
+        ordered = sorted(rows, key=lambda r: (r.created_at, r.id), reverse=True)
+        return httpx.Response(200, json=[r.model_dump(mode="json") for r in ordered[:limit]])
+
+    return answer
+
+
+class _Recording(LocalBbPull):
+    """`LocalBbPull`, keeping each usage body it is sent."""
+
+    sent: list[UsageBody]
+
+    async def book_usage(self, body: UsageBody, cancel: Any = None) -> UsageBooked:
+        self.sent.append(body)
+        return await super().book_usage(body, cancel)
+
+
+async def _recorded_pull(f: Filament, settings: StoredSettings) -> tuple[Any, list[UsageBody]]:
+    api = _Recording(f, lambda: settings)
+    api.sent = []
+    report = await bb_pull_run.read_and_pull(
+        api, settings, instance=instance_for(BB), pull_id=new_pull_id(), pulls=EVERY
+    )
+    return report, api.sent
+
+
+async def test_more_than_200_usage_rows_since_the_last_pull_are_all_booked_in_order(
+    pg_pool: PgPool,
+) -> None:
+    """#7002: Bambuddy answers only the newest ``limit`` rows. 300 rows written between two
+    pulls are all read in one listing and booked, each once, oldest first."""
+    f = _filament(pg_pool)
+    spool = _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [
+        usage(
+            id=1000 + i,
+            weight_used=1.0,
+            print_name=f"job-{i}",
+            created_at=_naive(T1 + timedelta(minutes=i)),
+        )
+        for i in range(300)
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(json=[bb().model_dump(mode="json")])
+        router.get(f"{BB}/api/v1/inventory/usage").mock(side_effect=_newest(rows))
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        report, sent = await _recorded_pull(f, settings)
+        again, _ = await _recorded_pull(f, settings)
+    assert report.usage_booked == 300
+    assert [u.id for body in sent for u in body.usage] == [r.id for r in rows]
+    events = _usage_events(f, spool)
+    assert sorted(int(e.ref_id) for e in events) == [r.id for r in rows]
+    assert [int(e.ref_id) for e in sorted(events, key=lambda e: e.at)] == [r.id for r in rows]
+    assert again.usage_booked == 0
+    assert len(_usage_events(f, spool)) == 300
+
+
+async def test_two_runs_of_one_job_in_one_read_pair_oldest_first(pg_pool: PgPool) -> None:
+    """#7002 (PR #7005 review): the rows reach `book_usage` oldest first, in one body.
+    Two runs of one job on printer 1: run 1's estimate is on Y and Bambuddy booked it on
+    Z; run 2's estimate and Bambuddy's row are both on W. Run 1's row covers Y's estimate
+    (W's is no candidate: run 2's row on W is pending when run 1's row books), and run 2's
+    row pairs on W by `ledger.basis`."""
+    f = _filament(pg_pool)
+    _printer_1(pg_pool)
+    z = _linked(f)
+    y = _second_spool(f)
+    (w,) = pull(f, [bb(id=9)], now=NOW).created_ids
+    run_1 = _estimate(f, y)
+    _estimate(f, w, run="run-2")
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [usage(id=457), usage(id=458, spool_id=9, created_at=_naive(T1 + timedelta(hours=1)))]
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{BB}/api/v1/inventory/spools").respond(
+            json=[s.model_dump(mode="json") for s in (bb(), bb(id=8), bb(id=9))]
+        )
+        router.get(f"{BB}/api/v1/inventory/usage").mock(side_effect=_newest(rows))
+        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        report, sent = await _recorded_pull(f, settings)
+    assert [[u.id for u in body.usage] for body in sent] == [[457, 458]]
+    assert report.usage_booked == 2
+    (zevent,) = _usage_events(f, z)
+    (cover,) = [e for e in f.spools.events(y) if e.kind == "print_ended"]
+    assert (cover.ref_id, cover.data["covered_by"]) == (run_1, str(zevent.id))
+    ended = [e for e in f.spools.events(w) if e.kind == "print_ended"]
+    assert [e.ref_kind for e in ended] == [ledger.BB_USAGE]

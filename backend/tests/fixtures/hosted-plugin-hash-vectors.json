@@ -1,0 +1,168 @@
+{
+  "cases": [
+    {
+      "name": "one skill and the generated manifest",
+      "files": [
+        {
+          "path": ".claude-plugin/plugin.json",
+          "text": "{\"name\":\"greeter\",\"description\":\"Says hello\",\"version\":\"1.0.0\"}\n",
+          "executable": false
+        },
+        {
+          "path": "skills/hello/SKILL.md",
+          "text": "---\nname: hello\ndescription: Says hello\n---\n\nSay hello.\n",
+          "executable": false
+        }
+      ],
+      "hash": "sha256:b43eba7919c53b2431792399a9214a70c1204f9bdbdce707c3c086e5c87b8225",
+      "file_list": {
+        ".claude-plugin/plugin.json": {
+          "sha256": "56433d1ca48b9210b6393564a8c872dd9971b32999c2d6080a7893fcec82310e",
+          "size": 64,
+          "executable": false
+        },
+        "skills/hello/SKILL.md": {
+          "sha256": "d925e968c37a59e65bf8ecdad89696e7a742981e404759d9a847f837e4607ae5",
+          "size": 56,
+          "executable": false
+        }
+      }
+    },
+    {
+      "name": "an executable script, an agent, a command and an empty file",
+      "files": [
+        {
+          "path": ".claude-plugin/plugin.json",
+          "text": "{\"name\":\"tools\",\"description\":\"\",\"version\":\"3.0.0\"}\n",
+          "executable": false
+        },
+        {
+          "path": "skills/run/SKILL.md",
+          "text": "---\nname: run\ndescription: Runs it\n---\n",
+          "executable": false
+        },
+        {
+          "path": "skills/run/scripts/go.sh",
+          "text": "#!/bin/sh\necho go\n",
+          "executable": true
+        },
+        {
+          "path": "agents/review.md",
+          "text": "---\nname: review\ndescription: Reviews\n---\n",
+          "executable": false
+        },
+        {
+          "path": "commands/wave.md",
+          "text": "Wave.\n",
+          "executable": false
+        },
+        {
+          "path": "skills/run/empty.txt",
+          "text": "",
+          "executable": false
+        }
+      ],
+      "hash": "sha256:af7f6a8631a00e7d77d103b5ce7b38cb07e6b5da12cc48bc0c371ccc1ae82236",
+      "file_list": {
+        ".claude-plugin/plugin.json": {
+          "sha256": "339811e918b54be78ce65d52cfd56bc044c8146b6105712a8ef79b25c46f67fa",
+          "size": 52,
+          "executable": false
+        },
+        "agents/review.md": {
+          "sha256": "bf565261c001ad61758dd2403f3025d2782a5011c80d3a22acc7fd55c318eb0d",
+          "size": 42,
+          "executable": false
+        },
+        "commands/wave.md": {
+          "sha256": "01da279ec1094bf762528ed2feddcd6c4ed889a6ae4f8434ce8ef558abdaad60",
+          "size": 6,
+          "executable": false
+        },
+        "skills/run/SKILL.md": {
+          "sha256": "aebef68bdec67b298e293c12929b63c9053f156d885d60866483630fcdb304d1",
+          "size": 39,
+          "executable": false
+        },
+        "skills/run/empty.txt": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "executable": false
+        },
+        "skills/run/scripts/go.sh": {
+          "sha256": "eea8377424ab8d94c7c0755fbfe41ddd13ef4098a3797ab6ee3de702db280a8c",
+          "size": 18,
+          "executable": true
+        }
+      }
+    },
+    {
+      "name": "paths whose order differs between UTF-16 and code points",
+      "files": [
+        {
+          "path": "skills/a/～.md",
+          "text": "tilde\n",
+          "executable": false
+        },
+        {
+          "path": "skills/a/😀.md",
+          "text": "smile\n",
+          "executable": false
+        },
+        {
+          "path": "skills/a/Z.md",
+          "text": "upper\n",
+          "executable": false
+        },
+        {
+          "path": "skills/a/a.md",
+          "text": "lower\n",
+          "executable": false
+        },
+        {
+          "path": "skills/a-b/SKILL.md",
+          "text": "dash\n",
+          "executable": false
+        },
+        {
+          "path": "skills/a/SKILL.md",
+          "text": "slash\n",
+          "executable": false
+        }
+      ],
+      "hash": "sha256:2b55ee3504532fee210052dd976b8f1ba76c65e2aabdcbb1333f8205042ebfe8",
+      "file_list": {
+        "skills/a-b/SKILL.md": {
+          "sha256": "f8359416cedbf4b44bd1cab71b791b4121e3b33748187c530e70207af87c3f39",
+          "size": 5,
+          "executable": false
+        },
+        "skills/a/SKILL.md": {
+          "sha256": "8578a26bad9cf662e6e0cd91540eea63fb2ed5b5b2cebc471364c137b12931e6",
+          "size": 6,
+          "executable": false
+        },
+        "skills/a/Z.md": {
+          "sha256": "e83189db38554920ea572093f9ad32facf682f28ccecdac085c1511735a2b492",
+          "size": 6,
+          "executable": false
+        },
+        "skills/a/a.md": {
+          "sha256": "b908e4daaf9d57fe9cb551a689a35c9a9e0fac85fdf11faaa0a1ba0e5efc06fd",
+          "size": 6,
+          "executable": false
+        },
+        "skills/a/😀.md": {
+          "sha256": "afdbe5c62eaa85fb1610acd334f294a746bbd9e361d6c336bceaf4e04edc8b3f",
+          "size": 6,
+          "executable": false
+        },
+        "skills/a/～.md": {
+          "sha256": "2e5eb29909463e08e713d1d4d0ea9f31efb7eb634eccd7682132a847bdbc855c",
+          "size": 6,
+          "executable": false
+        }
+      }
+    }
+  ]
+}

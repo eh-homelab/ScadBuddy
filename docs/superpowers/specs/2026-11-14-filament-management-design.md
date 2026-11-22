@@ -391,8 +391,9 @@ Known limits of the time rule (#6261 and #6263):
   plate that ends within that skew of the reading.
 - During a plate, the spool shows the anchor before the plate minus the
   estimate, because AMS readings taken while printing are no anchor (rule 2).
-- The pull reads the newest 200 usage rows. More than 200 rows between two pulls
-  are not all booked. They are inside the next BB reading's value.
+- The pull reads the newest 5,000 usage rows (#7002; Bambuddy's listing has no
+  offset or date). More than 5,000 rows between two pulls are not all booked. They
+  are inside the next BB reading's value. Prod wrote 471 rows in 60 days.
 - A plate end that no report showed (the next plate began, the printer went
   `IDLE`) is booked at the settle's clock time, an upper bound.
 

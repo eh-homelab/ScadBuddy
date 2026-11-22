@@ -196,12 +196,13 @@ def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, st
     seen: dict[tuple[str, str], dict[str, set[str]]] = {}
     captions: dict[tuple[str, str], dict[str, str | None]] = {}
     for listing in listings:
-        if listing.snapshot is None:
+        if listing.template_snapshot is None:
             continue
-        pair = (listing.slug, listing.commit)
+        slug, commit, snapshot = listing.design
+        pair = (slug, commit)
         bounds = listing.params
         names = seen.setdefault(pair, {})
-        for p in listing.snapshot.schema_.parameters:
+        for p in snapshot.schema_.parameters:
             captions.setdefault(pair, {})[p.name] = p.caption
             votes = names.setdefault(p.name, set())
             # Only a listing that offers the parameter has a say in its label.

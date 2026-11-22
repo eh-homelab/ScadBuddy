@@ -38,8 +38,9 @@ export function emptyDraft(slug = '', commit = ''): ListingDraft {
 
 export function draftOf(listing: StorefrontListing): ListingDraft {
   return {
-    slug: listing.slug,
-    commit: listing.commit,
+    // A file listing (#6710) has no template; the editor offers templates only for now.
+    slug: listing.slug ?? '',
+    commit: listing.commit ?? '',
     title: listing.title,
     description: listing.description,
     params: listing.params,

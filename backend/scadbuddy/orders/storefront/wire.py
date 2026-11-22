@@ -15,9 +15,17 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    StringConstraints,
+    Tag,
+    field_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 from scadbuddy.core.settings import unique_materials
@@ -28,6 +36,7 @@ from scadbuddy.orders.models import (
     ChargeKind,
     FilamentEffect,
     ItemKind,
+    ItemLibrary,
     OrderStatus,
     SubmitAddress,
 )
@@ -152,6 +161,9 @@ class ListingSnapshot(BaseModel):
 
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
 
+    #: A template listing's snapshot (#6710 §4.2); a row stored before it has none and
+    #: reads as this.
+    kind: Literal["template"] = "template"
     schema_: CustomizerSchema = Field(alias="schema")
     #: Always false for now: publish refuses a pipeline template.
     pipeline: bool
@@ -162,6 +174,77 @@ class ListingSnapshot(BaseModel):
     #: at this commit's default (plan point 13). Read this, never the row's ``fixed``,
     #: for what a published listing renders with.
     fixed: dict[str, ParamValue] = Field(default_factory=dict)
+
+
+#: A sha256, lowercase hex: a file listing's pinned content (#6710).
+SHA256: Final = r"^[0-9a-f]{64}$"
+#: A file listing's picture ids (#6710 §4.1): plate ``n``'s own picture (from 1), or a
+#: picture the shop uploaded to the listing (``upload:<sha256>``, spec §5.4).
+FILE_PICTURE_ID: Final = re.compile(r"plate:([1-9][0-9]{0,3})|upload:([0-9a-f]{64})")
+
+
+class FileSlot(BaseModel):
+    """One filament slot of a listed file, as publish read it (#6710 §4.2)."""
+
+    #: From 0, as `ColourSlot.slot` and `RenderBody.colours` key a slot (slot id - 1).
+    slot: int = Field(ge=0)
+    #: The file's own colour, ``#RRGGBB`` (`quote.py` `file_colour`); grey when it names none.
+    colour: str
+    #: The file's own filament type (`FilamentRequirement.type`), or None.
+    material: str | None
+    #: Whether a printed part uses it (`bambu3mf.part_settings_slots`). An unused slot is
+    #: never offered.
+    used: bool
+    #: A support or interface slot (`is_support` of ``material``): the shop locks it.
+    support: bool
+
+
+class FileSnapshot(BaseModel):
+    """What publish read from a listed library file (#6710 §4.2): the held copy the
+    listing sells (``copy_key``, ``listing-file-<sha256>``), its slots, its plates and a
+    held GLB of each plate."""
+
+    kind: Literal["library_file"] = "library_file"
+    file_id: int
+    library: ItemLibrary
+    filename: str
+    file_type: Literal["3mf", "stl"]
+    sha256: str = Field(pattern=SHA256)
+    size: int
+    copy_key: str
+    slots: list[FileSlot]
+    plates: list[int]
+    #: One held GLB per plate (``listing-preview-<sha256 of the GLB>``), in plate order;
+    #: empty for a file no mesh could be read from.
+    preview_keys: list[str] = Field(default_factory=list)
+    #: Each support slot's filament, as the shop locked it, by slot from 0: the first of
+    #: the listing's support filaments of the slot's material, else its first support
+    #: filament.
+    support: dict[int, str] = Field(default_factory=dict)
+    #: The remembered choices of ``library:<file_id>`` when publish ran
+    #: (`ModelPrintChoices`, as JSON: the settings store imports this module), or None
+    #: when the scope held none. The price reads it only when that scope holds none (§7.1).
+    remembered: dict[str, Any] | None = None
+
+    @property
+    def offered(self) -> list[FileSlot]:
+        """The slots a customer picks a colour for: used, and not support."""
+        return [slot for slot in self.slots if slot.used and not slot.support]
+
+
+def _snapshot_kind(value: Any) -> str:
+    """A stored snapshot's ``kind``; a row stored before #6710 has none and is a
+    template's."""
+    if isinstance(value, dict):
+        return str(value.get("kind", "template"))
+    return str(getattr(value, "kind", "template"))
+
+
+#: What publish captured: a template's commit, or a library file (#6710 §4.2).
+Snapshot = Annotated[
+    Annotated[ListingSnapshot, Tag("template")] | Annotated[FileSnapshot, Tag("library_file")],
+    Discriminator(_snapshot_kind),
+]
 
 
 class ListingMedia(BaseModel):
@@ -176,20 +259,58 @@ class ListingMedia(BaseModel):
     media_id: str | None = None
 
 
+class ListingFileInput(BaseModel):
+    """The library file a ``library_file`` listing sells (#6710 §4.1): an id of the
+    library that serves."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(ge=1)
+    library: ItemLibrary
+    #: True asks the next publish to read the library's file now and pin that version
+    #: ("Use the library's version"); False withdraws the request ("Keep the published
+    #: version"). Left out, the stored request stays.
+    repin: bool | None = None
+    #: What `Listing.library_file` answers, accepted so a client can send back the
+    #: object it read. It is ignored: no body sets the pin. A value that is not a
+    #: lowercase hex sha256 is refused (422), so a malformed body does not save
+    #: silently. `Listing.library_file` always answers it lowercase, so a read-back
+    #: object passes; a client that upper-cases hashes gets the 422.
+    pinned: str | None = Field(default=None, pattern=SHA256)
+    #: What `Listing.library_file` answers too, accepted and ignored as ``pinned`` is.
+    filename: str | None = Field(default=None, max_length=1000)
+
+
+class ListingFile(ListingFileInput):
+    """A file listing's ``library_file`` as stored: ``pinned`` is the sha256 of the held
+    copy the listing sells (null before its first publish), ``repin`` the stored request,
+    and ``filename`` the file's name when it was pinned."""
+
+    repin: bool = False
+
+
 class ListingInput(BaseModel):
     """The back office's listing, as it creates or replaces one."""
 
     model_config = ConfigDict(extra="forbid")
 
-    slug: str = Field(min_length=1, max_length=200)
-    commit: str = Field(pattern=LISTING_COMMIT)
+    #: What the listing sells (#6710): a commit of a template (``slug`` and ``commit``),
+    #: or a library file (``library_file``). Default ``template``, so a body built before
+    #: #6710 (the agent's, an old editor's) still saves. The store refuses a body whose
+    #: fields do not fit its source (422 ``listing_source_invalid``, with ``name``).
+    source: Literal["template", "library_file"] = "template"
+    slug: str | None = Field(default=None, min_length=1, max_length=200)
+    commit: str | None = Field(default=None, pattern=LISTING_COMMIT)
+    #: The file a ``library_file`` listing sells: an id of the library that serves.
+    library_file: ListingFileInput | None = None
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=5000)
     params: dict[str, ParamBound] = Field(default_factory=dict)
     fixed: dict[str, ParamValue] = Field(default_factory=dict)
     #: Price-book filament ids (plan point 12).
     colours: list[str] = Field(default_factory=list)
-    #: Ids of the template's media (``template_media``), in the order to show them.
+    #: Ids of the template's media (``template_media``), in the order to show them; for a
+    #: file listing, `FILE_PICTURE_ID`s (``plate:<n>``, ``upload:<sha256>``, #6710).
     media_ids: list[str] = Field(default_factory=list)
     #: The materials a print of this listing may be made of, in the shop's order of
     #: preference (#6258). Compared casefolded, at most `MAX_MATERIALS`, repeats dropped
@@ -216,11 +337,33 @@ class Listing(ListingInput):
     id: str
     position: int
     published: bool
-    snapshot: ListingSnapshot | None
+    library_file: ListingFile | None = None
+    snapshot: Snapshot | None
     media: list[ListingMedia]
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+    @property
+    def template_snapshot(self) -> ListingSnapshot | None:
+        """The snapshot of a published template listing; None for a file listing, which
+        a template's render, price and prepare never take (#6710)."""
+        return self.snapshot if isinstance(self.snapshot, ListingSnapshot) else None
+
+    @property
+    def design(self) -> tuple[str, str, ListingSnapshot]:
+        """The slug, commit and snapshot of a published template listing: what a render,
+        its price and the prepare run read. `ValueError` for any other listing, which
+        those paths refuse before they get here (`listings.py` `published_listing`)."""
+        snapshot = self.template_snapshot
+        if snapshot is None or self.slug is None or self.commit is None:
+            raise ValueError(f"listing {self.id!r} is not published as a template")
+        return self.slug, self.commit, snapshot
+
+    @property
+    def file_snapshot(self) -> FileSnapshot | None:
+        """The snapshot of a published file listing (#6710); None for any other."""
+        return self.snapshot if isinstance(self.snapshot, FileSnapshot) else None
 
 
 class ListingUpdate(BaseModel):
@@ -243,9 +386,10 @@ class ListingMediaUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    media_ids: list[Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]] = Field(
-        max_length=LISTING_MEDIA_MAX
-    )
+    media_ids: list[
+        Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]
+        | Annotated[str, StringConstraints(pattern=f"^(?:{FILE_PICTURE_ID.pattern})$")]
+    ] = Field(max_length=LISTING_MEDIA_MAX)
     updated_at: datetime
 
 
@@ -272,7 +416,8 @@ class ListingQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    #: Matches the title or the template's slug, case-insensitive, anywhere in it.
+    #: Matches the title, the template's slug or a file listing's filename,
+    #: case-insensitive, anywhere in it.
     q: str = Field(default="", max_length=200)
     status: ListingStatus | None = None
     #: Templates; a listing of any of them.
@@ -291,8 +436,12 @@ class ListingRow(BaseModel):
     the snapshot."""
 
     id: str
-    slug: str
-    commit: str
+    #: What the listing sells (#6710): a template's ``slug`` and ``commit``, or a library
+    #: file (``filename`` its name once published; null before).
+    source: Literal["template", "library_file"] = "template"
+    slug: str | None
+    commit: str | None
+    filename: str | None = None
     title: str
     #: The listing's place in the shop's order, from 1.
     place: int

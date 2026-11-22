@@ -16,6 +16,10 @@ from the file `TOKEN_FILE_ENV` names, in both processes):
 - ``POST /export`` with `ExportAsk` as JSON: export one printer model and nozzle. The
   answer is 200, ``application/octet-stream``, the file's UTF-8 bytes (at most
   `wire.MAX_FILE_BYTES`). The bytes travel as the body: never base64, never inside JSON.
+- ``POST /search`` with `wire.SearchAsk`, and ``POST /create`` with `wire.CreateAsk` (#7025):
+  the answer is 200, `wire.SearchAnswer` or `wire.CreateAnswer` as JSON (at most
+  `MAX_ANSWER_BYTES`), which the worker checks against its model; one that is not one is
+  ``browser``.
 
 Any other answer than 200 fails the step. A failure of the site is 500 with
 ``{"error": "site", "kind": <kind>}``. The worker reads every answer as untrusted, since a
@@ -35,10 +39,17 @@ from types import TracebackType
 from typing import Final, Self, get_args
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.profile_fetch.steps import ExportedFile, Kind, SiteError
-from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES
+from scadbuddy.profile_fetch.wire import (
+    MAX_FILE_BYTES,
+    CreateAnswer,
+    CreateAsk,
+    SearchAnswer,
+    SearchAsk,
+    search_query,
+)
 
 #: The browser service's port (``SCADBUDDY_PROFILE_FETCH_BROWSER_PORT``).
 BROWSER_PORT: Final = 8091
@@ -47,6 +58,12 @@ TOKEN_FILE_ENV: Final = "SCADBUDDY_PROFILE_FETCH_BROWSER_TOKEN_FILE"
 SESSION: Final = "/session"
 SPOOLS: Final = "/spools"
 EXPORT: Final = "/export"
+#: #7025: the search and the create; each answer is JSON (`SearchAnswer`, `CreateAnswer`).
+SEARCH: Final = "/search"
+CREATE: Final = "/create"
+#: The largest search or create answer: 25 candidates of a few hundred bytes each, and the
+#: duplicate list's text.
+MAX_ANSWER_BYTES: Final = 64 << 10
 #: The longest one step may take on the service: an export whose page asks for the login
 #: again signs in inside the step (`ThreeDfpSite._open`). Under the export activity's
 #: start-to-close (`workflow.EXPORT_TIMEOUT`, 20 min), so the attempt ends by its own read.
@@ -135,6 +152,28 @@ class RemoteSite:
         # The site's download name never crosses: the worker uses only the bytes.
         return ExportedFile(name="", text=text)
 
+    async def search(self, ask: SearchAsk) -> SearchAnswer:
+        context = f"3DFP search for {search_query(ask)!r}"
+        body = await self._call("POST", SEARCH, ask, MAX_ANSWER_BYTES, context)
+        return _answer(SearchAnswer, body, context)
+
+    async def create(self, ask: CreateAsk) -> CreateAnswer:
+        """The service's answer. Its own failure keeps its kind, which the driver gives only
+        before it clicks "Save Filament" (or ``not_created`` after it). Any other failure (no
+        answer, a lost or malformed one, a refusal of the call) is ``not_created``: the step
+        may have saved the filament (R-7025-11)."""
+        context = f"3DFP create of {ask.brand} {ask.material} {ask.material_type} {ask.colour}"
+        try:
+            body = await self._call("POST", CREATE, ask, MAX_ANSWER_BYTES, context)
+            return _answer(CreateAnswer, body, context)
+        except _SiteAnsweredError:
+            raise
+        except SiteError as error:
+            failed = SiteError(
+                "not_created", f"{error}; it may exist on 3dfilamentprofiles.com: search first"
+            )
+        raise failed
+
     async def _call(
         self, method: str, path: str, ask: BaseModel | None, cap: int, context: str
     ) -> bytes:
@@ -172,7 +211,8 @@ class RemoteSite:
         if status == 500 and body is not None:
             kind = _site_kind(body)
             if kind is not None:
-                raise _failure(kind, context)
+                failure = _failure(kind, context)
+                raise _SiteAnsweredError(failure.kind, str(failure))
         raise _failure("browser", context, f"the browser service answered HTTP {status}")
 
 
@@ -201,6 +241,20 @@ def _site_kind(body: bytes) -> Kind | None:
     if isinstance(kind, str) and kind in KINDS:
         return kind  # type: ignore[return-value]  # checked against Kind's values above
     return None
+
+
+class _SiteAnsweredError(SiteError):
+    """A failure the service answered as one of the site's kinds, as against one of the
+    call itself (`RemoteSite.create` tells them apart)."""
+
+
+def _answer[M: BaseModel](model: type[M], body: bytes, context: str) -> M:
+    """A search's or create's answer, checked against its model (which forbids any field
+    it does not name); a body that is not one is ``browser``, its text never quoted."""
+    try:
+        return model.model_validate_json(body)
+    except ValidationError:
+        raise _malformed(context, "an answer that is not one") from None
 
 
 def _failure(kind: Kind, context: str, text: str | None = None) -> SiteError:

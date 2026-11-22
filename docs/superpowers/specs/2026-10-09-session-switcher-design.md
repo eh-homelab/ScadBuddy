@@ -136,6 +136,14 @@ set and cleared by `PATCH /api/v1/ai/sessions/:id {archived}` in `sessions/edits
    `archived: 'only' | 'include'` asks for them, and every row carries `archived`. The HTTP
    lists do the same (`?archived=true | include | false`, `false` by default), so the
    per-resource list (#931) leaves them out too.
+7. **Its workflow (#7031).** Once the archive is written, the session's `AgentSession`
+   workflow is sent `end` (`DurableGate.end`), best-effort: it completes and releases its
+   warm place, and a workflow that misses the signal keeps waiting, with the archive
+   standing. Unarchiving does nothing in Temporal: the first send after it starts a new run
+   under the same id (`ALLOW_DUPLICATE`, `sessions/durable.ts`), which resumes from the
+   transcript.
+   - *Why:* an archived chat runs nothing, and before this its workflow waited for a
+     message for good (prod, 2026-11-22: archived sessions still had running workflows).
 
 In the panel, the user's own chats have an Archive action in the switcher, beside Rename
 and Done (hidden while a turn runs). The switcher has a Chats / Archived toggle; the

@@ -738,6 +738,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // R-PR2: reading the fetch can end a stale run `failed` and cancel its workflow; the run
   // is still the type's, no recorded kind.
   'filament_type_profile_fetch',
+  // #7025: a 3DFP create adds a filament on 3dfilamentprofiles.com and sets a type's
+  // `tdfp_id`; neither is a recorded kind.
+  'filament_tdfp_create',
   'filament_spool_upsert',
   'filament_spool_set_presets',
   'filament_spool_set_k_values',

@@ -210,6 +210,11 @@ export function StorefrontListingPage() {
       .storefrontListing(routeId)
       .then((listing) => {
         if (!live) return
+        if (listing.source === 'library_file') {
+          // #6710: this editor makes templates; a save from it would make the listing one.
+          setLoadError('This listing sells a library file, which this editor cannot open yet.')
+          return
+        }
         edited.current = false
         setOpen(opened(listing))
         setValues({})

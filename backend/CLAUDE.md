@@ -447,6 +447,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   agent's `pruneStaleRows`). `agent_data/access.py` holds the access writes they share.
   Tests `tests/api/test_crud_agent_access.py`, `test_crud_agent_plugins.py`,
   `test_crud_agent_packages.py`.
+- Hosted plugins (#6932, spec `2026-11-21-hosted-plugin-feeds-design.md` §6.1 to §6.3):
+  `hosted_plugins/` (`rules.py` the draft's paths, names and caps; `bundle.py` the publish's
+  checks, the generated `plugin.json`, the deterministic zip and the content hash, a port of
+  the agent's `hash.ts` pinned by `tests/fixtures/hosted-plugin-hash-vectors.json`, a copy of
+  the agent's, `agent/test/hostedPluginHashVectors.test.ts`; `store.py` the SQL) over the
+  agent-schema tables `ai_hosted_plugins`, `ai_hosted_plugin_files` (the draft) and
+  `ai_hosted_plugin_versions` (never updated; a trigger refuses it), and `ai_plugin_feeds`.
+  The bytes are blobs `attachment-<sha256>` held in `blob_refs` by holder `hosted_plugin`.
+  Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class) and the agent's area
+  `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
+  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`.
 - The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over
   `agent_data/gate.py`, the agent's `gate/store.ts` writers statement for statement, each one
   transaction: an entry opened (the Reset's cancels first, in their own), resolved, or decided
@@ -986,8 +997,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `SiteHolder` that keeps one signed-in browser, `SiteError` and its kinds (`login_failed`, only when the site sends the browser back to
   `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, an export over 512 KiB,
   which the driver refuses from the text's length before it reads the text (`_read_export`,
-  #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
-  `failed` activities; `workflow.py` is the `ProfileFetch` workflow; `wire.py` is the bodies
+  #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`,
+  and the 3DFP create's (#7025) `no_defaults`, no site defaults for the brand, material and
+  type (422), and `not_created`, Save Filament did not open the new filament's page, so it may
+  exist (502)); `activities.py` has the export, import and
+  `failed` activities, and `TdfpActivities`; `workflow.py` is the `ProfileFetch` workflow, and `TdfpSearch` and `TdfpCreate`; `wire.py` is the bodies
   shared with the CRUD routes; `site.py`'s `browser_env` is the allowlisted environment that
   Chromium launches with (no login, no token path). The API side is `filament/profile_fetch.py`
   (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
@@ -997,6 +1011,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
   (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
+  3DFP search and add (#7025, plan `docs/superpowers/plans/2026-11-22-3dfp-search-add.md`):
+  the workflows `TdfpSearch` and `TdfpCreate` on the same queue (`workflow.py`), their
+  activities `TdfpActivities` (no CRUD call: the API awaits the outcome, `filament/tdfp.py`
+  `TemporalTdfp`), the browser service's ``POST /search`` and ``/create`` (JSON answers the
+  worker validates), `site.py` `search` and `create`, and `duplicates.py` (the likely-duplicate
+  rule the create stops on, R-7025-5). The routes are `POST /filament/tdfp/search` and
+  `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key, type and ask,
+  `create_workflow_id`, R-7025-12; the create is never retried, and a failure before Save
+  Filament fails its workflow, so the same key runs it again, `workflow.BEFORE_SAVE`, R-7025-11).
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
@@ -2161,7 +2184,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `of_version`), so a held copy and a live copy, recorded under one `library:<id>`, are
   never reused, read or superseded for each other. A file's used slots (from 0) reach the
   slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
-  Only tests reach the file subject until a listing names a file (spec 2026-11-21 §12). The variant is sliced with the
+  A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
+  copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
+  the listing's pin; its price read and cart come in a later PR (spec 2026-11-21 §12). The variant is sliced with the
   choices and presets a back-office quote of a spool of the same filament type on the same
   printer gets (#6574, `test_slice_parity.py`). The shop slice profile gives only the
   printer and a filament type per material (`slice_profile.py`, a

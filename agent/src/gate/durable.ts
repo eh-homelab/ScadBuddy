@@ -200,7 +200,7 @@ export class DurableGate {
   }
 
   /**
-   * The session was marked done (#1056): its workflow completes once no turn runs. A
+   * The session was marked done (#1056), archived or forgotten (#7031): its workflow completes once no turn runs. A
    * workflow already gone has nothing left to end.
    */
   async end(sessionId: string): Promise<void> {

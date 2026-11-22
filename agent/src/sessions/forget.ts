@@ -2,6 +2,8 @@ import type { Client } from '@temporalio/client'
 import { CrudReadError, crudRead } from '../api/crudRead.js'
 import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import { backgroundWorkflowId } from '../background/service.js'
+import { DurableGate, sessionWorkflowId } from '../gate/durable.js'
+import { durableDescriber } from './durableSweep.js'
 import { BackgroundTaskStore, CrudBackgroundTasks } from '../background/store.js'
 import { unscheduleTask } from '../background/temporal.js'
 import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
@@ -16,6 +18,10 @@ import { CrudSessionReads, type SessionReads } from './sessionReads.js'
 //      workflows `bgtask-<session>-<id>`, terminated, so none encodes again under the key;
 //      and its tool calls still open (`session-<id>-call-<tool_use_id>`, plan 2026-10-13
 //      Step 9.2: every `tool.call` in its events with no `tool.result`) are terminated too;
+//      then the session's workflow is sent `end` (#7031), best-effort, as a done or archived
+//      session's is, and given FORGET_END_WAIT_MS to close, so it releases its warm place
+//      (only a run between turns: one in a turn, parked or not, ends after it; step 2 terminates
+//      it if it did not close);
 //   1. a session's forks that read its transcript through it (store.ts, plan 2026-10-13
 //      Step 6.5) take the range each references, sealed under their own keys, with the
 //      events and images they read through it (#4212), in the
@@ -76,6 +82,25 @@ export type ForgetDeps = {
   rows: Pick<CrudForgetRows, 'forget'>
 }
 
+/** How long a forget waits for the session's workflow to close after `end` (#7031). */
+export const FORGET_END_WAIT_MS = 10_000
+
+/**
+ * `end` to the session's workflow, then a bounded wait for it to close; best-effort: step 2
+ * terminates it. The wait is only for a run between turns: `end` takes effect only once a turn
+ * ends, a parked one included, so the terminate ends such a run instead.
+ */
+async function endSessionWorkflow(client: Client, sessionId: string): Promise<void> {
+  try {
+    await new DurableGate(client).end(sessionId)
+    const workflowId = sessionWorkflowId(sessionId)
+    if ((await durableDescriber(client)(workflowId)) !== 'between_turns') return
+    await client.withDeadline(Date.now() + FORGET_END_WAIT_MS, () => client.workflow.getHandle(workflowId).result())
+  } catch {
+    // Not reached, still closing, or gone: the terminate below ends it.
+  }
+}
+
 export type Forgotten = {
   key: boolean
   workflow: 'deleted' | 'not_found' | 'not_reached'
@@ -103,6 +128,8 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   deps.keys?.forget(subject)
   if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
   if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ reads: deps.reads, client: deps.client }, sessionId, 'forgotten (forgetSubject)')
+  // Before the tombstone: `end` is a payload sealed under the subject's key.
+  if (sessionId !== undefined && deps.client) await endSessionWorkflow(deps.client, sessionId)
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
   const key = await deps.crud.forget(subject)

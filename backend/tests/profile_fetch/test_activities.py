@@ -33,10 +33,15 @@ from scadbuddy.profile_fetch.steps import ExportedFile, Kind, SiteError
 from scadbuddy.profile_fetch.wire import (
     MAX_FILE_BYTES,
     NOT_RUNNING,
+    Candidate,
+    CreateAnswer,
+    CreateAsk,
     ExportFailure,
     ExportReport,
     ExportTarget,
     FetchAsk,
+    SearchAnswer,
+    SearchAsk,
 )
 from scadbuddy.profile_fetch.workflow import IMPORT_TIMEOUT
 from tests.crud.test_client import Source
@@ -50,6 +55,22 @@ ASK = FetchAsk(
     type_id="0f0e0d0c-0000-4000-8000-000000000001",
     tdfp_id=30173,
     targets=[ExportTarget(printer_model="H2C", nozzles=["0.2", "0.4", "0.6", "0.8"])],
+)
+
+
+SEARCH_ANSWER = SearchAnswer(
+    query="SUNLU Silk Bronze",
+    candidates=[
+        Candidate(
+            tdfp_id=38537,
+            brand="SUNLU",
+            material="PLA+/Pro",
+            material_type="Silk",
+            name="BRONZE (250g)",
+            hexes=["#779E7C"],
+            nominal_weight_g=250,
+        )
+    ],
 )
 
 
@@ -80,6 +101,10 @@ class FakeSite:
         self.logins = 0
         self.ensured: list[int] = []
         self.exports: list[tuple[int, str, str]] = []
+        self.searches: list[SearchAsk] = []
+        self.creates: list[CreateAsk] = []
+        self.tdfp_error: BaseException | None = None
+        self.create_answer = CreateAnswer(status="created", tdfp_id=40000, sent=["mpn"])
 
     async def __aenter__(self) -> Self:
         self.opened += 1
@@ -110,6 +135,20 @@ class FakeSite:
         if nozzle in self.too_large:
             raise SiteError("file_too_large", f"the exported file of H2C {nozzle} mm is too large")
         return ExportedFile(name=f"../{nozzle}/evil.json", text=self.text(nozzle))
+
+    async def search(self, ask: SearchAsk) -> SearchAnswer:
+        """#7025: ``tdfp_error`` makes it raise; else `SEARCH_ANSWER`."""
+        self.searches.append(ask)
+        if self.tdfp_error is not None:
+            raise self.tdfp_error
+        return SEARCH_ANSWER
+
+    async def create(self, ask: CreateAsk) -> CreateAnswer:
+        """#7025: ``tdfp_error`` makes it raise; else ``create_answer``."""
+        self.creates.append(ask)
+        if self.tdfp_error is not None:
+            raise self.tdfp_error
+        return self.create_answer
 
 
 class FakeCrud:

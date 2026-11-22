@@ -13,6 +13,8 @@
 #  - the gate's validator and response hash (agent-durable's gate/validate.py and
 #    gate/canonical.py), which the API runs behind its CRUD routes (#5299 step 10), are
 #    copied into backend/ byte for byte.
+#  - the hosted plugin name rules (#6932): `hosted_plugins/rules.py` `RESERVED_NAMES` must
+#    be the same set as `agent/src/plugins/registry.ts` `RESERVED_PLUGIN_NAMES`.
 set -euo pipefail
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 fail=0
@@ -29,6 +31,9 @@ same agent/test/fixtures/secret-vectors.json backend/tests/fixtures/secret-vecto
 # step 10): agent-durable's, copied whole, and the vectors that pin them to the agent's.
 same agent/test/fixtures/pending-input-vectors.json backend/tests/fixtures/pending-input-vectors.json
 same agent/test/fixtures/response-hash-vectors.json backend/tests/fixtures/response-hash-vectors.json
+# The hosted plugin content hash's vectors (#6932): `hash.ts` and `hosted_plugins/bundle.py`
+# must give the same hash, and the backend's tests read this copy.
+same agent/test/fixtures/hosted-plugin-hash-vectors.json backend/tests/fixtures/hosted-plugin-hash-vectors.json
 same agent-durable/src/scadbuddy_durable/gate/validate.py backend/scadbuddy/agent_data/gate_validate.py
 same agent-durable/src/scadbuddy_durable/gate/canonical.py backend/scadbuddy/agent_data/gate_canonical.py
 
@@ -74,6 +79,34 @@ backend = body("backend/scadbuddy/workflows/payload_codec.py", "flows_converter"
 differ = sorted(k for k in durable.keys() | backend.keys() if durable.get(k) != backend.get(k))
 if differ:
     print("FAIL: the two Python payload codecs differ in: " + ", ".join(differ))
+    sys.exit(1)
+PY
+then
+  fail=1
+fi
+if ! python3 - "$root" <<'PY'
+import ast
+import re
+import sys
+
+root = sys.argv[1]
+ts = open(f"{root}/agent/src/plugins/registry.ts").read()
+found = re.search(r"RESERVED_PLUGIN_NAMES[^=]*=\s*new Set\(\[(.*?)\]\)", ts, re.S)
+if found is None:
+    print("FAIL: RESERVED_PLUGIN_NAMES not found in agent/src/plugins/registry.ts")
+    sys.exit(1)
+agent = set(re.findall(r"'([^']+)'", found.group(1)))
+backend: set[str] = set()
+for node in ast.parse(open(f"{root}/backend/scadbuddy/hosted_plugins/rules.py").read()).body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id == "RESERVED_NAMES" for t in node.targets
+    ):
+        backend = set(ast.literal_eval(node.value.args[0]))  # type: ignore[attr-defined]
+if not agent or agent != backend:
+    print(
+        "FAIL: the reserved plugin names differ; only in the agent: "
+        f"{sorted(agent - backend)}, only in the backend: {sorted(backend - agent)}"
+    )
     sys.exit(1)
 PY
 then

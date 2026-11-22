@@ -463,6 +463,55 @@ def test_a_tray_that_holds_no_sb_spool_leaves_glow_unchecked() -> None:
     assert not found.abrasive and found.glow_unchecked
 
 
+def test_a_tray_whose_sb_spool_has_no_type_leaves_glow_unchecked() -> None:
+    """R-6876-6: the SB spool has no material, so the tray's ``PLA`` alone would judge it."""
+    [found] = rack_groups(
+        [requirement(1)], {1: _tray_choice(0, 0, sb=7)}, chosen={1: tray_spool_id(0, 0)}
+    )
+    assert not found.abrasive and found.glow_unchecked
+    assert found.unchecked == (
+        UncheckedSlot(slot_id=1, reason="no_type", spool_id=tray_spool_id(0, 0)),
+    )
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    [warning] = rack_warnings([found], [slot(2)], "least_used", picks, {})
+    assert warning.message == (
+        "Glow could not be checked for group 0, so it was ranked by its type alone: "
+        "filament 1's spool in AMS-A slot 1 has no type."
+    )
+
+
+def test_an_sb_row_with_no_type_is_named_by_its_slot_alone() -> None:
+    """R-6876-6 on Bambuddy's path: an SB row (no tray choice) under its number."""
+    spool = SpoolOption(spool_id=12, material="", sb_number=12)
+    [found] = rack_groups([requirement(1)], {1: spool}, chosen={1: 12})
+    assert found.unchecked == (UncheckedSlot(slot_id=1, reason="no_type", spool_id=12),)
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    [warning] = rack_warnings([found], [slot(2)], "least_used", picks, {})
+    assert warning.message == (
+        "Glow could not be checked for group 0, so it was ranked by its type alone: "
+        "filament 1's spool has no type."
+    )
+
+
+@pytest.mark.parametrize("material", [None, "", "  "])
+def test_an_untyped_sb_spool_whose_subtype_says_glow_is_abrasive(material: str | None) -> None:
+    """R-6876-6 / Decision 37: the spool's own subtype still counts. An untyped SB spool
+    whose subtype is Glow ranks abrasive and gets no ``rack-glow-unchecked`` warning; an
+    empty material name is untyped as ``None`` is."""
+    spool = SpoolOption(
+        spool_id=12, material="", sb_number=12, sb_material=material, sb_subtype="Glow"
+    )
+    [found] = rack_groups([requirement(1)], {1: spool}, chosen={1: 12})
+    assert found.abrasive
+    assert found.unchecked == (UncheckedSlot(slot_id=1, reason="no_type", spool_id=12),)
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    assert [
+        w
+        for w in rack_warnings([found], [slot(2)], "least_used", picks, {})
+        if w.kind == "rack-glow-unchecked"
+    ] == []
+
+
 def _ams(*trays: AmsTray) -> PrinterStatus:
     return PrinterStatus(id=1, name="H2C", connected=True, ams=[AmsUnit(id=0, tray=list(trays))])
 

@@ -149,7 +149,7 @@ async def create_mesh_model(
         )
         if changed is not None and first is not None:
             assert idempotency_key is not None
-            same_file = "origin" in source and (
+            same = (
                 await ops.store.keyed_operation(
                     kind.name,
                     slug,
@@ -160,8 +160,11 @@ async def create_mesh_model(
                         "source": {"origin": source["origin"]},
                     },
                 )
-                is not None
+                if "origin" in source
+                else None
             )
+            # Only `first` itself: the 409 names its id and says what it did (#7022).
+            same_file = same is not None and same.id == first.id
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 changed(first, catalogue.exists(slug), same_file),

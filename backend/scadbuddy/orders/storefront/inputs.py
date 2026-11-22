@@ -60,9 +60,7 @@ class InputOutsideListingError(ValueError):
 
 
 def _snapshot(listing: Listing) -> ListingSnapshot:
-    if listing.snapshot is None:
-        raise ValueError(f"listing {listing.id!r} is not published")
-    return listing.snapshot
+    return listing.design[2]
 
 
 class ColoursClashError(ValueError):
@@ -340,7 +338,7 @@ def listing_reference(
     of the listing's that ``filaments`` still has and a customer may pick (never a support
     material, `customer_filaments`, #6152), else `InputOutsideListingError`
     (``colours.<slot>``, ``colour``). ``values`` are `listing_values`' answer."""
-    snapshot = _snapshot(listing)
+    slug, commit, snapshot = listing.design
     slots: list[ColourSlot] = []
     for slot, filament_id in sorted(chosen.items()):
         if (
@@ -354,12 +352,12 @@ def listing_reference(
         )
     inputs = {"params": with_defaults(snapshot.schema_, values), "v": 0}
     reference = Reference(
-        slug=listing.slug,
-        commit=listing.commit,
+        slug=slug,
+        commit=commit,
         inputs=inputs,
         libraries=list(snapshot.libraries),
         template_name=snapshot.template_name,
-        render_key=render_key_of(listing.slug, inputs, listing.commit, pipeline=snapshot.pipeline),
+        render_key=render_key_of(slug, inputs, commit, pipeline=snapshot.pipeline),
     )
     return ResolvedReference(reference, slots)
 

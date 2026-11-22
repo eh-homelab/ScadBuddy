@@ -57,8 +57,10 @@ from scadbuddy.intake_worker.sandbox import (
     mounted_secrets,
 )
 from scadbuddy.profile_fetch.remote import (
+    CREATE,
     EXPORT,
     MAX_ASK_BYTES,
+    SEARCH,
     SESSION,
     SPOOLS,
     ExportAsk,
@@ -72,7 +74,7 @@ from scadbuddy.profile_fetch.settings import (
 )
 from scadbuddy.profile_fetch.site import SITE, ThreeDfpSite
 from scadbuddy.profile_fetch.steps import Site, SiteError, SiteHolder
-from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES
+from scadbuddy.profile_fetch.wire import MAX_FILE_BYTES, CreateAsk, SearchAsk
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +189,8 @@ class BrowserService:
             SESSION: {"POST": self._open, "DELETE": self._close},
             SPOOLS: {"POST": self._spools},
             EXPORT: {"POST": self._export},
+            SEARCH: {"POST": self._search},
+            CREATE: {"POST": self._create},
         }
         if path not in routes:
             await _send(writer, *_json(404, {"error": "not-found"}))
@@ -296,6 +300,30 @@ class BrowserService:
             return 200, {"Content-Type": "application/octet-stream"}, body
 
         return await self._on_site(export)
+
+    async def _search(self, ask: bytes) -> Answer:
+        wanted = _parse(SearchAsk, ask)
+        if wanted is None:
+            return _json(400, {"error": "bad-ask"})
+
+        async def search(site: Site) -> Answer:
+            return _model(await site.search(wanted))
+
+        return await self._on_site(search)
+
+    async def _create(self, ask: bytes) -> Answer:
+        wanted = _parse(CreateAsk, ask)
+        if wanted is None:
+            return _json(400, {"error": "bad-ask"})
+
+        async def create(site: Site) -> Answer:
+            return _model(await site.create(wanted))
+
+        return await self._on_site(create)
+
+
+def _model(answer: BaseModel) -> Answer:
+    return 200, {"Content-Type": "application/json"}, answer.model_dump_json().encode()
 
 
 def _parse[M: BaseModel](model: type[M], ask: bytes) -> M | None:

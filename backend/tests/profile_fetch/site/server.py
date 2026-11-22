@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
 HERE = Path(__file__).parent
@@ -23,6 +23,42 @@ SLICERS = ["Bambu Studio", "OrcaSlicer"]
 PRINTERS = ["H2C", "X1C"]
 #: No ``0.2 mm``: `test_an_option_the_dialog_lacks_is_reported`.
 NOZZLES = ["0.4 mm", "0.6 mm"]
+#: #7025: three of the seven rows the live search for "SUNLU Silk Bronze" listed on
+#: 2026-11-22.
+FILAMENTS: list[dict[str, Any]] = [
+    {
+        "id": 8916,
+        "brand": "SUNLU",
+        "material": "PLA",
+        "type": "Silk",
+        "name": "Bronze",
+        "hexes": ["#578A61"],
+    },
+    {
+        "id": 38537,
+        "brand": "SUNLU",
+        "material": "PLA+/Pro",
+        "type": "Silk",
+        "name": "BRONZE (250g)",
+        "hexes": ["#779E7C"],
+    },
+    {
+        "id": 1708,
+        "brand": "SUNLU",
+        "material": "PLA+/Pro",
+        "type": "Silk",
+        "name": "Bronze",
+        "hexes": ["#689471"],
+    },
+]
+#: The results table's columns, as measured.
+COLUMNS = ["Brand", "Material", "Type", "Color", "RGB", "TD", "Retailer", "Actions"]
+#: The add form's lists: brands, materials, types.
+ADD_LISTS = {
+    "brand": ["SUNLU", "eSUN", "Inland"],
+    "material": ["PLA", "PLA+/Pro", "PETG"],
+    "material_type": ["Basic", "Silk", "Silk Dual", "Kevlar"],
+}
 
 
 @dataclass
@@ -69,6 +105,26 @@ class Replica:
     header_user_agents: list[str] = field(default_factory=list)
     page_user_agents: list[str] = field(default_factory=list)
     posted_bodies: list[str] = field(default_factory=list)
+    #: #7025: what ``/filaments?q=`` lists, and its table's columns.
+    filaments: list[dict[str, Any]] = field(default_factory=lambda: list(FILAMENTS))
+    columns: list[str] = field(default_factory=lambda: list(COLUMNS))
+    searches: list[str] = field(default_factory=list)
+    #: The add form's lists; ``brand_select`` False leaves the brand out of its native
+    #: select, so only typing into the combobox finds it.
+    add_lists: dict[str, list[str]] = field(default_factory=lambda: dict(ADD_LISTS))
+    brand_select: bool = True
+    #: The ``brand|material|type`` keys that have site defaults.
+    defaults: set[str] = field(default_factory=lambda: {"SUNLU|PLA+/Pro|Silk"})
+    #: The add form's duplicate list, as `filaments` rows.
+    duplicates: list[dict[str, Any]] = field(default_factory=list)
+    #: The add form's identifier fields beyond ``#sku-0``: ``(id, label)``.
+    extra_fields: list[tuple[str, str]] = field(
+        default_factory=lambda: [("gtin", "GTIN / UPC"), ("asin", "ASIN")]
+    )
+    #: False: "Save Filament" saves but stays on the form.
+    save_lands: bool = True
+    created: list[dict[str, Any]] = field(default_factory=list)
+    next_id: int = 40000
 
     def expire_sessions(self) -> None:
         """Every session ends: the next page redirects to ``/login``."""
@@ -147,6 +203,37 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
             if path == "/my/spools":
                 self._send(200, b"<!doctype html><title>My Spools</title><h1>My Spools</h1>")
                 return
+            if path == "/filaments":
+                query = parse_qs(url.query).get("q", [""])[0]
+                site.searches.append(query)
+                words = query.casefold().split()
+                rows = [
+                    row
+                    for row in site.filaments
+                    if all(
+                        word in f"{row['brand']} {row['type']} {row['name']}".casefold()
+                        for word in words
+                    )
+                ]
+                self._send(
+                    200,
+                    _page("search.html", ROWS=json.dumps(rows), COLUMNS=json.dumps(site.columns)),
+                )
+                return
+            if path == "/filament/add":
+                self._send(
+                    200,
+                    _page(
+                        "add.html",
+                        LISTS=json.dumps(site.add_lists),
+                        DEFAULTS=json.dumps(sorted(site.defaults)),
+                        DUPLICATES=json.dumps(site.duplicates),
+                        EXTRA=json.dumps(site.extra_fields),
+                        BRAND_SELECT=json.dumps(site.brand_select),
+                        LANDS=json.dumps(site.save_lands),
+                    ),
+                )
+                return
             if path == "/my/dashboard":
                 self._send(200, b"<!doctype html><title>Dashboard</title><h1>Dashboard</h1>")
                 return
@@ -204,6 +291,14 @@ def _handler(site: Replica) -> type[BaseHTTPRequestHandler]:
                     self.end_headers()
                 else:
                     self._send(401, b"")
+                return
+            if path == "/api/filaments" and self._signed_in():
+                values = json.loads(body)
+                new_id = site.next_id
+                site.next_id += 1
+                site.created.append({"id": new_id, **values})
+                site.known_ids.add(new_id)
+                self._send(200, json.dumps({"id": new_id}).encode(), "application/json")
                 return
             if path.startswith("/api/spools/") and self._signed_in():
                 tdfp_id = self._id(path, "/api/spools/")

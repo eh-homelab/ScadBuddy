@@ -349,6 +349,77 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
   })
 })
 
+describe('3DFP search and create tools (#7025)', () => {
+  const SEARCH = `${BACKEND}/api/v1/filament/tdfp/search`
+  const CREATE = `${BACKEND}/api/v1/filament/tdfp/filaments`
+  const CANDIDATE = {
+    tdfp_id: 38537,
+    brand: 'SUNLU',
+    material: 'PLA+/Pro',
+    material_type: 'Silk',
+    name: 'BRONZE (250g)',
+    hexes: ['#779E7C'],
+    nominal_weight_g: 250,
+  }
+  const ASK = { brand: 'SUNLU', material: 'PLA+/Pro', material_type: 'Silk', colour: 'Copper', hexes: ['#B87333'] }
+
+  it.each([
+    ['filament_tdfp_search', 'read', false, ['POST /api/v1/filament/tdfp/search']],
+    ['filament_tdfp_create', 'outward', true, ['POST /api/v1/filament/tdfp/filaments']],
+  ])('%s is %s tier, gated %s, on its route', (name, risk, gated, routes) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(gated)
+    expect(tool(name).routes).toEqual(routes)
+  })
+
+  it('searches with the brand, material, type and colour and answers the candidates', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(SEARCH, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ query: 'SUNLU Silk Bronze', candidates: [CANDIDATE] })
+      }),
+    )
+    const ask = { brand: 'SUNLU', material: 'PLA+/Pro', material_type: 'Silk', colour: 'Bronze' }
+    const found = await runTool(tool('filament_tdfp_search'), ask, ctx())
+    expect(bodies).toEqual([ask])
+    expect(firstText(found)).toEqual({ query: 'SUNLU Silk Bronze', candidates: [CANDIDATE] })
+  })
+
+  it('needs a brand to search', () => {
+    expect(() => tool('filament_tdfp_search').parse({ colour: 'Bronze' })).toThrow()
+  })
+
+  it('creates with a request key and answers what the site did', async () => {
+    const seen: { key: string | null; body: unknown }[] = []
+    server.use(
+      http.post(CREATE, async ({ request }) => {
+        seen.push({ key: request.headers.get('Idempotency-Key'), body: await request.json() })
+        return HttpResponse.json({
+          create: { status: 'created', tdfp_id: 40000, duplicates: [], duplicate_text: '', likely: [], sent: ['gtin'], not_sent: [] },
+          type_id: ROW,
+          type_tdfp_id_set: true,
+        })
+      }),
+    )
+    const create = tool('filament_tdfp_create')
+    const made = await create.execute(create.parse({ ...ASK, gtin: '06975373321234', type_id: ROW }), ctx('outward'))
+    expect(made.isError).toBeFalsy()
+    expect(seen[0]?.key).toMatch(/^[0-9a-f]{32,64}$/)
+    expect(seen[0]?.body).toEqual({ ...ASK, gtin: '06975373321234', type_id: ROW })
+    expect((firstText(made) as { create: { tdfp_id: number } }).create.tdfp_id).toBe(40000)
+  })
+
+  it('checks the hexes and identifiers before it asks', () => {
+    const create = tool('filament_tdfp_create')
+    for (const bad of [{ hexes: [] }, { hexes: ['red'] }, { hexes: Array(5).fill('#000000') }, { gtin: '12' }]) {
+      expect(() => create.parse({ ...ASK, ...bad })).toThrow()
+    }
+    expect(create.description).toMatch(/Approved first\./)
+    expect(create.description).toContain('not_duplicates')
+  })
+})
+
 const SPOOLS = `${BACKEND}/api/v1/filament/spools`
 const SPOOL = `${SPOOLS}/${ROW}`
 

@@ -141,6 +141,18 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('That listing is gone.')
   })
 
+  it('opens no template editor for a listing that sells a library file', async () => {
+    // #6710: the editor handles templates only; a save from it would make the listing a template.
+    server.use(
+      http.get('/api/v1/storefront/listings/file-1', () =>
+        HttpResponse.json({ id: 'file-1', source: 'library_file', slug: null, commit: null, library_file: { id: 7, library: 'native', repin: false } }),
+      ),
+    )
+    renderStorefront('/storefront/listings/file-1')
+    expect(await screen.findByRole('alert')).toHaveTextContent('This listing sells a library file')
+    expect(screen.queryByRole('button', { name: 'Save draft' })).toBeNull()
+  })
+
   it('shows the shop’s text as text, never as HTML', async () => {
     const { user } = renderStorefront()
     const description = await screen.findByLabelText('Description')

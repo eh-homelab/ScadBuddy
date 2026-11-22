@@ -998,6 +998,8 @@ export class SessionManager {
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      // No Temporal (this.durable unset): nothing to end, and nothing to warn about.
+      endArchived: (id) => this.durable?.end(id) ?? Promise.resolve(),
       warm: this.warm,
       endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
