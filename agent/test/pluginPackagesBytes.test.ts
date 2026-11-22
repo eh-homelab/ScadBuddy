@@ -211,13 +211,21 @@ describe('installing bytes', () => {
     expect(mirror.kept.size).toBe(0)
   })
 
-  it('follows a redirect, but not past five, and not to a refused address', async () => {
+  it('refuses a redirect to a refused address, and to loopback http (plain http is for the first hop only)', async () => {
     routes['/greeter.zip'] = { body: greeterZip() }
-    for (let i = 0; i < 6; i++) routes[`/r${i}`] = { status: 302, location: i === 5 ? '/greeter.zip' : `/r${i + 1}` }
-    await expect(installer.prepare(validateSource({ kind: 'archive', url: `${base}/r1` }))).resolves.toMatchObject({ fetchPath: 'greeter-1.0' })
-    await expect(installer.prepare(validateSource({ kind: 'archive', url: `${base}/r0` }))).rejects.toThrow(/more than 5 redirects/)
+    routes['/r0'] = { status: 302, location: '/greeter.zip' }
+    await expect(installer.prepare(validateSource({ kind: 'archive', url: `${base}/r0` }))).rejects.toThrow(/https/)
+    routes['/r1'] = { status: 302, location: `${base}/greeter.zip` }
+    await expect(installer.prepare(validateSource({ kind: 'archive', url: `${base}/r1` }))).rejects.toThrow(/https/)
     routes['/meta'] = { status: 302, location: 'http://169.254.169.254/latest/meta-data' }
     await expect(installer.prepare(validateSource({ kind: 'archive', url: `${base}/meta` }))).rejects.toThrow(/link-local|metadata/)
+    expect(hits).not.toContain('/greeter.zip')
+  })
+
+  it('names an archive whose URL has a malformed percent escape, with no 500', async () => {
+    routes['/bad%zz.zip'] = { body: greeterZip() }
+    const prepared = await installer.prepare(validateSource({ kind: 'archive', url: `${base}/bad%zz.zip` }))
+    expect(prepared.review.name).toBeTruthy()
   })
 
   it('refuses a bytes install when no mirror can keep the file', async () => {

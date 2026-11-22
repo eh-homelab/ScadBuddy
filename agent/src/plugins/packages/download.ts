@@ -9,7 +9,7 @@ import { UNPACK_MAX_TOTAL_BYTES } from './unpack.js'
 
 // Downloading a plugin package's file (#6935, spec 2026-11-21 §6.6): a `marketplace.json`
 // from a bare URL, an `archive` zip, an npm registry document or tarball. EVERY HOP is
-// https, or http to loopback only (a loopback host whose addresses are all loopback;
+// https, or, on the first hop only, http to loopback (a loopback host whose addresses are all loopback;
 // spec §6.6 says https only, and loopback is for tests), and goes through the egress
 // check (`assertEndpointAllowed`: never a link-local or cloud metadata host), and the connection is
 // pinned to the addresses that check passed, so a name re-pointed between the check and
@@ -152,8 +152,11 @@ export const egressDownload: Downloader = async (start, options) => {
       throw err
     }
     // After the egress check, so a refused host is named as such; before any connection.
-    if (url.protocol === 'http:' && !(isLoopbackHost(url.hostname) && addresses.every((a) => isLoopbackPeer(a)))) {
-      throw new EgressError(`${options.what}: ${url.href} must use https (plain http is allowed for loopback only)`)
+    // Plain http to loopback is for the first hop only: a redirect never reaches it, so a public
+    // host cannot probe which loopback ports answer.
+    const loopbackHttp = redirects === 0 && isLoopbackHost(url.hostname) && addresses.every((a) => isLoopbackPeer(a))
+    if (url.protocol === 'http:' && !loopbackHttp) {
+      throw new EgressError(`${options.what}: ${url.href} must use https (plain http is allowed for a loopback start URL only)`)
     }
     const answer = await hop(url, addresses, options, signal)
     if (answer.bytes) return { bytes: answer.bytes, url: url.href }

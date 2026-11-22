@@ -390,7 +390,7 @@ const INSTALL_KINDS: { kind: InstallKind; label: string }[] = [
   { kind: 'git', label: 'Git repository' },
   { kind: 'marketplace', label: 'Marketplace repository' },
   { kind: 'marketplace-url', label: 'Marketplace URL' },
-  { kind: 'archive', label: 'Zip archive' },
+  { kind: 'archive', label: 'Archive' },
   { kind: 'npm', label: 'npm package' },
 ]
 
@@ -398,7 +398,7 @@ const URL_LABEL: Record<Exclude<InstallKind, 'npm'>, { label: string; placeholde
   git: { label: 'Repository URL', placeholder: 'https://github.com/owner/repo.git' },
   marketplace: { label: 'Marketplace repository URL', placeholder: 'https://github.com/owner/repo.git' },
   'marketplace-url': { label: 'marketplace.json URL', placeholder: 'https://plugins.example.com/marketplace.json' },
-  archive: { label: 'Zip URL', placeholder: 'https://files.example.com/plugin-1.0.0.zip' },
+  archive: { label: 'Archive URL', placeholder: 'https://files.example.com/plugin-1.0.0.zip' },
 }
 
 function InstallForm({ onInstalled }: { onInstalled: (pkg: PluginPackage) => void }) {

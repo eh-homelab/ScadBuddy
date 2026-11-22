@@ -188,7 +188,13 @@ export function marketplaceTarget(
 
 /** A name for a package whose manifest has none: the file's or the npm package's name. */
 function bytesFallbackName(source: BytesSource): string {
-  const last = decodeURIComponent(new URL(source.url).pathname.split('/').pop() ?? '')
+  const segment = new URL(source.url).pathname.split('/').pop() ?? ''
+  let last = segment
+  try {
+    last = decodeURIComponent(segment)
+  } catch {
+    // A malformed % escape: the raw segment names it.
+  }
   const bare = last.includes('/') ? last.slice(last.indexOf('/') + 1) : last
   return bare.replace(/(-\d[^/]*)?\.(zip|tgz|tar\.gz|tar)$/i, '').toLowerCase()
 }

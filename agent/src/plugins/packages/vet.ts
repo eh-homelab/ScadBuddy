@@ -109,8 +109,10 @@ export type PackageReview = {
    */
   builtin_tools?: string[]
   /**
-   * For an entry of a bare `marketplace.json` URL (#6935, spec 2026-11-21 §6.6): the
-   * sha256 of the marketplace file the entry was read from, for the admin to see.
+   * For an entry of a bare `marketplace.json` URL only (#6935, spec 2026-11-21 §6.6): the
+   * sha256 of the marketplace file the entry was read from, for the admin to see. An entry of
+   * a repository marketplace has none: its pin is the repository's commit (an archive or npm
+   * entry there is pinned by its own sha256).
    */
   marketplace_sha256?: string
   /**
