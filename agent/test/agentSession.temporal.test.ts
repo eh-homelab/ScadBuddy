@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { sessionWorkflowId } from '../src/gate/durable.js'
+import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
 import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
 import type { Database } from './support/database.js'
@@ -223,7 +223,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       taskQueue: SESSION_QUEUE,
       args: [start(id)],
       workflowIdConflictPolicy: 'USE_EXISTING',
-      workflowIdReusePolicy: 'REJECT_DUPLICATE',
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
     return client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, { accepted: boolean; turn_id: string }, [Message]>(SEND_MESSAGE_UPDATE, {
       args: [m],
@@ -1175,6 +1175,67 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
       // The turn is a stub here; that a placement resumes from the transcript is warm.ts's
       // (the store's `head`), whichever run placed it, as turnHost.pg.test.ts shows.
+    })
+
+    // #7031: an archived session's workflow ends, and an unarchived one's next send starts a new
+    // run under the same id (ALLOW_DUPLICATE) that resumes from the transcript.
+    it('archive sends `end`: the workflow completes and releases its home (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      expect((await handleOf(session.id).describe()).status.name).toBe('RUNNING')
+      await m.edits.update(session.id, browser, { archived: true })
+      await handleOf(session.id).result()
+      expect((await handleOf(session.id).describe()).status.name).toBe('COMPLETED')
+      expect(released).toEqual([session.id])
+    })
+
+    it('archive, unarchive, then a send within retention runs a turn in a new run, with the earlier transcript (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const key = (sessionId: string) => ({ projectKey: 'p', sessionId })
+      // The first turn writes its transcript; the next reads what its placement would resume from.
+      const seen: number[] = []
+      runTurn = async (input) => {
+        const earlier = (await m.store.load(key(input.sessionId))) ?? []
+        seen.push(earlier.length)
+        await m.store.append(key(input.sessionId), [{ type: 'user', uuid: randomUUID(), message: { role: 'user', content: input.message?.text } }])
+        return { status: 'done', hostQueue: '' }
+      }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      await m.edits.update(session.id, browser, { archived: true })
+      await handleOf(session.id).result()
+      const archivedRun = await runIdOf(session.id)
+      // Archived: the row refuses a send, and no run starts.
+      await expect(m.send(session.id, browser, 'too soon')).rejects.toMatchObject({ code: 'archived' })
+      expect(await runIdOf(session.id)).toBe(archivedRun)
+
+      await m.edits.update(session.id, browser, { archived: false })
+      const again = await m.send(session.id, browser, 'and a lid')
+      expect(await again.done).toMatchObject({ kind: 'result' })
+      // A new run of the same workflow id, though the closed one is still retained.
+      expect(await runIdOf(session.id)).not.toBe(archivedRun)
+      expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
+      expect(seen).toEqual([0, 1])
+    })
+
+    it('still refuses `closed` a send to a done session, and starts no run for it', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      await m.edits.update(session.id, browser, { done: true })
+      await handleOf(session.id).result()
+      const doneRun = await runIdOf(session.id)
+      await expect(m.send(session.id, browser, 'one more')).rejects.toMatchObject({ code: 'closed', message: `session ${session.id} is done` })
+      expect(await runIdOf(session.id)).toBe(doneRun)
+      expect((await handleOf(session.id).describe()).status.name).toBe('COMPLETED')
+      expect(turns).toHaveLength(1)
     })
 
     it('refuses `closed` a send to a session still recorded as DurableSession, and starts no workflow (plan Step 8.1)', async () => {

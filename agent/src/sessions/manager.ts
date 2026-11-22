@@ -1375,7 +1375,7 @@ export class SessionManager {
     )
   }
 
-  /** Tells a session's workflow it was marked done (#1056), or refuses `unavailable`. */
+  /** Tells a session's workflow to end: marked done (#1056) or archived (#7031); refuses `unavailable` with no Temporal. */
   private async endDurable(id: string): Promise<void> {
     if (!this.durable) {
       throw new SessionError('unavailable', 'this agent service has no Temporal to tell the session it is done; try again once it has')

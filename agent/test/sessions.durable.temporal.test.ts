@@ -753,18 +753,20 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello again'])
   }, 60_000)
 
-  it('refuses `closed`, as ended, a session whose workflow ran turns and ended but is still retained (#2078)', async () => {
+  it('starts a new run for a session whose workflow ran turns and ended but is still retained (#7031, ALLOW_DUPLICATE)', async () => {
     const m = await durableManager()
     const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
     await finishTurn(session.id, [
       { type: 'session.result', costUsd: 0.1, turns: 1, budgetUsd: 5 },
       { type: 'session.status', status: 'idle' },
     ])
-    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('ended')
-    // REJECT_DUPLICATE: an ended workflow is never started afresh under the same session.
-    const refused = await m.send(session.id, browser, 'hello again').catch((err: unknown) => err)
-    expect(refused).toMatchObject({ code: 'closed', message: expect.stringMatching(/has ended; continue in a new chat/) })
-    expect((refused as Error).message).not.toMatch(/removed/)
+    const handle = env.client.workflow.getHandle(sessionWorkflowId(session.id))
+    const endedRun = (await handle.describe()).runId
+    await handle.terminate('ended')
+    // The row decides (it is not done, archived or spent): the send starts a new run under the same id.
+    await m.send(session.id, browser, 'hello again')
+    expect((await handle.describe()).runId).not.toBe(endedRun)
+    expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello again'])
   }, 60_000)
 
   it("leaves a turn that was claimed again while its workflow was described", async () => {

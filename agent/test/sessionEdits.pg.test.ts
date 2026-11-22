@@ -247,6 +247,28 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edi
       expect(ended).toEqual([id])
     })
 
+    it('archives a session, then ends its workflow (#7031)', async () => {
+      const id = await session(1)
+      const ended: string[] = []
+      m.durable = {
+        end: async (sid: string) => {
+          // Told once the archive is written, never before.
+          expect((await m.get(sid, browser)).archivedAt).not.toBeNull()
+          ended.push(sid)
+        },
+      } as unknown as DurableGate
+      expect((await patch(id, { archived: true })).status).toBe(200)
+      expect(ended).toEqual([id])
+      expect((await m.get(id, browser)).status).not.toBe('done')
+    })
+
+    it('archives a session whose workflow cannot be told: the end is best-effort (#7031)', async () => {
+      const id = await session(1)
+      m.durable = undefined
+      expect((await patch(id, { archived: true })).status).toBe(200)
+      expect((await m.get(id, browser)).archivedAt).not.toBeNull()
+    })
+
     it('leaves a session as it was when its workflow cannot be told, with 503', async () => {
       const id = await session(1)
       m.durable = undefined

@@ -1,7 +1,6 @@
 import {
   type Client,
   WithStartWorkflowOperation,
-  WorkflowExecutionAlreadyStartedError,
   WorkflowUpdateFailedError,
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
@@ -33,12 +32,13 @@ import type { SendClaim, SendClaimed, TurnRows } from './turnRows.js'
 // - send: claim the row (`status = 'running'`, `durable_turn_id`: the workflow owns the turn),
 //   put the turn's images in ai_session_blobs (the claim check, by name), write `user.turn` and
 //   `session.status running`, then update-with-start `send_message` (update id: the turn id),
-//   starting the workflow on the first message. An ended workflow still retained is refused
-//   `closed` (REJECT_DUPLICATE). Once retention removes it, the same session's next send starts
-//   it again, on purpose: the turn resumes the transcript in ai_session_entries, so it never runs
-//   empty (#2078 refused it for good because DurableSession's history held the chat; plan
-//   Phase 10). Only a definite refusal (the validator's
-//   `busy`, a failed Update, an ended workflow)
+//   starting the workflow on the first message. A send to a session whose workflow ended (an
+//   archive or a forget ended it, #7031; a failure; a terminate) starts a new run under the same
+//   id (ALLOW_DUPLICATE), on purpose: the turn resumes the transcript in ai_session_entries, so it
+//   never runs empty (#2078 refused it for good because DurableSession's history held the chat;
+//   plan Phase 10). The row decides who may send: the claim refuses a session that is done
+//   (`closed`), archived or spent. Only a definite refusal (the validator's
+//   `busy`, a failed Update)
 //   gives the claim back. An Update not accepted in time keeps it: Temporal may already hold the
 //   message, which a worker delivers later, so the turn is handed back and `done` follows the log.
 // - `done` follows the event log from the turn's own `session.status running` to the status the
@@ -553,11 +553,10 @@ export class DurableTurns {
       taskQueue: this.#sessionQueue,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
-      // A session whose workflow ended (failed, or terminated) is refused `closed` while Temporal
-      // still holds that run: its end (a failure, a terminate) is what the panel shows, and a send
-      // must not paper over it at once. Once retention removes the run, a send starts it again
-      // and the turn resumes from ai_session_entries (see the header).
-      workflowIdReusePolicy: 'REJECT_DUPLICATE',
+      // A session whose workflow ended (archived and unarchived since, #7031; failed; terminated)
+      // starts a new run, which resumes from ai_session_entries (see the header). The claim above
+      // already refused a session that is done, archived or spent.
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
     // The turn id as the update id: a re-send of the same turn is the same Update.
     const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
@@ -572,10 +571,6 @@ export class DurableTurns {
       const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)
-      }
-      // An ended workflow still retained refuses the start (REJECT_DUPLICATE).
-      if (err instanceof WorkflowExecutionAlreadyStartedError) {
-        throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
       }
       if (err instanceof WorkflowUpdateFailedError) {
         throw new SessionError('unavailable', `session ${session.id}'s workflow did not take the message; send it again in a moment`)
