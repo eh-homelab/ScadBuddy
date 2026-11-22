@@ -19,6 +19,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.trays import EXTERNAL, unit_label
+from scadbuddy.codes.parse import format_code
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import BbLinked, forget_sync
@@ -109,9 +110,62 @@ class LocationStore:
             (roots if parent is None else parent.children).append(node)
         return roots
 
+    @property
+    def pool(self) -> ConnectionPool[Conn]:
+        return self._pool
+
     def get(self, location_id: UUID) -> m.Location | None:
         with self._pool.connection() as conn:
             return self._get(conn, location_id)
+
+    def detail(self, location_id: UUID) -> m.LocationDetail | None:
+        """A place with its code, kind, path from the root (this place excluded, archived
+        ancestors too), unarchived children and unarchived spools: four queries. An
+        archived place still resolves."""
+        with self._pool.connection() as conn:
+            place = self._get(conn, location_id)
+            if place is None:
+                return None
+            kind = conn.execute(
+                "SELECT name FROM filament_location_kinds WHERE id = %s", (place.kind_id,)
+            ).fetchone()
+            assert kind is not None
+            ancestors = conn.execute(
+                "WITH RECURSIVE up AS (SELECT id, name, number, parent_id, 1 AS depth"
+                " FROM filament_locations WHERE id = %s"
+                " UNION ALL SELECT l.id, l.name, l.number, l.parent_id, up.depth + 1"
+                " FROM filament_locations l JOIN up ON l.id = up.parent_id)"
+                " SELECT id, name, number FROM up WHERE id <> %s ORDER BY depth DESC",
+                (place.parent_id, location_id),
+            ).fetchall()
+            children = conn.execute(
+                "SELECT id, name, number FROM filament_locations"
+                " WHERE parent_id = %s AND archived_at IS NULL"
+                " ORDER BY sort_order, upper(name), id",
+                (location_id,),
+            ).fetchall()
+            spools = conn.execute(
+                "SELECT s.id, s.number, s.grams_left, COALESCE(s.rgba, t.rgba) AS colour_rgba,"
+                " mt.name AS material FROM filament_spools s"
+                " LEFT JOIN filament_spool_types t ON t.id = s.type_id"
+                " LEFT JOIN filament_materials mt ON mt.id = COALESCE(s.material_id, t.material_id)"
+                " WHERE s.location_id = %s AND s.archived_at IS NULL ORDER BY s.number",
+                (location_id,),
+            ).fetchall()
+
+        def step(row: dict[str, Any]) -> m.PathStep:
+            return m.PathStep(id=row["id"], name=row["name"], code=format_code("L", row["number"]))
+
+        return m.LocationDetail.model_validate(
+            place.model_dump()
+            | {
+                "code": format_code("L", place.number),
+                "kind_name": kind["name"],
+                "path": [step(r) for r in ancestors],
+                "children": [step(r) for r in children],
+                "spools": [m.PlacedSpool(**r, code=format_code("S", r["number"])) for r in spools],
+            }
+        )
 
     def create(self, body: m.LocationCreate) -> m.Location:
         data = body.model_dump()

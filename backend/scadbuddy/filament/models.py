@@ -403,6 +403,56 @@ class LocationNode(Location):
     children: list[LocationNode] = Field(default_factory=list)
 
 
+class PathStep(BaseModel):
+    """A place on the way to another, or under it: enough to name it and link to it."""
+
+    id: UUID
+    name: str
+    code: str
+
+
+class PlacedSpool(BaseModel):
+    """A spool in a place, as its page lists it: effective material and colour."""
+
+    id: UUID
+    number: int
+    code: str
+    material: str | None
+    colour_rgba: Rgba | None
+    grams_left: float | None
+
+
+class LocationDetail(Location):
+    """A place's own page (#6955): its code and kind, the places above it (root first),
+    the unarchived places under it and the unarchived spools in it."""
+
+    code: str
+    kind_name: str
+    path: list[PathStep]
+    children: list[PathStep]
+    spools: list[PlacedSpool]
+
+
+class PrinterLabelsRequest(_In):
+    #: ``None`` means every printer.
+    printer_ids: list[UUID] | None = None
+
+
+class PrinterLabel(BaseModel):
+    """One label: a printer's place (depth 0), an AMS unit or the external holder (1) or a
+    slot (2)."""
+
+    location_id: UUID
+    code: str
+    name: str
+    depth: int
+
+
+class PrinterLabels(BaseModel):
+    base_url: str | None
+    labels: list[PrinterLabel]
+
+
 Reading = Annotated[float, Field(allow_inf_nan=False)]
 
 

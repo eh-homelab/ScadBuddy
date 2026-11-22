@@ -102,11 +102,14 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
+from scadbuddy.filament.labels import label_base_url
+from scadbuddy.filament.labels import printer_labels as label_logic
 from scadbuddy.filament.ledger import BadCursorError
 from scadbuddy.filament.locations import (
     LocationCycleError,
     LocationExistsError,
     MoveTargetError,
+    NoPrinterKindError,
 )
 from scadbuddy.filament.profile_fetch import (
     PROBLEMS,
@@ -1473,6 +1476,50 @@ async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Lo
         return await asyncio.to_thread(filament.locations.create, body)
     except _LOCATION_REFUSED as exc:
         raise _refused(exc) from None
+
+
+@router.get(
+    "/locations/{location_id}",
+    response_model=m.LocationDetail,
+    summary="A location's page",
+    description=(
+        "The place with its `code` (`L-12`), its kind's name, its `path` (the places above "
+        "it, root first), its unarchived `children` and the unarchived `spools` in it. An "
+        "archived place still answers. 404 for no such place."
+    ),
+)
+async def get_location(filament: FilamentDep, location_id: UUID) -> m.LocationDetail:
+    found = await asyncio.to_thread(filament.locations.detail, location_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no location {location_id}")
+    return found
+
+
+@router.post(
+    "/printer-labels",
+    response_model=m.PrinterLabels,
+    summary="The labels of the printers' places",
+    description=(
+        "For each printer (the `printer_ids`, or every printer when null; by name): its own "
+        "place, each AMS unit with its slots, and the external holder, in that order, each "
+        "with its `code`, `name` and `depth` (0 printer, 1 unit or external holder, 2 "
+        "slot); with `base_url`, the address a label's QR opens (`filament_label_base_url`, "
+        "else `public_url`, else null). It makes a printer's place when it has none, so it "
+        "is a POST. 409 `no_printer_kind` when no location kind is marked as a printer, "
+        "422 for an unknown printer id."
+    ),
+)
+async def printer_labels(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.PrinterLabelsRequest
+) -> m.PrinterLabels:
+    try:
+        labels = await asyncio.to_thread(label_logic, filament.locations, body.printer_ids)
+    except NoPrinterKindError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code="no_printer_kind") from None
+    except CatalogRefError as exc:
+        raise _refused(exc) from None
+    read = await asyncio.to_thread(store.read, {"filament_label_base_url", "public_url"})
+    return m.PrinterLabels(base_url=label_base_url(read), labels=labels)
 
 
 @router.patch(
