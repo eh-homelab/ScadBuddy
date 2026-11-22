@@ -417,3 +417,33 @@ def test_merge_keeps_the_kept_printers_place(pg_pool: PgPool) -> None:
     assert live_unit.parent_id == root_into and live_unit.printer_id == into
     moved = store.get(beside.id)
     assert moved is not None and moved.archived_at is None and moved.printer_id == into
+
+
+def test_rehanging_never_makes_a_cycle_through_the_root(pg_pool: PgPool) -> None:
+    """Review of #7038: a person hangs the printer's place under its own unit place, then
+    the next capture rehangs the parentless unit. The unit stays where it is, and the
+    place page still reads."""
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    tray = store.ensure_ams(printer, 0, 1, label="T1")
+    root = store.ensure_printer(printer)
+    unit = tray.parent_id
+    assert unit is not None
+    store.update(unit, LocationPatch(parent_id=None))
+    store.update(root, LocationPatch(parent_id=unit))
+    assert store.ensure_printer(printer) == root
+    left = store.get(unit)
+    assert left is not None and left.parent_id is None
+    detail = store.detail(root)
+    assert detail is not None and [p.id for p in detail.path] == [unit]
+
+
+def test_the_place_page_reads_through_a_cycle(pg_pool: PgPool) -> None:
+    """A cycle a bad row made ends the ancestor walk instead of looping."""
+    store = LocationStore(pg_pool)
+    a = _place(store, pg_pool, "A")
+    b = _place(store, pg_pool, "B", parent=a)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_locations SET parent_id = %s WHERE id = %s", (b, a))
+    detail = store.detail(b)
+    assert detail is not None and [p.id for p in detail.path] == [a]

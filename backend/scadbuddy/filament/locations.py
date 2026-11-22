@@ -135,7 +135,10 @@ class LocationStore:
                 " FROM filament_locations WHERE id = %s"
                 " UNION ALL SELECT l.id, l.name, l.number, l.parent_id, up.depth + 1"
                 " FROM filament_locations l JOIN up ON l.id = up.parent_id)"
-                " SELECT id, name, number FROM up WHERE id <> %s ORDER BY depth DESC",
+                # A cycle (a bad row) ends the walk instead of looping until the timeout.
+                " CYCLE id SET looped USING trail"
+                " SELECT id, name, number FROM up WHERE id <> %s AND NOT looped"
+                " ORDER BY depth DESC",
                 (place.parent_id, location_id),
             ).fetchall()
             children = conn.execute(
@@ -411,8 +414,14 @@ class LocationStore:
                 " AND ((l.ams_id IS NOT NULL AND l.tray_id IS NULL)"
                 " OR (l.ams_id = %s AND l.tray_id IS NOT NULL))"
                 " AND NOT EXISTS (SELECT 1 FROM filament_locations p"
-                " WHERE p.id = l.parent_id AND p.archived_at IS NULL)",
-                (found["id"], printer_id, EXTERNAL),
+                " WHERE p.id = l.parent_id AND p.archived_at IS NULL)"
+                # Never the root's own ancestors: a person may have hung the root under a
+                # unit place, and moving that unit under the root would make a cycle.
+                " AND l.id NOT IN (WITH RECURSIVE up AS ("
+                " SELECT id, parent_id FROM filament_locations WHERE id = %s"
+                " UNION SELECT a.id, a.parent_id FROM filament_locations a"
+                " JOIN up ON a.id = up.parent_id) SELECT id FROM up)",
+                (found["id"], printer_id, EXTERNAL, found["id"]),
             )
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
