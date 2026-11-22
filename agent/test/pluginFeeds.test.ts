@@ -164,6 +164,14 @@ describe('the feed on the /mcp auth', () => {
     expect(await zipOf(local)).toBe('http://localhost:8081/api/v1/ai/plugin-feeds/default/plugins/greeter/versions/3.zip')
   })
 
+  it('answers 400 when the request names no usable host', async () => {
+    const { tokens, get } = made()
+    const { token } = await tokens.mint({ name: 'x', tier: 'read' })
+    const res = await get(`${FEED}/marketplace.json`, { ...bearer(token), 'x-forwarded-host': 'bad host!' })
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('names no host')
+  })
+
   it('needs no public URL, and answers 503 before the CRUD areas are served', async () => {
     const noUrl = made({ publicUrl: null })
     const { token } = await noUrl.tokens.mint({ name: 'x', tier: 'read' })

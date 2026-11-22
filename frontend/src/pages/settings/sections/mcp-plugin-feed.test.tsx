@@ -63,6 +63,13 @@ describe('Plugin feed section', () => {
     expect(screen.queryByTestId('plugin-feed-settings')).toBeNull()
   })
 
+  it('keeps the bearer entry and says so when the authentication mode cannot be read', async () => {
+    setPluginFeed({ authMode: null })
+    renderSettingsSection(<PluginFeed />, { route })
+    expect(await screen.findByTestId('plugin-feed-auth-unknown')).toHaveTextContent(/could not be read/)
+    expect(text('plugin-feed-settings')).toContain('Bearer')
+  })
+
   it('says when the feed is empty, or has no address', async () => {
     setPluginFeed({ packages: [], marketplaceUrl: null })
     renderSettingsSection(<PluginFeed />, { route })

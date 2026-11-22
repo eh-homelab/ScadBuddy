@@ -79,6 +79,12 @@ export function PluginFeedSection() {
         <div className="space-y-3">
           {snippets.header ? (
             <>
+              {view.auth_mode === null && (
+                <p className="text-xs text-warn" data-testid="plugin-feed-auth-unknown">
+                  The MCP authentication mode could not be read. The entry below assumes bearer tokens. If
+                  authentication is off, use <code className="sb-num">/plugin marketplace add</code> with the URL instead.
+                </p>
+              )}
               <p className="text-xs text-muted-foreground">
                 {!token && <>Create a token under Tokens, then paste it where the entry says {PLACEHOLDER}. </>}
                 Add the entry to <code className="sb-num">~/.claude/settings.json</code>, not to a project&rsquo;s
