@@ -706,7 +706,9 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   wanted area is listed, and asks for the input-hash key until the API releases it
   (`agent/src/api/agentKeys.ts`). Until every area is listed, the data routes answer `503`
   (`routes/module.ts` `ready`). Until both, the agent is not ready: `/mcp` answers `503`,
-  `/healthz` and `/readyz` say not ready, and no agent Temporal worker polls (§3.2).
+  `/healthz` and `/readyz` say not ready, an answer to a question (`POST
+  /api/v1/ai/pending-input/{request_id}`, audited with its hash) answers `503` with `retry`, and
+  no agent Temporal worker polls (§3.2).
 - `ai` is `"enabled"` only when every prerequisite holds. Otherwise it names the
   **first** one missing, in the order an operator has to fix them (`aiStatus()`, type
   `AiStatus` in [`agent/src/aiStatus.ts`](../../agent/src/aiStatus.ts)):

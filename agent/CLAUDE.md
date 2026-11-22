@@ -43,7 +43,8 @@ Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` f
 (back-off 1 s doubling to 30 s) until every wanted area is listed, and until then the agent is
 not ready: `/mcp` and the data routes answer 503. It is not ready either until the API has
 released the input-hash key (`InputHashKey.isReleased`, `dataHealthOf`'s `keyReleased`), but only
-`/mcp`, health and the workers wait for the key, not the data routes (`AgentData.areasReady`,
+`/mcp`, health, the workers and the pending-input respond (an answer is audited with its hash,
+503 with `retry`) wait for the key, not the other data routes (`AgentData.areasReady`,
 `routes/module.ts` `ready`), so Settings still answers on an API with no KEK: a tool
 call hashes its input for the audit log after it ran, so no Temporal worker polls before then
 (`AgentWorker`'s `before`), the worker's `/readyz` names the missing areas or the key, and `ai` says

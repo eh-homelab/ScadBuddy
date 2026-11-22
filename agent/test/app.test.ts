@@ -576,4 +576,11 @@ describe('/api/v1/ai/pending-input (#815; the store is covered in test/attention
     expect(await read.json()).toEqual({ detail: expect.stringMatching(/does not serve the agent's CRUD areas yet/) })
     expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
   })
+
+  it('answers a respond 503, to try again, while the API has not released the input-hash key: an answer is audited with its hash', async () => {
+    const app = createApp(deps({ database: { ping: up, ready: down, areasReady: up }, sessions }))
+    const res = await app.request('/api/v1/ai/pending-input/question:1', respond)
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ detail: expect.stringMatching(/has not released the input-hash key/), retry: true })
+  })
 })
