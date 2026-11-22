@@ -1555,13 +1555,14 @@ export const handlers = [
     if (source !== 'filamentcolors' && source !== 'bambu') return problem(422, "source: Input should be 'filamentcolors' or 'bambu'")
     // `colour_catalog.upsert_colours`: a row is found by maker, name and material, case-blind;
     // a person's row (`synced_at` null), an archived one or another source's is kept as it is
-    // (Decisions 209, 217, 221).
+    // (Decisions 209, 217, 221). As `_one`, it compares `upper(...)` with no trim, and of several
+    // matches takes an unarchived row first, then the oldest.
     const counts = { added: 0, updated: 0, unchanged: 0, kept: 0 }
+    const same = (a: string | null | undefined, b: string) => (a ?? '').toUpperCase() === b.toUpperCase()
     for (const colour of MOCK_SYNC_COLOURS[source]) {
-      const row = state.catalogs.colours.find(
-        (one) =>
-          sameName(one.manufacturer ?? '', colour.manufacturer) && sameName(one.name, colour.name) && sameName(one.material_name ?? '', colour.material_name),
-      )
+      const row = state.catalogs.colours
+        .filter((one) => same(one.manufacturer, colour.manufacturer) && same(one.name, colour.name) && same(one.material_name, colour.material_name))
+        .sort((a, b) => Number(a.archived_at !== null) - Number(b.archived_at !== null) || a.created_at.localeCompare(b.created_at))[0]
       if (!row) {
         state.catalogs.colours.push({ ...colour, id: newId(), sort_order: 0, material_id: null, effect_id: null, extra_colours: null, bb_colour_id: null, source, archived_at: null, created_at: now(), updated_at: now(), synced_at: now() })
         counts.added += 1
