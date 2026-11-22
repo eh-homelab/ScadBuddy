@@ -61,7 +61,8 @@ class FrontmatterError(ValueError):
 
 
 def _js_trim(text: str) -> str:
-    return text.strip(" \t\n\r\v\f﻿ ")
+    """JavaScript's ``trim``: Unicode white space and the byte-order mark."""
+    return text.strip().strip("\ufeff").strip()
 
 
 def _scalar(inline: str, more: list[str]) -> str | None:
@@ -212,7 +213,9 @@ def plugin_json(name: str, description: str, version: int) -> bytes:
     return (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def published_tree(files: Files, *, name: str, description: str, version: int) -> dict[str, tuple[bytes, bool]]:
+def published_tree(
+    files: Files, *, name: str, description: str, version: int
+) -> dict[str, tuple[bytes, bool]]:
     """The version's tree: the draft and its generated manifest."""
     return {**files, MANIFEST_PATH: (plugin_json(name, description, version), False)}
 

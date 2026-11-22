@@ -80,10 +80,10 @@ def test_a_name_the_package_rules_refuse_is_refused(name: str) -> None:
 
 
 def test_the_sort_is_javascripts() -> None:
-    paths = ["skills/a/～.md", "skills/a/\U0001f600.md", "skills/a-b/x", "skills/a/x"]
+    paths = ["skills/a/\uff5e.md", "skills/a/\U0001f600.md", "skills/a-b/x", "skills/a/x"]
     assert sorted(paths, key=rules.sort_key) == [
         "skills/a-b/x",
         "skills/a/x",
         "skills/a/\U0001f600.md",
-        "skills/a/～.md",
+        "skills/a/\uff5e.md",
     ]

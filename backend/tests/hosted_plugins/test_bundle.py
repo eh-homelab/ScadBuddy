@@ -32,13 +32,21 @@ def test_the_same_draft_gives_the_same_zip_bytes() -> None:
     assert bundle.build_zip(reordered) == first
     with zipfile.ZipFile(io.BytesIO(first)) as zf:
         infos = zf.infolist()
-        assert [i.filename for i in infos] == ["agents/a.md", "skills/hello/SKILL.md", "skills/hello/run.sh"]
+        assert [i.filename for i in infos] == [
+            "agents/a.md",
+            "skills/hello/SKILL.md",
+            "skills/hello/run.sh",
+        ]
         for info in infos:
             assert info.date_time == bundle.ZIP_DATE_TIME
             assert info.extra == b""
             assert info.create_system == 3
         modes = {i.filename: stat.S_IMODE(i.external_attr >> 16) for i in infos}
-        assert modes == {"agents/a.md": 0o644, "skills/hello/SKILL.md": 0o644, "skills/hello/run.sh": 0o755}
+        assert modes == {
+            "agents/a.md": 0o644,
+            "skills/hello/SKILL.md": 0o644,
+            "skills/hello/run.sh": 0o755,
+        }
         assert stat.S_ISREG(infos[0].external_attr >> 16)
         assert zf.read("skills/hello/run.sh") == b"#!/bin/sh\n"
 
@@ -55,7 +63,11 @@ def test_a_good_draft_has_no_problems() -> None:
             "skills/hello/scripts/go.sh": (b"#!/bin/sh\n", True),
             "agents/review.md": (b"---\nname: review\ndescription: Reviews\n---\nBody\n", False),
             "commands/wave.md": (b"Wave at $ARGUMENTS.\n", False),
-            "commands/greet.md": (b"---\ndescription: >\n  Greets\n  warmly\nallowed-tools: mcp__scadbuddy__get_model\n---\n", False),
+            "commands/greet.md": (
+                b"---\ndescription: >\n  Greets\n  warmly\n"
+                b"allowed-tools: mcp__scadbuddy__get_model\n---\n",
+                False,
+            ),
         }
     )
     assert bundle.problems(files) == []
@@ -77,9 +89,24 @@ def test_a_good_draft_has_no_problems() -> None:
         (_draft(**{"agents/a.txt": (b"x", False)}), "Markdown"),
         (_draft(**{"commands/a.json": (b"{}", False)}), "Markdown"),
         (_draft(**{"commands/a.md": (b"---\nhooks: x\n---\n", False)}), "hooks"),
-        (_draft(**{"agents/a.md": (b"---\nname: a\ndescription: d\nmcpServers: x\n---\n", False)}), "mcpServers"),
-        (_draft(**{"agents/a.md": (b"---\nname: a\ndescription: d\npermissionMode: x\n---\n", False)}), "permissionMode"),
-        (_draft(**{"commands/a.md": (b"---\n\"hooks\": x\n---\n", False)}), "plain"),
+        (
+            _draft(
+                **{"agents/a.md": (b"---\nname: a\ndescription: d\nmcpServers: x\n---\n", False)}
+            ),
+            "mcpServers",
+        ),
+        (
+            _draft(
+                **{
+                    "agents/a.md": (
+                        b"---\nname: a\ndescription: d\npermissionMode: x\n---\n",
+                        False,
+                    )
+                }
+            ),
+            "permissionMode",
+        ),
+        (_draft(**{"commands/a.md": (b'---\n"hooks": x\n---\n', False)}), "plain"),
         (_draft(**{"commands/a.md": (b"---\na: &x 1\n---\n", False)}), "anchor"),
         (_draft(**{"commands/a.md": (b"---\na: 1\na: 2\n---\n", False)}), "twice"),
         (_draft(**{"commands/a.md": (b"Run !`ls` now\n", False)}), "dynamic context"),
