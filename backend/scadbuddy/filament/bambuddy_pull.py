@@ -381,7 +381,18 @@ def pull(
         report.claimed += claimed
     check(cancel)
     run = _Run(store, now, actor, pulls, defer_archived, *_context(store, pulls))
-    quiet = _quiet(store, run, spools)
+    try:
+        quiet = _quiet(store, run, spools, cancel)
+    except (CancelledError, errors.QueryCanceled):
+        raise
+    except Exception as error:
+        # R-6768-4: the batch read never fails the pull; each spool takes its own path.
+        logger.warning(
+            "could not read which Bambuddy spools are unchanged; each is pulled",
+            extra={"error": type(error).__name__},
+            exc_info=True,
+        )
+        quiet = {}
     for bb in sorted(spools, key=lambda s: s.archived_at is not None):
         check(cancel)
         skipped: list[str] = []
@@ -500,7 +511,9 @@ def _context(store: Filament, pulls: Pulls) -> tuple[BbRefs, list[_Claim]]:
 _Outcome = tuple[str, UUID | None, bool] | None
 
 
-def _quiet(store: Filament, run: _Run, spools: Sequence[BbSpool]) -> dict[int, _Outcome]:
+def _quiet(
+    store: Filament, run: _Run, spools: Sequence[BbSpool], cancel: CancelToken | None = None
+) -> dict[int, _Outcome]:
     """#6768 (R-6768-1, R-6768-2): the linked BB spools on which `_one` would change
     nothing, by BB id, with what it would answer (``archived`` for an archived SB spool,
     else None). Read for every spool at once, in a fixed number of queries, after the
@@ -511,24 +524,27 @@ def _quiet(store: Filament, run: _Run, spools: Sequence[BbSpool]) -> dict[int, _
       older), and the link has a seen copy with a time;
     - its archive state and place agree with the seen copy, or the copy has none
       (`_archive_state`, `_follow_location`);
-    - for a spool that is not archived, the last ``synced_from_bb`` reading is BB's row
-      (`snapshot`), and after the push's echo every seen field is BB's (`_update`); the
-      insert type BB names is unmapped, the spool's own, or its type's
-      (`_backfill_insert_type`); under ``weights`` BB's weighing and drying are booked
+    - for a spool that is not archived, the last ``synced_from_bb`` reading is BB's row as
+      `_update` records it (`_reading`, `_seen`: an unmapped catalog id kept or left out,
+      a type that does not pull kept, R-6768-5), and after the push's echo every seen
+      field is BB's (`_update`); the insert type BB names is unmapped, the spool's own or
+      its type's, or a person edited it since the link (`_backfill_insert_type`,
+      R-6768-6); under ``weights`` BB's weighing and drying are booked
       (`_book`); under ``presets`` the link holds BB's preset and K-profiles
       (`_bb_presets`, `_bb_k_values`);
     - the seen copy `_write_seen` would merge is the one the link holds.
 
     Anything else, or a doubt (a value of another JSON form), goes through `_one`. The
     reads are not under the spools' locks: a write that lands after them is taken by the
-    next pull (R-6768-3)."""
+    next pull (R-6768-3). ``cancel`` stops the read as it stops a spool's transaction; any
+    other failure is the caller's to log, and then no spool is quiet (R-6768-4)."""
     from scadbuddy.filament import bb_sync_plan as plan
 
     timed = {bb.id: bb for bb in spools if bb.updated_at is not None}
     if not timed:
         return {}
     pulls = run.pulls
-    with store.spools.transaction() as conn:
+    with store.spools.transaction() as conn, watched(cancel, conn):
         links: dict[int, Any] = {}
         for row in conn.execute(
             "SELECT l.bb_spool_id, l.spool_id, l.bb_updated_at, l.bb_seen, l.bb_seen_at,"
@@ -575,6 +591,17 @@ def _quiet(store: Filament, run: _Run, spools: Sequence[BbSpool]) -> dict[int, _
                 ([timed[i].core_weight_catalog_id for i in links],),
             ).fetchall()
         }
+        edited = {
+            row["spool_id"]
+            for row in conn.execute(
+                "SELECT DISTINCT e.spool_id FROM filament_spool_events e"
+                " JOIN filament_bb_links l ON l.spool_id = e.spool_id"
+                " WHERE e.spool_id = ANY(%s) AND e.kind = 'edited' AND e.at > l.linked_at"
+                " AND jsonb_typeof(e.data -> 'changes') = 'object'"
+                " AND e.data -> 'changes' ? 'insert_type_id'",
+                (ids,),
+            ).fetchall()
+        }
         named = {timed[i].location_id for i in links} | {
             row["bb_seen"].get("location_id") for row in links.values()
         }
@@ -588,7 +615,9 @@ def _quiet(store: Filament, run: _Run, spools: Sequence[BbSpool]) -> dict[int, _
         steady = {
             bb_id: link
             for bb_id, link in links.items()
-            if _steady(timed[bb_id], link, last.get(link["spool_id"]), booked, inserts, pulls)
+            if _steady(
+                timed[bb_id], link, last.get(link["spool_id"]), booked, inserts, edited, pulls
+            )
         }
         if not steady:
             return {}
@@ -619,6 +648,7 @@ def _steady(
     last: Mapping[str, Any] | None,
     booked: set[tuple[UUID, str, str, str]],
     inserts: Mapping[int, UUID],
+    edited: set[UUID],
     pulls: Pulls,
 ) -> bool:
     """`_quiet`'s checks of one linked BB spool but the seen copy's merge."""
@@ -636,8 +666,12 @@ def _steady(
         return False
     if link["archived"]:
         return True
-    after = snapshot(bb)
-    if last is None or last["bb"] != after:
+    if last is None:
+        return False
+    before: dict[str, Any] = last["bb"] or {}
+    insert = None if bb.core_weight_catalog_id is None else inserts.get(bb.core_weight_catalog_id)
+    after = _reading(bb, before, insert)
+    if _seen(after, before, pulls) != before:
         return False
     if last["pushed"] and any(
         pulls.of_field(k)
@@ -646,10 +680,15 @@ def _steady(
         if k in _SEEN_NAMES
     ):
         return False
-    insert = None if bb.core_weight_catalog_id is None else inserts.get(bb.core_weight_catalog_id)
-    if pulls.spools and insert is not None and link["own"] is None and link["typed"] != insert:
-        return False
     spool_id = link["spool_id"]
+    if (
+        pulls.spools
+        and insert is not None
+        and link["own"] is None
+        and link["typed"] != insert
+        and spool_id not in edited
+    ):
+        return False
     if pulls.weights and any((spool_id, *ref) not in booked for ref in _book_refs(bb)):
         return False
     if pulls.presets:
@@ -1344,15 +1383,7 @@ def _update(
             data={"bb_spool_id": bb.id, "bb": before, "changes": {"insert_type_id": insert}},
         )
         return True
-    after = snapshot(bb)
-    if insert_id is None and bb.core_weight_catalog_id is not None:
-        # Its entry is not mapped (the read failed, or it was skipped or archived): the
-        # reading keeps the last id, so the pull that maps it sees the change. With no
-        # last id the key stays absent, so the pull that maps it reads it for the first time.
-        if "core_weight_catalog_id" in before:
-            after["core_weight_catalog_id"] = before["core_weight_catalog_id"]
-        else:
-            del after["core_weight_catalog_id"]
+    after = _reading(bb, before, insert_id)
     keys = (after["tag_uid"], after["tray_uuid"])
     retag = (
         pulls.tags
@@ -1446,6 +1477,21 @@ def _update(
         if reading is not None:
             taken.add("weight_used")
     return bool(changes) or retag or reading is not None
+
+
+def _reading(bb: BbSpool, before: Mapping[str, Any], insert_id: UUID | None) -> dict[str, Any]:
+    """`snapshot` as `_update` records it, ``insert_id`` the insert type BB's catalog id
+    maps to. When the entry is not mapped (the read failed, or it was skipped or
+    archived), the reading keeps the last id, so the pull that maps it sees the change;
+    with no last id the key stays absent, so the pull that maps it reads it for the first
+    time."""
+    after = snapshot(bb)
+    if insert_id is None and bb.core_weight_catalog_id is not None:
+        if "core_weight_catalog_id" in before:
+            after["core_weight_catalog_id"] = before["core_weight_catalog_id"]
+        else:
+            del after["core_weight_catalog_id"]
+    return after
 
 
 def _seen(after: dict[str, Any], before: dict[str, Any], pulls: Pulls) -> dict[str, Any]:
