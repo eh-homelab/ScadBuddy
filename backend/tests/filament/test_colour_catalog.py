@@ -199,6 +199,18 @@ async def test_an_archived_row_is_neither_brought_back_nor_added_again(pg_pool: 
 
 
 @pg
+async def test_an_archived_synced_row_keeps_its_values(pg_pool: PgPool) -> None:
+    # Archiving leaves `synced_at` as it is, but a sync still leaves the row alone.
+    await _send(pg_pool, _bb())
+    row = _one(pg_pool, "Jade White")
+    CatalogStore(pg_pool).update("colours", row.id, ColourPatch(archived=True))
+    assert _one(pg_pool, "Jade White").synced_at is not None
+    again = await _send(pg_pool, _bb(hex_color="#123456"))
+    assert (again.kept, again.updated) == (1, 0)
+    assert _one(pg_pool, "Jade White").rgba == "#FFFFFFFF"
+
+
+@pg
 async def test_one_name_of_two_materials_is_two_rows(pg_pool: PgPool) -> None:
     applied = await _send(
         pg_pool,

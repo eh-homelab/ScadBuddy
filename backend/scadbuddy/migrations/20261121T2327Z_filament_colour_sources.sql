@@ -1,14 +1,14 @@
 -- The colour catalog's sources (#6907, plan 2026-11-18-filament-bb-sync.md Decisions
--- 206-215): Bambuddy's colour catalog (`GET /inventory/colors`), filamentcolors.xyz and
+-- 206-218): Bambuddy's colour catalog (`GET /inventory/colors`), filamentcolors.xyz and
 -- Bambu Studio's colour codes fill `filament_colours`.
 --
 -- `material_name` is the material as the source names it ("PLA Basic", "Silk PLA"); a row
 -- is one maker's colour of one material, so the same name of two materials is two rows
 -- (Bambu Lab's "Black" is a PLA Basic, a PLA Matte and a PETG HF colour). `source` is the
 -- sync that made or last wrote the row (NULL: a person's). `synced_at` is that write's
--- time, and the sync sets `updated_at` to it too: a row whose `updated_at` is later was
--- edited by a person since, and no sync writes it again (Decision 208). `bb_colour_id`
--- links the row to Bambuddy's colour catalog entry.
+-- time: a person's write of a value a sync writes clears `synced_at`, and no sync writes
+-- a row whose `synced_at` is NULL (Decision 217). `bb_colour_id` links the row to
+-- Bambuddy's colour catalog entry.
 ALTER TABLE filament_colours
     ADD COLUMN material_name text,
     ADD COLUMN source text CHECK (source IN ('bambuddy', 'filamentcolors', 'bambu')),

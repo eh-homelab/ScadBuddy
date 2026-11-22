@@ -337,8 +337,8 @@ class Colour(_Catalog):
     effect_id: UUID | None
     #: The sync that made or last wrote the row; ``None`` for a person's own row.
     source: ColourSource | None = None
-    #: That sync write's time. A row whose ``updated_at`` is later was edited by a person
-    #: since: no sync writes it again (#6907, Decision 208).
+    #: That sync write's time. A person's write of a value a sync writes clears it, and no
+    #: sync writes a row whose ``synced_at`` is ``None`` (#6907, Decision 217).
     synced_at: datetime | None = None
     #: Bambuddy's colour catalog entry the row is linked to (`GET /inventory/colors`).
     bb_colour_id: int | None = None

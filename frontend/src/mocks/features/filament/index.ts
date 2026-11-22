@@ -1604,6 +1604,7 @@ export const handlers = [
       own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
     }
     // #6907 Decision 217: a person's write of a value a sync writes makes the colour theirs.
+    // A copy of the backend's `_SYNCED_VALUES` (`backend/scadbuddy/filament/catalog.py`).
     const values = ['name', 'manufacturer', 'rgba', 'material_name', 'material_id', 'extra_colours', 'effect_id']
     if (kind === 'colours' && values.some((field) => field in body)) (next as unknown as { synced_at: string | null }).synced_at = null
     rows[at] = next

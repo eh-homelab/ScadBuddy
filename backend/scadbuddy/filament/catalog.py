@@ -135,12 +135,13 @@ CATALOGS: dict[str, CatalogSpec] = {
 }
 
 
-#: The text columns a catalog search (`CatalogStore.list` ``q``) reads, where a kind has them.
-#: The colour values a sync writes (`colour_catalog.upsert_colours`); a person's write of
-#: any of them clears ``synced_at``.
+#: The colour columns a sync writes (`colour_catalog.upsert_colours` ``values``); a
+#: person's write of any of them clears ``synced_at`` (#6907 Decision 217), and a write of
+#: only ``sort_order`` or ``archived`` does not.
 _SYNCED_VALUES = frozenset(
     ("name", "manufacturer", "rgba", "material_name", "material_id", "extra_colours", "effect_id")
 )
+#: The text columns a catalog search (`CatalogStore.list` ``q``) reads, where a kind has them.
 _SEARCHED = ("name", "manufacturer", "material_name", "rgba")
 
 #: The kind of each catalog table.

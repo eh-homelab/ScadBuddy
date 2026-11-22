@@ -30,7 +30,7 @@ const SOURCE_NAMES: Record<string, string> = { bambuddy: 'Bambuddy', filamentcol
 function provenance(row: Row): string | null {
   if (typeof row.source !== 'string') return null
   const from = `From ${SOURCE_NAMES[row.source] ?? row.source}`
-  // A person's write clears `synced_at` (#6907 Decision 217).
+  // A person's write of a value a sync writes clears `synced_at` (#6907 Decision 217).
   const edited = row.synced_at === null
   return edited ? `${from}, edited since (syncs leave it as it is)` : from
 }
