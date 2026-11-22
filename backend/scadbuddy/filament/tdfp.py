@@ -116,7 +116,8 @@ class TemporalTdfp:
 
     async def started(self, ask: CreateAsk, *, key: str) -> bool:
         """Whether a create of this key and ask runs, or ended in a way that may have made a
-        filament; one that failed before its save does not count."""
+        filament; one that failed before its save does not count. Any other `RPCError`
+        than NOT_FOUND is raised, and the route reads it as every route does (R-7025-15)."""
         try:
             described = await self.client.get_workflow_handle(
                 create_workflow_id(key, ask)

@@ -117,6 +117,25 @@ Rulings from the review of PR #7041 at 1c19d9bc1:
   as the list. The site's container for the list was not measured (the peer's script reads
   `main.innerText`), so the cut is by that text, not a selector.
 
+Rulings from the review of PR #7041 at 5c03d8850 (its non-blocking findings):
+
+- **R-7025-14 (the type's id, set at once).** The route sets a type's `tdfp_id` with one
+  conditional UPDATE (`SpoolTypeStore.set_tdfp_id`: `WHERE id = … AND (tdfp_id IS NULL OR
+  tdfp_id = …)`) and answers `type_tdfp_id_set` from whether it matched a row. The read,
+  check and write of before ran in separate transactions, so two creates for one type under
+  different keys could both pass the check, and the second write replaced the first id. Now
+  the row's lock orders them: the first id stays, and the second create answers
+  `type_tdfp_id_set: false`. `tdfp_id` is no overridable or priced field, so the write needs
+  none of `update`'s spool events or price-book link. `test_two_sets_of_a_types_tdfp_id_keep_the_first`
+  races two sets with a `threading.Barrier`, as `test_invoices_race.py` does.
+- **R-7025-15 (Temporal down).** An `RPCError` from the create's resend check
+  (`TemporalTdfp.started`, other than NOT_FOUND), from the search, or from the create is
+  read by `workflows/commands.py` `temporal_failure`, as every route reads one: unavailable
+  or busy is 503 `https://scadbuddy.dev/problems/temporal-unavailable` with `Retry-After: 5`
+  (`api/operations.py` `temporal_unavailable`); a refusal is 500 `temporal-refused`. The
+  check's 503 says `may_have_started: false`, the create's `true` (its start may have reached
+  Temporal, and the same key joins it), and the search's leaves it out.
+
 ## Timeouts
 
 A search waits at most 1 min in the queue and runs at most 3 min (1 attempt, R-7025-10); a
