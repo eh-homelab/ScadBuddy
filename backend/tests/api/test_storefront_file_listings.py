@@ -27,7 +27,12 @@ from scadbuddy.library.settings_store import ModelPrintChoices, S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.storefront import file_listings
-from scadbuddy.orders.storefront.listings import HOLDER, KEPT_HOLDER, published_listing
+from scadbuddy.orders.storefront.listings import (
+    HOLDER,
+    KEPT_HOLDER,
+    file_copy_key,
+    published_listing,
+)
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import NativeFile
@@ -483,13 +488,16 @@ def test_a_plate_picture_whose_copy_is_gone_is_read_from_the_held_file(
     )
     copied = listing["media"][0]["blob_key"]
     read_held = file_listings.read_held
+    keys: list[str] = []
 
     async def copy_gone(content: ContentStore, key: str) -> bytes | None:
+        keys.append(key)
         return None if key == copied else await read_held(content, key)
 
     monkeypatch.setattr(file_listings, "read_held", copy_gone)
     found = client.get(f"{LISTINGS}/{listing['id']}/plates/1.png")
     assert found.status_code == 200 and found.content.startswith(b"\x89PNG")
+    assert keys == [copied, file_copy_key(keychain.sha256)]
 
 
 def test_a_listing_with_no_pin_has_no_plate_picture(
