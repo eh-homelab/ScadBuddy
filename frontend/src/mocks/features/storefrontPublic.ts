@@ -145,7 +145,7 @@ const SHIPPING = [
 let orders = 0
 
 let draft: Draft | null = null
-let renders = new Map<string, { render: StoreRender; polls: number; variant: string }>()
+let renders = new Map<string, { render: StoreRender; polls: number; variant: string; estimates: number }>()
 let serial = 0
 /**
  * #6921: what the shop holds of each variant (the listing and the values): the price and
@@ -346,7 +346,7 @@ export const handlers = [
       // the page's copy of that rule.
       values: colourPlan(checked, (body.values ?? {}) as Record<string, ParamValue>).shown,
     }
-    renders.set(id, { render, polls: 0, variant: variantOf(body) })
+    renders.set(id, { render, polls: 0, variant: variantOf(body), estimates: 0 })
     return HttpResponse.json(render, { status: 202 })
   }),
   http.get(`${base}/renders/:id`, ({ params }) => {
@@ -372,6 +372,10 @@ export const handlers = [
   http.get(`${base}/renders/:id/estimate`, ({ params }) => {
     const held = renders.get(String(params.id))
     if (held?.render.status !== 'done') return refused(404, 'render_not_found', 'There is no such render.')
+    // The slice works the price out first: one `pending` answer per render, as the shop
+    // gives while its slice runs, then the price.
+    held.estimates += 1
+    if (held.estimates === 1) return HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })
     // #6921: the priced slice records the variant, with the output it saved.
     variants.set(held.variant, { price: ESTIMATE, preview: cachedPreview(hexKey(held.variant)), render: null, values: null })
     return HttpResponse.json(ESTIMATE)

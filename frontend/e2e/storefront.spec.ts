@@ -56,7 +56,8 @@ test.describe('the public storefront', () => {
     const onEstimate = async (response: Response) => {
       const found = /\/renders\/([^/]+)\/estimate$/.exec(new URL(response.url()).pathname)
       if (!found || !response.ok()) return
-      const { source } = (await response.json()) as { source?: string }
+      // A body that cannot be read counts as no answer, so the wait fails plainly.
+      const { source } = ((await response.json().catch(() => ({}))) as { source?: string })
       if (source !== 'pending') estimated.add(found[1])
     }
     page.on('response', onEstimate)
