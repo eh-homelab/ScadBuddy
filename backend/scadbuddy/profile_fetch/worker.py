@@ -7,7 +7,8 @@ and refuses to start with one (`settings.check_environment`). It runs no browser
 with the RPC token). So no untrusted web content runs in the pod that holds the CRUD
 credential and reaches Temporal (#6780). It exchanges its proof for a ``profile-fetch``
 service credential (`exchange_source`), waits until the CRUD service serves its areas, then
-polls `DEFAULT_QUEUE` for `ProfileFetch` runs, one activity at a time (Decision 16). It does
+polls `DEFAULT_QUEUE` for `ProfileFetch` runs and for 3DFP searches and creates (`TdfpSearch`,
+`TdfpCreate`, #7025), one activity at a time on the one browser (Decision 16). It does
 not sign in at start: the browser service does, and the first export asks it to again when it
 has no signed-in browser. It imports no database code (`tests/profile_fetch/test_worker.py`).
 It is not versioned (no worker deployment), so a change to the workflow goes behind
@@ -31,11 +32,16 @@ from temporalio.worker import Worker
 
 from scadbuddy.auth.service_auth import ServiceAuth, exchange_source
 from scadbuddy.crud.client import AREAS_POLL, CrudClient, wait_for_areas
-from scadbuddy.profile_fetch.activities import ProfileFetchActivities, Site, SiteHolder
+from scadbuddy.profile_fetch.activities import (
+    ProfileFetchActivities,
+    Site,
+    SiteHolder,
+    TdfpActivities,
+)
 from scadbuddy.profile_fetch.remote import RemoteSite
 from scadbuddy.profile_fetch.settings import HEALTH_PORT, ProfileFetchSettings
 from scadbuddy.profile_fetch.wire import AREAS
-from scadbuddy.profile_fetch.workflow import ProfileFetch
+from scadbuddy.profile_fetch.workflow import ProfileFetch, TdfpCreate, TdfpSearch
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +87,7 @@ async def run(
 
     sites = SiteHolder(open_site or browser_service)
     activities = ProfileFetchActivities(crud, sites)
+    tdfp = TdfpActivities(sites)
     health = (
         await asyncio.start_server(_healthz, "0.0.0.0", health_port)
         if health_port is not None
@@ -101,8 +108,14 @@ async def run(
         worker = Worker(
             client,
             task_queue=settings.temporal_task_queue_profile_fetch,
-            workflows=[ProfileFetch],
-            activities=[activities.export, activities.import_, activities.failed],
+            workflows=[ProfileFetch, TdfpSearch, TdfpCreate],
+            activities=[
+                activities.export,
+                activities.import_,
+                activities.failed,
+                tdfp.search,
+                tdfp.create,
+            ],
             # One browser, one login: one export at a time (Decision 16).
             max_concurrent_activities=1,
         )

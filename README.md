@@ -2493,6 +2493,14 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   never calls Bambuddy and never has a Bambuddy key. The nozzles are the remembered setting
   `profile_fetch_nozzles` (Settings → Printing → Filament; default 0.2, 0.4, 0.6, 0.8). The
   printer models are the models of ScadBuddy's printers.
+- **Search and add (#7025).** The same worker and browser service also search 3DFP
+  (`POST /api/v1/filament/tdfp/search`, agent `filament_tdfp_search`) and add a filament it
+  lacks (`POST /api/v1/filament/tdfp/filaments`, agent `filament_tdfp_create`, approved
+  first) as the `TdfpSearch` and `TdfpCreate` workflows on the same queue, which the API
+  waits for. The create stops on a likely duplicate in the site's own list, refuses a brand,
+  material and type with no site defaults, is tried once, and sets the new id as the type's
+  `tdfp_id`. Neither needs a new setting, secret or CRUD area. The plan is
+  `docs/superpowers/plans/2026-11-22-3dfp-search-add.md`.
 - **Who starts a fetch.** Invoice confirm starts one for each new type that has a `tdfp_id`.
   The "Fetch from 3DFP" button on the type page and the agent tool
   `filament_type_fetch_profiles` start one by hand

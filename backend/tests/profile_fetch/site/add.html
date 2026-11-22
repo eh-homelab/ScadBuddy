@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Add Filament | 3D Filament Profiles (replica)</title>
+    <style>
+      .native { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
+      [hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <!-- /filament/add as the script on #7025 measured it (2026-11-22): #brand, #material and
+         #material_type are comboboxes, each followed by a hidden native <select>; "Defaults
+         found" once the three have site defaults; "Next" opens the Colors tab (#color,
+         #rgbText-0..3 with a button after each that adds a row, #nominal_weight, #sku-0);
+         the list after "Avoid creating duplicates"; "Save Filament" goes to
+         /filament/details/<id>. The other identifier fields are the replica's own. -->
+    <main>
+      <section id="basics"></section>
+      <p id="defaults"></p>
+      <button type="button" id="next">Next</button>
+      <section id="colors" hidden>
+        <label for="color">Color name</label><input id="color" />
+        <div id="rgb"></div>
+        <label for="nominal_weight">Nominal weight (g)</label><input id="nominal_weight" />
+        <label for="sku-0">SKU</label><input id="sku-0" />
+        <div id="extra"></div>
+        <h3>Avoid creating duplicates</h3>
+        <div id="duplicates"></div>
+        <button type="button" id="save">Save Filament</button>
+      </section>
+    </main>
+    <script>
+      const lists = __LISTS__;
+      const defaults = __DEFAULTS__;
+      const duplicates = __DUPLICATES__;
+      const extra = __EXTRA__;
+      const brandSelect = __BRAND_SELECT__;
+      const landsOnDetails = __LANDS__;
+      const chosen = { brand: null, material: null, material_type: null };
+      const basics = document.getElementById("basics");
+
+      function checkDefaults() {
+        const key = [chosen.brand, chosen.material, chosen.material_type].join("|");
+        document.getElementById("defaults").textContent = defaults.includes(key) ? "Defaults found" : "";
+      }
+
+      for (const field of ["brand", "material", "material_type"]) {
+        const box = document.createElement("button");
+        box.type = "button";
+        box.id = field;
+        box.setAttribute("role", "combobox");
+        box.textContent = "Select…";
+        const select = document.createElement("select");
+        select.className = "native";
+        select.setAttribute("aria-hidden", "true");
+        select.tabIndex = -1;
+        const offered = field === "brand" && !brandSelect ? [] : lists[field];
+        select.innerHTML = '<option value=""></option>' + offered.map((o) => `<option>${o}</option>`).join("");
+        select.onchange = () => {
+          chosen[field] = select.value;
+          box.textContent = select.value;
+          checkDefaults();
+        };
+        basics.append(box, select);
+        if (field === "brand") {
+          // The brand combobox filters its list as one types (the script typed the brand).
+          box.onclick = () => {
+            const input = document.createElement("input");
+            input.id = "brand-filter";
+            const list = document.createElement("div");
+            list.setAttribute("role", "listbox");
+            input.oninput = () => {
+              list.innerHTML = "";
+              for (const name of lists.brand.filter((b) => b.toLowerCase().includes(input.value.toLowerCase()))) {
+                const option = document.createElement("div");
+                option.setAttribute("role", "option");
+                option.textContent = name;
+                option.onclick = () => {
+                  chosen.brand = name;
+                  box.textContent = name;
+                  input.remove();
+                  list.remove();
+                  checkDefaults();
+                };
+                list.appendChild(option);
+              }
+            };
+            box.after(input, list);
+            input.focus();
+          };
+        }
+      }
+
+      const rgb = document.getElementById("rgb");
+      function addRow() {
+        const index = rgb.querySelectorAll("input").length;
+        if (index >= 4) return;
+        const input = document.createElement("input");
+        input.id = `rgbText-${index}`;
+        const add = document.createElement("button");
+        add.type = "button";
+        add.textContent = "+";
+        add.onclick = addRow;
+        rgb.append(input, add);
+      }
+      addRow();
+
+      for (const [id, label] of extra) {
+        document.getElementById("extra").insertAdjacentHTML("beforeend", `<label for="${id}">${label}</label><input id="${id}" />`);
+      }
+
+      const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      for (const row of duplicates) {
+        const base = `/filaments/${slug(row.brand)}`;
+        document.getElementById("duplicates").insertAdjacentHTML(
+          "beforeend",
+          `<div data-slot="card"><a href="${base}">${row.brand}</a><span>•</span>` +
+            `<a href="${base}/${slug(row.material)}">${row.material}</a><span>•</span>` +
+            `<a href="${base}/${slug(row.material)}/${slug(row.type)}">${row.type}</a>` +
+            `<div><a href="/filament/details/${row.id}">${row.name}</a></div>` +
+            row.hexes.map((hex) => `<div style="background:${hex}"></div><span>${hex}</span>`).join("") +
+            "</div>",
+        );
+      }
+
+      document.getElementById("next").onclick = () => {
+        document.getElementById("colors").hidden = false;
+      };
+      document.getElementById("save").onclick = async () => {
+        const values = { ...chosen };
+        for (const input of document.querySelectorAll("#colors input")) values[input.id] = input.value;
+        const answer = await fetch("/api/filaments", { method: "POST", body: JSON.stringify(values) });
+        const { id } = await answer.json();
+        if (landsOnDetails) location.href = `/filament/details/${id}`;
+      };
+    </script>
+  </body>
+</html>

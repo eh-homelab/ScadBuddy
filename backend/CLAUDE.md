@@ -996,6 +996,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   "profile-fetch")`, area `runs`: `PUT …/runs/{run_id}/files/{sha256}`, `POST …/runs/{run_id}/import`
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
   (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
+  3DFP search and add (#7025, plan `docs/superpowers/plans/2026-11-22-3dfp-search-add.md`):
+  the workflows `TdfpSearch` and `TdfpCreate` on the same queue (`workflow.py`), their
+  activities `TdfpActivities` (no CRUD call: the API awaits the outcome, `filament/tdfp.py`
+  `TemporalTdfp`), the browser service's ``POST /search`` and ``/create`` (JSON answers the
+  worker validates), `site.py` `search` and `create`, and `duplicates.py` (the likely-duplicate
+  rule the create stops on, R-7025-5). The routes are `POST /filament/tdfp/search` and
+  `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key and ask,
+  `create_workflow_id`; the create is never retried).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

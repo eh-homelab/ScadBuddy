@@ -120,6 +120,7 @@ from scadbuddy.filament.locations import (
 from scadbuddy.filament.operations import KIND as COLOUR_SYNC_KIND
 from scadbuddy.filament.operations import subject as colour_sync_subject
 from scadbuddy.filament.profile_fetch import (
+    PROBE_TIMEOUT_SECONDS,
     PROBLEMS,
     START_TIMEOUT_SECONDS,
     FetchNotStartedError,
@@ -149,12 +150,21 @@ from scadbuddy.filament.spools import (
     TagKeysClashError,
     TagUnnamedError,
 )
+from scadbuddy.filament.tdfp import CREATE_WAIT, SEARCH_WAIT, Tdfp, tdfp
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
+from scadbuddy.profile_fetch.wire import (
+    CreateAnswer,
+    CreateAsk,
+    SearchAnswer,
+    SearchAsk,
+    TdfpOutcome,
+)
+from scadbuddy.profile_fetch.workflow import NOT_STARTED as TDFP_NOT_STARTED
 from scadbuddy.rows.component import ROWS, Rows
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
@@ -761,6 +771,173 @@ async def get_type_profile_fetch(
         run = await end_unserved(state, run)
     gaps = await asyncio.to_thread(runs.gaps, type_id)
     return ProfileFetchStatus(run=run, gaps=gaps)
+
+
+# -- 3DFP search and create (#7025) ---------------------------------------------------------
+
+TDFP_PROBLEMS = "https://scadbuddy.dev/problems/tdfp/"
+#: The failure kinds that are the ask's fault (422); any other is the site's or the
+#: browser's (502), or no worker took the step (503).
+_TDFP_REFUSED = frozenset({"option_missing", "no_defaults"})
+
+
+def _tdfp_problem(status_code: int, code: str, detail: str) -> ApiError:
+    return ApiError(status_code, detail, type_=TDFP_PROBLEMS + code, code=code)
+
+
+def _tdfp_failed(outcome: TdfpOutcome) -> ApiError:
+    kind = outcome.kind or "browser"
+    detail = outcome.reason or "the 3dfilamentprofiles.com step failed"
+    if kind in _TDFP_REFUSED:
+        return _tdfp_problem(status.HTTP_422_UNPROCESSABLE_CONTENT, kind, detail)
+    if kind == TDFP_NOT_STARTED:
+        return _tdfp_problem(status.HTTP_503_SERVICE_UNAVAILABLE, kind, detail)
+    return _tdfp_problem(status.HTTP_502_BAD_GATEWAY, kind, detail)
+
+
+async def _tdfp_worker(runner: Tdfp) -> None:
+    """503 ``no_worker`` when Temporal says no profile-fetch worker polls; a Temporal that
+    does not answer leaves the call to the step's own timeouts."""
+    try:
+        async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+            served = await runner.has_worker()
+    except Exception:
+        logger.warning("could not read the pollers of the profile-fetch queue", exc_info=True)
+        return
+    if not served:
+        raise _tdfp_problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "no_worker", "no profile-fetch worker is running"
+        )
+
+
+@router.post(
+    "/tdfp/search",
+    response_model=SearchAnswer,
+    summary="Search 3dfilamentprofiles.com",
+    description=(
+        "Searches 3dfilamentprofiles.com (3DFP) on the profile-fetch worker, the one process "
+        "with its browser and login, and answers the first page of filaments: each one's "
+        "`tdfp_id`, brand, material, material type, colour name (`name`), `hexes` and the "
+        '`nominal_weight_g` its name carries ("(250g)"; null when it carries none). The site '
+        "filters only by its `?q=` text, which is the brand, the material type and the colour "
+        "(`query`); the material ranks the rows (its matches first, then the type's) and "
+        "filters nothing. Its index misses some brands: none found is not proof that 3DFP "
+        "lacks the filament. Reads only; ScadBuddy stores nothing. 503 `no_worker` when no "
+        "profile-fetch worker runs, 503 `not_started` when the worker, busy with a preset "
+        "fetch, did not take the search within a minute, 502 when the site or the browser "
+        "failed (`code` is the failure's kind), 504 when no outcome came within the wait."
+    ),
+)
+async def search_tdfp(state: StateDep, caller: CallerDep, body: SearchAsk) -> SearchAnswer:
+    runner = tdfp(state)
+    await _tdfp_worker(runner)
+    try:
+        outcome = await runner.search(body, wait=SEARCH_WAIT)
+    except TimeoutError:
+        raise _tdfp_problem(
+            status.HTTP_504_GATEWAY_TIMEOUT, "no_outcome", "the 3DFP search gave no answer in time"
+        ) from None
+    if outcome.search is None:
+        raise _tdfp_failed(outcome)
+    return outcome.search
+
+
+class TdfpCreateRequest(CreateAsk):
+    """``POST /filament/tdfp/filaments``: the filament to add, and the spool type whose
+    ``tdfp_id`` the new id becomes (optional)."""
+
+    type_id: UUID | None = None
+
+
+class TdfpCreated(BaseModel):
+    """What the create did (`CreateAnswer`), and whether the type took the new id."""
+
+    create: CreateAnswer
+    type_id: UUID | None
+    type_tdfp_id_set: bool
+
+
+@router.post(
+    "/tdfp/filaments",
+    response_model=TdfpCreated,
+    summary="Add a missing filament to 3dfilamentprofiles.com",
+    description=(
+        "Adds a filament to 3dfilamentprofiles.com (3DFP) on the profile-fetch worker: its "
+        "add form gets the brand, material and material type (each must be one the form "
+        "offers, else 422 `option_missing`), the colour name, `hexes` (1 to 4), the nominal "
+        "weight and the identifiers `mpn`, `gtin`, `asin`, `manufacturer_url`, "
+        "`empty_spool_weight_g` and `td` where the form has a field for them (`sent`, "
+        "`not_sent`; ScadBuddy stores none of them). A brand, material and type with no site "
+        "defaults are refused, 422 `no_defaults`. Before it saves, the form's own duplicate "
+        "list is read: a filament there of the same brand, material and type with a close "
+        "name or colour (CIEDE2000 within 5) stops the create with `status` `duplicate`, the "
+        "list (`duplicates`, `duplicate_text`) and why (`likely`), and nothing is saved; a "
+        "person who judges those to be other filaments sends their ids in `not_duplicates`. "
+        "Else it saves and answers `status` `created` with the new `tdfp_id`, which becomes "
+        "the `tdfp_id` of `type_id` when one is sent. Needs an `Idempotency-Key` (428 "
+        "without): the same key and body answer the first create's outcome and never add a "
+        "second filament. The create is tried once: 502 `not_created` means Save Filament did "
+        "not open the new filament's page and it may exist, so search before sending another "
+        "key. 404 for no such type, 409 `type_has_tdfp_id` for a type that already has one. "
+        "503 `no_worker`, 503 `not_started`, 502 and 504 as for the search; on 504 the "
+        "create may still run, and the same request with the same key waits for it."
+    ),
+)
+async def create_tdfp_filament(
+    state: StateDep,
+    filament: FilamentDep,
+    caller: CallerDep,
+    body: TdfpCreateRequest,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> TdfpCreated:
+    who = actor(caller)
+    key = f"{who}\x1f{required_key(idempotency_key)}"
+    ask = CreateAsk.model_validate(body.model_dump(exclude={"type_id"}))
+    runner = tdfp(state)
+    if body.type_id is not None:
+        kind = await asyncio.to_thread(filament.types.get, body.type_id)
+        if kind is None:
+            raise _no_type(body.type_id)
+        if kind.tdfp_id is not None and not await runner.started(ask, key=key):
+            raise _tdfp_problem(
+                status.HTTP_409_CONFLICT,
+                "type_has_tdfp_id",
+                f"spool type {body.type_id} already has 3DFP id {kind.tdfp_id}",
+            )
+    await _tdfp_worker(runner)
+    try:
+        outcome = await runner.create(ask, key=key, wait=CREATE_WAIT)
+    except TimeoutError:
+        raise _tdfp_problem(
+            status.HTTP_504_GATEWAY_TIMEOUT,
+            "no_outcome",
+            "the 3DFP create gave no answer in time; it may still run: send the same request"
+            " with the same Idempotency-Key to wait for it",
+        ) from None
+    if outcome.create is None:
+        raise _tdfp_failed(outcome)
+    made = outcome.create
+    taken = False
+    if made.status == "created" and made.tdfp_id is not None and body.type_id is not None:
+        taken = await asyncio.to_thread(
+            set_type_tdfp_id, filament, body.type_id, made.tdfp_id, actor=who
+        )
+    return TdfpCreated(create=made, type_id=body.type_id, type_tdfp_id_set=taken)
+
+
+def set_type_tdfp_id(filament: Filament, type_id: UUID, tdfp_id: int, *, actor: str) -> bool:
+    """Set the type's ``tdfp_id`` to the created one, unless it has another by now; whether
+    the type holds it."""
+    kind = filament.types.get(type_id)
+    if kind is None:
+        return False
+    if kind.tdfp_id == tdfp_id:
+        return True
+    if kind.tdfp_id is not None:
+        return False
+    return (
+        filament.types.update(type_id, m.SpoolTypePatch(tdfp_id=tdfp_id), actor=actor) is not None
+    )
 
 
 # -- spools, tags, the ledger ---------------------------------------------------------

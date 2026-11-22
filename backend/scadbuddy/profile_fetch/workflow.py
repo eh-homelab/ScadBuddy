@@ -23,15 +23,24 @@ from temporalio.exceptions import ActivityError, ApplicationError, TimeoutError,
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.profile_fetch.wire import (
+        CREATE_ACTIVITY,
+        CREATE_WORKFLOW,
         EXPORT_ACTIVITY,
         FAILED_ACTIVITY,
         FETCH_WORKFLOW,
         IMPORT_ACTIVITY,
         MAX_FAILED_REASON,
         NOT_RUNNING,
+        SEARCH_ACTIVITY,
+        SEARCH_WORKFLOW,
+        CreateAnswer,
+        CreateAsk,
         ExportReport,
         FetchAsk,
         ImportOutcome,
+        SearchAnswer,
+        SearchAsk,
+        TdfpOutcome,
     )
 
 #: One attempt: sign in, add the filament, and export every target (Decision 13).
@@ -168,3 +177,92 @@ class ProfileFetch:
                 raise _RunEndedError from error
             return failure_reason(error, "import")
         return outcome
+
+
+# -- #7025: search 3DFP, and add a filament it lacks ----------------------------------------
+
+#: A search is one page; a create one form. Both wait in the queue behind an export the
+#: worker runs (one activity at a time, Decision 16), for at most these.
+SEARCH_SCHEDULE_TO_START = timedelta(minutes=1)
+SEARCH_TIMEOUT: Final = timedelta(minutes=3)
+SEARCH_RETRY: Final = RetryPolicy(initial_interval=timedelta(seconds=5), maximum_attempts=2)
+CREATE_SCHEDULE_TO_START = timedelta(minutes=2)
+CREATE_TIMEOUT: Final = timedelta(minutes=5)
+#: Never retried: a create that failed after "Save Filament" may have made the filament
+#: (R-7025-7).
+CREATE_RETRY: Final = RetryPolicy(maximum_attempts=1)
+TDFP_HEARTBEAT: Final = timedelta(minutes=2)
+#: A search's or create's workflow ends this long after its start whatever its steps do.
+TDFP_EXECUTION_TIMEOUT: Final = timedelta(minutes=15)
+#: The kind of an outcome whose step no worker took in time.
+NOT_STARTED: Final = "not_started"
+#: The create's failure kinds that come before "Save Filament" is clicked, and ``not_created``,
+#: whose own text says so; any other may come after the click, so its reason says it may exist.
+NO_NOTE: Final = frozenset(
+    {NOT_STARTED, "option_missing", "no_defaults", "login_failed", "bot_check", "not_created"}
+)
+MAY_EXIST: Final = "the filament may exist on 3dfilamentprofiles.com: search before another create"
+
+
+def tdfp_failure(error: ActivityError, step: str) -> tuple[str, str]:
+    """The kind and the reason of a search's or create's failed step: the activity's own
+    (`activities.site_failure`), or what timed out."""
+    cause = error.cause
+    if isinstance(cause, TimeoutError):
+        if cause.type == TimeoutType.SCHEDULE_TO_START:
+            return NOT_STARTED, (
+                f"no profile-fetch worker took the {step} in time: none is running, or it is"
+                " busy with a preset fetch"
+            )
+        return "timeout", f"the {step} did not finish in time"
+    if isinstance(cause, ApplicationError):
+        return cause.type or "browser", (cause.message or f"the {step} failed")[:MAX_FAILED_REASON]
+    return "browser", f"the {step} failed"
+
+
+@workflow.defn(name=SEARCH_WORKFLOW)
+class TdfpSearch:
+    """One search of 3DFP (`activities.TdfpActivities.search`); the API waits for it."""
+
+    @workflow.run
+    async def run(self, ask: SearchAsk) -> TdfpOutcome:
+        try:
+            answer: SearchAnswer = await workflow.execute_activity(
+                SEARCH_ACTIVITY,
+                ask,
+                result_type=SearchAnswer,
+                schedule_to_start_timeout=SEARCH_SCHEDULE_TO_START,
+                start_to_close_timeout=SEARCH_TIMEOUT,
+                heartbeat_timeout=TDFP_HEARTBEAT,
+                retry_policy=SEARCH_RETRY,
+            )
+        except ActivityError as error:
+            kind, reason = tdfp_failure(error, "search")
+            return TdfpOutcome(kind=kind, reason=reason)
+        return TdfpOutcome(search=answer)
+
+
+@workflow.defn(name=CREATE_WORKFLOW)
+class TdfpCreate:
+    """One create of a filament on 3DFP (`activities.TdfpActivities.create`), tried once;
+    one workflow per request key and ask (`filament.tdfp.create_workflow_id`)."""
+
+    @workflow.run
+    async def run(self, ask: CreateAsk) -> TdfpOutcome:
+        try:
+            answer: CreateAnswer = await workflow.execute_activity(
+                CREATE_ACTIVITY,
+                ask,
+                result_type=CreateAnswer,
+                schedule_to_start_timeout=CREATE_SCHEDULE_TO_START,
+                start_to_close_timeout=CREATE_TIMEOUT,
+                heartbeat_timeout=TDFP_HEARTBEAT,
+                retry_policy=CREATE_RETRY,
+            )
+        except ActivityError as error:
+            kind, reason = tdfp_failure(error, "create")
+            if kind not in NO_NOTE:
+                # A timeout or a browser failure may come after "Save Filament" (R-7025-7).
+                reason = f"{reason}; {MAY_EXIST}"[:MAX_FAILED_REASON]
+            return TdfpOutcome(kind=kind, reason=reason)
+        return TdfpOutcome(create=answer)
