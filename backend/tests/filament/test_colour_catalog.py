@@ -175,6 +175,20 @@ async def test_a_re_order_or_an_archive_leaves_the_row_to_the_syncs(pg_pool: PgP
 
 
 @pg
+async def test_another_source_s_row_is_kept_and_linked(pg_pool: PgPool) -> None:
+    # A filamentcolors swatch of the translucent family keeps its alpha 80 and its source
+    # when Bambuddy names the same colour opaque (Decision 221).
+    ColourSyncs(pg_pool).upsert(
+        [ColourIn(manufacturer="Bambu Lab", name="Clear", rgba="#FFFFFF80", material_name="PLA")],
+        "filamentcolors",
+    )
+    applied = await _send(pg_pool, _bb(color_name="Clear", hex_color="#ffffff", material="PLA"))
+    assert (applied.kept, applied.updated) == (1, 0)
+    row = _one(pg_pool, "Clear")
+    assert (row.rgba, row.source, row.bb_colour_id) == ("#FFFFFF80", "filamentcolors", 1)
+
+
+@pg
 async def test_a_person_s_own_row_is_kept_and_linked(pg_pool: PgPool) -> None:
     CatalogStore(pg_pool).create(
         "colours",

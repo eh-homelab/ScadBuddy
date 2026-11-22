@@ -278,9 +278,12 @@ describe('the filament mocks', () => {
     expect(await refusal(upsertLocation({ archived: false }, place.id))).toMatchObject({ status: 409 })
   })
 
-  it('keeps a colour name unique per manufacturer, as `filament_colours_name` does', async () => {
+  it('keeps a colour unique per manufacturer, name and material, as `filament_colours_name` does', async () => {
     const black = { name: 'Black', rgba: '#000000FF', sort_order: 0 }
     expect(await upsertCatalog('colours', { ...black, manufacturer: 'Bambu Lab' })).toMatchObject({ name: 'Black' })
+    // The same name of another material is another colour (#6907).
+    expect(await upsertCatalog('colours', { ...black, manufacturer: 'Bambu Lab', material_name: 'PETG HF' })).toMatchObject({ material_name: 'PETG HF' })
+    expect(await refusal(upsertCatalog('colours', { ...black, manufacturer: 'bambu lab', material_name: 'petg hf' }))).toMatchObject({ status: 409 })
     expect(await upsertCatalog('colours', { ...black, manufacturer: 'Polymaker' })).toMatchObject({ name: 'Black' })
     expect(await upsertCatalog('colours', black)).toMatchObject({ manufacturer: null })
     expect(await refusal(upsertCatalog('colours', { ...black, manufacturer: 'bambu lab' }))).toMatchObject({ status: 409 })

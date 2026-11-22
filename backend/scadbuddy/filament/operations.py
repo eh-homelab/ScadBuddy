@@ -29,6 +29,7 @@ from scadbuddy.filament.colour_catalog import (
     run_filamentcolors,
 )
 from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind
+from scadbuddy.rows.component import ROWS
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -57,7 +58,7 @@ def running_error(source: str) -> ApiError:
 
 
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
-    syncs = ColourSyncs(core.settings_store.pool)
+    syncs = ColourSyncs(components.get(ROWS).pool)
 
     async def check(request: dict[str, Any]) -> dict[str, Any]:
         body = ColourSyncRequest.model_validate(request)

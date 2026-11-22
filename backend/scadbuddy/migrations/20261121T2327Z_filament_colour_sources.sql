@@ -1,5 +1,5 @@
 -- The colour catalog's sources (#6907, plan 2026-11-18-filament-bb-sync.md Decisions
--- 206-220): Bambuddy's colour catalog (`GET /inventory/colors`), filamentcolors.xyz and
+-- 206-222): Bambuddy's colour catalog (`GET /inventory/colors`), filamentcolors.xyz and
 -- Bambu Studio's colour codes fill `filament_colours`.
 --
 -- `material_name` is the material as the source names it ("PLA Basic", "Silk PLA"); a row

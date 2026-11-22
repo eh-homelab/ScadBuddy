@@ -38,6 +38,7 @@ from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, ValidationError
 
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -154,6 +155,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
+from scadbuddy.rows.component import ROWS, Rows
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
@@ -409,8 +411,10 @@ async def resolve_catalog_row(
         "`failed` (`error` says why; what it wrote stays). A source never run is absent."
     ),
 )
-async def list_colour_syncs(settings: SettingsStoreDep) -> list[ColourSync]:
-    return await asyncio.to_thread(ColourSyncs(settings.pool).latest)
+async def list_colour_syncs(
+    rows: Annotated[Rows, component_dep(ROWS)],
+) -> list[ColourSync]:
+    return await asyncio.to_thread(ColourSyncs(rows.pool).latest)
 
 
 @router.post(

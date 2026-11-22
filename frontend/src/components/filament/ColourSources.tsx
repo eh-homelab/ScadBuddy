@@ -33,7 +33,7 @@ function outcome(run: ColourSync): string {
   }
   if (run.state === 'unchanged') return 'No new swatches since the last sync, so nothing was read.'
   const parts = [`${count(run.added)} added`, `${count(run.updated)} changed`, `${count(run.unchanged)} already up to date`]
-  if (run.kept) parts.push(`${count(run.kept)} kept as a person edited them`)
+  if (run.kept) parts.push(`${count(run.kept)} kept (edited by a person, or from another source)`)
   if (run.skipped) parts.push(`${count(run.skipped)} skipped`)
   const what = parts.join(', ')
   if (run.state === 'failed') return `Stopped: ${run.error ?? 'the source could not be read'}. ${what}; what was read before stays.`

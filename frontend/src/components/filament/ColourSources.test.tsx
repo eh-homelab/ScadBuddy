@@ -136,7 +136,7 @@ describe('the colour catalog', () => {
     await user.click(screen.getByRole('button', { name: /Sync from filamentcolors/ }))
     expect(
       await screen.findByText(
-        'Stopped: filamentcolors.xyz did not answer (ConnectTimeout). 300 added, 0 changed, 0 already up to date, 2 kept as a person edited them; what was read before stays.',
+        'Stopped: filamentcolors.xyz did not answer (ConnectTimeout). 300 added, 0 changed, 0 already up to date, 2 kept (edited by a person, or from another source); what was read before stays.',
       ),
     ).toBeInTheDocument()
   })

@@ -811,8 +811,11 @@ async def test_a_pull_of_another_bambuddy_is_skipped(pg_pool: PgPool) -> None:
             json=[bb(note="a stranger's", updated_at=_bb_time(-1)).model_dump(mode="json")]
         )
         router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
+        colours = router.get(f"{BB}/api/v1/inventory/colors").respond(json=[])
         assert await scheduled_pull(f, lambda: settings, FilamentSync) == "skipped"
         assert not spools.called
+        # Nor Bambuddy's colours, which would only be refused 409 (#6907).
+        assert not colours.called
         with pytest.raises(PullInstanceChangedError):
             await read_and_pull(f, settings)
     spool = f.spools.get(made)

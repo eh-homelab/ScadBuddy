@@ -160,7 +160,8 @@ class PullReport(BaseModel):
     conflicts: int = 0
     #: #6907: Bambuddy's colour catalog, read under ``pulls.spools`` and sent apart from the
     #: spools (`ColoursBody`): the colours it added or changed, those a person made or edited
-    #: (left as they are), and whether the read or the write failed (logged).
+    #: or another source wrote (left as they are), and whether the read or the write failed
+    #: (logged).
     colours: int = 0
     colours_kept: int = 0
     colours_failed: bool = False

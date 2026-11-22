@@ -2256,6 +2256,17 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     pages; the rest were not read") and records no `db_last_modified`. What it wrote
     stays. Why: a version recorded from a partial read would make the next run
     `unchanged` and skip the swatches it never read.
+221. R-6907-16 (review of 959b010a): the first source to write a colour row keeps it. A
+    sync of another source finds the row by identity, links it (Bambuddy's `bb_colour_id`)
+    and counts it `kept`, but never writes its values or `source`. Why: a Bambuddy pull
+    that wrote over a filamentcolors swatch of the translucent family dropped its alpha
+    `80` (Decision 214) and moved `source` to `bambuddy` for good, so the next filamentcolors
+    run kept its own swatch out. A person who wants another source's values edits the row.
+222. R-6907-17 (review of 959b010a): a person's write keeps `source`. It says where the
+    row's values came from; `synced_at` NULL says a person edited them since, which is
+    what the Colours tab ("From …, edited since") and the agent's `filament_catalog_list`
+    read. Why: clearing `source` would lose that provenance, and a row with `source` and
+    `synced_at` NULL is already never written by a sync (Decision 217).
 
 ## Self-review
 

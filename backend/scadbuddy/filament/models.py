@@ -335,7 +335,9 @@ class Colour(_Catalog):
     material_name: str | None = None
     extra_colours: list[Rgba] | None
     effect_id: UUID | None
-    #: The sync that made or last wrote the row; ``None`` for a person's own row.
+    #: The sync that made or last wrote the row; ``None`` for a person's own row. A
+    #: person's edit keeps it, as where the values came from (Decision 222);
+    #: ``synced_at`` ``None`` says the row was edited since.
     source: ColourSource | None = None
     #: That sync write's time. A person's write of a value a sync writes clears it, and no
     #: sync writes a row whose ``synced_at`` is ``None`` (#6907, Decision 217).

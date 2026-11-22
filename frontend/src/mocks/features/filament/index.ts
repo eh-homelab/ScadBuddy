@@ -654,14 +654,17 @@ function catalogRefusal(kind: keyof Catalogs, values: Record<string, unknown>, b
     name: string
     archived_at: string | null
     manufacturer?: string | null
+    material_name?: string | null
   }[]
   const taken = rows.some(
     (row) =>
       row.id !== self &&
       !row.archived_at &&
       sameName(row.name, values.name) &&
-      // `filament_colours_name`: a colour's name is unique per manufacturer (none is one).
-      (kind !== 'colours' || sameName(row.manufacturer ?? '', values.manufacturer ?? '')),
+      // `filament_colours_name`: a colour is unique per manufacturer, name and material (none is one).
+      (kind !== 'colours' ||
+        (sameName(row.manufacturer ?? '', String(values.manufacturer ?? '')) &&
+          sameName(row.material_name ?? '', String(values.material_name ?? '')))),
   )
   return taken ? problem(409, REFUSED.catalogExists) : null
 }

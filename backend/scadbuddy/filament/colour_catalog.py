@@ -1,5 +1,5 @@
 """The colour catalog's sources (#6907, plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`
-Decisions 206-220): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
+Decisions 206-222): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
 filamentcolors.xyz and Bambu Studio's colour codes (`ColourSyncs`, run as the operation
 ``filament_colour_sync`` on the ``library`` queue, `filament/operations.py`).
 
@@ -11,6 +11,8 @@ Every source writes through `upsert_colours`, one transaction under one advisory
   ``backend/app/api/routes/inventory.py`` lines 1339-1434 at
   https://github.com/maziggy/bambuddy/tree/b7d894b57c0a373f66dc0de49680865b02b3aae5).
   Bambuddy's entry is found first by its link (``bb_colour_id``), then by identity.
+- A row another source wrote is ``kept`` as it is (Decision 221): the first source
+  to write a row keeps it; Bambuddy's entry still links to it.
 - A row found that a person made or edited (``synced_at`` NULL: a person's write of a
   value the sync writes clears it, `catalog.CatalogStore.update`; a re-order or an archive
   does not) is ``kept`` as it is (Decisions 208,
@@ -107,7 +109,8 @@ class ColourIn:
 
 class ColourCounts(BaseModel):
     """What one write did: rows added, rows a sync owned that it changed, rows it found
-    as they were, rows a person made or edited (``kept``), and colours it could not take
+    as they were, rows a person made or edited or another source wrote (``kept``), and
+    colours it could not take
     (no name, maker or colour, a name too long, a name a person's row of the same
     identity holds after a rename, or a second colour of one identity in one batch)."""
 
@@ -231,14 +234,14 @@ def _one(
     found = None
     if row.bb_colour_id is not None:
         found = conn.execute(
-            f"SELECT {_COLUMNS}, synced_at, updated_at, archived_at, bb_colour_id"
+            f"SELECT {_COLUMNS}, source, synced_at, updated_at, archived_at, bb_colour_id"
             " FROM filament_colours"
             " WHERE bb_colour_id = %s FOR UPDATE",
             (row.bb_colour_id,),
         ).fetchone()
     if found is None:
         found = conn.execute(
-            f"SELECT {_COLUMNS}, synced_at, updated_at, archived_at, bb_colour_id"
+            f"SELECT {_COLUMNS}, source, synced_at, updated_at, archived_at, bb_colour_id"
             " FROM filament_colours"
             " WHERE coalesce(upper(manufacturer), '') = upper(%s) AND upper(name) = upper(%s)"
             " AND coalesce(upper(material_name), '') = upper(%s)"
@@ -270,6 +273,10 @@ def _one(
         )
     if found["synced_at"] is None or found["archived_at"] is not None:
         # The person's row, or one they archived (left as it is until restored).
+        return "kept"
+    if found["source"] != source:
+        # Another source's colour: the first source to write a row keeps it (Decision
+        # 221), so a Bambuddy entry never drops a filamentcolors swatch's alpha.
         return "kept"
     if all(found[name] == value for name, value in values.items()):
         return "unchanged"
@@ -381,6 +388,8 @@ class ColourSyncs:
     dict rows. Its methods block: `run` calls them in threads."""
 
     def __init__(self, pool: ConnectionPool[Conn]) -> None:
+        # The shared `scadbuddy-rows` pool (`rows/component.py`), opened on first use.
+        pool.open(wait=False)
         self._pool = pool
 
     def upsert(self, rows: Sequence[ColourIn], source: ColourSource) -> ColourCounts:

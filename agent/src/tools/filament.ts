@@ -264,7 +264,7 @@ const tools: Tool[] = [
       'filamentcolors.xyz (maker, name, material, hex; a translucent swatch gets alpha `80`), skipped when the site has ' +
       "no new swatch since the last run unless `force`. `bambu`: Bambu Studio's colour codes as Bambu Lab's colours, " +
       'exact RGBA (`80` for a translucent one). A colour is added, or updated by its maker, name and material; a row ' +
-      'a person made or edited is left as it is (`kept`), and nothing is deleted. Answers the run: `state` `done`, ' +
+      'a person made or edited, or another source wrote, is left as it is (`kept`), and nothing is deleted. Answers the run: `state` `done`, ' +
       '`unchanged` or `failed` (`error` says why, e.g. the site did not answer; what it wrote stays) with its counts. ' +
       'A filamentcolors run reads about 23 pages: an answer with `status: running` is still running; follow it with ' +
       'get_operation, or read its progress with filament_colour_sync_status. 409 while a run of that source runs. ' +
