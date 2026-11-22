@@ -9,6 +9,7 @@ The times on a developer machine are in the PR that added this file."""
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -34,7 +35,11 @@ from scadbuddy.filament.bb_sync_plan import (
     desired_and_unmapped,
     plan,
 )
-from scadbuddy.filament.bb_sync_results import LocalFilamentSync, apply_results
+from scadbuddy.filament.bb_sync_results import (
+    InProcessFilamentSync,
+    LocalFilamentSync,
+    apply_results,
+)
 from scadbuddy.filament.component import Filament
 from tests.conftest import PgPool
 from tests.filament import bb_sync_scale as scale
@@ -283,3 +288,106 @@ def test_a_cancelled_statement_stops_the_pull_and_fails_no_spool(
     with pytest.raises(errors.QueryCanceled):
         pull(f, spools, now=_AT + timedelta(days=1), instance=INSTANCE, cancel=CancelToken())
     assert "could not pull a Bambuddy spool" not in caplog.text
+
+
+@contextmanager
+def _sync_held(pool: PgPool) -> Iterator[tuple[threading.Event, threading.Event]]:
+    """Another call holds the instance's sync until the block sets the first event it
+    gets; the second is set once that call has ended."""
+    release = threading.Event()
+    held = threading.Event()
+    freed = threading.Event()
+
+    def hold() -> None:
+        with pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (SYNC_LOCK + INSTANCE,)
+            )
+            held.set()
+            release.wait(30)
+        freed.set()
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert held.wait(10)
+    try:
+        yield release, freed
+    finally:
+        release.set()
+        holder.join(10)
+
+
+async def test_the_in_process_pass_waits_out_a_busy_sync(pg_pool: PgPool) -> None:
+    """#6910 review: the API's in-process pass gets no 503 and no client retry, so its
+    `InProcessFilamentSync` waits out another call's sync itself, as the print worker's
+    client waits out ``sync_busy``; past its budget the call is `SyncBusyError`."""
+    f = _filament(pg_pool)
+    made = scale.build(pg_pool, f, spools=4, archived=1, events=10)
+    writes, results = _round(f, made)
+    now = [0.0]
+    waits: list[float] = []
+
+    with _sync_held(pg_pool) as (release, freed):
+
+        async def frees_it(seconds: float) -> None:
+            waits.append(seconds)
+            release.set()
+            await asyncio.to_thread(freed.wait, 10)
+
+        sync = InProcessFilamentSync(
+            f,
+            _Settings(),  # type: ignore[arg-type]
+            clock=lambda: now[0],
+            sleep=frees_it,
+        )
+        report = await sync.results(INSTANCE, writes, results, "p1")
+    assert report.updated == len(writes)
+    assert waits == [InProcessFilamentSync.BUSY_BACKOFF_S]
+
+    async def passes(seconds: float) -> None:
+        waits.append(seconds)
+        now[0] += seconds
+
+    waits.clear()
+    with _sync_held(pg_pool):
+        sync = InProcessFilamentSync(
+            f,
+            _Settings(),  # type: ignore[arg-type]
+            clock=lambda: now[0],
+            sleep=passes,
+        )
+        with pytest.raises(SyncBusyError):
+            await sync.results(INSTANCE, writes, results, "p1")
+    assert sum(waits) <= InProcessFilamentSync.BUSY_BUDGET
+    assert len(waits) == int(
+        InProcessFilamentSync.BUSY_BUDGET / InProcessFilamentSync.BUSY_BACKOFF_S
+    )
+
+
+def test_a_shutdown_reads_the_end_of_the_work_it_leaves(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6910 review: when the route's own task is cancelled (a shutdown), nothing awaits
+    the work any more; its end (here the cancel's `CancelledError`) is still read, so
+    asyncio logs no "Task exception was never retrieved"."""
+
+    async def main() -> None:
+        started = asyncio.Event()
+
+        async def work(token: CancelToken) -> None:
+            started.set()
+            while not token.cancelled:
+                await asyncio.sleep(0.01)
+            raise CancelledError
+
+        route = asyncio.ensure_future(until_disconnect(_request(threading.Event()), work))
+        await started.wait()
+        route.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await route
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+
+    asyncio.run(main())
+    gc.collect()
+    assert "never retrieved" not in caplog.text

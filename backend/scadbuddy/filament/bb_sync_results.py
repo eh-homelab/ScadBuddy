@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -64,6 +65,7 @@ from scadbuddy.filament.bb_sync_plan import (
     UNSEEN,
     BbRefs,
     SpoolFacts,
+    SyncBusyError,
     bb_form,
     compare_form,
     desired_and_unmapped,
@@ -936,6 +938,60 @@ class LocalFilamentSync:
 
     async def record_pass(self, result: SyncPassResult) -> None:
         await asyncio.to_thread(record_pass, self._filament, result)
+
+
+class InProcessFilamentSync(LocalFilamentSync):
+    """`LocalFilamentSync` for the pass that the API's in-process print queue runs. Its
+    plan and results calls wait out another call's `SyncBusyError` (#6910 review): the
+    print worker's `RemoteFilamentSync` waits out the route's 503 ``sync_busy`` within
+    its ``BUSY_BUDGET``, and this waits within the same budget, trying again every
+    ``BUSY_BACKOFF_S``, so a second caller does not fail the pass at once. ``clock`` and
+    ``sleep`` are for tests."""
+
+    BUSY_BUDGET = 60.0
+    BUSY_BACKOFF_S = 1.0
+
+    def __init__(
+        self,
+        filament: Filament,
+        settings_store: SettingsStore,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        super().__init__(filament, settings_store)
+        self._clock = clock
+        self._sleep = sleep
+
+    async def _until_free[T](self, call: Callable[[], Awaitable[T]]) -> T:
+        deadline = self._clock() + self.BUSY_BUDGET
+        while True:
+            try:
+                return await call()
+            except SyncBusyError:
+                if self._clock() + self.BUSY_BACKOFF_S > deadline:
+                    raise
+            await self._sleep(self.BUSY_BACKOFF_S)
+
+    async def plan(
+        self, snap: BbSnapshot, limit: int, cancel: CancelToken | None = None
+    ) -> SyncPlan:
+        return await self._until_free(lambda: LocalFilamentSync.plan(self, snap, limit, cancel))
+
+    async def results(
+        self,
+        instance: str,
+        writes: Sequence[BbWrite],
+        results: Sequence[BbWriteResult],
+        pass_id: str | None,
+        unconfirmed: Sequence[tuple[Kind, UUID]] = (),
+        cancel: CancelToken | None = None,
+    ) -> ResultsReport:
+        return await self._until_free(
+            lambda: LocalFilamentSync.results(
+                self, instance, writes, results, pass_id, unconfirmed, cancel
+            )
+        )
 
 
 def _foreign(bambuddy_url: str | None, instance: str) -> bool:

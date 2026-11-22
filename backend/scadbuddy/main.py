@@ -98,7 +98,7 @@ from scadbuddy.crud import listener as crud_listener
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, execute_pull
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_nudge import instance_for
-from scadbuddy.filament.bb_sync_results import LocalFilamentSync, adopt_instance
+from scadbuddy.filament.bb_sync_results import InProcessFilamentSync, adopt_instance
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
@@ -1795,9 +1795,10 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
         ).lan_auto_import,
         # The filament sync's pass (#6265) on this process's own stores, as the CRUD
-        # routes run it for the print worker.
+        # routes run it for the print worker; it waits out a busy sync as that worker's
+        # client waits out the routes' 503 `sync_busy` (#6910 review).
         FilamentSyncActivities(
-            LocalFilamentSync(state.components.get(FILAMENT), state.settings_store),
+            InProcessFilamentSync(state.components.get(FILAMENT), state.settings_store),
             settings_loader(state.settings_store.load),
         ).sync_pass,
         # The Bambuddy pull's reads (#6772) on this process's own stores, as the CRUD

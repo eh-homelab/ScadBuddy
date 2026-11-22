@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import Request, status
 
@@ -34,6 +35,12 @@ logger = logging.getLogger(__name__)
 CALLER_GONE = "caller_gone"
 
 
+def _read_end(future: asyncio.Future[Any]) -> None:
+    """Read a future nobody awaits, so its exception is not logged as never retrieved."""
+    if not future.cancelled():
+        future.exception()
+
+
 async def until_disconnect[T](request: Request, work: Callable[[CancelToken], Awaitable[T]]) -> T:
     """``work(token)``'s answer, as the module says."""
     token = CancelToken()
@@ -43,8 +50,11 @@ async def until_disconnect[T](request: Request, work: Callable[[CancelToken], Aw
         await asyncio.wait({task, watcher}, return_when=asyncio.FIRST_COMPLETED)
     except asyncio.CancelledError:
         # The route's own task (a shutdown): stop the work, and leave it to roll back.
+        # Nothing awaits the work or the cancel now, so each one's end is read when it
+        # comes, or asyncio logs "Task exception was never retrieved" (#6910 review).
         watcher.cancel()
-        asyncio.get_running_loop().run_in_executor(None, token.cancel)
+        task.add_done_callback(_read_end)
+        asyncio.get_running_loop().run_in_executor(None, token.cancel).add_done_callback(_read_end)
         raise
     if task.done():
         watcher.cancel()

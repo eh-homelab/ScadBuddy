@@ -881,7 +881,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`bb_sync_plan.SpoolFacts`), and `apply_results` records a round in one transaction, a
   savepoint per result. Both take the instance's sync try-lock (`hold_sync`): another call
   of the instance meanwhile is 503 `sync_busy`, which the client waits out within
-  `RemoteFilamentSync.BUSY_BUDGET`. Both routes, and the pull's `…/pull` and `…/pull/usage`,
+  `RemoteFilamentSync.BUSY_BUDGET` (the API's in-process pass, which has no route, waits
+  out `SyncBusyError` itself: `bb_sync_results.InProcessFilamentSync`). Both routes, and the pull's `…/pull` and `…/pull/usage`,
   run under `api/disconnect.py` `until_disconnect`: when the worker goes away the running
   statement is cancelled and the work rolls back, unless it had already passed its last
   check, just before its commit (`core/cancel.py`; Postgres ignores a cancel between
