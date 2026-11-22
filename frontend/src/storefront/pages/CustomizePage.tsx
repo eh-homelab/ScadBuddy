@@ -419,6 +419,8 @@ export function CustomizePage({
       // the page's prediction again (#6258, #6302 review).
       if (!begun) setSettled(undefined)
       unpriced()
+      // An estimate read that failed after a pending answer works on nothing now.
+      setPendingFor(undefined)
       if (changedListing(caught)) setStale(true)
       setRenderError(refusalText(caught, listing))
       if (retryable(caught) && !retry) {

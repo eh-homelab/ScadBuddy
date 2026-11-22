@@ -65,7 +65,8 @@ describe('CustomizePage', () => {
     const sent = renders()
     show()
     expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
-    expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+    // The first test of the file loads the lazy viewer's chunk: under load it can come after the price.
+    expect(await screen.findByTestId('preview')).toHaveAttribute('data-status', 'done')
     expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, colours: {} }])
     expect(screen.queryByRole('button', { name: 'Render' })).toBeNull()
   })
@@ -614,6 +615,23 @@ describe('CustomizePage', () => {
     expect(screen.queryByText(/\$/)).toBeNull()
     release()
     expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    expect(screen.queryByText('Working out the price…')).toBeNull()
+  })
+
+  it('stops saying the price is being worked out when the read of it fails (#6921 review)', async () => {
+    let reads = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => {
+        reads += 1
+        return reads < 2
+          ? HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })
+          : HttpResponse.json({ type: `${PROBLEMS}render_not_found`, status: 404, detail: 'gone' }, { status: 404, headers: { 'Content-Type': 'application/problem+json' } })
+      }),
+    )
+    show()
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(reads).toBe(2)
     expect(screen.queryByText('Working out the price…')).toBeNull()
   })
 
