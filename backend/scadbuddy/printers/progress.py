@@ -38,7 +38,7 @@ from scadbuddy.bambuddy.runs import LatestRun, PrintRun, read_latest
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS
-from scadbuddy.printers.lan_models import LanStarted, LanStopped
+from scadbuddy.printers.lan_models import BUSY_STATES, LanStarted, LanStopped
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import RUNNING as _RUNNING
 from scadbuddy.printers.status import print_error_text
@@ -182,6 +182,12 @@ WAITING = "Waiting for the printer to finish the print before it."
 AWAITING_CLEAR = "Waiting for someone to say the plate of {printer} is clear."
 #: A run's first print, queued because the printer was busy with another (#6871).
 QUEUED_BUSY = "Queued: {printer} is busy with another print. Nothing was sent to it yet."
+#: A queued run's first print once the printer holds an ended print (#6871): the print it
+#: waited for ended, or it was queued for the plate alone.
+QUEUED_PLATE = (
+    "Queued: {printer} holds a print that has ended. Nothing is sent to it until someone"
+    " says its plate is clear."
+)
 
 
 def waiting_plate(
@@ -206,9 +212,18 @@ def waiting_plate(
     )
 
 
-def lan_control(run: PrintRun) -> LanRunControl | None:
+def printing_now(state: object) -> bool | None:
+    """Whether a printer whose ``gcode_state`` is ``state`` prints now (`BUSY_STATES`);
+    ``None`` when no state was read."""
+    return state in BUSY_STATES if isinstance(state, str) and state else None
+
+
+def lan_control(run: PrintRun, printing: bool | None = None) -> LanRunControl | None:
     """A succeeded native run's prints still to start and its controls (#4942, #4939);
-    ``None`` once it started every one or they were stopped."""
+    ``None`` once it started every one or they were stopped. ``printing`` is whether the
+    printer prints now, from its live state (`printing_now`): a queued run waits for a
+    print only while the printer still prints it (#6871); with no state read, the job
+    the run was queued behind says so."""
     result = run.result
     if run.status != "succeeded" or result is None or result.path != "native":
         return None
@@ -219,7 +234,9 @@ def lan_control(run: PrintRun) -> LanRunControl | None:
         waiting=len(result.lan_waiting),
         awaiting_clear=result.lan_awaiting_clear,
         queued=result.lan_queued is not None,
-        queued_for_print=result.lan_queued is not None and result.lan_queued.job is not None,
+        queued_for_print=result.lan_queued is not None
+        and result.lan_queued.job is not None
+        and printing is not False,
     )
 
 
@@ -272,6 +289,11 @@ class LanProgress:
         name = row.name if row is not None else None
         now = self.now()
         result = run.result
+        # The live state, from a report fresh enough to read (#6871): a queued run's
+        # print may have ended since it was queued.
+        fresh = report is not None and now - report[1] <= self.max_age
+        printing = printing_now(report[0].get("gcode_state")) if fresh and report else None
+        control = lan_control(run, printing)
         plates = [
             ended_plate(plate, name)
             if plate.ended is not None
@@ -281,12 +303,14 @@ class LanProgress:
         reasons = [WAITING] * len(result.lan_waiting)
         if reasons and result.lan_awaiting_clear:
             reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
-        elif reasons and result.lan_queued is not None:
+        elif reasons and control is not None and control.queued_for_print:
             reasons[0] = QUEUED_BUSY.format(printer=name or "the printer")
+        elif reasons and result.lan_queued is not None:
+            reasons[0] = QUEUED_PLATE.format(printer=name or "the printer")
         plates += [waiting_plate(name, result.lan_stopped, reason) for reason in reasons]
         if len(plates) == 1:
             # A run of one print queued on a busy printer still has its controls.
-            return plates[0].model_copy(update={"run_id": run.id, "lan_run": lan_control(run)})
+            return plates[0].model_copy(update={"run_id": run.id, "lan_run": control})
         merged = from_plates(
             plates,
             [
@@ -297,9 +321,7 @@ class LanProgress:
             queue_item_id=None,
             bambuddy_url="",
         )
-        return merged.model_copy(
-            update={"route": "lan", "lan_run": lan_control(run), "run_id": run.id}
-        )
+        return merged.model_copy(update={"route": "lan", "lan_run": control, "run_id": run.id})
 
 
 class LanLastPrints(Protocol):

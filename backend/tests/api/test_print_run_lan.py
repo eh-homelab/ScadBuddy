@@ -20,12 +20,13 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
 from temporalio.service import RPCError
 
+from scadbuddy import main as app_main
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.printers.component import PRINTERS, Printers
-from scadbuddy.printers.lan_models import LanStarted, LanStopped
+from scadbuddy.printers.lan_models import LanQueued, LanStarted, LanStopped
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.workflows.print_models import (
     LAN_SEQUENCE_WORKFLOW,
@@ -305,3 +306,50 @@ def test_a_gone_oldest_run_gives_way_once_the_sweep_records_it(
     workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
     assert card["lan_run"]["run_id"] == alive
+
+
+def test_the_prune_passes_run_holds_sweep_ends_a_gone_run(
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+) -> None:
+    """#6871 (review of #6939): the run-holds sweep, on the prune Schedule every
+    `PRUNE_INTERVAL` whatever the asset sweep's interval, records a run whose sequence is
+    gone as stopped, so the next run heads the printer's card within minutes."""
+    printer = _printer(client)
+    gone = _run(client, workflow_reaper, printer=printer)
+    alive = _run(client, workflow_reaper, printer=printer)
+    _sequence(workflow_reaper, alive, sequences)
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["run_id"] == gone
+
+    workflow_reaper.run(app_main._reap_run_holds_logged(_state(client)))
+
+    stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
+    assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] == stopped
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["run_id"] == alive
+
+
+def test_a_queued_runs_card_reads_whether_the_print_it_waits_for_still_runs(
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+) -> None:
+    """#6871 (review of #6939): `queued_for_print` follows the card's live state, so the
+    text turns to the plate once the print the run was queued behind has ended."""
+    printer = _printer(client)
+    printers: Printers = _state(client).components.get(PRINTERS)
+    queued = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan_waiting=[1],
+        lan_queued=LanQueued(state="RUNNING", job=STARTED, place=1),
+    )
+    run_id = _run(client, workflow_reaper, queued, printer=printer)
+    _sequence(workflow_reaper, run_id, sequences)
+
+    printers.reports.put(printer, {"gcode_state": "RUNNING"}, datetime.now(UTC))
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["queued"] and card["lan_run"]["queued_for_print"]
+
+    printers.reports.put(printer, {"gcode_state": "FINISH"}, datetime.now(UTC))
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert card["lan_run"]["queued"] and not card["lan_run"]["queued_for_print"]

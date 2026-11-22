@@ -32,6 +32,8 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
   const prints = (result.lan ?? []).length + waiting
   /** #6871 — the printer was busy, so nothing was sent: the run waits in ScadBuddy's queue. */
   const queued = native && stopped === null ? (result.lan_queued ?? null) : null
+  /** Whether it waits for a print still running: the live read once the progress has one. */
+  const forPrint = progress?.lan_run ? progress.lan_run.queued_for_print : Boolean(queued?.job)
   const printer = printerName ?? 'the printer you chose'
   return (
     <div className="space-y-2 text-[13px] text-foreground">
@@ -40,7 +42,7 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
           <>
           <p>
             Queued for {printer}:{' '}
-            {queued.job
+            {forPrint
               ? 'it is busy with another print, so nothing was sent to it yet.'
               : 'its plate must be cleared first, so nothing was sent to it yet.'}{' '}
             ScadBuddy sends it once the printer has finished and someone says the plate is clear.

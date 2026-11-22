@@ -25,6 +25,7 @@ from scadbuddy.printers.progress import (
     NOT_HEARD,
     PAUSED,
     QUEUED_BUSY,
+    QUEUED_PLATE,
     WAITING,
     LanProgress,
     from_lan_report,
@@ -563,6 +564,18 @@ async def test_a_run_queued_on_a_busy_printer_reads_as_queued_with_its_controls(
     progress = await _lan(_run(plate), value).read("o" * 32)
     assert progress is not None and progress.lan_run is not None
     assert progress.lan_run.queued and not progress.lan_run.queued_for_print
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        QUEUED_PLATE.format(printer="H2C")
+    ]
+    # The print it was queued behind has ended (review of #6939): read live, the run now
+    # waits for the plate, before its sequence records that.
+    ended = ({"subtask_name": "theirs", "gcode_state": "FINISH"}, at(seconds=20))
+    progress = await _lan(_run(result), ended).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.queued and not progress.lan_run.queued_for_print
+    assert [copy.waiting_reason for copy in progress.copies_detail] == [
+        QUEUED_PLATE.format(printer="H2C")
+    ]
     clear = result.model_copy(update={"lan_awaiting_clear": True})
     progress = await _lan(_run(clear), value).read("o" * 32)
     assert progress is not None and progress.lan_run is not None

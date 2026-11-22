@@ -178,7 +178,7 @@ from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
-from scadbuddy.printers.progress import LanProgress, lan_control
+from scadbuddy.printers.progress import LanProgress, lan_control, printing_now
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
@@ -871,7 +871,9 @@ async def _lan_controls(runs: PrintCommands, cards: PrintersNow) -> dict[str, La
     except DATABASE_ERRORS:
         logger.warning("print runs unreadable; the strip shows no run controls")
         return {}
-    controls = {printer: lan_control(run) for printer, run in waiting.items()}
+    # The card's live state: a queued run waits for a print only while one runs (#6871).
+    states = {card.id: printing_now(card.state) for card in cards.printers}
+    controls = {printer: lan_control(run, states.get(printer)) for printer, run in waiting.items()}
     return {printer: control for printer, control in controls.items() if control is not None}
 
 

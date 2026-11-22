@@ -233,7 +233,9 @@ AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: (`bambuddy.runs.reap_run_holds`): a slice attempt that outlived its run's end, and the
 #: runs the retention prune deleted. Last, behind its own patch; on the prune Schedule
 #: too, as the quote holds' reaper is, so a hold an end left keeps its blob for at most
-#: `PRUNE_INTERVAL`.
+#: `PRUNE_INTERVAL`. #6871: it first records the LAN runs whose sequence is gone as
+#: stopped (`api.printing.end_gone_sequences`), so a gone run heads a printer's card on
+#: the Prints page for at most `PRUNE_INTERVAL` too.
 RUN_HOLDS_SWEEP = "housekeeping_reap_print_run_holds"
 RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
@@ -400,7 +402,8 @@ STOREFRONT_MAIL_TIMEOUT = timedelta(minutes=10)
 #: and a few Bambuddy reads, and with the printer allowed an FTP listing and a read:
 #: most passes take none or one. Not imported, as `GIT_TIMEOUT`'s is not.
 AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
-#: One delete.
+#: Two describes per LAN run with prints still to start (`end_gone_sequences`; few run at
+#: once), then one delete.
 RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)

@@ -1499,7 +1499,14 @@ async def _import_maintenance_logged(state: AppState) -> None:
 
 
 async def _reap_run_holds_logged(state: AppState) -> None:
-    """#6122: the LAN runs' holds on their sliced files that a run's end left."""
+    """#6122: the LAN runs' holds on their sliced files that a run's end left. First
+    (#6871) the LAN runs whose sequence is gone are recorded stopped, which drops their
+    holds too and lets the next queued run head its printer's card, every
+    `PRUNE_INTERVAL` whatever the asset sweep's interval."""
+    try:
+        await end_gone_sequences(state.print_runs)
+    except Exception:
+        logger.warning("could not check the LAN runs' sequences", exc_info=True)
     try:
         dropped = await asyncio.to_thread(reap_run_holds, state.refs)
     except Exception:
