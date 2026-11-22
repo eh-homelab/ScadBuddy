@@ -37,7 +37,13 @@ export default defineConfig({
     // `isolate: false`) would fail, and kill, each other's processes.
     // test/support/gateway.ts starts the credential gateway every query goes through (main.ts
     // starts it in the service); first, so it closes after the leak guard's check.
-    setupFiles: ['test/support/gateway.ts', 'test/support/leakGuard.ts'],
+    // test/support/flushDrops.ts waits for the test databases' DROPs (#7058); before the
+    // gateway, so its hook runs last.
+    setupFiles: [
+      'test/support/flushDrops.ts',
+      'test/support/gateway.ts',
+      'test/support/leakGuard.ts',
+    ],
     pool: 'forks',
     isolate: true,
   },
