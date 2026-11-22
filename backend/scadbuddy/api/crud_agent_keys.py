@@ -26,14 +26,16 @@ from typing import Annotated, Any, Final
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.agent_data.rotation import kek_at
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.library.asset_fetch import ascii_host, parse_fetch_url
 from scadbuddy.library.fetch_grants import fetch_grant_key, mint
+from scadbuddy.library.url_import import ImportRefusedError
 
 router = crud_router("agent")
 
@@ -78,6 +80,18 @@ class GrantAsk(BaseModel):
 
     host: Annotated[str, Field(min_length=1, max_length=HOST_MAX)]
     url: Annotated[str, Field(min_length=1, max_length=URL_MAX)]
+
+    @model_validator(mode="after")
+    def _host_is_the_urls(self) -> GrantAsk:
+        """The grant names the host the asset route reads from ``url`` (its own parse,
+        `assets.py` `_spend_grant`): a grant it would refuse is an agent bug, shown here."""
+        try:
+            host = ascii_host(parse_fetch_url(self.url))
+        except ImportRefusedError as error:
+            raise ValueError(str(error)) from None
+        if host != self.host:
+            raise ValueError(f"host {self.host!r} is not the URL's host {host!r}")
+        return self
 
 
 class Grant(BaseModel):

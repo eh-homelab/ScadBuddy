@@ -104,6 +104,24 @@ def test_a_minted_grant_passes_the_asset_routes_check(pg_pool: PgPool, tmp_path:
         verify(key, grant, host="other.example.com", url=url, now=now)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"host": "", "url": "https://a.example/x"},
+        {"host": "a.example", "url": "https://a.example/" + "x" * crud_agent_keys.URL_MAX},
+        {"host": "a.example", "url": "https://a.example/x", "extra": 1},
+        {"host": "b.example", "url": "https://a.example/x"},
+        {"host": "a.example", "url": "http://a.example/x"},
+    ],
+    ids=["empty-host", "long-url", "unknown-field", "other-host", "not-https"],
+)
+def test_a_malformed_ask_is_refused(pg_pool: PgPool, tmp_path: Path, body: dict[str, Any]) -> None:
+    app = _app(pg_pool, tmp_path, kek=KEK_B64)
+    with TestClient(app) as client:
+        answer = client.post(f"{BASE}/fetch-grants", json=body, headers=_token(app))
+    assert answer.status_code == 422
+
+
 def test_another_caller_is_refused(pg_pool: PgPool, tmp_path: Path) -> None:
     app = _app(pg_pool, tmp_path, kek=KEK_B64)
     with TestClient(app) as client:
