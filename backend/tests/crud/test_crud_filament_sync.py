@@ -4,6 +4,8 @@ Bambuddy answered and reports a pass through them, only with the print credentia
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,18 +17,21 @@ import pytest
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.core.settings import FilamentSync, Settings
-from scadbuddy.crud.client import CrudClient, CrudRefusedError
+from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.print import BASE, RemoteFilamentSync
 from scadbuddy.filament.bb_sync_models import (
+    SYNC_BUSY,
     BbSnapshot,
     BbWrite,
     BbWriteResult,
     PlanRequest,
     ResultsReport,
+    ResultsRequest,
     SyncPassResult,
     SyncPlan,
     without_empty_unconfirmed,
 )
+from scadbuddy.filament.bb_sync_plan import SYNC_LOCK, plan
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync, sync_status
 from scadbuddy.filament.models import Material, SpoolCreate
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
@@ -38,6 +43,7 @@ from tests.crud.crud_support import (
     served_print_crud,
     threaded_print_crud,
 )
+from tests.filament import bb_sync_scale as scale
 
 pg = pytest.mark.requires_postgres
 
@@ -439,3 +445,95 @@ async def test_a_pass_of_another_bambuddy_plans_and_records_nothing(
         assert conn.execute("SELECT count(*) AS n FROM filament_bb_links").fetchone() == {"n": 0}
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
     assert state == {"instance": None}
+
+
+def _intents(store: SettingsStore) -> list[object]:
+    with store.pool.connection() as conn:
+        return list(conn.execute("SELECT kind, sb_id FROM filament_bb_creates").fetchall())
+
+
+@pg
+async def test_a_call_while_another_runs_waits_for_it(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """#6902: while another plan or results call of the instance holds its sync, the route
+    answers 503 `sync_busy` and does no work; the worker's client tries again within its
+    budget, and its call runs once the first has ended."""
+    _spools(store, 1)
+    release = threading.Event()
+    held = threading.Event()
+
+    def first_call() -> None:
+        with store.pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (SYNC_LOCK + INSTANCE,)
+            )
+            held.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=first_call)
+    holder.start()
+    held.wait(10)
+    try:
+        with pytest.raises(CrudUnavailableError) as busy:
+            await crud.request("POST", PLAN, json=_request(), budget=0.5)
+        assert busy.value.problem.get("reason") == SYNC_BUSY
+        assert _intents(store) == []
+        threading.Timer(1.0, release.set).start()
+        plan = await RemoteFilamentSync(crud).plan(_snapshot(), 200)
+    finally:
+        release.set()
+        holder.join(10)
+    assert len(plan.writes) == 1
+
+
+def _sync_free(store: SettingsStore) -> bool:
+    with store.pool.connection() as conn, conn.transaction():
+        row = conn.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS held",
+            (SYNC_LOCK + INSTANCE,),
+        ).fetchone()
+    return row is not None and bool(row["held"])
+
+
+@pg
+async def test_a_results_call_the_worker_gave_up_on_rolls_back(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """#6902, over a real connection: the worker's read timeout ends a results round that
+    waits on a spool another writer holds. The API notices the disconnect, cancels the
+    round's statement and rolls the whole round back, and frees the sync's lock while that
+    spool is still held, so the round never finished: nothing of it is committed."""
+    filament = filament_on(store.pool)
+    made = scale.build(store.pool, filament, spools=8, archived=1, events=20)
+    planned = plan(filament, made.snap, scale.TWO_WAY, interval_s=300.0)
+    results = scale.ok_results(made.snap, planned.writes, datetime.now(UTC))
+    body = ResultsRequest(
+        instance=INSTANCE, writes=planned.writes, results=results, pass_id="p1"
+    ).model_dump(mode="json")
+    spool_writes = [w for w in planned.writes if w.kind == "spool"]
+    held_spool = spool_writes[len(spool_writes) // 2].sb_id
+
+    def committed() -> object:
+        with store.pool.connection() as conn:
+            return conn.execute(
+                "SELECT spool_id, bb_seen, pushed_fields FROM filament_bb_links ORDER BY spool_id"
+            ).fetchall()
+
+    before = committed()
+    with store.pool.connection() as conn, conn.transaction():
+        conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (held_spool,))
+        with pytest.raises(CrudUnavailableError) as gave_up:
+            await crud.request("POST", RESULTS, json=body, timeout=1.5, budget=0)
+        assert gave_up.value.failure == "transport"
+        for _ in range(200):
+            if _sync_free(store):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the round still holds the sync after its caller left")
+        assert committed() == before
+    report = await RemoteFilamentSync(crud).results(
+        INSTANCE, planned.writes, results, "p1", planned.unconfirmed
+    )
+    assert report.updated == len(planned.writes)

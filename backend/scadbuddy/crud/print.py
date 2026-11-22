@@ -1463,10 +1463,34 @@ class RemoteFilamentSync:
     ``filament-sync``, #6265 Task 6): the plan, what Bambuddy answered, and a pass's
     state row. Each is natural, so each is sent again on the client's retries: a plan
     finds the intent it recorded, results sent again carry the plan's ``pass_id`` and add
-    no attempt (R-T6-5), and the pass row is set, not added to."""
+    no attempt (R-T6-5), and the pass row is set, not added to.
+
+    A plan or results call of a full round (200 writes on about 110 spools) took longer
+    than the client's 10 s default on prod (#6902), so each has `ROUND_TIMEOUT`. The API
+    stops and rolls back the call's work when the client goes away (`api/disconnect.py`),
+    so a read timeout means nothing was written. The client does not send it again: its
+    retry budget (`BUSY_BUDGET`) ends before the timeout, so the pass activity's retry is
+    the next try. The budget is how long a call waits out the API's 503 ``sync_busy``
+    (another call of the instance not ended yet, `bb_sync_plan.hold_sync`), a 5xx or a
+    missing route, trying again with the client's backoff."""
+
+    #: Well inside the pass activity's 15-minute start-to-close timeout; the pass
+    #: heartbeats while the call runs (`bb_sync_run`).
+    ROUND_TIMEOUT = 120.0
+    BUSY_BUDGET = 60.0
 
     def __init__(self, client: CrudClient) -> None:
         self._client = client
+
+    async def _post(self, path: str, body: Any) -> Any:
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/filament/sync/{path}",
+            json=body,
+            timeout=self.ROUND_TIMEOUT,
+            budget=self.BUSY_BUDGET,
+        )
+        return response.json()
 
     async def directions(self) -> FilamentSync:
         response = await self._client.request("GET", f"{BASE}/filament/sync/directions")
@@ -1474,8 +1498,7 @@ class RemoteFilamentSync:
 
     async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
         body = PlanRequest(snapshot=snap, limit=limit).model_dump(mode="json")
-        response = await self._client.request("POST", f"{BASE}/filament/sync/plan", json=body)
-        return SyncPlan.model_validate(response.json())
+        return SyncPlan.model_validate(await self._post("plan", body))
 
     async def results(
         self,
@@ -1495,8 +1518,7 @@ class RemoteFilamentSync:
                 unconfirmed=list(unconfirmed),
             )
         )
-        response = await self._client.request("POST", f"{BASE}/filament/sync/results", json=body)
-        return ResultsReport.model_validate(response.json())
+        return ResultsReport.model_validate(await self._post("results", body))
 
     async def record_pass(self, result: SyncPassResult) -> None:
         body = result.model_dump(mode="json")

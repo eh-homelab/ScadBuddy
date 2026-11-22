@@ -305,6 +305,9 @@ def without_empty_unconfirmed(model: SyncPlan | ResultsRequest) -> dict[str, Any
 #: The pass activity's name (`bb_sync_run.FilamentSyncActivities`), as the workflow
 #: (`workflows/filament_sync.py`) schedules it.
 SYNC_PASS_ACTIVITY = "filament_bb_sync_pass"
+#: The 503 problem's ``reason`` when another plan or results call of the instance is
+#: running (#6902, `bb_sync_plan.hold_sync`): the client tries again after a backoff.
+SYNC_BUSY = "sync_busy"
 #: The timer's interval a pass reports when it made no plan, unless told another.
 DEFAULT_INTERVAL_S = 300.0
 

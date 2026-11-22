@@ -866,7 +866,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
-  and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. After the
+  and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. At prod's
+  size (#6902): `plan` reads every spool's SB data in a fixed number of queries
+  (`bb_sync_plan.SpoolFacts`), and `apply_results` records a round in one transaction, a
+  savepoint per result. Both take the instance's sync try-lock (`hold_sync`): another call
+  of the instance meanwhile is 503 `sync_busy`, which the client waits out within
+  `RemoteFilamentSync.BUSY_BUDGET`. Both routes, and the pull's `…/pull` and `…/pull/usage`,
+  run under `api/disconnect.py` `until_disconnect`: when the worker goes away the running
+  statement is cancelled and the work rolls back (`core/cancel.py`; the pull keeps the BB
+  spools it pulled before, each its own transaction). The client gives `plan` and
+  `results` `ROUND_TIMEOUT` (120 s), and the pass heartbeats while one runs
+  (`bb_sync_run.CALL_BEAT_S`). After the
   Bambuddy URL changes the status says `instance_changed` and the sync stops until
   `POST /filament/sync/reset-links` (#6773, plan Decisions 165-170; `GET` is its dry run)
   deletes the old instance's links, hashes, seen copies, intents, error rows, ignored BB

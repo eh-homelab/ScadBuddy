@@ -1043,6 +1043,18 @@ class FilamentSpoolStore:
             _check_temps(spool.effective)
         return spool
 
+    @staticmethod
+    def read_many(conn: Conn, spool_ids: Iterable[UUID]) -> dict[UUID, m.Spool]:
+        """`read` of each spool among ``spool_ids`` that exists, by id, in a fixed number
+        of queries (#6902: the Bambuddy sync's plan reads every spool). Its hours outside
+        dry storage and ``needs_drying`` stay at their defaults and ``low_stock`` follows
+        the settings' defaults, so a caller that returns a spool reads it with `read`."""
+        rows = conn.execute(
+            f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = ANY(%s)",
+            (list(spool_ids),),
+        ).fetchall()
+        return {spool.id: spool for spool in _hydrate(conn, rows, hours=False)}
+
     def unbind_tag(self, tag_id: UUID, *, actor: str) -> m.TagBinding | None:
         """Take a tag off its spool, with a ``tag_unbound`` event; ``None`` when the tag
         is on no spool. Locks the tag, then the spool, as `bind_tag` does."""

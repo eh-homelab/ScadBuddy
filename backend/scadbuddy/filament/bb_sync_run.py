@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 #: At most this many Bambuddy calls (writes and probes) in one pass (Decision 11).
 WRITE_CAP = 200
+#: While a plan or results call runs, the pass heartbeats this often (#6902): a call may
+#: take up to `crud/print.py` `RemoteFilamentSync.ROUND_TIMEOUT`, longer than the pass's
+#: 60 s heartbeat timeout (`workflows/filament_sync.py` `PASS_HEARTBEAT`).
+CALL_BEAT_S = 20.0
 
 
 async def run_pass(
@@ -158,7 +162,7 @@ async def _rounds(
     for _ in range(max_rounds):
         if calls >= WRITE_CAP:
             break
-        plan = await api.plan(snap, WRITE_CAP - calls)
+        plan = await _beating(api.plan(snap, WRITE_CAP - calls), heartbeat)
         heartbeat()
         interval_s = plan.interval_s
         deferred = plan.deferred
@@ -180,7 +184,10 @@ async def _rounds(
                 failed += 1
             heartbeat()
         calls += len(plan.writes)
-        await api.results(snap.instance, plan.writes, results, plan.pass_id, plan.unconfirmed)
+        await _beating(
+            api.results(snap.instance, plan.writes, results, plan.pass_id, plan.unconfirmed),
+            heartbeat,
+        )
         heartbeat()
     return SyncPassResult(
         written=written,
@@ -193,6 +200,19 @@ async def _rounds(
         interval_s=interval_s,
         started_at=empty.started_at,
     )
+
+
+async def _beating[T](call: Awaitable[T], heartbeat: Callable[[], None]) -> T:
+    """``call``'s answer, heartbeating every `CALL_BEAT_S` while it runs."""
+    task = asyncio.ensure_future(call)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=CALL_BEAT_S)
+            if done:
+                return task.result()
+            heartbeat()
+    finally:
+        task.cancel()
 
 
 async def _call(
