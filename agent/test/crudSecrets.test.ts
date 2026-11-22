@@ -231,7 +231,7 @@ describe('CrudAreas', () => {
     expect(await areas.refresh()).toBe(false)
     expect(await areas.refresh()).toBe(false)
     expect(logs).toEqual([
-      "CRUD areas: waiting for the backend's agent areas (missing settings, credentials, payload-keys); reading over SQL until it lists them",
+      "CRUD areas: waiting for the backend's agent areas (missing settings, credentials, payload-keys); not ready until it lists them",
     ])
     listed = ['settings']
     expect(await areas.refresh()).toBe(false)

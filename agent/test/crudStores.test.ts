@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { crudUpsertActivityKinds } from '../src/activity/kinds.js'
 import { CrudReadError } from '../src/api/crudRead.js'
-import { crudCall, CrudPathError, gated, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
+import { crudCall, CrudPathError, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
 import { CrudTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { CrudPairingStore, hashCode, PairingError } from '../src/bridge/pairings.js'
 import { CrudSessionTabStore } from '../src/bridge/sessionTabs.js'
@@ -449,16 +449,6 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     await channels.record(id, 'HTTP 500')
     expect((await channels.list())[0]?.last_error).toBe('HTTP 500')
     expect(await channels.delete(id)).toBe(true)
-  })
-
-  it('picks the CRUD store per call once the area is listed', async () => {
-    let listed = false
-    const sql = { name: () => 'sql' }
-    const crud = { name: () => 'crud' }
-    const store = gated(sql, crud, () => listed)
-    expect(store.name()).toBe('sql')
-    listed = true
-    expect(store.name()).toBe('crud')
   })
 
   it("counts only the route's own answer: a proxy's is refused, and an abort stops the wait", async () => {

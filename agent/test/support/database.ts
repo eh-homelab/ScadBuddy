@@ -1,5 +1,5 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
-import { type AwaitMigrationsOptions, awaitMigrations, type ExpectedMigration, type LedgerReader, MigrationsPendingError } from '../../src/db/schema.js'
+import { type AwaitMigrationsOptions, awaitMigrations, type ExpectedMigration, type LedgerReader, MigrationsPendingError } from './schema.js'
 
 // The tests' own Postgres client (#5299 step 12): the agent runs no SQL, so what was
 // `src/db.ts` lives here, for the tests that seed or read the `ai_*` tables the API owns.

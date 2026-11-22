@@ -1,24 +1,20 @@
 import type { AppDeps } from './app.js'
-import { type OpenerStatus, openerOf, opensWith, soonestRecovery } from './credentials.js'
+import { type OpenerStatus, opensWith, soonestRecovery } from './credentials.js'
 
-/** Upper bound on each database step of the status (migrations, credential read). */
+/** Upper bound on each step of the status that asks the API (the credential list, its key). */
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
 
 /**
  * `ai` is `enabled` only when every prerequisite holds; otherwise it names the
  * first one missing, in the order an operator has to fix them. The CI smoke
- * test reads it (.github/workflows/ci.yml asserts the no-database string), and
+ * test reads it (.github/workflows/ci.yml asserts the API-unanswered string), and
  * so does the UI's gate, through GET /api/v1/ai/status (`AiStatusView`;
  * frontend src/agent/chat/availability.ts). Keep the strings stable for both.
  */
 export type AiStatus =
   | 'enabled'
-  | 'disabled (no database)'
-  | 'unavailable (database unreachable)'
   | "unavailable (the API does not answer the agent's CRUD areas)"
-  | 'unavailable (database migrations failed)'
-  | 'unavailable (database timed out)'
-  | 'unavailable (waiting for the API to apply the database migrations)'
+  | 'unavailable (the API timed out)'
   | 'unavailable (the API did not answer for its key-encryption key)'
   | 'unavailable (the API timed out answering for its key-encryption key)'
   | `disabled (no key-encryption key: ${string})`
@@ -46,49 +42,34 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TI
   }
 }
 
+const UNANSWERED = "unavailable (the API does not answer the agent's CRUD areas)" as const
+
 /**
  * The `ai` and `credential` fields of /healthz, which GET /api/v1/ai/status
  * (routes/status.ts) reports too. In its own module, not app.ts, because a route
  * module must not import a value from app.ts: app.ts loads routes/index.ts, which
  * imports each route module, so that import would be a cycle through a top-level await.
+ * The agent's data is the API's (#5299 step 12): `dataOk` is api/dataHealth.ts's `ping`.
  */
 export async function aiStatus(
-  deps: Pick<AppDeps, 'database' | 'credentials' | 'kek' | 'healthTimeoutMs'>,
-  dbOk: boolean | undefined,
-  /** The probe failed on the API, not on Postgres (api/dataHealth.ts `checkData`). */
-  apiUnanswered = false,
+  deps: Pick<AppDeps, 'credentials' | 'healthTimeoutMs'>,
+  dataOk: boolean,
 ): Promise<{ ai: AiStatus; credential: CredentialState; recoversAt?: string }> {
-  if (dbOk === undefined || !deps.database || !deps.credentials) {
-    return { ai: 'disabled (no database)', credential: 'unknown' }
-  }
-  if (!dbOk) {
-    // Once the API lists every area, health asks it too (api/dataHealth.ts): name which failed.
-    if (apiUnanswered) return { ai: "unavailable (the API does not answer the agent's CRUD areas)", credential: 'unknown' }
-    return { ai: 'unavailable (database unreachable)', credential: 'unknown' }
-  }
-  // Both steps are bounded: ready() may be waiting for the API to apply the
-  // agent's migrations (bounded itself, db/schema.ts), and a liveness probe must
-  // answer well inside its own timeout regardless.
+  if (!dataOk) return { ai: UNANSWERED, credential: 'unknown' }
+  // Each step is bounded: a liveness probe must answer well inside its own timeout.
   const timeoutMs = deps.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS
-  const ready = await within(deps.database.ready(), timeoutMs)
-  // The API applies the agent's migrations (#5299): while it has not, say so, not a timeout.
-  if (ready !== true && deps.database.waitingForMigrations?.()) {
-    return { ai: 'unavailable (waiting for the API to apply the database migrations)', credential: 'unknown' }
-  }
-  if (ready === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
-  if (!ready) return { ai: 'unavailable (database migrations failed)', credential: 'unknown' }
   let list
   try {
     list = await within(deps.credentials.list(), timeoutMs)
   } catch {
-    return { ai: 'unavailable (database unreachable)', credential: 'unknown' }
+    return { ai: UNANSWERED, credential: 'unknown' }
   }
-  if (list === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
+  if (list === TIMED_OUT) return { ai: 'unavailable (the API timed out)', credential: 'unknown' }
   const credential = list.length ? 'configured' : 'not configured'
-  // The key that opens them: this process's, or the API's through its CRUD routes (#5299 D5).
+  // The key that opens them is the API's (#5299 D5).
   let opener: OpenerStatus | typeof TIMED_OUT
   try {
-    opener = await within(openerOf(deps.credentials, deps.kek), timeoutMs)
+    opener = await within(deps.credentials.opener(), timeoutMs)
   } catch {
     return { ai: 'unavailable (the API did not answer for its key-encryption key)', credential }
   }

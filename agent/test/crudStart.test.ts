@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { CrudAreas } from '../src/api/crudAreas.js'
-import { checkData, dataHealthOf, ledgerOf } from '../src/api/dataHealth.js'
+import { dataHealthOf } from '../src/api/dataHealth.js'
 import { aiStatus } from '../src/aiStatus.js'
 import { BrowserSessions, CrudSessionLookup, sessionIdHash } from '../src/auth/browserSession.js'
-import { awaitMigrations, crudLedger, EXPECTED_MIGRATIONS, MigrationChecksumError, MigrationsPendingError } from '../src/db/schema.js'
 
-// What the agent read at its start and per request over its own SQL, through the API's CRUD
-// routes (#6501), against a fake API that answers as the backend's api/crud_agent_start.py does
-// (the backend's tests/crud/test_crud_agent_start.py covers the routes): the ledger of its
-// migrations, a signed-in person's session by its cookie's hash, and health's probe.
+// What the agent reads per request through the API's CRUD routes (#6501), against a fake API
+// that answers as the backend's api/crud_agent_start.py does (the backend's
+// tests/crud/test_crud_agent_start.py covers the routes): a signed-in person's session by its
+// cookie's hash, and health's probe of the agent's data, which is the API's (#5299 step 12).
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
@@ -37,37 +36,6 @@ class FakeApi {
 }
 
 const target = (api: FakeApi) => ({ baseUrl: BASE, fetch: api.fetch })
-
-describe("the agent's migrations through the API", () => {
-  const all = EXPECTED_MIGRATIONS.map((m) => ({ id: m.id, checksum: m.sha256 }))
-
-  it('asks for the expected ids and is done once each is in the ledger', async () => {
-    const api = new FakeApi().answer('POST /migrations/ledger', { found: true, keyed: true, rows: all })
-    await awaitMigrations(crudLedger(target(api)), EXPECTED_MIGRATIONS, { attempts: 1, log: () => undefined })
-    expect(api.seen[0]?.body).toEqual({ ids: EXPECTED_MIGRATIONS.map((m) => m.id) })
-  })
-
-  it('waits while the API has not made the ledger or a file is missing', async () => {
-    for (const ledger of [
-      { found: false, keyed: false, rows: [] },
-      { found: true, keyed: false, rows: [] },
-      { found: true, keyed: true, rows: all.slice(1) },
-    ]) {
-      const api = new FakeApi().answer('POST /migrations/ledger', ledger)
-      await expect(awaitMigrations(crudLedger(target(api)), EXPECTED_MIGRATIONS, { attempts: 1, log: () => undefined })).rejects.toThrow(
-        MigrationsPendingError,
-      )
-    }
-  })
-
-  it('stops on an edited migration, as over SQL', async () => {
-    const edited = [{ ...all[0]!, checksum: 'f'.repeat(64) }, ...all.slice(1)]
-    const api = new FakeApi().answer('POST /migrations/ledger', { found: true, keyed: true, rows: edited })
-    await expect(awaitMigrations(crudLedger(target(api)), EXPECTED_MIGRATIONS, { attempts: 1, log: () => undefined })).rejects.toThrow(
-      MigrationChecksumError,
-    )
-  })
-})
 
 describe("a signed-in person's session through the API", () => {
   const TOKEN = 'cookie-value'
@@ -143,64 +111,28 @@ describe("health's probe of the agent's data", () => {
     expect(await new CrudAreas(BASE, { fetch: new FakeApi().answer('GET /areas', {}, 503).fetch, wanted: [], log: () => undefined }).answers()).toBe(false)
   })
 
-  it('is the Postgres ping and, once every area is listed, the API too; aiStatus names which failed', async () => {
-    let pg = true
+  it('is ready, and answers, only once every area is listed and the API answers them; aiStatus names it', async () => {
     let complete = false
     let api = true
     const logged: string[] = []
     const health = dataHealthOf(
-      { ping: () => Promise.resolve(pg), ready: () => Promise.resolve(true) },
       { get complete() { return complete }, answers: () => Promise.resolve(api) },
       (m) => logged.push(m),
     )
-    const status = async () => {
-      const data = await checkData(health)
-      return (await aiStatus({ database: health, credentials: {} } as never, data?.ok, data?.apiUnanswered)).ai
-    }
-    api = false
-    expect(await health.ping()).toBe(true) // the API is not asked until every area is listed
+    const status = async () => (await aiStatus({ database: health, credentials: {} } as never, await health.ping())).ai
+    // Until the API lists every area, nothing is asked: the agent has no other path.
+    expect([await health.ready(), await health.ping()]).toEqual([false, false])
+    expect(await status()).toBe("unavailable (the API does not answer the agent's CRUD areas)")
     complete = true
-    expect(await health.check()).toEqual({ ok: false, apiUnanswered: true })
+    expect([await health.ready(), await health.ping()]).toEqual([true, true])
+    api = false
+    expect(await health.ping()).toBe(false)
     expect(await status()).toBe("unavailable (the API does not answer the agent's CRUD areas)")
     api = true
     expect(await health.ping()).toBe(true)
-    // The API stops answering, then Postgres goes down: the status names the database.
-    api = false
-    expect(await health.check()).toEqual({ ok: false, apiUnanswered: true })
-    pg = false
-    expect(await health.check()).toEqual({ ok: false, apiUnanswered: false })
-    expect(await status()).toBe('unavailable (database unreachable)')
     expect(logged).toEqual([
       "health: the API does not answer the agent's CRUD areas",
       "health: the API answers the agent's CRUD areas again",
-      "health: the API does not answer the agent's CRUD areas",
     ])
-  })
-
-  it('names the failure of its own probe, whatever another probe meanwhile found', async () => {
-    let releasePg: (ok: boolean) => void = () => undefined
-    const pings: Promise<boolean>[] = [new Promise<boolean>((resolve) => (releasePg = resolve)), Promise.resolve(true)]
-    const health = dataHealthOf(
-      { ping: () => pings.shift() ?? Promise.resolve(true), ready: () => Promise.resolve(true) },
-      { complete: true, answers: () => Promise.resolve(false) },
-      () => undefined,
-    )
-    const slow = health.check() // Postgres down, answered last
-    const fast = await health.check() // Postgres up, the API silent
-    releasePg(false)
-    expect(fast).toEqual({ ok: false, apiUnanswered: true })
-    expect(await slow).toEqual({ ok: false, apiUnanswered: false })
-  })
-
-  it('reads the ledger through the API once it lists migrations, over SQL until then', async () => {
-    let listed = false
-    const read: string[] = []
-    const crud = () => (read.push('crud'), Promise.resolve(new Map<string, string | null>()))
-    const sqlLedger = () => () => (read.push('sql'), Promise.resolve(new Map<string, string | null>()))
-    const ledger = ledgerOf({ has: (area: string) => listed && area === 'migrations' }, crud, sqlLedger)
-    await ledger({} as never)([])
-    listed = true
-    await ledger({} as never)([])
-    expect(read).toEqual(['sql', 'crud'])
   })
 })

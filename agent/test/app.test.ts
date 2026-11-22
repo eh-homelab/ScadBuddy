@@ -5,15 +5,13 @@ import type { Credential } from '../src/credentials.js'
 import type { ConnectionTest } from '../src/harness/testConnection.js'
 import { originPolicy } from '../src/http/origins.js'
 import { LEGACY_CREDENTIALS_DEPRECATED } from '../src/routes/credentials.js'
-import { kekFromBase64, type KekStatus, loadKek } from '../src/secrets.js'
+import { kekFromBase64 } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 
 const up = () => Promise.resolve(true)
 const down = () => Promise.resolve(false)
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
-const withKek: KekStatus = { ok: true, kek }
-const noKek: KekStatus = { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' }
 const SECRET = 'sk-ant-api03-route-test-secret-7e1c'
 const GATEWAY_TOKEN = 'gw-token-route-test-0000abcd'
 
@@ -21,7 +19,6 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     database: { ping: up, ready: up },
     backend: up,
-    kek: withKek,
     credentials: new MemoryCredentials(kek),
     testConnection: () => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }),
     // The ingress: a trusted proxy in front of https://scadbuddy.example.
@@ -54,15 +51,14 @@ function put(app: ReturnType<typeof createApp>, body: unknown, headers: Record<s
 }
 
 describe('GET /healthz', () => {
-  it('reports AI disabled when no database is configured', async () => {
-    const { status, body } = await health(createApp(deps({ database: undefined, credentials: undefined, kek: noKek })))
+  it("says the API does not answer the agent's CRUD areas until it lists and answers them (#5299 step 12)", async () => {
+    const { status, body } = await health(createApp(deps({ database: { ping: down, ready: down } })))
     expect(status).toBe(200)
     expect(body).toEqual({
       status: 'ok',
-      ai: 'disabled (no database)',
-      database: 'not configured',
+      ai: "unavailable (the API does not answer the agent's CRUD areas)",
+      database: 'unreachable',
       backend: 'ok',
-      secret_key: 'not configured',
       credential: 'unknown',
       temporal: 'not configured',
     })
@@ -76,25 +72,15 @@ describe('GET /healthz', () => {
     }
   })
 
-  it('stays 200 and says why when the database or backend is down', async () => {
+  it('stays 200 and says why when the backend is down', async () => {
     const { status, body } = await health(createApp(deps({ database: { ping: down, ready: up }, backend: down })))
     expect(status).toBe(200)
-    expect(body).toMatchObject({
-      ai: 'unavailable (database unreachable)',
-      database: 'unreachable',
-      backend: 'unreachable',
-    })
+    expect(body).toMatchObject({ database: 'unreachable', backend: 'unreachable' })
   })
 
-  it('says when migrations have not applied', async () => {
-    const { body } = await health(createApp(deps({ database: { ping: up, ready: down } })))
-    expect(body.ai).toBe('unavailable (database migrations failed)')
-  })
-
-  it('names the missing key-encryption key', async () => {
-    const { body } = await health(createApp(deps({ kek: noKek, credentials: new MemoryCredentials() })))
+  it("names the API's missing key-encryption key", async () => {
+    const { body } = await health(createApp(deps({ credentials: new MemoryCredentials() })))
     expect(body.ai).toBe('disabled (no key-encryption key: SCADBUDDY_SECRET_KEY_FILE is not set)')
-    expect(body.secret_key).toBe('not configured')
   })
 
   it('needs a credential', async () => {
@@ -102,11 +88,12 @@ describe('GET /healthz', () => {
     expect(body).toMatchObject({ ai: 'disabled (no Claude credential)', credential: 'not configured' })
   })
 
-  it('is enabled only with database, key and credential', async () => {
+  it("is enabled only with the API's areas, its key and a credential, and names no key file of its own", async () => {
     const credentials = new MemoryCredentials(kek)
     await credentials.put({ kind: 'anthropic_api_key', secret: SECRET })
     const { body } = await health(createApp(deps({ credentials })))
-    expect(body).toMatchObject({ ai: 'enabled', database: 'ok', secret_key: 'ok', credential: 'configured' })
+    expect(body).toMatchObject({ ai: 'enabled', database: 'ok', credential: 'configured' })
+    expect(body).not.toHaveProperty('secret_key')
   })
 
   it('notices a credential sealed under a different key', async () => {
@@ -156,7 +143,7 @@ describe('/api/v1/ai/credentials', () => {
   })
 
   it('reads as unconfigured, and says whether saving is possible', async () => {
-    const res = await createApp(deps({ kek: noKek, credentials: new MemoryCredentials() })).request('/api/v1/ai/credentials', { headers: UI })
+    const res = await createApp(deps({ credentials: new MemoryCredentials() })).request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       configured: false,
@@ -219,7 +206,7 @@ describe('/api/v1/ai/credentials', () => {
   })
 
   it('refuses to save without a key-encryption key, and says why', async () => {
-    const res = await put(createApp(deps({ kek: noKek, credentials: new MemoryCredentials() })), { kind: 'anthropic_api_key', secret: SECRET })
+    const res = await put(createApp(deps({ credentials: new MemoryCredentials() })), { kind: 'anthropic_api_key', secret: SECRET })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ detail: expect.stringMatching(/no key-encryption key.*SCADBUDDY_SECRET_KEY_FILE/) })
   })
@@ -366,48 +353,14 @@ describe('/api/v1/ai/credentials', () => {
 })
 
 describe('/healthz is bounded (review of #354, finding 3)', () => {
-  const never = () => new Promise<boolean>(() => {})
-
-  it('reports a hung migration step as unavailable instead of hanging', async () => {
-    const started = performance.now()
-    const { status, body } = await health(createApp(deps({ database: { ping: up, ready: never }, healthTimeoutMs: 50 })))
-    expect(status).toBe(200)
-    expect(body).toMatchObject({ ai: 'unavailable (database timed out)', credential: 'unknown' })
-    expect(performance.now() - started).toBeLessThan(1500)
-  })
-
-  it("says it is waiting for the API's migrations rather than timed out (#5299)", async () => {
-    const waiting = { ping: up, ready: never, waitingForMigrations: () => true }
-    const { body } = await health(createApp(deps({ database: waiting, healthTimeoutMs: 50 })))
-    expect(body).toMatchObject({ ai: "unavailable (waiting for the API to apply the database migrations)", credential: 'unknown' })
-    const gaveUp = { ping: up, ready: down, waitingForMigrations: () => true }
-    expect((await health(createApp(deps({ database: gaveUp })))).body.ai).toBe(
-      'unavailable (waiting for the API to apply the database migrations)',
-    )
-  })
-
   it('reports a hung credential read as unavailable instead of hanging', async () => {
+    const started = performance.now()
     const credentials = new MemoryCredentials(kek)
     credentials.hang = new Promise(() => {})
-    const { body } = await health(createApp(deps({ credentials, healthTimeoutMs: 50 })))
-    expect(body.ai).toBe('unavailable (database timed out)')
-  })
-})
-
-describe('health and settings name the key problem, not the key file (finding 9)', () => {
-  it('gives a generic reason in /healthz and cannot_save_reason; the path and errno stay in the log detail', async () => {
-    const missing = await loadKek('/run/secrets/some/where/scadbuddy.key')
-    expect(missing.ok).toBe(false)
-    if (missing.ok) return
-    expect(missing.detail).toMatch(/some\/where.*ENOENT/)
-    const app = createApp(deps({ kek: missing, credentials: new MemoryCredentials(undefined, missing.reason) }))
-    const healthText = JSON.stringify((await health(app)).body)
-    const getText = await (await app.request('/api/v1/ai/credentials', { headers: UI })).text()
-    for (const text of [healthText, getText]) {
-      expect(text).toContain('SCADBUDDY_SECRET_KEY_FILE cannot be read')
-      expect(text).not.toContain('some/where')
-      expect(text).not.toContain('ENOENT')
-    }
+    const { status, body } = await health(createApp(deps({ credentials, healthTimeoutMs: 50 })))
+    expect(status).toBe(200)
+    expect(body).toMatchObject({ ai: 'unavailable (the API timed out)', credential: 'unknown' })
+    expect(performance.now() - started).toBeLessThan(1500)
   })
 })
 

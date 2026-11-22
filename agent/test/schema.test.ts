@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { EXPECTED_MIGRATIONS } from '../src/db/schema.js'
+import { EXPECTED_MIGRATIONS } from './support/schema.js'
 import {
   DEFAULT_LOCK_TIMEOUT_MS,
   DEFAULT_STATEMENT_TIMEOUT_MS,
@@ -13,10 +13,10 @@ import {
 } from './support/migrations.js'
 
 // #5299 D6: the API applies the agent's migrations (backend/scadbuddy/render/agent_migrations.py),
-// the agent waits for the files it lists (src/db/expected-migrations.json), and the tests
+// the tests' wait reads the files it lists (support/expected-migrations.json), and the tests
 // migrate with the TypeScript runner (support/migrations.ts). These three must never drift.
 
-const EXPECTED_FILE = new URL('../src/db/expected-migrations.json', import.meta.url)
+const EXPECTED_FILE = new URL('./support/expected-migrations.json', import.meta.url)
 const BACKEND = fileURLToPath(new URL('../../backend/', import.meta.url))
 
 const files = loadMigrations().map((m) => ({ id: m.id, sha256: migrationChecksum(m) }))
@@ -38,7 +38,7 @@ print(json.dumps({
 `
 
 describe("the agent's migrations (#5299)", () => {
-  it('the agent expects every file of backend/scadbuddy/migrations_agent/, with its checksum', () => {
+  it('the tests expect every file of backend/scadbuddy/migrations_agent/, with its checksum', () => {
     expect(JSON.parse(readFileSync(EXPECTED_FILE, 'utf8'))).toEqual(files)
     expect(EXPECTED_MIGRATIONS).toEqual(files)
   })
