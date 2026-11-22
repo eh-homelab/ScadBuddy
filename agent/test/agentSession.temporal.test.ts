@@ -84,6 +84,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   /** Each acquire_worker's `exclude`: the homes the turn was lost on. */
   let excluded: string[][]
   let released: string[]
+  /** What release_worker waits on: a run that holds it is still closing. */
+  let releaseHold: Promise<void>
   /** The gate's activities (stubs): what describe_call and resolve_input wait on, and what each was sent. */
   let describeHold: Promise<void>
   let resolveHold: Promise<void>
@@ -156,6 +158,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
           },
           [RELEASE_WORKER_ACTIVITY]: async ({ sessionId }: { sessionId: string }) => {
             released.push(sessionId)
+            await releaseHold
           },
         },
         {},
@@ -175,6 +178,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     acquired = 0
     excluded = []
     released = []
+    releaseHold = Promise.resolve()
     describeHold = Promise.resolve()
     resolveHold = Promise.resolve()
     described = 0
@@ -1221,6 +1225,27 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await runIdOf(session.id)).not.toBe(archivedRun)
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
       expect(seen).toEqual([0, 1])
+    })
+
+    it('a send right after an archive and an unarchive waits for the ending run to close, then runs once in a new run (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      const closing = held()
+      releaseHold = closing.promise
+      await m.edits.update(session.id, browser, { archived: true })
+      // The run took `end` and is releasing its home: it refuses a message (`ended`) until it closes.
+      await poll(() => released.length, 1)
+      const endingRun = await runIdOf(session.id)
+      await m.edits.update(session.id, browser, { archived: false })
+      const sending = m.send(session.id, browser, 'and a lid')
+      setTimeout(() => closing.release(), 500)
+      const again = await sending
+      expect(await again.done).toMatchObject({ kind: 'result' })
+      expect(await runIdOf(session.id)).not.toBe(endingRun)
+      expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
     })
 
     it('still refuses `closed` a send to a done session, and starts no run for it', async () => {

@@ -87,6 +87,8 @@ const ACTIVITY_TASK_QUEUE = 2
 
 /** What the workflow's validator refuses a second turn with (temporal/session/workflow.ts). */
 const BUSY = 'busy'
+/** What the validator refuses a message with once the run was told to end. */
+const ENDED = 'ended'
 const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
 export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
@@ -548,7 +550,8 @@ export class DurableTurns {
       words: turn.prompt,
       ...(traceparent ? { traceparent } : {}),
     }
-    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
+    // One per attempt: an operation can be executed only once.
+    const operation = () => new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
       taskQueue: this.#sessionQueue,
       args: [start],
@@ -560,13 +563,26 @@ export class DurableTurns {
     })
     // The turn id as the update id: a re-send of the same turn is the same Update.
     const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
-    try {
-      await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
+    const deadline = Date.now() + this.#sendTimeoutMs
+    const send = () =>
+      this.#client.withDeadline(deadline, () =>
         this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
           SEND_MESSAGE_UPDATE,
-          { ...update, startWorkflowOperation: operation },
+          { ...update, startWorkflowOperation: operation() },
         ),
       )
+    try {
+      try {
+        await send()
+      } catch (err) {
+        const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
+        if (!(cause instanceof ApplicationFailure && cause.type === ENDED)) throw err
+        // The run was told to end (an archive just before an unarchive, #7031; a done whose edit
+        // did not land) and is closing. The claim passed, so the row is not done: once that run
+        // closes, the same Update starts a new one. The closing run refused it, so it never took it.
+        await this.#client.withDeadline(deadline, () => this.#client.workflow.getHandle(sessionWorkflowId(session.id)).result()).catch(() => undefined)
+        await send()
+      }
     } catch (err) {
       const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
