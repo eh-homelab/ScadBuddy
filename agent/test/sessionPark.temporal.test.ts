@@ -9,7 +9,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Sql } from 'postgres'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
-import { AuditLog } from '../src/audit/log.js'
 import { connectDatabase, type Database } from './support/database.js'
 import { PgEventListener } from './support/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
@@ -35,7 +34,7 @@ import { sessionGateActivities } from '../src/temporal/session/gateActivities.js
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
 import { ACQUIRE_WORKER_ACTIVITY, OPEN_INPUT_UPDATE, SESSION_GATE_ACTIVITIES as GATE, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
-import { gateActivities, PgSessionOwners } from '../src/temporal/toolActivities.js'
+import { gateActivities } from '../src/temporal/toolActivities.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
@@ -43,6 +42,12 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
+import { PgSessionOwners } from './support/sql/approvalRecords.js'
+import { PgTurnRows } from './support/sql/turnRows.js'
+import { durableStores, hostStores } from './support/agentSessions.js'
+import { sqlGateDb } from './support/sql/gate.js'
+import { sqlSettings } from './support/sql/settings.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // Parks through the session's workflow, held warm (unified runtime spec 2026-10-13 §5.4 "Open"
 // and "Hold", plan Task 5.3), end to end: AgentSession on a Temporal dev server, one replica
@@ -170,7 +175,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     const tag = randomUUID().slice(0, 8)
     const identity = `park-${tag}`
     const hostQueue = sessionHostQueue(identity)
-    const audit = new AuditLog({ sql: pool.sql })
+    const audit = sqlAuditLog(pool.sql)
     m = manager({
       sql: pool.sql,
       paths,
@@ -189,17 +194,17 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
           },
         }),
     })
-    m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, liveHosts: polledHosts(env.client, hostQueue) })
+    m.durableTurns = new DurableTurns({ client: env.client, ...durableStores(pool.sql), events: m.events, liveHosts: polledHosts(env.client, hostQueue) })
     // The respond route's way to a durable entry: the workflow's `respond` Update (main.ts). Its
     // deadline is wall-clock (`withDeadline(Date.now() + …)`): 30 s, not 5, so a step of this host's
     // clock (about 8 s) or a loaded worker cannot turn a respond the workflow takes into a 503.
-    m.durable = new DurableGate(env.client, { timeoutMs: 30_000, db: { sql: pool.sql, events: m.events } })
+    m.durable = new DurableGate(env.client, { timeoutMs: 30_000, db: sqlGateDb(pool.sql, m.events) })
     // The replica's LISTEN connection, as main.ts's event bus: a held call wakes on `scadbuddy_input`.
     listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
     listener.start()
     turnHost = new TurnHost({
       core: m.turnCore,
-      sql: flakyReads(pool.sql),
+      ...hostStores(flakyReads(pool.sql)),
       images: new SessionBlobs(pool.sql),
       hostQueue,
       listen: (channel, onNotify) => listener.listenAlso(channel, onNotify),
@@ -215,9 +220,9 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
       identity: workerIdentity(identity),
       activities: {
         ...acquire,
-        ...sessionFinishActivities(pool.sql, m.events),
+        ...sessionFinishActivities(new PgTurnRows(pool.sql), m.events),
         // As main.ts: the gate's timers and writers, and describe_call (the summary and the hash).
-        ...sessionGateActivities({ sql: pool.sql, events: m.events }),
+        ...sessionGateActivities(sqlGateDb(pool.sql, m.events), sqlSettings(pool.sql)),
         ...describeHeld(gateActivities({ audit, sessions: new PgSessionOwners(pool.sql) })),
       },
       shutdownGraceMs: 1_000,

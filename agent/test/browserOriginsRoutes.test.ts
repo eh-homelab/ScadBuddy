@@ -1,57 +1,68 @@
+import { randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { AuditEntry } from '../src/audit/log.js'
+import { beforeEach, describe, expect, it } from 'vitest'
+import type { AuditContext, AuditEntry } from '../src/audit/log.js'
 import { DEFAULT_LISTS } from '../src/browser/origins.js'
 import { BrowserOrigins } from '../src/browser/store.js'
-import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { BROWSER_ORIGINS_PATH, registerBrowserOriginsRoutes } from '../src/routes/browserOrigins.js'
 import { SessionError, type SessionRecord } from '../src/sessions/manager.js'
-import { sqlSettings } from './support/sql/settings.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { MemorySessionOrigins } from './support/memoryOrigins.js'
 
 // #982: the headless browser's allow and deny lists (ai_settings) and each session's
 // approved origins (ai_browser_session_origins), through their routes, which only the
-// user in the ScadBuddy UI may write.
+// user in the ScadBuddy UI may write. The stores are in memory: the API keeps the rows.
 
-const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
 const HOST = 'https://scadbuddy.example'
 const UI = { host: 'scadbuddy.example', origin: HOST, 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 
-describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip})` : ''}`, () => {
-  let db: Database
-  let drop: () => Promise<void>
+type Session = { owner: { kind: string; id: string; label: string }; archivedAt: Date | null }
+
+describe('browser origins', () => {
   let store: BrowserOrigins
   let app: Hono
   let audited: AuditEntry[]
+  /** The settings writes, each with the context the route gave. */
+  let settingsWrites: { key: string; context: AuditContext }[]
+  let rows: Map<string, Session>
+  let titles: Map<string, string>
 
-  async function session(title = 'Spool lock'): Promise<string> {
-    const [row] = await db.sql<{ id: string }[]>`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, title)
-      VALUES (gen_random_uuid(), 'chat', 'browser', 'browser', 'you', 'browser', 'browser', 'idle', 10, 1, ${title})
-      RETURNING id`
-    return row!.id
+  function session(title = 'Spool lock'): string {
+    const id = randomUUID()
+    rows.set(id, { owner: { kind: 'browser', id: 'browser', label: 'you' }, archivedAt: null })
+    titles.set(id, title)
+    return id
   }
 
-  beforeEach(async () => {
-    ;({ db, drop } = await throwawayDatabase())
+  beforeEach(() => {
     audited = []
+    settingsWrites = []
+    rows = new Map()
+    titles = new Map()
     const audit = {
       record: (e: AuditEntry) => {
         audited.push(e)
         return Promise.resolve()
       },
     }
-    store = new BrowserOrigins(db.sql, sqlSettings(db.sql, audit as never))
+    const values = new Map<string, unknown>()
+    const settings = {
+      get: <T>(key: string) => Promise.resolve(values.get(key) as T | undefined),
+      set: (key: string, value: unknown, context: AuditContext) => {
+        values.set(key, value)
+        settingsWrites.push({ key, context })
+        return Promise.resolve()
+      },
+    }
+    store = new BrowserOrigins(settings, new MemorySessionOrigins(titles))
     app = new Hono()
     // The session's owner and archive mark, as SessionManager.get answers for the user.
     const sessions = {
       async get(id: string): Promise<SessionRecord> {
-        const [row] = await db.sql<{ owner_kind: string; owner_id: string; owner_label: string; archived_at: Date | null }[]>`
-          SELECT owner_kind, owner_id, owner_label, archived_at FROM ai_sessions WHERE id = ${id}`
+        const row = rows.get(id)
         if (!row) throw new SessionError('not_found', `no session ${id}`)
-        return { id, owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label }, archivedAt: row.archived_at } as unknown as SessionRecord
+        return { id, owner: row.owner, archivedAt: row.archivedAt } as unknown as SessionRecord
       },
     }
     registerBrowserOriginsRoutes(app, {
@@ -63,10 +74,6 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
       audit: audit as never,
     })
   })
-  afterEach(async () => {
-    await drop()
-  })
-
   const send = (method: string, path: string, body?: unknown, headers: Record<string, string> = UI) =>
     app.request(`${HOST}${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
 
@@ -79,8 +86,8 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
     expect(saved.status).toBe(200)
     expect(await saved.json()).toMatchObject({ allow: ['makerworld.com', '*.printables.com'], deny: ['10.0.0.0/8'] })
     expect(await store.lists()).toEqual({ allow: ['makerworld.com', '*.printables.com'], deny: ['10.0.0.0/8'] })
-    // Audited as the UI user, from the request's address.
-    expect(audited.at(-1)).toMatchObject({ kind: 'settings', action: 'browser_origins', surface: 'http', clientIp: '10.0.0.7' })
+    // Written as the UI user, from the request's address (the settings store audits it).
+    expect(settingsWrites.at(-1)).toMatchObject({ key: 'browser_origins', context: { surface: 'http', clientIp: '10.0.0.7' } })
 
     const bad = await send('PUT', BROWSER_ORIGINS_PATH, { allow: ['https://a.example/path'], deny: [] })
     expect(bad.status).toBe(400)
@@ -99,7 +106,7 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
   })
 
   it('approves an origin for a session, lists it with the session, and revokes it', async () => {
-    const id = await session()
+    const id = session()
     const res = await send('POST', `/api/v1/ai/sessions/${id}/browser-origins`, { origin: 'https://Example.org/' })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ origin: 'https://example.org', scope: 'session' })
@@ -132,7 +139,7 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
   })
 
   it('refuses a session approval that is not an origin, or for no session', async () => {
-    const id = await session()
+    const id = session()
     expect((await send('POST', `/api/v1/ai/sessions/${id}/browser-origins`, { origin: 'https://example.org/path' })).status).toBe(400)
     expect((await send('POST', `/api/v1/ai/sessions/${id}/browser-origins`, { origin: 'file:///etc' })).status).toBe(400)
     expect(
@@ -141,11 +148,11 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
   })
 
   it("refuses to approve or revoke in another owner's session, or an archived one", async () => {
-    const theirs = await session()
-    await db.sql`UPDATE ai_sessions SET owner_kind = 'bearer', owner_id = 'token-1', owner_label = 'Claude Desktop' WHERE id = ${theirs}`
-    const archived = await session()
+    const theirs = session()
+    rows.get(theirs)!.owner = { kind: 'bearer', id: 'token-1', label: 'Claude Desktop' }
+    const archived = session()
     await store.approve(archived, 'https://example.org', 'session')
-    await db.sql`UPDATE ai_sessions SET archived_at = now() WHERE id = ${archived}`
+    rows.get(archived)!.archivedAt = new Date()
 
     const other = await send('POST', `/api/v1/ai/sessions/${theirs}/browser-origins`, { origin: 'https://example.org' })
     expect(other.status).toBe(403)
@@ -160,18 +167,11 @@ describe.skipIf(skip !== undefined)(`browser origins${skip ? ` (skipped: ${skip}
     ['another origin', { ...UI, origin: 'https://evil.example' }],
     ['no origin', { host: UI.host, 'x-forwarded-proto': 'https', 'content-type': 'application/json' }],
   ])('refuses every write from %s', async (_label, headers) => {
-    const id = await session()
+    const id = session()
     expect((await send('PUT', BROWSER_ORIGINS_PATH, { allow: [], deny: [] }, headers)).status).toBe(403)
     expect((await send('POST', `${BROWSER_ORIGINS_PATH}/allow`, { rule: 'evil.example' }, headers)).status).toBe(403)
     expect((await send('POST', `/api/v1/ai/sessions/${id}/browser-origins`, { origin: 'https://evil.example' }, headers)).status).toBe(403)
     expect(await store.lists()).toEqual(DEFAULT_LISTS)
     expect(await store.approved(id)).toEqual(new Map())
-  })
-
-  it('a session that is forgotten takes its approvals with it', async () => {
-    const id = await session()
-    await store.approve(id, 'https://example.org', 'once')
-    await db.sql`DELETE FROM ai_sessions WHERE id = ${id}`
-    expect(await db.sql`SELECT 1 FROM ai_browser_session_origins`).toHaveLength(0)
   })
 })

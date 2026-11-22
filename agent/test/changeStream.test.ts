@@ -1,6 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { Sql } from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { BusEvent } from '../src/events/bus.js'
 import { CHANGES_PATH, ChangeStream } from '../src/events/changeStream.js'
@@ -298,7 +297,7 @@ describe('a dropped change stream costs latency only (#5299 D4)', () => {
     const base = await api.listen()
     const rows = new MemoryRows()
     // A poll long enough that a delivery within it can only be the stream's wake.
-    const log = new EventLog(undefined as unknown as Sql, { rows: rows as unknown as EventRows, pollMs: 60_000 })
+    const log = new EventLog(rows as unknown as EventRows, { pollMs: 60_000 })
     const stream = new ChangeStream(base, { retryMinMs: 10, retryMaxMs: 40, log: () => {} })
     const stop = followSessionEvents(stream, log, 'this-replica')
     stream.start()
@@ -323,7 +322,7 @@ describe('a dropped change stream costs latency only (#5299 D4)', () => {
     }
 
     // The stream is down for good (no API at all): the follower still sees the next event, by its 1 s poll.
-    const polled = new EventLog(undefined as unknown as Sql, { rows: rows as unknown as EventRows, pollMs: 1000 })
+    const polled = new EventLog(rows as unknown as EventRows, { pollMs: 1000 })
     const down = new ChangeStream('http://127.0.0.1:9', { retryMinMs: 10, retryMaxMs: 40, log: () => {} })
     const stopDown = followSessionEvents(down, polled, 'this-replica')
     down.start()

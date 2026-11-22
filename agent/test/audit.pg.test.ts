@@ -7,6 +7,7 @@ import { type AuditFilter, type AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_
 import { TurnAuditor } from '../src/audit/turn.js'
 import { auditedTokenStore, UI_ACTOR } from '../src/audit/writes.js'
 import { type SettingsStore } from '../src/credentials.js'
+import { PostgresTokenStore } from './support/sql/tokens.js'
 import type { Database } from './support/database.js'
 import { MemoryEventSource } from '../src/events/bus.js'
 import type { ApprovalVerdict } from '../src/harness/permissions.js'
@@ -20,7 +21,6 @@ import { browser } from './support/sessions.js'
 import { sqlAuditLog } from './support/sql/audit.js'
 import { SqlApprovals } from './support/sql/approvals.js'
 import { PgEventRows } from './support/sql/eventRows.js'
-import { PostgresTokenStore } from './support/sql/tokens.js'
 
 // The audit log (#258, src/audit/log.ts) against Postgres: what is recorded,
 // that the table is append-only, retention, and the read route.

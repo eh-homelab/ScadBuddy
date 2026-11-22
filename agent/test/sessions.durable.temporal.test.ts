@@ -11,7 +11,7 @@ import { ChatConnection } from '../src/routes/chat.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../src/safety/untrusted.js'
 import { DurableTurns } from '../src/sessions/durable.js'
-import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal, durableStores } from './support/agentSessions.js'
 import { type DescribeSession, DurableRunningSweep, durableDescriber } from '../src/sessions/durableSweep.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { UserImage } from '../src/sessions/images.js'
@@ -21,6 +21,7 @@ import { frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { PgTurnRows } from './support/sql/turnRows.js'
 
 // The agent service's dispatch of a session's turns (plan 5c PR 3, Rulings 7, 8, 13; every
 // session an AgentSession since plan Step 6.3): the mode set at insert, a send as claim + blobs +
@@ -128,7 +129,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     })
     m.durableTurns = new StandinTurns({
       client: env.client,
-      sql: db.sql,
+      ...durableStores(db.sql),
       events: m.events,
       sessionQueue: options.sessionQueue ?? QUEUE,
       ...(options.cancelTimeoutMs ? { cancelTimeoutMs: options.cancelTimeoutMs } : {}),
@@ -527,7 +528,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
 
   it('writes nothing on Stop when the gone workflow is open again by the time it is described (#4131 review)', async () => {
     const m = await durableManager()
-    m.durableTurns = new StandinTurns({ client: env.client, sql: db.sql, events: m.events, sessionQueue: QUEUE, describe: async () => 'open' })
+    m.durableTurns = new StandinTurns({ client: env.client, ...durableStores(db.sql), events: m.events, sessionQueue: QUEUE, describe: async () => 'open' })
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
     await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - interval '5 minutes' WHERE id = ${session.id}`
     expect(session.mode).toBe('durable')
@@ -544,7 +545,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const failing: DescribeSession = async () => {
       throw new Error('describe failed')
     }
-    m.durableTurns = new StandinTurns({ client: env.client, sql: db.sql, events: m.events, sessionQueue: QUEUE, describe: failing })
+    m.durableTurns = new StandinTurns({ client: env.client, ...durableStores(db.sql), events: m.events, sessionQueue: QUEUE, describe: failing })
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
     await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - make_interval(mins => ${minutesAgo}) WHERE id = ${session.id}`
     expect(session.mode).toBe('durable')
@@ -632,7 +633,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
 
   const sweepOf = (m: SessionManager, options: { graceMs?: number; describe?: DescribeSession; batch?: number } = {}) =>
     new DurableRunningSweep({
-      sql: db.sql,
+      turns: new PgTurnRows(db.sql),
       events: m.events,
       describe: options.describe ?? durableDescriber(env.client),
       graceMs: options.graceMs ?? 0,
@@ -795,7 +796,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       if (workflowId === sessionWorkflowId(sorted[2]!)) return new Promise(() => {})
       return Promise.resolve(workflowId === sessionWorkflowId(sorted[3]!) ? 'not_found' : 'open')
     }
-    const sweep = new DurableRunningSweep({ sql: db.sql, events: m.events, describe, graceMs: 0, batch: 2, describeTimeoutMs: 200 })
+    const sweep = new DurableRunningSweep({ turns: new PgTurnRows(db.sql), events: m.events, describe, graceMs: 0, batch: 2, describeTimeoutMs: 200 })
     expect(await sweep.sweep()).toEqual([])
     expect(await sweep.sweep()).toEqual([sorted[3]])
     expect(described).toEqual(sorted.map((id) => sessionWorkflowId(id)))
@@ -808,7 +809,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const m = await durableManager()
     m.durableTurns = new DurableTurns({
       client: env.client,
-      sql: db.sql,
+      ...durableStores(db.sql),
       events: m.events,
       sessionQueue: `nobody-${randomUUID()}`,
     })
@@ -828,7 +829,7 @@ describe("a durable handoff whose workflow cannot be reached", () => {
       workflow: { getHandle: () => ({ executeUpdate: down, signal: down }) },
     } as unknown as Client
     // handoff reads the row's runtime first: no row, so a classic durable session.
-    const turns = new DurableTurns({ client, sql: (() => Promise.resolve([])) as unknown as Sql, events: {} as EventLog })
+    const turns = new DurableTurns({ client, ...durableStores((() => Promise.resolve([])) as unknown as Sql), events: {} as EventLog })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       await turns.handoff({ id: 'f0e1d2c3-0000-4000-8000-000000000000' } as SessionRecord, 'the session was handed off to You', { kind: 'browser', id: 'browser', label: 'You' })

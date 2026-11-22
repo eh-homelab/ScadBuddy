@@ -100,7 +100,7 @@ const TIMEOUT_TYPE_START_TO_CLOSE = 1
 
 /**
  * How often a replica refreshes its tabs' rows (`TabOwnerStore.refresh`): a claim lost while
- * the database was down, or a row a call that missed this replica's queue dropped, is back
+ * the API was down, or a row a call that missed this replica's queue dropped, is back
  * within this. A row naming another replica is never taken back.
  */
 export const OWNER_REFRESH_MS = 30_000
@@ -145,7 +145,7 @@ export type TemporalTabRelayOptions = {
   ackTimeoutMs?: number
   /** `OWNER_REFRESH_MS` when omitted. */
   refreshMs?: number
-  /** The database is migrated (db.ts `ready`): each owner-row write waits for it, and is skipped when it is down. */
+  /** The API's stores are ready: each owner-row write waits for it, and is skipped when they are down. */
   ready?: () => Promise<boolean>
   log?: (message: string) => void
   /** The clock a call's length is read on; `Date.now` when omitted. */
@@ -159,8 +159,8 @@ export type TemporalTabRelayOptions = {
 export type SealingClient = { client: Client; dropKey: (subject: string) => Promise<void> }
 
 const SEALING_NEEDED =
-  'no browser attached: the tab is connected to another agent replica, and reaching it there needs the agent ' +
-  "service's secret key (SCADBUDDY_SECRET_KEY_FILE), which seals the call's contents in Temporal. Ask the operator to mount it."
+  'no browser attached: the tab is connected to another agent replica, and reaching it there needs the payload ' +
+  "codec that seals the call's contents in Temporal, with the data keys the API releases. Ask the operator to check the agent's service credential."
 
 const NO_SEALING: RelayAnswer = { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } }
 
@@ -272,7 +272,7 @@ export class TemporalTabRelay implements TabRelay {
     const ready = this.#ready
     this.#writes = this.#writes
       .then(async () => {
-        if (ready && !(await ready())) throw new Error('the database is not ready; a tab owner row was not written')
+        if (ready && !(await ready())) throw new Error('the API\'s stores are not ready; a tab owner row was not written')
         await write()
       })
       .catch((err: unknown) => this.#failed(err))

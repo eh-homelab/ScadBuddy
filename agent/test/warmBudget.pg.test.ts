@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 
 // One session's turns alternating between two replicas, each with a warm
 // process of its own (spec 2026-10-13 §5.3 "budget", §6.6). Every spawn is
@@ -84,7 +85,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the budget 
       // The transcript's cost-states are each recycled process's own total, which is
       // stale against the row; fine, since the baseline warm.ts reads (`restoredCostUsd`)
       // is the entry the process restored from, and a turn's cost is the difference.
-      const entries = await new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) }).load({ projectKey: '', sessionId: id })
+      const entries = await new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql))).load({ projectKey: '', sessionId: id })
       expect((entries ?? []).filter((e) => e.type === 'cost-state').map((e) => e.totalCostUSD)).toEqual([0.03, 0.03])
     } finally {
       await A.warm.close()

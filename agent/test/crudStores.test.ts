@@ -260,23 +260,16 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     expect(api.seen.map((s) => `${s.method} ${s.path}`)).toEqual(['POST /activity-kinds'])
   })
 
-  it("keeps a session's approved origins on the API once the area is listed", async () => {
+  it("keeps a session's approved origins on the API", async () => {
     const api = new FakeApi()
-    let listed = false
-    // The SQL side is never reached while the area is listed: a Sql that throws shows it.
-    const noSql = (() => {
-      throw new Error('SQL used')
-    }) as never
-    const origins = new BrowserOrigins(noSql, undefined, { crud: new CrudSessionOrigins(target(api)), use: () => listed })
-    await expect(origins.approved(SESSION)).rejects.toThrow('SQL used')
-    listed = true
+    const origins = new BrowserOrigins(undefined, new CrudSessionOrigins(target(api)))
     expect(await origins.approve(SESSION, 'https://example.com', 'session')).toBe(true)
     expect(await origins.approve(SESSION, 'https://example.com', 'once')).toBe(true)
     expect(await origins.approved(SESSION)).toEqual(new Map([['https://example.com', 'session']]))
     const [row] = await origins.listApproved()
     expect(row).toEqual({ session_id: SESSION, title: 'Chat', origin: 'https://example.com', scope: 'session', approved_at: '2026-11-15T07:35:00.123Z' })
     expect(await origins.revoke(SESSION, 'https://example.com')).toBe(true)
-    // A session id that is not one is answered here, as the SQL store answers it.
+    // A session id that is not one is answered here, with no call.
     expect(await origins.approved('not-a-uuid')).toEqual(new Map())
   })
 
@@ -422,18 +415,10 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     expect(await push.unsubscribe('https://push.example/1')).toBe(true)
   })
 
-  it('keeps notification channels on the API with no KEK in this process, once it serves area notify', async () => {
+  it('keeps notification channels on the API with no KEK in this process', async () => {
     const api = new FakeNotifyApi()
-    let listed = false
-    const noSql = (() => {
-      throw new Error('SQL used')
-    }) as never
     const resolve = () => Promise.resolve(['203.0.113.5'])
-    const channels = new ChannelStore(noSql, undefined, resolve, { crud: new CrudChannelRows({ baseUrl: BASE, fetch: api.fetch }), use: () => listed })
-    // No KEK and no area yet: the routes answer "unavailable".
-    expect(channels.available()).toBe(false)
-    listed = true
-    expect(channels.available()).toBe(true)
+    const channels = new ChannelStore(new CrudChannelRows({ baseUrl: BASE, fetch: api.fetch }), resolve)
 
     const id = await channels.create({ kind: 'home_assistant', name: 'HA', url: 'https://ha.example/', target: 'mobile_app_x', token: 'long-lived-token-1234' })
     const [view] = await channels.list()
@@ -443,7 +428,7 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     const rename = api.seen.find((s) => s.path.endsWith('/update'))!
     expect(rename.body).toEqual({ kind: 'home_assistant', name: 'Home', url: 'https://ha.example', target: 'mobile_app_x', enabled: true, keep_token: true })
     expect((await channels.open(id))?.token).toBe('long-lived-token-1234')
-    // Moving it needs a new token, as over SQL.
+    // Moving it needs a new token.
     await expect(channels.update(id, { url: 'https://other.example' })).rejects.toThrow(/long-lived access token/)
     expect((await channels.enabled()).map((c) => c.id)).toEqual([id])
     await channels.record(id, 'HTTP 500')

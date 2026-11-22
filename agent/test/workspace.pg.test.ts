@@ -21,6 +21,7 @@ import { SessionFiles } from './support/sql/sessionFiles.js'
 import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { pgHttpBodies } from './support/sql/httpBodies.js'
 
 // #2329: the assistant's workspace in ai_session_files: the store's caps,
 // conflicts, scoping, fork copy, cascade and sweep; the workspace_* tools over
@@ -671,7 +672,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
         }),
       }
       const out = await new MockActivityEnvironment({
@@ -701,7 +702,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
         }),
       }
       const out = String(
@@ -736,7 +737,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         sessions: { ownerOf: async () => undefined },
         flows: { startedBy: async (run: string) => (run === flow ? browser : undefined), approved: async () => false },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
         }),
       }
       const out = String(

@@ -3,10 +3,10 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
-import { PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
 
 // Only a durable session's workflow may run tools as activities (spec 2026-10-01 §6.1,
 // §6.3; #1055): the activity skips the approval its workflow made, so a classic

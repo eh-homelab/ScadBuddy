@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { ApplicationFailure } from '@temporalio/common'
 import { WorkflowNotFoundError } from '@temporalio/client'
@@ -8,7 +8,7 @@ import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
-import { AuditLog } from '../src/audit/log.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { connectDatabase, type Database } from './support/database.js'
 import { PgEventListener } from './support/pgListener.js'
@@ -23,7 +23,7 @@ import { DurableTurns } from '../src/sessions/durable.js'
 import { type SessionManager } from '../src/sessions/manager.js'
 import type { InputEntry } from '../src/sessions/protocol.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
@@ -32,7 +32,7 @@ import { sessionGateActivities } from '../src/temporal/session/gateActivities.js
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
 import { ACQUIRE_WORKER_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, SHUTTING_DOWN_FAILURE, sessionHostQueue } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
-import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
+import { decidedCalls, gateActivities } from '../src/temporal/toolActivities.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { createHarnessServer } from '../src/tools/projections.js'
 import { defineTool, idempotencyKey, text } from '../src/tools/registry.js'
@@ -46,6 +46,12 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { flushTracing, resetTracing, testTracing } from './support/tracing.js'
+import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
+import { PgTurnRows } from './support/sql/turnRows.js'
+import { durableStores, hostStores } from './support/agentSessions.js'
+import { sqlGateDb } from './support/sql/gate.js'
+import { sqlSettings } from './support/sql/settings.js'
 
 // A park that outlasts its hold releases the process (unified runtime spec 2026-10-13 §5.4
 // "Release" and "Continue after a release", plan Task 5.4), end to end: AgentSession on a
@@ -155,8 +161,6 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
   /** The session host queues acquire_worker may refer a turn to: the replicas up now. */
   let live: Set<string>
   let tag: string
-  /** The approvals' HMAC key, as every replica derives it from the one KEK (main.ts `approvalHashKey`). */
-  let hashKey: Buffer
 
   async function replica(name: string): Promise<Replica> {
     const paths = await tempPaths()
@@ -164,7 +168,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     const pool = connectDatabase(url, { searchPath: schema })
     const identity = `release-${name}-${tag}`
     const hostQueue = sessionHostQueue(identity)
-    const audit = new AuditLog({ sql: pool.sql, hashKey })
+    const audit = sqlAuditLog(pool.sql)
     const principal = { id: browser.id, kind: 'browser' as const, tiers: tiersUpTo('outward') }
     const m = manager({
       sql: pool.sql,
@@ -186,8 +190,8 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
           },
         }),
     })
-    m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, liveHosts: polledHosts(env.client, hostQueue) })
-    m.durable = new DurableGate(env.client, { timeoutMs: 30_000, db: { sql: pool.sql, events: m.events } })
+    m.durableTurns = new DurableTurns({ client: env.client, ...durableStores(pool.sql), events: m.events, liveHosts: polledHosts(env.client, hostQueue) })
+    m.durable = new DurableGate(env.client, { timeoutMs: 30_000, db: sqlGateDb(pool.sql, m.events) })
     const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
     listener.start()
     const runCall = decidedCalls([ship], {
@@ -198,7 +202,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     })
     const turnHost = new TurnHost({
       core: m.turnCore,
-      sql: pool.sql,
+      ...hostStores(pool.sql),
       images: new SessionBlobs(pool.sql),
       hostQueue,
       listen: (channel, onNotify) => listener.listenAlso(channel, onNotify),
@@ -220,8 +224,8 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
       identity: workerIdentity(identity),
       activities: {
         ...acquire,
-        ...sessionFinishActivities(pool.sql, m.events),
-        ...sessionGateActivities({ sql: pool.sql, events: m.events }),
+        ...sessionFinishActivities(new PgTurnRows(pool.sql), m.events),
+        ...sessionGateActivities(sqlGateDb(pool.sql, m.events), sqlSettings(pool.sql)),
         ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql) }),
       },
       shutdownGraceMs: 1_000,
@@ -279,7 +283,6 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     replicas = []
     live = new Set()
     tag = randomUUID().slice(0, 8)
-    hashKey = randomBytes(32)
     script = () => ({ text: 'ok' })
     m = (await replica('a')).m
   }, 90_000)
@@ -336,7 +339,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
 
   /** The parked call's results in the session's transcript (ai_session_entries). */
   async function resultsOf(id: string, toolUseId: string) {
-    const store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
+    const store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
     return ((await store.load({ projectKey: '', sessionId: id })) ?? []).flatMap((e) => {
       const content = (e as { message?: { content?: unknown } }).message?.content
       return Array.isArray(content) ? content.filter((b: { type?: string; tool_use_id?: string }) => b.type === 'tool_result' && b.tool_use_id === toolUseId) : []

@@ -11,11 +11,11 @@ import { bundleWorkflowCode } from '@temporalio/worker'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo, type Principal } from '../src/auth/principal.js'
 import { TabHub, type TabConnection } from '../src/bridge/hub.js'
-import { PostgresPairingStore } from '../src/bridge/pairings.js'
+import { PostgresPairingStore } from './support/sql/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import { hostTabs, TemporalTabRelay } from '../src/bridge/relay.js'
-import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
-import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
+import { PostgresSessionTabStore } from './support/sql/bridgeTabs.js'
+import { PostgresTabOwnerStore } from './support/sql/bridgeTabs.js'
 import { connectDatabase, type Database } from './support/database.js'
 import { PgEventListener } from './support/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
@@ -49,6 +49,10 @@ import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { PgTurnRows } from './support/sql/turnRows.js'
+import { durableStores, hostStores } from './support/agentSessions.js'
+import { sqlGateDb } from './support/sql/gate.js'
+import { sqlSettings } from './support/sql/settings.js'
 
 // SCADBUDDY_AGENT_ROLE end to end (spec 2026-10-13 §14.3 and §14.5, plan Step 6.1): one `api`
 // process and one `worker` process on one Temporal dev server and one Postgres, each wired as
@@ -225,11 +229,11 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
     // Readiness reads the live session hosts as main.ts does (`liveHostQueues`), cut to this test's.
     p.m.durableTurns = new DurableTurns({
       client,
-      sql: pool.sql,
+      ...durableStores(pool.sql),
       events: p.m.events,
       liveHosts: async () => new Set([...(await liveHostQueues(client))].filter((q) => processes.some((other) => sessionHostQueue(other.identity) === q))),
     })
-    p.m.durable = new DurableGate(client, { timeoutMs: 30_000, db: { sql: pool.sql, events: p.m.events } })
+    p.m.durable = new DurableGate(client, { timeoutMs: 30_000, db: sqlGateDb(pool.sql, p.m.events) })
     // As main.ts: the hub's process resolves a session's tab waits; every process follows the evictions.
     if (parts.http) resolveTabWaits(p.tabs, p.m)
     p.stopRuntimeSync = wireRuntimeSync({ settings: { get: () => Promise.resolve(undefined) }, warm: p.m.warm, revalidate: () => p.m.revalidateWarm(), events: listener, log: () => {} })
@@ -238,7 +242,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
     p.turnHost = parts.sessionHost
       ? new TurnHost({
           core: p.m.turnCore,
-          sql: pool.sql,
+          ...hostStores(pool.sql),
           images: new SessionBlobs(pool.sql),
           hostQueue: sessionHost,
           listen: (channel, onNotify) => listener.listenAlso(channel, onNotify),
@@ -253,7 +257,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
         AgentWorker.start({
           ...common,
           taskQueue: TASK_QUEUE,
-          activities: { ...acquire, ...sessionFinishActivities(pool.sql, p.m.events), ...sessionGateActivities({ sql: pool.sql, events: p.m.events }) },
+          activities: { ...acquire, ...sessionFinishActivities(new PgTurnRows(pool.sql), p.m.events), ...sessionGateActivities(sqlGateDb(pool.sql, p.m.events), sqlSettings(pool.sql)) },
           // AgentSession's own bundle, as every shared agent-tools worker carries it.
           workflows: { workflowBundle: bundle },
         }),

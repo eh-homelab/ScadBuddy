@@ -1,12 +1,10 @@
 import { mkdir, mkdtemp, readdir } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { gated } from '../src/api/crudStores.js'
 import { CrudForgetRows, CrudSubjectKeys, forgetRoutes, forgetSubject } from '../src/sessions/forget.js'
 import { CrudSessionReads } from '../src/sessions/sessionReads.js'
-import { CrudSessionPresence, LIVE_IDS_MAX, PgSessionPresence, type SessionPresence } from '../src/sessions/presence.js'
+import { CrudSessionPresence, LIVE_IDS_MAX } from '../src/sessions/presence.js'
 import { ForksNeedKeys } from '../src/sessions/store.js'
 import { sweepTurnDirs } from '../src/temporal/turnServers.js'
 
@@ -47,15 +45,6 @@ class FakeApi {
   }
 }
 
-const noSql = new Proxy(() => {}, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
-
 const target = (api: FakeApi) => ({ baseUrl: BASE, fetch: api.fetch })
 
 describe('which sessions still have a row, over the CRUD route', () => {
@@ -89,12 +78,12 @@ describe('which sessions still have a row, over the CRUD route', () => {
     expect((await readdir(root)).sort()).toEqual([SESSION, GONE].sort())
   })
 
-  it("sweeps a gone session's directory through the gated route, with no SQL", async () => {
+  it("sweeps a gone session's directory through the route", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'crud-sweeps-'))
     for (const name of [SESSION, GONE]) await mkdir(path.join(root, name), { recursive: true })
     const api = new FakeApi()
     api.live = new Set([SESSION])
-    const presence = gated<SessionPresence>(new PgSessionPresence(noSql), new CrudSessionPresence(target(api)), () => true)
+    const presence = new CrudSessionPresence(target(api))
     expect(await sweepTurnDirs(root, presence)).toEqual([GONE])
     expect(await readdir(root)).toEqual([SESSION])
   })

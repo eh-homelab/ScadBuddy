@@ -19,6 +19,7 @@ import { readTurnSettings, SYSTEM_PROMPT_APPEND_MAX, TURN_DEFAULTS } from '../sr
 import { systemAppend } from '../src/sessions/turnShared.js'
 import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // /api/v1/ai/settings/session-runtime (unified runtime spec 2026-10-13 §13,
 // plan Task 2.5): the four runtime settings, their bounds, the audit rows, and
@@ -45,7 +46,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session runtime settings${TEST_DATABASE
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    audit = new AuditLog({ sql: db.sql })
+    audit = sqlAuditLog(db.sql)
     store = sqlSettings(db.sql, audit)
     app = new Hono()
     registerSessionRuntimeRoutes(app, {

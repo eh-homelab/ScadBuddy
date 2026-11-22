@@ -13,26 +13,18 @@ import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import type { SessionManager, SessionManagerDeps } from '../src/sessions/manager.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { evictOnNotify, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
-import {
-  displayUpdates,
-  type FakeAnthropic,
-  type RecordedRequest,
-  type Reply,
-  REPLY_COST_USD,
-  STALL,
-  STALL_COST_USD,
-  startFakeAnthropic,
-} from './support/fakeAnthropic.js'
+import { displayUpdates, type FakeAnthropic, type RecordedRequest, type Reply, REPLY_COST_USD, STALL, STALL_COST_USD, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, sessionWorkflow } from './support/agentSessions.js'
 import { SESSION_QUEUE, SESSION_WORKFLOW } from '../src/temporal/session/names.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 
 // Sessions end to end: the real Agent SDK and its bundled Claude Code binary,
 // pointed at the local fake Anthropic endpoint as a gateway (as
@@ -661,9 +653,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     expect(rows.length).toBeGreaterThan(0)
     expect(rows.every((r) => r.sealed && !r.plain)).toBe(true)
     const keys = testPayloadKeys(db.sql)
-    const asParent = new PostgresSessionStore(db.sql, { keys: { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) } })
+    const asParent = new TranscriptStore(new PgTranscriptRows(db.sql, { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) }))
     await expect(asParent.load({ projectKey: '', sessionId: child.id })).rejects.toBeInstanceOf(SealError)
-    const asChild = new PostgresSessionStore(db.sql, { keys })
+    const asChild = new TranscriptStore(new PgTranscriptRows(db.sql, keys))
     expect((await asChild.load({ projectKey: '', sessionId: child.id }))!.length).toBeGreaterThan(0)
   }, 60_000)
 

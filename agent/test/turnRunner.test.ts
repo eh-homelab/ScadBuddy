@@ -5,14 +5,13 @@ import { ROOT_CONTEXT } from '@opentelemetry/api'
 import { createTurnSlot, slotHooks, slotHttpContext, type TurnContext } from '../src/sessions/turnSlot.js'
 import { type FingerprintParts, TurnRunner } from '../src/sessions/turnRunner.js'
 import { TurnTrace } from '../src/telemetry/turn.js'
-import { PgHttpBodies } from './support/sql/httpBodies.js'
 import { harnessTierOf } from '../src/harness/run.js'
 import { TOOL_SEARCH } from '../src/harness/toolSearch.js'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
-import { turnRunnerForTest, type TurnRunnerTestOptions, unusedSql } from './support/turnRunner.js'
+import { turnRunnerForTest, type TurnRunnerTestOptions, unusedBodies } from './support/turnRunner.js'
 
 // TurnRunner (unified runtime plan, Task 1.2; spec 2026-10-13 §5.3): every
 // callback it assembles reads the current turn from the slot, so the options
@@ -306,7 +305,7 @@ describe('TurnRunner', () => {
 
   it("gives the http tool the slot's turn id and signal as each request reads them, and an aborted signal between turns", () => {
     const slot = createTurnSlot()
-    const context = slotHttpContext({ saved: new PgHttpBodies(unusedSql, 'unused'), secrets: () => [], actor: { kind: 'browser', id: 'browser', label: 'You' } }, slot)
+    const context = slotHttpContext({ saved: unusedBodies, secrets: () => [], actor: { kind: 'browser', id: 'browser', label: 'You' } }, slot)
     expect(context.turnId).toBeUndefined()
     expect(context.signal?.aborted).toBe(true)
     expect((context.signal?.reason as Error).message).toBe('no turn is running')

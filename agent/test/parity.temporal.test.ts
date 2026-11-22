@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { TabHub } from '../src/bridge/hub.js'
-import { PostgresPairingStore } from '../src/bridge/pairings.js'
+import { PostgresPairingStore } from './support/sql/pairings.js'
 import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { HTTP_TOOL_NAME } from '../src/harness/httpRequest.js'
@@ -136,7 +136,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
       remotePlugins,
       packagePlugins,
       httpRequest: {},
-      approvalHashKey: Buffer.alloc(32, 5),
+      approvalHashKey: () => Buffer.alloc(32, 5),
     })
   }
 
