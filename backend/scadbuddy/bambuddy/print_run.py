@@ -2383,7 +2383,7 @@ async def rack_preview(
             )
             for slot in slots
             # A spool with no type names no material to test Glow on (R-6876-6).
-            if (spool := found[slot.slot_id]) is None or spool.names.material is None
+            if (spool := found[slot.slot_id]) is None or not spool.names.material
         ]
         if nozzle_plan is not None:
             planned = {slot.slot_id for slot in request.filament_plan.slots}
