@@ -870,7 +870,10 @@ read finds (§5.3), so the Source block only informs:
 unsaved; the next publish reads the library and pins its version (§5.1). While the stored
 `repin` is true, the Source block says "The next publish takes the library's version."
 with "Keep the published version", which saves with `repin: false`. Picking another file
-in the picker clears the pin by its changed id.
+in the picker clears the pin by its changed id. On a listing with a pin, the editor asks
+before it saves that change: "Customers lose the version you published. The next publish
+sells the file you picked." with "Save" and "Cancel". The save drops the kept copy (§4.1),
+so picking the old file again after it reads the library's version, not the published one.
 
 ### 9.5 Sell from the library
 
@@ -1136,7 +1139,8 @@ customer, until the step that makes it safe.
 5. **`feat(storefront): choose a library file as a listing's source`** (frontend). The
    Source block, the file picker with `types`, the Parts section, Pictures over plate
    pictures and uploads, the refusals, the file state notes with "Use the library's
-   version", "Sell on storefront…" on the library page, the mocks. After 3.
+   version", the ask before a pinned listing saves another file (§9.4), "Sell on
+   storefront…" on the library page, the mocks. After 3.
 6. **`feat(storefront): a customer page for a file listing`** (frontend, and the backend
    switch). The file branch of `CustomizePage`, the slot recolour in `Preview`, the price
    route client; this PR lets `public_card` and `public_listing` show file listings. After 3,
