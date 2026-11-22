@@ -40,6 +40,8 @@ CREATE TABLE filament_colour_syncs (
     error text,
     db_last_modified bigint,
     started_at timestamptz NOT NULL DEFAULT now(),
-    finished_at timestamptz
+    finished_at timestamptz,
+    -- The operation run that started it: a retry of that run ends its own dead row.
+    operation_id text
 );
 CREATE INDEX filament_colour_syncs_newest ON filament_colour_syncs (source, started_at DESC);

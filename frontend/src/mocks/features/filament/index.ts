@@ -1603,8 +1603,9 @@ export const handlers = [
       const own = next as unknown as AliasedRow
       own.aliases = own.aliases.filter((one) => catalogKey(one) !== key)
     }
-    // #6907 Decision 217: a person's write makes the colour theirs.
-    if (kind === 'colours') (next as unknown as { synced_at: string | null }).synced_at = null
+    // #6907 Decision 217: a person's write of a value a sync writes makes the colour theirs.
+    const values = ['name', 'manufacturer', 'rgba', 'material_name', 'material_id', 'extra_colours', 'effect_id']
+    if (kind === 'colours' && values.some((field) => field in body)) (next as unknown as { synced_at: string | null }).synced_at = null
     rows[at] = next
     return HttpResponse.json(next)
   }),

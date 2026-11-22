@@ -28,7 +28,7 @@ from scadbuddy.filament.colour_catalog import (
     run_bambu,
     run_filamentcolors,
 )
-from scadbuddy.operations.kinds import KindsBuild, OperationKind
+from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -68,7 +68,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
     async def run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = ColourSyncRequest.model_validate(request)
         try:
-            sync_id = await asyncio.to_thread(syncs.start, body.source)
+            sync_id = await asyncio.to_thread(syncs.start, body.source, OPERATION_RUN.get())
         except ColourSyncRunningError:
             raise running_error(body.source) from None
         if body.source == "bambu":

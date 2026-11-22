@@ -160,6 +160,20 @@ async def test_a_person_edit_wins_whatever_its_clock_says(pg_pool: PgPool) -> No
 
 
 @pg
+async def test_a_re_order_or_an_archive_leaves_the_row_to_the_syncs(pg_pool: PgPool) -> None:
+    await _send(pg_pool, _bb())
+    store = CatalogStore(pg_pool)
+    row = _one(pg_pool, "Jade White")
+    store.update("colours", row.id, ColourPatch(sort_order=5))
+    store.update("colours", row.id, ColourPatch(archived=True))
+    store.update("colours", row.id, ColourPatch(archived=False))
+    assert _one(pg_pool, "Jade White").synced_at is not None
+    again = await _send(pg_pool, _bb(hex_color="#EEEEEE"))
+    assert (again.kept, again.updated) == (0, 1)
+    assert _one(pg_pool, "Jade White").rgba == "#EEEEEEFF"
+
+
+@pg
 async def test_a_person_s_own_row_is_kept_and_linked(pg_pool: PgPool) -> None:
     CatalogStore(pg_pool).create(
         "colours",
@@ -354,6 +368,20 @@ def test_a_second_run_of_a_source_is_refused_while_one_runs(pg_pool: PgPool) -> 
     syncs.start("filamentcolors")
     states = sorted((s.source, s.state) for s in syncs.latest())
     assert states == [("bambu", "failed"), ("filamentcolors", "running")]
+
+
+@pg
+def test_a_retried_operation_run_ends_its_own_dead_row(pg_pool: PgPool) -> None:
+    # The first attempt's worker died with its row `running`; the retry is the same
+    # operation run, so it is not refused against that row. Another operation still is.
+    syncs = ColourSyncs(pg_pool)
+    dead = syncs.start("bambu", "operation-1")
+    retry = syncs.start("bambu", "operation-1")
+    assert syncs.get(dead).state == "failed"
+    assert syncs.get(dead).error == "the run was interrupted"
+    assert syncs.get(retry).state == "running"
+    with pytest.raises(ColourSyncRunningError):
+        syncs.start("bambu", "operation-2")
 
 
 @pg

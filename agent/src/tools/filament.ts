@@ -135,7 +135,7 @@ export const filamentTools: Tool[] = [
       'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases). The ' +
       "colours catalog holds thousands of rows once synced (filament_colour_sync): pass `q` (every word must match a " +
       "row's name, maker, `material_name` or `#RRGGBBAA`, e.g. `bambu jade white`) rather than listing it whole. A " +
-      'colour with `source` came from a sync; one whose `updated_at` is after its `synced_at` was edited by a person.',
+      'colour with `source` came from a sync; one with `source` and a null `synced_at` was edited by a person since (syncs leave it as it is).',
     input: z.object({
       kind,
       include_archived: z.boolean().default(false),

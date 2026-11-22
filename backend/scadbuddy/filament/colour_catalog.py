@@ -1,5 +1,5 @@
 """The colour catalog's sources (#6907, plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`
-Decisions 206-217): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
+Decisions 206-218): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
 filamentcolors.xyz and Bambu Studio's colour codes (`ColourSyncs`, run as the operation
 ``filament_colour_sync`` on the ``library`` queue, `filament/operations.py`).
 
@@ -12,12 +12,14 @@ Every source writes through `upsert_colours`, one transaction under one advisory
   https://github.com/maziggy/bambuddy/tree/b7d894b57c0a373f66dc0de49680865b02b3aae5).
   Bambuddy's entry is found first by its link (``bb_colour_id``), then by identity.
 - A row found that a person made or edited (``synced_at`` NULL: a person's write of a
-  colour clears it, `catalog.CatalogStore.update`) is ``kept`` as it is (Decisions 208,
+  value the sync writes clears it, `catalog.CatalogStore.update`; a re-order or an archive
+  does not) is ``kept`` as it is (Decisions 208,
   217); a Bambuddy entry still links to it. A sync's write sets ``updated_at`` and
   ``synced_at`` to the database's ``now()``, and it reads the row ``FOR UPDATE``, so an
   edit that commits while the sync runs waits for it or is seen by it, whatever the
   clocks say.
-- An archived row counts: a sync never brings back a row a person archived, and never
+- An archived row counts and is ``kept`` (restored, it is synced again): a sync never
+  brings back or changes a row a person archived, and never
   deletes a row (Decision 209).
 - A source's material is resolved to the materials catalog by key (`catalog.lookup_key`):
   the whole name, else its first word ("PLA Basic" is PLA); an effect only by the whole
@@ -225,13 +227,15 @@ def _one(
     found = None
     if row.bb_colour_id is not None:
         found = conn.execute(
-            f"SELECT {_COLUMNS}, synced_at, updated_at, bb_colour_id FROM filament_colours"
+            f"SELECT {_COLUMNS}, synced_at, updated_at, archived_at, bb_colour_id"
+            " FROM filament_colours"
             " WHERE bb_colour_id = %s FOR UPDATE",
             (row.bb_colour_id,),
         ).fetchone()
     if found is None:
         found = conn.execute(
-            f"SELECT {_COLUMNS}, synced_at, updated_at, bb_colour_id FROM filament_colours"
+            f"SELECT {_COLUMNS}, synced_at, updated_at, archived_at, bb_colour_id"
+            " FROM filament_colours"
             " WHERE coalesce(upper(manufacturer), '') = upper(%s) AND upper(name) = upper(%s)"
             " AND coalesce(upper(material_name), '') = upper(%s)"
             " ORDER BY archived_at IS NOT NULL, created_at LIMIT 1 FOR UPDATE",
@@ -255,13 +259,13 @@ def _one(
         )
         return "added"
     if row.bb_colour_id is not None and found["bb_colour_id"] is None:
-        # A link changes no value, so it is no edit (`updated_at` stays).
+        # A link changes no value, so it is no edit (`updated_at` and `synced_at` stay).
         conn.execute(
             "UPDATE filament_colours SET bb_colour_id = %s WHERE id = %s",
             (row.bb_colour_id, found["id"]),
         )
-    synced = found["synced_at"]
-    if synced is None or found["updated_at"] > synced:
+    if found["synced_at"] is None or found["archived_at"] is not None:
+        # The person's row, or one they archived (left as it is until restored).
         return "kept"
     if all(found[name] == value for name, value in values.items()):
         return "unchanged"
@@ -408,13 +412,20 @@ class ColourSyncs:
             ).fetchone()
         return row is not None
 
-    def start(self, source: SyncSource) -> UUID:
-        """A new run of ``source``; first a stale run ends ``failed`` and finished runs
-        past `RUNS_KEPT` but the newest are deleted. `ColourSyncRunningError` while another
-        runs."""
+    def start(self, source: SyncSource, operation_id: str | None = None) -> UUID:
+        """A new run of ``source`` for the operation run ``operation_id``; first a stale
+        run, and a run the same operation left (an attempt that died, now retried), end
+        ``failed``, and finished runs past `RUNS_KEPT` but the newest are deleted.
+        `ColourSyncRunningError` while another runs."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"{_LOCK}:{source}",))
             _end_stale(conn, source)
+            if operation_id is not None:
+                conn.execute(
+                    "UPDATE filament_colour_syncs SET state = 'failed', finished_at = now(),"
+                    " error = %s WHERE source = %s AND state = 'running' AND operation_id = %s",
+                    (INTERRUPTED, source, operation_id),
+                )
             if conn.execute(
                 "SELECT 1 FROM filament_colour_syncs WHERE source = %s AND state = 'running'",
                 (source,),
@@ -427,7 +438,9 @@ class ColourSyncs:
                 (source, RUNS_KEPT, source),
             )
             row = conn.execute(
-                "INSERT INTO filament_colour_syncs (source) VALUES (%s) RETURNING id", (source,)
+                "INSERT INTO filament_colour_syncs (source, operation_id) VALUES (%s, %s)"
+                " RETURNING id",
+                (source, operation_id),
             ).fetchone()
         assert row is not None
         made: UUID = row["id"]

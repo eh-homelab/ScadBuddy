@@ -248,6 +248,7 @@ ALL_ONE = {
     "locations": 1,
     "insert_types": 1,
     "filaments": 1,
+    "colours": 1,
     "intents": 1,
     "errors": 1,
     "ignored": 1,
@@ -312,6 +313,10 @@ def _linked(client: TestClient, pg_conninfo: str, instance: str = OLD) -> None:
                 (Jsonb({"name": "h"}), Jsonb({"name": "x"}), row_id),
             )
         conn.execute(
+            "INSERT INTO filament_colours (name, manufacturer, rgba, source, synced_at,"
+            " bb_colour_id) VALUES ('Old Green', 'Old Maker', '#00FF00FF', 'bambuddy', now(), 21)"
+        )
+        conn.execute(
             "INSERT INTO filament_bb_creates (kind, sb_id) VALUES ('spool', %s)", (other["id"],)
         )
         conn.execute(
@@ -346,6 +351,7 @@ def _left(conn: psycopg.Connection[Any]) -> dict[str, int]:
         "locations": kept("filament_locations", "bb_location_id"),
         "insert_types": kept("filament_insert_types", "bb_catalog_id"),
         "filaments": kept("filament_spool_types", "bb_filament_id"),
+        "colours": count("SELECT count(*) FROM filament_colours WHERE bb_colour_id IS NOT NULL"),
         "intents": count("SELECT count(*) FROM filament_bb_creates"),
         "errors": count("SELECT count(*) FROM filament_bb_push_errors"),
         "ignored": count("SELECT count(*) FROM filament_bb_ignored"),

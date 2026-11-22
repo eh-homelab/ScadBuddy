@@ -136,6 +136,11 @@ CATALOGS: dict[str, CatalogSpec] = {
 
 
 #: The text columns a catalog search (`CatalogStore.list` ``q``) reads, where a kind has them.
+#: The colour values a sync writes (`colour_catalog.upsert_colours`); a person's write of
+#: any of them clears ``synced_at``.
+_SYNCED_VALUES = frozenset(
+    ("name", "manufacturer", "rgba", "material_name", "material_id", "extra_colours", "effect_id")
+)
 _SEARCHED = ("name", "manufacturer", "material_name", "rgba")
 
 #: The kind of each catalog table.
@@ -453,8 +458,9 @@ class CatalogStore:
                 "archived_at = COALESCE(archived_at, now())" if archived else "archived_at = NULL"
             )
         sets.append("updated_at = now()")
-        if kind == "colours":
-            # The row is the person's from now on: no sync overwrites it (#6907 Decision 217).
+        if kind == "colours" and _SYNCED_VALUES & set(columns):
+            # A value the person wrote makes the row theirs: no sync overwrites it again
+            # (#6907 Decision 217). A re-order or an archive is no such write.
             sets.append("synced_at = NULL")
         with self._pool.connection() as conn:
             try:
