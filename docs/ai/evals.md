@@ -71,7 +71,9 @@ processes in the test's own process, each wired as `main.ts` wires its
 - **`worker`** runs `AgentSession` on `agent-sessions`, the shared `agent-tools`
   activities a session uses and its own session host queue, so every turn runs there.
 
-Every payload is sealed with the stack's KEK, as `main.ts` seals them. The turn gets
+Every payload is sealed under a data key, as a deployment's are; the stack makes its own
+throwaway KEK and keeps the keys with the tests' SQL fake (`agent/test/support/sql/`),
+where a deployment's agent gets them from the API (#5299 step 12). The turn gets
 exactly what a session's turn gets: the system prompt (the SDK's own, with what
 `src/sessions/manager.ts` `systemAppend` appends: the untrusted-content policy and the
 browser guide, #258, and no eval-only defence on top), ScadBuddy's own plugin
@@ -153,11 +155,11 @@ pnpm evals                              # vitest run --config vitest.evals.confi
 
 The credential comes from, in order:
 
-1. **The credential saved in Settings.** The run reads it from the agent's database the
-   way the service does (`CredentialStore.reveal` under the key in
-   `SCADBUDDY_SECRET_KEY_FILE`, as in [`agent/src/main.ts`](../../agent/src/main.ts)).
-   Set `SCADBUDDY_DATABASE_URL` and `SCADBUDDY_SECRET_KEY_FILE` to a deployment's
-   values. The model chosen in Settings (`ai_settings` key `model`) is used too.
+1. **The credential saved in Settings.** The eval harness reads it straight from the
+   deployment's database (`CredentialStore.reveal` under the key in
+   `SCADBUDDY_SECRET_KEY_FILE`, [`agent/evals/credential.ts`](../../agent/evals/credential.ts)),
+   as the API opens it; the agent service itself has no database and no KEK (#5299 step 12).
+   Set `SCADBUDDY_DATABASE_URL` and `SCADBUDDY_SECRET_KEY_FILE` to the API's values. The model chosen in Settings (`ai_settings` key `model`) is used too.
 2. **`SCADBUDDY_EVAL_ANTHROPIC_API_KEY`**, which is meant for the CI job only. It has a
    dedicated name so that a developer's own `ANTHROPIC_API_KEY` is never picked up by
    accident.
