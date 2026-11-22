@@ -1,8 +1,10 @@
+import { filamentLinks } from '../../lib/filamentLinks'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import type { RackAlgorithm, RackOption, RackPickView } from '../../api/types'
+import { Link } from 'react-router'
+import type { RackAlgorithm, RackOption, RackPickView, RackUncheckedSlot } from '../../api/types'
 import { ALGORITHM_LABELS, flowLabel } from './rackLabels'
 import { Swatch } from './Swatch'
 
@@ -24,11 +26,45 @@ export function RackNozzleLine({ rack, algorithm }: { rack: RackPickView | null 
   return (
     <div className="text-[13px]">
       <p data-testid="rack-nozzle-line">{text}</p>
-      {rack.glow_unchecked && (
-        <p className="text-xs text-muted-foreground">A spool is not in the inventory, so Glow could not be checked.</p>
+      {rack.unchecked?.length ? (
+        <ul className="mt-0.5 space-y-0.5 text-xs text-muted-foreground">
+          {rack.unchecked.map((slot) => (
+            <li key={slot.slot_id} data-testid="rack-glow-unchecked">
+              {uncheckedText(slot)}
+              {slot.reason === 'not_in_inventory' && (
+                <>
+                  {' '}
+                  <Link to={filamentLinks.spools} className="text-foreground underline underline-offset-4">
+                    Open Filament
+                  </Link>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        rack.glow_unchecked && (
+          <p className="text-xs text-muted-foreground">A spool is not in the inventory, so Glow could not be checked.</p>
+        )
       )}
     </div>
   )
+}
+
+/** #6872 — which slot Glow could not be checked on, and why, so a person can act. */
+function uncheckedText(slot: RackUncheckedSlot): string {
+  const what = [slot.colour_word, slot.material].filter(Boolean).join(' ')
+  const end = 'so Glow could not be checked.'
+  switch (slot.reason) {
+    case 'no_spool':
+      return `Slot ${slot.slot_id}${what ? ` (${what})` : ''} has no spool chosen, ${end}`
+    case 'empty_tray':
+      return `Slot ${slot.slot_id}: ${slot.tray ?? 'its tray'} has no spool in it, ${end}`
+    default:
+      if (slot.spool_number != null) return `Slot ${slot.slot_id}: spool #${slot.spool_number} is not in the inventory, ${end}`
+      if (slot.tray) return `Slot ${slot.slot_id}: the ${what ? `${what} ` : 'spool '}in ${slot.tray} is not in the inventory, ${end}`
+      return `Slot ${slot.slot_id}: its spool is not in the inventory, ${end}`
+  }
 }
 
 /** What a hotend last ran, as a person reads it: "last ran black PLA", or nothing known. */

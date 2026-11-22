@@ -57,7 +57,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 from uuid import UUID
 
 from psycopg import Connection
@@ -169,12 +169,21 @@ def record(
     if row is None:
         return None
     event = m.SpoolEvent.model_validate(row)
-    refresh_derived(conn, spool_id, event)
-    _check_empty(conn, spool_id, event)
+    derived = refresh_derived(conn, spool_id, event)
+    if derived is not None:
+        _check_empty(conn, spool_id, event, derived)
     return event
 
 
-def _check_empty(conn: Conn, spool_id: UUID, event: m.SpoolEvent) -> None:
+class Derived(NamedTuple):
+    """What `refresh_derived` left on the spool's row that `_check_empty` needs, so a
+    booking reads the row once."""
+
+    grams_left: float | None
+    archived: bool
+
+
+def _check_empty(conn: Conn, spool_id: UUID, event: m.SpoolEvent, now: Derived) -> None:
     """#6868: the move into empty adds the spool's type to the shopping list, in this
     write's transaction (`shopping.add_for_empty_on`). Every spool event is booked here, so
     every path that empties a spool is checked: a print's grams, a weighing, an AMS
@@ -190,14 +199,9 @@ def _check_empty(conn: Conn, spool_id: UUID, event: m.SpoolEvent) -> None:
             return
         add_for_empty_on(conn, spool_id, cause="archived", at=event.at)
         return
-    if before is None or was_empty:
+    if before is None or was_empty or now.archived:
         return
-    now = conn.execute(
-        "SELECT grams_left, archived_at FROM filament_spools WHERE id = %s", (spool_id,)
-    ).fetchone()
-    if now is None or now["archived_at"] is not None:
-        return
-    if now["grams_left"] is not None and now["grams_left"] <= 0:
+    if now.grams_left is not None and now.grams_left <= 0:
         add_for_empty_on(conn, spool_id, cause="ran_out", at=event.at)
 
 
@@ -403,24 +407,32 @@ def page(
     )
 
 
-def refresh_derived(conn: Conn, spool_id: UUID, event: m.SpoolEvent | None = None) -> None:
+def refresh_derived(
+    conn: Conn, spool_id: UUID, event: m.SpoolEvent | None = None
+) -> Derived | None:
     """Recompute the spool's ``grams_left`` and ``last_*`` columns from its events. The
     label weight is the spool's own, else its type's. The spool's row is locked (`record`
     has locked it already), so two transactions that each record an event read each
     other's in turn. With ``event`` (the one just booked), an event on top of the history
-    updates the columns without reading it, by the module's rule."""
+    updates the columns without reading it, by the module's rule. It answers the new
+    ``grams_left`` and whether the spool is archived; ``None`` for no such spool."""
     spool = conn.execute(
-        "SELECT s.weight_locked, coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
+        "SELECT s.weight_locked, coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g,"
+        " s.grams_left, s.archived_at IS NOT NULL AS archived"
         " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"
         " WHERE s.id = %s FOR UPDATE OF s",
         (spool_id,),
     ).fetchone()
     if spool is None:
-        return
+        return None
+    archived: bool = spool["archived"]
     if event is not None and _on_top(conn, spool_id, event):
-        _book_on_top(conn, spool_id, event, spool["weight_locked"], spool["label_weight_g"])
-        return
+        left = _book_on_top(conn, spool_id, event, spool["weight_locked"], spool["label_weight_g"])
+        return Derived(spool["grams_left"] if left is None else left, archived)
     history = events(conn, spool_id)
+    left = grams_left(
+        history, weight_locked=spool["weight_locked"], label_weight_g=spool["label_weight_g"]
+    )
     weighed = [e for e in history if _weighs(e)]
     dried = [e for e in history if e.kind == "dried"]
     used = [e for e in history if e.kind in _USED]
@@ -431,11 +443,7 @@ def refresh_derived(conn: Conn, spool_id: UUID, event: m.SpoolEvent | None = Non
         " last_dried_at = %s, last_dried_temp_c = %s, last_dried_hours = %s, last_used_at = %s"
         " WHERE id = %s",
         (
-            grams_left(
-                history,
-                weight_locked=spool["weight_locked"],
-                label_weight_g=spool["label_weight_g"],
-            ),
+            left,
             last_weighed.grams_after if last_weighed else None,
             last_weighed.at if last_weighed else None,
             last_dried.at if last_dried else None,
@@ -445,6 +453,7 @@ def refresh_derived(conn: Conn, spool_id: UUID, event: m.SpoolEvent | None = Non
             spool_id,
         ),
     )
+    return Derived(left, archived)
 
 
 def _weighs(event: m.SpoolEvent) -> bool:
@@ -470,9 +479,10 @@ def _book_on_top(
     event: m.SpoolEvent,
     weight_locked: bool,
     label_weight_g: int | None,
-) -> None:
+) -> float | None:
     """The columns ``event`` changes when it is on top. A last reading is the walk's
-    anchor whenever it qualifies (no manual reading is later), and no delta follows it."""
+    anchor whenever it qualifies (no manual reading is later), and no delta follows it.
+    The new ``grams_left`` when it sets one, else ``None`` (the column is unchanged)."""
     sets: dict[str, Any] = {}
     value = reading(event, label_weight_g)
     if value is not None and is_anchor(
@@ -492,3 +502,5 @@ def _book_on_top(
         conn.execute(
             f"UPDATE filament_spools SET {columns} WHERE id = %s", [*sets.values(), spool_id]
         )
+    left: float | None = sets.get("grams_left")
+    return left

@@ -3,6 +3,7 @@ import type { FilamentOptions, FilamentWarning, SlotNeed, SpoolOption } from '..
 import {
   NO_FILTERS,
   choiceReasons,
+  plateFamilies,
   colourName,
   tileGroups,
   trayCode,
@@ -489,6 +490,22 @@ describe('choiceReasons (#6885)', () => {
     expect(choiceReasons(grey, teal, true)).toEqual(["teal, not the file's colour"])
   })
 
+  it("judges a slot with no material by the plate's family (#6885 review)", () => {
+    const undeclared: SlotNeed = { slot_id: 2, colour: '#A7AEB2', colour_matches: [-4] }
+    const petg = spool({ spool_id: -4, material: 'PETG', colour: '#A7AEB2' })
+    expect(choiceReasons(undeclared, petg, true, ['PLA'])).toEqual(["PETG instead of the plate's PLA"])
+    expect(choiceReasons(undeclared, petg, true, [])).toEqual([])
+  })
+
+  it('takes the plate’s family from the declared slots, else from most of the choices', () => {
+    const spools = [spool({ spool_id: 1, material: 'PLA Basic' }), spool({ spool_id: 2, material: 'PLA Matte' }), spool({ spool_id: 3, material: 'PETG' })]
+    const plan = [1, 2, 3].map((id) => ({ slot_id: id, spool_id: id }))
+    const undeclared = [1, 2, 3].map((slot_id) => ({ slot_id, colour_matches: [] }))
+    expect(plateFamilies({ slots: undeclared, spools }, plan)).toEqual(['PLA'])
+    expect(plateFamilies({ slots: [...undeclared, { slot_id: 4, material: 'PETG HF' }], spools }, plan)).toEqual(['PETG'])
+    expect(plateFamilies({ slots: undeclared, spools }, plan.slice(1))).toEqual([])
+  })
+
   it('says nothing for a close match in the same family', () => {
     const match = spool({ spool_id: -4, material: 'PLA Matte', colour: '#A7AEB2' })
     expect(choiceReasons(grey, match, true)).toEqual([])
@@ -524,6 +541,16 @@ describe('tileGroups (#6885)', () => {
   it('has no close-match group for a slot with no colour', () => {
     const groups = tileGroups([tray(-1, 0, 0)], { slot_id: 1, colour_matches: [-1] }, 1)
     expect(groups.map((group) => group.label)).toEqual(['AMS-A'])
+  })
+
+  it("keeps one printer's units together when no printer is chosen (#6885 review)", () => {
+    const at = (spool_id: number, printer_id: number, ams_id: number) =>
+      spool({ spool_id, loaded: loaded({ printer_id, printer_name: `P${printer_id}`, ams_id, tray_id: 0 }) })
+    const groups = tileGroups([at(1, 2, 0), at(2, 1, 1), at(3, 1, 0), at(4, 2, 1)], { slot_id: 1, colour_matches: [] }, null)
+    expect(groups.map((group) => group.label)).toEqual(['P1 · AMS-A', 'P1 · AMS-B', 'P2 · AMS-A', 'P2 · AMS-B'])
+    // By number: printer 2 before printer 10.
+    const ten = tileGroups([at(5, 10, 0), at(6, 2, 0)], { slot_id: 1, colour_matches: [] }, null)
+    expect(ten.map((group) => group.label)).toEqual(['P2 · AMS-A', 'P10 · AMS-A'])
   })
 
   it('puts a spool loaded in another printer apart', () => {

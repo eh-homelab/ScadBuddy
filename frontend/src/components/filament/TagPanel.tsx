@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../api/client'
 import { bindTag, getTag, scanTag, unbindTag, type SpoolDetail, type TagBind } from '../../api/filament'
 import { useAsync } from '../../lib/useAsync'
@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { KINDS } from './tagKinds'
+import { SpoolLink } from './SpoolLink'
 
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The server could not be reached. Try again.')
 
@@ -42,7 +43,7 @@ export function TagPanel({ spool, onChanged }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [scanning, setScanning] = useState(false)
-  const [scanNote, setScanNote] = useState<string | null>(null)
+  const [scanNote, setScanNote] = useState<ReactNode>(null)
   const scan = useRef<AbortController | null>(null)
   /** Counts the changes made here, so the open tag's binding (its Override mark) is read again. */
   const [changes, setChanges] = useState(0)
@@ -112,7 +113,17 @@ export function TagPanel({ spool, onChanged }: Props) {
       setTray(found.tray_uuid ?? '')
       if (found.kind) setKind(found.kind)
       if (found.kind !== 'bambu_mifare') setOverride(false)
-      setScanNote(found.sb_spool && found.sb_spool.id !== spool.id ? `Spool #${found.sb_spool.number} already holds this tag` : null)
+      const holder = found.sb_spool && found.sb_spool.id !== spool.id ? found.sb_spool : null
+      setScanNote(
+        holder ? (
+          <>
+            <SpoolLink spool={holder} className="underline underline-offset-2">
+              Spool #{holder.number}
+            </SpoolLink>{' '}
+            already holds this tag
+          </>
+        ) : null,
+      )
     } catch (cause) {
       if (controller.signal.aborted) return
       if (cause instanceof ApiError && (cause.status === 502 || cause.status === 504)) setScanNote('Could not reach the reader through Bambuddy')

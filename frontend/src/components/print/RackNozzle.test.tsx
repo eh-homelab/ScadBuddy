@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { choose } from '../../test/select'
 import type { RackPickView } from '../../api/types'
@@ -37,6 +38,37 @@ describe('RackNozzleLine (#836)', () => {
   it('says when Glow could not be checked', () => {
     render(<RackNozzleLine rack={{ ...rack, glow_unchecked: true }} algorithm="least_used" />)
     expect(screen.getByText(/Glow could not be checked/)).toBeInTheDocument()
+  })
+
+  it('names each slot Glow could not be checked on, and links the Filament page (#6872)', () => {
+    render(
+      <MemoryRouter>
+        <RackNozzleLine
+          rack={{
+            ...rack,
+            glow_unchecked: true,
+            unchecked: [
+              { slot_id: 1, reason: 'not_in_inventory', spool_number: 45 },
+              { slot_id: 2, reason: 'not_in_inventory', tray: 'HT-A', material: 'PETG', colour: '#A7AEB2', colour_word: 'grey' },
+              { slot_id: 3, reason: 'empty_tray', tray: 'AMS-A slot 2' },
+              { slot_id: 4, reason: 'no_spool', material: 'PLA', colour: '#FFFFFF', colour_word: 'white' },
+            ],
+          }}
+          algorithm="least_used"
+        />
+      </MemoryRouter>,
+    )
+    const lines = screen.getAllByTestId('rack-glow-unchecked').map((line) => line.textContent)
+    expect(lines).toEqual([
+      'Slot 1: spool #45 is not in the inventory, so Glow could not be checked. Open Filament',
+      'Slot 2: the grey PETG in HT-A is not in the inventory, so Glow could not be checked. Open Filament',
+      'Slot 3: AMS-A slot 2 has no spool in it, so Glow could not be checked.',
+      'Slot 4 (white PLA) has no spool chosen, so Glow could not be checked.',
+    ])
+    expect(screen.queryByText(/A spool is not in the inventory/)).toBeNull()
+    for (const link of screen.getAllByRole('link', { name: 'Open Filament' })) {
+      expect(link).toHaveAttribute('href', '/filament/spools')
+    }
   })
 
   it('shows nothing without a rack', () => {

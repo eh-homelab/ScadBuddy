@@ -58,8 +58,8 @@ describe('the invoice page', () => {
     expect(await heading()).toHaveTextContent('US-452318')
     expect(await screen.findByRole('combobox', { name: 'Supplier' })).toHaveTextContent('Bambu Lab')
     expect(screen.getByRole('table', { name: 'Invoice lines' })).toBeInTheDocument()
-    const file = await screen.findByTitle('Invoice file')
-    expect(file).toHaveAttribute('data', `/api/v1/filament/invoices/${INVOICE.DRAFT_A}/file`)
+    const file = await screen.findByTitle('Invoice PDF, bambu-US-452318.pdf')
+    expect(file).toHaveAttribute('src', `/api/v1/filament/invoices/${INVOICE.DRAFT_A}/file`)
     expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('target', '_blank')
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument()
   })
@@ -127,6 +127,51 @@ describe('the invoice page', () => {
     const lines = screen.getByRole('table', { name: 'Invoice lines' })
     expect(within(lines).getAllByRole('link', { name: /^Spool #/ })).toHaveLength(5)
     expect(screen.queryByLabelText('Unit price, line 1')).not.toBeInTheDocument()
+  })
+
+  describe('the spools a confirm made, before the spools are read again (R-6869-5)', () => {
+    /** Answers the spool list as usual until the invoice is confirmed, then with `after`. */
+    function spoolsAfterConfirm(after: () => Promise<Response | undefined> | Response | undefined) {
+      let confirmed = false
+      server.use(
+        http.post('/api/v1/filament/invoices/:id/confirm', () => {
+          confirmed = true
+          return undefined
+        }),
+        http.get('/api/v1/filament/spools', () => (confirmed ? after() : undefined)),
+      )
+    }
+
+    async function confirmDraft() {
+      const { user } = render(INVOICE.DRAFT_A)
+      await heading()
+      await user.click(await screen.findByRole('button', { name: 'Confirm' }))
+      await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Make the spools' }))
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument())
+      return screen.getByRole('table', { name: 'Invoice lines' })
+    }
+
+    it('links each new spool while the read is in flight, never as deleted', async () => {
+      let release: () => void = () => {}
+      const held = new Promise<void>((resolve) => (release = resolve))
+      spoolsAfterConfirm(async () => {
+        await held
+        return undefined
+      })
+      const lines = await confirmDraft()
+      expect(within(lines).getAllByRole('link', { name: /^Spool #/ })).toHaveLength(5)
+      expect(lines).not.toHaveTextContent('(deleted)')
+      release()
+      await waitFor(() => expect(within(lines).getAllByRole('link', { name: /^Spool #\d+$/ })).toHaveLength(5))
+    })
+
+    it('never says deleted when the read fails', async () => {
+      spoolsAfterConfirm(() => HttpResponse.json({ detail: 'down' }, { status: 500 }))
+      const lines = await confirmDraft()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(within(lines).getAllByRole('link', { name: /^Spool #/ })).toHaveLength(5)
+      expect(lines).not.toHaveTextContent('(deleted)')
+    })
   })
 
   it('keeps a confirmed invoice frozen except the note and the file', async () => {

@@ -68,6 +68,24 @@ describe('the spool timeline', () => {
     expect(within(items()[2]!).getByRole('link', { name: 'Its order' })).toHaveAttribute('href', '/orders/order-7')
   })
 
+  it("links each id an event names to that entity's page (#6869)", () => {
+    const hrefs = new Map([
+      ['t-black', '/filament/types/t-black'],
+      ['t-pink', '/filament/types/t-pink'],
+      ['shelf', '/filament/spools?location=Shelf+A'],
+    ])
+    renderPage(<SpoolTimeline rows={rows} catalogs={catalogs} types={types} hrefs={hrefs} />)
+    const changes = within(items()[0]!).getByRole('list', { name: 'Changes' })
+    expect(within(changes).getByRole('link', { name: 'BL-PLA-BASIC-BLACK' })).toHaveAttribute('href', '/filament/types/t-black')
+    expect(within(changes).getByRole('link', { name: 'BL-PLA-BASIC-HOT-PINK' })).toHaveAttribute('href', '/filament/types/t-pink')
+    expect(within(changes).getAllByRole('listitem').map((item) => item.textContent)).toEqual(['Cost per kg: 20.00 → 25.00', 'Type: BL-PLA-BASIC-BLACK → BL-PLA-BASIC-HOT-PINK'])
+    const moved = items()[4]!
+    expect(within(moved).getByRole('link', { name: 'Workshop / Shelf A' })).toHaveAttribute('href', '/filament/spools?location=Shelf+A')
+    // A place with no page in the map stays text.
+    expect(within(moved).queryByRole('link', { name: 'Workshop / Dry box' })).toBeNull()
+    expect(moved).toHaveTextContent('from Workshop / Shelf A to Workshop / Dry box')
+  })
+
   it('narrows the rows to the kind the filter chooses', async () => {
     const { user } = renderPage(<SpoolTimeline rows={rows} catalogs={catalogs} types={types} />)
     expect(items()).toHaveLength(7)

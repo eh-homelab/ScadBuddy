@@ -119,7 +119,8 @@ test('an invoice is imported with the assistant, and a second visit shows the im
 
   // In-app: a reload would reset the msw worker's data. Away to the Invoices tab and back to the Acme draft.
   await page.getByRole('link', { name: 'Invoices', exact: true }).click()
-  await page.locator('tr[data-invoice]', { hasText: 'Acme' }).getByRole('link').click()
+  // The row links its supplier too (#6869): open the invoice's own link.
+  await page.locator('tr[data-invoice]', { hasText: 'Acme' }).getByRole('link').filter({ hasNotText: 'Acme' }).click()
   await expect(page).toHaveURL(/\/filament\/invoices\/[0-9a-f-]+$/)
   await expect(page.getByText('Import running')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Import with the assistant' })).toHaveCount(0)
@@ -138,4 +139,36 @@ test('a total that does not add up cannot be confirmed', async ({ page }) => {
   await expect(page.getByText('The total does not match the lines')).toBeVisible()
   await expect(page.getByText('$5.00 apart')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeDisabled()
+})
+
+// #6889 — the file beside the lines: a PDF embedded in a same-origin frame (the page CSP has
+// `object-src 'none'`), and a photo that zooms with the buttons, the wheel and a double-click.
+test('a PDF invoice is embedded, and a photo zooms and fits again', async ({ page }) => {
+  await addSupplierAndProduct(page)
+  await startDraft(page)
+  const frame = page.getByTitle(`Invoice PDF, ${pdf.name}`)
+  await expect(frame).toBeVisible()
+  await expect(frame).toHaveAttribute('src', /\/api\/v1\/filament\/invoices\/[0-9a-f-]+\/file$/)
+  await expect(page.locator('object')).toHaveCount(0)
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64')
+  await page.getByLabel('Choose an invoice file').setInputFiles({ name: 'receipt.png', mimeType: 'image/png', buffer: png })
+  const photo = page.getByRole('img', { name: 'Photo of the invoice, receipt.png' })
+  await expect(photo).toBeVisible()
+  const level = page.getByRole('group', { name: 'Zoom' }).getByLabel('Zoom level')
+  await expect(level).toHaveText('100%')
+
+  await page.getByRole('button', { name: 'Zoom in' }).click()
+  await expect(level).toHaveText('150%')
+  const viewport = page.getByTestId('invoice-photo-viewport')
+  await viewport.hover()
+  await page.mouse.wheel(0, -300)
+  await expect.poll(async () => Number((await level.textContent())?.replace('%', ''))).toBeGreaterThan(150)
+  await page.getByRole('button', { name: 'Fit to view' }).click()
+  await expect(level).toHaveText('100%')
+  await viewport.dblclick()
+  await expect(level).toHaveText('250%')
+
+  await expect(page.getByRole('link', { name: 'Open', exact: true })).toHaveAttribute('href', /\/file$/)
+  await expect(page.getByRole('button', { name: 'Download', exact: true })).toBeEnabled()
 })

@@ -81,7 +81,8 @@ export function ColorWidget({
               className="size-8 shrink-0 cursor-pointer rounded-lg border border-input ring-1 ring-black/10 ring-inset outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
             />
           </PopoverTrigger>
-          <PopoverContent align="start" className="w-80">
+          {/* Wide enough for a spool's detail line and the material chips on one line; inside a phone's viewport (#6924). */}
+          <PopoverContent align="start" className="w-[min(30rem,calc(100vw-2rem))]">
             <label className="flex items-center gap-2 text-xs font-medium">
               <input
                 type="color"

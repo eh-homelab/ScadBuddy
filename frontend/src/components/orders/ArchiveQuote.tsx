@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { filamentLabel } from './FilamentsEditor'
 import { refusalText } from './refusal'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /** The most units one run may name (`quote.py` `ARCHIVE_UNITS_MAX`). */
 const UNITS_MAX = 1000
@@ -80,7 +81,7 @@ export function ArchiveQuote({
   return (
     <fieldset className="flex flex-col gap-2 rounded-md border p-2" aria-label="Quote from the print">
       <legend className="px-1 text-sm font-medium">Quote from the print</legend>
-      {book.data && filaments.length === 0 && <p className="text-xs text-warn">The price book has no filaments yet: add them in <AppLink href="/filament/types" className="underline">Filament → Types</AppLink>.</p>}
+      {book.data && filaments.length === 0 && <p className="text-xs text-warn">The price book has no filaments yet: add them in <AppLink href={filamentLinks.types} className="underline">Filament → Types</AppLink>.</p>}
       {colours.length > 0 ? (
         colours.map((colour) => {
           const id = `archive-filament-${itemId}-${colour.slot}`

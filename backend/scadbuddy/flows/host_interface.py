@@ -12,7 +12,7 @@ from typing import Any
 from pydantic import BaseModel
 from temporal_agent_harness.harness.code_mode.stubs import render_host_interface
 
-from scadbuddy.flows.inputs import schema_problems
+from scadbuddy.core.input_schema import schema_problems
 from scadbuddy.workflows.flow_tools import HOST_FUNCTIONS, inputs_tool
 
 

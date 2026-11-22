@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { filamentLabel } from './FilamentsEditor'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /**
  * #4250 — the print dialog's quote mode (plan Ruling 2): beside the spool each slot is
@@ -40,7 +41,7 @@ export function QuoteFilaments({
       {filaments.length === 0 && (
         <p className="text-xs text-warn">
           The price book has no filaments yet: add them in{' '}
-          <AppLink href="/filament/types" className="underline">
+          <AppLink href={filamentLinks.types} className="underline">
             Filament → Types
           </AppLink>
           .

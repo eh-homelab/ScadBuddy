@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label'
 import { MakeTypeError, makeTypeFromBook } from '../filament/makeType'
 import { DataTable, type Column } from '../records/DataTable'
 import { refusalText } from './refusal'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 type Draft = {
   material: string
@@ -253,7 +254,7 @@ export function FilamentsEditor({ types, onTypesChanged }: { types?: SpoolType[]
               const linked = types.find((one) => one.filament_id === f.id)
               if (linked) {
                 return (
-                  <Link to={`/filament/types/${linked.id}`} className="underline-offset-4 hover:underline">
+                  <Link to={filamentLinks.type(linked.id)} className="underline-offset-4 hover:underline">
                     {linked.code}
                   </Link>
                 )

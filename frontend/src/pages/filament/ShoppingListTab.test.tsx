@@ -29,6 +29,13 @@ beforeEach(() => {
 })
 
 describe('the Shopping list tab', () => {
+  it("links an item's material to its type, and leaves an item with no type as text (#6869)", async () => {
+    renderPage(<ShoppingListTab />)
+    await table()
+    expect(within(rowOf(ITEM.PINK)).getByRole('link', { name: 'PLA' })).toHaveAttribute('href', `/filament/types/${T.PINK}`)
+    expect(within(rowOf(ITEM.TPU)).queryByRole('link', { name: 'TPU' })).toBeNull()
+  })
+
   it('lists the items, newest pending first', async () => {
     renderPage(<ShoppingListTab />)
     await table()

@@ -3,6 +3,7 @@ import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed, SpoolOptio
 import {
   NO_FILTERS,
   choiceReasons,
+  plateFamilies,
   closeMatch,
   colourName,
   facets,
@@ -29,6 +30,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { NeedsTypeBadge } from './filament/NeedsTypeBadge'
+import { SpoolNumberLink } from './filament/SpoolNumberLink'
 import { RgbaSwatch } from './filament/RgbaSwatch'
 import { Swatch } from './print/Swatch'
 
@@ -318,7 +320,7 @@ function SpoolTile({
         <span className="relative z-10 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
           {spool.sb_number != null && (
             <span className="sb-num" data-testid={`sb-spool-${spool.spool_id}`}>
-              #{spool.sb_number}
+              <SpoolNumberLink spool={spool}>#{spool.sb_number}</SpoolNumberLink>
             </span>
           )}
           <NeedsTypeBadge spool={spool} />
@@ -365,7 +367,16 @@ export function FilamentPicker({
   showMissing = false,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
-  const [wasReset, setWasReset] = useState(false)
+  // The printer, file and slots a reset was pressed for: another one is a new start (#6885
+  // review). Each slot's id, material and colour tell two outputs apart, which have no library file
+  // (#2720). Not the options object: a new slice's grams make a new one.
+  const [resetFor, setResetFor] = useState<string | null>(null)
+  const target = [
+    options.printer_id ?? '',
+    options.library_file_id ?? '',
+    options.source ?? '',
+    ...(options.slots ?? []).map((slot) => `${slot.slot_id}:${slot.material ?? ''}:${slot.colour ?? ''}`),
+  ].join('|')
   // Slots whose list is open although a spool is chosen. A slot with a spool shows only
   // that spool until "Change" opens it; a slot with nothing chosen is always open.
   const [opened, setOpened] = useState<ReadonlySet<number>>(() => new Set())
@@ -410,9 +421,10 @@ export function FilamentPicker({
 
   // Recomputed from the plan on screen, not read off the server's answer for its own
   // opening selection — that one stops being true the moment a slot is changed.
+  const plate = plateFamilies(options, plan)
   // #6885 — an empty slot is no fault until the user acts: see `showMissing`.
   const warnings = checkPlan(options, plan, copies).filter(
-    (warning) => warning.kind !== 'no-choice' || showMissing || wasReset,
+    (warning) => warning.kind !== 'no-choice' || showMissing || resetFor === target,
   )
   // #2166 — with the Filament Track Switch any spool reaches either nozzle, so which
   // inlet it rests on is not shown: ScadBuddy's nozzle plan says where each prints.
@@ -435,7 +447,7 @@ export function FilamentPicker({
           onClick={() => {
             onChange(suggested.map((choice) => ({ ...choice })))
             setOpened(new Set())
-            setWasReset(true)
+            setResetFor(target)
           }}
           data-testid="reset-filaments"
         >
@@ -523,7 +535,7 @@ export function FilamentPicker({
               ? matched
               : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
           const heading = `filament-slot-${slot.slot_id}-heading`
-          const reasons = chosenSpool ? choiceReasons(slot, chosenSpool, trays) : []
+          const reasons = chosenSpool ? choiceReasons(slot, chosenSpool, trays, plate) : []
           return (
             // min-w-0: without it the slot grows to its widest row and runs off a phone's
             // screen (#944).

@@ -1,6 +1,18 @@
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
+import { linkingTools, type LinkKind } from './filamentLinks.js'
+import {
+  catalogNames,
+  matchesSearch,
+  orElse,
+  parseSearch,
+  SEARCH_ROUTES,
+  spoolSearchDoc,
+  spoolTrays,
+  typeSearchDoc,
+  typeSkus,
+} from './filamentSearch.js'
 import { defineTool, idempotencyKey, json, ToolError, type Tool } from './registry.js'
 
 // ScadBuddy's own filament inventory (#6261, epic #6260): the catalogs a spool type or a
@@ -96,13 +108,23 @@ const DATE = z
 /** The events `filament_spool_history` returns: the route sends them newest first. */
 const HISTORY_EVENTS = 50
 
+/** #6894: the Filament page's text search (`filamentSearch.ts`). */
+const searchQuery = z
+  .string()
+  .max(200)
+  .optional()
+  .describe(
+    'Text search, as the Filament page searches: every word must match some field, in any case. `#87` is spool 87 ' +
+      'only; `87` is spool 87 or any field holding 87; a hex matches with or without `#` (`#FF6A13`, `ff6a13`).',
+  )
+
 const csvRows = z
   .array(z.record(z.string(), z.string().nullable()))
   .min(1)
   .max(5000)
   .describe('One object per CSV row, column name to cell text')
 
-export const filamentTools: Tool[] = [
+const tools: Tool[] = [
   defineTool({
     name: 'filament_catalog_list',
     label: 'List a filament catalog',
@@ -232,18 +254,22 @@ export const filamentTools: Tool[] = [
     description:
       'The spool types, by code. A type is a product: what a maker sells under one code (brand, material, ' +
       'subtype, colour `#RRGGBBAA`, label weight, print values a spool inherits, `cost_per_kg`, `filament_id` of ' +
-      'its price book row). Archived types only with `include_archived`.',
-    input: z.object({ include_archived: z.boolean().default(false) }),
+      'its price book row). Archived types only with `include_archived`. `q` keeps the types whose code, brand, ' +
+      'material, subtype, colour name, hex or supplier SKU match it.',
+    input: z.object({ include_archived: z.boolean().default(false), q: searchQuery }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/filament/types'],
-    handler: async ({ include_archived }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/filament/types', { params: { query: { include_archived } } }),
-          'list the spool types',
-        ),
-      ),
+    routes: ['GET /api/v1/filament/types', 'GET /api/v1/filament/catalog/{kind}', ...SEARCH_ROUTES],
+    handler: async ({ include_archived, q }, { backend }) => {
+      const types = await ok(
+        backend.GET('/api/v1/filament/types', { params: { query: { include_archived } } }),
+        'list the spool types',
+      )
+      const tokens = parseSearch(q)
+      if (!tokens.length) return json(types)
+      const [names, skus] = await Promise.all([catalogNames(backend), orElse(typeSkus(backend), new Map<string, string[]>())])
+      return json(types.filter((type) => matchesSearch(typeSearchDoc(type, names, skus.get(type.id)), tokens)))
+    },
   }),
 
   defineTool({
@@ -598,21 +624,46 @@ export const filamentTools: Tool[] = [
       "override, else its type's), the fields it `overridden`, the `names` behind its ids, `low_stock`, and " +
       '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
-      'with `include_archived`.',
+      'with `include_archived`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
+      "place, tray, type code or type's supplier SKU match it.",
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
+      q: searchQuery,
     }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/filament/spools'],
-    handler: async ({ include_archived, needs_type }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
-          'list the spools',
+    routes: ['GET /api/v1/filament/spools', 'GET /api/v1/filament/types', 'GET /api/v1/filament/inventory', ...SEARCH_ROUTES],
+    handler: async ({ include_archived, needs_type, q }, { backend }) => {
+      const spools = await ok(
+        backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
+        'list the spools',
+      )
+      const tokens = parseSearch(q)
+      if (!tokens.length) return json(spools)
+      // The type codes, SKUs and trays only add to the search: one that cannot be read leaves its field out.
+      const [types, skus, trays] = await Promise.all([
+        orElse(
+          ok(backend.GET('/api/v1/filament/types', { params: { query: { include_archived: true } } }), 'list the spool types'),
+          [],
         ),
-      ),
+        orElse(typeSkus(backend), new Map<string, string[]>()),
+        orElse(spoolTrays(backend), new Map<string, string>()),
+      ])
+      const codes = new Map(types.map((type) => [type.id, type.code]))
+      return json(
+        spools.filter((spool) =>
+          matchesSearch(
+            spoolSearchDoc(spool, {
+              typeCode: spool.type_id ? codes.get(spool.type_id) : null,
+              skus: spool.type_id ? skus.get(spool.type_id) : undefined,
+              tray: trays.get(spool.id),
+            }),
+            tokens,
+          ),
+        ),
+      )
+    },
   }),
 
   defineTool({
@@ -1655,3 +1706,23 @@ export const filamentTools: Tool[] = [
       ),
   }),
 ]
+
+const catalogRow = (args: Record<string, unknown>): LinkKind => `catalog:${String(args.kind)}`
+
+/** #6869: each answer's entities carry their `ui_path` (`filamentLinks.ts`); these tools answer one kind of entity, or a list of it. */
+export const filamentTools: Tool[] = linkingTools(tools, {
+  filament_catalog_list: catalogRow,
+  filament_catalog_upsert: catalogRow,
+  filament_catalog_resolve: catalogRow,
+  filament_catalog_set_aliases: catalogRow,
+  filament_type_list: 'type',
+  filament_type_get: 'type',
+  filament_type_upsert: 'type',
+  filament_spool_list: 'spool',
+  filament_spool_get: 'spool',
+  filament_spool_upsert: 'spool',
+  filament_spool_archive: 'spool',
+  filament_spool_move: 'spool',
+  filament_location_list: 'location',
+  filament_location_upsert: 'location',
+})

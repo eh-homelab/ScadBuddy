@@ -752,3 +752,94 @@ fewer clicks; the builder cites the Bambu Studio source they compare against.
 - Task 19 (ruling): the picker's "Needs type" badge links to the spool page in a new tab and stops the click, so it never toggles the row's radio.
 - Task 20 (ruling): Task 20 writes the e2e specs and docs and commits; the controller opens the PR after the final review. The backend's full pytest and e2e-stack run in CI (machine load, Docker). The native `<select>` in four Filament files (Tasks 17-19) fails `ui-guard.test.ts`, so Task 20 switches them to the shared Select. The six tab routes are literal `path="filament/..."` routes, as the page-titles tripwire requires.
 - Final review (rulings): the API caches Bambuddy's tray assignments for 5 s, and for 30 s after a failed read it serves "no assignments" without asking, so a hung Bambuddy cannot stall every Filament page (cost: up to 5 s stale; a changed API key is seen up to 5 s late). `FilamentPlan.ids` keeps its `"bb"` default for old raw clients, documented on the field and in the print skill. An unexpected database error in a CSV import write stays a 500 with nothing written (no input found that reaches it). CSV cells cap at 200 characters, `note` at 2000. The move pickers leave out AMS tray places: loading a tray is the tray's job. The CSV import dialog stays open while its write runs. The rollback caveats (an old worker's settle 404, the 0706Z CHECK, the 0034Z plan rewrite) are in the PR body.
+
+### #6872: the rack preview's Glow check finds the spool the plan names
+
+The owner's print dialog (2026-11-21, printer 3DP-31B-598, library file 1000000763) said
+"A spool is not in the inventory, so Glow could not be checked." The Temporal history of
+`print-1e3d8e87…` (read with `.claude/skills/scadbuddy-run-forensics`) shows its plan:
+`{"slots": [{"slot_id": 2, "spool_id": -2049}], "ids": "sb"}`, HT-A chosen for itself on
+the native path. `rack_preview` looked every id up among SB spool numbers, and the native
+check passed it no inventory. So Decision 2's negative tray id was never found.
+
+15. R-6872-1: `rack_preview` finds each slot's spool by the id the plan carries
+    (`print_run._chosen_spools`). A positive id is an SB number, found in the inventory
+    rows. A negative id is a tray chosen for itself (`tray_spool_id`), and it names the SB
+    spool that tray holds: on the native check, the trays' view (`route_trays`, passed as
+    `held`); on Bambuddy's path, the inventory row placed at that tray on the plan's
+    Bambuddy printer. Why: Decision 2 keeps tray ids in plans, so a lookup by number alone
+    calls every tray choice "not in the inventory", and the Glow test never sees the spool.
+16. R-6872-2: `RackPickView.unchecked` names each slot that Glow could not be checked on
+    (`RackUncheckedSlot`: the slot, the reason, the SB number or the tray, and the tray's
+    or the slot's material and colour). The dialog shows one line per slot. A
+    `not_in_inventory` line links the Filament page's Spools tab with a plain router link
+    (`filamentLinks.spools`, #6869's helper). `glow_unchecked`
+    stays, so an older client still shows its one line. Why: issue ruling 2; a line that
+    names no slot or spool cannot be acted on.
+17. R-6872-3: three reasons, each said in its own words. `no_spool`: a rack-side slot of
+    the nozzle plan that the filament plan gives no spool. `empty_tray`: a tray chosen for
+    itself that reports no filament. `not_in_inventory`: an SB number the inventory does
+    not have, or a filled tray that holds no SB spool. The reasons live in `print_run.py`
+    (`UncheckedReason`, `_unfound_reason`); `rank.py` is unchanged (R-6872-5). Why: issue
+    ruling 3; a slot with no spool is not "not in the inventory".
+18. R-6872-4: the run's ranking on a native run judges Glow on the tray option, whose
+    material is the tray's reported `tray_type` and whose subtype is empty, not on the SB
+    spool's subtype. That is a separate gap, filed as #6876, not changed here. Why: it is
+    the run's choice, not the dialog's lookup, and its fix touches the picker's labels and
+    the profile resolution.
+19. R-6869-1: every filament entity the UI names links to its page: spools, types, invoices and invoice lines, suppliers, supplier products, price sheet rows, places, insert types and other catalog entries, printers, shopping items, and the rows of the spool timeline, the ledger, the tags and the Bambuddy sync errors. Why: the owner asked for it on 2026-11-21 (#6869); a name a person reads should take them to the record.
+20. R-6869-2: each path comes from one place. The frontend's is `frontend/src/lib/filamentLinks.ts` (`filamentLinks`, `anchors`), the agent's is `agent/src/tools/filamentLinks.ts` (`filamentPaths`). The two packages share no code, so `test-fixtures/filament/ui-paths.json` holds the vectors both are tested against, as the sell-draft vectors do. Every inline `/filament/...` string outside the router and the API clients is gone. Why: a route change then moves every link, and a drift between the UI and the assistant fails a test.
+21. R-6869-3: in-app links are relative router links (`Link`, `EntityLink`), or `AppLink` where the page already used it (Settings, the print dialog), which takes the host from `window.location`. No link uses `public_url`. A link inside the print dialog's picker rows opens a new tab and stops the click (`SpoolNumberLink`, as Task 19's "Needs type" badge). Why: the user stays on the host they are on, and a click on a link never picks a row.
+22. R-6869-4: the agent's filament tools (`filament_*` and the tray-spool tools) answer `ui_path` beside each entity's `id`, and `<field>_ui_path` (`type_ui_path`, `spool_ui_paths`, `invoice_line_ui_path`, `location_ui_path`, and a shopping item's `empty_spool_ui_path`, the spool an automatic item came from, #6874) beside each field that names another entity. `linkingTools` adds them to each JSON answer in the tool layer, from a table of what each tool answers, and appends `UI_PATH_NOTE` to every description, which tells the model to link names with the path as given. Why: the backend returns nothing path-like, the paths are a UI concern, and one wrapper covers 60 tools without touching each handler.
+23. R-6869-5: a target that is gone shows its name and "(deleted)" as text, never a link: a sync error whose item is gone (`label` null), a tag binding's spool missing from the read of every spool, archived included, and a confirmed invoice line's spool missing from that read. An archived target keeps its link: its page shows archived rows. Why: a link that 404s is worse than none.
+24. R-6869-6: no new pages. An entity with no page links to the list that shows it: a place to the Spools tab filtered to it by id (`?place=<id>`, Decision 29), a catalog entry to its catalog (`/filament/catalog?kind=`), an invoice line and a supplier product to their row on the invoice or supplier page by anchor (`#line-<id>`, `#product-<id>`; `useHashTarget` scrolls to the row once and marks it `aria-current="location"`), a shopping item to the shopping list, a printer to Settings → Printing's printer list, and a supplier's spend or invoice count to the Invoices tab filtered to it. Why: each of these already has a list that shows exactly it; a page of its own would add nothing.
+25. R-6869-7: a price point answers `invoice_id` beside `invoice_line_id` (`suppliers.py` joins `filament_invoice_lines`), so an invoice's price links to its line (the Type page's price history, `PriceCell`). Why: the row held only the line's id, and no route finds a line without its invoice.
+26. R-6869-8: text stays where no id travels or a link would sit inside a control: the CSV import's rows (a number only), the Tag panel's "Tag is on spool #N — Move it here" button, a ledger row's reference (a print run, or an invoice line with no invoice id), a printed label, and the options of a select or picker (the spool page's type and place selects, `SpoolMatchPicker`). A form shows its link beside the control instead: the spool page's header links its type, and its Storage section says "Spools in <place>". Why: a number has no route, and a link inside a control fights its click.
+27. R-6869-9: dense tables link catalog names too (the Spools table's material, brand and subtype, the cards, the forecast's material), styled as plain text until hovered. The Types tab's Product column, a sentence built from several names, stays text; the type's code is its link. Why: every name links, but a sentence of names has no one target.
+28. R-6872-5: `rank.rack_groups` gets no `chosen` parameter and `RackGroup` no per-slot
+    reasons in #6872; `RackGroup.glow_unchecked` stays a plain field. The per-slot reasons
+    for the run's own ranking come with #6876 and reuse `print_run._unfound_reason`'s tray
+    check. Why: claude-review on #6877 found that no production caller passed `chosen`, so
+    its reasons ran only in tests, and that it called every unfound tray id empty while the
+    preview checks the tray's report. (19-27 are #6869's.)
+29. R-6869-10: a place links by its id: `filamentLinks.location(id)` and the agent's `location_ui_path` are `/filament/spools?place=<id>`, the Spools tab's `place` filter, which keeps the spools whose `location_id` is that id. Its chip names the place's path ("Location: Workshop / Shelf A"). The Filter menu's `location` filter, by name, stays. Why: a place's own name repeats under other parents (two "Shelf" boxes), and a link by name listed the spools of both (the review of #6878).
+30. R-6869-11: a confirmed invoice's spools are links ("Spool #N", or "Spool #?" before the number is known) until a read of every spool that started after the confirm answers. Only a spool missing from that read is "(deleted)"; a failed read keeps the links. Why: the spool list read before the confirm lacks the spools the confirm made, so it said every new spool was deleted (the review of #6878); Decision 23 counts only a read that covers the spool.
+31. R-6869-12: the supplier page, opened at a product's anchor, lists that product even when it is archived and "Show archived" is off; the other archived products stay hidden, and the remembered toggle does not change. Why: a price sheet row's SKU links to its product's row, and an archived product's row was not on the page (the review of #6878).
+
+## Entity links audit (#6869)
+
+Each filament screen, the entities it names, and how each is linked now (paths from
+`lib/filamentLinks.ts`; Decisions 19-27).
+
+| Screen or component | Names | Linked as |
+| --- | --- | --- |
+| Spools tab table (`SpoolsTable`) | spool number, type code, material, brand, subtype, place | spool page, type page, catalog, catalog, catalog, spools in the place |
+| Spools tab cards (`SpoolCards`) | spool number, material, brand | spool page, catalog |
+| Spools tab forecast (`SpoolForecast`, also Metrics) | type label, material, spool number | type page, catalog, spool page |
+| Type proposals (`TypeProposals`) | spool numbers | spool page (already) |
+| Spool page (`SpoolPage`) | its type (header), its place, labels | type page, spools in the place, labels page |
+| Spool timeline (`SpoolTimeline`) | type, catalog rows and places in edits and moves, print, order | type page, catalog, spools in the place, print page, order page |
+| Spool purchasing (`SpoolPurchasing`) | invoice, its supplier, the type's suppliers | invoice line anchor, supplier page |
+| Tag panel (`TagPanel`) | the spool a scanned tag is on | spool page (the "Move it here" button stays text, Decision 26) |
+| Type page (`TypePage`) | its spools, their places | spool page, spools in the place |
+| Price panel (`PricePanel`, `PriceCell`) | supplier, SKU, an invoice's price | supplier page, product anchor, invoice line anchor |
+| Types tab (`TypesTab`, fill report) | type codes | type page |
+| Tags tab (`TagsTab`) | bound spool, history spools | spool page; a gone spool "(deleted)" |
+| Suppliers tab (`SuppliersTab`) | supplier, spend | supplier page, its invoices |
+| Supplier page (`SupplierPage`, `ProductsTable`, `PriceSheet`) | product types, SKUs | type page, product anchor (row marked) |
+| Invoices tab (`InvoicesTab`) | invoice number, supplier | invoice page, supplier page |
+| Invoice page (`InvoicePage`, `InvoiceHeaderForm`, `InvoiceLinesTable`) | supplier, duplicate invoice, line types, SKUs, spools | supplier page, invoice page, type page, product anchor, spool page; a gone spool "(deleted)"; each line anchored and marked |
+| Invoice upload and import (`InvoiceUpload`, `InvoiceImport`) | kept draft | invoice page |
+| Spool match picker (`SpoolMatchPicker`) | candidate spools | text inside the picker (Decision 26); the ticked ones link beside it |
+| Shopping list (`ShoppingListTab`) | an item's type, an automatic item's spool (#6874) | type page (an item typed by text stays text), spool page |
+| Locations tab (`LocationTree`) | place, its kind, its spools | spools in the place, catalog, spool page |
+| Catalog tab (`CatalogList`) | rows of the open catalog | the page itself |
+| Ledger tab (`LedgerTab`) | spool, a row's reference | spool page; the reference stays text (Decision 26) |
+| Metrics tab (`MetricsTab`) | consumption by material, brand, type, supplier or place; price series type and supplier; spend supplier and invoices | catalog, type page, supplier page, spools in the place; its invoices |
+| Labels page (`LabelsPage`) | spools on paper | text (printed) |
+| CSV import (`SpoolImport`) | spool numbers | text (no id, Decision 26) |
+| Settings → Filament sync (`sections/filament.tsx`) | items not synced | spool, type, supplier page, spools in the place, insert types catalog; a gone item "(deleted)" |
+| Check tray (`CheckTray`) | printer and tray | Settings → Printing's printers |
+| Print dialog (`FilamentPicker`, `TrayQuestion`, `NeedsTypeBadge`) | SB spool numbers | spool page in a new tab |
+| Price book (`FilamentsEditor`, `QuoteFilaments`, `ArchiveQuote`, storefront `ListingEditor`) | linked type, the Types tab | type page, Types tab |
+| Agent filament tools | every entity in an answer | `ui_path`, `<field>_ui_path` (Decision 22) |
