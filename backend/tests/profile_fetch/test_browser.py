@@ -1,7 +1,7 @@
 """The profile-fetch browser service's process (#6780): it imports no Temporal, CRUD or
 database code, signs in at start (a login refused on every try or a browser that does not
-launch ends the process with 1), forbids core dumps before any browser launches, and drops the 3DFP login
-from its environment once read."""
+launch ends the process with 1), forbids core dumps before any browser launches, and drops
+the 3DFP login from its environment once read."""
 
 from __future__ import annotations
 
