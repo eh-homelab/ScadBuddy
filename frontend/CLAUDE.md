@@ -294,7 +294,7 @@ same way, `vite.config.ts`).
   products, trays from `/filament/inventory`), and every Filament tab has the quick find
   (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
-  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`). The price book is edited on Filament → Types, not in Settings; the ledger
+  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`); both tests run `test-fixtures/filament/search-vectors.json`. The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
   configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
   `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with

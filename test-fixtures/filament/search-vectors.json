@@ -1,0 +1,79 @@
+{
+  "comment": "#6894: the filament text search's cases. frontend/src/lib/filamentSearch.test.ts and agent/test/filamentSearch.test.ts both run every group, so the two copies of the matcher cannot drift apart. A spool group gives the spool and its extras; a type group gives the type, its catalog names and its SKUs.",
+  "groups": [
+    {
+      "name": "a pink Bambu spool in a tray",
+      "kind": "spool",
+      "spool": {
+        "number": 87,
+        "colour_name": null,
+        "rgba": null,
+        "names": { "brand": "Bambu Lab", "material": "PLA", "subtype": "Basic", "location": "Shelf A" },
+        "effective": { "colour_name": "Hot Pink", "rgba": "#F5547CFF" }
+      },
+      "extras": { "typeCode": "BL-PLA-BASIC-HOT-PINK", "skus": ["A00-R3"], "tray": "H2C AMS-A slot 2" },
+      "cases": [
+        { "query": "#87", "match": true },
+        { "query": "87", "match": true },
+        { "query": "#8", "match": false },
+        { "query": "#187", "match": false },
+        { "query": "bambu", "match": true },
+        { "query": "pla", "match": true },
+        { "query": "BASIC", "match": true },
+        { "query": "hot pink", "match": true },
+        { "query": "shelf", "match": true },
+        { "query": "bl-pla-basic", "match": true },
+        { "query": "a00-r3", "match": true },
+        { "query": "ams-a", "match": true },
+        { "query": "h2c slot", "match": true },
+        { "query": "pink pla", "match": true },
+        { "query": "pink petg", "match": false },
+        { "query": "#F5547C", "match": true },
+        { "query": "f5547c", "match": true },
+        { "query": "5547cff", "match": true },
+        { "query": "#00FF00", "match": false },
+        { "query": "f5", "match": false },
+        { "query": "", "match": true },
+        { "query": "  ", "match": true },
+        { "query": "#", "match": true }
+      ]
+    },
+    {
+      "name": "#87 is a number only, never a hex or a text",
+      "kind": "spool",
+      "spool": {
+        "number": 3,
+        "names": { "location": "Bin 87" },
+        "effective": { "colour_name": "Grey", "rgba": "#878787FF" }
+      },
+      "extras": {},
+      "cases": [
+        { "query": "#87", "match": false },
+        { "query": "87", "match": true }
+      ]
+    },
+    {
+      "name": "a spool with no effective colour reads its own",
+      "kind": "spool",
+      "spool": { "number": 5, "colour_name": "Teal", "rgba": "#1B9AAAFF", "names": {}, "effective": {} },
+      "extras": {},
+      "cases": [{ "query": "teal 1b9aaa", "match": true }]
+    },
+    {
+      "name": "a gold silk type",
+      "kind": "type",
+      "type": { "code": "EL-PLA-SILK-GOLD", "brand_id": "b", "material_id": "m", "subtype_id": "s", "colour_name": "Gold", "rgba": "#D4AF37FF" },
+      "names": { "b": "Elegoo", "m": "PLA", "s": "Silk" },
+      "skus": ["ELG-SILK-GLD"],
+      "cases": [
+        { "query": "elegoo silk", "match": true },
+        { "query": "gold", "match": true },
+        { "query": "#d4af37", "match": true },
+        { "query": "d4af37", "match": true },
+        { "query": "elg-silk", "match": true },
+        { "query": "el-pla", "match": true },
+        { "query": "#1", "match": false }
+      ]
+    }
+  ]
+}
