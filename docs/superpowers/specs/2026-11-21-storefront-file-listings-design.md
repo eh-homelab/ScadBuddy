@@ -161,7 +161,7 @@ answers. Line numbers are on that commit.
 22. **The content store streams a held blob.** `ContentStore.get(ref)` streams a blob, and
     `stat(key)` gives its ref (`store/content.py:319`, `:432`). Read.
 23. **An order item's print reads the live file.** A `library_file` item prints through
-    `start_library_run` (called from `item_print_run`, `orders/operations.py:939`), whose run source is
+    `start_library_run` (called from `item_print_run`, `orders/operations.py:916`), whose run source is
     `SourceSpec(kind="library", file_id=…)` (`api/library_print.py:1407-1450`, `:1445`): the
     print worker reads the file from the library that serves at print time. Read.
 24. **Remembered choices outlive the file.** `model_print_choices` loses a scope's row only
