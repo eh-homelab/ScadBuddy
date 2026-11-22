@@ -7,8 +7,13 @@ import type { StoreEstimate } from '../api/client'
  * grams or print time (owner, 2026-11-14). While the slice runs, the page says it is
  * working the price out. With no firm price (the slice failed, or the shop cannot slice
  * this design), it shows no number at all: the shop prices the design by hand.
+ *
+ * #6921: the owner's rule is "always show a price". With `updating`, the price on screen
+ * is not yet the firm price of the choices on screen (a `last` price, or the price of the
+ * choices before a change): it stays visible, marked as updating, until the render's
+ * estimate answers. A `last` price is never shown as firm, whatever `updating` says.
  */
-export function Estimate({ estimate }: { estimate: StoreEstimate }) {
+export function Estimate({ estimate, updating = false }: { estimate: StoreEstimate; updating?: boolean }) {
   if (estimate.source === 'pending') {
     return (
       <div className="sf-estimate" role="status">
@@ -16,7 +21,8 @@ export function Estimate({ estimate }: { estimate: StoreEstimate }) {
       </div>
     )
   }
-  if (estimate.source !== 'slice' || estimate.price_minor == null || !estimate.currency) {
+  const priced = (estimate.source === 'slice' || estimate.source === 'last') && estimate.price_minor != null && estimate.currency
+  if (!priced) {
     return (
       <div className="sf-estimate" role="status">
         <p className="sf-estimate-price">We price this design by hand</p>
@@ -24,7 +30,15 @@ export function Estimate({ estimate }: { estimate: StoreEstimate }) {
       </div>
     )
   }
-  const price = formatMoney(estimate.price_minor, estimate.currency, estimate.minor_exponent ?? 2)
+  const price = formatMoney(estimate.price_minor ?? 0, estimate.currency ?? '', estimate.minor_exponent ?? 2)
+  if (updating || estimate.source === 'last') {
+    return (
+      <div className="sf-estimate sf-estimate-updating" role="status" aria-busy="true">
+        <p className="sf-estimate-price">{`${price} for one`}</p>
+        <p className="sf-estimate-note">Updating this price…</p>
+      </div>
+    )
+  }
   return (
     <div className="sf-estimate" role="status">
       <p className="sf-estimate-price">{`${price} for one`}</p>

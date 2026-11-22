@@ -86,6 +86,7 @@ from scadbuddy.orders.quote import (
     QuoteRun,
     SlicedPlate,
     SliceQuoteRequest,
+    SlotColours,
     SlotPresets,
     library_file_gone,
     operation_quote_id,
@@ -219,11 +220,23 @@ class PreviewSlicer:
         return await self._start(request, subject, output_id=output_id, slot_presets=slot_presets)
 
     async def start_library(
-        self, file_id: int, request: SliceQuoteRequest, subject: str
+        self,
+        file_id: int,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+        slot_colours: SlotColours | None = None,
     ) -> list[PreviewStarted]:
         """A library file item's plates (#5544), read as the dialog's background slice
         of a library file reads it (``bambuddy/operations.py`` ``preview_run``)."""
-        return await self._start(request, subject, file_id=file_id)
+        return await self._start(
+            request,
+            subject,
+            file_id=file_id,
+            slot_presets=slot_presets,
+            slot_colours=slot_colours,
+        )
 
     async def _start(
         self,
@@ -233,6 +246,7 @@ class PreviewSlicer:
         output_id: str | None = None,
         file_id: int | None = None,
         slot_presets: SlotPresets | None = None,
+        slot_colours: SlotColours | None = None,
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
@@ -276,6 +290,8 @@ class PreviewSlicer:
                 route=route,
                 reads=reads,
                 sb=sb,
+                slot_presets=slot_presets,
+                slot_colours=slot_colours,
             )
         assert output_id is not None
         outputs = LocalOutputs(core.outputs, core.catalogue)
@@ -312,6 +328,7 @@ class PreviewSlicer:
             reads=reads,
             sb=sb,
             slot_presets=slot_presets,
+            slot_colours=slot_colours,
         )
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:

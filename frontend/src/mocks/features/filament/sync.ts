@@ -60,6 +60,42 @@ let unreadable = false
 /** #6907 — the links left are only colours' links to Bambuddy's colour catalog. */
 let onlyColours = false
 
+/**
+ * #6905 — `GET /api/v1/filament/sync/passes`: the pass history, newest first. The seed holds
+ * 14 passes ending at the seed's last pass: clean ones on the timer, one that failed on
+ * ScadBuddy's own API (`crud_unavailable:transport`) and one skipped, so the list has a second
+ * page at 10. A pass that lands is added on top. The cursor is the index of the next row.
+ */
+const passId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+
+function seedPasses(): S['SyncPass'][] {
+  const end = new Date(FIRST_PASS).getTime()
+  return Array.from({ length: 14 }, (_, i) => {
+    const ended = new Date(end - i * 5 * 60_000)
+    const started = new Date(ended.getTime() - 4_000)
+    const base: S['SyncPass'] = {
+      id: passId(i + 1),
+      instance: '0123456789ab',
+      trigger: i === 0 ? 'full' : 'timer',
+      started_at: started.toISOString(),
+      ended_at: ended.toISOString(),
+      written: i === 0 ? 4 : 0,
+      failed: i === 0 ? 2 : 0,
+      deferred: 0,
+      conflicts: 0,
+      unmapped_k: 0,
+      skipped: null,
+      instance_changed: false,
+      error: null,
+    }
+    if (i === 2) return { ...base, trigger: 'change', error: 'crud_unavailable:transport' }
+    if (i === 3) return { ...base, skipped: 'nothing_pushes' }
+    return base
+  })
+}
+
+let passes = seedPasses()
+
 /** What the seed's links number when they belong to another Bambuddy. */
 const SEED_LINKS = { spools: 12, suppliers: 2, locations: 3, insert_types: 1, filaments: 4, colours: 5, intents: 1, ignored: 0 }
 const NO_LINKS = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, intents: 0, errors: 0, ignored: 0 }
@@ -76,6 +112,7 @@ export function reset() {
   changedSincePull = false
   unreadable = false
   onlyColours = false
+  passes = seedPasses()
 }
 
 /** #6907 — the other Bambuddy's links are only colours' links (its spools and the rest were unlinked). */
@@ -144,6 +181,25 @@ function land() {
   lastPassStartedAt = requestedAt ?? lastPassAt
   // A held-back row is never sent, so only the refused one is tried again.
   errors = errors.map((error) => (error.error === 'name_taken' ? error : { ...error, attempts: error.attempts + 1, at: lastPassAt }))
+  // #6905 — and the pass is a row of the history, on top.
+  passes = [
+    {
+      id: passId(1000 + passes.length),
+      instance: configured(),
+      trigger: 'full',
+      started_at: lastPassStartedAt,
+      ended_at: lastPassAt,
+      written: 4,
+      failed: errors.filter((error) => error.error !== 'name_taken').length,
+      deferred: 0,
+      conflicts: 0,
+      unmapped_k: 0,
+      skipped: null,
+      instance_changed: false,
+      error: null,
+    },
+    ...passes,
+  ]
 }
 
 function skipped(): S['SyncStatus']['skipped'] {
@@ -184,6 +240,17 @@ export const handlers = [
       }
     }
     return HttpResponse.json(status())
+  }),
+  http.get(`${BASE}/passes`, ({ request }) => {
+    const params = new URL(request.url).searchParams
+    const limit = Number(params.get('limit') ?? 20)
+    const cursor = params.get('cursor')
+    const from = cursor === null ? 0 : Number(cursor)
+    if (!Number.isInteger(from) || from < 0) return problem(422, 'Unprocessable Content', 'the cursor is not one this pass history gave')
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) return problem(422, 'Unprocessable Content', 'limit must be 1 to 200')
+    const page = passes.slice(from, from + limit)
+    const next = from + limit < passes.length ? String(from + limit) : null
+    return HttpResponse.json({ passes: page, next_cursor: next } satisfies S['SyncPassPage'])
   }),
   http.post(`${BASE}/run`, () => {
     restoreFilamentSync()

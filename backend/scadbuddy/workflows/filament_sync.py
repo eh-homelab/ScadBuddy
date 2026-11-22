@@ -40,6 +40,7 @@ from temporalio.exceptions import ActivityError
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.filament.bb_sync_models import (
         SYNC_PASS_ACTIVITY,
+        PassTrigger,
         SyncPassInput,
         SyncPassResult,
     )
@@ -84,10 +85,12 @@ class FilamentBbSync:
         interval_s = start.interval_s
         passes = 0
         while True:
-            full = await self._wait(interval_s)
+            full, trigger = await self._wait(interval_s)
             for _ in range(MAX_PASSES_IN_A_ROW):
-                result = await self._pass(start.instance, full, interval_s)
+                result = await self._pass(start.instance, full, interval_s, trigger)
                 passes += 1
+                # #6905: the passes after the first in a row ran because one left work.
+                trigger = "more"
                 if result is None:
                     break
                 interval_s = result.interval_s
@@ -118,26 +121,31 @@ class FilamentBbSync:
                     )
                 )
 
-    async def _wait(self, interval_s: float) -> bool:
-        """Until a signal (then `DEBOUNCE`) or the timer; whether the pass is full."""
+    async def _wait(self, interval_s: float) -> tuple[bool, PassTrigger]:
+        """Until a signal (then `DEBOUNCE`) or the timer; whether the pass is full, and
+        what started it (#6905): ``timer``, ``full`` (a signal that asked for a full
+        pass) or ``change``. It sends the same commands as before #6905."""
         if not self.pending:
             timeout = timedelta(seconds=interval_s) if interval_s > 0 else None
             try:
                 await workflow.wait_condition(lambda: self.pending, timeout=timeout)
             except TimeoutError:
-                return True
+                return True, "timer"
         await workflow.sleep(DEBOUNCE)
         full = self.full
         self.pending = False
         self.full = False
-        return full
+        return full, "full" if full else "change"
 
-    async def _pass(self, instance: str, full: bool, interval_s: float) -> SyncPassResult | None:
-        """One pass; None when its every attempt failed."""
+    async def _pass(
+        self, instance: str, full: bool, interval_s: float, trigger: PassTrigger
+    ) -> SyncPassResult | None:
+        """One pass; None when its every attempt failed. ``trigger`` goes in the
+        activity's input only (#6905), so the commands are those of before."""
         try:
             result: SyncPassResult = await workflow.execute_activity(
                 SYNC_PASS_ACTIVITY,
-                SyncPassInput(instance=instance, full=full, interval_s=interval_s),
+                SyncPassInput(instance=instance, full=full, interval_s=interval_s, trigger=trigger),
                 result_type=SyncPassResult,
                 start_to_close_timeout=PASS_TIMEOUT,
                 heartbeat_timeout=PASS_HEARTBEAT,

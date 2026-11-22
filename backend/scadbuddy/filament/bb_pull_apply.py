@@ -22,6 +22,7 @@ from temporalio.client import Client
 
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.core import settings as core_settings
+from scadbuddy.core.cancel import CancelToken, check, watched
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import bambuddy_usage, sensors
 from scadbuddy.filament.bambuddy_pull import (
@@ -101,10 +102,11 @@ class LocalBbPull:
         if links and links_elsewhere(self.filament, instance):
             raise PullInstanceChangedError(instance)
 
-    async def apply(self, body: PullBody) -> PullApplied:
-        return await asyncio.to_thread(self._apply, body)
+    async def apply(self, body: PullBody, cancel: CancelToken | None = None) -> PullApplied:
+        """``cancel``: the CRUD route's (`api/disconnect.py`), which stops the pull (`pull`)."""
+        return await asyncio.to_thread(self._apply, body, cancel)
 
-    def _apply(self, body: PullBody) -> PullApplied:
+    def _apply(self, body: PullBody, cancel: CancelToken | None = None) -> PullApplied:
         """The pull as `read_and_pull` ran it before #6772, from the worker's read: the
         rows parsed, `pull`, then which usage rows would book and are not booked yet, for
         the archives the worker reads next. That check fails alone, logged."""
@@ -122,6 +124,7 @@ class LocalBbPull:
             suppliers=body.suppliers,
             locations=body.locations,
             instance=body.instance,
+            cancel=cancel,
         )
         report.catalog_failed = report.catalog_failed or body.catalog is None
         report.invalid = len(bad)
@@ -141,16 +144,19 @@ class LocalBbPull:
         with self.filament.spools.transaction() as conn:
             return bambuddy_usage.unbooked(conn, usage)
 
-    async def book_usage(self, body: UsageBody) -> UsageBooked:
-        return await asyncio.to_thread(self._book_usage, body)
+    async def book_usage(self, body: UsageBody, cancel: CancelToken | None = None) -> UsageBooked:
+        """One transaction. ``cancel`` (as `apply`'s) rolls it back whole unless the booking
+        had already reached its commit: the last step before the commit checks it."""
+        return await asyncio.to_thread(self._book_usage, body, cancel)
 
-    def _book_usage(self, body: UsageBody) -> UsageBooked:
+    def _book_usage(self, body: UsageBody, cancel: CancelToken | None = None) -> UsageBooked:
         self._check(body.instance)
         archives: Sequence[Archive] = body.archives
-        with self.filament.spools.transaction() as conn:
+        with self.filament.spools.transaction() as conn, watched(cancel, conn):
             booked = bambuddy_usage.book_usage(
                 conn, body.usage, archives, actor=self._actor(body.pull_id)
             )
+            check(cancel)
         return UsageBooked(booked=booked.booked, unlinked=booked.unlinked)
 
     async def ha_states(self, body: HaBody) -> None:

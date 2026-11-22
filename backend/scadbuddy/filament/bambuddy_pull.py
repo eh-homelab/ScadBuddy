@@ -132,6 +132,7 @@ from scadbuddy.bambuddy.models import (
     as_utc,
 )
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.core.cancel import CancelledError, CancelToken, check, watched
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger
@@ -323,6 +324,7 @@ def pull(
     suppliers: Sequence[BbSupplier] | None = None,
     locations: Sequence[BbLocation] | None = None,
     instance: str | None = None,
+    cancel: CancelToken | None = None,
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
     says, after ``catalog`` (BB's spool catalog) is mapped to insert types, and BB's
@@ -343,7 +345,13 @@ def pull(
 
     ``instance`` is the Bambuddy read (`bb_sync_nudge.instance_for`): each transaction
     that links a row or a spool records it as the links' instance when none is
-    (`record_instance`, Decision 12)."""
+    (`record_instance`, Decision 12).
+
+    ``cancel`` (the CRUD route's, cancelled when the print worker goes away, #6902) stops
+    the pull between BB spools and cancels the running statement, so the spool in flight
+    rolls back (unless its transaction had already reached its commit, after its last
+    check) and `CancelledError` or ``QueryCanceled`` is raised; the spools pulled before it
+    stay, each a whole transaction that the next pull leaves as it is."""
     report = PullReport()
     newest: dict[int, datetime] = {}
     for row in usage:
@@ -369,14 +377,20 @@ def pull(
         setattr(report, f"{kind}s", changed)
         report.conflicts += conflicts
         report.claimed += claimed
+    check(cancel)
     run = _Run(store, now, actor, pulls, defer_archived, *_context(store, pulls))
     for bb in sorted(spools, key=lambda s: s.archived_at is not None):
+        check(cancel)
         try:
-            with store.spools.transaction() as conn:
+            with store.spools.transaction() as conn, watched(cancel, conn):
                 conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
                 skipped: list[str] = []
                 outcome = _one(conn, run, bb, skipped, newest.get(bb.id))
                 record_instance(conn, instance)
+                check(cancel)
+        except (CancelledError, errors.QueryCanceled):
+            # The caller went away: the pull stops, never a spool that failed.
+            raise
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",

@@ -1230,6 +1230,32 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_sync_passes',
+    label: 'Read the Bambuddy sync history',
+    description:
+      "The ScadBuddy-to-Bambuddy filament sync's passes, newest first, failed ones too (filament_sync_status " +
+      'holds only the last). Each has its `id`, the Bambuddy `instance`, its `trigger` (`timer`, `change`: a ' +
+      'write\'s nudge, `full`: a full pass asked for such as Sync now, `more`: the pass before it left writes; ' +
+      'null when unknown), `started_at`, `ended_at`, the counts `written`, `failed`, `deferred`, `conflicts` and ' +
+      '`unmapped_k`, `skipped` (`no_bambuddy` or `nothing_pushes`), `instance_changed` and `error` (a label, null ' +
+      "when it worked; `crud_unavailable:<failure>` or `crud_refused:<status>` when ScadBuddy's own API failed " +
+      'during the pass, `internal` for any other failure outside Bambuddy). A page holds up to `limit` passes (at most 200); when `next_cursor` is set, pass it back ' +
+      'as `cursor` for the next page. Passes older than the setting `filament_sync_pass_ttl_days` (30 by default) ' +
+      'are gone. Reads ScadBuddy only.',
+    input: z.object({
+      cursor: z.string().optional(),
+      limit: z.number().int().min(1).max(200).default(20),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sync/passes'],
+    handler: async (query, { backend }) =>
+      json(
+        await ok(backend.GET('/api/v1/filament/sync/passes', { params: { query } }), 'read the Bambuddy sync history'),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_sync_run',
     label: 'Sync with Bambuddy now',
     description:

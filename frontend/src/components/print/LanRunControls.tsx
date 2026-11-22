@@ -66,9 +66,11 @@ export function LanRunControls({
           ? `The printer has finished. Clear the plate of ${printer}, then start the next print. ${waiting} still to start.`
           : control.queued && control.queued_for_print
             ? `Queued until ${printer} has finished the print it is running. ${waiting} still to start.`
-            : control.queued
-              ? `Queued until the plate of ${printer} is clear: it holds a print that has ended. ${waiting} still to start.`
-              : `${waiting} still to start, each once the printer has finished the one before.`}
+            : control.queued && control.printer_idle
+              ? `Queued until the plate of ${printer} is said clear. It reads idle, but its plate may still hold the print before: clear it if so. ${waiting} still to start.`
+              : control.queued
+                ? `Queued until the plate of ${printer} is clear: it holds a print that has ended. ${waiting} still to start.`
+                : `${waiting} still to start, each once the printer has finished the one before.`}
       </p>
       <div className="flex flex-wrap gap-2">
         {control.awaiting_clear && (

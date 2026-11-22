@@ -1,9 +1,10 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../../api/client'
 import {
   getResetPreview,
   getRfidStatus,
   getSyncStatus,
+  listSyncPasses,
   reconcileRfid,
   resetSyncLinks,
   runSync,
@@ -14,6 +15,7 @@ import {
   type RfidReconcileReport,
   type RfidStatus,
   type SyncError,
+  type SyncPass,
   type SyncStatus,
 } from '../../../api/filament'
 import { statusAfterKeptReset } from './resetStatus'
@@ -35,12 +37,24 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
+import { Input } from '@/components/ui/input'
 import { FieldRow } from '../controls'
 import { docOf } from '../fields'
 import { FieldBadge, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings, type BackendSettings } from '../useBackendSettings'
-import { FETCH_NOZZLES, fieldsOf, nozzlesValue, SYNC_KINDS, syncParts, syncValue, type SyncDirection, type SyncKind } from '../values'
+import {
+  FETCH_NOZZLES,
+  fieldsOf,
+  nozzlesValue,
+  SYNC_KINDS,
+  SYNC_PASS_TTL,
+  syncParts,
+  syncValue,
+  toPatchValue,
+  type SyncDirection,
+  type SyncKind,
+} from '../values'
 
 export const id = 'filament'
 export const area: AreaId = 'printing'
@@ -181,6 +195,10 @@ const PROBLEMS = 'https://scadbuddy.dev/problems/'
 function syncErrorText(label: string): string {
   if (label === 'name_taken') return 'Not sent: another Bambuddy row has this name. Rename one of them.'
   if (label === 'internal') return 'ScadBuddy failed while it wrote this.'
+  // #6905 — a pass that failed on ScadBuddy's own API (`bb_sync_run.failure_label`).
+  if (label.startsWith('crud_unavailable:'))
+    return label.endsWith(':transport') ? "ScadBuddy's own API did not answer in time." : "ScadBuddy's own API could not be reached."
+  if (label.startsWith('crud_refused:')) return `ScadBuddy's own API refused a step (HTTP ${label.slice('crud_refused:'.length)}).`
   const [type, status] = label.startsWith(PROBLEMS) ? label.slice(PROBLEMS.length).split(':') : [label, undefined]
   const code = status ? ` (HTTP ${status})` : ''
   switch (type) {
@@ -571,6 +589,173 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
   )
 }
 
+/** #6905 — what started a pass, as a person says it. */
+const TRIGGER_TEXT: Record<NonNullable<SyncPass['trigger']>, string> = {
+  timer: 'On the timer',
+  change: 'After a change',
+  full: 'Full pass',
+  more: 'Follow-up',
+}
+
+/** How long a pass took, from its worker's start to the server's record; null when the clocks disagree. */
+function duration(pass: SyncPass): string | null {
+  const ms = new Date(pass.ended_at).getTime() - new Date(pass.started_at).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return null
+  if (ms < 1_000) return 'under a second'
+  const seconds = Math.round(ms / 1_000)
+  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`
+}
+
+/** A pass's outcome: it failed, did nothing, or worked. */
+function outcome(pass: SyncPass): 'failed' | 'idle' | 'ok' {
+  if (pass.error) return 'failed'
+  if (pass.skipped || pass.instance_changed) return 'idle'
+  return 'ok'
+}
+
+const OUTCOME_RULE = { failed: 'bg-warn', idle: 'bg-line-strong', ok: 'bg-ok' } as const
+
+/** #6905 — why a past pass did nothing. */
+const PASS_SKIPPED_TEXT: Record<NonNullable<SyncPass['skipped']>, string> = {
+  no_bambuddy: 'Skipped: no Bambuddy was set up.',
+  nothing_pushes: 'Skipped: nothing was set to go to Bambuddy.',
+}
+
+function passLine(pass: SyncPass): string {
+  if (pass.skipped) return PASS_SKIPPED_TEXT[pass.skipped]
+  if (pass.instance_changed) return 'Stopped: the links belong to another Bambuddy.'
+  if (pass.error && !pass.written && !pass.failed) return 'Nothing written.'
+  const { written, failed, deferred, conflicts, unmapped_k } = pass
+  return countsLine({ written, failed, deferred, conflicts, unmapped_k })
+}
+
+/**
+ * #6905 — the sync's recent passes (`GET /filament/sync/passes`), newest first, failed ones
+ * too, a page at a time. Each row's rule says how it went. `lastPassAt` is the status's
+ * last pass: when it moves, the first page is read again.
+ */
+function SyncPassesRow({ lastPassAt, form }: { lastPassAt: string | null | undefined; form: BackendSettings }) {
+  const [passes, setPasses] = useState<SyncPass[] | null>(null)
+  const [cursor, setCursor] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [reading, setReading] = useState(true)
+  const [failed, setFailed] = useState(false)
+  // Bumped by each read of the first page, so an older page asked for before it is dropped:
+  // appended to the new first page, it would skip the rows the new passes pushed down.
+  const generation = useRef(0)
+
+  useEffect(() => {
+    let stopped = false
+    const mine = ++generation.current
+    setReading(true)
+    listSyncPasses({ limit: PASS_PAGE })
+      .then((page) => {
+        if (stopped) return
+        setPasses(page.passes)
+        setCursor(page.next_cursor)
+        setFailed(false)
+      })
+      .catch(() => {
+        if (!stopped) setFailed(true)
+      })
+      .finally(() => {
+        if (generation.current === mine) setReading(false)
+      })
+    return () => {
+      stopped = true
+    }
+  }, [lastPassAt])
+
+  async function older() {
+    if (!cursor) return
+    const mine = generation.current
+    setLoading(true)
+    try {
+      const page = await listSyncPasses({ limit: PASS_PAGE, cursor })
+      if (generation.current !== mine) return
+      setPasses((now) => [...(now ?? []), ...page.passes])
+      setCursor(page.next_cursor)
+      setFailed(false)
+    } catch {
+      if (generation.current === mine) setFailed(true)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // The stored value while the field holds one save would refuse.
+  const typed = toPatchValue('filament_sync_pass_ttl_days', form.value('filament_sync_pass_ttl_days'), form.settings)
+  const stored = form.settings.filament_sync_pass_ttl_days
+  const kept = typeof typed === 'number' ? typed : typed === null ? SYNC_PASS_TTL.default : (stored ?? SYNC_PASS_TTL.default)
+  return (
+    <FieldRow id="filament-sync-passes" label="Recent passes" help={`Every pass, failed ones too, kept for ${plural(kept, 'day', 'days')}.`}>
+      <div className="flex flex-col gap-2 text-sm">
+        {passes && passes.length === 0 && <p className="text-muted-foreground">No pass recorded yet.</p>}
+        {passes && passes.length > 0 && (
+          <ol id="filament-sync-passes" aria-label="Recent sync passes" className="flex flex-col gap-1.5">
+            {passes.map((pass) => {
+              const state = outcome(pass)
+              const took = duration(pass)
+              return (
+                <li key={pass.id} data-outcome={state} className="flex gap-2.5">
+                  <span aria-hidden className={`w-0.5 shrink-0 rounded-full ${OUTCOME_RULE[state]}`} />
+                  <div className="flex min-w-0 flex-col">
+                    <p>
+                      <When at={pass.ended_at} />
+                      <span className="text-muted-foreground">
+                        {pass.trigger && `, ${TRIGGER_TEXT[pass.trigger].toLowerCase()}`}
+                        {took && `, took ${took}`}
+                      </span>
+                    </p>
+                    <p className={state === 'idle' ? 'text-muted-foreground' : undefined}>{passLine(pass)}</p>
+                    {pass.error && <p className="text-warn">Failed: {syncErrorText(pass.error)}</p>}
+                  </div>
+                </li>
+              )
+            })}
+          </ol>
+        )}
+        {failed && <p className="text-warn">The recent passes could not be read. Reload the page to try again.</p>}
+        {cursor && (
+          <div>
+            <Button type="button" size="sm" variant="ghost" disabled={loading || reading} onClick={() => void older()}>
+              {loading && <Spinner />}
+              Show older passes
+            </Button>
+          </div>
+        )}
+      </div>
+    </FieldRow>
+  )
+}
+
+/** #6905 — how many days a pass's row is kept. A stored choice, saved with "Save Filament". */
+function SyncPassTtlRow({ form }: { form: BackendSettings }) {
+  return (
+    <FieldRow
+      id="setting-filament_sync_pass_ttl_days"
+      {...docOf(form.settings, 'filament_sync_pass_ttl_days')}
+      error={form.errors.filament_sync_pass_ttl_days}
+    >
+      <Input
+        id="setting-filament_sync_pass_ttl_days"
+        type="number"
+        min={SYNC_PASS_TTL.min}
+        max={SYNC_PASS_TTL.max}
+        step={1}
+        inputMode="numeric"
+        placeholder={String(SYNC_PASS_TTL.default)}
+        value={form.value('filament_sync_pass_ttl_days')}
+        onChange={(event) => form.setField('filament_sync_pass_ttl_days', event.target.value)}
+        className="sb-num max-w-32"
+      />
+    </FieldRow>
+  )
+}
+
+/** #6905 — the passes one page of the history holds. */
+const PASS_PAGE = 10
+
 /**
  * #6868 — whether a spool that reaches 0 g, or is archived, adds its type to the shopping
  * list. A stored choice (no environment value, so no badge), on by default, saved with
@@ -718,6 +903,8 @@ export function Component() {
       <RuntimeRows form={form} section="filament" />
       <SyncRows form={form} />
       <SyncStatusRow status={syncStatus} />
+      <SyncPassesRow lastPassAt={syncStatus.data?.last_pass_at} form={form} />
+      <SyncPassTtlRow form={form} />
       <OverrideRow />
       <FetchNozzlesRow form={form} />
       <AutoShoppingRow form={form} />

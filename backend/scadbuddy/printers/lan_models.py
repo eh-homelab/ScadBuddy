@@ -83,6 +83,8 @@ BUSY_STATES = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
 #: The ended states whose plate may still hold the print (#6871): a run waits for a
 #: cleared plate here only when ``lan_require_plate_clear`` asks it to.
 ENDED_STATES = frozenset({"FINISH", "FAILED"})
+#: A printer with no print at all (#6871): neither busy nor holding an ended one.
+IDLE_STATES = frozenset({"IDLE"})
 
 
 class LanQueued(BaseModel):

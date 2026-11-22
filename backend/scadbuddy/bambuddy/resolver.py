@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentPlan,
     FilamentWarning,
     SpoolOption,
+    normalise_colour,
     spool_label,
 )
 from scadbuddy.bambuddy.models import (
@@ -318,6 +319,7 @@ def resolve(
     spool_presets: Mapping[int, Sequence[EffectivePreset]],
     *,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
 ) -> Resolved:
     """Every slicer preset for ``plan`` on ``options``. ``spool_presets`` are each chosen
     spool's effective presets (#6262 F1, `filament.presets.effective_presets`), keyed by
@@ -327,8 +329,11 @@ def resolve(
     A slot needs a spool, except a slot in ``slot_presets`` (a storefront price's slice,
     #6574): the presets of its filament type, by slot id. Such a slot takes its type's
     preset for the H2C and the chosen nozzle as a spool takes its own, in the file's own
-    colour for the slot. That is how a price names a filament that is not loaded. A
-    print still needs a spool for every slot."""
+    colour for the slot, or in its ``slot_colours`` entry, by slot id (a storefront file
+    listing's visitor's colour, #6710), as ``#RRGGBB`` (an entry that is not a colour
+    leaves the file's). A slot with a spool takes the spool's colour, whatever
+    ``slot_colours`` says, and a colour never stands in for a spool. That is how a price
+    names a filament that is not loaded. A print still needs a spool for every slot."""
     chosen = _resolve_choices(choices, catalogue)
     warnings = list(chosen.warnings)
     errors = list(chosen.errors)
@@ -351,7 +356,9 @@ def resolve(
         type_presets = (
             slot_presets.get(slot.slot_id) if option is None and slot_presets is not None else None
         )
-        colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"
+        # ``#RRGGBB`` only, as the native slicer takes; anything else leaves the file's.
+        given = normalise_colour(slot_colours.get(slot.slot_id)) if slot_colours else None
+        colours[idx] = (option.colour if option else given or slot.colour) or "#FFFFFF"
         label = spool_label(option) if option is not None else f"Slot {slot.slot_id}'s filament"
         if option is None and type_presets is None:
             # Not a preset problem, so Advanced cannot fix it: the slot needs a spool.

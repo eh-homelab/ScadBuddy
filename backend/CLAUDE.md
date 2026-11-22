@@ -791,8 +791,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`, and for a run
   queued on a busy printer, whatever that setting says, behind `BUSY_PATCH`). The strip
   shows each printer's oldest waiting run and only reads; a run whose sequence is gone is
-  recorded stopped by the native-copies sweep (`end_gone_sequences`, on every backend) or
-  by a control sent to it. `components/print/LanRunControls.tsx` shows the controls from
+  recorded stopped (`end_gone_sequences`) by the run-holds sweep (`RUN_HOLDS_SWEEP`, on the
+  prune Schedule, so within `PRUNE_INTERVAL`, 300 s, sweeps off too), by the native-copies
+  sweep, or at once by a control sent to it. A queued run's `queued_for_print` is read
+  from the printer's live state (`printers/progress.py` `printing_now`: the card's `state`,
+  or a fresh report), so its text turns to the plate once the print it waited for ends. `components/print/LanRunControls.tsx` shows the controls from
   `PrintProgress.lan_run` and `PrinterNow.lan_run`; the agent's are `stop_print_run` and
   `confirm_plate_clear`.
 - `backend/scadbuddy/filament/` — the filament data model (#6261, epic #6260, spec
@@ -876,7 +879,20 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
-  and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. After the
+  and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. At prod's
+  size (#6902): `plan` reads every spool's SB data in a fixed number of queries
+  (`bb_sync_plan.SpoolFacts`), and `apply_results` records a round in one transaction, a
+  savepoint per result. Both take the instance's sync try-lock (`hold_sync`): another call
+  of the instance meanwhile is 503 `sync_busy`, which the client waits out within
+  `RemoteFilamentSync.BUSY_BUDGET`. Both routes, and the pull's `…/pull` and `…/pull/usage`,
+  run under `api/disconnect.py` `until_disconnect`: when the worker goes away the running
+  statement is cancelled and the work rolls back, unless it had already passed its last
+  check, just before its commit (`core/cancel.py`; Postgres ignores a cancel between
+  statements). A retry is safe because each call is natural, not because the call rolled
+  back. The pull keeps the BB spools it pulled before, each its own transaction, and a
+  round locks its spools up front in id order. The client gives `plan` and
+  `results` `ROUND_TIMEOUT` (120 s), and the pass heartbeats while one runs
+  (`bb_sync_run.CALL_BEAT_S`). After the
   Bambuddy URL changes the status says `instance_changed` and the sync stops until
   `POST /filament/sync/reset-links` (#6773, plan Decisions 165-170; `GET` is its dry run)
   deletes the old instance's links, hashes, seen copies, intents, error rows, ignored BB
@@ -893,7 +909,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
   true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered. `expect_kept: false` deletes
-  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward). A new
+  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
+  Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
+  `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a
+  resent record adds none (an `instance_changed` pass gets the history row only); `run_pass`
+  records a pass whose step raised (a CRUD `plan` or `results` timeout, the settings read) with
+  `failure_label` (`crud_unavailable:<failure>`, `crud_refused:<status>`, `internal`) and the
+  counts its rounds reached, and raises it again, so the activity's retries are unchanged; the workflow sends the pass's `trigger`
+  (`timer`, `change`, `full`, `more`) in the activity's input only, so its commands are
+  unchanged. `GET /filament/sync/passes` pages them newest first by cursor (agent
+  `filament_sync_passes`), and the housekeeping's activity sweep deletes rows older than the
+  stored setting `filament_sync_pass_ttl_days` (30 by default), at most `PRUNE_BATCH` a run
+  (`SyncPassStore.prune`). A new
   workflow type: roll `scadbuddy-print` with `Recreate` (README, "A release that needs
   `Recreate`").
   History and metrics (#6269, spec §5.7; plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,
@@ -2134,6 +2161,34 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
   edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
   is no longer read; `rough_estimate` stays for the back office.
+  The instant read (#6921, migration `20261122T0128Z_storefront_variant_prices.sql`): the
+  visitor's choices have a key known before any render, `renders.py` `variant_key` (the
+  sha256 of the listing id, its `updated_at` and the choices as `checked_choice` settled
+  them: the render's values, the material and the body's slot filaments). The render row
+  keeps it (`storefront_renders.variant_key`), the slice's operation carries it
+  (`SliceVariant.variant_key`, with its `listing_id`), and its `done` row records them with
+  the slot filaments, the slot colours and the output the slice saved (`variant_key`,
+  `listing_id`, `slot_filaments`, `slot_colours`, `output_id`; a finish that names none of
+  these keeps the row's, `coalesce`); a `done` row from before takes the key and listing of
+  the first render whose estimate reads it (`SlicePrices.adopt`, no output). The instant
+  read, the preview and the cart add all take one row of the key,
+  `SlicePrices.variant_row`: the newest that names an output, else the newest. `POST …/listings/{id}/variant`
+  (area `variants`; edge `/api/store/v1/listings/{id}/variant`, counted as a read,
+  `ratelimit.py` `READ_POSTS`) takes the render's body, checks it as the render does,
+  starts no render and no slice, and answers `StoreVariant`: `price` from
+  `slice_price.py` `instant_price` (that row, re-keyed with
+  `price_key` from its `model_sha256` and slot filaments and the shop's settings now:
+  `slice` when that key has a `done` row, else that row's price as `last`, else
+  `none`; each read runs `_planned`, whose live rate and printer opening are kept
+  `RATE_TTL` per process), `preview` (that row's output, while it is of
+  the listing's slug and commit, as `/api/store/v1/variants/{key}/preview.glb`, which
+  `…/variants/{key}/preview.glb` streams; 404 `variant_not_found` for none, or when the
+  row's listing is not published; never the output id), `render` (the visitor's own render of these choices while it is held) and
+  `values`. `last` is never a line's price: `firm_price` and `line_prices.py` read by key
+  only. A cart add with no done render of the visitor's takes the variant a priced slice
+  recorded, while its output is of the listing's design (`line_prices.py`
+  `_priced_variant`; its slot colours, `drafts.py` `_render_colours`), and still reads the
+  firm price by key.
   Checkout charges that price (#6153 PR B, `orders/storefront/line_prices.py`, migration
   `20261115T1823Z_storefront_item_prices.sql`). The server never takes a price from the
   browser: `add_listing_item` makes the line's key as the estimate does
