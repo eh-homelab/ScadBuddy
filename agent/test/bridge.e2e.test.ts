@@ -5,10 +5,10 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
 import { DEFAULT_MCP_AUTH } from '../src/auth/authenticate.js'
-import { PostgresTokenStore } from '../src/auth/tokens.js'
+import { PostgresTokenStore } from './support/sql/tokens.js'
 import { TabHub } from '../src/bridge/hub.js'
-import { PostgresPairingStore } from '../src/bridge/pairings.js'
-import type { Database } from '../src/db.js'
+import { PostgresPairingStore } from './support/sql/pairings.js'
+import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -104,7 +104,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...harnessTools(toolServices),
-      approvalHashKey: Buffer.alloc(32, 9),
+      approvalHashKey: () => Buffer.alloc(32, 9),
     })
     agent = await startLiveAgent(m, {
       database: { ping: () => Promise.resolve(true), ready: db.ready },

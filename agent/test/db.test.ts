@@ -12,7 +12,7 @@ import {
   makeUntilReady,
   SQL_CONNECTIONS,
   TEST_LOCK_CONNECTIONS,
-} from '../src/db.js'
+} from './support/database.js'
 
 describe('the connection budget (#5226)', () => {
   it('sums the stores and the lock client (no LISTEN connection, #5299 D4), and every client closes what sits idle', () => {

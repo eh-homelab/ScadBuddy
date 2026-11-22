@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import postgres, { type Sql } from 'postgres'
-import { connectDatabase, type Database } from '../../src/db.js'
+import { connectDatabase, type Database } from './database.js'
 import { migrate, MIGRATIONS } from './migrations.js'
 
 // A Postgres the tests may create and drop schemas and databases in, the same

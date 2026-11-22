@@ -14,7 +14,7 @@ import type { SettingsWriter } from './mcpAuthMode.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/workspace (#2329): the caps on the assistant's workspace
-// (workspace/store.ts), in bytes. `SessionFiles` reads them at every write, so
+// (workspace/store.ts), in bytes. `CrudSessionFiles` reads them at every write, so
 // a change applies to the next one; files already stored stay.
 //
 //   GET /api/v1/ai/settings/workspace   { file_max_bytes, workspace_max_bytes, min, file_max, workspace_max }
@@ -66,7 +66,7 @@ const WHAT = 'assistant workspace settings'
 
 /**
  * The caps as stored, each the default for anything the PUT could not have
- * written. The store (`SessionFiles.limits`) takes any positive integer, so a
+ * written. The store (`WorkspaceFiles.limits`) takes any positive integer, so a
  * value written some other way still applies there; this shows what the
  * form can save.
  */

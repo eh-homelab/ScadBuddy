@@ -281,7 +281,7 @@ describe('the connection test stores its listing (#2171)', () => {
     const { a, repo, listings } = setup(testPlugin)
     const first = test(a)
     await vi.waitFor(() => expect(finish).toBeDefined())
-    const direct = await testAndList({ plugins: repo, kek: { ok: true, kek }, testPlugin, listings, ready: () => Promise.resolve(true) }, 'mem')
+    const direct = await testAndList({ plugins: repo, testPlugin, listings, ready: () => Promise.resolve(true) }, 'mem')
     expect(direct.status).toBe(429)
     finish!(result(true))
     expect((await first).status).toBe(200)

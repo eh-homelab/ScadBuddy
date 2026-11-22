@@ -2,13 +2,16 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database, LockClient, LockLease } from '../src/db.js'
+import type { Database, LockClient, LockLease } from './support/database.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { payloadKeyLock, SubjectForgotten } from '../src/temporal/payloadCodec.js'
-import { BackendWorkspaceBlobs, WORKSPACE_BLOB_REFS, WORKSPACE_BLOBS } from '../src/workspace/blobs.js'
-import { WorkspaceSealing } from '../src/workspace/sealing.js'
-import { SessionFiles, sha256, type WorkspaceRef } from '../src/workspace/store.js'
+import { sqlForget } from './support/sql/forget.js'
+import { SubjectForgotten } from '../src/temporal/payloadCodec.js'
+import { payloadKeyLock } from './support/sql/payloadKeys.js'
+import { BackendWorkspaceBlobs, WORKSPACE_BLOB_REFS, WORKSPACE_BLOBS } from './support/sql/workspaceBlobs.js'
+import { WorkspaceSealing } from './support/sql/workspaceSealing.js'
+import { sha256, type WorkspaceRef } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -285,7 +288,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     const childWs: WorkspaceRef = { kind: 'session', sessionId: child.id }
     expect((await files.read(childWs, 'a.txt'))?.bytes.toString()).toBe('from the parent')
     // Forgetting the parent leaves the fork's copy whole; reconcile releases the parent's hold.
-    await forgetSubject({ sql: db.sql }, `session-${sessionId}`)
+    await forgetSubject(sqlForget(db.sql), `session-${sessionId}`)
     expect((await files.read(childWs, 'a.txt'))?.bytes.toString()).toBe('from the parent')
     expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([[parent!.blob_key, `session:${child.id}/a.txt`]])
@@ -294,7 +297,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
   it("leaves a forgotten session's blob unopenable, and drops its holder", async () => {
     await files.write(ws, 'secret.txt', Buffer.from('forget me'))
     const kept = (await row('secret.txt'))!
-    await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${sessionId}`)
+    await forgetSubject(sqlForget(db.sql, { keys: testPayloadKeys(db.sql) }), `session-${sessionId}`)
     // The rows went in a cascade, which tells the backend nothing: reconcile releases the hold.
     expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([])
@@ -412,7 +415,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     it("never makes a payload key for a session that is gone or being forgotten", async () => {
       const subject = `session-${sessionId}`
       // forgetSubject has deleted the key (and left its tombstone) but not yet the rows.
-      await forgetSubject({ sql: db.sql }, subject).catch(() => undefined)
+      await forgetSubject(sqlForget(db.sql), subject).catch(() => undefined)
       await expect(files.write(ws, 'late.txt', Buffer.from('late'))).rejects.toThrow()
       expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
       // A session deleted another way (no tombstone): no key either.

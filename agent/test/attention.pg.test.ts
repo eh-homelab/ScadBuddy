@@ -3,21 +3,18 @@ import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../src/app.js'
-import { AuditLog } from '../src/audit/log.js'
 import { TabHub } from '../src/bridge/hub.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { attentionCard, type AttentionSpec, parseAttention, timedOutText } from '../src/harness/attention.js'
 import { ATTENTION_TOOL, type QuestionGate, type QuestionRequest, type QuestionVerdict } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
-import { loadDoneSummary } from '../src/gate/doneSummary.js'
 import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/gate/questions.js'
 import { pendingInput, respond } from '../src/routes/pendingInput.js'
 import { ASK_USER, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../src/gate/entry.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
-import { CLAIMED_AT, resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
-import { PgSessionRows } from '../src/sessions/rows.js'
+import { resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import { browserTools } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -29,6 +26,9 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { CLAIMED_AT, PgSessionRows } from './support/sql/sessionRows.js'
+import { sqlAuditLog } from './support/sql/audit.js'
+import { loadDoneSummary } from './support/sql/doneSummary.js'
 
 // Attention requests (#815) at the question gate, in Postgres: parked as an
 // `ai_questions` row of kind 'attention', answered like a question, and timed
@@ -185,7 +185,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
 
   // #815 §4: the timer never answers for the user, and never approves.
   it("on_timeout 'proceed': the timer resolves it as timed_out, never answered, and the turn goes on", async () => {
-    const audit = new AuditLog({ sql: db.sql })
+    const audit = sqlAuditLog(db.sql)
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }), audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const id = await parked(session.id)
@@ -806,7 +806,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         for (let i = 0; i <= DONE_POSTS_PER_TURN; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
         yield result(run)
       })()
-    const audit = new AuditLog({ sql: db.sql })
+    const audit = sqlAuditLog(db.sql)
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: looping, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
@@ -962,7 +962,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
             ${db.sql.json({ kind: 'system', id: 'scadbuddy', label: 'ScadBuddy' })}, 'old', ${WAIT_FOR_USER}, now())`
 
   it('refuses past the per-user rate limit without parking, and audits the refusal (#1205)', async () => {
-    const audit = new AuditLog({ sql: db.sql })
+    const audit = sqlAuditLog(db.sql)
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), audit })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < ATTENTION_RATE_LIMIT; i++) {
@@ -1112,7 +1112,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
 
   // #1380: the hub ends tab waits on every attach and pairing, almost always with nothing waiting.
   it('a tab back with no open tab_disconnected request ends nothing and writes no event, audit row or status', async () => {
-    const audit = new AuditLog({ sql: db.sql })
+    const audit = sqlAuditLog(db.sql)
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), audit })
     const { session } = await m.start(browser, { origin: 'chat', title: 'idle' })
     // A resolved tab wait, and a status no pending row explains: a refreshStatus would move it to idle.
@@ -1397,7 +1397,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         results.push(await wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_lim', signal: new AbortController().signal, isBack: () => Promise.resolve(false) }))
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
       })()
-    const audit = new AuditLog({ sql: db.sql })
+    const audit = sqlAuditLog(db.sql)
     const m = manager({
       sql: db.sql,
       paths: await tempPaths(),

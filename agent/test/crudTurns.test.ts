@@ -13,8 +13,8 @@ import { SESSION_BEGIN_TURN_ACTIVITY, SESSION_FINISH_ACTIVITY } from '../src/tem
 
 // A durable turn's row writes through the API's CRUD routes (#6449), against a fake API that
 // answers as the backend's api/crud_agent_turns.py does (the backend's
-// tests/crud/test_crud_agent_turns.py covers the routes and their fences;
-// test/turnRowsParity.pg.test.ts the port against the SQL). A session id goes into a path only as
+// tests/crud/test_crud_agent_turns.py covers the routes and their fences). A session id goes
+// into a path only as
 // a lowercase UUID, encoded; a turn id is a UUID or never sent; the events travel as their JSON
 // text and come back as the logged batch the caller hands its followers.
 
@@ -93,7 +93,7 @@ describe('a turn\'s row writes over the CRUD routes', () => {
     })
     const committed = vi.fn()
     const events = { committed } as unknown as EventLog
-    const finish = sessionFinishActivities(undefined as never, events, undefined, undefined, rows(api))[SESSION_FINISH_ACTIVITY]
+    const finish = sessionFinishActivities(rows(api), events)[SESSION_FINISH_ACTIVITY]
     const next = {
       turn_id: TURN,
       text: 'next',
@@ -121,7 +121,7 @@ describe('a turn\'s row writes over the CRUD routes', () => {
   it('hears a refused head as dropped, and a begun one\'s events once', async () => {
     const api = new FakeApi().answer(`POST /sessions/${SESSION}/turn/begin`, { outcome: 'busy', logged: null })
     const committed = vi.fn()
-    const begin = sessionFinishActivities(undefined as never, { committed } as unknown as EventLog, undefined, undefined, rows(api))[SESSION_BEGIN_TURN_ACTIVITY]
+    const begin = sessionFinishActivities(rows(api), { committed } as unknown as EventLog)[SESSION_BEGIN_TURN_ACTIVITY]
     const next = { turn_id: TURN, text: 't', words: 't', author: { ...BROWSER, label: 'You' }, images: [], system_append: null, queued_at: '' }
     expect(await begin({ sessionId: SESSION, next } as never)).toBe('busy')
     expect(committed).not.toHaveBeenCalled()
@@ -144,7 +144,7 @@ describe('a turn\'s row writes over the CRUD routes', () => {
       const giveBack = vi.fn(async () => undefined)
       const state = vi.fn(async () => ({ durable_turn_id: holder }))
       const turns = { sendClaim: vi.fn(async () => Promise.reject(err)), state, giveBack } as unknown as TurnRows
-      const durable = new DurableTurns({ client: {} as never, sql: {} as never, events: {} as EventLog, turns })
+      const durable = new DurableTurns({ client: {} as never, blobs: {} as never, pendingRoutes: {} as never, events: {} as EventLog, turns })
       await expect(durable.send(session, turn)).rejects.toBe(err)
       return { giveBack, state }
     }

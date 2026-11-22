@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
-import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
-import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
-import { QUEUED_DROPPED } from '../src/temporal/session/finishActivity.js'
+import type { Database } from './support/database.js'
+import { sessionImage } from '../src/sessions/blobs.js'
+import { sessionFinishActivities, QUEUED_DROPPED } from '../src/temporal/session/finishActivity.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { QueuedMessage } from '../src/temporal/session/models.js'
 import { SESSION_BEGIN_TURN_ACTIVITY, SESSION_FINISH_ACTIVITY, SESSION_QUEUE_CHANGED_ACTIVITY } from '../src/temporal/session/names.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
+import { PgTurnRows } from './support/sql/turnRows.js'
 
 // `session.finish_turn` (temporal/session/finishActivity.ts) writes a turn's end only while the
 // row still runs that turn. AgentSession takes a message once the row is idle, before it has
@@ -29,7 +30,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
   it('writes nothing for a turn the row no longer runs: a retry after the next turn claimed it', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths() })
     const { session } = await m.start(browser, { origin: 'chat', title: 'two turns' })
-    const finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
+    const finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
     const [t1, t2] = [randomUUID(), randomUUID()]
     // The next turn has claimed the row (DurableTurns.send) after t1's end was written.
     await db.sql`UPDATE ai_sessions SET status = 'running', durable_turn_id = ${t2} WHERE id = ${session.id}`
@@ -49,7 +50,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
     const { session } = await m.start(browser, { origin: 'chat', title: 'order work' })
     const reported: string[] = []
     // A report that never ends holds up neither the turn's end nor the next turn.
-    const finish = sessionFinishActivities(db.sql, m.events, {
+    const finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events, {
       report: (id) => {
         reported.push(id)
         return new Promise<void>(() => {})
@@ -87,7 +88,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
     it("starts the queue's head in the turn's end: no idle row a send could take, its user.turn after the end's events", async () => {
       const m = manager({ sql: db.sql, paths: await tempPaths() })
       const { session } = await m.start(browser, { origin: 'chat', title: 'queued' })
-      const activities = sessionFinishActivities(db.sql, m.events)
+      const activities = sessionFinishActivities(new PgTurnRows(db.sql), m.events)
       const [t1, q1] = [randomUUID(), randomUUID()]
       await db.sql`UPDATE ai_sessions SET status = 'running', durable_turn_id = ${t1} WHERE id = ${session.id}`
       const before = await m.events.lastSeq(session.id)
@@ -110,7 +111,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
     it('begin_turn: busy while another turn has the row, started once it is free, dropped with its reason when the session cannot run it', async () => {
       const m = manager({ sql: db.sql, paths: await tempPaths() })
       const { session } = await m.start(browser, { origin: 'chat', title: 'queued' })
-      const begin = sessionFinishActivities(db.sql, m.events)[SESSION_BEGIN_TURN_ACTIVITY]
+      const begin = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_BEGIN_TURN_ACTIVITY]
       const other = randomUUID()
       await db.sql`UPDATE ai_sessions SET status = 'running', durable_turn_id = ${other} WHERE id = ${session.id}`
       expect(await begin({ sessionId: session.id, next: next(randomUUID()) })).toBe('busy')
@@ -138,7 +139,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
     it('queue_changed writes the queue as a session.queue event, and nothing for a session that is gone', async () => {
       const m = manager({ sql: db.sql, paths: await tempPaths() })
       const { session } = await m.start(browser, { origin: 'chat', title: 'queued' })
-      const changed = sessionFinishActivities(db.sql, m.events)[SESSION_QUEUE_CHANGED_ACTIVITY]
+      const changed = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_QUEUE_CHANGED_ACTIVITY]
       const queue = [{ id: 'q1', text: 'and a lid', author: browser, queuedAt: '2026-11-15T00:00:00.000Z' }]
       expect(await changed({ sessionId: session.id, version: 3, queue })).toBe(true)
       expect((await m.events.read(session.id, 0, 1000)).at(-1)?.event).toMatchObject({ type: 'session.queue', version: 3, queue })
@@ -154,7 +155,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
       const made = await blobs.putMade(session.id, [image])
       expect(made).toHaveLength(1)
       const deleted: string[] = []
-      const changed = sessionFinishActivities(db.sql, m.events, undefined, {
+      const changed = sessionFinishActivities(new PgTurnRows(db.sql), m.events, undefined, {
         delete: async (id, dropped) => {
           deleted.push(...(await blobs.delete(id, dropped)))
           return deleted
@@ -164,7 +165,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
       expect(deleted).toEqual([image.name])
       expect(await blobs.get(session.id, image.name)).toBeUndefined()
       // A delete that fails loses only the images: the event is written.
-      const failing = sessionFinishActivities(db.sql, m.events, undefined, { delete: () => Promise.reject(new Error('down')) })[SESSION_QUEUE_CHANGED_ACTIVITY]
+      const failing = sessionFinishActivities(new PgTurnRows(db.sql), m.events, undefined, { delete: () => Promise.reject(new Error('down')) })[SESSION_QUEUE_CHANGED_ACTIVITY]
       expect(await failing({ sessionId: session.id, version: 2, queue: [], drop: made })).toBe(true)
       expect((await m.events.read(session.id, 0, 1000)).at(-1)?.event).toMatchObject({ type: 'session.queue', version: 2 })
     })

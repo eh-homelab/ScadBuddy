@@ -1,16 +1,13 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { gated } from '../src/api/crudStores.js'
 import { CrudAreas, SESSION_AREAS } from '../src/api/crudAreas.js'
 import { CrudReadError } from '../src/api/crudRead.js'
-import { CrudSessionRows, PgSessionRows, type SessionRows } from '../src/sessions/rows.js'
-import { CrudResourceRows, PgResourceRows, type ResourceRows, SessionResources } from '../src/sessions/touched.js'
+import { CrudSessionRows } from '../src/sessions/rows.js'
+import { CrudResourceRows, SessionResources } from '../src/sessions/touched.js'
 
 // A session's row and what its calls touched through the API's CRUD routes (#5299 step 9, part
 // a), against a fake API that answers as the backend's api/crud_agent_sessions.py does (the
-// backend's tests/crud/test_crud_agent_sessions.py covers the routes and their SQL). The stores
-// keep their interfaces: each method goes to its route once the area is listed, and to its own
-// SQL until then.
+// backend's tests/crud/test_crud_agent_sessions.py covers the routes and their SQL). Each method
+// goes to its route.
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
@@ -85,16 +82,6 @@ class FakeApi {
   }
 }
 
-/** A Sql that fails the test if a store runs any SQL on it. */
-const noSql = new Proxy(() => {}, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
-
 describe('the sessions areas', () => {
   it('are among the areas the agent waits for', async () => {
     expect(SESSION_AREAS).toEqual(['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'])
@@ -103,16 +90,6 @@ describe('the sessions areas', () => {
     expect(await areas.refresh()).toBe(false)
     expect(areas.has('sessions')).toBe(true)
     expect(areas.has('session-resources')).toBe(false)
-  })
-
-  it('runs its own SQL until the area is listed, then only the routes', async () => {
-    const api = new FakeApi().answer(`GET /sessions/${SESSION}`, { session: WIRE_TURN_ROW })
-    const listed = { on: false }
-    const rows = gated<SessionRows>(new PgSessionRows(noSql), new CrudSessionRows(BASE, { fetch: api.fetch }), () => listed.on)
-    await expect(rows.get(SESSION)).rejects.toThrow('ran SQL')
-    expect(api.seen).toEqual([])
-    listed.on = true
-    expect((await rows.get(SESSION))?.id).toBe(SESSION)
   })
 })
 
@@ -316,14 +293,10 @@ describe('what a session touched through the CRUD routes', () => {
     expect(api.seen).toHaveLength(1)
   })
 
-  it('goes through the routes once the area is listed, and a failure never reaches the call', async () => {
+  it('goes through the routes, and a failure never reaches the call', async () => {
     const api = new FakeApi()
-    const listed = { on: true }
     const errors: unknown[] = []
-    const sink = new SessionResources(
-      gated<ResourceRows>(new PgResourceRows(noSql), new CrudResourceRows(BASE, { fetch: api.fetch }), () => listed.on),
-      (err) => errors.push(err),
-    )
+    const sink = new SessionResources(new CrudResourceRows(BASE, { fetch: api.fetch }), (err) => errors.push(err))
     await sink.record({
       sessionId: SESSION,
       tool: { name: 'delete_model', risk: 'write' },

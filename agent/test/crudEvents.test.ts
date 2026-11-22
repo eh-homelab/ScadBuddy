@@ -1,15 +1,13 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { gated } from '../src/api/crudStores.js'
 import { CrudEventRows } from '../src/sessions/crudEvents.js'
-import { type EventRows, EventLog, ForkParentGone, PgEventRows } from '../src/sessions/eventLog.js'
+import { EventLog, ForkParentGone } from '../src/sessions/eventLog.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // A session's event log through the API's CRUD routes (#5299 step 9, part b), against a fake API
 // that answers as the backend's api/crud_agent_events.py does (the backend's
 // tests/crud/test_crud_agent_events.py covers the routes, the fence and the chain). An event
 // travels as its JSON text, an inherited one is addressed to the session here, a session id goes
-// into a path only as a lowercase UUID, and the log keeps its interface over either side.
+// into a path only as a lowercase UUID, and the log keeps its interface.
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
@@ -38,15 +36,6 @@ class FakeApi {
     return this
   }
 }
-
-const noSql = new Proxy(() => {}, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
 
 const rows = (api: FakeApi) => new CrudEventRows(BASE, { fetch: api.fetch })
 const delta = (sessionId: string, delta: string) => ({ type: 'assistant.text.delta', sessionId, messageId: 'm', delta }) as ServerEvent
@@ -119,18 +108,12 @@ describe('an event log over the CRUD routes', () => {
     expect(api.seen).toEqual([])
   })
 
-  it('keeps the log on its SQL until the area is listed, then on the routes, and wakes on a fenced write', async () => {
+  it('keeps the log on the routes, and wakes on a fenced write', async () => {
     const api = new FakeApi()
       .answer(`GET /sessions/${SESSION}/events/last-seq`, { seq: 2 })
       .answer(`POST /sessions/${SESSION}/events`, { seqs: [3] })
-    const listed = { on: false }
     const appended: number[] = []
-    const log = new EventLog(noSql, {
-      rows: gated<EventRows>(new PgEventRows(noSql), rows(api), () => listed.on),
-      onAppend: (_id, _events, last) => appended.push(last),
-    })
-    await expect(log.lastSeq(SESSION)).rejects.toThrow('ran SQL')
-    listed.on = true
+    const log = new EventLog(rows(api), { onAppend: (_id, _events, last) => appended.push(last) })
     expect(await log.lastSeq(SESSION)).toBe(2)
     expect(await log.appendFenced(SESSION, [delta(SESSION, 'a')], { attempt: 'run:1', turnId: 't' })).toBe(true)
     expect(appended).toEqual([3])
@@ -146,10 +129,7 @@ describe('an event log over the CRUD routes', () => {
       return api.fetch(input, init)
     }
     const heard: [number, number][] = []
-    const log = new EventLog(noSql, {
-      rows: new CrudEventRows(BASE, { fetch }),
-      onAppend: (_id, events, last) => heard.push([events.length, last]),
-    })
+    const log = new EventLog(new CrudEventRows(BASE, { fetch }), { onAppend: (_id, events, last) => heard.push([events.length, last]) })
     const events = Array.from({ length: 1001 }, (_, i) => delta(SESSION, String(i)))
     expect(await log.appendFenced(SESSION, events, { attempt: 'run:1', turnId: 't' })).toBe(false)
     expect(call).toBe(2)

@@ -5,7 +5,8 @@ import { vi } from 'vitest'
 import type { Credential } from '../../src/credentials.js'
 import { userMessage } from '../../src/harness/inbox.js'
 import { ensureStateDirs } from '../../src/harness/stateDirs.js'
-import { PostgresSessionStore } from '../../src/sessions/store.js'
+import { TranscriptStore } from '../../src/sessions/store.js'
+import { PgTranscriptRows } from './sql/transcriptRows.js'
 import type { AssembledTurn, FingerprintParts } from '../../src/sessions/turnRunner.js'
 import { createTurnSlot } from '../../src/sessions/turnSlot.js'
 import { type WarmEntry, WarmSessions } from '../../src/sessions/warm.js'
@@ -28,7 +29,7 @@ export type WarmHarnessOptions = {
   idleMs?: number
   now?: () => number
   /** Wraps the transcript tail read WarmSessions is given (the store keeps the real one). */
-  moved?: (moved: PostgresSessionStore['moved']) => PostgresSessionStore['moved']
+  moved?: (moved: TranscriptStore['moved']) => TranscriptStore['moved']
   /** Runs at each model request, before the fake replies. */
   onRequest?: () => Promise<void>
   /** Runs at each transcript append the process hands over, before it is written. */
@@ -43,10 +44,10 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
   })
   const paths = await tempPaths()
   await ensureStateDirs(paths)
-  const store = new PostgresSessionStore(db.db.sql, { keys: testPayloadKeys(db.db.sql) })
+  const store = new TranscriptStore(new PgTranscriptRows(db.db.sql, testPayloadKeys(db.db.sql)))
   const beforeAppend = options.beforeAppend
   const sessionStore: SessionStore = beforeAppend
-    ? Object.assign(Object.create(store) as PostgresSessionStore, {
+    ? Object.assign(Object.create(store) as TranscriptStore, {
         append: async (key: SessionKey, entries: SessionStoreEntry[]) => {
           await beforeAppend(key, entries)
           await store.append(key, entries)

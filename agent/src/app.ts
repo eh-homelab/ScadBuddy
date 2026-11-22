@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
-import { checkData, type DataCheck } from './api/dataHealth.js'
+import type { AgentData } from './api/dataHealth.js'
 import type { AccessStore } from './access/store.js'
 import type { AuditRepo } from './audit/log.js'
 import type { Attachments } from './attachments/store.js'
@@ -14,7 +14,6 @@ import type { RemoteAddress } from './routes/guard.js'
 import { ROUTES } from './routes/index.js'
 import type { TemporalHealth } from './temporal/worker.js'
 import type { TabHub } from './bridge/hub.js'
-import type { KekStatus } from './secrets.js'
 import type { SessionManager } from './sessions/manager.js'
 import { type BrowserSessions, personSessions } from './auth/browserSession.js'
 import type { AuthMode } from './config.js'
@@ -38,15 +37,12 @@ export type Probe = () => Promise<boolean>
  * group's file, by augmenting this interface (routes/module.ts).
  */
 export interface AppDeps {
-  /** Undefined when SCADBUDDY_DATABASE_URL is unset. */
-  database: { ping: Probe; ready: Probe; waitingForMigrations?: () => boolean; check?: (timeoutMs?: number) => Promise<DataCheck> } | undefined
+  /** The agent's data, which is the API's (#5299 step 12; api/dataHealth.ts). */
+  database: AgentData
   backend: Probe
-  /** The key-encryption key, or why there is none (secrets.ts `loadKek`). */
-  kek: KekStatus
-  /** Undefined exactly when `database` is. */
-  credentials: CredentialRepo | undefined
+  credentials: CredentialRepo
   remoteAddress: RemoteAddress
-  /** The tool-access store (#2171), shared by the plugins, plugin packages and capabilities routes; undefined when there is no database. */
+  /** The tool-access store (#2171), shared by the plugins, plugin packages and capabilities routes. */
   access?: AccessStore | undefined
   /** `ai_settings` (credentials.ts SettingsStore), shared by the settings routes (session limits #790, routes/sessionLimits.ts, ...), which answer 503 without it. */
   settings?: SettingsRepo | undefined
@@ -54,7 +50,7 @@ export interface AppDeps {
   origins: OriginPolicy
   /** Gateway host resolver for the SSRF check; the system resolver when omitted. */
   resolveHost?: Resolver
-  /** Upper bound on each database step of /healthz (migrations, credential read). */
+  /** Upper bound on each step of /healthz that asks the API (the credential list, its key). */
   healthTimeoutMs?: number
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
@@ -166,9 +162,9 @@ export const SERVICE_HEADER = 'X-ScadBuddy-Service'
 export type Health = {
   status: 'ok'
   ai: AiStatus
-  database: 'ok' | 'unreachable' | 'not configured'
+  /** Whether the API lists and answers the agent's CRUD areas, where its data is. */
+  database: 'ok' | 'unreachable'
   backend: 'ok' | 'unreachable'
-  secret_key: 'ok' | 'not configured'
   credential: CredentialState
   temporal: TemporalHealth | 'not configured'
 }
@@ -189,19 +185,16 @@ export function createApp(deps: AppDeps): AgentApp {
     }
   })
 
-  // Liveness: always 200 while the process serves HTTP. A missing or
-  // unreachable database or backend is REPORTED, not failed on, so a Postgres
-  // blip does not restart the container.
+  // Liveness: always 200 while the process serves HTTP. An unreachable API is
+  // REPORTED, not failed on, so an API restart does not restart the container.
   app.get('/healthz', async (c) => {
-    const [data, backendOk] = await Promise.all([checkData(deps.database), deps.backend()])
-    const dbOk = data?.ok
-    const { ai, credential } = await aiStatus(deps, dbOk, data?.apiUnanswered)
+    const [dataOk, backendOk] = await Promise.all([deps.database.ping(), deps.backend()])
+    const { ai, credential } = await aiStatus(deps, dataOk)
     const body: Health = {
       status: 'ok',
       ai,
-      database: dbOk === undefined ? 'not configured' : dbOk ? 'ok' : 'unreachable',
+      database: dataOk ? 'ok' : 'unreachable',
       backend: backendOk ? 'ok' : 'unreachable',
-      secret_key: deps.kek.ok ? 'ok' : 'not configured',
       credential,
       temporal: deps.temporal ? deps.temporal() : 'not configured',
     }
@@ -243,24 +236,16 @@ export function createApp(deps: AppDeps): AgentApp {
 
   if (deps.mcp) {
     const database = deps.database
-    if (database) {
-      // /mcp serves only once the agent's migrations have applied (db.ts
-      // `ready()`), so its database-backed stores never see a half-made schema.
-      // `/mcp/*` matches the bare path too (Hono), so it covers the uploads (mcp/uploads.ts).
-      app.use('/mcp/*', async (c, next) => {
-        if (!(await database.ready())) {
-          return c.json({ error: 'AI unavailable: database migrations have not applied' }, 503)
-        }
-        await next()
-      })
-      mcp = mountMcp(app, deps.mcp, { origins: deps.origins, remoteAddress: deps.remoteAddress })
-    } else {
-      // Spec §9, "No database": AI features are disabled. /mcp answers why
-      // instead of 404, so an MCP client's error names the fix.
-      app.all('/mcp/*', (c) =>
-        c.json({ error: 'AI disabled: no database (SCADBUDDY_DATABASE_URL is not set)' }, 503),
-      )
-    }
+    // /mcp serves only once the API lists every CRUD area the agent wants (api/crudAreas.ts),
+    // so its stores never meet an API pod older than their routes.
+    // `/mcp/*` matches the bare path too (Hono), so it covers the uploads (mcp/uploads.ts).
+    app.use('/mcp/*', async (c, next) => {
+      if (!(await database.ready())) {
+        return c.json({ error: "AI unavailable: the API does not serve the agent's CRUD areas yet" }, 503)
+      }
+      await next()
+    })
+    mcp = mountMcp(app, deps.mcp, { origins: deps.origins, remoteAddress: deps.remoteAddress })
   }
 
   return Object.assign(app, {

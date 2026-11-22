@@ -8,8 +8,8 @@ import { MCP_CHANNEL, RelayBodyTooLargeError, type RelayRows } from './relayRows
 // the process that opened it (mcp/http.ts), which no other replica can rebuild.
 // So a request that reaches another replica is relayed to the owner, the way
 // browser calls were until #4780 (#1916; they go through Temporal now, bridge/relay.ts). The
-// directory and the messages are kept by `RelayRows` (relayRows.ts): over the agent's SQL, or
-// over the backend's CRUD routes once the API lists area `mcp-relay` (#5299 step 11):
+// directory and the messages are kept by `RelayRows` (relayRows.ts), over the backend's CRUD
+// routes of area `mcp-relay`:
 //
 //   any replica (got the request)            owner (holds the session)
 //   look the session up in ai_mcp_sessions

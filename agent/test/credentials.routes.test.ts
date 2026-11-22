@@ -25,8 +25,7 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const JSON_UI = { ...UI, 'content-type': 'application/json' }
 const BASE = '/api/v1/ai/credentials'
 
-function setup(overrides: Partial<AppDeps> = {}) {
-  const credentials = new MemoryCredentials()
+function setup(overrides: Partial<AppDeps> = {}, credentials = new MemoryCredentials(kek)) {
   const tested: Credential[] = []
   const audited: AuditEntry[] = []
   const app = createApp({
@@ -130,13 +129,13 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
     expect(
       (await call('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_A }, { ...JSON_UI, origin: 'https://evil.example' })).status,
     ).toBe(403)
-    const noKey = setup({ kek: { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' } })
+    const noKey = setup({ kek: { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' } }, new MemoryCredentials())
     expect((await noKey.call('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_A })).status).toBe(503)
   })
 
   it('refuses a credential past the most that can be stored', async () => {
     const { call, credentials } = setup()
-    for (let i = 0; i < MAX_CREDENTIALS; i++) await credentials.create({ kind: 'anthropic_api_key', secret: `${KEY_A}${i}` }, kek)
+    for (let i = 0; i < MAX_CREDENTIALS; i++) await credentials.create({ kind: 'anthropic_api_key', secret: `${KEY_A}${i}` })
     const res = await call<{ detail: string }>('POST', '/entries', { kind: 'anthropic_api_key', secret: KEY_B })
     expect(res.status).toBe(409)
     expect(res.body.detail).toBe(TOO_MANY_MESSAGE)
@@ -364,7 +363,7 @@ describe('GET /api/v1/ai/status with several credentials (#1093)', () => {
     const { app, create, credentials } = setup()
     const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
     await credentials.record(a.id, 0, { kind: 'disabled', reason: 'HTTP 401' })
-    await credentials.create({ kind: 'anthropic_api_key', secret: KEY_B }, kekFromBase64(randomBytes(32).toString('base64')))
+    await credentials.createUnder(kekFromBase64(randomBytes(32).toString('base64')), { kind: 'anthropic_api_key', secret: KEY_B })
     const body = await status(app)
     expect(body).toMatchObject({ available: false, state: 'unavailable', ai: 'unavailable (no Claude credential is usable now)' })
     expect(body.recovers_at).toBeUndefined()

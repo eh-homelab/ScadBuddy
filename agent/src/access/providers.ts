@@ -394,8 +394,7 @@ export function remoteProvider(deps: {
     },
     get,
     async setEnabled(source, enabled, context) {
-      // The secret is not touched, so no key is needed.
-      await registry(deps.plugins.update(nameOf(source), { enabled }, undefined, context))
+      await registry(deps.plugins.update(nameOf(source), { enabled }, context))
     },
     async setItem(source, item, access, context) {
       // Every item here is a tool: Capabilities refused `on` (ITEM_ACCESS).

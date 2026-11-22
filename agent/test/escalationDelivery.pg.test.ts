@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Tier } from '../src/auth/principal.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { type FlowRunReads, type ParentHopCursor, STILL_WAITING_BATCH } from '../src/flows/backendReads.js'
 import { CLAIM_LEASE_S, Escalations, UNLOGGED_GRACE_MS, type EscalationSend } from '../src/flows/escalations.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
@@ -11,6 +11,7 @@ import { SessionError } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
+import { sqlEscalationDeps } from './support/sql/escalations.js'
 
 // Delivery of a flow run's calls waiting at its starter session (#2482, spec 2026-10-11
 // §4.4): one turn per idle starter session, listing what waits for it, the details in
@@ -50,7 +51,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     sent = []
     refuse = undefined
     refuseFor.clear()
-    escalations = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => undefined, send })
+    escalations = new Escalations({ ...sqlEscalationDeps(db.sql), reads: new SqlFlowRunReads(db.sql), durable: () => undefined, send })
     parent = await session('bearer', TOKEN)
     child = await session('flow', `flow:${RUN}`)
     await db.sql`INSERT INTO ai_mcp_tokens (id, name, token_hash, tier) VALUES (${TOKEN_ID}, 'parent', ${'a'.repeat(64)}, 'outward')`
@@ -187,7 +188,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     // claims the entry then, as the parent's own deny would, races the skip that follows.
     const racing = new Escalations({
       reads: new SqlFlowRunReads(db.sql),
-      sql: db.sql,
+      ...sqlEscalationDeps(db.sql),
       durable: () => undefined,
       send,
       currentTiers: async () => {
@@ -226,7 +227,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     const asked: Owner[] = []
     const shared = new Escalations({
       reads: new SqlFlowRunReads(db.sql),
-      sql: db.sql,
+      ...sqlEscalationDeps(db.sql),
       durable: () => undefined,
       send,
       currentTiers: async (owner) => (asked.push(owner), owner.id === TOKEN ? ['read', 'write'] : undefined),
@@ -295,7 +296,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     let release!: (err: Error) => void
     const stuck = new Promise<never>((_, reject) => (release = reject))
     // The send never returns: the process died while starting the turn.
-    const dying = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => undefined, send: async () => (started(), stuck) })
+    const dying = new Escalations({ ...sqlEscalationDeps(db.sql), reads: new SqlFlowRunReads(db.sql), durable: () => undefined, send: async () => (started(), stuck) })
     const running = dying.deliver().catch(() => undefined)
     await inSend
     // Its connection goes with it.
@@ -318,7 +319,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     // loaded host: at 200 ms it could run after the hold had ended, and take the row.
     const hanging = new Escalations({
       reads: new SqlFlowRunReads(db.sql),
-      sql: db.sql,
+      ...sqlEscalationDeps(db.sql),
       durable: () => undefined,
       send: async () => {
         sending()
@@ -410,7 +411,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
       },
       stillAtParentHop: (requestIds) => sql.stillAtParentHop(requestIds),
     }
-    const paged = new Escalations({ sql: db.sql, reads: onePerPage, durable: () => undefined, send })
+    const paged = new Escalations({ ...sqlEscalationDeps(db.sql), reads: onePerPage, durable: () => undefined, send })
     expect(await paged.deliver()).toBe(1)
     expect(sent[0]!.text).toContain(newer)
     // Three delivered runs, then the newer one; its full page asks once more and finds none.
@@ -441,7 +442,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
         return sql.stillAtParentHop(requestIds)
       },
     }
-    const batched = new Escalations({ sql: db.sql, reads: counted, durable: () => undefined, send })
+    const batched = new Escalations({ ...sqlEscalationDeps(db.sql), reads: counted, durable: () => undefined, send })
     expect(await batched.deliver()).toBe(0)
     expect(asked).toEqual([STILL_WAITING_BATCH, 8])
     const records = (await db.sql<{ request_id: string }[]>`SELECT request_id FROM ai_escalation_deliveries`).map((r) => r.request_id)

@@ -9,7 +9,6 @@ import {
   RECONCILE_GRACE_MS,
   type Reconciled,
   sha256,
-  type SessionFiles,
   startWorkspaceSweeper,
   STREAM_CHUNK_BYTES,
   type SweeperOptions,
@@ -29,7 +28,7 @@ import {
 } from './store.js'
 
 // The workspace files through the API's CRUD routes (#5299 step 7, area `workspace`; backend
-// api/crud_agent_workspace.py), with the interface `SessionFiles` has over SQL (store.ts). The
+// api/crud_agent_workspace.py), behind the `WorkspaceFiles` interface (store.ts). The
 // API seals and opens every file with its own KEK and the session's payload key (D5): this
 // process sends and gets plaintext, and holds no file key, KEK or blob URL. Bytes travel as
 // bytes (multipart for a write, a stream for a read), never base64 (D8). A workspace and a path
@@ -38,7 +37,7 @@ import {
 //
 // A refusal the API gives with a `reason` that is a WorkspaceErrorCode is that WorkspaceError,
 // its detail as the message. A read hashes what streamed: a file that changed while it streamed
-// ends the API's stream short, which is a `conflict`, as a change between two SQL slices was.
+// ends the API's stream short, which is a `conflict`.
 
 /** How long a read or a write of a file's bytes may take. */
 export const FILE_TIMEOUT_MS = 120_000
@@ -212,7 +211,7 @@ export class CrudSessionFiles implements WorkspaceFiles {
 
   /**
    * The bytes of `path` as it is at `expectedSha256`, as they stream from the API (`chunkBytes`
-   * is the SQL store's slice; the API streams a sealed segment at a time). `not_found` when there
+   * is ignored; the API streams a sealed segment at a time). `not_found` when there
    * is no such file, `conflict` when it is not at that sha256, then or while it streams.
    */
   async *chunks(ws: WorkspaceRef, path: string, expectedSha256: string, _chunkBytes = STREAM_CHUNK_BYTES): AsyncGenerator<Buffer> {
@@ -322,33 +321,4 @@ export class CrudSessionFiles implements WorkspaceFiles {
   startSweeper(everyMs: number, options: SweeperOptions = {}): () => void {
     return startWorkspaceSweeper(this, everyMs, { ...options, reconciles: true })
   }
-}
-
-/** `crud` once `useCrud()` holds (the API lists area `workspace`), `pg` until then, chosen per call (#5299 D9). */
-export function gatedWorkspaceFiles(pg: SessionFiles, crud: WorkspaceFiles, useCrud: () => boolean): WorkspaceFiles {
-  const pick = (): WorkspaceFiles => (useCrud() ? crud : pg)
-  const gated: WorkspaceFiles = {
-    get maxFiles() {
-      return pick().maxFiles
-    },
-    limits: () => pick().limits(),
-    fileCount: (ws) => pick().fileCount(ws),
-    bytesStatus: () => pick().bytesStatus(),
-    list: (ws, prefix) => pick().list(ws, prefix),
-    usage: (ws) => pick().usage(ws),
-    listSessions: (ids) => pick().listSessions(ids),
-    sealedUnreadable: () => pick().sealedUnreadable(),
-    stat: (ws, path) => pick().stat(ws, path),
-    read: (ws, path) => pick().read(ws, path),
-    chunks: (ws, path, expected, chunkBytes) => pick().chunks(ws, path, expected, chunkBytes),
-    write: (ws, path, bytes, options) => pick().write(ws, path, bytes, options),
-    delete: (ws, path, options) => pick().delete(ws, path, options),
-    copy: (from, to) => pick().copy(from, to),
-    moveToBlobs: (batch) => pick().moveToBlobs(batch),
-    sweep: (ttlMs) => pick().sweep(ttlMs),
-    reconcile: (graceMs) => pick().reconcile(graceMs),
-    // Each tick picks again, so the sweeper moves to the routes once the area is listed.
-    startSweeper: (everyMs, options = {}) => startWorkspaceSweeper(gated, everyMs, { ...options, reconciles: true }),
-  }
-  return gated
 }

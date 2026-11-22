@@ -8,7 +8,6 @@ import {
   MAX_CREDENTIALS,
   normaliseBaseUrl,
   type OpenerStatus,
-  openerOf,
   opensWith,
   soonestRecovery,
   type StoredCredential,
@@ -16,7 +15,7 @@ import {
 import type { ConnectionTest } from '../harness/testConnection.js'
 import { assertGatewayHostAllowed, EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { type KekStatus, SealError } from '../secrets.js'
+import { SealError } from '../secrets.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -46,7 +45,6 @@ export type CredentialRouteDeps = {
   credentials: CredentialRepo | undefined
   /** Applies migrations; the routes answer 503 until it resolves true. */
   ready: () => Promise<boolean>
-  kek: KekStatus
   testConnection: (credential: Credential) => Promise<ConnectionTest>
   remoteAddress: RemoteAddress
   /** Which origins may write (src/http/origins.ts). */
@@ -209,9 +207,6 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   const resolveHost = deps.resolveHost ?? systemResolver
   const cooldownMs = deps.testCooldownMs ?? DEFAULT_TEST_COOLDOWN_MS
   const now = deps.now ?? (() => performance.now())
-  // This process's own KEK: it opens the credentials over SQL. Through the API's CRUD routes the
-  // API's key does (#5299 D5), read per request (`openerOf`).
-  const ownKek = deps.kek
 
   /** The store once migrations are current, or a 503 response. */
   async function store(): Promise<CredentialRepo | string> {
@@ -229,7 +224,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     const repo = await store()
     if (typeof repo === 'string') return c.json(unavailable(repo), 503)
     try {
-      return await fn(repo, await openerOf(repo, ownKek))
+      return await fn(repo, await repo.opener())
     } catch (err) {
       if (err instanceof CredentialError) return c.json({ detail: err.message }, err.status)
       if (err instanceof EgressError) return c.json({ detail: err.message }, 400)
@@ -250,7 +245,6 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     ...(body.secret === undefined ? {} : { secret: body.secret }),
     ...(body.name === undefined ? {} : { name: body.name }),
   })
-  const kekOrUndefined = ownKek.ok ? ownKek.kek : undefined
 
   // --- The single-credential routes (#255): the first credential by priority.
 
@@ -286,7 +280,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     if (!parsed.ok) return parsed.response
     return withStore(c, async (repo, kek) => {
       await checkGateway(parsed.body)
-      return c.json(view(await repo.put(update(parsed.body), kekOrUndefined), kek))
+      return c.json(view(await repo.put(update(parsed.body)), kek))
     })
   })
 
@@ -307,7 +301,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     if (!parsed.ok) return parsed.response
     return withStore(c, async (repo, kek) => {
       await checkGateway(parsed.body)
-      return c.json(entryView(await repo.create(update(parsed.body), kekOrUndefined), kek), 201)
+      return c.json(entryView(await repo.create(update(parsed.body)), kek), 201)
     })
   })
 
@@ -322,7 +316,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     if (!parsed.ok) return parsed.response
     return withStore(c, async (repo, kek) => {
       await checkGateway(parsed.body)
-      return c.json(entryView(await repo.put(update(parsed.body), kekOrUndefined, c.req.param('id')), kek))
+      return c.json(entryView(await repo.put(update(parsed.body), c.req.param('id')), kek))
     })
   })
 
@@ -378,9 +372,9 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
       if (typeof repo === 'string') return c.json(unavailable(repo), 503)
       let credential: Credential | undefined
       try {
-        const kek = await openerOf(repo, ownKek)
+        const kek = await repo.opener()
         if (!kek.ok) return c.json({ detail: `no key-encryption key: ${kek.reason}` }, 503)
-        credential = await repo.reveal(kekOrUndefined, id, 'test')
+        credential = await repo.reveal(id, 'test')
       } catch (err) {
         if (err instanceof SealError) {
           return c.json({ detail: `the stored credential cannot be decrypted: ${err.message}; save it again` }, 409)
@@ -428,7 +422,6 @@ export const route: RouteModule = {
     registerCredentialRoutes(app, {
       credentials: deps.credentials,
       ready: ready(deps),
-      kek: deps.kek,
       testConnection: deps.testConnection,
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,

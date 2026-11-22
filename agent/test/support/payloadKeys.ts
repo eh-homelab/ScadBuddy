@@ -1,6 +1,6 @@
 import type { Sql } from 'postgres'
 import { kekFromBase64 } from '../../src/secrets.js'
-import { PgPayloadKeys } from '../../src/temporal/payloadCodec.js'
+import { PgPayloadKeys } from './sql/payloadKeys.js'
 
 const kek = kekFromBase64(Buffer.alloc(32, 7).toString('base64'))
 
