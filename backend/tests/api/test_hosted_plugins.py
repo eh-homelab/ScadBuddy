@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import hosted_plugins as routes
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.hosted_plugins import bundle, rules
 from tests.api.test_crud_agent_cost import token
 
@@ -311,3 +312,115 @@ def test_a_draft_over_the_packages_cap_with_its_manifest_is_not_published(
     monkeypatch.setattr(routes, "PACKAGE_MAX_TOTAL_BYTES", len(SKILL) + 10)
     refused = client.post(f"{BASE}/greeter/publish")
     assert (refused.status_code, refused.json()["reason"]) == (422, "draft-invalid")
+
+
+def test_a_plugin_is_edited_with_a_patch(client: TestClient) -> None:
+    assert _create(client, category="tools", tags=["fun"]).status_code == 201
+    only = client.patch(f"{BASE}/greeter", json={"description": "Waves"})
+    assert only.status_code == 200, only.text
+    assert (only.json()["description"], only.json()["category"], only.json()["tags"]) == (
+        "Waves",
+        "tools",
+        ["fun"],
+    )
+    both = client.patch(f"{BASE}/greeter", json={"category": None, "tags": ["a", "b"]})
+    assert (both.json()["description"], both.json()["category"], both.json()["tags"]) == (
+        "Waves",
+        None,
+        ["a", "b"],
+    )
+    assert client.get(f"{BASE}/greeter").json()["tags"] == ["a", "b"]
+    assert client.patch(f"{BASE}/greeter", json={}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"tags": ["Bad Tag"]},
+        {"category": "Bad Category"},
+        {"description": "x" * 1025},
+        {"tags": [str(i) for i in range(21)]},
+        {"name": "other"},
+        {"description": None},
+        {"tags": None},
+    ],
+)
+def test_a_patch_is_validated_as_a_create_is(client: TestClient, body: dict[str, Any]) -> None:
+    assert _create(client).status_code == 201
+    assert client.patch(f"{BASE}/greeter", json=body).status_code == 422
+
+
+def test_a_patch_of_a_missing_plugin_is_404(client: TestClient) -> None:
+    gone = client.patch(f"{BASE}/nope", json={"description": "x"})
+    assert (gone.status_code, gone.json()["reason"]) == (404, "hosted-plugin-not-found")
+
+
+def test_a_new_description_reaches_the_next_version_only(client: TestClient) -> None:
+    _ready(client)
+    v1 = client.post(f"{BASE}/greeter/publish").json()
+    client.patch(f"{BASE}/greeter", json={"description": "Waves"})
+    again = client.get(f"{BASE}/greeter").json()
+    assert again["description"] == "Waves"
+    assert again["latest_version"] == v1["version"]
+
+
+def test_a_put_to_a_missing_plugin_is_404(client: TestClient) -> None:
+    gone = _put(client, "skills/a/SKILL.md", SKILL, name="nope")
+    assert (gone.status_code, gone.json()["reason"]) == (404, "hosted-plugin-not-found")
+
+
+def test_a_draft_changed_while_it_is_published_is_refused(
+    client: TestClient, db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(client)
+    build = bundle.build_zip
+
+    def changed_midway(files: Any) -> bytes:
+        db.execute(
+            "UPDATE ai_hosted_plugin_files SET sha256 = %s WHERE path = 'skills/hello/SKILL.md'",
+            ("0" * 64,),
+        )
+        return build(files)
+
+    monkeypatch.setattr(bundle, "build_zip", changed_midway)
+    refused = client.post(f"{BASE}/greeter/publish")
+    assert (refused.status_code, refused.json()["reason"]) == (409, "draft-changed"), refused.text
+    assert client.get(f"{BASE}/greeter").json()["latest_version"] is None
+    assert db.execute("SELECT count(*) FROM ai_hosted_plugin_versions").fetchone()[0] == 0
+
+
+def _lose_blob(client: TestClient, sha256: str) -> None:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.store.blobs.remove(f"attachment-{sha256}")
+
+
+def test_a_blob_the_store_lost_is_a_500_with_a_reason(client: TestClient) -> None:
+    _ready(client)
+    _lose_blob(client, hashlib.sha256(SKILL).hexdigest())
+    read = client.get(f"{BASE}/greeter/files/skills/hello/SKILL.md")
+    assert (read.status_code, read.json()["reason"]) == (500, "blob-missing")
+    publish = client.post(f"{BASE}/greeter/publish")
+    assert (publish.status_code, publish.json()["reason"]) == (500, "blob-missing")
+
+
+def test_a_version_zip_the_store_lost_is_a_500_for_the_agent(client: TestClient) -> None:
+    _ready(client)
+    v1 = client.post(f"{BASE}/greeter/publish").json()
+    _lose_blob(client, v1["zip_sha256"])
+    got = client.get(f"{CRUD}/greeter/versions/1.zip", headers=token(client))
+    assert (got.status_code, got.json()["reason"]) == (500, "blob-missing")
+
+
+def test_the_trigger_refuses_to_update_or_delete_a_version_row(client: TestClient, db: Any) -> None:
+    _ready(client)
+    client.post(f"{BASE}/greeter/publish")
+    for sql in (
+        "UPDATE ai_hosted_plugin_versions SET published_by = 'x' WHERE version = 1",
+        "UPDATE ai_hosted_plugin_versions SET zip_sha256 = %s WHERE version = 1",
+        "DELETE FROM ai_hosted_plugin_versions WHERE version = 1",
+    ):
+        args = ("f" * 64,) if "%s" in sql else ()
+        with pytest.raises(psycopg.errors.RestrictViolation):
+            db.execute(sql, args)
+    row = db.execute("SELECT published_by FROM ai_hosted_plugin_versions").fetchone()
+    assert row is not None and row[0] != "x"

@@ -3,8 +3,9 @@ ScadBuddy as a draft of files, published as immutable numbered versions.
 
 - ``POST /hosted-plugins`` creates one (409 ``hosted-plugin-exists``; 409
   ``package-name-taken`` when an installed or built-in package has the name, plan ruling
-  R3); ``GET /hosted-plugins``, ``GET`` and ``DELETE /hosted-plugins/{name}`` list, read
-  and delete it (with its versions and, once one was installed from it, its package);
+  R3); ``GET /hosted-plugins``, ``GET``, ``PATCH`` (``description``, ``category``,
+  ``tags``) and ``DELETE /hosted-plugins/{name}`` list, read, change and delete it
+  (with its versions and, once one was installed from it, its package);
 - ``GET /{name}/files`` the draft; ``GET``, ``PUT`` (the raw bytes as the body,
   ``?executable=true`` for a script under ``skills/``) and ``DELETE /{name}/files/{path}``
   one file; ``POST /{name}/files/moves`` a rename; ``GET /{name}/draft-diff`` the draft
@@ -32,14 +33,15 @@ from typing import Annotated, Any
 
 import psycopg
 from fastapi import APIRouter, Path, Query, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Anonymous, Caller, Person, PersonalToken, Service
 from scadbuddy.core.problems import ApiError
 from scadbuddy.hosted_plugins import bundle, rules, store
-from scadbuddy.orders.attachments import blob_key, blob_path, keep_file
+from scadbuddy.hosted_plugins.blobs import blob_bytes
+from scadbuddy.orders.attachments import keep_file
 
 router = APIRouter(prefix="/hosted-plugins", tags=["hosted-plugins"])
 
@@ -58,7 +60,6 @@ DRAFT_TOO_LARGE = "draft-too-large"
 DRAFT_INVALID = "draft-invalid"
 DRAFT_CHANGED = "draft-changed"
 NOTHING_TO_PUBLISH = "nothing-to-publish"
-BLOB_MISSING = "blob-missing"
 
 #: The agent's own cap on a package's tree (``agent/src/plugins/packages/hash.ts``
 #: ``MAX_TOTAL_BYTES``), which the published tree, manifest included, must fit.
@@ -77,6 +78,22 @@ class HostedPluginCreate(_Body):
     description: str = Field(default="", max_length=1024)
     category: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     tags: list[Annotated[str, Field(pattern=TAG)]] = Field(default_factory=list, max_length=20)
+
+
+class HostedPluginUpdate(_Body):
+    """The fields a plugin may change after create, checked as ``HostedPluginCreate`` checks
+    them. An absent field stays; ``category`` null clears it. The name never changes."""
+
+    description: str | None = Field(default=None, max_length=1024)
+    category: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    tags: list[Annotated[str, Field(pattern=TAG)]] | None = Field(default=None, max_length=20)
+
+    @model_validator(mode="after")
+    def _only_category_clears(self) -> HostedPluginUpdate:
+        for field in ("description", "tags"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
 
 
 class HostedPlugin(BaseModel):
@@ -269,6 +286,18 @@ async def get_hosted_plugin(name: Name, state: StateDep) -> HostedPlugin:
     return await _in_tx(state, lambda conn: _view(conn, _plugin(conn, name)))
 
 
+@router.patch("/{name}", summary="Change a hosted plugin's description, category or tags")
+async def update_hosted_plugin(
+    name: Name, body: HostedPluginUpdate, state: StateDep
+) -> HostedPlugin:
+    def run(conn: psycopg.Connection[Any]) -> HostedPlugin:
+        row = _plugin(conn, name, lock=True)
+        row = store.update(conn, row, body.model_dump(include=body.model_fields_set))
+        return _view(conn, row)
+
+    return await _in_tx(state, run)
+
+
 @router.delete(
     "/{name}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -292,24 +321,6 @@ async def list_hosted_plugin_files(name: Name, state: StateDep) -> HostedPluginF
         )
 
     return await _in_tx(state, run)
-
-
-async def blob_bytes(state: Any, sha256: str) -> bytes:
-    path = await blob_path(state.store.blobs, blob_key(sha256))
-    if path is None:
-        raise ApiError(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            "the store has lost a file's bytes",
-            reason=BLOB_MISSING,
-        )
-    data = await asyncio.to_thread(path.read_bytes)
-    if hashlib.sha256(data).hexdigest() != sha256:
-        raise ApiError(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            "a file's bytes in the store do not match their sha256",
-            reason=BLOB_MISSING,
-        )
-    return data
 
 
 @router.get(

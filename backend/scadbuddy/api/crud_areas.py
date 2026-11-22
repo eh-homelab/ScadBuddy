@@ -117,7 +117,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: (`api/crud_agent_plugins.py`); its ``plugin-packages`` area is
 #: ``…/agent/plugin-packages`` and every route under it, the installed packages' pins
 #: (`api/crud_agent_packages.py`); its ``hosted-plugins`` area is ``…/agent/hosted-plugins/*``,
-#: a hosted plugin's latest version and a version's zip (#6932, the same module). Its ``gate`` area is ``…/agent/gate/*``: the tool-call
+#: a hosted plugin's latest version and a version's zip (#6932, the same module). Its
+#: ``gate`` area is ``…/agent/gate/*``: the tool-call
 #: gate's writes, an entry opened, a run grant's approval checked against ``flow_grants``, a
 #: flow's refusal, an entry resolved, a response decided against the row's record by the
 #: gate's validator, and the record read, each with its session events, status, audit row and

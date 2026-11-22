@@ -57,6 +57,17 @@ def create(conn: Conn, name: str, description: str, category: str | None, tags: 
     return row
 
 
+def update(conn: Conn, plugin_row: Any, fields: dict[str, Any]) -> Any:
+    """The plugin with ``fields`` (any of description, category, tags) changed."""
+    if not fields:
+        return plugin_row
+    sets = ", ".join(f"{column} = %({column})s" for column in fields)
+    return conn.execute(
+        f"UPDATE ai_hosted_plugins SET {sets}, updated_at = now() WHERE id = %(id)s RETURNING *",
+        {**fields, "id": plugin_row["id"]},
+    ).fetchone()
+
+
 def draft(conn: Conn, plugin_id: int) -> list[Any]:
     return conn.execute(
         "SELECT path, sha256, size, executable, updated_at FROM ai_hosted_plugin_files"

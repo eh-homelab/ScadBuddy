@@ -144,11 +144,14 @@ blob store for bytes).
 
 ### 6.2 Editing a draft
 
-Routes under `/api/v1/hosted-plugins` (the API), each a `person` route (an access
-token with `write` also works):
+Routes under `/api/v1/hosted-plugins` (the API). They are `api` routes
+(`auth/routes.py`), not `person` routes: a person, an access token with `write` for a
+write, or the agent's service credential may call them. The `person` class refuses every
+access token, and the agent's credential is what the MCP tools of #6938 call them with.
 
-- `POST /` creates a plugin. `GET /`, `GET /{name}` and `DELETE /{name}` list, read and
-  delete it.
+- `POST /` creates a plugin. `GET /`, `GET /{name}`, `PATCH /{name}` and `DELETE /{name}`
+  list, read, change and delete it. `PATCH` changes `description`, `category` and `tags`,
+  checked as at create. The name never changes.
 - `GET /{name}/files` lists the draft. `GET`, `PUT` and `DELETE /{name}/files/{path}`
   read, write and delete one file. `PUT` takes the raw bytes as the body.
 - `POST /{name}/files/moves` renames a path.
@@ -180,12 +183,19 @@ with frontmatter), the draft diff and Publish. Load `frontend-design` for this w
 
 1. Validate the draft. Each `skills/<s>/` has a `SKILL.md` with `name` and `description`
    frontmatter. Each `agents/*.md` and `commands/*.md` parses. Apply the same structural
-   rules as `vet.ts`. The agent still runs `vetPackage` at every load, so a gap here fails
-   closed there.
+   rules as `vet.ts`. One rule is stricter than `vet.ts`: dynamic context injection (the
+   `!` followed by a backtick command) is refused in every `.md` file of the draft, not
+   only in a skill or command. The agent still runs `vetPackage` at every load, so a gap
+   here fails closed there.
 2. Generate `.claude-plugin/plugin.json`: `name`, `description`, `version` `"<N>.0.0"`.
 3. Build the zip deterministically: sorted paths, a fixed mtime, mode 0644 or 0755, no
    extra fields. The same draft gives the same bytes, and the same `zip_sha256`.
-4. Store the zip blob and the version row, and set `latest_version`, in one transaction.
+4. Store the zip blob, then write the version row and set `latest_version` in one
+   transaction. The blob goes first and outside the transaction: the store cannot join a
+   database transaction, and the row must name a blob that exists. A transaction that
+   fails (for example `draft-changed`, 409) leaves an unreferenced blob. No row holds it
+   in `blob_refs`, so the store's `sweep_blobs` removes it after its grace period. The
+   same draft gives the same zip, so a publish that is tried again reuses the blob.
 5. Answer the new version number. The API does not vet and does not touch
    `ai_plugin_packages`. The version is then offered to the package model with source
    `{ kind: 'hosted', name }`, which always takes the plugin's `latest_version`:

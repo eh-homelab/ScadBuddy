@@ -47,10 +47,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scadbuddy.agent_data.access import notify_warm_evict
 from scadbuddy.agent_data.packages import forget_package, prune_stale_rows
 from scadbuddy.api.deps import StateDep
-from scadbuddy.api.hosted_plugins import blob_bytes
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.hosted_plugins import store as hosted_store
+from scadbuddy.hosted_plugins.blobs import blob_bytes
 
 router = crud_router("agent")
 
