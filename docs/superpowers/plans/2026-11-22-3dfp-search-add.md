@@ -68,10 +68,13 @@ web search, which 3DFP's Vercel bot check refuses.
 - **R-7025-7 (once only).** The create's activity is tried once (`maximum_attempts=1`). A
   failure after the "Save Filament" click is `not_created` (502): the filament may exist,
   so search before another create. A `timeout` or `browser` failure may also come after
-  the click, so its reason says the same (`workflow.MAY_EXIST`). One workflow per caller, `Idempotency-Key` (428 without)
-  and ask (`create_workflow_id`, conflict `USE_EXISTING`, reuse `REJECT_DUPLICATE`): the same
+  the click, so its reason says the same (`workflow.MAY_EXIST`). One workflow per caller,
+  `Idempotency-Key` (428 without), type and ask (`create_workflow_id`, conflict
+  `USE_EXISTING`, reuse `ALLOW_DUPLICATE_FAILED_ONLY`; R-7025-11, R-7025-12): the same
   request sent again answers the first outcome and never adds a second filament, and a 504
   (no outcome within the wait) is sent again with the same key to wait for it.
+  (Amended by R-7025-11: the driver's own `timeout` and `browser` come only before the
+  click; a Temporal timeout of the step is `step_timeout`, and that one carries the note.)
 - **R-7025-8 (the type).** With `type_id`, a created id becomes the type's `tdfp_id`. A type
   that already has one is refused 409 `type_has_tdfp_id` before the create starts, unless
   this key and ask already started (a resend). A type that took another id meanwhile keeps it
@@ -80,10 +83,46 @@ web search, which 3DFP's Vercel bot check refuses.
   `filament_tdfp_create` is `outward`, approved first: it writes 3DFP, a shared public
   database, as the repo marks the other tools that write outside ScadBuddy.
 
+Rulings from the review of PR #7041 at 1c19d9bc1:
+
+- **R-7025-10 (the search's wait).** The search is tried once (`SEARCH_RETRY`,
+  `maximum_attempts=1`), not twice: it is a read, so a caller sends it again, and a second
+  attempt would double how long the route holds the request. The route's waits come from
+  the workflow's own constants: `workflow.step_wait` is every attempt's queue wait and run,
+  the back-off between attempts and `WAIT_MARGIN` (30 s), so `SEARCH_WAIT` is 4 min 30 s
+  and `CREATE_WAIT` 7 min 30 s. `test_the_routes_wait_out_every_attempt` pins each wait
+  against its retry policy.
+- **R-7025-11 (a failure before the save runs again).** A create that failed before "Save
+  Filament" made nothing, so its outcome is not kept under the key. The driver raises
+  `option_missing`, `no_defaults`, `login_failed`, `bot_check`, `timeout` and `browser`
+  only before it clicks Save (after the click every failure is `not_created`), and
+  `not_started` is a step no worker took. For those (`workflow.BEFORE_SAVE`) the workflow
+  fails with the kind, the API answers it as before, and `ALLOW_DUPLICATE_FAILED_ONLY` lets
+  the same key start the create again; `started` counts a failed run as not started, so a
+  type's 409 check is not skipped for it. A failure the worker cannot place is kept as one
+  that may have saved: a lost, malformed or unexpected answer of the browser service is
+  `not_created` (`remote.RemoteSite.create`), a Temporal timeout of the step is
+  `step_timeout`, and any other is `step_failed`; each completes the workflow, so the key
+  answers it again, and its reason says the filament may exist.
+- **R-7025-12 (the key and the type).** The type is part of the create's key: the route
+  keys on caller, `Idempotency-Key` and `type_id` (`create_workflow_id`). The same key sent
+  for another type is another create, so it never sets the first create's id on a type it
+  was not made for. Chosen over a 409 because the key's owner meant another request, and a
+  409 would need a stored link from key to type.
+- **R-7025-13 (the duplicate list's text).** With no card read, the list's text stops the
+  create only when it names the ask's colour as whole words, case aside, with any
+  non-letter run between its words (`duplicates._names_whole`): "Tan" is not in "Standard".
+  The text is the page from the "Avoid creating duplicates" heading, cut at the "Save
+  Filament" button when that is within it, so the form's labels after the list are not read
+  as the list. The site's container for the list was not measured (the peer's script reads
+  `main.innerText`), so the cut is by that text, not a selector.
+
 ## Timeouts
 
-A search waits at most 1 min in the queue and runs at most 3 min (2 attempts); a create
-waits 2 min and runs 5 min (1 attempt). The worker runs one activity at a time, so either
+A search waits at most 1 min in the queue and runs at most 3 min (1 attempt, R-7025-10); a
+create waits 2 min and runs 5 min (1 attempt). The routes wait every attempt's queue wait
+and run plus 30 s (`workflow.step_wait`): 4 min 30 s for a search, 7 min 30 s for a
+create, then 504 `no_outcome`. The worker runs one activity at a time, so either
 waits behind a preset export; past its wait it is 503 `not_started`. Each workflow ends 15
 min after its start. The routes answer 503 `no_worker` when Temporal says no worker polls
 the queue.

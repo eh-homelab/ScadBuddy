@@ -139,3 +139,14 @@ def test_a_list_with_no_cards_stops_when_its_text_names_the_colour() -> None:
     """With no card read from the list, its text decides: the colour named there stops."""
     assert likely_duplicates(_ask(), [], "SUNLU PLA+/Pro Silk BRONZE (250g)") != []
     assert likely_duplicates(_ask(), [], "No similar filaments") == []
+
+
+def test_the_text_names_the_colour_only_as_whole_words() -> None:
+    """R-7025-13: "Tan" is not in "Standard"; case and the characters between words aside,
+    a whole-word name stops the create."""
+    tan = _ask().model_copy(update={"colour": "Tan"})
+    assert likely_duplicates(tan, [], "SUNLU PLA+/Pro Silk Standard Grey") == []
+    assert likely_duplicates(tan, [], "SUNLU PLA+/Pro Silk TAN (1kg)") != []
+    dark = _ask().model_copy(update={"colour": "Dark Tan (250g)"})
+    assert likely_duplicates(dark, [], "Silk dark-tan") != []
+    assert likely_duplicates(dark, [], "Silk darktan") == []

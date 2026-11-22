@@ -64,7 +64,7 @@ Sources, relative to the root of
 - `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md` (#6625): the 3DFP
   profile-fetch worker, for "Profiles".
 - `docs/superpowers/plans/2026-11-22-3dfp-search-add.md` (#7025): the 3DFP search
-  and add, for "Find or add the 3DFP id", and its rulings R-7025-1 to R-7025-9.
+  and add, for "Find or add the 3DFP id", and its rulings R-7025-1 to R-7025-13.
 - `.claude/skills/filament-intake/SKILL.md`: the owner's rules for receipts. It
   is the source of the diff, cost and colour-code rules below. It still drives
   the BB-era scripts (see "Profiles").
@@ -231,7 +231,10 @@ search or a fetch of the site: 3DFP's bot check refuses those.
      offers no such brand, material or type. Tell the person; do not guess
      another name.
    - 502 `not_created`: Save Filament did not open the new filament's page. The
-     filament may exist. Search again before any second create (R-7025-7).
+     filament may exist. Search again before any second create (R-7025-7). Treat
+     any 502 whose detail says the filament may exist the same way. A failure
+     before the save (422, 503 `not_started`, another 502) made nothing; the same
+     call may be sent again (R-7025-11).
    - 503 `no_worker` or `not_started`: the worker is not running, or it is busy
      with a preset fetch. Try again later.
 

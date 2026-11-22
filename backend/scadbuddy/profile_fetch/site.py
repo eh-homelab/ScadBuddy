@@ -140,6 +140,8 @@ SAVE_WAIT_MS: float = 20_000
 DEFAULTS_FOUND: Final = "Defaults found"
 #: The heading of the add form's duplicate list (the same script).
 AVOID_DUPLICATES: Final = "Avoid creating duplicates"
+#: The add form's save button (the same script).
+SAVE_FILAMENT: Final = "Save Filament"
 SAVED_URL: Final = re.compile(r"/filament/details/(\d+)")
 #: The label of the add form's field for each identifier key but ``mpn`` (R-7025-6): the
 #: fields were not measured, so a key goes only to the one field whose label names it.
@@ -182,14 +184,17 @@ SEARCH_READ: Final = """() => {
 #: The add form's duplicate list: the text after `AVOID_DUPLICATES` in ``main`` (as the
 #: script on #7025 read it), and a card per ``/filament/details/<id>`` link after it, read
 #: as a search page's card is: its breadcrumb (``/filaments/<brand>/<material>/<type>``),
-#: its name and its colours.
+#: its name and its colours. The text ends at the `SAVE_FILAMENT` button when it is within
+#: it, so the form's own labels after the list are not read as the list (R-7025-13).
 DUPLICATES_READ: Final = (
     """() => {
   const main = document.querySelector('main') || document.body;
   const all = main.innerText || '';
   const at = all.indexOf('__HEAD__');
   if (at < 0) return { text: '', cards: [] };
-  const text = all.slice(at, at + __TEXT__);
+  let text = all.slice(at, at + __TEXT__);
+  const save = text.indexOf('__SAVE__');
+  if (save > 0) text = text.slice(0, save);
   const head = [...main.querySelectorAll('*')].find(
     e => e.children.length === 0 && e.textContent.includes('__HEAD__'));
   const cards = [];
@@ -223,6 +228,7 @@ DUPLICATES_READ: Final = (
 }""".replace("__HEAD__", AVOID_DUPLICATES)
     .replace("__TEXT__", str(MAX_DUPLICATE_TEXT))
     .replace("__MAX__", str(MAX_CANDIDATES))
+    .replace("__SAVE__", SAVE_FILAMENT)
 )
 
 
@@ -614,7 +620,7 @@ class ThreeDfpSite:
             logger.info("3DFP create stopped on %d likely duplicate(s)", len(likely))
             return answer
         try:
-            await page.get_by_role("button", name="Save Filament", exact=True).click()
+            await page.get_by_role("button", name=SAVE_FILAMENT, exact=True).click()
             await page.wait_for_url(SAVED_URL, wait_until="commit", timeout=SAVE_WAIT_MS)
             found_id = SAVED_URL.search(page.url)
         except PlaywrightError:

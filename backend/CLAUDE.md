@@ -996,8 +996,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `SiteHolder` that keeps one signed-in browser, `SiteError` and its kinds (`login_failed`, only when the site sends the browser back to
   `/login`; `tdfp_not_found`, `option_missing`, `file_too_large`, an export over 512 KiB,
   which the driver refuses from the text's length before it reads the text (`_read_export`,
-  #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`); `activities.py` has the export, import and
-  `failed` activities; `workflow.py` is the `ProfileFetch` workflow; `wire.py` is the bodies
+  #6726; the page's blob hook's flag is a first filter only), `bot_check`, `timeout`, `browser`,
+  and the 3DFP create's (#7025) `no_defaults`, no site defaults for the brand, material and
+  type (422), and `not_created`, Save Filament did not open the new filament's page, so it may
+  exist (502)); `activities.py` has the export, import and
+  `failed` activities, and `TdfpActivities`; `workflow.py` is the `ProfileFetch` workflow, and `TdfpSearch` and `TdfpCreate`; `wire.py` is the bodies
   shared with the CRUD routes; `site.py`'s `browser_env` is the allowlisted environment that
   Chromium launches with (no login, no token path). The API side is `filament/profile_fetch.py`
   (`ProfileFetches`: `open`, `get`, `latest`, `gaps`, `fail_unstarted`, `running_age`,
@@ -1013,8 +1016,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `TemporalTdfp`), the browser service's ``POST /search`` and ``/create`` (JSON answers the
   worker validates), `site.py` `search` and `create`, and `duplicates.py` (the likely-duplicate
   rule the create stops on, R-7025-5). The routes are `POST /filament/tdfp/search` and
-  `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key and ask,
-  `create_workflow_id`; the create is never retried).
+  `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key, type and ask,
+  `create_workflow_id`, R-7025-12; the create is never retried, and a failure before Save
+  Filament fails its workflow, so the same key runs it again, `workflow.BEFORE_SAVE`, R-7025-11).
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

@@ -825,7 +825,8 @@ async def _tdfp_worker(runner: Tdfp) -> None:
         "lacks the filament. Reads only; ScadBuddy stores nothing. 503 `no_worker` when no "
         "profile-fetch worker runs, 503 `not_started` when the worker, busy with a preset "
         "fetch, did not take the search within a minute, 502 when the site or the browser "
-        "failed (`code` is the failure's kind), 504 when no outcome came within the wait."
+        "failed (`code` is the failure's kind; the search is tried once, so send it again), "
+        "504 when no outcome came within the wait."
     ),
 )
 async def search_tdfp(state: StateDep, caller: CallerDep, body: SearchAsk) -> SearchAnswer:
@@ -875,10 +876,12 @@ class TdfpCreated(BaseModel):
         "person who judges those to be other filaments sends their ids in `not_duplicates`. "
         "Else it saves and answers `status` `created` with the new `tdfp_id`, which becomes "
         "the `tdfp_id` of `type_id` when one is sent. Needs an `Idempotency-Key` (428 "
-        "without): the same key and body answer the first create's outcome and never add a "
-        "second filament. The create is tried once: 502 `not_created` means Save Filament did "
-        "not open the new filament's page and it may exist, so search before sending another "
-        "key. 404 for no such type, 409 `type_has_tdfp_id` for a type that already has one. "
+        "without): the same key, body and `type_id` answer the first create's outcome and "
+        "never add a second filament, except after a failure before the save (422, 503 "
+        "`not_started`, or a site failure before the save), which the same key tries again. "
+        "The create is tried once: 502 `not_created`, or a 502 whose detail says the filament "
+        "may exist, means it may exist, so search before sending another key. 404 for no "
+        "such type, 409 `type_has_tdfp_id` for a type that already has one. "
         "503 `no_worker`, 503 `not_started`, 502 and 504 as for the search; on 504 the "
         "create may still run, and the same request with the same key waits for it."
     ),
@@ -891,7 +894,9 @@ async def create_tdfp_filament(
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> TdfpCreated:
     who = actor(caller)
-    key = f"{who}\x1f{required_key(idempotency_key)}"
+    # The caller's key under their own name, and the type the new id goes to: the same key
+    # for another type is another create, never the first one's id on it (R-7025-12).
+    key = f"{who}\x1f{required_key(idempotency_key)}\x1f{body.type_id or ''}"
     ask = CreateAsk.model_validate(body.model_dump(exclude={"type_id"}))
     runner = tdfp(state)
     if body.type_id is not None:

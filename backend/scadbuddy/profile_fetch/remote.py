@@ -158,9 +158,21 @@ class RemoteSite:
         return _answer(SearchAnswer, body, context)
 
     async def create(self, ask: CreateAsk) -> CreateAnswer:
+        """The service's answer. Its own failure keeps its kind, which the driver gives only
+        before it clicks "Save Filament" (or ``not_created`` after it). Any other failure (no
+        answer, a lost or malformed one, a refusal of the call) is ``not_created``: the step
+        may have saved the filament (R-7025-11)."""
         context = f"3DFP create of {ask.brand} {ask.material} {ask.material_type} {ask.colour}"
-        body = await self._call("POST", CREATE, ask, MAX_ANSWER_BYTES, context)
-        return _answer(CreateAnswer, body, context)
+        try:
+            body = await self._call("POST", CREATE, ask, MAX_ANSWER_BYTES, context)
+            return _answer(CreateAnswer, body, context)
+        except _SiteAnsweredError:
+            raise
+        except SiteError as error:
+            failed = SiteError(
+                "not_created", f"{error}; it may exist on 3dfilamentprofiles.com: search first"
+            )
+        raise failed
 
     async def _call(
         self, method: str, path: str, ask: BaseModel | None, cap: int, context: str
@@ -199,7 +211,8 @@ class RemoteSite:
         if status == 500 and body is not None:
             kind = _site_kind(body)
             if kind is not None:
-                raise _failure(kind, context)
+                failure = _failure(kind, context)
+                raise _SiteAnsweredError(failure.kind, str(failure))
         raise _failure("browser", context, f"the browser service answered HTTP {status}")
 
 
@@ -228,6 +241,11 @@ def _site_kind(body: bytes) -> Kind | None:
     if isinstance(kind, str) and kind in KINDS:
         return kind  # type: ignore[return-value]  # checked against Kind's values above
     return None
+
+
+class _SiteAnsweredError(SiteError):
+    """A failure the service answered as one of the site's kinds, as against one of the
+    call itself (`RemoteSite.create` tells them apart)."""
 
 
 def _answer[M: BaseModel](model: type[M], body: bytes, context: str) -> M:

@@ -42,7 +42,9 @@ async def test_a_create_answers_what_the_site_did() -> None:
     assert site.creates == [ASK]
 
 
-@pytest.mark.parametrize("kind", ["no_defaults", "not_created", "option_missing"])
+@pytest.mark.parametrize(
+    "kind", ["no_defaults", "not_created", "option_missing", "browser", "timeout", "bot_check"]
+)
 async def test_a_create_failure_crosses_as_its_kind_only(kind: str) -> None:
     site = FakeSite()
     site.tdfp_error = SiteError(kind, INJECTED)  # type: ignore[arg-type]
@@ -69,13 +71,35 @@ def _fake(answer: httpx.Response) -> RemoteSite:
         json.dumps({"status": "deleted"}).encode(),
     ],
 )
-async def test_a_create_answer_that_is_not_one_is_a_browser_failure(body: bytes) -> None:
-    """The service may be compromised: its answer is checked, and its text never crosses."""
+async def test_a_create_answer_that_is_not_one_may_have_saved(body: bytes) -> None:
+    """The service may be compromised: its answer is checked, and its text never crosses.
+    A create whose answer is lost may have saved, so it is ``not_created`` (R-7025-11)."""
     with pytest.raises(SiteError) as caught:
         async with _fake(httpx.Response(200, content=body)) as remote:
             await remote.create(ASK)
-    assert caught.value.kind == "browser"
+    assert caught.value.kind == "not_created"
     assert INJECTED not in str(caught.value)
+    assert "may exist" in str(caught.value)
+
+
+async def test_a_create_the_service_never_answered_may_have_saved() -> None:
+    """R-7025-11: no answer from the service is not a failure before the save."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("gone", request=request)
+
+    remote = RemoteSite("http://browser.example", TOKEN, transport=httpx.MockTransport(refuse))
+    with pytest.raises(SiteError) as caught:
+        async with remote:
+            await remote.create(ASK)
+    assert caught.value.kind == "not_created"
+
+
+async def test_a_create_the_service_refused_with_no_kind_may_have_saved() -> None:
+    with pytest.raises(SiteError) as caught:
+        async with _fake(httpx.Response(500, content=b"{}")) as remote:
+            await remote.create(ASK)
+    assert caught.value.kind == "not_created"
 
 
 async def test_a_search_answer_past_its_cap_is_refused() -> None:

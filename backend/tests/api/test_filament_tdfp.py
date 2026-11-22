@@ -124,8 +124,8 @@ def test_a_create_sets_the_types_tdfp_id(client: TestClient, runner: FakeTdfp) -
     [(ask, key)] = runner.creates
     assert ask.hexes == ["#B87333"]
     assert ask.identifiers() == {"mpn": "SL-SILK-CU", "gtin": "06975373321234"}
-    # The caller's key, under its own name.
-    assert key.endswith("\x1fcreate-7025-1")
+    # The caller's key, under its own name, with the type (R-7025-12).
+    assert key.endswith(f"\x1fcreate-7025-1\x1f{type_id}")
     stored = client.get(f"{URL}/types/{type_id}").json()
     assert stored["tdfp_id"] == 40000
     # R-7025-6: the identifiers are stored nowhere on the type.
@@ -143,6 +143,25 @@ def test_a_create_sent_again_answers_again_and_keeps_the_type(
     again = client.post(f"{URL}/tdfp/filaments", json=body, headers=KEY)
     assert again.status_code == 200, again.text
     assert again.json() == first.json()
+
+
+def test_the_same_key_for_another_type_is_another_create(
+    client: TestClient, runner: FakeTdfp
+) -> None:
+    """R-7025-12: a key used for one type never sets the first create's id on another; it is
+    another create, of its own outcome."""
+    first_type = _type(client, code="PLA-CU", tdfp_id=None)
+    second_type = _type(client, code="PLA-CU2", tdfp_id=None)
+    first = client.post(f"{URL}/tdfp/filaments", json={**BODY, "type_id": first_type}, headers=KEY)
+    runner.create_outcome = TdfpOutcome(create=CreateAnswer(status="created", tdfp_id=40002))
+    second = client.post(
+        f"{URL}/tdfp/filaments", json={**BODY, "type_id": second_type}, headers=KEY
+    )
+    assert first.status_code == second.status_code == 200, second.text
+    [(_, first_key), (_, second_key)] = runner.creates
+    assert first_key != second_key
+    assert client.get(f"{URL}/types/{first_type}").json()["tdfp_id"] == 40000
+    assert client.get(f"{URL}/types/{second_type}").json()["tdfp_id"] == 40002
 
 
 def test_a_type_with_a_tdfp_id_is_refused(client: TestClient, runner: FakeTdfp) -> None:

@@ -14,8 +14,8 @@ or one of its colours is close to the ask's:
   (`orders/storefront/closest_colour.py`, a module of pure functions).
 
 A list the browser read no card from is judged by its text: it stops when the text holds
-the ask's colour name. An id in the ask's ``not_duplicates`` (a person judged it another
-filament) is never a likely duplicate.
+the ask's colour name as whole words (`_names_whole`, R-7025-13). An id in the ask's
+``not_duplicates`` (a person judged it another filament) is never a likely duplicate.
 """
 
 from __future__ import annotations
@@ -88,6 +88,17 @@ def likely_duplicates(
         hex_colour = _close_hex(ask.hexes, candidate.hexes)
         if hex_colour is not None:
             found.append((candidate, f"a colour within ΔE {CLOSE_DELTA_E:g} of {hex_colour}"))
-    if not candidates and _name(ask.colour) and _name(ask.colour) in _name(text):
+    if not candidates and _names_whole(ask.colour, text):
         found.append((None, f"the duplicate list names {ask.colour!r}"))
     return found
+
+
+def _names_whole(colour: str, text: str) -> bool:
+    """The colour name (its weight suffix left out) is in ``text`` as whole words, case
+    aside, with any run of other characters between its words (R-7025-13): "Tan" is not in
+    "Standard"."""
+    words = re.findall(r"[0-9a-z]+", _WEIGHT.sub("", colour).casefold())
+    if not words:
+        return False
+    pattern = r"(?<![0-9a-z])" + r"[^0-9a-z]+".join(map(re.escape, words)) + r"(?![0-9a-z])"
+    return re.search(pattern, text.casefold()) is not None
