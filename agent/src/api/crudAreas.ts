@@ -82,11 +82,16 @@ export const REST_AREAS = ['publish', 'session-reads'] as const
 export const TURN_AREAS = ['session-turns', 'session-edits'] as const
 
 /**
- * What the agent read at its start and per request (#6501; backend api/crud_agent_start.py):
- * the ledger of its migrations (db/schema.ts `crudLedger`) and a signed-in person's session
- * (auth/browserSession.ts `CrudSessionLookup`).
+ * A signed-in person's session, read per request (#6501; backend api/crud_agent_start.py;
+ * auth/browserSession.ts `CrudSessionLookup`).
  */
-export const START_AREAS = ['migrations', 'auth-sessions'] as const
+export const START_AREAS = ['auth-sessions'] as const
+
+/**
+ * The keys the API derives from its KEK for the agent: the approvals' input-hash key and the
+ * one-off fetch grants (#5299 step 12; backend api/crud_agent_keys.py; api/agentKeys.ts).
+ */
+export const KEY_AREAS = ['keys'] as const
 
 /**
  * Which sessions still have a row, for the pod's directory sweeps, and a forget's last rows

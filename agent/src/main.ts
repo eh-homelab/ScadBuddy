@@ -52,7 +52,7 @@ import { CrudPluginStore, loadEnabledPlugins } from './plugins/registry.js'
 import { toolSecrets } from './plugins/secrets.js'
 import { ResourceHub } from './resources/hub.js'
 import { ExchangeCredential, serviceCredentialMiddleware, withServiceCredential } from './api/serviceCredential.js'
-import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, RELAY_AREAS, SECRET_AREAS, SESSION_AREAS, START_AREAS, TASK_AREAS, TURN_AREAS, WORKSPACE_AREAS, REST_AREAS, SWEEP_AREAS } from './api/crudAreas.js'
+import { BLOB_AREAS, CrudAreas, FORGET_AREAS, GATE_AREAS, KEY_AREAS, RELAY_AREAS, SECRET_AREAS, SESSION_AREAS, START_AREAS, TASK_AREAS, TURN_AREAS, WORKSPACE_AREAS, REST_AREAS, SWEEP_AREAS } from './api/crudAreas.js'
 import { CrudFetchGrants, InputHashKey } from './api/agentKeys.js'
 import { CrudApprovals } from './approvals/crudApprovals.js'
 import { CrudAudit } from './audit/crudAudit.js'
@@ -199,7 +199,7 @@ const serviceCredential = new ExchangeCredential({
 // seals and opens what is sealed. The areas are read from the start, again with back-off until the
 // API lists every one (api/crudAreas.ts); until then the agent is not ready.
 const crudFetch = withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl)
-const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...REST_AREAS, ...TURN_AREAS, ...RELAY_AREAS, ...START_AREAS, ...SWEEP_AREAS] })
+const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...REST_AREAS, ...TURN_AREAS, ...RELAY_AREAS, ...START_AREAS, ...SWEEP_AREAS, ...KEY_AREAS] })
 crudAreas.start()
 const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
 // Health's probe of the agent's data (api/dataHealth.ts): ready once the API lists every area, and
