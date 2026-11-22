@@ -259,7 +259,7 @@ class ListingMedia(BaseModel):
     media_id: str | None = None
 
 
-class ListedFileInput(BaseModel):
+class ListingFileInput(BaseModel):
     """The library file a ``library_file`` listing sells (#6710 §4.1): an id of the
     library that serves."""
 
@@ -281,7 +281,7 @@ class ListedFileInput(BaseModel):
     filename: str | None = Field(default=None, max_length=1000)
 
 
-class ListedFile(ListedFileInput):
+class ListingFile(ListingFileInput):
     """A file listing's ``library_file`` as stored: ``pinned`` is the sha256 of the held
     copy the listing sells (null before its first publish), ``repin`` the stored request,
     and ``filename`` the file's name when it was pinned."""
@@ -302,7 +302,7 @@ class ListingInput(BaseModel):
     slug: str | None = Field(default=None, min_length=1, max_length=200)
     commit: str | None = Field(default=None, pattern=LISTING_COMMIT)
     #: The file a ``library_file`` listing sells: an id of the library that serves.
-    library_file: ListedFileInput | None = None
+    library_file: ListingFileInput | None = None
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=5000)
     params: dict[str, ParamBound] = Field(default_factory=dict)
@@ -337,7 +337,7 @@ class Listing(ListingInput):
     id: str
     position: int
     published: bool
-    library_file: ListedFile | None = None
+    library_file: ListingFile | None = None
     snapshot: Snapshot | None
     media: list[ListingMedia]
     published_at: datetime | None

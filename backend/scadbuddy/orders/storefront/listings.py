@@ -71,8 +71,8 @@ from scadbuddy.orders.storefront.wire import (
     FILE_PICTURE_ID,
     ChoiceBound,
     FileSnapshot,
-    ListedFile,
     Listing,
+    ListingFile,
     ListingInput,
     ListingMedia,
     ListingPage,
@@ -287,7 +287,7 @@ def _stored_file(body: ListingInput) -> Jsonb | None:
     """A new row's ``library_file``: no pin, no request."""
     if body.library_file is None:
         return None
-    fresh = ListedFile(id=body.library_file.id, library=body.library_file.library)
+    fresh = ListingFile(id=body.library_file.id, library=body.library_file.library)
     return Jsonb(fresh.model_dump(mode="json"))
 
 
@@ -297,7 +297,7 @@ def _saved_file(body: ListingInput, stored: Any) -> tuple[Jsonb | None, bool]:
     save keeps it unless the file's id or library changed, and then stores no pin and no
     request. ``repin`` is written only when the body names it."""
     asked = body.library_file
-    before = None if stored is None else ListedFile.model_validate(stored)
+    before = None if stored is None else ListingFile.model_validate(stored)
     if asked is None:
         return None, before is not None
     if before is None or (before.id, before.library) != (asked.id, asked.library):
