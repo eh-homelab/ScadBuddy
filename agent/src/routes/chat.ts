@@ -1,3 +1,4 @@
+import { KeyNotReleasedError } from '../api/agentKeys.js'
 import { context as otelContext } from '@opentelemetry/api'
 import type { Hono, MiddlewareHandler } from 'hono'
 import { WebSocket } from 'ws'
@@ -197,6 +198,11 @@ function errorEvent(
   const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}), ...(queuedId ? { queuedId } : {}) }
   if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
+  }
+  // An answer or a decision is audited with its input's hash; a replica that has just started
+  // holds no key yet (api/agentKeys.ts). The panel may send it again.
+  if (err instanceof KeyNotReleasedError) {
+    return event({ type: 'error', ...where, code: 'unavailable', message: 'The assistant is still starting, so this was not done. Send it again.' })
   }
   // Anything else is ours, not the user's: log it, and say only that it failed.
   log(`chat: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`)
