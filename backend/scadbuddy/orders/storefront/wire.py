@@ -357,7 +357,7 @@ class Listing(ListingInput):
         those paths refuse before they get here (`listings.py` `published_listing`)."""
         snapshot = self.template_snapshot
         if snapshot is None or self.slug is None or self.commit is None:
-            raise ValueError(f"listing {self.id!r} is not a published template listing")
+            raise ValueError(f"listing {self.id!r} is not published as a template")
         return self.slug, self.commit, snapshot
 
     @property
