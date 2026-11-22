@@ -802,15 +802,17 @@ def reset_links(
     configured Bambuddy, whose spools are ``listing`` (``None``: it could not be read),
     must still be the links' own (`same_bambuddy`); then nothing is deleted: the state
     row records ``configured`` as the links' instance, so every link and intent stays
-    (R-6845-3). When it is not, the reset is refused ``proof_changed`` and writes
-    nothing, so a Bambuddy that changed between the preview and the reset never turns
-    "Keep links" into a delete. Without ``expect_kept`` (the person confirmed the delete,
-    Decision 198; ``listing`` is not read) every
-    Bambuddy link and what the sync keeps of the old Bambuddy is deleted (#6773): the
+    (R-6845-3), and so does the usage mark, under ``configured`` (R-7002-6). When it is
+    not, the reset is refused ``proof_changed`` and writes nothing, so a Bambuddy that
+    changed between the preview and the reset never turns "Keep links" into a delete.
+    Without ``expect_kept`` (the person confirmed the delete, Decision 198; ``listing`` is
+    not read) every Bambuddy link and what the sync keeps of the old Bambuddy is deleted
+    (#6773): the
     spool links, each supplier's, location's, insert type's and spool type's Bambuddy id
     with its hashes and seen copy, the open create intents, the error rows, the ignored
-    Bambuddy spools and the state row's ``instance``. No ScadBuddy spool, type, supplier
-    or location is deleted, and none of their own fields changes."""
+    Bambuddy spools, the state row's ``instance`` and its usage mark (R-7002-6). No
+    ScadBuddy spool, type, supplier or location is deleted, and none of their own fields
+    changes."""
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state FOR UPDATE").fetchone()
         instance = state["instance"] if state is not None else None
@@ -823,7 +825,12 @@ def reset_links(
         if expect_kept:
             if configured is None or listing is None or not _proof_of(conn, listing)[0]:
                 raise ResetRefusedError("proof_changed")
-            conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (configured,))
+            # The same Bambuddy: its usage mark stays and moves to the new name (R-7002-6).
+            conn.execute(
+                "UPDATE filament_bb_sync_state SET instance = %s, usage_read_instance ="
+                " CASE WHEN usage_read_instance = %s THEN %s ELSE usage_read_instance END",
+                (configured, instance, configured),
+            )
             logger.info(
                 "the Bambuddy links were kept: the new URL reaches the same Bambuddy",
                 extra={"instance": instance, "configured": configured},
@@ -852,7 +859,10 @@ def reset_links(
         conn.execute(
             "UPDATE filament_colours SET bb_colour_id = NULL WHERE bb_colour_id IS NOT NULL"
         )
-        conn.execute("UPDATE filament_bb_sync_state SET instance = NULL")
+        conn.execute(
+            "UPDATE filament_bb_sync_state SET instance = NULL, usage_read_instance = NULL,"
+            " usage_read_at = NULL, usage_read_id = NULL"
+        )
     logger.info("the Bambuddy links were reset", extra={"instance": instance})
     return LinksResetDone(instance=instance, kept=False, deleted=counts)
 

@@ -1720,7 +1720,8 @@ const tools: Tool[] = [
       'rows it could not read (`invalid`) or pull (`failed_bb_ids`). Also: `rfid_duplicates` (Bambuddy spools made ' +
       'for a tag a linked spool holds, left alone), `catalog_failed` and `catalog_skipped` (Bambuddy\'s spool ' +
       'catalog), `names_skipped` (catalog names with no letter or digit, left out), and `usage_booked` and ' +
-      '`usage_unlinked` (Bambuddy usage rows booked, and those of an unlinked spool). ' +
+      '`usage_unlinked` (Bambuddy usage rows booked, and the rows of an unlinked spool later than the last ' +
+      "read an earlier pull booked whole; a failed body's rows are counted again). " +
       '409 when no Bambuddy is configured, or when the Bambuddy URL changed during the import (import again). ' +
       '503 when the print worker did not finish in time: it may still be running, so check the spools before ' +
       'importing again. 502 when ScadBuddy refused what the worker read (importing again gets the same answer). ' +
