@@ -196,6 +196,12 @@ class OutcomeUnknown extends Error {}
 
 type ServerEventOf<T extends string> = Extract<ServerEvent, { type: T }>
 
+/** The workflow refused the Update because its run was told to end and is closing (#7031). */
+function refusedEnded(err: unknown): boolean {
+  const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
+  return cause instanceof ApplicationFailure && cause.type === ENDED
+}
+
 /** A queue Update's failure as the caller hears it (#6386). */
 function queueRefusal(err: unknown, id: string, what: string): SessionError {
   const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
@@ -411,8 +417,7 @@ export class DurableTurns {
     } catch (err) {
       const refusal = queueRefusal(err, id, 'queue the message')
       // Refused, it was never queued: what its write made goes. Any other failure may have queued it.
-      const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
-      if (refusal.code === 'queue_full' || (cause instanceof ApplicationFailure && cause.type === ENDED)) {
+      if (refusal.code === 'queue_full' || refusedEnded(err)) {
         for (const write of made) {
           await this.#blobs.delete(id, write).catch(() => {
             console.warn(`durable send: session ${id}: a refused message's images were not deleted`)
@@ -577,10 +582,6 @@ export class DurableTurns {
         ),
       )
     const stillEnding = () => new SessionError('unavailable', `session ${session.id}'s workflow is still ending; send the message again in a moment`)
-    const refusedEnded = (err: unknown) => {
-      const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
-      return cause instanceof ApplicationFailure && cause.type === ENDED
-    }
     try {
       try {
         await send()
@@ -589,11 +590,21 @@ export class DurableTurns {
         // The run was told to end (an archive just before an unarchive, #7031; a done whose edit
         // did not land) and is closing. The claim passed, so the row is not done: once that run
         // closes, the same Update starts a new one. The closing run refused it, so it never took it.
+        // The wait is pinned to the run current at this describe, which is the run that refused it
+        // unless that run closed and another started in between (the SDK's update-with-start handle
+        // does not expose the run its start found). A run started after the describe is not waited
+        // for: the retry reaches it, and it takes the Update or answers busy.
         const workflowId = sessionWorkflowId(session.id)
-        await this.#client.withDeadline(deadline, () => this.#client.workflow.getHandle(workflowId).result()).catch(() => undefined)
-        const state = Date.now() < deadline ? await this.#describe(workflowId).catch(() => 'open' as const) : 'open'
+        const closed = await this.#client
+          .withDeadline(deadline, async () => {
+            const { runId } = await this.#client.workflow.getHandle(workflowId).describe()
+            const run = this.#client.workflow.getHandle(workflowId, runId, { followRuns: false })
+            await run.result().catch(() => undefined)
+            return (await run.describe()).status.name !== 'RUNNING'
+          })
+          .catch((err: unknown) => err instanceof WorkflowNotFoundError)
         // Still closing, or no time left for the Update: nothing took the message, so the claim is given back.
-        if (state !== 'closed' && state !== 'not_found') throw stillEnding()
+        if (!closed || Date.now() >= deadline) throw stillEnding()
         // A new run told to end in the meantime (another archive) refuses it too.
         await send().catch((retryErr: unknown) => {
           throw refusedEnded(retryErr) ? stillEnding() : retryErr
