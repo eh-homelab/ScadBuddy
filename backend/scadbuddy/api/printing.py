@@ -1353,6 +1353,8 @@ SEQUENCE_GONE = (
 )
 #: What a run whose sequence closed without recording its end records: its controls
 #: would otherwise stand for good, each answering `SEQUENCE_GONE`.
+#: How long `end_gone_sequences` waits on one run's describes and record.
+SEQUENCE_CHECK_TIMEOUT = timedelta(seconds=10)
 SEQUENCE_GONE_STOP = LanStopped(
     stage="cancelled",
     message="The run's later prints stopped running in ScadBuddy's background service,"
@@ -1387,11 +1389,24 @@ async def end_gone_sequences(runs: PrintCommands) -> None:
     sequence terminated, or never started, writes no end of its own, and its run would
     otherwise keep its subject's files in use for good. Only once the run's own
     ``PrintRun`` execution has closed: until then it may still start the sequence, which
-    it does after it records the run succeeded (`workflows/printing.py`)."""
+    it does after it records the run succeeded (`workflows/printing.py`).
+
+    Each run's check (its describes and its record) is bounded by
+    `SEQUENCE_CHECK_TIMEOUT`; one that fails or does not answer in time is skipped and
+    left waiting, so the sweep that calls this (the run-holds reap, #6871) always goes on."""
     for run_id, workflow_id in await runs.store.lan_waiting_runs():
-        if workflow_id is None or await _execution_open(runs, workflow_id):
+        if workflow_id is None:
             continue
-        await _to_sequence(runs, run_id, _leave_running)
+        try:
+            async with asyncio.timeout(SEQUENCE_CHECK_TIMEOUT.total_seconds()):
+                if await _execution_open(runs, workflow_id):
+                    continue
+                await _to_sequence(runs, run_id, _leave_running)
+        except Exception as error:
+            logger.warning(
+                "a LAN run's sequence could not be checked; it is left waiting",
+                extra={"error": type(error).__name__},
+            )
 
 
 async def _execution_open(runs: PrintCommands, workflow_id: str) -> bool:

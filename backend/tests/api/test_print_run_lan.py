@@ -8,10 +8,12 @@ the routes only send to it, and what they sent is in its history."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -353,3 +355,32 @@ def test_a_queued_runs_card_reads_whether_the_print_it_waits_for_still_runs(
     printers.reports.put(printer, {"gcode_state": "FINISH"}, datetime.now(UTC))
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
     assert card["lan_run"]["queued"] and not card["lan_run"]["queued_for_print"]
+
+
+def test_a_hanging_describe_never_stops_the_hold_reap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6871 (review of #6948): each run's sequence check is bounded, and one that does
+    not answer is skipped, so the run-holds reap after it still runs."""
+
+    class Hanging:
+        async def describe(self) -> None:
+            await asyncio.sleep(3600)
+
+    class Client:
+        def get_workflow_handle(self, workflow_id: str) -> Hanging:
+            return Hanging()
+
+    class Store:
+        async def lan_waiting_runs(self) -> list[tuple[str, str | None]]:
+            return [("r1", "print-r1"), ("r2", "print-r2")]
+
+    reaped: list[object] = []
+
+    def reap(refs: object) -> int:
+        reaped.append(refs)
+        return 0
+
+    monkeypatch.setattr(printing_api, "SEQUENCE_CHECK_TIMEOUT", timedelta(milliseconds=50))
+    monkeypatch.setattr(app_main, "reap_run_holds", reap)
+    state = SimpleNamespace(print_runs=SimpleNamespace(store=Store(), client=Client()), refs="refs")
+    asyncio.run(asyncio.wait_for(app_main._reap_run_holds_logged(state), timeout=5))  # type: ignore[arg-type]
+    assert reaped == ["refs"]

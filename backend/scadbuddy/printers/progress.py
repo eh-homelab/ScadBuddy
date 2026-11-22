@@ -38,7 +38,13 @@ from scadbuddy.bambuddy.runs import LatestRun, PrintRun, read_latest
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS
-from scadbuddy.printers.lan_models import BUSY_STATES, LanStarted, LanStopped
+from scadbuddy.printers.lan_models import (
+    BUSY_STATES,
+    ENDED_STATES,
+    IDLE_STATES,
+    LanStarted,
+    LanStopped,
+)
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import RUNNING as _RUNNING
 from scadbuddy.printers.status import print_error_text
@@ -213,9 +219,16 @@ def waiting_plate(
 
 
 def printing_now(state: object) -> bool | None:
-    """Whether a printer whose ``gcode_state`` is ``state`` prints now (`BUSY_STATES`);
-    ``None`` when no state was read."""
-    return state in BUSY_STATES if isinstance(state, str) and state else None
+    """Whether a printer whose ``gcode_state`` is ``state`` prints now: ``True`` in
+    `BUSY_STATES`, ``False`` in `ENDED_STATES` or `IDLE_STATES`, and ``None`` for no state
+    or a word it does not know, so the caller falls back to what the run recorded."""
+    if not isinstance(state, str):
+        return None
+    if state in BUSY_STATES:
+        return True
+    if state in ENDED_STATES or state in IDLE_STATES:
+        return False
+    return None
 
 
 def lan_control(run: PrintRun, printing: bool | None = None) -> LanRunControl | None:

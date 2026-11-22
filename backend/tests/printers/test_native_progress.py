@@ -31,6 +31,7 @@ from scadbuddy.printers.progress import (
     from_lan_report,
     lan_ended,
     lan_last_print,
+    printing_now,
     shows,
 )
 from scadbuddy.printers.status import print_error_text
@@ -660,3 +661,24 @@ def test_a_busy_print_with_no_name_has_not_ended_while_busy(state: str) -> None:
     assert lan_ended(({"gcode_state": state}, at(seconds=10)), queued.job, seen=False) is None
     # Nor from a report no newer than the check.
     assert lan_ended(({"gcode_state": "FINISH"}, STARTED_AT), queued.job, seen=False) is None
+
+
+@pytest.mark.parametrize(
+    ("state", "printing"),
+    [
+        ("RUNNING", True),
+        ("PAUSE", True),
+        ("FINISH", False),
+        ("FAILED", False),
+        ("IDLE", False),
+        ("SOMETHING_NEW", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_only_known_states_say_whether_the_printer_prints(
+    state: object, printing: bool | None
+) -> None:
+    """#6871 (review of #6948): a word the code does not know reads as no state, so a
+    queued run's text falls back to the job it recorded."""
+    assert printing_now(state) is printing
