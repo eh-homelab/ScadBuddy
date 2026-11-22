@@ -48,11 +48,24 @@ test.describe('the public storefront', () => {
   test('shows the preview and price of choices priced before at once, with no render (#6921)', async ({ page }) => {
     await page.goto('/store/l/l1')
     const name = page.getByLabel('Name', { exact: true })
-    await name.fill('Ada')
+    // Each name is priced before the next: the load's price is on screen too, so wait for
+    // the estimate of that name's own render, not for any price (#6921).
+    const priced = async (value: string) => {
+      const posted = page.waitForRequest(
+        (request) =>
+          request.method() === 'POST' &&
+          new URL(request.url()).pathname.endsWith('/renders') &&
+          (request.postDataJSON() as { values?: { name?: string } } | null)?.values?.name === value,
+      )
+      await name.fill(value)
+      const answer = await (await posted).response()
+      const { id } = (await answer!.json()) as { id: string }
+      await page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(`/renders/${id}/estimate`))
+      await expect(page.getByText('Updating this price…')).toBeHidden()
+    }
+    await priced('Ada')
     await expect(page.getByText('$12.40 for one')).toBeVisible()
-    await name.fill('Bo')
-    await expect(page.getByText('Updating this price…')).toBeVisible()
-    await expect(page.getByText('Updating this price…')).toBeHidden()
+    await priced('Bo')
     const renders: string[] = []
     page.on('request', (request) => {
       if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/renders')) renders.push(request.url())

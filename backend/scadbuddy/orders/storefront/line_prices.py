@@ -142,10 +142,10 @@ async def variant_at_add(
     (`RenderLimits.job_of`), the slot filaments of ``colours`` in ``material`` as the
     estimate takes them (``renders.py`` `variant_of`). With no such render, the priced
     slice of the choices' ``variant_key`` (`SlicePrices.variant_row`), while its saved
-    output is of the listing's design (#6921: the page showed that preview and price with no render): its 3MF's
-    sha256 and slot filaments, as the server recorded them. The price is still read by
-    the key (`price_of`), never from the browser. None when there is neither, or a slot
-    has no listing filament: the line has no firm price."""
+    output is of the listing's design (#6921: the page showed that preview and price
+    with no render): its 3MF's sha256 and slot filaments, as the server recorded them.
+    The price is still read by the key (`price_of`), never from the browser. None when
+    there is neither, or a slot has no listing filament: the line has no firm price."""
 
     def job() -> Any:
         job_id = RenderLimits(state.projection.pool).job_of(visitor_id, render_key)
