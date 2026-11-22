@@ -67,14 +67,16 @@ async function load(): Promise<Loaded> {
  * the swatch, the name, then the number, the place and what is left; it shares the picker's
  * remembered material and "Loaded in a printer" filters (a type counts as loaded when one of
  * its spools is). The search is the tabs' (`lib/filamentSearch.ts`); Enter opens the spool or
- * the type. The lists are read each time it opens.
+ * the type. The lists are read each time it opens. Ctrl+K stays out of every text field except
+ * one marked `data-quick-find` (the tabs' own `FilamentSearchBox`).
  */
 export function FilamentQuickFind() {
   const [open, setOpen] = useState(false)
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (!isQuickFindKey(event) || event.defaultPrevented || isTyping(event.target)) return
+      if (!isQuickFindKey(event) || event.defaultPrevented) return
+      if (isTyping(event.target) && !(event.target as HTMLElement).hasAttribute('data-quick-find')) return
       event.preventDefault()
       setOpen(true)
     }
