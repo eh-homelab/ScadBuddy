@@ -75,3 +75,42 @@ ALTER TABLE entity_attachments
   ADD CONSTRAINT entity_attachments_role_check CHECK (role ~ '^[a-z_]{1,32}$');
 
 CREATE INDEX entity_attachments_entity ON entity_attachments (entity_id, created_at);
+
+-- The old name, for the replicas of the previous build while the API rolls out
+-- (`RollingUpdate`), as `20261026T2151Z_rename_order_attachments.sql` kept `attachments`:
+-- a plain view of one table is automatically updatable, so their reads and writes keep
+-- working. It names the columns that build reads and writes, and only an order's files
+-- (another entity's have no `order_id`, which that build's rows require). That build
+-- names no `entity_id`, so the trigger below fills it from `subject` (making the
+-- `entities` row), and moves it when a write changes `subject` alone (that build's
+-- `release_print_claim`). A later migration drops the view, the trigger and its function
+-- once every replica runs this build; until then no migration may add a column that an
+-- old replica's insert through the view must set.
+CREATE VIEW order_attachments AS
+SELECT id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,
+  caption, created_at, created_by, attempt_item_id, fulfilment_id
+FROM entity_attachments
+WHERE order_id IS NOT NULL;
+
+CREATE FUNCTION entity_attachments_fill_entity() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  entity_kind text := split_part(NEW.subject, ':', 1);
+  entity_ref text := substring(NEW.subject FROM position(':' IN NEW.subject) + 1);
+BEGIN
+  IF TG_OP = 'INSERT' AND NEW.entity_id IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE' AND (NEW.subject = OLD.subject OR NEW.entity_id <> OLD.entity_id) THEN
+    RETURN NEW;
+  END IF;
+  INSERT INTO entities (kind, ref) VALUES (entity_kind, entity_ref)
+  ON CONFLICT (kind, ref) DO NOTHING;
+  SELECT id INTO NEW.entity_id FROM entities WHERE kind = entity_kind AND ref = entity_ref;
+  RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER entity_attachments_fill_entity
+BEFORE INSERT OR UPDATE OF subject ON entity_attachments
+FOR EACH ROW EXECUTE FUNCTION entity_attachments_fill_entity();
