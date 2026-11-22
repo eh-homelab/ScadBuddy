@@ -38,19 +38,24 @@ def _package(
     fetch_path: str = "",
     content_hash: str = H1,
     description: str | None = "A plugin",
+    version: int | None = None,
 ) -> None:
+    """A hosted package is pinned to its `version`; every other kind to the commit C1."""
     review = {"name": name, "description": description, "version": None}
     db.execute(
         "INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref,"
-        " marketplace_entry, fetch_url, fetch_path, commit_sha, content_hash, files, review,"
-        " approved_at) VALUES (%s, %s, %s, 'main', NULL, %s, %s, %s, %s, '{}', %s, %s)",
+        " marketplace_entry, fetch_url, fetch_path, pin_kind, commit_sha, version, content_hash,"
+        " files, review, approved_at)"
+        " VALUES (%s, %s, %s, 'main', NULL, %s, %s, %s, %s, %s, %s, '{}', %s, %s)",
         (
             name,
             kind,
             f"https://git.test/{name}.git",
             f"https://git.test/{name}.git",
             fetch_path,
-            C1,
+            "version" if version is not None else "commit",
+            None if version is not None else C1,
+            version,
             content_hash,
             json.dumps(review),
             "2026-11-22T00:00:00Z" if approved else None,
@@ -116,7 +121,6 @@ def test_a_deleted_package_leaves_the_feed(client: TestClient, db: Any) -> None:
 
 
 def test_a_hosted_package_names_the_version_its_pin_is(client: TestClient, db: Any) -> None:
-    _allow_hosted(db)
     assert client.post(HOSTED, json={"name": "greeter", "description": "Hi"}).status_code == 201
     put = client.put(f"{HOSTED}/greeter/files/skills/hello/SKILL.md", content=SKILL)
     assert put.status_code == 200, put.text
@@ -125,20 +129,12 @@ def test_a_hosted_package_names_the_version_its_pin_is(client: TestClient, db: A
     v2 = client.post(f"{HOSTED}/greeter/publish").json()
     assert v2["version"] == 2
     # The approved pin is version 1; version 2 is newer but not the pin.
-    _package(db, "greeter", kind="hosted", content_hash=v1["content_hash"])
+    _package(db, "greeter", kind="hosted", content_hash=v1["content_hash"], version=1)
     _list(db, "greeter")
 
     [entry] = client.get(f"{CRUD}/default", headers=token(client)).json()["packages"]
     assert entry["source_kind"] == "hosted"
     assert entry["hosted"] == {"version": 1, "zip_sha256": v1["zip_sha256"]}
-
-
-def _allow_hosted(db: Any) -> None:
-    """The `hosted` source kind is #6934's; until it lands the CHECK is dropped, in this test's
-    own schema."""
-    db.execute(
-        "ALTER TABLE ai_plugin_packages DROP CONSTRAINT ai_plugin_packages_source_kind_check"
-    )
 
 
 def test_a_hosted_plugin_published_back_to_old_files_is_listed_once(
@@ -147,7 +143,6 @@ def test_a_hosted_plugin_published_back_to_old_files_is_listed_once(
     """Publish A, B, then A again: versions 1 and 3 have the same draft files. Each version's
     plugin.json names its own number, so their content hashes differ, and the pin names one
     version; the feed lists the package once, at that version, and its zip is served."""
-    _allow_hosted(db)
     agent = token(client)
     assert client.post(HOSTED, json={"name": "greeter", "description": "Hi"}).status_code == 201
     assert client.put(f"{HOSTED}/greeter/files/skills/hello/SKILL.md", content=SKILL).is_success
@@ -158,7 +153,7 @@ def test_a_hosted_plugin_published_back_to_old_files_is_listed_once(
     v3 = client.post(f"{HOSTED}/greeter/publish").json()
     assert v3["version"] == 3
     assert v3["content_hash"] != v1["content_hash"]
-    _package(db, "greeter", kind="hosted", content_hash=v3["content_hash"])
+    _package(db, "greeter", kind="hosted", content_hash=v3["content_hash"], version=3)
     _list(db, "greeter")
 
     [entry] = client.get(f"{CRUD}/default", headers=agent).json()["packages"]
