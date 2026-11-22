@@ -22,10 +22,12 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
+from scadbuddy.core.cancel import CancelledError, CancelToken
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.listener import crud_listener_port
 from scadbuddy.crud.print import BASE, RemoteBbPull
+from scadbuddy.filament import bambuddy_usage
 from scadbuddy.filament.bambuddy_pull import ACTOR, Pulls
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, forget_actor, remember_actor
 from scadbuddy.filament.bb_pull_models import (
@@ -315,6 +317,34 @@ async def test_usage_rows_name_the_archives_date_then_book(
         )
     )
     assert (unlinked.booked, unlinked.unlinked) == (0, 1)
+
+
+@pg
+async def test_a_cancel_between_the_bookings_statements_books_nothing(
+    store: SettingsStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6910 review: Postgres ignores a cancel that reaches the backend between
+    statements, so a cancel that lands after the booking's last statement is caught by
+    the check before the commit, and nothing is booked. Sent again, the rows book once."""
+    local = _local(store)
+    await local.apply(_body())
+    ended = datetime.now(UTC) + timedelta(minutes=1)
+    usage = [_usage(created_at=ended.replace(tzinfo=None).isoformat())]
+    archive = Archive(id=40, printer_id=1, completed_at=datetime(2026, 11, 14, 10, tzinfo=UTC))
+    body = UsageBody(instance=INSTANCE, pull_id=PULL_ID, usage=usage, archives=[archive])
+    token = CancelToken()
+    real = bambuddy_usage.book_usage
+
+    def then_cancel(*args: Any, **kwargs: Any) -> Any:
+        booked = real(*args, **kwargs)
+        token.cancel()
+        return booked
+
+    monkeypatch.setattr(bambuddy_usage, "book_usage", then_cancel)
+    with pytest.raises(CancelledError):
+        await local.book_usage(body, cancel=token)
+    monkeypatch.setattr(bambuddy_usage, "book_usage", real)
+    assert (await local.book_usage(body)).booked == 1
 
 
 @pg

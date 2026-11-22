@@ -1,7 +1,7 @@
 """The profile-fetch browser service's process (#6780): it imports no Temporal, CRUD or
-database code, signs in once at start (a refused login or a browser that does not launch ends
-the process with 1), forbids core dumps before any browser launches, and drops the 3DFP login
-from its environment once read."""
+database code, signs in at start (a login refused on every try or a browser that does not
+launch ends the process with 1), forbids core dumps before any browser launches, and drops
+the 3DFP login from its environment once read."""
 
 from __future__ import annotations
 
@@ -65,13 +65,46 @@ def _settings(tmp_path: Path) -> BrowserSettings:
     )
 
 
+class Sleeps:
+    """`sign_in_at_start`'s ``sleep``: records each pause and returns at once."""
+
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def __call__(self, delay: float) -> None:
+        self.delays.append(delay)
+
+
 async def test_a_refused_login_at_start_refuses_the_start() -> None:
+    """A login the site refuses on every try refuses the start, after three tries 10 s and
+    30 s apart (#6941)."""
     site = FakeSite(login_error=SiteError("login_failed"))
+    sleeps = Sleeps()
     with pytest.raises(StartRefusedError) as caught:
-        await sign_in_at_start(SiteHolder(lambda: site))
+        await sign_in_at_start(SiteHolder(lambda: site), sleep=sleeps)
     assert str(caught.value) == "3DFP login failed"
     assert caught.value.__cause__ is None and caught.value.__context__ is None
-    assert (site.opened, site.logins, site.closed) == (1, 1, 1)
+    assert (site.opened, site.logins, site.closed) == (3, 3, 3)
+    assert sleeps.delays == [10.0, 30.0]
+
+
+async def test_a_login_refused_then_accepted_at_start_signs_in() -> None:
+    """On prod the site refused three starts' logins and accepted the fourth's, with the
+    same login (#6941): a refused login is tried again before it refuses the start."""
+
+    class RefusedTwice(FakeSite):
+        async def login(self) -> None:
+            self.login_error = SiteError("login_failed") if self.logins < 2 else None
+            await super().login()
+
+    site = RefusedTwice()
+    sleeps = Sleeps()
+    sites = SiteHolder(lambda: site)
+    await sign_in_at_start(sites, sleep=sleeps)
+    assert (site.opened, site.logins, site.closed) == (3, 3, 2)
+    assert sleeps.delays == [10.0, 30.0]
+    assert await sites.get() is site
+    assert site.logins == 3
 
 
 @pytest.mark.parametrize("kind", ["bot_check", "timeout", "browser"])
@@ -83,8 +116,10 @@ async def test_a_passing_failure_at_start_is_logged(
     again."""
     caplog.set_level(logging.DEBUG)
     site = FakeSite(login_error=SiteError(kind))
-    await sign_in_at_start(SiteHolder(lambda: site))
-    assert site.closed == 1
+    sleeps = Sleeps()
+    await sign_in_at_start(SiteHolder(lambda: site), sleep=sleeps)
+    assert (site.logins, site.closed) == (1, 1)
+    assert sleeps.delays == []
     assert kind in caplog.text
     assert EMAIL not in caplog.text and PASSWORD not in caplog.text
 
@@ -130,6 +165,25 @@ async def test_serve_signs_in_once_and_answers_healthz(
     stop.set()
     await asyncio.wait_for(serving, 5)
     assert site.closed == 1
+
+
+async def test_a_sigterm_during_the_start_sign_in_ends_serve_at_once(tmp_path: Path) -> None:
+    """``stop`` set while the start's sign-in waits to try a refused login again (10 s,
+    then 30 s) ends ``serve`` at once and closes the browser: a rollout's SIGTERM must not
+    wait out the retries until the pod is SIGKILLed (claude-review on #6947)."""
+    site = FakeSite(login_error=SiteError("login_failed"))
+    stop = asyncio.Event()
+    serving = asyncio.create_task(
+        serve(_settings(tmp_path), stop=stop, open_site=lambda: site, host="127.0.0.1", port=0)
+    )
+    for _ in range(100):
+        if site.logins:
+            break
+        await asyncio.sleep(0.02)
+    assert site.logins == 1
+    stop.set()
+    await asyncio.wait_for(serving, 2)
+    assert (site.logins, site.closed) == (1, 1)
 
 
 async def test_serve_forbids_core_dumps_before_the_browser(

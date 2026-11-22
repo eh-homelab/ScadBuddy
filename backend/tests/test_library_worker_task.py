@@ -500,6 +500,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             sessions=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
             # #6646 Decision 49: the sensors' old notification rows, one delete.
             sensors=SimpleNamespace(prune_notifications=lambda: time.sleep(0.1)),
+            # #6905: the filament sync's old pass rows, one bounded delete.
+            sync_passes=SimpleNamespace(prune=lambda ttl_days: time.sleep(0.1)),
             # Phase 6: the spent delegation codes and long-dead access tokens.
             delete_spent_delegations=lambda: time.sleep(0.1),
             tokens=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),

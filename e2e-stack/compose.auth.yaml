@@ -13,7 +13,7 @@
 # `oidc` and `edge` run the repository's files (mounted read-only at /repo) on the test
 # image's venv, as compose.yaml runs moto: no image of their own to pin. The Playwright
 # image is pinned by its index digest to the version frontend/pnpm-lock.yaml resolves
-# (1.64.1), whose browsers it carries with their system libraries.
+# (1.65.1), whose browsers it carries with their system libraries.
 
 services:
   app:
@@ -80,7 +80,7 @@ services:
       retries: 30
 
   playwright:
-    image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+    image: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
     profiles: ["playwright"]
     working_dir: /work
     environment:

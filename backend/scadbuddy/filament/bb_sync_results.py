@@ -36,8 +36,9 @@ from pydantic import ValidationError
 
 from scadbuddy.bambuddy.models import BbLocation, BbSupplier, CatalogFilament, SpoolCatalogEntry
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.core.cancel import CancelToken, check, watched
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import ledger
+from scadbuddy.filament import bb_sync_passes, ledger
 from scadbuddy.filament.bambuddy_pull import REF_KIND, record_instance, snapshot
 from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
@@ -62,9 +63,11 @@ from scadbuddy.filament.bb_sync_plan import (
     ROW_KINDS,
     UNSEEN,
     BbRefs,
+    SpoolFacts,
     bb_form,
     compare_form,
     desired_and_unmapped,
+    hold_sync,
     k_form,
     pendings,
     plan,
@@ -135,6 +138,30 @@ class _Reads:
     #: this pass, or cut by the cap). Bambuddy may have deleted them, so the plan named
     #: none of them to a spool (`BbRefs.without`), and a spool's compare names none.
     unconfirmed: frozenset[tuple[str, UUID]] = frozenset()
+    #: The round's spools, whose SB data is read once (#6902), and that data.
+    spool_ids: Sequence[UUID] = ()
+    facts: SpoolFacts | None = None
+
+    def spool_facts(self, conn: Conn) -> SpoolFacts:
+        if self.facts is None:
+            self.facts = SpoolFacts.read(conn, self.spool_ids, _EVERY)
+        return self.facts
+
+    def echoed(self, conn: Conn, spool_id: UUID) -> None:
+        """A spool's echo event was booked, which refreshes its derived columns
+        (`ledger.refresh_derived`). Its compare values read them (grams left, last dried),
+        so when they moved the spool's data is read again for its next result."""
+        if self.facts is None or spool_id not in self.facts.spools:
+            return
+        row = conn.execute(
+            "SELECT grams_left, last_dried_at FROM filament_spools WHERE id = %s", (spool_id,)
+        ).fetchone()
+        held = self.facts.spools[spool_id]
+        if row is None or (row["grams_left"], row["last_dried_at"]) != (
+            held.grams_left,
+            held.last_dried_at,
+        ):
+            self.facts = None
 
     def desired(self, conn: Conn, kind: str, sb_id: UUID) -> dict[str, Any] | None:
         if kind not in self.rows:
@@ -165,9 +192,21 @@ def apply_results(
     now: datetime,
     pass_id: str | None = None,
     unconfirmed: Sequence[tuple[str, UUID]] = (),
+    cancel: CancelToken | None = None,
 ) -> ResultsReport:
-    """Record what Bambuddy answered to ``plan_writes``, as the module says, each result
-    in a transaction of its own. ``now`` is the stored seen copies' ``bb_seen_at``.
+    """Record what Bambuddy answered to ``plan_writes``, as the module says, all of them
+    in one transaction, each result in a savepoint of its own, so an ignored result rolls
+    back its own writes only (#6902: a transaction per result was 200 commits, and each
+    took 1 to 2 s on prod). The transaction takes the state row's lock once, and the
+    instance's sync lock (`hold_sync`), so a second call for the instance while this one
+    runs is `SyncBusyError` and writes nothing. It also locks the round's spools up front,
+    in id order, so a writer that locks several spools in the same order waits for the
+    round rather than deadlocking with it. ``cancel`` stops the round between results (and
+    cancels the running statement): the whole round rolls back, unless it had already
+    passed its last check, just before the commit. Either way the results sent again later
+    are safe: they find their items linked or recorded, and the plan's ``pass_id`` adds no
+    attempt. An error that is no ignored result rolls the round back too. ``now`` is the
+    stored seen copies' ``bb_seen_at``.
 
     An ``ok`` create or adoption links the item, closes its intent, sets its hashes and
     seen copy (a spool's K-profiles too, R-T4-11), books a spool's event and queues the
@@ -189,28 +228,42 @@ def apply_results(
     report = ResultsReport()
     # The round's own probes too: a worker from before R-6688-11 sends no `unconfirmed`.
     probed = {(w.kind, w.sb_id) for w in plan_writes if w.op == "probe" and w.kind != "spool"}
-    reads = _Reads(unconfirmed=frozenset(probed | set(unconfirmed)))
+    reads = _Reads(
+        unconfirmed=frozenset(probed | set(unconfirmed)),
+        spool_ids=[w.sb_id for w in plan_writes if w.kind == "spool"],
+    )
     writes = {write.key: write for write in plan_writes}
-    for result in results:
-        write = writes.get(result.key)
-        try:
-            if write is None:
-                raise _IgnoredError("no write has this key")
-            with store.spools.transaction() as conn:
-                state = conn.execute(
-                    "SELECT instance FROM filament_bb_sync_state FOR UPDATE"
-                ).fetchone()
-                if state is not None and state["instance"] not in (None, instance):
-                    raise _IgnoredError("the links belong to another Bambuddy")
-                outcome = _apply(conn, write, result, instance, now, reads, pass_id)
-        except _IgnoredError as why:
-            logger.warning(
-                "a Bambuddy sync result is ignored",
-                extra={"key": result.key, "reason": str(why)},
+    outcomes: list[Outcome] = []
+    with store.spools.transaction() as conn, watched(cancel, conn):
+        hold_sync(conn, instance)
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state FOR UPDATE").fetchone()
+        foreign = state is not None and state["instance"] not in (None, instance)
+        if reads.spool_ids:
+            conn.execute(
+                "SELECT 1 FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                (list(reads.spool_ids),),
             )
-            continue
-        if outcome is not None:
-            setattr(report, outcome, getattr(report, outcome) + 1)
+        for result in results:
+            check(cancel)
+            write = writes.get(result.key)
+            try:
+                if write is None:
+                    raise _IgnoredError("no write has this key")
+                if foreign:
+                    raise _IgnoredError("the links belong to another Bambuddy")
+                with conn.transaction():
+                    outcome = _apply(conn, write, result, instance, now, reads, pass_id)
+            except _IgnoredError as why:
+                logger.warning(
+                    "a Bambuddy sync result is ignored",
+                    extra={"key": result.key, "reason": str(why)},
+                )
+                continue
+            if outcome is not None:
+                outcomes.append(outcome)
+        check(cancel)
+    for outcome in outcomes:
+        setattr(report, outcome, getattr(report, outcome) + 1)
     return report
 
 
@@ -396,7 +449,7 @@ def _spool(
             seen = {"suppliers": seen_value("suppliers", rows)}
         elif field == "k_profiles" and isinstance(rows, list):
             k_rows = json_form(rows)
-    sb = _spool_compare(conn, write.sb_id, reads.bb_refs(conn))
+    sb = _spool_compare(conn, write.sb_id, reads.bb_refs(conn), reads.spool_facts(conn))
     merged = _merge(
         item["bb_seen"], seen, write, lambda n, _v: n in sb and bb_form(n, seen, k_rows) == sb[n]
     )
@@ -454,12 +507,13 @@ def _spool(
             at=bb.updated_at,
             data={"bb_spool_id": bb.id, "bb": snapshot(bb), "pushed": True, "changes": {}},
         )
+        reads.echoed(conn, write.sb_id)
 
 
-def _spool_compare(conn: Conn, spool_id: UUID, refs: BbRefs) -> dict[str, Any]:
+def _spool_compare(conn: Conn, spool_id: UUID, refs: BbRefs, facts: SpoolFacts) -> dict[str, Any]:
     """SB's values of the spool in the compare form, for every data type; a field that
     names a row Bambuddy has no id for is left out."""
-    desired, _ = desired_and_unmapped(conn, spool_id, refs, _EVERY)
+    desired, _ = desired_and_unmapped(conn, spool_id, refs, _EVERY, facts)
     return {n: compare_form(n, v) for n, v in desired.items() if next(pendings(v), None) is None}
 
 
@@ -493,7 +547,10 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
     """Write the state row for one pass (Decision 19): ``last_pass_at``,
     ``last_pass_started_at`` (the pass's own start, #6836) and the counts always,
     ``last_error`` from ``result.error``, and ``last_ok_at`` only when it is ``None``, so a
-    failed pass keeps the last clean one's time."""
+    failed pass keeps the last clean one's time. #6905: and the pass's history row
+    (`bb_sync_passes.insert_on`) in the same transaction; a pass that found the links or
+    its instance another Bambuddy's (``instance_changed``) gets the history row only, so
+    the state stays the configured instance's."""
     counts = {
         "written": result.written,
         "failed": result.failed,
@@ -502,6 +559,9 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
         "unmapped_k": result.unmapped_k,
     }
     with store.spools.transaction() as conn:
+        bb_sync_passes.insert_on(conn, result)
+        if result.instance_changed:
+            return
         conn.execute(
             "UPDATE filament_bb_sync_state SET last_pass_at = now(),"
             " last_pass_started_at = COALESCE(%s, now()),"
@@ -632,6 +692,29 @@ def _reset_counts(conn: Conn) -> LinksResetCounts:
     return LinksResetCounts(**counts)
 
 
+def _proof(
+    links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
+) -> tuple[bool, bool]:
+    """``(same, changed)`` for `same_bambuddy` and `changed_since_pull`."""
+    if not links or bad:
+        return False, False
+    held = {row.id: row for row in rows}
+    exact = False
+    timed = 0
+    for bb_id, seen in links.items():
+        row = held.get(bb_id)
+        if row is None:
+            return False, False
+        if seen is None or row.updated_at is None:
+            continue
+        if row.updated_at < seen:
+            return False, False
+        timed += 1
+        exact = exact or row.updated_at == seen
+    enough = timed * 2 >= len(links)
+    return exact and enough, enough and not exact
+
+
 def same_bambuddy(
     links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
 ) -> bool:
@@ -644,31 +727,29 @@ def same_bambuddy(
     only checked to be there, so at least half the links must have a time on both sides
     (Decision 199): a few exact matches among many unchecked links prove too little. A
     listing with a row that did not parse, or no spool link at all, proves nothing."""
-    if not links or bad:
-        return False
-    held = {row.id: row for row in rows}
-    exact = False
-    timed = 0
-    for bb_id, seen in links.items():
-        row = held.get(bb_id)
-        if row is None:
-            return False
-        if seen is None or row.updated_at is None:
-            continue
-        if row.updated_at < seen:
-            return False
-        timed += 1
-        exact = exact or row.updated_at == seen
-    return exact and timed * 2 >= len(links)
+    return _proof(links, rows, bad)[0]
 
 
-def _proven_same(conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]) -> bool:
-    """`same_bambuddy` for the spool links as they stand."""
+def changed_since_pull(
+    links: Mapping[int, datetime | None], rows: Sequence[BbSpool], bad: Sequence[int | None]
+) -> bool:
+    """Why `same_bambuddy` is false although nothing contradicts it: Bambuddy holds every
+    linked spool, none older than its link, at least half the links are timed on both
+    sides, but not one is exactly as ScadBuddy last saw it, so every timed linked spool
+    was edited in Bambuddy since the last pull and nothing ties this Bambuddy to the
+    links. The reset offers only the delete then (#6845 review)."""
+    return _proof(links, rows, bad)[1]
+
+
+def _proof_of(
+    conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]
+) -> tuple[bool, bool]:
+    """`same_bambuddy` and `changed_since_pull` for the spool links as they stand."""
     links = {
         row["bb_spool_id"]: row["bb_updated_at"]
         for row in conn.execute("SELECT bb_spool_id, bb_updated_at FROM filament_bb_links")
     }
-    return same_bambuddy(links, *listing)
+    return _proof(links, *listing)
 
 
 #: What `parse_rows` makes of the configured Bambuddy's spools: the rows, and the ids of
@@ -687,12 +768,13 @@ def reset_preview(
     with store.spools.transaction() as conn:
         state = conn.execute("SELECT instance FROM filament_bb_sync_state").fetchone()
         counts = _reset_counts(conn)
-        same = listing is not None and _proven_same(conn, listing)
+        same, changed = (False, False) if listing is None else _proof_of(conn, listing)
     return LinksResetPreview(
         instance=state["instance"] if state is not None else None,
         configured_instance=configured,
         counts=counts,
         same_bambuddy=same,
+        changed_since_pull=changed,
         bambuddy_unreadable=unreadable,
     )
 
@@ -733,14 +815,19 @@ def reset_links(
         if confirm_instance != instance:
             raise ResetRefusedError("confirm_mismatch")
         if expect_kept:
-            if configured is None or listing is None or not _proven_same(conn, listing):
+            if configured is None or listing is None or not _proof_of(conn, listing)[0]:
                 raise ResetRefusedError("proof_changed")
             conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (configured,))
             logger.info(
                 "the Bambuddy links were kept: the new URL reaches the same Bambuddy",
                 extra={"instance": instance, "configured": configured},
             )
-            return LinksResetDone(instance=instance, kept=True, deleted=LinksResetCounts())
+            return LinksResetDone(
+                instance=instance,
+                kept=True,
+                configured_instance=configured,
+                deleted=LinksResetCounts(),
+            )
         counts = _reset_counts(conn)
         for table in (
             "filament_bb_links",
@@ -779,7 +866,14 @@ class LocalFilamentSync:
         sync: FilamentSync = read["filament_sync"]
         return sync
 
-    async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
+    async def plan(
+        self, snap: BbSnapshot, limit: int, cancel: CancelToken | None = None
+    ) -> SyncPlan:
+        """``cancel``: the CRUD route's (`api/disconnect.py`), cancelled when its caller
+        goes away; the plan then writes nothing unless it had already passed its last
+        check (`plan`). Another plan or results call of the
+        instance still running is `SyncBusyError`."""
+
         def run() -> SyncPlan:
             read = self._settings.read(
                 {"filament_sync", "spool_overlay_refresh_seconds", "bambuddy_url"}
@@ -799,6 +893,7 @@ class LocalFilamentSync:
                 read["filament_sync"],
                 interval_s=interval_s,
                 limit=limit,
+                cancel=cancel,
             )
 
         planned = await asyncio.to_thread(run)
@@ -812,7 +907,10 @@ class LocalFilamentSync:
         results: Sequence[BbWriteResult],
         pass_id: str | None,
         unconfirmed: Sequence[tuple[Kind, UUID]] = (),
+        cancel: CancelToken | None = None,
     ) -> ResultsReport:
+        """``cancel`` as `plan`'s: the round then writes nothing unless it had already
+        passed its last check (`apply_results`)."""
         read = await asyncio.to_thread(self._settings.read, {"bambuddy_url"})
         # This reads bambuddy_url before apply_results takes the state row's lock. After a
         # reset the row's instance is NULL, so this check is what stops an old pass's
@@ -833,6 +931,7 @@ class LocalFilamentSync:
             now=datetime.now(UTC),
             pass_id=pass_id,
             unconfirmed=unconfirmed,
+            cancel=cancel,
         )
 
     async def record_pass(self, result: SyncPassResult) -> None:

@@ -85,6 +85,6 @@ describe('adoptAppStyles', () => {
     vi.stubGlobal('CSSStyleSheet', undefined)
     const root = shadowRoot()
     expect(() => adoptAppStyles(root)).not.toThrow()
-    expect(root.adoptedStyleSheets).toBeUndefined()
+    expect(root.adoptedStyleSheets).toEqual([])
   })
 })

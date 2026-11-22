@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -379,6 +379,7 @@ def test_the_dry_run_counts_what_a_reset_deletes(client: TestClient, pg_conninfo
         "configured_instance": instance_for(BASE),
         "counts": ALL_ONE,
         "same_bambuddy": False,
+        "changed_since_pull": False,
         "bambuddy_unreadable": False,
     }
 
@@ -402,7 +403,12 @@ def test_a_reset_deletes_the_links_and_no_sb_row(
     reset = client.post(RESET, json={"confirm_instance": OLD})
 
     assert reset.status_code == 200, reset.text
-    assert reset.json() == {"instance": OLD, "kept": False, "deleted": ALL_ONE}
+    assert reset.json() == {
+        "instance": OLD,
+        "kept": False,
+        "configured_instance": None,
+        "deleted": ALL_ONE,
+    }
     assert not spools.called
     with psycopg.connect(pg_conninfo) as conn:
         left = _left(conn)
@@ -496,6 +502,7 @@ def test_a_reset_waits_for_an_old_instances_result_and_deletes_what_it_wrote(
     assert response.json() == {
         "instance": OLD,
         "kept": False,
+        "configured_instance": None,
         "deleted": {**ALL_ONE, "ignored": 2},
     }
     with psycopg.connect(pg_conninfo) as conn:
@@ -527,7 +534,12 @@ def test_a_reset_to_the_same_bambuddy_keeps_the_links(
     reset = client.post(RESET, json={"confirm_instance": OLD, "expect_kept": True})
 
     assert reset.status_code == 200, reset.text
-    assert reset.json() == {"instance": OLD, "kept": True, "deleted": dict.fromkeys(ALL_ONE, 0)}
+    assert reset.json() == {
+        "instance": OLD,
+        "kept": True,
+        "configured_instance": instance_for(BASE),
+        "deleted": dict.fromkeys(ALL_ONE, 0),
+    }
     with psycopg.connect(pg_conninfo) as conn:
         left = _left(conn)
         assert left == dict.fromkeys(left, 1)
@@ -536,6 +548,48 @@ def test_a_reset_to_the_same_bambuddy_keeps_the_links(
     assert state == (instance_for(BASE),)
     assert filament_nudges == [True]
     assert client.get(f"{SYNC}/status").json()["instance_changed"] is False
+
+
+@respx.mock
+def test_the_preview_says_when_every_linked_spool_changed_since_the_pull(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#6845 review: Bambuddy holds the linked spool 11, not older than its link, but it
+    was edited since the last pull, so no row matches exactly: no keep is offered
+    and `changed_since_pull` says why."""
+    configure(client)
+    _linked(client, pg_conninfo)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("UPDATE filament_bb_links SET bb_updated_at = %s", (SEEN_AT,))
+    later = SEEN_AT + timedelta(hours=1)
+    _listing(_bb_spool(11, later))
+
+    preview = client.get(RESET)
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["same_bambuddy"] is False
+    assert preview.json()["changed_since_pull"] is True
+    assert preview.json()["bambuddy_unreadable"] is False
+
+
+@respx.mock
+def test_the_preview_of_a_row_older_than_its_link_has_no_proof_and_no_reason(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """Bambuddy holds every linked id, but its row is older than its link (an older copy
+    or another Bambuddy): no keep, and not the "changed since the pull" reason."""
+    configure(client)
+    _linked(client, pg_conninfo)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("UPDATE filament_bb_links SET bb_updated_at = %s", (SEEN_AT,))
+    _listing(_bb_spool(11, SEEN_AT - timedelta(hours=1)))
+
+    preview = client.get(RESET)
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["same_bambuddy"] is False
+    assert preview.json()["changed_since_pull"] is False
+    assert preview.json()["bambuddy_unreadable"] is False
 
 
 @respx.mock
@@ -610,7 +664,12 @@ def test_the_preview_of_an_unreadable_bambuddy_offers_the_delete(
     reset = client.post(RESET, json={"confirm_instance": OLD, "expect_kept": False})
 
     assert reset.status_code == 200, reset.text
-    assert reset.json() == {"instance": OLD, "kept": False, "deleted": ALL_ONE}
+    assert reset.json() == {
+        "instance": OLD,
+        "kept": False,
+        "configured_instance": None,
+        "deleted": ALL_ONE,
+    }
     assert not spools.called
     with psycopg.connect(pg_conninfo) as conn:
         left = _left(conn)
