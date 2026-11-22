@@ -726,8 +726,10 @@ for geometry you do not have. Nothing is written to Bambuddy. Sources: design
 Workflow:
 
 1. Open the mesh with `create_model_from_mesh`. Give exactly one source: a Bambuddy
-   `library_file_id` (from `list_library`), an `output_id`, or a 3MF/STL in your
-   workspace as `workspace_path` + `workspace_sha256` (a file the user uploaded in the
+   `library_file_id` (from `list_library`), an `output_id`, a print's file as
+   `archive_id` with `archive_source` (one place `get_print_sources` lists as
+   available; a sliced file is refused, and a `printer` source waits for a person's
+   approval), or a 3MF/STL in your workspace as `workspace_path` + `workspace_sha256` (a file the user uploaded in the
    panel, or one saved by `http_request` `save_to_workspace` or `workspace_save`; bytes
    are never a tool argument, #2510, `agent/src/tools/workspaceUploads.ts`). Over an
    external `/mcp` install there is no panel: put a local file in with
