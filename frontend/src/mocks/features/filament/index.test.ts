@@ -14,6 +14,7 @@ import {
   getTag,
   getType,
   importSpools,
+  listCatalog,
   listEvents,
   listLocations,
   listSensors,
@@ -24,6 +25,7 @@ import {
   unbindTag,
   resolveCatalog,
   setCatalogAliases,
+  startColourSync,
   upsertCatalog,
   upsertLocation,
   upsertType,
@@ -276,6 +278,18 @@ describe('the filament mocks', () => {
     await upsertLocation({ archived: true }, place.id)
     await upsertLocation({ name: 'cupboard', kind_id: LK.SHELF, sort_order: 0 })
     expect(await refusal(upsertLocation({ archived: false }, place.id))).toMatchObject({ status: 409 })
+  })
+
+  it("keeps a person's colour as it is when a sync finds it case-blind (#6907)", async () => {
+    // A person's own Black PLA Basic, in other letter case than the sync names it.
+    await upsertCatalog('colours', { name: 'black', manufacturer: 'bambu lab', material_name: 'pla basic', rgba: '#111111FF', sort_order: 0 })
+    const run = await startColourSync('bambu')
+    expect([run.added, run.kept, run.updated]).toEqual([1, 1, 0])
+    const black = (await listCatalog('colours')).filter((row) => row.name.toLowerCase() === 'black')
+    expect(black.map((row) => [row.rgba, row.source])).toEqual([['#111111FF', null]])
+    // A second run finds its own row unchanged and still keeps the person's.
+    const again = await startColourSync('bambu')
+    expect([again.added, again.kept, again.unchanged]).toEqual([0, 1, 1])
   })
 
   it('keeps a colour unique per manufacturer, name and material, as `filament_colours_name` does', async () => {

@@ -2267,6 +2267,23 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     what the Colours tab ("From …, edited since") and the agent's `filament_catalog_list`
     read. Why: clearing `source` would lose that provenance, and a row with `source` and
     `synced_at` NULL is already never written by a sync (Decision 217).
+223. R-6907-18 (review of f417b327): no map from Bambu Studio's `fila_type` to Bambuddy's
+    material labels. Measured 2026-11-22: they are the same labels. Bambu Studio v02.08.02.61's
+    `resources/profiles/BBL/filament/filaments_color_codes.json`
+    (https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/resources/profiles/BBL/filament/filaments_color_codes.json,
+    314 codes) names materials "PLA Basic", "PLA Matte", "PETG HF" and so on, as Bambuddy's
+    `DEFAULT_COLOR_CATALOG` does
+    (https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/core/catalog_defaults.py,
+    180 Bambu Lab rows). 171 of those 180 rows have the same maker, name and material as a
+    Bambu code, so the two sources find one row. The other 9 have no code of their own: six
+    are "TPU 95A", "PLA Tough" or "ABS" colours that Bambu's table names under another
+    material ("TPU 95A HF", "TPU for AMS", "PLA Tough+", "PLA Matte"), and the two
+    "Natural" "PLA Support" and "PVA Support" rows match no support code by name or colour
+    (Bambu's are "Support for PLA" "White", "PVA" "Clear"), and "Blue Grey" "PLA Basic"
+    is a name the table does not have. Mapping them would guess
+    between products, so they stay rows of their own. Compared by a script over both
+    files (each Bambuddy row's upper-cased name and material against each code's English
+    name and `fila_type`).
 
 ## Self-review
 
