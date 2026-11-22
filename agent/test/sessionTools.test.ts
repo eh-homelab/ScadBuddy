@@ -45,7 +45,7 @@ describe('the sessions_* tools', () => {
     for (const t of sessionTools) expect(t.name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/)
   })
 
-  it('say so when there is no database', async () => {
+  it('say so when this process has no session manager', async () => {
     const tool = sessionTools.find((t) => t.name === 'sessions_list')!
     const result = await runTool(tool, {}, {
       ...services(),
@@ -54,7 +54,7 @@ describe('the sessions_* tools', () => {
       signal: new AbortController().signal,
     })
     expect(result.isError).toBe(true)
-    expect(firstText(result)).toMatch(/need the database/)
+    expect(firstText(result)).toMatch(/not set up in this process/)
   })
 
   it('passes no background built-in on from a flow run or a session that has none, through start, send and fork (#5870)', async () => {

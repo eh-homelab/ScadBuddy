@@ -34,14 +34,14 @@ import { pluginTestDeps, testAndList } from './plugins.js'
 
 export const CAPABILITIES_PATH = '/api/v1/ai/capabilities'
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 const SourceBody = z.strictObject({ enabled: z.boolean() })
 const ItemBody = z.strictObject({ access: z.enum(['off', 'read', 'write', 'outward', 'on']) })
 const LoadingBody = z.strictObject({ loading: z.enum(['base', 'searchable']) })
 
-/** No stored listings (no database for them): every remote source reads as never listed. */
+/** No stored listings (this process was given none): every remote source reads as never listed. */
 const NO_LISTINGS: Pick<ToolListings, 'get' | 'getMany'> = {
   get: () => Promise.resolve(undefined),
   getMany: () => Promise.resolve(new Map()),
@@ -64,7 +64,7 @@ export const route: RouteModule = {
 
     /** The tree, or why it cannot answer (503). */
     async function capabilities(): Promise<Capabilities | string> {
-      if (!deps.access) return NO_DATABASE
+      if (!deps.access) return NOT_CONFIGURED
       if (!(await isReady())) return NOT_READY
       if (built === undefined) {
         const providers: CapabilityProvider[] = [builtInProviders({ access: deps.access })]
@@ -112,8 +112,8 @@ export const route: RouteModule = {
     const context = (c: Context): AuditContext => ({ actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
 
     /**
-     * Answers `run`'s value, a refusal with its status, or 503 without the database. With
-     * `body`, the body is parsed after the database check (a bad one is 400) and passed to `run`.
+     * Answers `run`'s value, a refusal with its status, or 503 when the store is not set up. With
+     * `body`, the body is parsed after the store check (a bad one is 400) and passed to `run`.
      */
     async function answer<B = undefined>(c: Context, run: (caps: Capabilities, body: B) => Promise<unknown>, body?: z.ZodType<B>) {
       const caps = await capabilities()

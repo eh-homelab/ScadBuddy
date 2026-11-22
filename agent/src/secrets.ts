@@ -1,23 +1,17 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 
 // Envelope encryption for secrets at rest (design spec §9,
-// docs/superpowers/specs/2026-09-27-ai-integration-design.md):
+// docs/superpowers/specs/2026-09-27-ai-integration-design.md): each secret is
+// sealed with AES-256-GCM under a random per-row data key, and the data key under
+// a key-encryption key. The agent holds no key-encryption key (#5299 step 12): the
+// API reads it and seals and opens the agent's rows (backend agent_data/). This
+// module stays the format's reference: the tests' vectors (test/secretVectors.test.ts,
+// which agent-durable opens) and the payload codec's sealing under a released key.
 //
-//   "Each secret is sealed with AES-256-GCM under a random per-row data key.
-//    The data key is sealed under a key-encryption key read from a file
-//    (SCADBUDDY_SECRET_KEY_FILE, mounted from a Kubernetes Secret ...).
-//    Rotating it re-wraps the data keys only. Without the file, Settings
-//    refuses to save credentials and says why."
-//
-// KEY FILE FORMAT. Exactly 32 random bytes, base64-encoded (standard alphabet,
-// with padding: 44 characters). Surrounding whitespace, including the trailing
-// newline most tools write, is ignored. Generate one with
-//
-//     openssl rand -base64 32 > scadbuddy-secret.key
-//
-// Anything else (hex, a passphrase, a different length) is refused at load
-// rather than stretched into a key, so a mis-mounted file is visible.
+// KEY FORMAT. Exactly 32 random bytes, base64-encoded (standard alphabet,
+// with padding: 44 characters), as `openssl rand -base64 32` writes it. Anything
+// else (hex, a passphrase, a different length) is refused (`kekFromBase64`)
+// rather than stretched into a key.
 //
 // SEALED FORMAT. Both the secret and its data key are stored as
 //
@@ -91,36 +85,6 @@ export function kekFromBase64(text: string): Kek {
     )
   }
   return { id: createHash('sha256').update(key).digest('hex').slice(0, 16), key }
-}
-
-/**
- * `reason` is safe to show unauthenticated (/healthz, GET credentials): it names
- * the variable, never the file path or the errno. `detail`, when present, is
- * for the service's own log only.
- */
-export type KekStatus = { ok: true; kek: Kek } | { ok: false; reason: string; detail?: string }
-
-/** Reads a key file (SCADBUDDY_SECRET_KEY_FILE unless `variable` says otherwise). Never throws. */
-export async function loadKek(file: string | undefined, variable = 'SCADBUDDY_SECRET_KEY_FILE'): Promise<KekStatus> {
-  if (file === undefined) {
-    return { ok: false, reason: `${variable} is not set` }
-  }
-  let text: string
-  try {
-    text = await readFile(file, 'utf8')
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code ?? 'read error'
-    return { ok: false, reason: `${variable} cannot be read`, detail: `${variable} ${file} cannot be read (${code})` }
-  }
-  try {
-    return { ok: true, kek: kekFromBase64(text) }
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `${variable} does not hold a valid key (32 random bytes, base64)`,
-      detail: `${variable} ${file}: ${(err as Error).message}`,
-    }
-  }
 }
 
 /** Where `seal` takes its IV and `sealSecret` its data key: `randomBytes`, except in the vectors. */

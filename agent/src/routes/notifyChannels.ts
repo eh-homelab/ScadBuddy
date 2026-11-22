@@ -34,7 +34,7 @@ export type NotifyChannelRouteDeps = {
 
 declare module '../app.js' {
   interface AppDeps {
-    /** The notification channels (#815, notify/channels.ts); left out without the database. */
+    /** The notification channels (#815, notify/channels.ts); left out when this process was not given it (tests). */
     notifyChannels?: ChannelStore | undefined
     /** SCADBUDDY_PUBLIC_URL, for the links notifications carry. */
     publicUrl?: string | undefined
@@ -42,7 +42,7 @@ declare module '../app.js' {
 }
 
 const UNAVAILABLE = "notification channels need the API's stores (CRUD area notify)"
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'notification channels'
 
 const Fields = {

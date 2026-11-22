@@ -798,7 +798,7 @@ export type SessionManagerDeps = {
    * A session's background tasks (src/background/): every turn gets the session's CronCreate
    * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
    * which end with the turn, unless the session keeps none (ClaimedSession.backgroundTools: a
-   * flow-started session, a Workflow agent's chat). Without it (no Temporal or no database)
+   * flow-started session, a Workflow agent's chat). Without it (no Temporal)
    * no turn has them.
    */
   background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }

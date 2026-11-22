@@ -91,7 +91,7 @@ export async function listPackageServer(
     const held = await deps.listings.exclusiveServer(pkg, server, run)
     if (held === 'busy') return busy
     if (held === 'full') return { status: 429, body: { detail: 'too many connection tests are running; try again shortly' }, retryAfter: RETRY_AFTER_S }
-    if (held === 'unreachable') return refusal(502, 'the AI database is unreachable, so the listing cannot be stored; try again shortly')
+    if (held === 'unreachable') return refusal(502, 'the API does not answer, so the listing cannot be stored; try again shortly')
     return held.value
   } finally {
     listing.delete(source)

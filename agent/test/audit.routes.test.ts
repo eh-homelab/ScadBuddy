@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { auditedTokenStore, REFUSAL_WINDOW_MS, RefusalCoalescer, UI_ACTOR, UNVERIFIED_ACTOR } from '../src/audit/writes.js'
@@ -6,7 +5,6 @@ import { cap } from '../src/audit/log.js'
 import type { TokenStore } from '../src/auth/tokens.js'
 import { SettingsStore, type SettingsRows } from '../src/credentials.js'
 import { originPolicy } from '../src/http/origins.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { MemoryAudit } from './support/memoryAudit.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
@@ -14,7 +12,6 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // guard, validation and wiring. The log itself against Postgres is
 // test/audit.pg.test.ts.
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
 /** The UI through the TLS ingress (routes/guard.ts). */
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 /** A same-origin GET sends no Origin (Fetch standard). */
@@ -24,7 +21,6 @@ function app(overrides: Partial<AppDeps> = {}) {
   return createApp({
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     testPlugin: vi.fn(),
     testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
@@ -73,7 +69,7 @@ describe('GET /api/v1/ai/audit', () => {
   })
 
   it('answers 503 without a database', async () => {
-    const res = await app({ database: undefined, credentials: undefined }).request('/api/v1/ai/audit', { headers: UI_READ })
+    const res = await app({ credentials: undefined }).request('/api/v1/ai/audit', { headers: UI_READ })
     expect(res.status).toBe(503)
   })
 })

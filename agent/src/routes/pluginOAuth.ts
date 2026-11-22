@@ -66,7 +66,7 @@ export const route: RouteModule = {
       const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'a plugin sign-in')
       if (problem) return page(c, 403, 'Sign-in refused', problem)
       const oauth = deps.pluginOAuth
-      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in needs the AI database.')
+      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in is not set up in this process.')
       const ticket = c.req.query('ticket')
       if (!ticket) return page(c, 400, 'Sign-in link incomplete', 'This link has no ticket; start the sign-in again from Settings.')
       const binding = randomToken()
@@ -97,7 +97,7 @@ export const route: RouteModule = {
       const problem = callbackProblem(c, deps)
       if (problem) return page(c, 403, 'Sign-in refused', problem)
       const oauth = deps.pluginOAuth
-      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in needs the AI database.')
+      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in is not set up in this process.')
       const binding = getCookie(c, COOKIE)
       deleteCookie(c, COOKIE, { path: COOKIE_PATH })
       try {

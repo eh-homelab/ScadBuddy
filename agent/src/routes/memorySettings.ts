@@ -28,9 +28,9 @@ import { ready, type RouteModule } from './module.js'
 export const MEMORY_SETTINGS_PATH = '/api/v1/ai/settings/memory'
 
 export type MemorySettingsRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   settings: SettingsRepo | undefined
-  /** Applies migrations; the routes answer 503 until it resolves true. */
+  /** True once the API serves the agent's CRUD areas; the routes answer 503 until then. */
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -42,8 +42,8 @@ const PutBody = z.strictObject({
   recall_max_query_chars: z.number().int().min(0).max(MAX_RECALL_MAX_QUERY_CHARS),
 })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'assistant memory settings'
 
 function view(chars: number): MemorySettingsView {
@@ -52,7 +52,7 @@ function view(chars: number): MemorySettingsView {
 
 export function registerMemorySettingsRoutes(app: Hono, deps: MemorySettingsRouteDeps): void {
   async function repo(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
 

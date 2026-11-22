@@ -19,7 +19,7 @@ import { CredentialPool } from '../src/harness/fallback.js'
 import { originPolicy } from '../src/http/origins.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
 import type { CredentialEntryView, CredentialListView } from '../src/routes/credentials.js'
-import { type KekStatus, SealError } from '../src/secrets.js'
+import { SealError } from '../src/secrets.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { gateSettings } from '../src/temporal/session/gateActivities.js'
 import { CrudPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.js'
@@ -31,7 +31,6 @@ import { CrudPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
-const NO_KEK: KekStatus = { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' }
 const API_KEK_ID = 'a1b2c3d4e5f60718'
 
 type Stored = {
@@ -278,6 +277,21 @@ describe('CrudAreas', () => {
     expect(calls).toBe(after)
     areas.stop()
   })
+
+  it('whenComplete resolves once every area is listed, and at once after that', async () => {
+    let listed: string[] = []
+    const areas = new CrudAreas(BASE, { fetch: areasApi(() => listing(listed)()), wanted: SECRET_AREAS, log: () => {} })
+    let done = false
+    const waiting = areas.whenComplete().then(() => (done = true))
+    await areas.refresh()
+    await new Promise((r) => setTimeout(r, 5))
+    expect(done).toBe(false)
+    listed = [...SECRET_AREAS]
+    await areas.refresh()
+    await waiting
+    expect(done).toBe(true)
+    await areas.whenComplete()
+  })
 })
 
 describe('CrudSettings and SettingsStore over the routes', () => {
@@ -478,7 +492,7 @@ describe('the credential consumers with no KEK in this process', () => {
         return Promise.reject(new Error('the backend could not be reached'))
       }
     })(BASE, { fetch })
-    const status = await aiStatus({ database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) }, credentials: failing, kek: NO_KEK }, true)
+    const status = await aiStatus({ credentials: failing }, true)
     expect(status.ai).toBe('unavailable (the API did not answer for its key-encryption key)')
   })
 
@@ -498,7 +512,6 @@ describe('the credential consumers with no KEK in this process', () => {
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: NO_KEK,
       credentials,
       testConnection: (credential) => {
         tested.push(credential)
@@ -525,7 +538,7 @@ describe('the credential consumers with no KEK in this process', () => {
     const test = await app.request(`/api/v1/ai/credentials/entries/${entry.id}/test`, { method: 'POST', headers: UI })
     expect(test.status).toBe(200)
     expect(tested).toEqual([{ kind: 'anthropic_api_key', secret: 'sk-ant-api03-routeroute01' }])
-    const status = await aiStatus({ database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) }, credentials, kek: NO_KEK }, true)
+    const status = await aiStatus({ credentials }, true)
     expect(status.ai).toBe('enabled')
   })
 

@@ -41,9 +41,9 @@ import { ready, type RouteModule } from './module.js'
 //     (#3710), and the order a query tries them in.
 
 export type CredentialRouteDeps = {
-  /** Undefined when there is no database (spec §9, "No database"). */
+  /** Undefined when this process was not given it (tests). */
   credentials: CredentialRepo | undefined
-  /** Applies migrations; the routes answer 503 until it resolves true. */
+  /** True once the API serves the agent's CRUD areas; the routes answer 503 until then. */
   ready: () => Promise<boolean>
   testConnection: (credential: Credential) => Promise<ConnectionTest>
   remoteAddress: RemoteAddress
@@ -119,13 +119,13 @@ const RenameBody = z.strictObject({ name: NameField })
 
 const OrderBody = z.strictObject({ ids: z.array(z.string().min(1).max(64)).max(MAX_CREDENTIALS) })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
 /**
- * Says "no AI database here" to a machine: the Settings section hides on it
+ * Says "no credential store here" to a machine: the Settings section hides on it
  * (frontend `AiCredentialSection` `notDeployed`) instead of matching the text above.
  */
 export const NO_DATABASE_CODE = 'no_database'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 export const DEFAULT_TEST_COOLDOWN_MS = 10_000
 /** The largest credential body read: a secret and a base URL, with room to spare. */
 const BODY_MAX = 16 * 1024
@@ -208,15 +208,15 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   const cooldownMs = deps.testCooldownMs ?? DEFAULT_TEST_COOLDOWN_MS
   const now = deps.now ?? (() => performance.now())
 
-  /** The store once migrations are current, or a 503 response. */
+  /** The store once the API serves the agent's CRUD areas, or a 503 response. */
   async function store(): Promise<CredentialRepo | string> {
-    if (!deps.credentials) return NO_DATABASE
+    if (!deps.credentials) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.credentials : NOT_READY
   }
 
-  /** The 503 for `store()`'s refusal, with `code` when there is no database at all. */
+  /** The 503 for `store()`'s refusal, with `code` when this process has no credential store at all. */
   function unavailable(detail: string) {
-    return { detail, ...(detail === NO_DATABASE ? { code: NO_DATABASE_CODE } : {}) }
+    return { detail, ...(detail === NOT_CONFIGURED ? { code: NO_DATABASE_CODE } : {}) }
   }
 
   /** Runs `fn` with the store and the key that opens it, mapping the store's refusals to their statuses. */

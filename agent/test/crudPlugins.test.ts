@@ -247,7 +247,6 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     const app: AgentApp = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'not set' },
       credentials: new MemoryCredentials(),
       plugins,
       pluginOAuth: oauth,
@@ -333,7 +332,6 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     const app: AgentApp = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'not set' },
       credentials: new MemoryCredentials(),
       plugins,
       pluginOAuth: oauth,

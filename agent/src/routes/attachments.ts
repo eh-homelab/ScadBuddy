@@ -54,13 +54,13 @@ export type AttachmentRouteDeps = {
   origins: OriginPolicy
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'image uploads'
 
 export function registerAttachmentRoutes(app: Hono, deps: AttachmentRouteDeps): void {
   async function store(): Promise<Attachments | string> {
-    if (!deps.attachments) return NO_DATABASE
+    if (!deps.attachments) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.attachments : NOT_READY
   }
 

@@ -211,7 +211,7 @@ export class Capabilities {
     if (!LOADING_SOURCES.has(id) || view.kind !== 'tool') {
       throw new CapabilityError(`"${item}" in "${id}" has no loading: only ScadBuddy's own tools take base or searchable`, 409)
     }
-    if (this.loadings === undefined) throw new CapabilityError('tool loadings need the database', 503)
+    if (this.loadings === undefined) throw new CapabilityError('tool loadings are not set up in this process', 503)
     for (let attempt = 0; attempt < LOADING_ATTEMPTS; attempt++) {
       const seen = await this.loadings.read()
       const next = withLoading(seen, item, loading)

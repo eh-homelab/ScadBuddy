@@ -481,7 +481,6 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     const appDeps = (): AppDeps => ({
         database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
         backend: () => Promise.resolve(true),
-        kek: { ok: false, reason: 'not configured' },
         credentials: new MemoryCredentials(),
         pluginPackages: store,
         packageInstaller: installer,

@@ -76,7 +76,6 @@ describe.skipIf(skip)(`plugin package install on Temporal${TEMPORAL_SKIP}`, () =
     app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'not configured' },
       credentials: new MemoryCredentials(),
       pluginPackages: packages,
       packageInstaller: installer,

@@ -34,7 +34,6 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(kek),
     testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
     remoteAddress: () => '10.0.0.7',
@@ -104,27 +103,22 @@ describe('GET /api/v1/ai/status', () => {
     expect(await status(createApp(deps({ credentials })))).toEqual({ available: true, state: 'enabled', ai: 'enabled' })
   })
 
-  it('names what is missing: no credential, no database, no key, unreachable', async () => {
+  it('names what is missing: no credential, no key, the API not answering', async () => {
     expect(await status(createApp(deps()))).toEqual({
       available: false,
       state: 'disabled',
       ai: 'disabled (no Claude credential)',
       reason: 'No Claude credential is configured yet.',
     })
-    expect(await status(createApp(deps({ database: undefined, credentials: undefined, sessions: undefined })))).toMatchObject({
-      available: false,
-      state: 'disabled',
-      reason: expect.stringMatching(/SCADBUDDY_DATABASE_URL/),
-    })
-    expect(await status(createApp(deps({ kek: { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' }, credentials: new MemoryCredentials() })))).toMatchObject({
+    expect(await status(createApp(deps({ credentials: new MemoryCredentials() })))).toMatchObject({
       state: 'disabled',
       reason: expect.stringMatching(/key-encryption key.*SCADBUDDY_SECRET_KEY_FILE is not set/),
     })
     expect(await status(createApp(deps({ database: { ping: () => Promise.resolve(false), ready: () => Promise.resolve(true) } })))).toEqual({
       available: false,
       state: 'unavailable',
-      ai: 'unavailable (database unreachable)',
-      reason: 'The agent service is unavailable: database unreachable.',
+      ai: "unavailable (the API does not answer the agent's CRUD areas)",
+      reason: "The agent service is unavailable: the API does not answer the agent's CRUD areas.",
     })
   })
 

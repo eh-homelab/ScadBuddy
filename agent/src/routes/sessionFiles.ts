@@ -101,8 +101,8 @@ export function fileView(info: WorkspaceFileInfo): WorkspaceFileView {
   }
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 /** What a multipart body may carry besides the file: its boundaries and the other fields. */
 export const MULTIPART_SLACK = 64 * 1024
@@ -157,7 +157,7 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
   type Ready = { sessions: SessionManager; files: WorkspaceFiles }
 
   async function stores(): Promise<Ready | string> {
-    if (!deps.sessions || !deps.workspace) return NO_DATABASE
+    if (!deps.sessions || !deps.workspace) return NOT_CONFIGURED
     return (await deps.ready()) ? { sessions: deps.sessions, files: deps.workspace } : NOT_READY
   }
 

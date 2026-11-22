@@ -42,12 +42,12 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 //
 // Sealed, always: the request and the answer (page snapshots, form contents, the
 // editor's text) are the workflow's payloads, and every BridgeCall workflow is a subject
-// of its own, `bridge-<uuid>`, sealed under a key made for it under the KEK
+// of its own, `bridge-<uuid>`, sealed under a data key the API makes for it
 // (temporal/payloadCodec.ts `subjectOf`). The caller deletes that key once it has the
 // answer, so the call's history cannot be read again; `sweepBridgeKeys` deletes the key
 // of a call that was cancelled or whose caller went away. A bridge payload is never stored
 // by reference (only a session's are): each is capped at MAX_BRIDGE_BYTES instead, inline.
-// Without a sealing client (no KEK), no call goes through Temporal.
+// Without a sealing client (no Temporal client), no call goes through Temporal.
 //
 // No owner: there is no row, or the owner's queue has no poller and the activity is not
 // taken within `ackTimeoutMs` (schedule-to-start, never retried), and the call answers
@@ -219,7 +219,7 @@ export class TemporalTabRelay implements TabRelay {
    * from now on this replica claims its tabs in ai_tab_owners, and claims the ones it already
    * holds. Never before: a claim with nothing polling the queue would send every call there to
    * wait out the ack timeout. Never without a sealing client (`useClient`) either: a replica
-   * with no KEK cannot decode the sealed calls other replicas send it, so each would answer
+   * with no codec cannot decode the sealed calls other replicas send it, so each would answer
    * no_answer (#4949). Its tabs then reach only the calls made on this replica.
    */
   startHosting(): void {
@@ -227,7 +227,7 @@ export class TemporalTabRelay implements TabRelay {
     if (!this.#client) {
       if (!this.#refused) {
         this.#refused = true
-        this.#log('bridge relay: no sealing client (no secret key), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
+        this.#log('bridge relay: no sealing client (no Temporal codec), so no tab is claimed here; other replicas cannot reach this one\'s tabs')
       }
       return
     }
@@ -442,7 +442,7 @@ export const HOSTING_POLL_MS = 200
 /**
  * How main.ts starts this replica's tab hosting (#5421): the sealing client first, when there is
  * one, then `startHosting` once `worker` (the host worker on `relay.hostQueue`) polls, asked now
- * and every `pollMs`. In that order, or `startHosting` would refuse as for a replica with no KEK.
+ * and every `pollMs`. In that order, or `startHosting` would refuse as for a replica with no codec.
  * Without `worker` the client is set and no tab is claimed. Returns a stop for the wait.
  */
 export function hostTabs(
