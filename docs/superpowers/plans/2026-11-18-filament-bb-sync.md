@@ -2428,7 +2428,24 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     left out is booked and changes nothing, as before (`_book` returned `None` for it).
     It is also no longer in `_cover`'s `pending`; it is a booked row there, which the
     `others` query counts (bar one that covered an estimate, as for any booked row).
-    `usage_unlinked` still counts every row of an unlinked BB spool in the read.
+    `usage_unlinked` counts only the unlinked rows newer than every row booked before
+    the call (Decision 242). `test_a_mix_of_booked_and_new_rows_locks_and_books_only_the_new`
+    pins that `capture.lock` takes only the new rows' spools.
+242. R-7002-4 (PR #7040 review): `book_usage` counts a row of an unlinked BB spool in
+    `unlinked` only when it is newer than every row of the body that a `ledger.BB_USAGE`
+    event named before the call; with none, every such row counts. An unlinked row is
+    never booked, so `_booked` can never name it, and nothing else records that a pull
+    read it. Bambuddy writes a row at its print's end, so a row no newer than a row booked
+    before was in the listing when that row was booked, and a pull read it then. Before
+    this, each pull counted every unlinked row of the read again (all of them, now that
+    the read is 5,000 rows, Decision 239). A row of a print that also has a linked row
+    shares its `created_at` and is not counted again either.
+    `test_an_unlinked_row_counts_only_when_newer_than_the_rows_booked_before`.
+243. R-7002-5 (PR #7040 review): `BambuddyClient.spool_usage` takes `limit` with no
+    default (it was 200). Bambuddy answers only the newest `limit` rows, so a default
+    would let a new caller read a short window without naming it. The pull names
+    `USAGE_READ_ROWS`. The client does not default to that constant, so it does not
+    import the filament package.
 
 ## Self-review
 

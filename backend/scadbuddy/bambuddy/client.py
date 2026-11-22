@@ -1084,11 +1084,14 @@ class BambuddyClient:
         )
         return AppMessageResult.model_validate(response.json()).channels
 
-    async def spool_usage(self, *, limit: int = 200) -> list[SpoolUsage]:
+    async def spool_usage(self, *, limit: int) -> list[SpoolUsage]:
         """``GET /api/v1/inventory/usage`` (#6263): BB's usage rows, one per spool per
         print. The prod key's scopes answered it with 200 on 2026-11-15 (the probe in
         ``docs/superpowers/plans/2026-11-15-filament-capture.md``). Each row is validated
-        on its own: one that is not a usage row is logged and left out."""
+        on its own: one that is not a usage row is logged and left out. Bambuddy answers
+        only the newest ``limit`` rows, with no offset or date, so ``limit`` has no default:
+        each caller names its window (the pull's is `bb_pull_run.USAGE_READ_ROWS`,
+        R-7002-5)."""
         what = "list the spool usage history"
         response = await self._send(
             "GET",

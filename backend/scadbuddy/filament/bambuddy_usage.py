@@ -145,13 +145,15 @@ def book_usage(
     conn: Conn, rows: Sequence[SpoolUsage], archives: Sequence[Archive], *, actor: str
 ) -> UsageReport:
     """Book ``rows`` on ``conn``'s transaction, as the module says (`_books`). A row of
-    a BB spool with no link is counted ``unlinked``; a row of an archived SB spool is
-    counted neither way. Each row is booked, and its estimate covered (`_cover`), in one
-    savepoint: a row whose booking or cover fails is logged and skipped, nothing of it is
-    kept, and the next pull retries both; the rest are booked. A row a `ledger.BB_USAGE`
-    event names already is left out in one query, never tried again: the pull sends every
-    row it read, not only the new ones (R-7002-3). The spools it books are locked first, in id
-    order, as `capture.lock` does for a report write, so the two cannot deadlock."""
+    a BB spool with no link is counted ``unlinked`` when it is newer than every row of
+    ``rows`` that was booked before this call, so a row a pull read before is not counted
+    again (R-7002-4); a row of an archived SB spool is counted neither way. Each row is
+    booked, and its estimate covered (`_cover`), in one savepoint: a row whose booking or
+    cover fails is logged and skipped, nothing of it is kept, and the next pull retries
+    both; the rest are booked. A row a `ledger.BB_USAGE` event names already is left out
+    in one query, never tried again: the pull sends every row it read, not only the new
+    ones (R-7002-3). The spools it books are locked first, in id order, as `capture.lock`
+    does for a report write, so the two cannot deadlock."""
     report = UsageReport()
     links = _links(conn, rows)
     wanted = [
@@ -164,8 +166,13 @@ def book_usage(
     spools = {link.spool_id for _, link in todo}
     if spools:
         capture.lock(conn, sorted(spools))
+    seen = max((row.created_at for row, _ in wanted if row.id in done), default=None)
     for row in rows:
-        if row.weight_used > 0 and links.get(row.spool_id) is None:
+        if (
+            row.weight_used > 0
+            and links.get(row.spool_id) is None
+            and (seen is None or row.created_at > seen)
+        ):
             report.unlinked += 1
     for i, (row, link) in enumerate(todo):
         try:

@@ -184,6 +184,51 @@ def test_a_usage_row_of_an_unlinked_bb_spool_is_counted_unlinked(pg_pool: PgPool
     assert (report.booked, report.unlinked) == (0, 1)
 
 
+def test_an_unlinked_row_counts_only_when_newer_than_the_rows_booked_before(
+    pg_pool: PgPool,
+) -> None:
+    """#7002 R-7002-4: the pull sends the whole read every time, so an unlinked row a
+    pull read before (no newer than a row booked before this call) is not counted again;
+    one newer than every such row is."""
+    f = _filament(pg_pool)
+    _linked(f)
+    old = usage(id=10, print_name="a", created_at=_naive(T1))
+    old_unlinked = usage(id=11, spool_id=99, print_name="a", created_at=_naive(T1))
+    assert _book(f, [old, old_unlinked]).unlinked == 1
+    later = T1 + timedelta(minutes=5)
+    new = usage(id=12, print_name="b", created_at=_naive(later))
+    new_unlinked = usage(id=13, spool_id=99, print_name="b", created_at=_naive(later))
+    report = _book(f, [old, old_unlinked, new, new_unlinked])
+    assert (report.booked, report.unlinked) == (1, 1)
+    again = _book(f, [old, old_unlinked, new, new_unlinked])
+    assert (again.booked, again.unlinked) == (0, 0)
+
+
+def test_a_mix_of_booked_and_new_rows_locks_and_books_only_the_new(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7002 R-7002-3: a row a `ledger.BB_USAGE` event names already is left out before
+    the lock: `capture.lock` takes only the new rows' spools, and only they count booked."""
+    f = _filament(pg_pool)
+    made = pull(f, [bb(id=7), bb(id=8)], now=NOW).created_ids
+    by_bb = {7: made[0], 8: made[1]}
+    booked = usage(id=1, spool_id=7, print_name="a")
+    assert _book(f, [booked]).booked == 1
+    fresh = usage(id=2, spool_id=8, print_name="b", created_at=_naive(T1 + timedelta(minutes=1)))
+    locked: list[list[UUID]] = []
+    real = capture.lock
+
+    def spy(conn: Any, spool_ids: Any) -> None:
+        locked.append(list(spool_ids))
+        real(conn, spool_ids)
+
+    monkeypatch.setattr(capture, "lock", spy)
+    assert _book(f, [booked, fresh]).booked == 1
+    assert locked == [[by_bb[8]]]
+    assert _book(f, [booked, fresh]).booked == 0
+    assert locked == [[by_bb[8]]]
+
+
 def test_a_usage_row_without_a_name_is_booked(pg_pool: PgPool) -> None:
     f = _filament(pg_pool)
     spool = _linked(f)
@@ -868,7 +913,8 @@ async def test_a_usage_history_past_one_body_is_booked_once_in_order(
         ("12", 302),
         ("13", 303),
     ]
-    assert (again.usage_booked, again.usage_unlinked) == (0, 1)
+    # R-7002-4: row 20 is no newer than the rows booked before, so it counts once.
+    assert (again.usage_booked, again.usage_unlinked) == (0, 0)
     assert len(_usage_events(f, spool)) == 4
 
 
