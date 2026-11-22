@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Response } from '@playwright/test'
 
 // #5282 (spec 2026-11-02 §5.1-§5.4): the public storefront page over the mocks
 // (src/mocks/features/storefrontPublic.ts), on a phone. `vite preview` serves the page
@@ -50,12 +50,16 @@ test.describe('the public storefront', () => {
     const name = page.getByLabel('Name', { exact: true })
     // Each name is priced before the next: the load's price is on screen too, so wait for
     // the estimate of that name's own render, not for any price (#6921). The answers are
-    // recorded from the start, so an estimate that answers before the wait is not missed.
+    // recorded from the start, so an estimate that answers before the wait is not missed;
+    // only a firm or final answer counts, never a `pending` one.
     const estimated = new Set<string>()
-    page.on('response', (response) => {
+    const onEstimate = async (response: Response) => {
       const found = /\/renders\/([^/]+)\/estimate$/.exec(new URL(response.url()).pathname)
-      if (found) estimated.add(found[1])
-    })
+      if (!found || !response.ok()) return
+      const { source } = (await response.json()) as { source?: string }
+      if (source !== 'pending') estimated.add(found[1])
+    }
+    page.on('response', onEstimate)
     const priced = async (value: string) => {
       const posted = page.waitForRequest(
         (request) =>
@@ -72,6 +76,7 @@ test.describe('the public storefront', () => {
     await priced('Ada')
     await expect(page.getByText('$12.40 for one')).toBeVisible()
     await priced('Bo')
+    page.off('response', onEstimate)
     const renders: string[] = []
     page.on('request', (request) => {
       if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/renders')) renders.push(request.url())
