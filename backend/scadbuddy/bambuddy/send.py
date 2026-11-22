@@ -983,10 +983,11 @@ async def upload_copy(
     A folder carries ``project_id``, so the folder is what files the copy under a
     project (#79) and puts it on Bambuddy's project page.
 
-    In the inbox the new copy *supersedes* every other copy already there, so the inbox
-    holds one copy per output (or library file) rather than one per printer it was ever
-    aimed at. In a project's folder it supersedes only this output's copies nothing was
-    printed from (:func:`_supersede_unprinted`, #2476); a copy the project printed from
+    In the inbox the new copy *supersedes* every other copy of its version already there
+    (:func:`of_version`), so the inbox holds one copy per output (or library file) and
+    version rather than one per printer it was ever aimed at. In a project's folder it
+    supersedes only this output's copies of its version nothing was printed from
+    (:func:`_supersede_unprinted`, #2476); a copy the project printed from
     is never deleted, even when this upload is for another printer (#316). A project
     folder that already holds the same 3MF for the same target, filed by an identical
     output, gets nothing new (:func:`_same_content`).
