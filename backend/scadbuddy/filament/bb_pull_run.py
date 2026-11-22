@@ -14,7 +14,8 @@ pull needs, in the order `bambuddy_pull.read_and_pull` and `scheduled_pull` read
    under its own type), then the spool catalog (under ``pulls.spools``, bounded by
    `CATALOG_TIMEOUT`), sent as one body. Each read but the spools fails alone, logged.
 3. When SB answers that usage rows would book and are not booked yet, the archives from
-   the date it names; then the usage rows with them, to book.
+   the date it names; then the usage rows with them, to book, oldest first in bodies of
+   at most `USAGE_BODY_ROWS` rows, each under the API's body gate (#6860).
 4. After the Schedule's pull, Bambuddy's tray assignments, to set right the untagged
    trays (#6713).
 
@@ -26,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
 
 from fastapi import status
@@ -42,10 +43,12 @@ from scadbuddy.bambuddy.models import (
     BbSupplier,
     SpoolCatalogEntry,
     SpoolUsage,
+    as_utc,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.filament.bambuddy_pull import try_assignments
+from scadbuddy.filament.bambuddy_usage import ARCHIVE_AFTER, ARCHIVE_BEFORE
 from scadbuddy.filament.bb_pull_models import (
     PULL_READ_ACTIVITY,
     BbPullApi,
@@ -70,6 +73,11 @@ logger = logging.getLogger(__name__)
 #: How long :func:`read_catalog` waits for Bambuddy: the catalog is the pull's second
 #: read, and a slow one must not hold the spools back (the client's own 30 s would).
 CATALOG_TIMEOUT = 5.0
+
+#: At most this many usage rows in one booking body (R-6860-2): with `ARCHIVES_MAX`
+#: archives, every field filled, such a body is 1.6 MiB (measured), a fifth of the API's
+#: 8 MiB body gate (`api/limits.py` `MAX_TEXT_BODY_BYTES`, Decision 182).
+USAGE_BODY_ROWS = 5_000
 
 #: The import's answer when the Bambuddy URL changed between the route and the read.
 URL_CHANGED = "the Bambuddy URL changed during the import; import again"
@@ -164,8 +172,11 @@ async def read_and_pull(
     read after the pull, and only when SB answers that a usage row that would book is not
     booked yet, so the rows of a spool this pull made are matched with their archives too.
     The usage read, the archive read and the booking each fail alone: logged, and the
-    spool pull's report stands. When the usage read fails, no archived BB spool is made in
-    this pull (``archived_deferred``, R-6707-16).
+    spool pull's report stands. Bambuddy's usage listing takes a ``limit`` and no offset
+    or date, newest first (R-6860-1), so the read is the newest rows the client's
+    ``limit`` asks for; the booking sends them in bodies (`usage_bodies`). When the usage
+    read fails, no archived BB spool is made in this pull (``archived_deferred``,
+    R-6707-16).
 
     BB's suppliers are read only under ``pulls.suppliers``, and its locations only under
     ``pulls.locations``, whatever ``pulls.spools`` says (#6265 Decision 16); each read
@@ -217,28 +228,70 @@ async def read_and_pull(
                     archives = await _read_archives(client, applied.archives_since)
             except Exception as error:
                 _failed("could not read Bambuddy's archives", error)
-        try:
-            booked = await api.book_usage(
-                UsageBody(
-                    instance=instance,
-                    pull_id=pull_id,
-                    usage=usage,
-                    # Only what the booking matches by (`bambuddy_usage.match_archive`).
-                    archives=[
-                        Archive(id=a.id, printer_id=a.printer_id, completed_at=a.completed_at)
-                        for a in archives
-                    ],
-                )
-            )
-        except Exception as error:
-            _failed("could not book Bambuddy's usage rows", error)
-        else:
-            report.usage_booked, report.usage_unlinked = booked.booked, booked.unlinked
+        await _book_usage(api, instance, pull_id, usage, archives, report)
     logger.info(
         "pulled Bambuddy's spools",
         extra={"usage_booked": report.usage_booked, "usage_unlinked": report.usage_unlinked},
     )
     return report
+
+
+def usage_bodies(
+    usage: Sequence[SpoolUsage], archives: Sequence[Archive], rows: int
+) -> list[tuple[list[SpoolUsage], list[Archive]]]:
+    """``usage`` cut into bodies of at most ``rows`` rows, oldest first (R-6860-2), each
+    with the archives its rows can match (`bambuddy_usage.match_archive`'s window) and of
+    those only what the booking matches by. The rows of one print share one ``created_at``
+    (spec §8.2), and a body never splits them, so `bambuddy_usage._cover` sees a print's
+    rows together; such a group may pass ``rows``."""
+    ordered = sorted(usage, key=lambda row: (row.created_at, row.id))
+    groups: list[list[SpoolUsage]] = []
+    for row in ordered:
+        if groups and groups[-1][-1].created_at == row.created_at:
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    chunks: list[list[SpoolUsage]] = []
+    for group in groups:
+        if chunks and len(chunks[-1]) + len(group) <= rows:
+            chunks[-1].extend(group)
+        else:
+            chunks.append(list(group))
+    ended = [(as_utc(a.completed_at), a) for a in archives if a.completed_at is not None]
+    bodies: list[tuple[list[SpoolUsage], list[Archive]]] = []
+    for chunk in chunks:
+        first = chunk[0].created_at - ARCHIVE_BEFORE
+        last = chunk[-1].created_at + ARCHIVE_AFTER
+        matched = [
+            Archive(id=a.id, printer_id=a.printer_id, completed_at=a.completed_at)
+            for at, a in ended
+            if at is not None and first <= at <= last
+        ]
+        bodies.append((chunk, matched))
+    return bodies
+
+
+async def _book_usage(
+    api: BbPullApi,
+    instance: str,
+    pull_id: str,
+    usage: Sequence[SpoolUsage],
+    archives: Sequence[Archive],
+    report: PullReport,
+) -> None:
+    """Book ``usage`` in bodies of `USAGE_BODY_ROWS` (`usage_bodies`), oldest first, adding
+    up what each booked. A body that fails is logged and ends the booking: its rows and the
+    newer ones wait for the next pull, which reads them again (R-6860-3)."""
+    for rows, matched in usage_bodies(usage, archives, USAGE_BODY_ROWS):
+        try:
+            booked = await api.book_usage(
+                UsageBody(instance=instance, pull_id=pull_id, usage=rows, archives=matched)
+            )
+        except Exception as error:
+            _failed("could not book Bambuddy's usage rows", error)
+            return
+        report.usage_booked += booked.booked
+        report.usage_unlinked += booked.unlinked
 
 
 async def _read_archives(client: BambuddyClient, since: date) -> list[Archive]:
