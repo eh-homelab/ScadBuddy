@@ -137,11 +137,13 @@ async def test_update_result_rewrites_only_a_succeeded_run(
         await store.update_result("nope", "demo", later)
 
 
-async def test_lan_waiting_reads_each_printers_newest_run_with_prints_to_start(
+async def test_lan_waiting_reads_each_printers_oldest_run_with_prints_to_start(
     store: PrintRunStore, jobs: JobProjection
 ) -> None:
-    """#4942: the Prints page's controls. A printer's newest succeeded run whose prints
-    still to start were neither all started nor stopped; nothing for any other run."""
+    """#4942: the Prints page's controls. A printer's oldest succeeded run whose prints
+    still to start were neither all started nor stopped; nothing for any other run. With
+    two runs queued on one busy printer (#6871), it is the one `queue_place` puts first,
+    so the card's controls start the runs in the order the print dialog announced."""
     printers = PrinterStore(jobs.pool, KEK)
     one = printers.create(PrinterCreate(serial="01P00A000000001", name="One")).id
     two = printers.create(PrinterCreate(serial="01P00A000000002", name="Two")).id
@@ -169,7 +171,9 @@ async def test_lan_waiting_reads_each_printers_newest_run_with_prints_to_start(
     running = await accept(store, "k3", run_id="running", wf_run="w3")
     assert running.status == "running"
     found = await store.lan_waiting([one, two])
-    assert {printer: run.id for printer, run in found.items()} == {one: "new"}
+    assert {printer: run.id for printer, run in found.items()} == {one: "old"}
+    assert await store.queue_place(one, "old") == 1
+    assert await store.queue_place(one, "new") == 2
     assert await store.lan_waiting([]) == {}
 
 

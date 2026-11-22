@@ -861,8 +861,9 @@ async def _scadbuddy_jobs(
 
 
 async def _lan_controls(runs: PrintCommands, cards: PrintersNow) -> dict[str, LanRunControl]:
-    """Each card's waiting native run (#4942); none when the runs cannot be read, so a
-    database blip costs the controls, never the strip."""
+    """Each card's oldest waiting native run (#4942), the first in its queue (#6871);
+    none when the runs cannot be read, so a database blip costs the controls, never the
+    strip."""
     try:
         waiting = await runs.store.lan_waiting([card.id for card in cards.printers])
     except DATABASE_ERRORS:

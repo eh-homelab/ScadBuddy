@@ -339,9 +339,10 @@ class PrintRunStore:
         return await asyncio.to_thread(self._latest_for_output, output_id)
 
     async def lan_waiting(self, printers: list[str]) -> dict[str, PrintRun]:
-        """Each of ``printers``' newest succeeded native run with prints still to start,
+        """Each of ``printers``' oldest succeeded native run with prints still to start,
         neither all started nor stopped (#4942), by printer, in one read: the Prints page
-        card's controls."""
+        card's controls. Oldest, as `queue_place` orders them (#6871): the run told it is
+        first in a busy printer's queue is the one whose controls the card shows."""
         if not printers:
             return {}
         return await asyncio.to_thread(self._lan_waiting, printers)
@@ -538,14 +539,15 @@ class PrintRunStore:
         return PrintRun.model_validate(row) if row else None
 
     def _lan_waiting(self, printers: list[str]) -> dict[str, PrintRun]:
-        # The predicate is `print_runs_lan_waiting`'s, so the read is that index's.
+        # The predicate is `print_runs_lan_waiting`'s, so the read is that index's. The
+        # order is `_queue_place`'s: oldest first.
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT DISTINCT ON (printer) {_COLUMNS} FROM print_runs"
                 " WHERE printer = ANY(%s::uuid[]) AND status = 'succeeded'"
                 " AND result->'lan_waiting' <> '[]'::jsonb"
                 " AND result->>'lan_stopped' IS NULL"
-                " ORDER BY printer, created_at DESC",
+                " ORDER BY printer, created_at, id",
                 (printers,),
             ).fetchall()
         runs = [PrintRun.model_validate(row) for row in rows]

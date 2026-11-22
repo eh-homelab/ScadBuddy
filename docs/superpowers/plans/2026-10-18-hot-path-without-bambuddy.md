@@ -94,7 +94,10 @@ was read with `scadbuddy-run-forensics` (`print_runs.py show`). It is now the re
 12. R-6871-5: A printer that holds an ended print (`FINISH`, `FAILED`) is busy only while
     `lan_require_plate_clear` is on. Why: with that setting off, the person chose not to be
     asked, and today's run starts on such a printer. Ruling 1 ties the hold to a plate "that
-    needs a plate clear".
+    needs a plate clear". This hold (`lan_check` with `plate_clear`, `ENDED_STATES`) covers
+    `FAILED` too, which decision 8 does not count as busy: the bed still holds the failed
+    print. After someone says the plate is clear, the re-check (decision 11) reads with
+    `plate_clear=False`, so a `FAILED` printer then lets the start through.
 13. R-6871-6: A queued run is recorded `succeeded`. Its result has every print in
     `lan_waiting`, nothing in `lan`, and `lan_queued`: the state read, the job it waits for, and
     its place. The place is 1 plus the printer's older runs that still have prints to start,

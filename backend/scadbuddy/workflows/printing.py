@@ -67,6 +67,7 @@ with workflow.unsafe.imports_passed_through():
         LAN_UNSURE,
         LAN_UPLOAD_ACTIVITY,
         LAN_WAIT_ACTIVITY,
+        NOTHING_SENT,
         PLATE_CLEARED_SIGNAL,
         PRINT_LAN_UPDATE_ACTIVITY,
         PRINT_RUN_WORKFLOW,
@@ -206,10 +207,28 @@ class _ClearTimeoutError(Exception):
     timeout, so no other step's `TimeoutError` is read as it."""
 
 
-def _lan_failed(error: BaseException, step: LanStep, plate_id: int, next_id: int) -> LanStopped:
+def _bare(detail: str) -> str:
+    """``detail`` without `NOTHING_SENT`, which a ``lan_print`` of a build before the
+    workflow added it put on every refusal (#6871)."""
+    return detail.removesuffix(f" {NOTHING_SENT}")
+
+
+def _lan_failed(
+    error: BaseException,
+    step: LanStep,
+    plate_id: int,
+    next_id: int,
+    *,
+    refused: bool = False,
+    started: int = 0,
+    copy: int | None = None,
+) -> LanStopped:
     """Why a LAN run started none of its later plate copies (#4541): the step that failed
-    on ``plate_id``, in its own words, and ``next_id`` the first plate it did not start."""
-    detail = problem_of(error).detail
+    on ``plate_id``, in its own words, and ``next_id`` the first plate it did not start.
+    A start ``refused`` for sure (#6871: ``start_refused``) says nothing was sent: for the
+    whole run when it had ``started`` none, else from that plate's ``copy`` on only, since
+    the prints before it did start."""
+    detail = _bare(problem_of(error).detail)
     if (
         step == "wait"
         and isinstance(error, ActivityError)
@@ -233,6 +252,14 @@ def _lan_failed(error: BaseException, step: LanStep, plate_id: int, next_id: int
         )
     else:
         message = f"Plate {next_id} was not started, nor the plates after it: {detail}"
+        if refused and step == "start" and not started:
+            message = f"{message} {NOTHING_SENT}"
+        elif refused and step == "start":
+            which = f"plate {next_id}" if copy is None else f"plate {next_id}, copy {copy},"
+            message = (
+                f"{message} Nothing was sent for {which} or the prints after it, but the"
+                f" {started} before it did start: print again only what did not start."
+            )
     return LanStopped(stage="failed", message=message)
 
 
@@ -718,6 +745,13 @@ class PrintRunWorkflow(_PlateStarts):
                 # completes. A cancel is recorded as one (review #1061 (3) 1).
                 if not is_cancelled_exception(error):
                     problem = problem_of(error)
+                    # Only a start that started nothing for sure says so (#6871, ruling
+                    # 4): after an unsure attempt, that one may have started. The text
+                    # is only the record's input, so a history replays as before.
+                    detail = _bare(problem.detail)
+                    if self.start_refused:
+                        detail = f"{detail} {NOTHING_SENT}"
+                    problem = problem.model_copy(update={"detail": detail})
                 else:
                     self.cancel_absorbed = True
                     # The row exists and a plate may be sliced: never "before it
@@ -1350,12 +1384,14 @@ class LanSequenceWorkflow(_PlateStarts):
         #: What the loop was doing when it stopped, for the reason it records.
         step: LanStep = "wait"
         plate_id = 0
+        copy: int | None = None
         try:
             for start in sequence.starts:
                 # A cancel a start, a record or an update absorbed stops the next start.
                 self._stop_if_cancelled()
                 plate, native = start.plate, start.native
                 plate_id = plate.plate_id
+                copy = start.copy_number if planned.copies > 1 else None
                 step = "wait"
                 if queued is not None and not result.lan:
                     # The run's first start, queued on a busy printer (#6871): until the
@@ -1505,7 +1541,15 @@ class LanSequenceWorkflow(_PlateStarts):
             stopped = (
                 _LAN_CANCELLED
                 if cancelled
-                else _lan_failed(error, step, plate_id, result.lan_waiting[0])
+                else _lan_failed(
+                    error,
+                    step,
+                    plate_id,
+                    result.lan_waiting[0],
+                    refused=self.start_refused,
+                    started=len(result.lan),
+                    copy=copy,
+                )
             )
             row = await self._lan_update(
                 input,

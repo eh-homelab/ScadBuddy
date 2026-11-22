@@ -360,16 +360,20 @@ class Places:
 
 class Unsure(LanActivities):
     """The real ``lan_print``, answered ``LAN_UNSURE`` for its first ``unsure`` starts
-    *after* each ran: a start the printer took whose answer was lost."""
+    *after* each ran: a start the printer took whose answer was lost. The first
+    ``unsent`` calls are answered so without running: a start that never reached it."""
 
-    def __init__(self, deps: LanDeps, unsure: int) -> None:
+    def __init__(self, deps: LanDeps, unsure: int, unsent: int = 0) -> None:
         super().__init__(deps)
         self.unsure = unsure
+        self.unsent = unsent
         self.calls = 0
 
     @activity.defn(name=LAN_PRINT_ACTIVITY)
     async def lan_print(self, input: LanPrintInput) -> object:  # type: ignore[override]
         self.calls += 1
+        if self.calls <= self.unsent:
+            raise ApplicationError("no answer", type=LAN_UNSURE, non_retryable=True)
         started = await super().lan_print(input)
         if self.calls <= self.unsure:
             raise ApplicationError("the answer was lost", type=LAN_UNSURE, non_retryable=True)
@@ -385,6 +389,7 @@ async def _run(
     library: Library | None = None,
     native_slicer: bool = True,
     unsure: int = 0,
+    unsent: int = 0,
     plan: FilamentPlan = TRAYS,
     lan_start: bool = True,
     rack: Usage | None = None,
@@ -428,7 +433,7 @@ async def _run(
         wait_poll=0.2,
         runs=places or Places(),
     )
-    lan = Unsure(deps, unsure)
+    lan = Unsure(deps, unsure, unsent)
     arg = PrintRunInput(
         subject="o" * 32,
         slug="demo",
@@ -874,6 +879,9 @@ async def test_a_later_start_that_fails_stops_the_rest(
     assert stopped is not None and stopped.stage == "failed"
     assert stopped.message.startswith("Plate 1 was not started, nor the plates after it:")
     assert "refused the print" in stopped.message
+    # Copy 1 printed: only the copies from 2 on were not sent (review of #6882).
+    assert "safe to print again" not in stopped.message
+    assert "Nothing was sent for plate 1, copy 2, or the prints after it" in stopped.message
 
 
 async def _cancel_while_it_waits(client: Client, arg: PrintRunInput, fake: NativeFake) -> None:
@@ -1224,6 +1232,24 @@ async def test_with_the_setting_off_a_busy_printer_refuses_and_nothing_was_sent(
     assert error.detail.startswith("Fake H2C refused the print: ERROR STATE.")
     assert "Nothing was sent to print" in error.detail
     assert fake_lan.received()["refused"][0]["reason"] == "ERROR STATE"
+
+
+async def test_a_refusal_after_an_unsure_start_may_have_queued_and_never_says_safe(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#6871 ruling 4 (review of #6882): the first attempt's answer was lost, so it may
+    have started; the second is refused. The run may have queued, and its text never
+    says that printing again is safe."""
+    printer = fake_lan.printer
+    missing = printer._missing
+    printer._missing = lambda path: "the file is gone" if "-2.3mf" in str(path) else missing(path)
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), unsent=1)
+    assert run.status == "failed" and run.may_have_queued
+    error = run.error
+    assert error is not None and "refused the print: the file is gone." in error.detail
+    assert "Nothing was sent" not in error.detail
+    names = [entry["name"] for entry in fake_lan.received()["ftps"]]
+    assert names == ["/scadbuddy-run-1-p1.3mf", "/scadbuddy-run-1-p1-2.3mf"]
 
 
 async def test_a_start_whose_answer_is_lost_every_time_may_have_queued(

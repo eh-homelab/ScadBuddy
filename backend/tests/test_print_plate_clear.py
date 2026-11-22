@@ -8,11 +8,14 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan
+from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.library.settings_store import PrintSettings, SettingsReader, StoredSettings
 from scadbuddy.workflows.print_activities import plate_clear_of
+from scadbuddy.workflows.print_models import LAN_REFUSED, NOTHING_SENT
 from scadbuddy.workflows.printing import _ClearTimeoutError, _lan_failed
 
 
@@ -60,6 +63,28 @@ def test_only_the_gates_own_timeout_reads_as_nobody_saying_the_plate_is_clear() 
     assert gate.stage == "failed" and gate.message.startswith("Nobody said the plate was clear")
     other = _lan_failed(TimeoutError("slow"), "start", 1, 2)
     assert other.message.startswith("Plate 2 was not started")
+
+
+def _refusal(detail: str) -> ApplicationError:
+    problem = PrintRunError(status=502, title="Bad Gateway", detail=detail)
+    return ApplicationError(detail, problem, type=LAN_REFUSED, non_retryable=True)
+
+
+def test_a_refused_start_says_nothing_was_sent_only_for_what_it_did_not_start() -> None:
+    """#6871 (review of #6882): a queued run whose first start is refused started nothing,
+    so printing again is safe; a refused later copy names itself, since the prints before
+    it did start; an unsure refusal says neither. A refusal from a build that added the
+    sentence in ``lan_print`` is not doubled."""
+    old = _refusal(f"Fake H2C refused the print: ERROR STATE. {NOTHING_SENT}")
+    first = _lan_failed(old, "start", 1, 1, refused=True, started=0)
+    assert first.message.endswith(f"ERROR STATE. {NOTHING_SENT}")
+    assert first.message.count(NOTHING_SENT) == 1
+    later = _lan_failed(old, "start", 1, 1, refused=True, started=1, copy=2)
+    assert NOTHING_SENT not in later.message
+    assert "Nothing was sent for plate 1, copy 2, or the prints after it" in later.message
+    assert "the 1 before it did start" in later.message
+    unsure = _lan_failed(old, "start", 1, 1, refused=False, started=0)
+    assert unsure.message.endswith("ERROR STATE.") and "Nothing was sent" not in unsure.message
 
 
 def test_a_bambuddy_run_never_reads_them() -> None:

@@ -138,14 +138,10 @@ def _failed(detail: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY) -> A
     )
 
 
-#: What a refusal that started nothing adds to its reason (#6871, ruling 4).
-NOTHING_SENT = "Nothing was sent to print, so it is safe to print again."
-
-
 def _refused(detail: str) -> ApplicationError:
-    """The printer refused the start, so nothing prints: ``LAN_REFUSED`` (#6871), which
-    the run records as failed with nothing queued."""
-    detail = f"{detail} {NOTHING_SENT}"
+    """The printer refused this start, so this attempt prints nothing: ``LAN_REFUSED``
+    (#6871). Whether the run printed nothing is the workflow's to say (`NOTHING_SENT`):
+    an earlier, unsure attempt may have started."""
     return ApplicationError(
         detail,
         PrintRunError(status=status.HTTP_502_BAD_GATEWAY, title="Bad Gateway", detail=detail),
@@ -366,9 +362,10 @@ class LanActivities:
     async def lan_print(self, input: LanPrintInput) -> LanStarted:
         """Start the uploaded plate and wait up to `LanDeps.start_wait` for the printer to
         report it under ``input.subtask_name``. A non-zero ``print_error`` it reports
-        after the start (or a refused ``project_file``) is ``FAILED`` with the code; no
-        word from it at all is ``LAN_UNSURE``, which the workflow answers by uploading
-        and starting again, and the report read first finds a start it did take."""
+        after the start is ``FAILED`` with the code, and a refused ``project_file`` is
+        ``LAN_REFUSED`` with the printer's reason; no word from it at all is
+        ``LAN_UNSURE``, which the workflow answers by uploading and starting again, and
+        the report read first finds a start it did take."""
         row, lan = await self._printer(input.printer)
         try:
             first = await lan.probe(timeout=LAN_PROBE_TIMEOUT)

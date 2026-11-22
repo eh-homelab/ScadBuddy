@@ -198,9 +198,10 @@ def plate_clear_of(
 ) -> PlannedRun:
     """``planned`` with ``lan_require_plate_clear`` (#4939) and ``lan_queue_when_busy``
     (#6871), for a native run: the run keeps them, so a change applies from the next run.
-    A run of several prints waits for a cleared plate between them; every native run
-    reads the printer before its first upload and, with ``lan_queue_when_busy``, waits
-    for it while it is busy, an ended print whose plate must be cleared counting as busy.
+    A run of several prints waits for a cleared plate between them; a run planned with
+    ``lan_queue_when_busy`` reads the printer before its first upload and waits while it
+    is busy, an ended print whose plate must be cleared counting as busy. With it off,
+    nothing reads the printer before the upload.
     A run on Bambuddy's path reads nothing. ``loaded`` are the settings the plan read:
     the print worker's (`PrintSettings`, #5298) hold the fields, so they are read from
     them and nothing is fetched again; the API's `StoredSettings` do not, so ``settings``

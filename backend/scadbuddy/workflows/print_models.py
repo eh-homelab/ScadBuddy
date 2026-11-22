@@ -72,6 +72,11 @@ LAN_UNSURE = "PrintLanUnsure"
 #: run's first start refused so queued nothing, and the run says so (``print_fail``'s
 #: ``unqueued``).
 LAN_REFUSED = "PrintLanRefused"
+#: What a run adds to its failure when its start started nothing for sure (#6871,
+#: ruling 4): the first attempt refused (``LAN_REFUSED``) or its upload failed. The
+#: workflow adds it (`PrintRunWorkflow`, ``start_refused``), never ``lan_print``, which
+#: cannot know whether an earlier, unsure attempt started.
+NOTHING_SENT = "Nothing was sent to print, so it is safe to print again."
 
 
 class SourceSpec(BaseModel):
