@@ -296,7 +296,10 @@ async def _book_usage(
     up what each booked. A body that fails is logged and ends the booking: its rows and the
     newer ones wait for the next pull, which reads them again (R-6860-3). The last body
     carries ``read_to``, the newest row read, so the instance's usage mark moves only once
-    the whole read is booked, in that body's transaction (R-7002-6)."""
+    the whole read is booked, in that body's transaction (R-7002-6). An empty read books
+    nothing and sends nothing."""
+    if not usage:
+        return
     bodies = usage_bodies(usage, archives, USAGE_BODY_ROWS)
     newest = max(usage, key=lambda row: (row.created_at, row.id))
     for i, (rows, matched) in enumerate(bodies):

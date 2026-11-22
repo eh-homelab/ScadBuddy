@@ -7,7 +7,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
@@ -21,7 +21,13 @@ from scadbuddy.filament import bambuddy_usage, bb_pull_run, capture, ledger
 from scadbuddy.filament.bambuddy_pull import EVERY, pull
 from scadbuddy.filament.bambuddy_usage import book_usage
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, new_pull_id
-from scadbuddy.filament.bb_pull_models import UsageBody, UsageBooked, UsageMark
+from scadbuddy.filament.bb_pull_models import (
+    BbPullApi,
+    PullReport,
+    UsageBody,
+    UsageBooked,
+    UsageMark,
+)
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_results import reset_links
 from scadbuddy.filament.catalog import CatalogStore
@@ -214,16 +220,16 @@ def _mark(f: Filament) -> tuple[Any, Any, Any]:
 
 
 async def _pull_rows(
-    f: Filament, rows: list[SpoolUsage], spools: list[BbSpool] | None = None
+    f: Filament, rows: list[SpoolUsage], spools: list[BbSpool] | None = None, url: str = BB
 ) -> Any:
-    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    settings = StoredSettings(bambuddy_url=url, bambuddy_api_key="k")
     with respx.mock(assert_all_called=False) as router:
-        router.get(f"{BB}/api/v1/inventory/spools").respond(
+        router.get(f"{url}/api/v1/inventory/spools").respond(
             json=[s.model_dump(mode="json") for s in (spools if spools is not None else [bb()])]
         )
-        router.get(f"{BB}/api/v1/inventory/usage").mock(side_effect=_newest(rows))
-        router.get(f"{BB}/api/v1/inventory/catalog").respond(json=[])
-        router.get(f"{BB}/api/v1/archives/").respond(json=[])
+        router.get(f"{url}/api/v1/inventory/usage").mock(side_effect=_newest(rows))
+        router.get(f"{url}/api/v1/inventory/catalog").respond(json=[])
+        router.get(f"{url}/api/v1/archives/").respond(json=[])
         return await read_and_pull(f, settings)
 
 
@@ -1203,6 +1209,44 @@ async def test_a_reset_that_deletes_the_links_clears_the_mark(pg_pool: PgPool) -
         conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (instance_for(BB),))
     reset_links(f, instance_for(BB), instance_for("https://new.test"), None, expect_kept=False)
     assert _mark(f) == (None, None, None)
+
+
+async def test_a_reset_that_keeps_the_links_carries_the_mark_to_the_new_url(
+    pg_pool: PgPool,
+) -> None:
+    """#7002 R-7002-6: the reset that keeps the links (the same Bambuddy at a new URL)
+    moves the usage mark to the new instance, so a pull at the new URL counts no unlinked
+    row the old URL's pull counted."""
+    f = _filament(pg_pool)
+    _linked(f)
+    rows = [usage(id=11, spool_id=99, created_at=_naive(T1))]
+    first = await _pull_rows(f, rows)
+    assert first.usage_unlinked == 1
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (instance_for(BB),))
+    new_url = "https://new.test"
+    done = reset_links(f, instance_for(BB), instance_for(new_url), ([bb()], []), expect_kept=True)
+    assert done.kept
+    assert _mark(f) == (instance_for(new_url), T1, 11)
+    second = await _pull_rows(f, rows, url=new_url)
+    assert second.usage_unlinked == 0
+
+
+async def test_an_empty_usage_read_sends_no_body() -> None:
+    """#7002: `_book_usage` of no rows books nothing and sends nothing."""
+    sent: list[UsageBody] = []
+
+    class Recording:
+        async def book_usage(self, body: UsageBody) -> UsageBooked:
+            sent.append(body)
+            return UsageBooked(booked=0, unlinked=0)
+
+    report = PullReport()
+    await bb_pull_run._book_usage(
+        cast(BbPullApi, Recording()), instance_for(BB), new_pull_id(), [], [], report
+    )
+    assert sent == []
+    assert (report.usage_booked, report.usage_unlinked) == (0, 0)
 
 
 def test_two_concurrent_bookings_count_each_new_unlinked_row_once(pg_pool: PgPool) -> None:
