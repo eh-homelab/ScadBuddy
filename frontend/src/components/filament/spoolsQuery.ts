@@ -1,11 +1,12 @@
 /**
  * #6262 — the Spools tab's view, filters, grouping, columns and sort, kept in the URL
- * (`?view=&status=&needs_type=&low=&used=&new=&loaded=&material=&brand=&insert=&location=&group=&cols=&sort=`)
+ * (`?q=&view=&status=&needs_type=&low=&used=&new=&loaded=&material=&brand=&insert=&location=&group=&cols=&sort=`)
  * as `listingsQuery.ts` keeps the Storefront list's, so back, reload and a shared link show
  * the same rows. The columns are also remembered per viewer (`readStoredColumns`), a view
  * convenience used when the URL names none.
  */
 import type { Spool } from '../../api/filament'
+import { matchesSearch, parseSearch, spoolSearchDoc, type SearchDoc } from '../../lib/filamentSearch'
 
 /** `forecast` (#6269): each shown spool's burn and empty day, then the types to reorder. */
 export type SpoolsView = 'table' | 'cards' | 'forecast'
@@ -48,6 +49,8 @@ export const DEFAULT_COLUMNS: ColumnId[] = ['number', 'colour', 'material', 'bra
 const SORTABLE: readonly ColumnId[] = ['number', 'colour', 'material', 'brand', 'subtype', 'grams_left', 'label_weight', 'location', 'last_used']
 
 export interface SpoolsQuery {
+  /** #6894: the text search (`lib/filamentSearch.ts`). */
+  q?: string
   view: SpoolsView
   status: SpoolsStatus
   needsType?: boolean
@@ -75,6 +78,7 @@ const FLAGS = [
   ['loaded', 'loaded'],
 ] as const
 const NAMES = [
+  ['q', 'q'],
   ['material', 'material'],
   ['brand', 'brand'],
   ['insertType', 'insert'],
@@ -170,9 +174,16 @@ export function hasUnknownMaterial(spool: Spool): boolean {
 
 /**
  * The spools `q` keeps. `lowStock` reads the server's `low_stock` (F3); `loaded` reads
- * `trays`, the places that are a printer's tray.
+ * `trays`, the places that are a printer's tray. `q.q` searches what `searchDoc` gives
+ * for each spool (#6894: its type's code and SKUs and its tray on the tab), else the spool's own fields.
  */
-export function filterSpools(spools: readonly Spool[], q: SpoolsQuery, trays: ReadonlySet<string> = new Set()): Spool[] {
+export function filterSpools(
+  spools: readonly Spool[],
+  q: SpoolsQuery,
+  trays: ReadonlySet<string> = new Set(),
+  searchDoc: (spool: Spool) => SearchDoc = (spool) => spoolSearchDoc(spool),
+): Spool[] {
+  const tokens = parseSearch(q.q)
   return spools.filter((spool) => {
     const archived = spool.archived_at != null
     if (q.status === 'active' ? archived : q.status === 'archived' ? !archived : false) return false
@@ -185,6 +196,7 @@ export function filterSpools(spools: readonly Spool[], q: SpoolsQuery, trays: Re
     if (q.brand && !same(spool.names?.brand, q.brand)) return false
     if (q.insertType && !same(spool.names?.insert_type, q.insertType)) return false
     if (q.location && !same(spool.names?.location, q.location)) return false
+    if (tokens.length && !matchesSearch(searchDoc(spool), tokens)) return false
     return true
   })
 }

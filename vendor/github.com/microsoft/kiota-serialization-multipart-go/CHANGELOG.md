@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.6](https://github.com/microsoft/kiota-serialization-multipart-go/compare/v1.1.5...v1.1.6) (2026-11-11)
+
+
+### Bug Fixes
+
+* **multipart:** handle nil and empty collections in WriteCollection methods ([c15b8ca](https://github.com/microsoft/kiota-serialization-multipart-go/commit/c15b8ca48e213d6e928a6e4aa3384504c9f06ad0))
+* **multipart:** normalize header keys and prevent malformed headers in WriteStringValue ([a2939ce](https://github.com/microsoft/kiota-serialization-multipart-go/commit/a2939ce4c48f6192a035bb53dddec74317465faa))
+* **multipart:** normalize header keys and validate CRLF in WriteStringValue ([846e008](https://github.com/microsoft/kiota-serialization-multipart-go/commit/846e00845549c48f18bf9f5abe7bc57388694a28))
+* **multipart:** omit nil header string values and handle nil buffer in get serialized content ([32c1695](https://github.com/microsoft/kiota-serialization-multipart-go/commit/32c16958ef493cd368db61a5cb9808d761b4c467))
+* **multipart:** reject CRLF in header keys prior to whitespace trimming ([49b81cb](https://github.com/microsoft/kiota-serialization-multipart-go/commit/49b81cb3557bcdd944f9ac171c751e738357e1f6))
+* **multipart:** validate header keys and values against CRLF injection in WriteStringValue ([0400eee](https://github.com/microsoft/kiota-serialization-multipart-go/commit/0400eeedd207ff97c278d14245fec932d8850333))
+
+## [1.1.5](https://github.com/microsoft/kiota-serialization-multipart-go/compare/v1.1.4...v1.1.5) (2026-11-03)
+
+
+### Bug Fixes
+
+* **factory:** add nil receiver check to GetValidContentType ([65ff36e](https://github.com/microsoft/kiota-serialization-multipart-go/commit/65ff36e01870558306038278544e4d7d8386e41c))
+* **factory:** add nil receiver check to GetValidContentType ([c9c5163](https://github.com/microsoft/kiota-serialization-multipart-go/commit/c9c516321208acd5638ea91916ee159a93ee3c51))
+* **multipart:** add defensive nil receiver guards to serialization callback methods ([68233da](https://github.com/microsoft/kiota-serialization-multipart-go/commit/68233dace8576e9ecec7951871ec0b5b563c63b4))
+* **multipart:** add nil guards to unsupported methods and validate multipart body before start callback ([1df8d43](https://github.com/microsoft/kiota-serialization-multipart-go/commit/1df8d4357a50847d013be62fb943af4eeaf676ce))
+* **multipart:** add nil guards to unsupported methods and validate multipart body before start callback ([2cf9b02](https://github.com/microsoft/kiota-serialization-multipart-go/commit/2cf9b027f1ad113a5cb9fbccd416265fd6e103d1))
+* **multipart:** guard callback getters and setters against nil pointer dereference ([4db85ef](https://github.com/microsoft/kiota-serialization-multipart-go/commit/4db85efd1a13bd83dfc61156a5ccacffff2a1d2e))
+* **multipart:** handle nil and empty values in WriteAdditionalData and WriteAnyValue ([1ac92d7](https://github.com/microsoft/kiota-serialization-multipart-go/commit/1ac92d77da38042b9ed854d64c7caf9b088cd55c))
+* **multipart:** handle nil and empty values in WriteAdditionalData and WriteAnyValue ([b6634c3](https://github.com/microsoft/kiota-serialization-multipart-go/commit/b6634c3a039b389e48585472fb061f97fbfd92b8))
+* **multipart:** handle nil values in scalar write methods and WriteStringValue ([0c282a4](https://github.com/microsoft/kiota-serialization-multipart-go/commit/0c282a4d52740e5d923c39f882d21ff5b6e6fd5a))
+* **multipart:** handle nil values in scalar write methods and WriteStringValue ([431a897](https://github.com/microsoft/kiota-serialization-multipart-go/commit/431a8977bbb8511972eb6bb01b23ab58e9ff0758))
+
 ## [1.1.4](https://github.com/microsoft/kiota-serialization-multipart-go/compare/v1.1.3...v1.1.4) (2026-10-21)
 
 
