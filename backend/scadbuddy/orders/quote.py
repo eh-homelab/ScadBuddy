@@ -561,6 +561,10 @@ class SlicedPlate:
 #: ``bambuddy/resolver.py`` ``resolve``'s ``slot_presets``).
 SlotPresets = Mapping[int, Sequence[EffectivePreset]]
 
+#: The colour a spool-less slot is sliced in, by slot id (#6710, ``resolve``'s
+#: ``slot_colours``); a slot it leaves out takes the file's own colour.
+SlotColours = Mapping[int, str]
+
 
 class Slicer(Protocol):
     """The print dialog's background slice, for a quote (Ruling 2)."""
@@ -584,9 +588,17 @@ class Slicer(Protocol):
     async def fetch(self, sliced: SlicedPlate) -> bytes: ...
 
     async def start_library(
-        self, file_id: int, request: SliceQuoteRequest, subject: str
+        self,
+        file_id: int,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+        slot_colours: SlotColours | None = None,
     ) -> list[PreviewStarted]:
-        """Every plate of a library file (#5544), as :meth:`start` slices an output's."""
+        """Every plate of a library file (#5544), as :meth:`start` slices an output's. A
+        slot in ``slot_presets`` has no spool, and is sliced in its ``slot_colours`` entry
+        or, with none, in the file's own colour (#6710)."""
         ...
 
 
