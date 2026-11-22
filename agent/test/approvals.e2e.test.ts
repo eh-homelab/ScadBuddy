@@ -345,9 +345,14 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`approvals aga
 
   it('expires a parked approval at its time, and the model is told', async () => {
     script = printing(() => 'box.3mf')
-    const m = await replica()
-    // The shortest window Settings takes, read by the gate when the call parks.
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SETTING_APPROVAL_EXPIRY_SECONDS}, ${db.sql.json(10)})`
+    // The shortest window Settings takes, read by the gate when the call parks (from the API's
+    // settings area, which this manager's settings stand in for).
+    const m = await replica({
+      settings: {
+        get: <T>(key: string) =>
+          Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_APPROVAL_EXPIRY_SECONDS ? 10 : undefined) as T),
+      },
+    })
     const { session, turn, requestId } = await parked(m)
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(printed).toEqual([])

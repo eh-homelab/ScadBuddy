@@ -161,7 +161,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
       services: services(),
       sessions: new PgSessionOwners(db.sql),
       approvals: new PgApprovalRecords(db.sql, new SqlFlowRunReads(db.sql)),
-      audit: sqlAuditLog(db.sql, { hashKey: () => Buffer.alloc(32, 5) }),
+      audit: sqlAuditLog(db.sql),
     }
   })
   afterEach(async () => {

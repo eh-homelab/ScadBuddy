@@ -289,26 +289,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(await hop(current)).toMatchObject({ hop: 'parent', delivered: true })
   })
 
-  it('a process that dies before the turn started leaves the call unclaimed for the next tick', async () => {
-    const id = await park()
-    let started!: () => void
-    const inSend = new Promise<void>((resolve) => (started = resolve))
-    let release!: (err: Error) => void
-    const stuck = new Promise<never>((_, reject) => (release = reject))
-    // The send never returns: the process died while starting the turn.
-    const dying = new Escalations({ ...sqlEscalationDeps(db.sql), reads: new SqlFlowRunReads(db.sql), durable: () => undefined, send: async () => (started(), stuck) })
-    const running = dying.deliver().catch(() => undefined)
-    await inSend
-    // Its connection goes with it.
-    await db.sql`
-      SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-      WHERE datname = current_database() AND state = 'idle in transaction' AND pid <> pg_backend_pid()`
-    expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: false })
-    release(new Error('gone'))
-    await running
-    expect(await escalations.deliver()).toBe(1)
-  })
-
+  // A process that dies while it starts the turn leaves the call claimed until the claim's
+  // hold ends (the claim is a committed row on the API, #5299 step 12): the next test.
   it('a send that hangs holds its claim no longer than the hold', async () => {
     const id = await park()
     let release!: (err: Error) => void

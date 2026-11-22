@@ -530,6 +530,7 @@ export class ApprovalService {
     } catch (err) {
       // Whether it was written is not known: the span says so.
       recordFailure(span, err)
+      span.setAttribute('scadbuddy.outcome', 'unknown')
       span.end()
       throw err
     }
@@ -681,8 +682,10 @@ export class ApprovalService {
     try {
       made = await this.deps.routes.createPrepared(await this.newRow({ ...request, sessionId: null, turnId: null }, summary), bounds, traceparents)
     } catch (err) {
+      // Which rows it evicted, and whether, is not known: each span says so.
       for (const span of spans) {
         recordFailure(span, err)
+        span.setAttribute('scadbuddy.outcome', 'unknown')
         span.end()
       }
       throw err
@@ -691,6 +694,9 @@ export class ApprovalService {
       const span = spans[i]
       if (span === undefined) return
       const evicted = record(row)
+      // Started before the API chose the row, so linked to its parked span only now.
+      const link = linkTo(evicted.traceparent)
+      if (link) span.addLink(link)
       const waited = evicted.decidedAt ? (Date.parse(evicted.decidedAt) - Date.parse(evicted.createdAt)) / 1000 : 0
       span.setAttributes({
         'scadbuddy.approval_id': evicted.id,
