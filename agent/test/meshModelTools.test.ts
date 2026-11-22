@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { pinnedOutward } from '../src/tools/pinnedOutward.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
 import type { SessionFiles } from '../src/workspace/store.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -64,6 +65,26 @@ describe('mesh model tools', () => {
     expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh', body: { name: 'Carrot', output_id: 'a'.repeat(32), description: '' } }))
   })
 
+  it("creates from a print's file: the archive and where its 3MF is (#6916)", async () => {
+    const { seen, client } = backend()
+    await call('create_model_from_mesh', { name: 'Carrot', archive_id: 193, archive_source: { kind: 'archive_source' } }, client)
+    expect(seen).toEqual([
+      expect.objectContaining({
+        path: '/api/v1/models/from-mesh',
+        body: { name: 'Carrot', description: '', archive_id: 193, archive_source: { kind: 'archive_source' } },
+      }),
+    ])
+    expect(seen[0]!.key).toBeTruthy()
+  })
+
+  it("pins a print's file on the printer to a person's approval (#6916)", () => {
+    const onPrinter = { name: 'X', archive_id: 193, archive_source: { kind: 'printer', path: '/cache/x.3mf' } }
+    expect(pinnedOutward('create_model_from_mesh', onPrinter)).toBe(true)
+    expect(pinnedOutward('mcp__scadbuddy__create_model_from_mesh', { name: 'X', archive_id: 193, archive_source: 'printer' })).toBe(true)
+    expect(pinnedOutward('create_model_from_mesh', { name: 'X', archive_id: 193, archive_source: { kind: 'archive' } })).toBe(false)
+    expect(pinnedOutward('create_model_from_mesh', { name: 'X', library_file_id: 7 })).toBe(false)
+  })
+
   it('uploads a workspace file as multipart, named by its path', async () => {
     const { seen, client } = backend()
     const ws = memoryWorkspace({ 'downloads/carrot.stl': Buffer.from('solid x') })
@@ -85,6 +106,9 @@ describe('mesh model tools', () => {
     for (const args of [
       { name: 'X' },
       { name: 'X', library_file_id: 1, output_id: 'a'.repeat(32) },
+      { name: 'X', library_file_id: 1, archive_id: 193, archive_source: { kind: 'archive' } },
+      { name: 'X', archive_id: 193 },
+      { name: 'X', archive_source: { kind: 'archive' } },
       { name: 'X', library_file_id: 1, ...ws.ref('x.bin') },
       { name: 'X', library_file_id: 1, workspace_sha256: ws.ref('x.bin').workspace_sha256 },
       { name: 'X', workspace_path: 'x.bin' },
@@ -93,7 +117,7 @@ describe('mesh model tools', () => {
     ]) {
       const result = await call('create_model_from_mesh', args, client, ws.workspace)
       expect(result.isError).toBe(true)
-      expect(JSON.stringify(firstText(result))).toMatch(/exactly one source|goes with `workspace_path`|needs `workspace_sha256`|\.3mf or \.stl/)
+      expect(JSON.stringify(firstText(result))).toMatch(/exactly one source|go together|goes with `workspace_path`|needs `workspace_sha256`|\.3mf or \.stl/)
     }
     expect(seen).toEqual([])
   })

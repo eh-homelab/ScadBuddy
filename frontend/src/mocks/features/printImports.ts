@@ -111,7 +111,8 @@ export const handlers = [
       printer_id: archive.printer_id ?? null,
       linked,
       imported: null,
-      sources: linked ? [] : sourcesOf(archive, printer),
+      // The route lists a linked print's places too: a mesh model may still open its file (#6916).
+      sources: sourcesOf(archive, printer),
       suggested_models: suggested(archive),
       suggested_library_files: SUGGESTED_FILES[archive.id] ?? [],
     } satisfies PrintSources)

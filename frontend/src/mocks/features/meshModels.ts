@@ -4,7 +4,8 @@ import { addMockModel, mockModels, problem } from '../handlers'
 import { libraryFiles } from './library'
 
 /**
- * #2146 — `POST /models/from-mesh`: a library file opened as an editable mesh model;
+ * #2146 — `POST /models/from-mesh`: a library file, an output or (#6916) a print's file
+ * opened as an editable mesh model;
  * `POST /models/from-mesh/upload` (#4703) opens an uploaded one.
  * Arrange makes one as the home of a library file's arranged plates (#3638). The model
  * records the file it came from (`mesh_source`), as the API's does.
@@ -20,6 +21,7 @@ export const handlers = [
     if (mockModels().some((m) => m.slug === slug)) {
       return problem(409, 'Conflict', `a model named '${slug}' already exists`)
     }
+    if (body.archive_id != null && !request.headers.get('Idempotency-Key')) return problem(428, 'Precondition Required', 'send an Idempotency-Key')
     const file = libraryFiles.find((f) => f.id === body.library_file_id)
     const model: ModelSummary = {
       slug,
@@ -40,7 +42,12 @@ export const handlers = [
               sha256: '0'.repeat(64),
               file_id: body.library_file_id,
             }
-          : null,
+          : body.output_id != null
+            ? { kind: 'output', name: `${body.output_id}.3mf`, sha256: '0'.repeat(64), output_id: body.output_id }
+            : // #6916 — a print's file is read by the route and opened as an upload is.
+              body.archive_id != null
+              ? { kind: 'upload', name: body.archive_source?.path?.split('/').pop() ?? `print-${body.archive_id}.3mf`, sha256: '0'.repeat(64) }
+              : null,
     }
     addMockModel(model)
     return HttpResponse.json(model, { status: 201 })
