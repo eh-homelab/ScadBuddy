@@ -480,6 +480,19 @@ def test_a_tray_whose_sb_spool_has_no_type_leaves_glow_unchecked() -> None:
     )
 
 
+def test_an_sb_row_with_no_type_is_named_by_its_slot_alone() -> None:
+    """R-6876-6 on Bambuddy's path: an SB row (no tray choice) under its number."""
+    spool = SpoolOption(spool_id=12, material="", sb_number=12)
+    [found] = rack_groups([requirement(1)], {1: spool}, chosen={1: 12})
+    assert found.unchecked == (UncheckedSlot(slot_id=1, reason="no_type", spool_id=12),)
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    [warning] = rack_warnings([found], [slot(2)], "least_used", picks, {})
+    assert warning.message == (
+        "Glow could not be checked for group 0, so it was ranked by its type alone: "
+        "filament 1's spool has no type."
+    )
+
+
 def _ams(*trays: AmsTray) -> PrinterStatus:
     return PrinterStatus(id=1, name="H2C", connected=True, ams=[AmsUnit(id=0, tray=list(trays))])
 

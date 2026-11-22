@@ -53,6 +53,8 @@ describe('RackNozzleLine (#836)', () => {
               { slot_id: 3, reason: 'empty_tray', tray: 'AMS-A slot 2' },
               { slot_id: 4, reason: 'no_spool', material: 'PLA', colour: '#FFFFFF', colour_word: 'white' },
               { slot_id: 5, reason: 'no_type', tray: 'AMS-A slot 1', material: 'PLA' },
+              { slot_id: 6, reason: 'no_type', spool_number: 12 },
+              { slot_id: 7, reason: 'no_type' },
             ],
           }}
           algorithm="least_used"
@@ -67,6 +69,8 @@ describe('RackNozzleLine (#836)', () => {
       'Slot 4 (white PLA) has no spool chosen, so Glow could not be checked.',
       // R-6876-6: the tray's material is no stand-in for the spool's type.
       'Slot 5: the spool in AMS-A slot 1 has no type, so Glow could not be checked. Open Filament',
+      'Slot 6: spool #12 has no type, so Glow could not be checked. Open Filament',
+      'Slot 7: its spool has no type, so Glow could not be checked. Open Filament',
     ])
     expect(screen.queryByText(/A spool is not in the inventory/)).toBeNull()
     for (const link of screen.getAllByRole('link', { name: 'Open Filament' })) {
