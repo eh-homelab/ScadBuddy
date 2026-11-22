@@ -345,3 +345,18 @@ def test_verify_refuses_a_declaration_the_catalogue_refuses(tmp_path: Path) -> N
     (template / "model.json").write_text(json.dumps({"name": "Demo", "pipeline": pipeline}))
     failures = declared_inputs_failures(template, [{"n": 2}])
     assert failures and all(line.startswith("model.json pipeline: ") for line in failures)
+
+
+@pytest.mark.parametrize("content", [None, "{not json"])
+def test_verify_reports_an_unreadable_inputs_file(tmp_path: Path, content: str | None) -> None:
+    """#6913 review: a missing or broken `pipeline.inputs` file is a failure line, not a
+    traceback."""
+    template = _declaring(tmp_path, SMALL_SCHEMA)
+    target = template / "pipeline" / "inputs.json"
+    if content is None:
+        target.unlink()
+    else:
+        target.write_text(content)
+    failures = declared_inputs_failures(template, [{"n": 2}])
+    assert len(failures) == 1
+    assert failures[0].startswith("pipeline/inputs.json: cannot be read: ")

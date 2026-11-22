@@ -137,6 +137,8 @@ def _object_problems(name: str, prop: dict[str, Any], *, stored: bool) -> list[s
     """One level of object (#5701): scalar properties only, and no extra keys."""
     if not _NAME.match(name) or keyword.iskeyword(name):
         return ["a name is lower-case letters, digits and _, starting with a letter"]
+    if name in _PYDANTIC:
+        return [f"{name!r} is reserved"]
     allowed = _DESCRIBED | _OBJECT_OWN
     problems = [f"{key!r} is not supported for object" for key in prop if key not in allowed]
     if prop.get("additionalProperties") is not False:
