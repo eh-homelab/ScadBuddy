@@ -901,13 +901,19 @@ jobs:
             -v "$proof:/run/scadbuddy/proof:ro" -e SCADBUDDY_SERVICE_BOOTSTRAP_FILE=/run/scadbuddy/proof \
             -e SCADBUDDY_DATABASE_URL=postgresql://u:never-used@db:5432/x -e SCADBUDDY_SECRET_KEY_FILE=/nonexistent/kek \
             scadbuddy-agent:ci
+          started=no
           for _ in $(seq 1 30); do
             docker logs scadbuddy-agent-ci-old-env > /tmp/old-env.log 2>&1
-            if grep -q 'listening on' /tmp/old-env.log; then break; fi
+            if grep -q 'listening on' /tmp/old-env.log; then started=yes; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' scadbuddy-agent-ci-old-env)" != true ]; then break; fi
             sleep 1
           done
           logs="$(docker logs scadbuddy-agent-ci-old-env 2>&1)"
           echo "$logs"
+          if [ "$started" != yes ]; then
+            echo "::error::the agent with the old environment exited, or did not listen within 30 s"
+            exit 1
+          fi
           if ! grep -q 'ignores SCADBUDDY_DATABASE_URL, SCADBUDDY_SECRET_KEY_FILE' <<<"$logs" || ! grep -q 'listening on' <<<"$logs"; then
             echo "::error::the agent did not start, or did not say it ignores the database and KEK variables"
             exit 1

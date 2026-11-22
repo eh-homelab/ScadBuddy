@@ -357,7 +357,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
   and read. For `api/crud_agent_workspace.py` (area `workspace`, #5299 step 7): `workspace.py`
   is the agent's `workspace/store.ts` `SessionFiles` on the API, with the sealing
-  (`seal_file`, `open_file`: the agent's `workspace/sealing.ts` format) and the file keys
+  (`seal_file`, `open_file`; the agent's tests keep a copy of the format, `agent/test/support/sql/workspaceSealing.ts`) and the file keys
   wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
   audit row: the key never leaves the API) or the KEK; each write's row, its blob's
   `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one

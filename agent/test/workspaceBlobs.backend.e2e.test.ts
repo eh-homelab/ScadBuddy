@@ -23,8 +23,8 @@ import { TEMPORAL_CLI, TEMPORAL_CLI_ENV } from './support/temporal.js'
 // (docs/ai/operating.md §13). It also pins the holds the agent takes through its CRUD routes
 // (backend api/crud_agent.py, with the agent's service credential, #5299) to the backend's
 // own `blob_refs` rows: the agent's code never touches that table, the test reads it. And it
-// checks that the API's sealing (backend agent_data/workspace.py, #5299 step 7) and the agent's
-// (workspace/sealing.ts) open each other's files: the harness takes the test's KEK.
+// checks that the API's sealing (backend agent_data/workspace.py, #5299 step 7) and the tests' copy
+// of its format (support/sql/workspaceSealing.ts) open each other's files: the harness takes the test's KEK.
 
 const BACKEND_DIR = fileURLToPath(new URL('../../backend/', import.meta.url))
 

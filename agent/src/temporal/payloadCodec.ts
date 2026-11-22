@@ -128,7 +128,7 @@ export function openPayload(dek: Buffer, subject: string, payload: Payload): Pay
 export type KeyForOptions = {
   /**
    * Make the key only while the session `session-<id>` names has its `ai_sessions` row,
-   * checked by the API in the insert itself (workspace/sealing.ts, #4789): a write racing the
+   * checked by the API in the insert itself (backend agent_data/payload_keys.py `standing`, #4789): a write racing the
    * session's deletion never leaves a key nothing deletes. SubjectForgotten otherwise.
    */
   onlyForStandingSession?: boolean
