@@ -1056,7 +1056,9 @@ async def upload_copy(
                 continue
             await _delete_copy(client, uploads, printable.key, copy.id, strict=False)
         return uploaded.id, uploaded.filename, True
-    filename = await _supersede_unprinted(client, uploads, printable.key, folder, uploaded)
+    filename = await _supersede_unprinted(
+        client, uploads, printable.key, folder, uploaded, version=printable.version
+    )
     return uploaded.id, filename, True
 
 
@@ -1098,9 +1100,12 @@ async def _supersede_unprinted(
     key: str,
     folder: int | None,
     uploaded: LibraryFile,
+    *,
+    version: str | None = None,
 ) -> str:
-    """Replace ``key``'s other copies in the project's ``folder`` that nothing printed
-    from with ``uploaded`` (#2476); its file name, which takes theirs.
+    """Replace ``key``'s other copies of ``version`` in the project's ``folder`` that
+    nothing printed from with ``uploaded`` (#2476); its file name, which takes theirs.
+    A held copy and a live copy are never superseded for each other (:func:`of_version`).
 
     Generate files a copy laid out for its best guess at the printer; a print on another
     printer or nozzle then adds its own. Rather than leave both (and a third, its slice)
@@ -1111,7 +1116,10 @@ async def _supersede_unprinted(
     unprinted = [
         copy
         for copy in await uploads.for_output(key)
-        if copy.folder_id == folder and copy.id != uploaded.id and not copy.sliced
+        if copy.folder_id == folder
+        and copy.id != uploaded.id
+        and not copy.sliced
+        and of_version(copy.target_key, version)
     ]
     shared = await uploads.shared([copy.id for copy in unprinted], key)
     filename = uploaded.filename

@@ -1631,6 +1631,34 @@ async def test_a_held_copy_and_a_live_copy_are_never_taken_for_each_other(
     assert (await _print(other, bambuddy)).id == 103
 
 
+async def test_a_held_copy_in_a_project_folder_never_supersedes_a_live_one(
+    tmp_path: Path,
+) -> None:
+    """#6710 review: in a project's folder an upload supersedes the key's unprinted
+    copies; a held copy and a live copy are of other versions, so neither replaces the
+    other there either."""
+    live_bytes = _scadbuddy_3mf(tmp_path)
+    bambuddy, uploads = _Bambuddy(live_bytes), _Copies()
+    bambuddy.deleted = []  # type: ignore[attr-defined]
+
+    async def delete_library_file(file_id: int) -> None:
+        bambuddy.deleted.append(file_id)  # type: ignore[attr-defined]
+
+    async def rename_library_file(file_id: int, filename: str) -> LibraryFile:
+        file = await bambuddy.library_file(file_id)
+        return file.model_copy(update={"filename": filename})
+
+    bambuddy.delete_library_file = delete_library_file  # type: ignore[attr-defined]
+    bambuddy.rename_library_file = rename_library_file  # type: ignore[attr-defined]
+    live = await _print(_library(uploads), bambuddy, project_id=5)
+    held = await _load_held(ORIGIN, _held_reads(_sliced_3mf()), bambuddy, uploads)
+    copied = await _print(held, bambuddy, project_id=5)
+
+    assert (live.id, copied.id) == (101, 102)
+    assert bambuddy.deleted == []  # type: ignore[attr-defined]
+    assert {copy.id for copy in uploads.copies["library:41"]} == {101, 102}
+
+
 async def test_a_held_raw_copy_names_its_version() -> None:
     """#6710 §7.3.1: a held STL that will not wrap goes up as it is, recorded as a raw
     copy of its version; a live raw copy recorded under `library:41` is neither taken nor
