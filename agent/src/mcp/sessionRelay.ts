@@ -59,6 +59,11 @@ import { MCP_CHANNEL, RelayBodyTooLargeError, type RelayRows } from './relayRows
 // so it is not counted. A peer that died is still found: this side's own beats
 // keep coming back.
 //
+// But a lag is not let run for ever (#7048). After LOST_AFTER_UNHEARD_TICKS ticks in a
+// row with no echo and nothing from the peer, the call ends as lost (below), the same as
+// at a gap: the change stream may be refused in a loop while this replica's sends still
+// work, and then no reconnect comes to end the call.
+//
 // Lag is not loss. The channel is NOTIFY-only: a message sent while this
 // replica's change stream was down, or while the API's LISTEN was down or this
 // reader fell behind (its `reconnected`), is gone for good, so an answer that
@@ -67,6 +72,7 @@ import { MCP_CHANNEL, RelayBodyTooLargeError, type RelayRows } from './relayRows
 // it waits on answers 503 before its head, or its body ends with an error, so the
 // client reconnects and the owner's replay log (`Last-Event-ID`) fills the gap;
 // one it runs as owner is stopped. The directory row stays: the owner did not go.
+// A lag past LOST_AFTER_UNHEARD_TICKS ends a call the same way, on both sides.
 //
 // The channel is `scadbuddy_mcp`, heard on the API's change stream
 // (events/changeStream.ts `listenAlso`, #5299 D4), in the order Postgres
@@ -82,6 +88,15 @@ export const ACK_TIMEOUT_MS = 3_000
 export const BEAT_MS = 10_000
 /** Beat ticks in a row with nothing heard before the peer is taken for gone. */
 const SILENT_AFTER_BEATS = 3
+/**
+ * Uncounted ticks in a row (no echo and nothing from the peer) before a relayed call ends as
+ * lost (#7048): 15 ticks, 150 s at BEAT_MS. A change stream that the API refuses in a loop never
+ * reconnects, so `onReconnect` never ends the call, and without this bound it waits until the
+ * client gives up. It is 5 × SILENT_AFTER_BEATS ticks; a peer is taken for gone at the 4th
+ * counted tick (more than SILENT_AFTER_BEATS), so a lag of up to 14 ticks still answers whole
+ * (#6563; the hold test lags 8 ticks).
+ */
+const LOST_AFTER_UNHEARD_TICKS = 5 * SILENT_AFTER_BEATS
 /**
  * NOTIFY payloads are capped at 8000 bytes; a chunk whose whole payload, as
  * serialised, is past this goes in a row. Measured on the payload, not the
@@ -219,6 +234,8 @@ type Running = {
   peer: string
   /** Counted ticks since the relaying replica was last heard. */
   silentTicks: number
+  /** Ticks in a row with no echo and no beat from the relaying replica. */
+  unheardTicks: number
   /** One of this replica's own messages for it came back since the last tick. */
   echoed: boolean
 }
@@ -306,6 +323,8 @@ export class SharedMcpSessionRelay implements McpSessionRelay {
       let stream: ReadableStreamDefaultController<Uint8Array> | undefined
       /** Counted liveness ticks since the owner was last heard. */
       let silentTicks = 0
+      /** Ticks in a row with no echo and nothing from the owner. */
+      let unheardTicks = 0
       /** One of this replica's own messages for the request came back since the last tick. */
       let echoed = false
       let ackTimer: NodeJS.Timeout | undefined
@@ -372,30 +391,32 @@ export class SharedMcpSessionRelay implements McpSessionRelay {
         }
         settle(undefined)
       }
+      const lost = () => {
+        // Not ownerGone: the owner lives, so its directory row stays. Told to stop, since
+        // the gap may have eaten an earlier cancel, and nobody reads the rest of this answer.
+        done()
+        cancelOwner()
+        if (!settled) {
+          settle(
+            Response.json(
+              { jsonrpc: '2.0', error: { code: -32000, message: 'The relay lost messages for this MCP request; try again' }, id: null },
+              { status: 503 },
+            ),
+          )
+        } else stream?.error(new Error('the relay lost messages for this MCP request'))
+      }
       signal.addEventListener('abort', onAbort, { once: true })
       this.#waiting.set(req, {
         chain: Promise.resolve(),
         heard: () => {
           silentTicks = 0
+          unheardTicks = 0
         },
         peer: owner,
         echoed: () => {
           echoed = true
         },
-        lost: () => {
-          // Not ownerGone: the owner lives, so its directory row stays. Told to stop, since
-          // the gap may have eaten an earlier cancel, and nobody reads the rest of this answer.
-          done()
-          cancelOwner()
-          if (!settled) {
-            settle(
-              Response.json(
-                { jsonrpc: '2.0', error: { code: -32000, message: 'The relay lost messages for this MCP request; try again' }, id: null },
-                { status: 503 },
-              ),
-            )
-          } else stream?.error(new Error('the relay lost messages for this MCP request'))
-        },
+        lost,
         shutdown: () => {
           done()
           if (!settled) {
@@ -414,8 +435,16 @@ export class SharedMcpSessionRelay implements McpSessionRelay {
           silentTicks = 0
           liveness = setInterval(() => {
             // Counted only when the channel carried this replica's own messages meanwhile.
-            if (!echoed) return
+            if (!echoed) {
+              // The channel lags, or this replica's change stream is down for good (see the top).
+              if (++unheardTicks >= LOST_AFTER_UNHEARD_TICKS) {
+                this.#log(`mcp relay: heard nothing for request ${req} in ${unheardTicks} beats; ending it as lost`)
+                lost()
+              }
+              return
+            }
             echoed = false
+            unheardTicks = 0
             if (++silentTicks > SILENT_AFTER_BEATS) void ownerGone()
           }, this.#beatMs)
         },
@@ -520,7 +549,10 @@ export class SharedMcpSessionRelay implements McpSessionRelay {
     const running = this.#running.get(header.req)
     if (running) {
       // As the owner: the relaying replica is still there, and still wants the answer.
-      if (header.t === 'beat') running.silentTicks = 0
+      if (header.t === 'beat') {
+        running.silentTicks = 0
+        running.unheardTicks = 0
+      }
       return
     }
     const waiting = this.#waiting.get(header.req)
@@ -570,7 +602,7 @@ export class SharedMcpSessionRelay implements McpSessionRelay {
     const to = body.from
     const req = header.req
     const controller = new AbortController()
-    const running: Running = { controller, peer: to, silentTicks: 0, echoed: false }
+    const running: Running = { controller, peer: to, silentTicks: 0, unheardTicks: 0, echoed: false }
     this.#running.set(req, running)
     // One message at a time, so they commit, and so are heard, in order.
     let queue = Promise.resolve()
@@ -592,10 +624,17 @@ export class SharedMcpSessionRelay implements McpSessionRelay {
       // only when the channel carried this replica's own messages meanwhile.
       if (running.echoed) {
         running.echoed = false
+        running.unheardTicks = 0
         if (++running.silentTicks > SILENT_AFTER_BEATS) {
           controller.abort()
           return
         }
+      } else if (++running.unheardTicks >= LOST_AFTER_UNHEARD_TICKS) {
+        // The channel lags, or this replica's change stream is down for good: it could not hear
+        // a cancel, nor find the relaying replica gone, so the answer stops as at a gap.
+        this.#log(`mcp relay: heard nothing for request ${req} in ${running.unheardTicks} beats; stopping it`)
+        controller.abort()
+        return
       }
       void send({ t: 'beat', req, to })
       // A long relayed GET stream is use too: keep the directory row from the sweep.

@@ -130,13 +130,15 @@ describe('the /mcp relay counts a peer silent only while the channel carries its
     let settled = false
     void pending.finally(() => (settled = true))
     await until(() => isRunning() && channel.sent.some((h) => h.t === 'ack'))
-    // Nothing is delivered for many times the beats that make a peer gone: both sides tick, and
+    // Nothing is delivered for twice the 4 ticks that make a peer gone: both sides tick, and
     // both still talk, but neither hears the other or itself. (A side that took the other for
-    // gone stops beating, and B then answers 503 at once.)
+    // gone stops beating, and B then answers 503 at once.) 8 ticks, well under the 15 of
+    // LOST_AFTER_UNHEARD_TICKS (#7051): beats sent stand in for B's liveness ticks, and timer
+    // drift between the two on a loaded runner stays far inside that margin.
     channel.hold()
     const sentA = beatsFrom(a)
     const sentB = beatsFrom(b)
-    await until(() => settled || (beatsFrom(a) >= sentA + 12 && beatsFrom(b) >= sentB + 12))
+    await until(() => settled || (beatsFrom(a) >= sentA + 8 && beatsFrom(b) >= sentB + 8))
     expect(settled).toBe(false)
     channel.letGo()
     answer()
@@ -245,5 +247,96 @@ describe('the /mcp relay counts a peer silent only while the channel carries its
     expect(aborted).toBe(true)
     expect(res.status).toBe(200)
     await expect(res.text()).rejects.toThrow(/failed while answering/)
+  })
+
+  it('does not take a message for the request sent to another replica for its own echo', async () => {
+    const { channel, rows, a, b, isRunning } = pair()
+    await rows.register('hash', a.replica)
+    const pending = b.forward('hash', PRINCIPAL, REQUEST, new AbortController().signal)
+    let settled = false
+    void pending.finally(() => (settled = true))
+    await until(() => isRunning() && channel.sent.some((h) => h.t === 'ack'))
+    const req = channel.sent.find((h) => h.t === 'req')!.req
+    // A dies, and B hears none of its own messages back: only messages for the request that
+    // are addressed to a third replica. If B took those for echoes, it would find A gone in 4 ticks.
+    a.close()
+    channel.drop = (payload, listener) => listener === 1 && (JSON.parse(payload) as Header).to === a.replica
+    const foreign = setInterval(() => channel.publish(JSON.stringify({ t: 'beat', req, to: 'another-replica' })), BEAT_MS / 2)
+    const beatsToA = () => channel.sent.filter((h) => h.t === 'beat' && h.to === a.replica).length
+    const sent = beatsToA()
+    try {
+      await until(() => settled || beatsToA() >= sent + 8)
+      expect(settled).toBe(false)
+      // The bound on uncounted ticks ends it as lost, not as a dead owner: the row stays.
+      const res = (await pending)!
+      expect(res.status).toBe(503)
+      expect(rows.owners.get('hash')).toBe(a.replica)
+    } finally {
+      clearInterval(foreign)
+    }
+  })
+
+  it('answers 503 and keeps the owner when its change stream stays down before the head', async () => {
+    const { channel, rows, a, b, isRunning } = pair()
+    await rows.register('hash', a.replica)
+    const pending = b.forward('hash', PRINCIPAL, REQUEST, new AbortController().signal)
+    await until(() => isRunning() && channel.sent.some((h) => h.t === 'ack'))
+    // B's change stream is refused in a loop: it hears nothing, and no reconnect comes.
+    channel.drop = (_payload, listener) => listener === 1
+    const res = (await pending)!
+    expect(res.status).toBe(503)
+    expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/lost messages/)
+    expect(rows.owners.get('hash')).toBe(a.replica)
+    // The owner is told to stop.
+    expect(channel.sent.some((h) => h.t === 'cancel' && h.to === a.replica)).toBe(true)
+  })
+
+  it('ends a relayed answer with an error and keeps the owner when its change stream stays down', async () => {
+    const { channel, rows, a, b } = pair()
+    await rows.register('hash', a.replica)
+    let body!: ReadableStreamDefaultController<Uint8Array>
+    let aborted = false
+    a.serve({
+      run: async (_hash, _principal, _request, signal) => {
+        signal.addEventListener('abort', () => (aborted = true), { once: true })
+        const stream = new ReadableStream<Uint8Array>({ start: (c) => void (body = c) })
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
+      },
+    })
+    const res = (await b.forward('hash', PRINCIPAL, REQUEST, new AbortController().signal))!
+    expect(res.status).toBe(200)
+    const reader = res.body!.getReader()
+    body.enqueue(new TextEncoder().encode('one'))
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe('one')
+    // B's change stream is refused in a loop: it hears nothing, and no reconnect comes.
+    channel.drop = (_payload, listener) => listener === 1
+    await expect(reader.read()).rejects.toThrow(/lost/)
+    expect(rows.owners.get('hash')).toBe(a.replica)
+    // The owner is told to stop.
+    await until(() => aborted)
+  })
+
+  it('stops the answer it runs as owner when its own change stream stays down', async () => {
+    const { channel, rows, a, b } = pair()
+    await rows.register('hash', a.replica)
+    let running = false
+    let aborted = false
+    a.serve({
+      run: async (_hash, _principal, _request, signal) => {
+        running = true
+        await new Promise<void>((r) => signal.addEventListener('abort', () => r(), { once: true }))
+        aborted = true
+        return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
+      },
+    })
+    const pending = b.forward('hash', PRINCIPAL, REQUEST, new AbortController().signal)
+    await until(() => running && channel.sent.some((h) => h.t === 'ack'))
+    // A's change stream is refused in a loop: it hears nothing, and no reconnect comes.
+    channel.drop = (_payload, listener) => listener === 0
+    const res = (await pending)!
+    expect(aborted).toBe(true)
+    expect(res.status).toBe(200)
+    await expect(res.text()).rejects.toThrow(/failed while answering/)
+    expect(rows.owners.get('hash')).toBe(a.replica)
   })
 })

@@ -289,6 +289,12 @@ sequenceDiagram
   replica hears every message, its own too, in commit order). While the change stream
   lags, nothing comes back, so neither side takes the other for gone; a peer that died
   is still found, because the side that lives keeps hearing its own beats (#6563).
+  But a lag has a bound (#7048): after 15 ticks in a row (150 s, 5 × the 3 beats of
+  `SILENT_AFTER_BEATS`, `LOST_AFTER_UNHEARD_TICKS`; a peer is taken for gone at its 4th
+  silent tick) with no echo and nothing from the
+  peer, the side ends the call as at a gap (below). A change stream that the API refuses
+  in a loop never reconnects, so without the bound a call would wait until the client
+  gave up.
 - **A gap ends the relayed calls.** `scadbuddy_mcp` is NOTIFY-only, so a message sent
   while a replica's change stream was down, or while the API sent `reconnected` (its
   LISTEN dropped, or the reader fell behind), is gone. On the change stream's

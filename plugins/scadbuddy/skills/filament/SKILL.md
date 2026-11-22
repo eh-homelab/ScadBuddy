@@ -63,9 +63,11 @@ Sources, relative to the root of
   decisions of the import, and "Decisions made while building".
 - `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md` (#6625): the 3DFP
   profile-fetch worker, for "Profiles".
+- `docs/superpowers/plans/2026-11-22-3dfp-search-add.md` (#7025): the 3DFP search
+  and add, for "Find or add the 3DFP id", and its rulings R-7025-1 to R-7025-13.
 - `.claude/skills/filament-intake/SKILL.md`: the owner's rules for receipts. It
   is the source of the diff, cost and colour-code rules below. It still drives
-  the BB-era scripts, so use it for 3dfilamentprofiles work (see "Profiles").
+  the BB-era scripts (see "Profiles").
 - Bambu Studio's colour table, `filaments_color_codes.json`, from the
   [BambuStudio](https://github.com/bambulab/BambuStudio) profiles. SB reads its
   copy at `BBL/filament/filaments_color_codes.json` under `slicer_profiles_dir`
@@ -170,8 +172,9 @@ uncosted one has an empty own cost too; a costed one has its own cost:
    - A multi-colour silk's subtype follows the SKU: `A05-M*` is Dual Color and
      `A05-T*` is Tri Color.
 5. **Other brands:** propose a new type with its 3dfilamentprofiles.com (3DFP)
-   id set as `tdfp_id`. Its RGBA is the catalog row's (tool step 3); use the
-   3DFP hex only when no catalog row fits. Confirm starts the preset fetch
+   id set as `tdfp_id`. Find the id with `filament_tdfp_search`, never with a
+   web search (see "Find or add the 3DFP id"). Its RGBA is the catalog row's
+   (tool step 3); use the 3DFP hex only when no catalog row fits. Confirm starts the preset fetch
    for each new type that has a `tdfp_id` (see "Profiles"). Without a `tdfp_id`
    no fetch starts.
 6. **Never confirm for the person.** Show the totals, the spools to create, and
@@ -189,6 +192,51 @@ uncosted one has an empty own cost too; a costed one has its own cost:
 - Every new type has a preset for each nozzle of each printer model (filament
   spec §9, step 8). Read `filament_type_profile_fetch` for each new type after
   the confirm (see "Profiles"), and report each gap to the person.
+
+## Find or add the 3DFP id
+
+The profile-fetch worker is the one process with 3DFP's browser and login, so it
+also searches 3DFP and adds a filament that 3DFP lacks (#7025; plan
+`docs/superpowers/plans/2026-11-22-3dfp-search-add.md`). Use these tools, not a web
+search or a fetch of the site: 3DFP's bot check refuses those.
+
+1. **Search.** `filament_tdfp_search` with the `brand`, and the `material`,
+   `material_type` and `colour` you know. It answers the site's first page:
+   each candidate's `tdfp_id`, brand, material, material type, colour `name`,
+   `hexes` and `nominal_weight_g`. The site filters only by its text (the brand,
+   the type and the colour); the material only ranks the candidates. Check a
+   candidate's brand, material, type and colour before you take its id. A name
+   that ends in a weight, as "BRONZE (250g)", is that spool size only (R-7025-3).
+2. **No match is not proof.** 3DFP's text index misses some brands
+   (`.claude/skills/filament-intake/SKILL.md`, Common mistakes). Search again with
+   fewer words (the brand and the colour) before you decide that 3DFP lacks it.
+3. **Add only with the person.** When no candidate is the filament, offer
+   `filament_tdfp_create`. 3DFP is a shared public database, so the tool asks for
+   approval first. Send the brand, material and material type as 3DFP names them
+   (a candidate of the same brand shows them), the colour name, every hex, the
+   nominal weight, and the identifiers you have: `mpn` (the SKU), `gtin`, `asin`,
+   `manufacturer_url`, `empty_spool_weight_g`, `td`. ScadBuddy stores none of
+   them (R-7025-6). Send `type_id` to set the new id on a type that has none.
+4. **Read the answer.**
+   - `created`: the new `tdfp_id`, set on `type_id` when sent
+     (`type_tdfp_id_set`). `not_sent` names the identifiers the form had no
+     field for.
+   - `duplicate`: nothing was saved. 3DFP's own duplicate list held a filament
+     of the same brand, material and type with a close name or colour (R-7025-5).
+     Show the person `likely` and `duplicates`. Take that id when it is the
+     filament. Call again with its id in `not_duplicates` only when the person
+     says it is another filament.
+   - 422 `no_defaults`: 3DFP has no defaults for that brand, material and type,
+     so the worker does not add it (R-7025-4). 422 `option_missing`: the form
+     offers no such brand, material or type. Tell the person; do not guess
+     another name.
+   - 502 `not_created`: Save Filament did not open the new filament's page. The
+     filament may exist. Search again before any second create (R-7025-7). Treat
+     any 502 whose detail says the filament may exist the same way. A failure
+     before the save (422, 503 `not_started`, another 502) made nothing; the same
+     call may be sent again (R-7025-11).
+   - 503 `no_worker` or `not_started`: the worker is not running, or it is busy
+     with a preset fetch. Try again later.
 
 ## Profiles
 
@@ -249,6 +297,14 @@ For the BB-era scripts (`intake.py`, `3dfp.mjs`), use
 `.claude/skills/filament-intake/SKILL.md`.
 
 ## Where a fact comes from
+
+- The 3DFP search page's layout (a table whose header names Brand, Material,
+  Type, Color and RGB, a first page of 25 rows, a "(250g)" weight in the name)
+  was read in one read-only search for "SUNLU Silk Bronze" on 2026-11-22. The add
+  form's fields, "Defaults found", the duplicate list and the page Save Filament
+  opens come from the script posted on
+  [#7025](https://github.com/eh-homelab/ScadBuddy/issues/7025), run on 2026-11-22.
+  The worker's tests drive a local replica of both pages, never 3DFP.
 
 - The 3DFP bot check, its 429 and 403 answers, and the `GFA17` gap are stated
   in `.claude/skills/filament-intake/SKILL.md`, which gives a date only for the 403

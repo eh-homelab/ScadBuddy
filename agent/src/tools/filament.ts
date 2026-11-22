@@ -554,6 +554,93 @@ const tools: Tool[] = [
       ),
   }),
 
+  // #7025: 3DFP search and create run on the profile-fetch worker, the one process with the
+  // site's browser and login (backend `filament/tdfp.py`).
+  defineTool({
+    name: 'filament_tdfp_search',
+    label: 'Search 3dfilamentprofiles.com',
+    description:
+      "Find a filament's 3dfilamentprofiles.com (3DFP) id, for a spool type's `tdfp_id`. ScadBuddy's profile-fetch " +
+      "worker searches the site's filament list and answers its first page: each candidate's `tdfp_id`, `brand`, " +
+      '`material`, `material_type`, colour `name`, `hexes` and `nominal_weight_g` (from a "(250g)" suffix on the ' +
+      "name; null when it has none). The site filters only by text, sent as the brand, the material type and the " +
+      'colour (`query`); the `material` ranks the candidates (its matches first, then the type\'s) and filters ' +
+      'nothing, so check each candidate\'s brand, material and type before you take its id. The site misses some ' +
+      'brands: no candidate is not proof that 3DFP lacks the filament. Use it in place of a web search for 3DFP ' +
+      'ids. 503 `no_worker` or `not_started` when the worker is not running or is busy with a preset fetch (try ' +
+      'again later), 502 when the site failed. Reads only.',
+    input: z.object({
+      brand: z.string().min(1).max(200).describe('The brand as 3DFP files it, e.g. `SUNLU`'),
+      material: z.string().min(1).max(200).optional().describe('e.g. `PLA+/Pro`'),
+      material_type: z.string().min(1).max(200).optional().describe('e.g. `Silk`, `Basic`, `Matte`'),
+      colour: z.string().min(1).max(200).optional().describe('The colour name, e.g. `Bronze`'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/tdfp/search'],
+    handler: async (body, { backend }) =>
+      json(await ok(backend.POST('/api/v1/filament/tdfp/search', { body }), 'search 3dfilamentprofiles.com')),
+  }),
+
+  defineTool({
+    name: 'filament_tdfp_create',
+    label: 'Add a filament to 3dfilamentprofiles.com',
+    description:
+      'Add a filament that 3dfilamentprofiles.com (3DFP) lacks, through its add form, on the profile-fetch ' +
+      'worker. Search with filament_tdfp_search first: create only when no candidate is the filament. The form ' +
+      'gets `brand`, `material` and `material_type` (each must be an entry the form offers, else 422 ' +
+      '`option_missing`; a combination with no site defaults is refused, 422 `no_defaults`), the colour name, ' +
+      '`hexes` (1 to 4), `nominal_weight_g`, and the identifiers `mpn`, `gtin`, `asin`, `manufacturer_url`, ' +
+      '`empty_spool_weight_g` and `td` where the form has a field for them (`sent`, `not_sent`; ScadBuddy stores ' +
+      'none of them). Before it saves, it reads the form\'s duplicate list: one there of the same brand, material ' +
+      'and type with a close name or colour stops it with `create.status` `duplicate`, the list and why ' +
+      '(`likely`), and nothing is saved; show them to the user, and only when the user says those are other ' +
+      'filaments, call again with their ids in `not_duplicates`. Else it answers `created` with the new ' +
+      "`tdfp_id`, which becomes `type_id`'s `tdfp_id` when you send one (409 `type_has_tdfp_id` when that type " +
+      'already has one). Tried once: 502 `not_created` means it may exist, so search again before another create. ' +
+      'Writes 3dfilamentprofiles.com, a shared public database, and the type. Approved first.',
+    input: z.object({
+      brand: z.string().min(1).max(200),
+      material: z.string().min(1).max(200),
+      material_type: z.string().min(1).max(200),
+      colour: z.string().min(1).max(200).describe('The colour name, e.g. `Bronze`'),
+      hexes: z
+        .array(z.string().regex(/^#[0-9A-Fa-f]{6}$/))
+        .min(1)
+        .max(4)
+        .describe('One `#RRGGBB` per colour of the filament, the first the main one'),
+      nominal_weight_g: z.number().int().positive().max(100000).optional().describe('The net filament weight'),
+      mpn: z.string().min(1).max(200).optional().describe("The maker's part number (SKU)"),
+      gtin: z.string().regex(/^[0-9]{8,14}$/).optional().describe('The UPC or EAN barcode'),
+      asin: z.string().regex(/^[A-Z0-9]{10}$/).optional(),
+      manufacturer_url: z.string().url().max(1000).optional().describe("The maker's product page"),
+      empty_spool_weight_g: z.number().int().positive().max(10000).optional(),
+      td: z.number().positive().max(100).optional().describe('HueForge transmission distance'),
+      not_duplicates: z
+        .array(z.number().int().positive())
+        .max(25)
+        .optional()
+        .describe('3DFP ids from a `duplicate` answer that the user said are other filaments'),
+      type_id: z.string().uuid().optional().describe('The spool type whose `tdfp_id` the new id becomes'),
+    }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/tdfp/filaments'],
+    summarize: ({ brand, material, material_type, colour }) =>
+      `Add ${brand} ${material} ${material_type} ${colour} to 3dfilamentprofiles.com`,
+    handler: async (body, ctx) =>
+      json(
+        await ok(
+          ctx.backend.POST('/api/v1/filament/tdfp/filaments', {
+            body,
+            // One key per call: a re-send after a lost answer gets the first create's outcome.
+            headers: { 'Idempotency-Key': idempotencyKey(ctx) },
+          }),
+          'add the filament to 3dfilamentprofiles.com',
+        ),
+      ),
+  }),
+
   defineTool({
     name: 'filament_type_set_k_values',
     label: "Set a spool type's pressure-advance values",

@@ -331,7 +331,9 @@ Design: `docs/superpowers/specs/2026-10-09-session-switcher-design.md`.
   An archived chat is read-only: a send or a handoff is refused with `archived` (409),
   its composer is locked with an Unarchive button, and Fork still continues it.
   Archiving is refused while a turn runs or anything waits on the user; an undismissed
-  done summary is dismissed with it. The decisions are in the switcher spec's
+  done summary is dismissed with it. Archiving also ends the chat's workflow
+  (best-effort); after an unarchive, the next message starts a new one, which picks the
+  conversation up from its transcript (#7031). The decisions are in the switcher spec's
   "Archive (#1885)".
 
 ## 5. Not built yet

@@ -192,15 +192,6 @@ async def _from_library(state: AppState, listing: Listing, refs: BlobRefs) -> He
     return HeldBytes(file.filename, file_type, sha256, bytes(data))
 
 
-def _held_by(refs: BlobRefs, key: str, listing_id: str) -> bool:
-    with refs.pool.connection() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM blob_refs WHERE key = %s AND holder_kind = %s AND holder_id = %s",
-            (key, KEPT_HOLDER, listing_id),
-        ).fetchone()
-    return row is not None
-
-
 async def read_held(content: ContentStore, key: str) -> bytes | None:
     """A held blob's bytes, or None when the store lost it."""
     stat = await content.stat(key)
@@ -220,7 +211,7 @@ async def _from_copy(state: AppState, listing: Listing, refs: BlobRefs) -> HeldB
     assert asked is not None and asked.pinned is not None
     key = file_copy_key(asked.pinned)
     payload = None
-    if await asyncio.to_thread(_held_by, refs, key, listing.id):
+    if await asyncio.to_thread(refs.holds, key, KEPT_HOLDER, listing.id):
         payload = await read_held(_content(state), key)
     if payload is None:
         raise _unknown()
@@ -421,7 +412,7 @@ async def _checked_pictures(
         key = picture_key(match.group(2))
         stat = (
             await content.stat(key)
-            if await asyncio.to_thread(_held_by, refs, key, listing.id)
+            if await asyncio.to_thread(refs.holds, key, KEPT_HOLDER, listing.id)
             else None
         )
         if stat is None:
@@ -507,7 +498,13 @@ async def upload_picture(
         key=key,
         meta={"media_type": sniffed[2]},
     )
-    await asyncio.to_thread(BlobRefs(state.projection.pool).hold, key, KEPT_HOLDER, listing.id)
+    refs = BlobRefs(state.projection.pool)
+    await asyncio.to_thread(refs.hold, key, KEPT_HOLDER, listing.id)
+    # A delete between the read above and this hold drops no hold it did not see: drop
+    # this one, which nothing else would.
+    if await asyncio.to_thread(store.get, listing_id) is None:
+        await asyncio.to_thread(refs.release, key, KEPT_HOLDER, listing_id)
+        raise listing_not_found(listing_id)
     return f"upload:{sha256}"
 
 
@@ -516,8 +513,21 @@ async def pinned_plate_image(
 ) -> bytes | None:
     """Plate ``plate``'s picture in the held copy a file listing pins (§9.3), or None: no
     such listing, no pin, a copy gone or a plate with no picture. The library is not read,
-    so a file gone from it still shows its pictures."""
+    so a file gone from it still shows its pictures. A plate picture publish copied
+    (``plate:<n>`` in the listing's ``media``) is read from that copy, not the whole file."""
     listing = await asyncio.to_thread(store.get, listing_id)
+    copied = next(
+        (
+            item.blob_key
+            for item in (listing.media if listing is not None else [])
+            if item.media_id == f"plate:{plate}"
+        ),
+        None,
+    )
+    if copied is not None:
+        picture = await read_held(_content(state), copied)
+        if picture is not None:
+            return picture
     pinned = (
         None if listing is None or listing.library_file is None else listing.library_file.pinned
     )
