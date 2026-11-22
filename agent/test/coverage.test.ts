@@ -128,6 +128,9 @@ describe('agent route coverage', () => {
         .replace('{request_id}', 'approval:x')
         .replace('{source}', 'builtin%3Ascadbuddy')
         .replace('{item}', 'get_model')
+        .replace('{feed}', 'default')
+        .replace('{name}', 'greeter')
+        .replace('{file}', '1.zip')
       const url = `http://localhost${filled}`
       const res = await app.request(url, { method, ...(method === 'POST' ? { body: '{}' } : {}) })
       // Hono's not-found is a 404 in text; the routes answer JSON (403 off-origin, 503 with no database).

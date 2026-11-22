@@ -181,21 +181,35 @@ def _plugin(conn: psycopg.Connection[Any], name: str, *, lock: bool = False) -> 
     return row
 
 
+def _draft_totals(conn: psycopg.Connection[Any], ids: list[int]) -> dict[int, tuple[int, int]]:
+    """Each plugin's draft file count and bytes, in one query; a plugin with no file is absent."""
+    rows = conn.execute(
+        "SELECT plugin_id, count(*) AS n, coalesce(sum(size), 0) AS total"
+        " FROM ai_hosted_plugin_files WHERE plugin_id = ANY(%s) GROUP BY plugin_id",
+        (ids,),
+    ).fetchall()
+    return {r["plugin_id"]: (r["n"], r["total"]) for r in rows}
+
+
 def _view(conn: psycopg.Connection[Any], row: Any) -> HostedPlugin:
-    totals = conn.execute(
-        "SELECT count(*) AS n, coalesce(sum(size), 0) AS total FROM ai_hosted_plugin_files"
-        " WHERE plugin_id = %s",
-        (row["id"],),
-    ).fetchone()
-    assert totals is not None
+    return _shown(row, _draft_totals(conn, [row["id"]]))
+
+
+def _views(conn: psycopg.Connection[Any], rows: list[Any]) -> list[HostedPlugin]:
+    totals = _draft_totals(conn, [r["id"] for r in rows])
+    return [_shown(r, totals) for r in rows]
+
+
+def _shown(row: Any, totals: dict[int, tuple[int, int]]) -> HostedPlugin:
+    count, size = totals.get(row["id"], (0, 0))
     return HostedPlugin(
         name=row["name"],
         description=row["description"],
         category=row["category"],
         tags=list(row["tags"]),
         latest_version=row["latest_version"],
-        file_count=totals["n"],
-        total_bytes=totals["total"],
+        file_count=count,
+        total_bytes=size,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -292,7 +306,7 @@ async def create_hosted_plugin(body: HostedPluginCreate, state: StateDep) -> Hos
 
 @router.get("", summary="List the hosted plugins")
 async def list_hosted_plugins(state: StateDep) -> list[HostedPlugin]:
-    return await _in_tx(state, lambda conn: [_view(conn, r) for r in store.plugins(conn)])
+    return await _in_tx(state, lambda conn: _views(conn, store.plugins(conn)))
 
 
 @router.get("/{name}", summary="Read a hosted plugin")

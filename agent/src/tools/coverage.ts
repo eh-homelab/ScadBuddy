@@ -792,6 +792,19 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     'PUT /api/v1/ai/capabilities/{source}/items/{item}/loading',
     'DELETE /api/v1/ai/capabilities/{source}/items/{item}/loading',
   ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
+  // The marketplace feed (#6933, routes/pluginFeeds.ts).
+  ...['GET /api/v1/ai/plugin-feeds/{feed}/marketplace.json', 'GET /api/v1/ai/plugin-feeds/{feed}/plugins/{name}/versions/{file}'].map(
+    (route) => ({
+      route,
+      reason:
+        'A Claude Code marketplace feed for sessions outside ScadBuddy, fetched by `/plugin marketplace add` and ' +
+        '`/plugin install` on the /mcp auth; an assistant reads packages with the plugin package routes, not a catalog.',
+    }),
+  ),
+  {
+    route: 'GET /api/v1/ai/plugin-feeds/{feed}',
+    reason: "Settings → MCP access' view of the feed and its setup snippet, for the person to copy into Claude Code.",
+  },
   {
     route: 'POST /api/v1/ai/capabilities/{source}/refresh',
     reason: "Connects to the plugin with its stored secret to list its tools for the Settings page, at the user's click in the UI",

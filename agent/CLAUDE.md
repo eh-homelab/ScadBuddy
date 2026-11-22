@@ -167,7 +167,13 @@ and its backend module:
   `tool-listing:<source>`, `crudStores.ts` `CrudLeases`, renewed every 30 s, and stores its
   listing only while the lease holds, else 409 `lease-lost`), `plugin-sessions`, `plugins`
   (`CrudPluginStore`, `CrudOAuthRows`: the API seals and opens the header secrets and the
-  sign-ins; a refresh holds the lease `plugin-oauth:<plugin>`) and `plugin-packages`.
+  sign-ins; a refresh holds the lease `plugin-oauth:<plugin>`) and `plugin-packages`;
+  `plugin-feeds` and `hosted-plugins` (`src/plugins/feed.ts` `CrudPluginFeeds`, #6933): a
+  marketplace feed's packages and a hosted version's zip, which `src/routes/pluginFeeds.ts`
+  serves to outside Claude Code at `/api/v1/ai/plugin-feeds/{feed}/marketplace.json` and
+  `…/plugins/{name}/versions/{N}.zip` behind /mcp's gates and auth (`mcpAuthResolver`,
+  `mcpTransportProblem`, `authenticate`), only approved pins, URLs from
+  `SCADBUDDY_PUBLIC_URL`; `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read.
 - `mcp-relay` (#5299 step 11, `api/crud_agent_mcp.py`): `src/mcp/relayRows.ts` `CrudRelayRows`
   (the /mcp session directory and messages; a message's row and its `scadbuddy_mcp` NOTIFY
   commit in one transaction). `test/mcpSessions.pg.test.ts` runs the relay against the
