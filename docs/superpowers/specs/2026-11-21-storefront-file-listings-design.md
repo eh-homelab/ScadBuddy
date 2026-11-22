@@ -1,6 +1,7 @@
 # Storefront: sell a library file as a listing (#6710)
 
-Date: 2026-11-21. Status: draft. Nothing is built before the owner approves it. The
+Date: 2026-11-21. Status: draft. Nothing is built before the owner approves it. The owner
+answered the questions of §14 on 2026-11-21, and this text follows those answers. The
 pricing owner (scadify) set four constraints on
 [a comment on #6710](https://github.com/eh-homelab/ScadBuddy/issues/6710#issuecomment-7033218958); §7 applies each of them, and §15 lists them with where each one is met.
 
@@ -25,7 +26,9 @@ print it made before, a file a customer sent once. There is no way to sell one o
 A file listing has no parameters. The customer picks a colour for each part of the file
 (each filament slot it prints in) from the colours on offer, and a quantity. The price
 comes from a slice of the file, through the one path the back office quotes with. The
-order prints that file, with the customer's colours on its slots. Nothing renders.
+order prints that file, with the customer's colours on its slots. Nothing renders. Publish
+keeps a copy of the file, and that copy is the version the listing sells: a later change
+of the library file does not change the listing (§5.3).
 
 ## 2. Facts it rests on
 
@@ -131,8 +134,53 @@ Each fact says where it was measured. "Read" means a read of the code on `origin
     `model_settings.config`, and `None` for a file it cannot write into
     (`render/bambu3mf.py:2620-2640`). Read.
 
+Facts 19 to 25 were read on `origin/main` a7dfea096, on 2026-11-21, after the owner's
+answers. Line numbers are on that commit.
+
+19. **A library file's slice reads its bytes through one seam.** `start_library_quote_preview`
+    builds a `LibrarySource` with `files=reads_for(file_id, client, native_reads)`
+    (`orders/bambuddy.py:292-321`, `:314`). `LibrarySource` reads the file's row, its
+    plates, its bytes and its slots only through that `LibraryReads`
+    (`print_source.py:1016-1101`, `reads_of`), which has four calls: `library_file`,
+    `library_plates`, `download_library_file` and `filament_requirements`
+    (`print_library/reads.py:33-39`). With `read_own=True` the slots come from the
+    downloaded bytes (`print_source.py:1104-1129`). The slicer then reads a laid-out copy
+    that the pipeline uploads (`bambuddy/preview.py:315-368`, `_start_native` at
+    `:371-426`), never the source file's id, except in one case (fact 20). Read.
+20. **A Bambuddy file can be sliced in place.** `origin_id` is the file's id for a
+    Bambuddy file and `None` for a native one (`print_source.py:1161-1164`). On Bambuddy's
+    path, a source with an `origin_id` and nothing to lay out is sliced as that library
+    file itself (`print_source.py:629-638`), and the dialog's slot read takes it too
+    (`bambuddy/send.py:1600-1601`). Read.
+21. **A library file's copies are recorded under its run subject.** A laid-out or raw
+    copy is recorded under `library:<file id>` (`print_source.py:452-467`,
+    `send.py:1512-1550`), and reused for the same folder and target on the rule that the
+    bytes under a key do not change (`send.py:1615-1631`). Upload keys must be run
+    subjects: `slice_owners` answers them and `linking.py:491` parses each with
+    `PrintSubject.from_run_subject`. Read.
+22. **The content store streams a held blob.** `ContentStore.get(ref)` streams a blob, and
+    `stat(key)` gives its ref (`store/content.py:319`, `:432`). Read.
+23. **An order item's print reads the live file.** A `library_file` item prints through
+    `start_library_run` (`orders/operations.py:862-930`), whose run source is
+    `SourceSpec(kind="library", file_id=…)` (`api/library_print.py:1407-1450`, `:1445`): the
+    print worker reads the file from the library that serves at print time. Read.
+24. **Remembered choices outlive the file.** `model_print_choices` loses a scope's row only
+    when the choices are set empty or every choice is forgotten
+    (`library/settings_store.py:1358-1372`, `:1540-1545`). A library file's delete leaves
+    `library:<id>` in place. Read.
+25. **How a template listing holds its pictures.** `media_ids` name images of the
+    template's media (`catalogue.media_item`, `library/catalogue.py:1719-1726`).
+    `PUT /storefront/listings/{id}/media` sets them and publishes a published listing
+    again (`api/storefront.py:146-163`, `listings.py` `change_media`). Publish copies
+    each one into the content store as `listing-media-<sha256>`, holds it under
+    (`storefront_listing`, listing id) and lists it in `Listing.media` as a
+    `ListingMedia` (`listings.py:949-985` `_copy_media`). The editor's
+    `ListingPictures.tsx` picks, orders and removes them, and uploads a new one into the
+    template's media (`api.uploadMedia(slug, file)`, `ListingPictures.tsx:83-107`). Read.
+
 Not measured: whether Bambuddy ever changes a file's bytes under the same id. This design
-does not rely on either answer (decision 3).
+does not rely on either answer: the price and the print use the held copy (decisions 3
+and 8). The one place the answer matters is fact 21's copy reuse (§7.3.1).
 
 ## 3. Decisions in short
 
@@ -141,16 +189,21 @@ does not rely on either answer (decision 3).
 2. **Publish pins the file by its content sha256** and copies its bytes into the content
    store as `listing-file-<sha256>`, held in `blob_refs` as the snapshot is. It always
    copies, also for a native file, because the native sweep ignores `blob_refs` (fact 11).
-3. **The price slices the library file itself, by id**, through `start_library`, as a
-   back-office quote of that file does. Before it slices, it checks that the file's
-   content sha256 is still the pinned one. A file that changed or went gives no firm
-   price (`FILE_DIFFERS`, `FILE_GONE`): the shop prices that line by hand, and the editor
-   says to republish.
+   **The held copy is the listing's version of the file.** Library files have no version
+   history, so the price never reads the live file's bytes after publish, and a print
+   reads them only when they are still the pinned ones (§10.2).
+3. **The price slices the held copy**, through `start_library` and the back office's own
+   `start_library_quote_preview`, with the held copy in place of the library's reads
+   (§7.3.1). So a file that changed or went after publish changes nothing: the listing
+   stays live on the version it was published with, and its price stays firm. There is
+   no file-state refusal and no "priced by hand" for this case.
 4. **The slice request is built once, for both sources**, from the remembered choices of
    the subject's scope (`library:<id>` for a file, the slug for a template): the dialog's
    opening choices, plus the remembered print sequence, process overrides and settings
-   per part, as the dialog seeds them (fact 7). With nothing remembered, the file's own
-   3MF settings apply, as in the back office (fact 6).
+   per part, as the dialog seeds them (fact 7). A file listing reads `library:<id>` while
+   that scope holds an entry, also after the file is deleted (fact 24). When it holds
+   none, the listing reads the copy of that entry that publish took (`FileSnapshot.remembered`,
+   §4.2). With neither, the file's own 3MF settings apply, as in the back office (fact 6).
 5. **A spool-less slot can take a given colour.** `resolve` gains `slot_colours`, so a
    file's slot is sliced in the visitor's colour, not the author's (fact 5). A template
    variant passes none, and its request does not change.
@@ -163,14 +216,22 @@ does not rely on either answer (decision 3).
    locks it to a support filament, as for a template (#6152). A print is of one material,
    as every listing's (fact 17).
 8. **The order item is a `library_file` item** with the customer's colours on its slots
-   and the pinned sha256 and copy key. A print of an item whose library file changed or
-   went is refused, and the order page offers "Restore the listed file", which puts the
-   held copy back into the library that serves.
+   and the pinned sha256 and copy key. **Its print prints the held copy.** When the
+   library file is still the pinned one, the print reads it as today. When it changed or
+   went, the print itself first puts the held copy into the library that serves and
+   prints that file (§10.2). There is no "Restore the listed file" action: the print
+   does it, so no step is left to the shop.
 9. **The customer's preview is the file itself**, read once at publish into a held GLB
    per plate, and recoloured on the page by slot. No render job, no render limits for
    the preview.
 10. **The editor's Design block becomes Source**, with two choices: a design (Design and
     Version, as today) or a library file (a picker over the library, 3MF and STL only).
+11. **A file listing has pictures as a template listing has**: `media_ids` in the draft,
+    `ListingMedia` in `Listing.media` once published, each held as `listing-media-<sha256>`
+    under the listing, set through the same `PUT /storefront/listings/{id}/media` and
+    edited in the same `ListingPictures` (fact 25). The pictures to pick from are the
+    file's own plate pictures and the pictures the shop uploads. A file has no template
+    media, so an upload is put straight at the key publish would give it (§5.4).
 
 ## 4. The listing (wire and migration)
 
@@ -194,14 +255,24 @@ class ListedFileInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: int = Field(ge=1)
     library: ItemLibrary  # "bambuddy" | "native", as `LibraryFileRef.library`
+    #: The version the listing sells: the sha256 of its held copy, which publish set
+    #: (§5.1). The editor sends back what it read. None asks publish to read the
+    #: library's file now and pin that. A body built before (the agent's) sends none.
+    pinned: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 ```
+
+The `library_file` column stores this object, `pinned` included. Publish writes `pinned`
+in the same transaction as the snapshot.
 
 A `model_validator(mode="after")` keeps the two shapes apart. It answers 422 with code
 `listing_source_invalid` and the field's `name` when:
 
 - `source` is `template` and `slug` or `commit` is missing, or `library_file` is set;
 - `source` is `library_file` and `library_file` is missing, or `slug`, `commit`,
-  `params`, `fixed` or `media_ids` is not empty.
+  `params` or `fixed` is not empty;
+- `source` is `library_file` and an id in `media_ids` is not a file listing's picture id:
+  `plate:<n>` (plate `n`'s own picture, `n` from 1) or `upload:<sha256>` (a picture the
+  shop uploaded to this listing, §5.4).
 
 `Listing`, `ListingRow` and the agent's types read `slug` and `commit` as nullable.
 `ListingRow` gains `source` and `filename` (the file's name for a file listing, else
@@ -245,10 +316,13 @@ class FileSnapshot(BaseModel):
     slots: list[FileSlot]
     plates: list[int]
     #: One held GLB per plate (`listing-preview-<sha256 of the GLB>`), in plate order.
-    #: The file's own plate pictures go in `Listing.media`, as a template's media (§5.2).
+    #: The pictures the draft's `media_ids` pick go in `Listing.media`, as a template's (§5.2).
     preview_keys: list[str]
     #: Each support slot's filament, as the shop locked it (§9.3), by slot from 0.
     support: dict[int, str] = Field(default_factory=dict)
+    #: The remembered choices of `library:<file_id>` when publish ran, or None when the
+    #: scope held none. `plan_variant` reads it only when that scope holds none (§7.1).
+    remembered: ModelPrintChoices | None = None
 ```
 
 `Listing.snapshot` becomes `Snapshot | None`. Every reader of `snapshot.schema_`,
@@ -307,16 +381,35 @@ Rows 6 and 9 run unchanged. Row 7 is `printable_materials` over the offered slot
 `check_locked_colours` is for a template's colour parameters (`listings.py:850-887`).
 Each code carries `name`, so the editor shows it under the field it names.
 
+Rows 1 to 4 read the library. They run only when `library_file.pinned` is None (§4.1): a
+first publish, a new file picked, or "Use the library's version" (§9.4). With `pinned`
+set, publish reads the held copy `listing-file-<pinned>` in place of the library, and
+rows 1 to 4 become one check: that copy is held under the listing (§5.2 step 1), else
+422 `listing_file_unknown`. So a publish again of the same version (after an edit of the
+title, the colours or the pictures, and `change_media`'s publish) keeps that version,
+and a file gone from the library does not stop it. An edit sets `published = false` and
+`snapshot = NULL` (`listings.py:276-300`), so the pin cannot live in the snapshot: it
+lives in the `library_file` column.
+
+One more check runs after row 5: an id in `media_ids` that names no plate picture of the
+file and no picture held for the listing is 422 `listing_media_unknown`, with the id as
+`name`, as for a template (`_check_pictures`, `listings.py:1068-1094`).
+
 ### 5.2 What publish stores
 
 1. **The copy.** The file is downloaded once (`LibrarySource.download`, as a print reads
    it), hashed as it streams, and put in the content store with kind `media` and key
    `listing-file-<sha256>`, as `_copy_media` puts media (`listings.py:949-985`). The key
-   is held under (`storefront_listing`, listing id). Two listings of one file share one
-   blob and hold it twice.
-2. **The slots.** Read from the bytes with the dialog's own reader (`LibrarySource.load`
-   with `read_own=True`, as `start_library_quote_preview` reads a file,
-   `orders/bambuddy.py:313-321`): each declared slot, its colour and its type. `used` is
+   is held under (`storefront_listing_kept`, listing id), a holder kind of its own: an
+   edit or an unpublish drops the (`storefront_listing`, listing id) holds
+   (`listings.py:1-17`, `release_unheld` at `:549-563`), and the pinned version must
+   outlive both. A `storefront_listing_kept` hold is dropped only by the listing's delete,
+   and by a publish that pins another sha256 (in the row's transaction, as the other
+   drops are). With `pinned` set, this step reads nothing: the copy is held already. Two
+   listings of one file share one blob and hold it twice.
+2. **The slots.** Read from the held bytes with the dialog's own reader (`LibrarySource.load`
+   with `read_own=True` over the held copy's reads, §7.3.1, as `start_library_quote_preview`
+   reads a file, `orders/bambuddy.py:308-321`): each declared slot, its colour and its type. `used` is
    from `part_settings_slots` of the 3MF (fact 18). When that answers `None` or an empty
    set, every declared slot counts as used. An STL has one slot, used.
 3. **The previews.** One GLB per plate, from `library_preview` of the held bytes
@@ -324,14 +417,25 @@ Each code carries `name`, so the editor shows it under the field it names.
    is put as `listing-preview-<sha256 of the GLB>` and held. A file it cannot read a mesh
    from (`NotViewableError`) publishes with no preview; the page then shows its pictures
    only.
-4. **The pictures.** Each plate's picture the 3MF holds (`Metadata/plate_<n>.png`, as
-   `quote.py` `plate_image` reads a sliced file's) is copied as a `ListingMedia` of kind
-   `image`. An STL has none.
-5. **The snapshot.** `FileSnapshot` as in §4.2. `mark_published` writes it with the media,
-   as today.
+4. **The pictures**, in `media_ids` order, as a template's (fact 25). A `plate:<n>` id is
+   plate `n`'s picture in the held 3MF (`Metadata/plate_<n>.png`, as `quote.py`
+   `plate_image` reads a sliced file's), put as `listing-media-<sha256>` and held under
+   (`storefront_listing`, listing id), as `_copy_media` does. An `upload:<sha256>` id is
+   a picture already at `listing-media-<sha256>` (§5.4): publish adds the
+   (`storefront_listing`, listing id) hold on it and copies nothing. Each becomes a
+   `ListingMedia` of kind `image` with its id as `media_id`, so `ListingPictures` marks it
+   Live as it marks a template's. An STL has no plate picture.
+5. **The snapshot.** `FileSnapshot` as in §4.2, with `remembered` set to
+   `model_print_choices.get(library_options_scope(file_id))` as publish reads it.
+   `mark_published` writes it with the media, as today, and writes
+   `library_file.pinned`.
 
-A failure after the first hold drops every hold the row does not name
-(`release_unheld`), as today.
+A failure after the first hold drops every (`storefront_listing`, listing id) hold the
+row does not name (`release_unheld`), as today. `release_unheld` also keeps a file
+snapshot's `preview_keys` beside its `media` (today it keeps a template snapshot's
+`snapshot_key` and the media, `listings.py:560-562`). A new (`storefront_listing_kept`)
+hold that publish took and the row does not name in `library_file.pinned` is dropped
+with them.
 
 All of this runs in the CRUD service (today's API process), which already downloads and
 reads library files for the back office (facts 3 and 14). No new database client, grant
@@ -340,11 +444,29 @@ data, with the readers the back office uses.
 
 ### 5.3 What a change of the file does
 
-A published listing never moves. Its snapshot names the sha256, and the held copy keeps
-the bytes. A file renamed or moved in the library keeps its id, so nothing changes. A file
-deleted, or one whose bytes are no longer the pinned ones, makes the listing's price
-"by hand" (§7.4) until the shop republishes. The editor reads the file's state on open
-and says so (§9.4). Publish never follows the file by itself.
+A published listing never moves (decided by the owner, 2026-11-21). `library_file.pinned`
+names the sha256, and the held copy keeps the bytes: the held copy is the listing's
+version of the file. A file renamed or moved in the library keeps its id, so nothing
+changes. A file deleted, or one whose bytes are no longer the pinned ones, changes
+nothing either: the listing stays live on its pinned version, its price is the held
+copy's (§7.3), and its order items print the held copy (§10.2). The editor reads the
+file's state on open and says that the listing sells the published version (§9.4).
+Publish never follows the file by itself; the shop moves the listing to the library's
+version with "Use the library's version" (§9.4).
+
+### 5.4 An uploaded picture
+
+A file has no template media to upload into, so `ListingPictures`' upload goes to the
+listing. `POST /storefront/listings/{id}/pictures` (multipart, one image) checks the type
+and the size as the template's media upload does (`mediaProblem` in the editor, the
+server's own check behind `api.uploadMedia`), puts the image in the content store with
+kind `media` at `listing-media-<sha256>` (the key publish gives a template picture), and
+holds it under (`storefront_listing_kept`, listing id). It answers the id
+`upload:<sha256>`, which the editor adds to `media_ids` as it adds a template upload's
+id (`onUploaded`). The listing must be saved first (it needs an id); the editor saves a
+new draft before the first upload. A save drops a `storefront_listing_kept` hold on a
+`listing-media-*` key that `media_ids` no longer names, in the save's transaction. This is
+the one new route: after the upload, the picture takes the template's path (§5.2 step 4).
 
 ## 6. The customer page
 
@@ -410,8 +532,8 @@ The pricing owner's constraints are the rule here. §15 maps each one to its sec
 ```python
 #: A template variant's render (today).
 reference: Reference | None = None
-#: A file listing's file (#6710): the library file the slice reads, and the content it
-#: must have.
+#: A file listing's file (#6710): the listing's held copy of a library file, which the
+#: slice reads (§7.3.1).
 library_file: PricedFile | None = None
 ```
 
@@ -422,8 +544,15 @@ class PricedFile(BaseModel):
     library: ItemLibrary
     filename: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    #: The held copy the slice reads, `listing-file-<sha256>` (`FileSnapshot.copy_key`).
+    copy_key: str
+    file_type: Literal["3mf", "stl"]
+    size: int
+    plates: list[int]
     #: The slots the slice must use (`FileSlot.used`), from 0.
     used: list[int]
+    #: `FileSnapshot.remembered`, for a scope that holds none (decision 4).
+    remembered: ModelPrintChoices | None = None
 ```
 
 A validator requires exactly one. An operation started before this change has a
@@ -433,10 +562,19 @@ A validator requires exactly one. An operation started before this change has a
 and reads the remembered entry by the subject's scope:
 
 ```python
-scope = reference.slug if reference is not None else library_options_scope(file.id)
-remembered = settings.model_print_choices.get(scope)
+if reference is not None:
+    remembered = settings.model_print_choices.get(reference.slug)
+else:
+    remembered = settings.model_print_choices.get(library_options_scope(file.id), file.remembered)
 choices = opening_choices(remembered, printer.status, printer.bed_type(settings))
 ```
+
+A file listing reads `library:<id>` while that scope holds an entry. A library file's
+delete leaves the entry (fact 24), so the shop's last choices for the file still apply
+after it is gone. Only a scope with no entry (never set, or forgotten in the dialog)
+falls back to the copy publish took; with neither, the file's own settings apply (§7.2).
+So forgetting a file's choices returns its listing to the setup it was published with,
+not to the file's own; "Use the library's version" and publish take a new copy (§9.4).
 
 So the plan's inputs are the same for both sources: the same `opening_choices`, the same
 `PrinterOpening` from `printer_opening` (through `live_opening`, `slice_price.py:923-942`)
@@ -461,33 +599,72 @@ slicer in the same way.
 This applies to a template variant too. Today a template variant's slice drops the
 remembered print sequence, overrides and settings per part, which the dialog sends
 (fact 7). That is a parity gap of its own, and one builder closes it for both sources.
-The owner confirms this (§14).
+Decided (owner, 2026-11-21): template listings take the three fields too, as proposed.
 
 ### 7.3 The slice
 
 `price_variant` (`slice_price.py:516-581`) branches on the subject. For a file:
 
 1. Each slot's filament is read, as today (`FILAMENT_GONE`).
-2. The file is read in the library that serves (`ServedLibrary.file`,
-   `orders/bambuddy.py:347-373`). None: `FILE_GONE`, "the listed library file is no
-   longer in the library".
-3. Its content sha256: `file_hash` when it states one, else the sha256 of a download.
-   A native file always states its row's `sha256` (fact 10), so only a Bambuddy file
-   with no stated hash pays for that download, once per claimed slice (a slice runs once
-   per key). No hash is kept between runs: a kept hash could hide a file that changed
-   under its id. Not the pinned one: `FILE_DIFFERS`, "the library file is
-   not the one the listing was published with". This takes the place of
-   `GEOMETRY_DIFFERS`, which compares a render's 3MF to the key's.
-4. `slice_and_price` with
+2. The held copy is read: `content.stat(file.copy_key)` (fact 22). None (only after a
+   fault: a hold keeps it, §5.2 step 1): `FILE_GONE`, "the listing's copy of its file is
+   missing". The library is not read: the live file's state does not change the price.
+   This takes the place of `GEOMETRY_DIFFERS`, which compares a render's 3MF to the key's;
+   the held copy's key is its sha256, so its bytes are the pinned ones.
+3. `slice_and_price` with
    `start = lambda: run.slicer.start_library(file.id, variant.slice, subject,
-   slot_presets=variant.slot_presets, slot_colours=variant.slot_colours)`.
-5. `priced_for` runs `sliced_slots(plates, file.used)` and gives the filament of each
+   slot_presets=variant.slot_presets, slot_colours=variant.slot_colours,
+   held=HeldFile(file, content))`.
+4. `priced_for` runs `sliced_slots(plates, file.used)` and gives the filament of each
    used slot. A used slot at 0 g fails the price, as for a template.
 
-`Slicer.start_library` (`quote.py:586-591`) gains the two keywords, `PreviewSlicer`
-passes them to `start_library_quote_preview` (fact 4), and that function passes them on
-to `start_preview_plates`. A back-office quote passes neither, so its request does not
-change.
+`Slicer.start_library` (`quote.py:586-591`) gains the two keywords and `held`,
+`PreviewSlicer` passes them to `start_library_quote_preview` (fact 4,
+`orders/operations.py:264-279`), and that function passes the two keywords on to
+`start_preview_plates` and uses `held` as §7.3.1 says. A back-office quote passes none
+of the three, so its request and its input do not change.
+
+#### 7.3.1 How the held copy reaches the slicer
+
+The slice reads its file through one seam: the `LibraryReads` that
+`start_library_quote_preview` gives `LibrarySource.load` (fact 19). The change is to give
+it the held copy there, and nothing else in the path moves:
+
+1. **`HeldFile`** (new, `orders/storefront/held_file.py`) is a `LibraryReads`
+   (`print_library/reads.py:33-39`) over one held copy, built from the `PricedFile` and the content store:
+   - `library_file(id)` answers a `LibraryFile` with the listed id, filename, type and
+     size, and `file_hash` = the pinned sha256;
+   - `library_plates(id)` answers the pinned `plates`;
+   - `download_library_file(id)` streams `ContentStore.get` of `copy_key`
+     (`store/content.py:319`);
+   - `filament_requirements(id)` answers the snapshot's slots by slot id. It is reached
+     only where the bytes give no slots (an STL, `print_source.py:989-998`).
+2. **`start_library_quote_preview`** (`orders/bambuddy.py:292-321`) gains
+   `held: HeldFile | None = None`. With it, `files=held` in place of
+   `reads_for(file_id, client, native_reads)` (`:314`), and `LibrarySource.load` gets
+   `held=True`. `native=native_reads if lan else None` stays: a LAN slice still uploads
+   its laid-out copy into the native library, as a back-office slice does.
+3. **`LibrarySource`** gains `held: bool = False`. `origin_id` answers `None` when it is
+   set (`print_source.py:1161-1164`), so Bambuddy's path never slices the live Bambuddy
+   file in place (fact 20, `print_source.py:629-638`) and the slot read never takes it
+   (`send.py:1600-1601`). A held Bambuddy file then takes the native file's branch: its
+   bytes are laid out and uploaded as a copy (`print_source.py:624-627`, or the upload
+   below it).
+
+So the slicer reads a copy of the held bytes, laid out by the dialog's own pipeline, on
+either slicer. `plan_variant`, `slice_and_price`, `opening_choices`, `printer_opening`,
+`read_type_presets` and the request are the ones a back-office quote uses; only the bytes'
+source differs, and those bytes are the bytes a back-office quote of the unchanged file
+reads. The key stays on the content sha256 (§7.4).
+
+The copies stay recorded under the run subject `library:<file id>`, because upload keys
+must be run subjects (fact 21). A recorded copy is reused for the same folder and target
+on the rule that the bytes under a key do not change (`send.py:1615-1631`). That rule
+holds for a native file (fact 10), and for a deleted file, whose recorded copies are of
+the bytes it had. It fails only if Bambuddy changes a file's bytes under the same id,
+which is not measured (§2), and which would make today's back-office reuse stale in the
+same way. PR 2 tests that a held Bambuddy file is never sliced in place; the copy reuse is
+not changed by this design.
 
 **Slot numbers.** The listing counts slots from 0 (`FileSlot.slot`, `PricedFile.used`,
 `RenderBody.colours`), as `ColourSlot.slot` and a sliced plate's `PlateFilament.slot` do.
@@ -520,10 +697,9 @@ The body gains two fields:
 
 and `model` is the sha256 of the file the slice reads: a render's 3MF (today), or the
 library file's content (the pinned `FileSnapshot.sha256`). It is never a job id or a file
-id. Two listings of the same file at the same colours share one price. A file restored
-under a new id keeps its price only because the restore copies the remembered choices of
-`library:<old id>` to `library:<new id>` (§10.3 step 4): the key's `setup` comes from the
-remembered scope. The slot colours are in the key already (each filament's
+id. Two listings of the same file at the same colours and the same setup share one
+price. A change of the live library file does not move the key: `model` is the pinned
+sha256, and the setup comes from `library:<id>` or the publish copy (§7.1). The slot colours are in the key already (each filament's
 `colour`, `slice_price.py:420-427`).
 
 After the bump, every stored row is read under a new key, so each variant is sliced again
@@ -595,8 +771,8 @@ stays at the top, because the source decides everything below it.
   Design and Version selects as today. "A library file" shows the picker.
 - **A saved listing** folds the block to one line, with "Change": "Design Dollhouse Kit,
   version 3f9a2c1" or "Library file Keychain base.3mf". "Change" opens both choices.
-- Switching the source clears what the other source set (`params`, `fixed`, `commit` and
-  `media_ids`, or `library_file`), keeps the title, the description and the colours on
+- Switching the source clears what the other source set (`params`, `fixed` and `commit`,
+  or `library_file`) and `media_ids`, whose ids name the other source's pictures, keeps the title, the description and the colours on
   offer, and marks the draft unsaved.
 
 ### 9.2 The file picker
@@ -614,8 +790,13 @@ The picker is `LibraryFilePicker` (fact 13), with a `types` filter:
 - **Product**: title, description, as today. The title starts as the file's name without
   its ending and without colour words (`withoutWords`, `listingDraft.ts:313`), and the
   "Leave … out of the title" warning (`titleColours`, `listingDraft.ts:303`) runs over the
-  file's colours too. Pictures: the file's own plate pictures, read at publish (§5.2); no
-  template media.
+  file's colours too.
+- **Pictures**: the same `ListingPictures` as a template listing's (fact 25, decision 11).
+  The pictures to add are the file's plate pictures (`plate:<n>`, shown from the library
+  file's plate images; publish reads them from the held copy, §5.2 step 4) and the shop's uploads
+  (`upload:<sha256>`, §5.4). A new file listing starts with every plate picture in
+  `media_ids`. "Upload a picture" saves a new draft first. Live marks, order, remove and
+  the republish of a published listing work as for a template (`PUT …/media`).
 - **Parts** takes the place of Settings: one row per slot. "Part 1 — the customer picks
   its colour" with the file's swatch, or, for a support slot, a select of support
   filaments ("Support: locked"). An unused slot is not shown.
@@ -623,11 +804,20 @@ The picker is `LibraryFilePicker` (fact 13), with a `types` filter:
 
 ### 9.4 The file's state
 
-On open, the editor of a published file listing reads the file
-(`GET /print/library/{id}`). A file that is gone, or whose `file_hash` is not the pinned
-sha256, shows a warning in the Source block: "This file changed in the library since you
-published. Customers get no firm price until you publish again." A file with no stated
-hash shows nothing; the price check of §7.3 still runs.
+On open, the editor of a file listing with a `pinned` version reads the file
+(`GET /print/library/{id}`). The listing keeps selling its pinned version whatever this
+read finds (§5.3), so the Source block only informs:
+
+- A file whose `file_hash` is not the pinned sha256: "This file changed in the library
+  since you published. Customers still get the version you published." with the button
+  "Use the library's version".
+- A file that is gone: "This file is no longer in the library. Customers still get the
+  version you published." with no button.
+- A file with no stated hash, or the pinned one: nothing.
+
+"Use the library's version" sets `library_file.pinned` to None and marks the draft
+unsaved; the next publish reads the library and pins its version (§5.1). Picking another
+file in the picker does the same.
 
 ### 9.5 Sell from the library
 
@@ -638,7 +828,8 @@ render (easy listing spec §3).
 ### 9.6 Refusals
 
 `listingRefusal` (`listingDraft.ts:111`) gains kind `file` for the `listing_file_*` codes
-and `listing_source_invalid`, each with `name`, shown in the Source block or under
+and `listing_source_invalid`, each with `name`; `listing_media_unknown` stays a picture
+refusal, as for a template. Each is shown in the Source block or under
 Colours on offer as `name` says. A page built before maps an unknown code to its general
 error, as today.
 
@@ -670,33 +861,46 @@ plan R5, R10). The item is a `library_file` item, which takes no revisions
 
 The order holds the copy: the item adds a `blob_refs` hold on `copy_key` (holder kind
 `order_item`, its id) in the add's transaction. So a later unpublish or delete of the
-listing does not lose the bytes the order may need.
+listing does not lose the bytes the order prints (§10.2).
 
 ### 10.2 The print
 
-`_library_stands` (`printing.py:575-600`) also checks the content when the item names a
-`sha256`: the file's sha256 (as §7.3 step 3) must be the item's. Else 409
-`library_file_changed`, with `library_file_id`. A file gone stays `library_file_gone`.
+The item prints the held copy (decision 8). Today a `library_file` item's print reads the
+live file at print time (fact 23). So the print first makes sure the library holds the
+pinned bytes, and only then starts the run as today.
+
+1. **The check.** `_library_stands` (`printing.py:575-600`) keeps today's rule for an
+   item with no `sha256` (a back-office add). For an item with a `sha256`, it reads the
+   file (`ServedLibrary.file`). The file stands when it is there and its sha256 is the
+   item's: its `file_hash`, or, for a Bambuddy file that states none, the sha256 of a
+   download. Else, when the held copy is there (`content.stat(copy_key)`), the check
+   answers as today with `"restore": true` added. Only a missing held copy is
+   `library_file_gone`. There is no `library_file_changed` refusal.
+2. **The restore.** `item_print_run` (`orders/operations.py:850-945`), on a check with
+   `restore`, puts the held copy into the library that serves before
+   `start_library_run`. It looks first in the folder "Storefront" (made when missing) for
+   a file whose sha256 is the item's, so a retry of the same claim uploads nothing. Else
+   it uploads the copy, streamed from the content store, with the upload the library
+   page uses (`POST /print/library/files`, `api/library_print.py:679-695` `post_library_file`): on the native
+   library `NativeLibrary.upload` (`print_library/native.py:257`), on Bambuddy's
+   `upload_raw` (`bambuddy/send.py:1488`). Then it points the item at the new file id, in
+   one transaction with an order event that names both ids.
+3. **The remembered choices.** It copies `library:<old id>` to `library:<new id>` when the
+   new scope holds none, so the dialog opens on the file as before. The run itself takes
+   the accepted quote's setup (`quoted_setup(quote)`, `printing.py:598`), so the print
+   does not depend on this copy.
+4. **The run** starts on the new id, as today. The next print of the item finds that
+   file with the pinned sha256, and stands without a restore.
+
+The item's accepted quote stays: its bytes are the held copy's, which it priced
+(§7.3). The listing is not changed: it keeps its pin and its held copy.
+
+All of this runs in the CRUD service, which holds the content store and already writes
+the library for the back office. No new database client or grant is added (#5295).
 
 The print dialog opens on the item's file with its colours; the shop picks the spools.
 Nothing here changes how a print maps spools to slots: the item's colours say which
 colour each slot needs, and "Wait for the right colour" (#6218) is on by default.
-
-### 10.3 Restore the listed file
-
-For a `library_file_gone` or `library_file_changed` item with a `copy_key`, the order
-page offers "Restore the listed file". `POST /orders/{id}/items/{item}/library-file/restore`
-(an operation, idempotent by key):
-
-1. reads the held copy;
-2. uploads it to the library that serves, through the upload the library page uses
-   (`upload_library_file`), into a folder "Storefront";
-3. points the item at the new file id;
-4. copies the remembered choices of `library:<old id>` to `library:<new id>` when the new
-   scope has none, so the next slice and print open as before.
-
-The item's accepted quote stays: the bytes are the ones it priced. The listing is not
-changed; the shop republishes it on the restored file from the editor.
 
 ## 11. Test plan
 
@@ -710,7 +914,19 @@ changed; the shop republishes it on the restored file from the editor.
   `tests/api/test_storefront_listings.py`): each row of §5.1 with its code and `name`, in
   order; the copy is held under `listing-file-<sha256>`; the slots of a two-colour 3MF
   fixture with `used` from `part_settings_slots`; an STL gives one used slot; a file with
-  no readable mesh publishes with no preview; a failed publish drops its holds.
+  no readable mesh publishes with no preview; a failed publish drops its holds. The pin:
+  a first publish writes `library_file.pinned` and holds the copy as
+  `storefront_listing_kept`; an edit, an unpublish and a publish again keep that hold;
+  a publish again with `pinned` set reads no library (a fake that fails every library
+  read) and passes with the file deleted; `pinned` None after the file changed pins the
+  new sha256 and drops the old kept hold; a delete drops every kept hold. The snapshot's
+  `remembered` is the `library:<id>` entry at publish, or None.
+- **Pictures** (`test_listings.py`, `tests/api/test_storefront_listings.py`): `media_ids`
+  of `plate:1` and `upload:<sha256>` publish as two `ListingMedia` held under the
+  listing, in that order, with their ids as `media_id`; an unknown id is
+  `listing_media_unknown` with `name`; an upload holds `listing-media-<sha256>` as
+  `storefront_listing_kept` and answers `upload:<sha256>`; a save that drops the id
+  drops that hold; `PUT …/media` republishes a published file listing.
 - **Resolver** (`tests/bambuddy/test_resolver.py`): a spool-less slot with a
   `slot_colours` entry takes it; one without takes the file's; a slot with a spool takes
   the spool's, whatever `slot_colours` says.
@@ -722,10 +938,19 @@ changed; the shop republishes it on the restored file from the editor.
   setup give two keys only when their kind differs; a change of any remembered override
   gives another key.
 - **The run** (`test_slice_price.py`, with the quote fakes): a file variant calls
-  `start_library` once with `slot_presets` and `slot_colours`; a gone file is `FILE_GONE`;
-  a file whose `file_hash` differs is `FILE_DIFFERS` and never slices; one with no stated
-  hash is hashed from its download; an unused slot at 0 g still prices; slot 0's colour
+  `start_library` once with `slot_presets`, `slot_colours` and `held`, and reads no
+  library file; a library whose file is gone or holds other bytes gives the same row as
+  one with the pinned file; a held copy missing from the content store is `FILE_GONE`
+  and never slices; with no `library:<id>` entry the request carries the snapshot's
+  `remembered` setup, and with one it carries that entry's; an unused slot at 0 g still
+  prices; slot 0's colour
   reaches `resolve` as slot id 1, and a `part_settings_slots` id 1 is stored in `used` as 0.
+- **The held reads** (`tests/orders/storefront/test_held_file.py`,
+  `tests/orders/test_bambuddy.py`): `HeldFile` answers the pinned row, plates and bytes
+  and the snapshot's slots; `start_library_quote_preview` with `held` reads its bytes,
+  not the library's; a held Bambuddy-range file is never sliced in place (`origin_id` is
+  None, so the fake Bambuddy sees an upload and no slice of the file id); without `held`
+  the request and the input are as today.
 - **Parity, the owner's constraint 4** (`tests/orders/storefront/test_slice_parity.py`), a
   new test beside `test_the_storefront_slices_and_prices_as_the_back_office_quote`:
   - The back office: the dialog's `choices_for` over a `LibrarySource` of file 42, with
@@ -734,8 +959,10 @@ changed; the shop republishes it on the restored file from the editor.
     `SliceQuoteRequest` with those choices, the dialog's three seeded fields and an SB
     spool per slot; `quote_run` on a `library_file` item of file 42 (`_library_quote`).
   - The storefront: `printer_opening`, then `plan_variant` with the file as its subject,
-    then `price_variant`.
-  - Asserts: `start_library` is called for file 42 on both sides; the two requests are
+    then `price_variant`, with the held copy in a fake content store holding the same
+    bytes as file 42.
+  - Asserts: `start_library` is called for file 42 on both sides, the storefront's with
+    `held`; the bytes each slice reads have the same sha256; the two requests are
     equal but `filament_plan` and `filaments`; `resolve` gives the same presets and the
     same colours per slot (`["GFSA00_22", "GFSG02_25"]`, `[RED, GREEN]`); the row's
     `total_minor`, `unit_price_minor`, `unit_cost_minor` and `lines` equal the quote's.
@@ -751,9 +978,14 @@ changed; the shop republishes it on the restored file from the editor.
 - **The cart** (`test_drafts.py`, `test_submit.py`): an add makes a `library_file` item with
   the colours, the sha256 and a hold on the copy; `reprice` answers `by_hand` after the
   listing is republished on another file; a firm line records a `storefront` quote.
-- **Orders** (`tests/orders/`): `_library_stands` refuses `library_file_changed`; restore
-  uploads the held copy, moves the item to the new id, copies the remembered choices, and
-  a second call with the same key does nothing.
+- **Orders** (`tests/orders/`): `_library_stands` of a storefront item with the pinned
+  file stands as today; with the file gone, or with other bytes, it answers `restore`
+  and never `library_file_changed`; with the held copy missing it is `library_file_gone`;
+  a back-office item is unchanged. `item_print_run` with `restore` uploads the held copy
+  into "Storefront", points the item at the new id with an order event, copies the
+  remembered choices to an empty new scope only, and starts the run on the new id; a
+  retry of the same claim finds that file by its sha256 and uploads nothing; the next
+  print of the item stands without a restore.
 - **Public** (`test_storefront_public.py`): a file listing answers `source`, its offered
   slots with labels and defaults, no support slot, and the edge preview paths; the preview
   route streams the held GLB.
@@ -764,7 +996,10 @@ changed; the shop republishes it on the restored file from the editor.
   "A library file" lists only 3MF and STL hits; a picked file shows its parts; a saved file
   listing folds to "Library file …" with "Change"; switching source clears the other's
   fields; each `listing_file_*` refusal shows under its field; the "changed in the library"
-  warning.
+  and "no longer in the library" notes say that customers still get the published
+  version, and "Use the library's version" sends `pinned: null`; Pictures lists the
+  file's plate pictures, a new file listing starts with all of them, an upload saves a
+  new draft first and adds `upload:<sha256>`.
 - `listingDraft.test.ts`: `listingInput` and `savedKey` of a file draft; the title default
   drops the ending and colour words.
 - `CustomizePage.test.tsx`: a file listing shows one picker per part, recolours the
@@ -784,8 +1019,9 @@ changed; the shop republishes it on the restored file from the editor.
 - List one two-colour 3MF from the library, read its price as a visitor, and compare it to
   a back-office quote of the same file at the same colours on the profile's printer. Record
   both totals and the operation ids in the go-live PR.
-- Delete the file's library copy, check the page says "We price this design by hand",
-  order it, and restore it from the order page.
+- Delete the file from the library. Check that the visitor's price is the same firm
+  price, order it, and print the item: the print puts the held copy into "Storefront"
+  and prints it. Record the new file id and the run id in the go-live PR.
 
 ## 12. PR split
 
@@ -796,29 +1032,41 @@ customer, until the step that makes it safe.
    `resolve`, `start_preview_plates` and `start_library_quote_preview`;
    `Slicer.start_library` and `PreviewSlicer` take `slot_presets` and `slot_colours`. No
    storefront change; every existing caller passes neither.
-2. **`feat(storefront): price a library file through the one path`** (backend). The
-   subject on `SliceVariant` and `plan_variant`; `slice_request` with the remembered setup;
-   `KEY_VERSION` 4 with `subject` and `setup`; `price_variant` for a file (`FILE_GONE`,
-   `FILE_DIFFERS`, the hash read); the pinned key tests; the parity test of §11.1. No
-   listing names a file yet, so only tests reach the file branch. The bump re-slices each
-   template variant once. After 1.
-3. **`feat(storefront): list a library file`** (backend). The migration; the wire and the
-   snapshot; publish's checks, the copy, the slots, the previews and the pictures; the
-   price read and its edge route; the cart, `price_of`, `reprice` and submit as a
-   `library_file` item with the sha256, the copy and its hold; `_library_stands`'
-   `library_file_changed`; the library search's `types`; the GLB slot extra. Until PR 6,
-   `public_card` and `public_listing` leave a file listing out, because the public page
-   cannot show one yet. After 2.
-4. **`feat(orders): restore a storefront item's library file`** (backend and frontend). §10.3
-   and its button. After 3.
+2. **`feat(storefront): price a library file through the one path`** (backend). Starts
+   only after scadify's #6921 merges, and keeps `storefront_slice_prices.variant_key` on
+   done rows, which #6921 adds. `HeldFile`, `held` on `Slicer.start_library`,
+   `PreviewSlicer` and `start_library_quote_preview`, and `LibrarySource.held` with its
+   `origin_id` (§7.3.1); the subject on `SliceVariant` and `plan_variant`, with the
+   publish copy of the remembered choices; `slice_request` with the remembered setup;
+   `KEY_VERSION` 4 with `subject` and `setup`; `price_variant` for a file (the held copy,
+   `FILE_GONE` for a missing one); the pinned key tests; the held reads tests; the
+   parity test of §11.1. No listing names a file yet, so only tests reach the file
+   branch. The bump re-slices each template variant once. After 1.
+3. **`feat(storefront): list a library file`** (backend). The migration; the wire, the pin
+   and the snapshot; publish's checks, the copy and its `storefront_listing_kept` hold,
+   the slots, the previews and the pictures (`plate:<n>`, `upload:<sha256>`, the upload
+   route of §5.4); the price read and its edge route; the cart, `price_of`, `reprice` and
+   submit as a `library_file` item with the sha256, the copy and its hold; the library
+   search's `types`; the GLB slot extra. Until PR 6, `public_card` and `public_listing`
+   leave a file listing out, because the public page cannot show one yet. Until PR 4, a
+   storefront item whose file changed or went keeps today's `library_file_gone` print
+   refusal (no listing is public before PR 6, so no such order exists yet). After 2.
+4. **`feat(orders): print a storefront item from its held copy`** (backend). §10.2: the
+   check's `restore`, the upload into "Storefront", the item moved to the new id, the
+   remembered choices. No button: the print does it. After 3.
 5. **`feat(storefront): choose a library file as a listing's source`** (frontend). The
-   Source block, the file picker with `types`, the Parts section, the refusals, the file
-   state warning, "Sell on storefront…" on the library page, the mocks. After 3.
+   Source block, the file picker with `types`, the Parts section, Pictures over plate
+   pictures and uploads, the refusals, the file state notes with "Use the library's
+   version", "Sell on storefront…" on the library page, the mocks. After 3.
 6. **`feat(storefront): a customer page for a file listing`** (frontend, and the backend
    switch). The file branch of `CustomizePage`, the slot recolour in `Preview`, the price
-   route client; this PR lets `public_card` and `public_listing` show file listings. After 3
-   and 5.
+   route client; this PR lets `public_card` and `public_listing` show file listings. After 3,
+   4 and 5.
 7. **`feat(agent): draft a file listing`** (agent, shared vectors). After 3.
+
+Not in this split: #6922 (warm the slice price on publish and Prepare colours) warms
+every published listing through publish, so it covers file listings once PR 3 lands. A
+file listing needs no change of its own there.
 
 Then the prod checks of §11.4, as a comment on #6710.
 
@@ -830,28 +1078,35 @@ Then the prod checks of §11.4, as a comment on #6710.
   rebases its wire change on the other's. Neither changes the other's price: a pipeline
   variant is a `reference` subject.
 - **The slice price.** PR 2 changes `price_key` and `slice_request`. scadify owns that code
-  and reviews PR 2. No other pricing change is in this design.
+  and reviews PR 2. PR 2 starts after scadify's #6921 merges and keeps the
+  `variant_key` that #6921 writes on done rows. #6922 (warm the price on publish) covers
+  file listings through publish. No other pricing change is in this design.
 - **Easy listing (#6131).** "Sell on storefront…" from the library (§9.5) follows the same
   entry as Sell from a render. #6131's smart defaults do not apply: a file has no
   parameters to lock.
 
-## 14. Owner to confirm
+## 14. Decided (owner, 2026-11-21)
 
-1. A template variant's slice also takes the remembered print sequence, process overrides
-   and settings per part (§7.2). This closes a parity gap with the dialog, changes template
-   prices where a model has such choices remembered, and re-slices every variant once
-   (`KEY_VERSION` 4).
-2. A file listing shows only the file's own plate pictures and its 3D preview: no uploaded
-   pictures in this version (§9.3). A follow-up can add them.
-3. A file that changed or went after publish gives no firm price until the shop
-   republishes; the listing never follows the file by itself (§5.3).
+1. Decided (owner, 2026-11-21): a template variant's slice also takes the remembered
+   print sequence, process overrides and settings per part, as proposed (§7.2). This
+   closes a parity gap with the dialog, changes template prices where a model has such
+   choices remembered, and re-slices every variant once (`KEY_VERSION` 4).
+2. Decided (owner, 2026-11-21): a file listing has uploaded pictures in this version, as
+   a template listing has, through the same `media_ids`, `ListingMedia` and
+   `ListingPictures` (decision 11, §5.2 step 4, §5.4, §9.3).
+3. Decided (owner, 2026-11-21): a file that changed or went after publish leaves the
+   listing live on its pinned version. The owner asked whether ScadBuddy has file
+   versioning. Templates have git history; library files (3MF, STL) have none. The
+   listing's held copy (`listing-file-<sha256>`) is the version: the price slices it
+   (§7.3.1), and the order item prints it (§10.2). The listing never follows the file by
+   itself (§5.3, §9.4).
 
 ## 15. The pricing owner's constraints
 
 | Constraint | Where it is met |
 | --- | --- |
-| 1. One path: `plan_variant` → `slice_and_price`, the same `opening_choices`, `printer_opening` and `read_type_presets`; no second slicer request | §7.1 (one `plan_variant` for both subjects), §7.3 (one `slice_and_price`, one claim per key, `start_library` as the back office's quote uses) |
-| 2. Support and process settings from the library item: its remembered choices for the file, else its own 3MF settings, as the back-office dialog opens on it | §7.1 (`library:<id>` scope), §7.2 (the dialog's seeded fields; none remembered leaves the file's own) |
+| 1. One path: `plan_variant` → `slice_and_price`, the same `opening_choices`, `printer_opening` and `read_type_presets`; no second slicer request | §7.1 (one `plan_variant` for both subjects), §7.3 (one `slice_and_price`, one claim per key, `start_library` as the back office's quote uses), §7.3.1 (only the bytes' source changes: the held copy through the same `start_library_quote_preview`) |
+| 2. Support and process settings from the library item: its remembered choices for the file, else its own 3MF settings, as the back-office dialog opens on it | §7.1 (`library:<id>` scope, then the copy publish took when the scope holds none), §7.2 (the dialog's seeded fields; none remembered leaves the file's own) |
 | 3. Key the price on the file's content sha256; bump `KEY_VERSION` if the key's meaning changes | §7.4 (`model` is the pinned sha256; `KEY_VERSION` 4) |
 | 4. Extend `test_slice_parity.py`: same slicer request and price as a back-office quote of that file | §11.1 "Parity" |
 
@@ -860,7 +1115,7 @@ Then the prod checks of §11.4, as a comment on #6710.
 - A sliced file (`gcode.3mf`) as a listing: it is fixed for one printer and one set of
   colours (§5.1 row 2).
 - A customer who changes the quantity per plate, or picks plates.
-- Uploaded pictures for a file listing (§14 item 2).
 - A batch that pre-prices every colour combination of a file listing (#6237).
-- A listing that follows its library file when the file changes (§14 item 3).
+- A listing that follows its library file by itself when the file changes (§14 item 3);
+  the shop moves it with "Use the library's version" (§9.4).
 - Template media on a file listing.
