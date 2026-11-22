@@ -2,8 +2,10 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 
 // What a turn spent on model requests Claude Code never priced (#991).
 //
-// Claude Code prices a request once its stream completes. A request cut off
-// mid-stream is never priced: measured on SDK 0.3.283 and 0.3.287 against the fake endpoint
+// Claude Code prices a request once its stream completes. A request no
+// message_stop closed (the process gone or killed mid-stream) is never priced.
+// Through SDK 0.3.314 a request the user stopped was not priced either:
+// measured on SDK 0.3.283 and 0.3.287 against the fake endpoint
 // (test/sessions.e2e.test.ts), a query stopped while the model streamed ends
 // with an `aborted_streaming` result whose `total_cost_usd` is 0, although
 // message_start had reported the request's input tokens; and the transcript's
@@ -11,14 +13,23 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 // endpoint still bills it. So the manager prices it here, from the stream it
 // already sees (`includePartialMessages`), and charges it to the session.
 //
-// Since SDK 0.3.295 Claude Code closes the stopped request itself: measured
-// against the fake endpoint (test/sessions.e2e.test.ts), after the user's
-// interrupt it emits a content_block_stop, a message_delta whose `stop_reason`
-// is null and whose usage repeats message_start's, and a message_stop, then an
-// `error_during_execution` result (terminal_reason `aborted_streaming`) whose
-// `total_cost_usd` is still 0. The endpoint's own message_delta always names a
-// stop reason, so a null one marks the request as cut off: its usage is not
-// taken, and the message_stop after it leaves the request open.
+// Since SDK 0.3.295 Claude Code closes the stopped request itself: after the
+// user's interrupt it emits a content_block_stop, a message_delta whose
+// `stop_reason` is null and whose usage repeats message_start's, and a
+// message_stop, then an `error_during_execution` result (terminal_reason
+// `aborted_streaming`). Through SDK 0.3.314 that result's `total_cost_usd` was
+// still 0. Since SDK 0.3.327 (Claude Code 2.1.327) Claude Code prices the
+// request it closed: measured on 2026-11-21 against the fake endpoint
+// (test/sessions.e2e.test.ts, the #991 stop tests), the
+// `aborted_streaming` result's `total_cost_usd` and the next resumed query's
+// total both hold it. Neither changelog names the change
+// (https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md,
+// https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md). So that
+// message_stop finishes the request here like any other, and it is not charged
+// twice. The null stop reason's usage is not taken (it repeats message_start's
+// output count); the output is estimated from the streamed text, as for a
+// request still open. Only a request no message_stop closed (the process gone
+// or killed mid-stream) is still unpriced.
 //
 // A request the ENDPOINT cuts off is not charged. Measured on SDK 0.3.289
 // (test/sessions.e2e.test.ts, #1661): when a stream ends in an SSE `error`
@@ -109,7 +120,7 @@ export function costOf(model: string | undefined, usage: Usage): number {
 
 const CHARS_PER_TOKEN = 4
 
-type Open = { model: string | undefined; usage: Usage; reportedOutput: boolean; chars: number; cutOff: boolean }
+type Open = { model: string | undefined; usage: Usage; reportedOutput: boolean; chars: number }
 
 /**
  * Watches a turn's SDK messages and prices the requests that started and never
@@ -139,7 +150,6 @@ export class UnpricedSpend {
           usage: { ...event.message?.usage },
           reportedOutput: false,
           chars: 0,
-          cutOff: false,
         })
         return
       case 'content_block_delta': {
@@ -151,11 +161,9 @@ export class UnpricedSpend {
       case 'message_delta': {
         const open = this.#open.get(key)
         if (!open) return
-        // Claude Code's own close of a request the user stopped (SDK 0.3.295).
-        if (event.delta?.stop_reason === null) {
-          open.cutOff = true
-          return
-        }
+        // Claude Code's own close of a request the user stopped (SDK 0.3.295): its usage
+        // repeats message_start's, so the output stays estimated from the text.
+        if (event.delta?.stop_reason === null) return
         if (!event.usage) return
         // message_delta's counts are cumulative for the request.
         for (const [k, v] of Object.entries(event.usage) as [keyof Usage, unknown][]) {
@@ -166,7 +174,7 @@ export class UnpricedSpend {
       }
       case 'message_stop': {
         const open = this.#open.get(key)
-        if (open && !open.cutOff) {
+        if (open) {
           this.#completed += requestUsd(open)
           this.#open.delete(key)
         }

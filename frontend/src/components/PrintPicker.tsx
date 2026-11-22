@@ -94,6 +94,7 @@ import { PrintVerdict } from './print/PrintVerdict'
 import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
+import { plateSwapReminder } from './print/plateSwap'
 import { PresetOverrides } from './print/PresetOverrides'
 import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
@@ -623,6 +624,28 @@ export function PrintPicker({
     carry,
     picker.registryAsked,
   )
+
+  /**
+   * #6885 — a slot with no filament is no fault until the user acts. Print (or Queue)
+   * pressed while a slot is empty sends nothing and turns the picker's "Slot N has no
+   * filament chosen" on; it stays on until every slot has a filament.
+   */
+  // The picker's own rule (checkPlan 'no-choice'): no plan entry, or a spool it does not list.
+  const firstEmpty = filaments
+    ? checkPlan(filaments, plan, 1).find((warning) => warning.kind === 'no-choice')
+    : undefined
+  const [missingShown, setMissingShown] = useState(false)
+  const allFilled = firstEmpty === undefined
+  useEffect(() => {
+    if (allFilled) setMissingShown(false)
+  }, [allFilled])
+  function guardMissing(action: () => void) {
+    if (firstEmpty) {
+      setMissingShown(true)
+      return
+    }
+    action()
+  }
 
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
@@ -1714,6 +1737,7 @@ export function PrintPicker({
     setPrimeTower(null)
     filamentProfiles.reset()
     setPartsOpened(false)
+    setMissingShown(false)
     setSlicerOpened(false)
     setPicked(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
@@ -1859,7 +1883,7 @@ export function PrintPicker({
                         lastBedType !== null &&
                         lastBedType !== bedType &&
                         (!picker.advanced || !sections.isOpen('quality'))
-                          ? `The ${printer?.name ?? 'printer'}'s last print used ${lastBedType}. Swap to ${bedType} before this starts.`
+                          ? plateSwapReminder(printer?.name ?? null, lastBedType, bedType)
                           : undefined,
                       ...(picker.advanced ? { onSelect: () => goToSection('quality') } : { panel: plateStep }),
                     },
@@ -1921,7 +1945,9 @@ export function PrintPicker({
   /** The first check that holds Print, said beside it. */
   const footerBlocking = noPlate
     ? 'No plate is chosen to print.'
-    : filamentError
+    : missingShown && firstEmpty
+      ? firstEmpty.message
+      : filamentError
       ? 'ScadBuddy could not read the filament inventory.'
       : runRefuses
         ? (check.verdict?.errors?.[0] ?? null)
@@ -2037,7 +2063,7 @@ export function PrintPicker({
             </Button>
             <Button
               type="button"
-              onClick={() => void run()}
+              onClick={() => guardMissing(() => void run())}
               // Held while the dialog's own project list and default (#3651) load, so a
               // Simple-mode print cannot go out before the default project has seeded it.
               disabled={
@@ -2216,6 +2242,7 @@ export function PrintPicker({
                       copies={effectiveCopies}
                       offeredTrays={trays.offered}
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
+                      showMissing={missingShown}
                       slotExtra={
                         takesParts
                           ? (slotId) => (

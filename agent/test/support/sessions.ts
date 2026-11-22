@@ -43,13 +43,18 @@ export type FakeTurn =
   /**
    * Starts a reply (message_start with this usage, then `text`) and waits for
    * the interrupt, as a model cut off mid-reply (#991). Then ends with the
-   * interrupt's result, whose total is `resultCostUsd` (Claude Code prices
-   * nothing for the cut-off request), or throws (the process dies) when that
-   * is undefined.
+   * interrupt's result, whose total is `resultCostUsd`, or throws (the process
+   * dies) when that is undefined. Without `closes` nothing closes the request,
+   * so the result leaves it out, as Claude Code through SDK 0.3.314 did. With
+   * `closes` the request is closed first, as Claude Code does since SDK 0.3.327
+   * (content_block_stop, a message_delta whose `stop_reason` is null, then
+   * message_stop; sessions/unpricedSpend.ts), and `resultCostUsd` includes it.
    */
   | {
       stall: { model: string; usage: Record<string, number>; text?: string }
       resultCostUsd?: number
+      /** Closes the request after the interrupt, as Claude Code does since SDK 0.3.327. */
+      closes?: boolean
       /** Dies with this error right after the text, instead of waiting for an interrupt. */
       dies?: string
     }
@@ -185,6 +190,11 @@ export function scriptedRunner(
           if (turn.dies !== undefined) throw new Error(turn.dies)
           if ((await whenStopped()) === 'close') return
           if (turn.resultCostUsd === undefined) throw new Error('Claude Code process aborted by user')
+          if (turn.closes) {
+            yield stream({ type: 'content_block_stop', index: 0 })
+            yield stream({ type: 'message_delta', delta: { stop_reason: null }, usage })
+            yield stream({ type: 'message_stop' })
+          }
           total = turn.resultCostUsd
           inTurn = false
           yield result({ subtype: 'error_during_execution', is_error: true, errors: [], num_turns: 0, terminal_reason: 'aborted_streaming' })
