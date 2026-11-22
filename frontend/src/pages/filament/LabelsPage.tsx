@@ -246,7 +246,7 @@ export function LabelsPage() {
         )}
         {readyPlaces && readyPlaces.noReport.length > 0 && (
           <p className="mb-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground">
-            No report found for {readyPlaces.noReport.join(', ')}: an AMS slot of {readyPlaces.noReport.length === 1 ? 'it' : 'them'} gets a label once the printer reports or a
+            No AMS report for {readyPlaces.noReport.join(', ')}: an AMS slot of {readyPlaces.noReport.length === 1 ? 'it' : 'them'} gets a label once the printer reports or a
             spool has been loaded in it.
           </p>
         )}

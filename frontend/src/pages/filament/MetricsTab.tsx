@@ -38,7 +38,7 @@ import { EntityLink } from '../../components/filament/EntityLink'
 
 const DIMENSION_TITLES: Record<Dimension, string> = { material: 'Material', brand: 'Brand', type: 'Type', supplier: 'Supplier', location: 'Location' }
 
-/** A dimension value's page (#6869): its catalog, type, supplier, or the spools in a place; none for "none" (no key). */
+/** A dimension value's page (#6869): its catalog, type, supplier, or a place's page; none for "none" (no key). */
 function dimensionHref(dimension: Dimension, key: string | null | undefined): string | null {
   if (!key) return null
   switch (dimension) {

@@ -1484,7 +1484,7 @@ const tools: Tool[] = [
       '`code`, `name` and `depth` (0 printer, 1 unit or external holder, 2 slot), and the `base_url` a QR opens. ' +
       '`printer_ids` limits it; omit for every printer. It may create the printer\'s own place and the place of each ' +
       'AMS unit, slot and external holder the printer\'s latest report lists. That is derived data: capture makes ' +
-      'the same places (the printer\'s own on its next tray capture, a slot\'s when a spool loads there), so this ' +
+      'the same places (the printer\'s own once it has an AMS unit or holder place, a slot\'s when a spool loads there), so this ' +
       'tool is `read` tier. `no_report` names the printers with no report that lists a unit or a holder: their ' +
       'empty slots get labels only once a spool has been loaded. 409 `no_printer_kind` when no location kind is ' +
       'marked as a printer.',

@@ -892,7 +892,7 @@ export function SpoolPage() {
                   {saved?.names?.location && saved.location_id && (
                     <>
                       {' '}
-                      <EntityLink to={filamentLinks.location(saved.location_id)} className="underline">
+                      <EntityLink to={filamentLinks.locationSpools(saved.location_id)} className="underline">
                         Spools in {saved.names.location}
                       </EntityLink>
                     </>

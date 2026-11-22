@@ -176,7 +176,7 @@ describe('the labels page', () => {
       ),
     )
     renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
-    expect(await screen.findByText(/No report found for H2C/)).toBeInTheDocument()
+    expect(await screen.findByText(/No AMS report for H2C/)).toBeInTheDocument()
     expect(screen.getAllByTestId('label')).toHaveLength(1)
   })
 
