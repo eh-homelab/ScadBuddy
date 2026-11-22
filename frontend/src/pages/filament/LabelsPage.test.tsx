@@ -1,6 +1,7 @@
 import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LabelsPage } from './LabelsPage'
@@ -94,5 +95,40 @@ describe('the labels page', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Print' }))
     expect(print).toHaveBeenCalled()
+  })
+
+  it('draws a label for every printer place of ?printers=all, in order, with its code and name', async () => {
+    renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    expect(screen.getByRole('heading', { level: 1, name: 'Printer labels' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByTestId('label').length).toBeGreaterThan(0))
+    const labels = screen.getAllByTestId('label')
+    expect(labels[0]).toHaveTextContent('3DP-31B-598')
+    expect(labels.some((label) => label.textContent?.includes('H2C AMS-A slot 1'))).toBe(true)
+    for (const label of labels) {
+      expect(label.querySelector('svg')).not.toBeNull()
+      expect(label.textContent).toMatch(/L-\d+/)
+    }
+    expect(screen.getAllByTestId('print-label')).toHaveLength(labels.length)
+    expect(screen.getByText(`Labels open ${window.location.origin}`)).toBeInTheDocument()
+  })
+
+  it('uses the base address of the answer', async () => {
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: 'https://sb.example.com', labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }] })))
+    renderPage(<LabelsPage />, { route: '/filament/labels?printers=p1,p2' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByText('Labels open https://sb.example.com')).toBeInTheDocument()
+  })
+
+  it('draws the label of one place, with the base from the settings', async () => {
+    server.use(http.get('*/api/v1/settings', () => HttpResponse.json({ filament_label_base_url: null, public_url: 'https://pub.example.com/' })))
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByTestId('label')).toHaveTextContent('H2C AMS-A slot 1')
+    expect(screen.getByText('Labels open https://pub.example.com')).toBeInTheDocument()
+  })
+
+  it('names a place that could not be read', async () => {
+    renderPage(<LabelsPage />, { route: '/filament/labels?locations=nope' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be read')
   })
 })

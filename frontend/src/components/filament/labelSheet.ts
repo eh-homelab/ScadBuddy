@@ -25,4 +25,14 @@ export function parseLabelPayload(text: string): string | null {
   return id === '' ? null : id
 }
 
+/**
+ * #6955 — what a place label's QR code holds: the address of its code on ScadBuddy, which a phone camera
+ * opens. The base is an https origin of at most 64 characters, so the payload is at most 84 bytes: QR
+ * version 5 (37 modules) at level M, and a module of at least 0.5 mm at `QR_MM`.
+ */
+export const locationPayload = (base: string, code: string): string => `${base.replace(/\/+$/, '')}/x/${code}`
+
+/** The address a place label opens: the configured base, else this page's own origin; no trailing slash. */
+export const labelBase = (baseUrl: string | null): string => (baseUrl ?? window.location.origin).replace(/\/+$/, '')
+
 export const qrSvg = (payload: string): Promise<string> => QRCode.toString(payload, { type: 'svg', errorCorrectionLevel: 'M', margin: 0 })

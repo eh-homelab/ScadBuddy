@@ -2,9 +2,10 @@ import { ChevronLeftIcon, PrinterIcon } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router'
-import { getSpool, type SpoolDetail } from '../../api/filament'
-import { Label } from '../../components/filament/Label'
-import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, labelPayload, MAX_LABELS, qrSvg } from '../../components/filament/labelSheet'
+import { api } from '../../api/client'
+import { getLocation, getSpool, printerLabels, type SpoolDetail } from '../../api/filament'
+import { Label, LocationLabel } from '../../components/filament/Label'
+import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, labelBase, labelPayload, locationPayload, MAX_LABELS, qrSvg } from '../../components/filament/labelSheet'
 import { Button } from '@/components/ui/button'
 import { Label as FieldLabel } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
@@ -52,6 +53,26 @@ interface Loaded {
   failed: string[]
 }
 
+interface PlaceLabel {
+  id: string
+  code: string
+  name: string
+  svg: string
+}
+
+interface LoadedPlaces {
+  key: string
+  base: string
+  labels: PlaceLabel[]
+  failed: string[]
+}
+
+/** The label base of the settings (`filament_label_base_url`, else `public_url`), or null. */
+async function settingsBase(): Promise<string | null> {
+  const settings = await api.getSettings()
+  return settings.filament_label_base_url ?? settings.public_url ?? null
+}
+
 /**
  * #6264 — `/filament/labels?ids=<id>,<id>`: spool labels to print. Each spool is read
  * again (the ids are the page's only input) and drawn at 50 x 25 mm with its number and a
@@ -66,6 +87,37 @@ export function LabelsPage() {
   const key = ids.join(',')
   const [layout, setLayout] = useState<Layout>(storedLayout)
   const [loaded, setLoaded] = useState<Loaded | null>(null)
+  // #6955 — `?printers=<id>,<id>|all` (every place of those printers) or `?locations=<id>` (one place).
+  const printersParam = params.get('printers')
+  const locationParam = params.get('locations')?.trim() || null
+  const placesKey = printersParam ? `printers:${printersParam}` : locationParam ? `locations:${locationParam}` : ''
+  const [places, setPlaces] = useState<LoadedPlaces | null>(null)
+
+  useEffect(() => {
+    if (!placesKey) return
+    let live = true
+    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], failed: string[]) => {
+      const origin = labelBase(base)
+      const labels = await Promise.all(rows.map(async (row) => ({ ...row, svg: await qrSvg(locationPayload(origin, row.code)) })))
+      if (live) setPlaces({ key: placesKey, base: origin, labels, failed })
+    }
+    const fail = () => {
+      if (live) setPlaces({ key: placesKey, base: labelBase(null), labels: [], failed: [placesKey.slice(placesKey.indexOf(':') + 1)] })
+    }
+    if (printersParam) {
+      const wanted = printersParam === 'all' ? null : [...new Set(printersParam.split(',').map((id) => id.trim()).filter(Boolean))]
+      printerLabels(wanted)
+        .then((answer) => draw(answer.base_url, answer.labels.map((row) => ({ id: row.location_id, code: row.code, name: row.name })), []))
+        .catch(fail)
+    } else if (locationParam) {
+      Promise.all([getLocation(locationParam), settingsBase().catch(() => null)])
+        .then(([place, base]) => draw(base, [{ id: place.id, code: place.code, name: place.name }], []))
+        .catch(fail)
+    }
+    return () => {
+      live = false
+    }
+  }, [placesKey, printersParam, locationParam])
 
   useEffect(() => {
     const wanted = key.split(',').filter(Boolean)
@@ -109,8 +161,12 @@ export function LabelsPage() {
     }
   }
 
-  const ready = !tooMany && loaded?.key === key ? loaded : null
+  const placeMode = placesKey !== ''
+  const ready = !placeMode && !tooMany && loaded?.key === key ? loaded : null
   const labels = ready?.labels ?? []
+  const readyPlaces = placeMode && places?.key === placesKey ? places : null
+  const placeLabels = readyPlaces?.labels ?? []
+  const count = placeMode ? placeLabels.length : labels.length
 
   return (
     <div className="h-full overflow-y-auto">
@@ -121,10 +177,15 @@ export function LabelsPage() {
         </Link>
         <header className="mb-5 flex flex-wrap items-center gap-3">
           <div className="min-w-0 flex-1">
-            <h1 className="text-lg font-semibold tracking-tight">Spool labels</h1>
+            <h1 className="text-lg font-semibold tracking-tight">{placeMode ? 'Printer labels' : 'Spool labels'}</h1>
             <p className="text-[13px] text-muted-foreground">
-              {tooMany ? '' : ids.length === 0 ? 'No spools chosen.' : `${labels.length} of ${ids.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`}
+              {placeMode
+                ? readyPlaces
+                  ? `${placeLabels.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`
+                  : 'Loading labels…'
+                : tooMany ? '' : ids.length === 0 ? 'No spools chosen.' : `${labels.length} of ${ids.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`}
             </p>
+            {readyPlaces && <p className="text-[13px] text-muted-foreground">{`Labels open ${readyPlaces.base}`}</p>}
           </div>
           <RadioGroup value={layout} onValueChange={choose} aria-label="Layout" className="flex w-auto items-center gap-4">
             <span className="flex items-center gap-1.5">
@@ -140,7 +201,7 @@ export function LabelsPage() {
               </FieldLabel>
             </span>
           </RadioGroup>
-          <Button type="button" size="sm" disabled={labels.length === 0} onClick={() => window.print()}>
+          <Button type="button" size="sm" disabled={count === 0} onClick={() => window.print()}>
             <PrinterIcon /> Print
           </Button>
         </header>
@@ -148,6 +209,11 @@ export function LabelsPage() {
         {tooMany && (
           <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
             Print at most {MAX_LABELS} labels at a time
+          </p>
+        )}
+        {readyPlaces && readyPlaces.failed.length > 0 && (
+          <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
+            The labels for {readyPlaces.failed.join(', ')} could not be read
           </p>
         )}
         {ready && ready.failed.length > 0 && (
@@ -162,6 +228,11 @@ export function LabelsPage() {
               <Label spool={spool} svg={svg} />
             </div>
           ))}
+          {placeLabels.map((one) => (
+            <div key={one.id} className="outline outline-1 outline-dashed outline-border">
+              <LocationLabel code={one.code} name={one.name} svg={one.svg} />
+            </div>
+          ))}
         </div>
       </div>
       {createPortal(
@@ -169,6 +240,11 @@ export function LabelsPage() {
           {labels.map(({ spool, svg }) => (
             <div key={spool.id}>
               <Label spool={spool} svg={svg} testId="print-label" />
+            </div>
+          ))}
+          {placeLabels.map((one) => (
+            <div key={one.id}>
+              <LocationLabel code={one.code} name={one.name} svg={one.svg} testId="print-label" />
             </div>
           ))}
         </div>,

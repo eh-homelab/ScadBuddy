@@ -1,6 +1,6 @@
-import { PlusIcon } from 'lucide-react'
+import { PlusIcon, PrinterIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import {
   listCatalog,
@@ -218,9 +218,14 @@ export function LocationsTab() {
           />
           Show archived
         </label>
-        <Button type="button" size="sm" disabled={!data} onClick={() => open()}>
-          <PlusIcon /> Add a place
-        </Button>
+        <div className="flex flex-wrap items-center gap-3">
+          <Link to="/filament/labels?printers=all" className="inline-flex items-center gap-1 text-[13px] underline">
+            <PrinterIcon className="size-3.5" /> Print printer labels
+          </Link>
+          <Button type="button" size="sm" disabled={!data} onClick={() => open()}>
+            <PlusIcon /> Add a place
+          </Button>
+        </div>
       </div>
       <p role="status" className="min-h-5 text-[13px] text-muted-foreground">
         {notice}

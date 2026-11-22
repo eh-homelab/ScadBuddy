@@ -14,6 +14,11 @@ const place = async (id: string) => {
 }
 
 describe('the Locations tab', () => {
+  it('links to the printer labels', async () => {
+    renderPage(<LocationsTab />)
+    expect(await screen.findByRole('link', { name: 'Print printer labels' })).toHaveAttribute('href', '/filament/labels?printers=all')
+  })
+
   it('shows the tree with each place spool count and its spools', async () => {
     renderPage(<LocationsTab />)
     await tree()
