@@ -202,7 +202,7 @@ def search_library(
     ignored: none is counted hidden."""
     terms = _words(query).split()
     wanted = {kind.lower() for kind in types} if types is not None else set()
-    found = LibrarySearch(query=query, all=show_all)
+    found = LibrarySearch(query=query, all=show_all and types is None)
     if not terms:
         return found
     by_id = {folder.id: folder for folder in folders}
