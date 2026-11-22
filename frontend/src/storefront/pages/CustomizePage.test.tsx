@@ -265,7 +265,7 @@ describe('CustomizePage', () => {
   it('renders choices again after a change and back once their render ended as too slow (#7010 review)', async () => {
     server.use(http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)))
     const sent = renders()
-    const { user } = show(CHARM_ID, { ...FAST, limitMs: 200 }, 1_000)
+    const { user } = show(CHARM_ID, { ...FAST, limitMs: 100 }, 1_000)
     await screen.findByRole('alert')
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))
     await user.click(await screen.findByRole('radio', { name: 'Rust' }))
@@ -274,12 +274,12 @@ describe('CustomizePage', () => {
     await user.click(screen.getByRole('button', { name: /Body colour/ }))
     await user.click(await screen.findByRole('radio', { name: 'Teal' }))
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument(), { timeout: 2_000 })
-    await new Promise((resolve) => setTimeout(resolve, 300))
     await user.click(screen.getByRole('button', { name: /Body colour/ }))
     await user.click(await screen.findByRole('radio', { name: 'Rust' }))
     await waitFor(() => expect(sent).toHaveLength(3), { timeout: 2_000 })
     expect(sent[2]).toEqual(sent[1])
-  })
+    // The two one-second debounces take about 2.5 s; the 15 s timeout leaves room on a loaded machine.
+  }, 15_000)
 
   it('renders refused choices again after a change and back inside the debounce (#7000 review)', async () => {
     const sent = renders()
