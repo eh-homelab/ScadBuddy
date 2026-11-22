@@ -82,9 +82,14 @@ Fetching presets is the `ProfileFetch` workflow on the profile-fetch worker
 - Printer places: a printer has its own place (`filament_locations.printer_root`, kind
   "Printer"). Its AMS units and external holder hang under it
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
-  label request makes the place when it is missing.
+  label request makes the place when it is missing, and so does a tray capture whose printer
+  has a unit place or external holder with no live parent (`LocationStore.hang_orphans_on`).
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
-  with `?locations=` and printers with `?printers=`. Spool labels keep `scadbuddy:spool:<id>`.
+  with `?locations=` and printers with `?printers=` (one printer's from its place page, every
+  printer's from the Locations tab). The printer labels first make the place of each AMS unit,
+  slot and external holder the printer's latest report lists; a printer with no such report is
+  named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
+  `/filament/locations/<id>`.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
   `filament_printer_labels`.
 

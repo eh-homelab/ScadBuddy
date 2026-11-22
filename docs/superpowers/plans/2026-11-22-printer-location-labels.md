@@ -215,6 +215,7 @@ Same commands. Expected: PASS.
   - `LocationStore.detail(self, location_id: UUID) -> LocationDetail | None`. Route `GET /filament/locations/{location_id}` → `LocationDetail`, 404 when none.
   - `PrinterLabel(BaseModel)`: `location_id: UUID`, `code: str`, `name: str`, `depth: int` (0 printer, 1 unit or external holder, 2 slot). `PrinterLabels(BaseModel)`: `base_url: str | None`, `labels: list[PrinterLabel]`.
   - Route `POST /filament/printer-labels`, body `{printer_ids: list[UUID] | None}` (null means every printer), → `PrinterLabels`: for each printer by name, `ensure_printer_on`, then its unarchived places in tree order (unit by `ams_id`, slot by `tray_id`, the external holder last). 422 for an unknown printer id. It is a POST because it may make the printer's place.
+  - As built (final review): before it lists, the route makes the place of each AMS unit, slot and external holder in the printer's latest `printer_reports` row; `PrinterLabels.no_report` names the printers with no report that lists one. The route is in `api/filament.py` `NOT_NUDGED`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -357,6 +358,7 @@ Expected: FAIL.
 - [ ] **Step 3: Implement the tools and write the notes**
 
 `filament_printer_labels` is `read` even though its route may make a printer's place: the place is derived data the next capture would make anyway. State that in the tool's description.
+As built (final review): capture makes the printer's place on its next tray capture only when a unit place or the external holder has no live parent (`LocationStore.hang_orphans_on`), and the route also makes each reported unit, slot and external holder; the description says both.
 
 - [ ] **Step 4: Run the agent checks**
 

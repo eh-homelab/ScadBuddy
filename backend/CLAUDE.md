@@ -873,7 +873,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py` and after a
   settings save that changes `filament_sync`; capture, `sync_ams_weights` and the worker's
   CRUD `filament` writes are not nudged and reach Bambuddy on the timer, and the Bambuddy
-  import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push. The print worker
+  import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push, and the printer
+  labels (#6955, also in `NOT_NUDGED`) make only places capture makes too. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
   and `POST /filament/sync/run` (`api/filament.py`) serve people and the agent. After the
@@ -992,16 +993,20 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   root per printer. `LocationStore.ensure_printer_on` makes or finds the root (409
   `no_printer_kind` through `NoPrinterKindError` when no kind has the flag) and moves the
   printer's AMS unit places and external holder under it when they have no parent or an archived
-  one. A "beside the printer" place keeps `printer_root` false and is not touched. In
+  one. Capture calls it through `_printer_parent` when it makes a unit or the external holder, and
+  `reconcile` calls `hang_orphans_on` first, which calls it when a unit place or the external
+  holder has no live parent, so an older install gets its root on its next tray capture. A
+  "beside the printer" place keeps `printer_root` false and is not touched. In
   `repoint_printer_locations` (the printer merge) a root clashes only with a root.
   `filament/labels.py`: `label_base_url` (setting `filament_label_base_url`, else `public_url`
   reduced to its https origin, else `None`) and `printer_labels` (root, units with slots, external
-  holder; not "beside" places). Routes in `api/filament.py`: `GET /filament/locations/{id}`
-  (`LocationDetail`) and `POST /filament/printer-labels` (a POST because it may make a root; 422
-  for an unknown printer). Agent tools: `filament_code_resolve`, `filament_location_get`,
+  holder; not "beside" places; it first makes each unit, slot and external holder the printer's
+  latest `printer_reports` row lists, and answers `no_report` for a printer with none). Routes in `api/filament.py`: `GET /filament/locations/{id}`
+  (`LocationDetail`) and `POST /filament/printer-labels` (a POST because it may make places; 422
+  for an unknown printer; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
   `filament_printer_labels` (all `read`).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
-  (`L-12`, `S-142`; any case, dash optional, number 1 to 2^31-1), `resolve.py` `PREFIXES`
+  (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
   (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,
   archived}`; an archived row still resolves). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
   404 `code_unknown`). A new prefix is one entry in `PREFIXES`.

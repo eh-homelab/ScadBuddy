@@ -70,10 +70,14 @@ these labels, so a label printed now must stay valid.
    flag `filament_location_kinds.printer` (seeded on "Printer"), not found by name. One
    unarchived root per printer (unique index). A "beside the printer" place is not a root. A
    unit place whose parent is empty or archived is moved under the root. In the printer merge
-   a root clashes only with a root. The labels route calls `ensure_printer_on`, and so does capture
-   when it makes an AMS unit or the external holder (`_printer_parent`; a missing printer kind
-   leaves the place with no parent and never fails a capture). A printer with no AMS trays yet
-   gets its place only from the labels route.
+   a root clashes only with a root. The labels route calls `ensure_printer_on`. So does capture
+   (`filament/locations.py` `_printer_parent`; a missing printer kind leaves the place with no
+   parent and never fails a capture): when it makes an AMS unit or the external holder, and on
+   each tray capture (`filament/capture.py` `reconcile`, a tray change or the refresh's
+   backstop) whose printer has a unit place or external holder with no live parent
+   (`LocationStore.hang_orphans_on`). So an install made before printer places gets its root on
+   its next tray capture. A printer with no AMS unit or external holder place yet gets its place
+   only from the labels route.
 3. **Code format.** `<prefix>-<number>`, prefixes upper case. The parser accepts any case,
    with or without the dash: `l12`, `L12`, `L-12`. This piece registers `L` (location) and
    `S` (spool). A registry maps a prefix to a lookup and a page, so later prefixes (types,
@@ -97,6 +101,12 @@ these labels, so a label printed now must stay valid.
    50 x 25 mm size and layouts as spool labels. The QR payload is longer than the spool
    payload, so its version and module size are checked against the 50 x 25 mm label, and
    the module stays at least 0.5 mm.
+   As built: the labels route first makes the place of each AMS unit, slot and external holder
+   the printer's latest report (`printer_reports`) lists, so a slot that never held a spool
+   gets a label. A printer with no report that lists a unit or a holder gets no invented slot;
+   the answer's `no_report` names it and the page says so. A printer's own place page links
+   "Print this printer's labels" (`?printers=<printer_id>`); the Locations tab links every
+   printer (`?printers=all`).
 9. **Agent.** A tool to resolve a code, and the location page's read, named like the
    existing filament tools.
 
@@ -104,4 +114,7 @@ these labels, so a label printed now must stay valid.
 
 - The exact layout of the location page at phone width.
 - Whether the location page also becomes the target of the Locations tab's rows.
+  As built: it does. `filamentLinks.location` and the agent's `location` `ui_path` are
+  `/filament/locations/<id>` (`test-fixtures/filament/ui-paths.json`); the spools in a place
+  are `filamentLinks.locationSpools` (`/filament/spools?place=<id>`).
 - Test split between the migration, the store, the resolver and the page.
