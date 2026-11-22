@@ -12,15 +12,15 @@ import type { Context, Hono } from 'hono'
 import type { AuditLog } from '../audit/log.js'
 import {
   authenticate,
-  DEFAULT_MCP_AUTH,
   type McpAuthSettings,
+  mcpAuthResolver,
   mcpTransportProblem,
   oidcContext,
   type OidcRuntime,
 } from '../auth/authenticate.js'
 import { type OidcProvider, protectedResourceMetadata, RESOURCE_METADATA_PATH } from '../auth/oidc.js'
 import type { Principal } from '../auth/principal.js'
-import { FailClosedTokenStore, type TokenStore } from '../auth/tokens.js'
+import type { TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { requestFacts, type RemoteAddress } from '../routes/guard.js'
 import { installResources } from '../resources/server.js'
@@ -163,8 +163,6 @@ function authInfoFor(principal: Principal): AuthInfo {
   // The token itself is not carried further; tools only need who is calling.
   return { token: '', clientId: principal.id, scopes: [...principal.tiers], extra: { principal } }
 }
-
-const FAIL_CLOSED_TOKENS = new FailClosedTokenStore()
 
 function jsonRpcError(status: number, code: number, message: string): Response {
   return Response.json({ jsonrpc: '2.0', error: { code, message }, id: null }, { status })
@@ -413,13 +411,7 @@ export function mountMcp(
   }
 
   /** The configured auth, or fail-closed bearer when it cannot be read. */
-  async function resolveAuth(): Promise<{ settings: McpAuthSettings; tokens: TokenStore }> {
-    try {
-      return { settings: await deps.authSettings(), tokens: deps.tokens }
-    } catch {
-      return { settings: { ...DEFAULT_MCP_AUTH, mode: 'bearer' }, tokens: FAIL_CLOSED_TOKENS }
-    }
-  }
+  const resolveAuth = mcpAuthResolver(deps.authSettings, deps.tokens)
 
   const oidc: OidcRuntime | undefined = deps.oidc ? { provider: deps.oidc, publicUrl: deps.publicUrl } : undefined
 

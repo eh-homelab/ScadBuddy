@@ -46,6 +46,7 @@ import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
 import { CrudPackageStore } from './plugins/packages/store.js'
+import { CrudPluginFeeds } from './plugins/feed.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
 import { CrudOAuthRows, PluginOAuth } from './plugins/oauthStore.js'
 import { CrudPluginStore, loadEnabledPlugins } from './plugins/registry.js'
@@ -1152,6 +1153,7 @@ const app = !role.http
       pluginForwarder,
       listings,
       pluginPackages,
+      pluginFeeds: new CrudPluginFeeds(crudTarget),
       packageInstaller,
       verifiedPackageReview,
       packageLoadCheck: packagesLoadCheck,

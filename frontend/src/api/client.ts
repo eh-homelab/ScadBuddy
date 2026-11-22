@@ -316,6 +316,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { PluginFeedView } from './pluginFeeds'
 import type {
   AiConnectionTest,
   AiCredentialCreate,
@@ -3629,6 +3630,9 @@ export const api = {
 
   revokeMcpToken: (id: string) =>
     request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: 'DELETE' }),
+
+  /** #6933 — the marketplace feed Claude Code installs plugins from, as Settings shows it. */
+  getPluginFeed: (feed: string) => request<PluginFeedView>(`/ai/plugin-feeds/${seg(feed)}`),
 
   /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
   getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),
