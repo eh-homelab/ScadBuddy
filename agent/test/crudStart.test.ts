@@ -135,4 +135,15 @@ describe("health's probe of the agent's data", () => {
       "health: the API answers the agent's CRUD areas again",
     ])
   })
+
+  it('is not ready while the API has not released the input-hash key, though every area is listed', async () => {
+    let released = false
+    const health = dataHealthOf({ complete: true, answers: () => Promise.resolve(true) }, () => undefined, () => released)
+    // A tool call hashes its input for the audit log after it ran: before the key it must not run.
+    expect(await health.ready()).toBe(false)
+    // The API answers, so /healthz says the data is reachable.
+    expect(await health.ping()).toBe(true)
+    released = true
+    expect(await health.ready()).toBe(true)
+  })
 })

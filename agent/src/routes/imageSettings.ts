@@ -49,7 +49,7 @@ const LongEdge = z.number().int().min(MIN_IMAGE_LONG_EDGE).max(MAX_IMAGE_LONG_ED
 const PutBody = z.strictObject({ long_edge: LongEdge })
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
 const WHAT = 'assistant image settings'
 
 /** The stored long edge, or the default for anything the PUT could not have written. */

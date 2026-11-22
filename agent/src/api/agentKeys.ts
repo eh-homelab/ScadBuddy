@@ -45,6 +45,11 @@ export class InputHashKey {
     return this.#key
   }
 
+  /** Whether the API released the key: readiness waits for it (api/dataHealth.ts, main.ts). */
+  isReleased(): boolean {
+    return this.#key !== undefined
+  }
+
   /** Asks in the background until the API releases the key; never throws. */
   start(): void {
     this.#started ??= this.#run()

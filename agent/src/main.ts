@@ -202,16 +202,19 @@ const crudFetch = withServiceCredential(globalThis.fetch, serviceCredential, con
 const crudAreas = new CrudAreas(config.backendUrl, { fetch: crudFetch, wanted: [...SECRET_AREAS, ...FORGET_AREAS, ...STORE_AREAS, ...WORKSPACE_AREAS, ...BLOB_AREAS, ...TASK_AREAS, ...GATE_AREAS, ...SESSION_AREAS, ...REST_AREAS, ...TURN_AREAS, ...RELAY_AREAS, ...START_AREAS, ...SWEEP_AREAS, ...KEY_AREAS] })
 crudAreas.start()
 const crudTarget = { baseUrl: config.backendUrl, fetch: crudFetch }
-// Health's probe of the agent's data (api/dataHealth.ts): ready once the API lists every area, and
-// up while it answers them. The sweeps run only while it is ready.
-const dataHealth = dataHealthOf(crudAreas)
-// The work this process does once at start waits for the API to list every area.
-const untilAreas = (): Promise<void> => crudAreas.whenComplete()
 // The approvals' and the audit log's input-hash key, released by the API (api/agentKeys.ts): a
-// hash asked for before then throws KeyNotReleasedError.
+// hash asked for before then throws KeyNotReleasedError. So this process is not ready until it
+// holds the key, and no Temporal worker of it polls before then (`untilKey`): an activity, a route
+// and /mcp hash a call's input after it ran. Once released it is kept for the process's life.
 const inputHashKey = new InputHashKey(crudTarget)
 inputHashKey.start()
 const hashKey = (): Buffer => inputHashKey.get()
+const untilKey = (): Promise<void> => inputHashKey.released()
+// Health's probe of the agent's data (api/dataHealth.ts): ready once the API lists every area and
+// has released the key, and up while it answers the areas. The sweeps run only while it is ready.
+const dataHealth = dataHealthOf(crudAreas, undefined, () => inputHashKey.isReleased())
+// The work this process does once at start waits for the API to list every area.
+const untilAreas = (): Promise<void> => crudAreas.whenComplete()
 // The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py), and its pending
 // input and responses beyond its writers (area `pending-input`).
 const gateRoutes = new CrudGate(crudTarget)
@@ -901,6 +904,7 @@ const versionedQueues = (): string[] => [
 const temporalWorker =
   role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
+        before: untilKey,
         address: temporal.address,
         namespace: config.temporalNamespace,
         // Polled as this replica: a poller listing names it (affinity.ts `liveHostQueues`, pluginSessions.ts).
@@ -957,6 +961,7 @@ eager.worker = temporalWorker
 const sessionWorker =
   role.sharedWorkers && temporal
     ? AgentWorker.start({
+        before: untilKey,
         address: temporal.address,
         namespace: config.temporalNamespace,
         taskQueue: SESSION_QUEUE,
@@ -979,6 +984,7 @@ const sessionWorker =
 const hostWorkers =
   temporal && operationStore && turnToolDeps
     ? startHostWorkers({
+        before: untilKey,
         address: temporal.address,
         namespace: config.temporalNamespace,
         identity: replicaIdentity(),
@@ -1225,6 +1231,8 @@ const health = role.http
         ),
       ready: () => {
         if (!temporalClient) return Promise.resolve('SCADBUDDY_TEMPORAL_ADDRESS is needed to run turns')
+        // Its workers poll only once the API has released the key (`untilKey`).
+        if (!inputHashKey.isReleased()) return Promise.resolve('the API has not released the input-hash key yet; its start log says why')
         // A worker this process never started (it lacked what its start log names) is said so, not waited for.
         const queues: PolledQueue[] = [
           { name: SESSION_QUEUE, type: 1, started: sessionWorker !== undefined },

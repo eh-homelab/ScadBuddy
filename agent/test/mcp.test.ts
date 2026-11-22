@@ -4,6 +4,7 @@ import type { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/cl
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { dataHealthOf } from '../src/api/dataHealth.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { createHarnessServer } from '../src/tools/projections.js'
@@ -383,6 +384,19 @@ describe('/mcp: fail closed', () => {
     expect(upload.status).toBe(503)
     expect(await upload.text()).toContain("the API does not serve the agent's CRUD areas yet")
     migrated = true
+    const client = await open(app)
+    expect((await client.listTools()).tools.length).toBe(ALL_TOOLS.length)
+  })
+
+  it('answers 503 while every area is listed but the API has not released the input-hash key (#5299)', async () => {
+    // The audit row's input hash is made after a tool ran: a call before the key would act, then fail.
+    let released = false
+    const database = dataHealthOf({ complete: true, answers: async () => true }, () => undefined, () => released)
+    const { app } = testApp({ settings: { mode: 'disabled' }, deps: { database } })
+    const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
+    expect(res.status).toBe(503)
+    expect(await res.text()).toContain('input-hash key')
+    released = true
     const client = await open(app)
     expect((await client.listTools()).tools.length).toBe(ALL_TOOLS.length)
   })

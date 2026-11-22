@@ -51,7 +51,7 @@ const AllowBody = z.strictObject({ rule })
 const ApproveBody = z.strictObject({ origin: z.string().max(MAX_RULE_LENGTH) })
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
 const WHAT = 'the headless browser lists'
 
 /** `text` as an http(s) origin (scheme://host[:port]), or undefined when it is not exactly one. */

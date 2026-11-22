@@ -4,7 +4,8 @@ import { CrudReadError, crudRead } from './crudRead.js'
 // The rolling deploy (#5299 D9, as #5298's workers do): a new agent may meet an API pod older
 // than an area's routes. `CrudAreas` reads `GET …/crud/agent/areas` from the start, backing off,
 // until the API lists every area the agent wants. The agent has no SQL path (#5299 step 12), so
-// until then it is not ready (`/healthz` 503). An area is listed only once all its routes are in
+// until then it is not ready: `/mcp` and the data routes answer 503 (`/healthz` stays 200). An
+// area is listed only once all its routes are in
 // (backend api/crud_areas.py `CRUD_AREAS`).
 
 /**

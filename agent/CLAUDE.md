@@ -41,7 +41,10 @@ call and logged once as "waiting for the backend".
 
 Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from the start
 (back-off 1 s doubling to 30 s) until every wanted area is listed, and until then the agent is
-not ready: `/mcp` and the data routes answer 503. `/healthz`'s `database` is `ok` once the API
+not ready: `/mcp` and the data routes answer 503. It is not ready either until the API has
+released the input-hash key (`InputHashKey.isReleased`, `dataHealthOf`'s `keyReleased`): a tool
+call hashes its input for the audit log after it ran, so no Temporal worker polls before then
+(`AgentWorker`'s `before`), and the worker's `/readyz` names the key. `/healthz`'s `database` is `ok` once the API
 lists and answers the areas (`src/api/dataHealth.ts` `dataHealthOf`, `CrudAreas.answers`),
 else `unreachable`, and `ai` then says `unavailable (the API does not answer the agent's CRUD
 areas)` (`src/aiStatus.ts`). There is no migration wait: the tests' ledger wait is

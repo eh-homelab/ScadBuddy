@@ -35,7 +35,7 @@ import { pluginTestDeps, testAndList } from './plugins.js'
 export const CAPABILITIES_PATH = '/api/v1/ai/capabilities'
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
 
 const SourceBody = z.strictObject({ enabled: z.boolean() })
 const ItemBody = z.strictObject({ access: z.enum(['off', 'read', 'write', 'outward', 'on']) })

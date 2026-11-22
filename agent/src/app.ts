@@ -241,7 +241,7 @@ export function createApp(deps: AppDeps): AgentApp {
     // `/mcp/*` matches the bare path too (Hono), so it covers the uploads (mcp/uploads.ts).
     app.use('/mcp/*', async (c, next) => {
       if (!(await database.ready())) {
-        return c.json({ error: "AI unavailable: the API does not serve the agent's CRUD areas yet" }, 503)
+        return c.json({ error: "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key" }, 503)
       }
       await next()
     })

@@ -1924,7 +1924,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   lost key cannot be decrypted and must be entered again (`/healthz` then says it was
   sealed with a different key). A rotation mounts the old key as
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the API container only, and the API re-wraps
-  every agent table at its start (`docs/ai/operating.md` §3.3).
+  every agent table at its start; then restart the agent workers too, since each agent
+  process keeps the input-hash key derived from the KEK it first read (`docs/ai/operating.md` §3.3).
 - `/healthz` reports `"ai": "enabled"` only when the API lists and answers every CRUD
   area the agent wants (`database` reads `ok`, else `unreachable`, and the agent logs each
   change, `agent/src/api/dataHealth.ts`), the API holds its key and a Claude credential is

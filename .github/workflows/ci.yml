@@ -961,7 +961,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker rm -f scadbuddy-agent-ci scadbuddy-sandbox-ci || true
+        run: docker rm -f scadbuddy-agent-ci scadbuddy-agent-ci-old-env scadbuddy-sandbox-ci || true
 
   agent-durable:
     name: Agent-durable lint, test, image

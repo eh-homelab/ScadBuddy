@@ -79,7 +79,7 @@ export function approvalView(a: ApprovalRecord): ApprovalView {
 const DecisionBody = z.strictObject({ input_hash: z.string().regex(/^[0-9a-f]{64}$/).optional() })
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
 
 export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void {
   const base = '/api/v1/ai/approvals'

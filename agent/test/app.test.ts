@@ -569,7 +569,7 @@ describe('/api/v1/ai/pending-input (#815; the store is covered in test/attention
     expect((await app.request('/api/v1/ai/pending-input/question:1', respond)).status).toBe(503)
   })
 
-  it('answers 503 before the migrations have applied (#1228)', async () => {
+  it('answers 503 while the API has not served its CRUD areas yet (#1228)', async () => {
     const app = createApp(deps({ database: { ping: up, ready: down }, sessions }))
     const read = await app.request('/api/v1/ai/pending-input', { headers: UI })
     expect(read.status).toBe(503)

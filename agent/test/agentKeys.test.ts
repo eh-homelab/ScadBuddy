@@ -33,8 +33,10 @@ describe('the input-hash key', () => {
     const logs: string[] = []
     const key = new InputHashKey({ baseUrl: BASE, fetch: api.fetch }, { firstMs: 1, maxMs: 2, log: (m) => logs.push(m) })
     expect(() => key.get()).toThrow(KeyNotReleasedError)
+    expect(key.isReleased()).toBe(false)
     key.start()
     await key.released()
+    expect(key.isReleased()).toBe(true)
     expect(key.get()).toEqual(KEY)
     expect(api.seen.map((s) => `${s.method} ${s.path}`)).toEqual(Array(3).fill('GET /keys/input-hash'))
     // Each kind of wait once, never the key.

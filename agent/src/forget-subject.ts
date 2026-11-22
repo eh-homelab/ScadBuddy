@@ -1,5 +1,5 @@
 import { Client, Connection } from '@temporalio/client'
-import { loadConfig } from './config.js'
+import { ConfigError, loadConfig } from './config.js'
 import { ExchangeCredential, withServiceCredential } from './api/serviceCredential.js'
 import { forgetRoutes, forgetSubject } from './sessions/forget.js'
 import path from 'node:path'
@@ -19,7 +19,15 @@ if (!subject) {
   console.error('usage: forget-subject <session-<uuid> | flow-<uuid>>')
   process.exit(2)
 }
-const config = loadConfig()
+let config: ReturnType<typeof loadConfig>
+try {
+  config = loadConfig()
+} catch (err) {
+  // No proof (or a bad variable) is a ConfigError naming it, as main.ts reports it.
+  if (!(err instanceof ConfigError)) throw err
+  console.error(`forget-subject: ${err.message}`)
+  process.exit(2)
+}
 const proofFile = config.serviceTokenFile ?? config.serviceBootstrapFile
 if (proofFile === undefined) {
   console.error('forget-subject: SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE is not set')

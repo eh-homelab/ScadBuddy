@@ -60,6 +60,8 @@ export type HostWorkersOptions = {
    */
   sessions?: { activities: Activities; slots: number; shutdownGraceMs?: number; shutdownForceMs?: number }
   shutdownGraceMs?: number
+  /** Awaited before either worker polls (AgentWorkerOptions.before). */
+  before?: () => Promise<void>
 }
 
 export type HostWorkers = { pinned: AgentWorker; sessions: AgentWorker | undefined; stop(): Promise<void> }
@@ -85,6 +87,7 @@ export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
     identity: workerIdentity(options.identity),
     ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),
     ...(options.shutdownGraceMs !== undefined ? { shutdownGraceMs: options.shutdownGraceMs } : {}),
+    ...(options.before ? { before: options.before } : {}),
   }
   const pinned = AgentWorker.start({
     ...common,

@@ -455,11 +455,18 @@ kubectl -n scadbuddy create secret generic scadbuddy-kek \
 
 Spec §9: "Rotating it re-wraps the data keys only." The API does all of it
 ([`backend/scadbuddy/agent_data/rotation.py`](../../backend/scadbuddy/agent_data/rotation.py),
-called by `main._rotate_agent_secrets`); the agent re-wraps nothing and needs no restart.
+called by `main._rotate_agent_secrets`); the agent re-wraps nothing. It does keep the
+approvals' input-hash key, which the API derives from its current KEK, for its process's life
+(`agent/src/api/agentKeys.ts` `InputHashKey`), so restart every agent process after step 2.
 
 1. Generate a new key file (§3.1).
 2. Mount the **new** key as `SCADBUDDY_SECRET_KEY_FILE` and the **old** one as
-   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the **API container**, then restart it.
+   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` on the **API container**, then restart it. Then
+   restart the agent workers (`kubectl -n bambuddy rollout restart
+   deploy/scadbuddy-agent-worker`); the sidecar restarts with the API's pod. Until every
+   agent process has restarted, replicas hash with different keys, and an `/mcp` action
+   prepared on one is refused at `confirm_action` on another. An action prepared before the
+   rotation is refused the same way and must be asked for again.
 3. After its migrations the API re-wraps, for each row whose `kek_id` is the old key's,
    only the data key: `ai_credentials`, `ai_payload_keys`, `ai_push_vapid`,
    `ai_push_subscriptions`, `ai_notify_channels`, `ai_plugins`, `ai_plugin_oauth` (the
