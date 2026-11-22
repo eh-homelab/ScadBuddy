@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.filament.bb_sync_models import SyncPassResult
 from scadbuddy.filament.bb_sync_results import record_pass
@@ -180,17 +181,23 @@ def test_the_route_refuses_a_cursor_no_page_gave(client: TestClient) -> None:
     assert empty.status_code == 200 and empty.json() == {"passes": [], "next_cursor": None}
 
 
-#: The housekeeping workflow's activity sweep prunes these rows too
-#: (`main._sweep_activity_logged`), with the stored setting or the 30-day default, and it
-#: can run in the middle of a test (#6962). These tests keep their rows out of its reach.
-SWEEP_KEEPS_DAYS = 3650
+@pytest.fixture
+def no_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The housekeeping workflow's activity sweep prunes these rows too, and it can run in
+    the middle of a test (#6962, #6966). Its activity calls `main._sweep_activity_logged`
+    by name at each run, so this no-op, set before `client` builds the app, keeps every
+    sweep out of the test."""
+
+    async def skip(state: AppState) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_sweep_activity_logged", skip)
 
 
-def test_the_prune_keeps_the_settings_days(client: TestClient, pg_conninfo: str) -> None:
+def test_the_prune_keeps_the_settings_days(
+    no_sweep: None, client: TestClient, pg_conninfo: str
+) -> None:
     filament = _filament(client)
-    # The 40-day row tests the default, so the sweep must keep it: it prunes by the setting.
-    put = client.put("/api/v1/settings", json={"filament_sync_pass_ttl_days": SWEEP_KEEPS_DAYS})
-    assert put.status_code == 200
     fresh, ten, forty = _pass(), _pass(), _pass()
     for result in (fresh, ten, forty):
         record_pass(filament, result)
@@ -204,15 +211,14 @@ def test_the_prune_keeps_the_settings_days(client: TestClient, pg_conninfo: str)
     assert [row["id"] for row in _rows(pg_conninfo)] == [fresh.pass_id]
 
 
-def test_the_prune_is_bounded(client: TestClient, pg_conninfo: str) -> None:
+def test_the_prune_is_bounded(no_sweep: None, client: TestClient, pg_conninfo: str) -> None:
     filament = _filament(client)
     old = [_pass() for _ in range(3)]
     for result in old:
         record_pass(filament, result)
-        # Younger than any TTL the sweep uses, older than the one given here.
-        _age(pg_conninfo, result.pass_id, 10)  # type: ignore[arg-type]
-    assert filament.sync_passes.prune(5, batch=2) == 2
-    assert filament.sync_passes.prune(5, batch=2) == 1
+        _age(pg_conninfo, result.pass_id, 31)  # type: ignore[arg-type]
+    assert filament.sync_passes.prune(None, batch=2) == 2
+    assert filament.sync_passes.prune(None, batch=2) == 1
     assert _rows(pg_conninfo) == []
 
 
