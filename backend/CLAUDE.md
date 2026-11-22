@@ -447,7 +447,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `agent_data/plugins.py`, which also re-wraps them in the rotation; a token refresh is
   stored only while the lease `plugin-oauth:<plugin>` holds) and `api/crud_agent_packages.py`
   (area `plugin-packages`: each write with `agent_data/packages.py` `prune_stale_rows`, the
-  agent's `pruneStaleRows`). `agent_data/access.py` holds the access writes they share.
+  agent's `pruneStaleRows`; area `package-mirrors`, #6935: an archive or npm pin's file kept
+  as the blob `plugin-mirror-<sha256>` by `agent_data/package_mirrors.py`, a bytes pin
+  stored only while its mirror is held, and each package write releasing the holds no pin
+  names after a day). `agent_data/access.py` holds the access writes they share.
   Tests `tests/api/test_crud_agent_access.py`, `test_crud_agent_plugins.py`,
   `test_crud_agent_packages.py`.
 - The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over

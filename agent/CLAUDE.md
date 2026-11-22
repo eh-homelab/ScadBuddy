@@ -653,13 +653,20 @@ opens every one and seals it again byte for byte).
     frontend's `listingDraft.ts` tested against `test-fixtures/storefront/sell-draft-vectors.json`;
     a colour the customer can choose is taken out of the title) and
     `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
-  - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
+  - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry, or,
+    #6935, a bare `marketplace.json` URL's entry, an archive or an npm package) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
-    `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);
+    `src/routes/pluginPackages.ts`). Postgres holds the pin (a commit, or for an archive
+    or npm package the file's sha256, `pin_kind` `bytes`, plus the content hash);
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
-    re-fetched from the pin. Install stores the pin unapproved; approving needs the
-    exact commit and hash. `vet.ts` adds rules on top of `harness/plugins.ts`. Tests
-    use local git repos (`test/support/gitRepo.ts`). Their MCP servers' http ones go
+    re-fetched from the pin: a commit from git, a bytes pin from its mirror in the
+    API's area `package-mirrors` (`mirror.ts`), never upstream. Downloads go through
+    the egress check at every hop (`download.ts`), archives are unpacked by
+    `unpack.ts` (no links, devices or paths out). Install stores the pin unapproved;
+    approving needs the exact commit (or `bytes_sha256`) and hash. `vet.ts` adds rules
+    on top of `harness/plugins.ts`. Tests use local git repos (`test/support/gitRepo.ts`),
+    and archives built byte by byte (`test/support/archives.ts`) on a local HTTP server
+    (`test/pluginPackagesBytes.test.ts`). Their MCP servers' http ones go
     through the forwarder (`plugins/packages/mcp.ts`), and on Temporal each call is a
     `turn:<server>__<tool>` ToolCall.
   - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,
