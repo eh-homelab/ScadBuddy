@@ -653,18 +653,37 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     listing = await asyncio.to_thread(orders.listings.get, owned.listing_id)
     if listing is None or listing.snapshot is None:
         return NO_PRICE
+    return await estimate_of(
+        state, listing, job, owned.colours, owned.material, variant_key=owned.variant_key
+    )
+
+
+async def estimate_of(
+    state: AppState,
+    listing: Listing,
+    job: Job,
+    colours: Mapping[int, str],
+    material: str | None,
+    *,
+    variant_key: str | None,
+) -> StoreEstimate:
+    """`render_estimate` of the done ``job``, a render of the published ``listing`` with
+    ``colours`` and ``material``, whose choices have ``variant_key``. The shop's warming of
+    a listing's prices (#6922, `prepare.py` `warm`) asks the same, so it starts its slices
+    through the visitor's own path. ``pending`` with no ``price_key`` while its files are
+    fetched."""
     if job.slug != listing.slug or job.model_version != listing.commit:
         # The shop moved the listing since this render: the page renders again.
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()
-    digest, slots = await variant_of(state, listing, job, owned.colours, owned.material)
+    digest, slots = await variant_of(state, listing, job, colours, material)
     return await slice_estimate(
         state,
         reference=reference_of(listing, job),
         model_sha256=digest,
         filaments=slots,
-        variant_key=owned.variant_key,
+        variant_key=variant_key,
         listing_id=listing.id,
     )
 

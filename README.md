@@ -287,6 +287,11 @@ on shutdown.
   only. The flow chooses no spools, so on the native (LAN) path, where the run's spools
   are the request's, each print is refused and the flow asks a person to print the item
   from the order's page);
+  `SCADBUDDY_STOREFRONT_WARM_PRICES` (default `true`: publish renders a listing's default
+  variant and starts its storefront slice price, and Prepare colours starts each prepared
+  variant's once its renders settle, one at a time under `storefront_slices_concurrent`,
+  so the shop shows a firm price before a visitor asks, #6922; `false` starts neither, and
+  a visitor's read still starts the slice; read from the environment only);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
