@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Filaments | 3D Filament Profiles (replica)</title>
+  </head>
+  <body>
+    <!-- The layout of /filaments?q= as measured on 2026-11-22 (#7025): a card per filament,
+         then a table whose header names the columns, and whose Color cell links the
+         filament. Both list the same filaments. -->
+    <main>
+      <div id="cards"></div>
+      <table>
+        <thead><tr id="head"></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </main>
+    <script>
+      const rows = __ROWS__;
+      const columns = __COLUMNS__;
+      const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const head = document.getElementById("head");
+      for (const column of columns) {
+        const th = document.createElement("th");
+        th.innerHTML = `<a href="#"><span>${column}</span></a>`;
+        head.appendChild(th);
+      }
+      const cards = document.getElementById("cards");
+      const body = document.getElementById("rows");
+      for (const row of rows) {
+        const base = `/filaments/${slug(row.brand)}`;
+        const swatch = row.hexes
+          .map((hex) => `<div data-own-click="" style="background:${hex}"></div><span>${hex}</span>`)
+          .join("");
+        cards.insertAdjacentHTML(
+          "beforeend",
+          `<div data-slot="card"><a href="${base}">${row.brand}</a><span>•</span>` +
+            `<a href="${base}/${slug(row.material)}">${row.material}</a><span>•</span>` +
+            `<a href="${base}/${slug(row.material)}/${slug(row.type)}">${row.type}</a>` +
+            `<div><a href="/filament/details/${row.id}">${row.name}</a></div>${swatch}` +
+            `<a href="/filament/td/${row.id}">TD</a></div>`,
+        );
+        const cell = {
+          Brand: `<a href="${base}">${row.brand}</a>`,
+          Material: `<a href="${base}/${slug(row.material)}">${row.material}</a>`,
+          Type: `<a href="${base}/${slug(row.material)}/${slug(row.type)}">${row.type}</a>`,
+          Color: `<a href="/filament/details/${row.id}">${row.name}<!-- --> </a>`,
+          RGB: `<div>${swatch}</div>`,
+          TD: `<a href="/filament/td/${row.id}"><span></span></a>`,
+          Retailer: "—",
+          Actions: `<button title="Add to Wishlist">Add to Wishlist</button>`,
+        };
+        const tr = document.createElement("tr");
+        tr.innerHTML = columns.map((column) => `<td>${cell[column] ?? ""}</td>`).join("");
+        body.appendChild(tr);
+      }
+    </script>
+  </body>
+</html>

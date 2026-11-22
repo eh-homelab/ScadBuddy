@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Final, Literal, Protocol
 
+from scadbuddy.profile_fetch.wire import CreateAnswer, CreateAsk, SearchAnswer, SearchAsk
+
 Kind = Literal[
     "login_failed",
     "tdfp_not_found",
@@ -21,6 +23,8 @@ Kind = Literal[
     "file_too_large",
     "timeout",
     "browser",
+    "no_defaults",
+    "not_created",
 ]
 
 _MESSAGES: Final[dict[str, str]] = {
@@ -31,6 +35,11 @@ _MESSAGES: Final[dict[str, str]] = {
     "file_too_large": "the exported file is larger than 512 KiB",
     "timeout": "3dfilamentprofiles.com did not answer in time",
     "browser": "the browser failed on 3dfilamentprofiles.com",
+    "no_defaults": "3dfilamentprofiles.com has no defaults for that brand, material and type",
+    "not_created": (
+        "Save Filament did not open the new filament's page: it may or may not exist on"
+        " 3dfilamentprofiles.com; search before trying again"
+    ),
 }
 
 
@@ -69,6 +78,10 @@ class Site(Protocol):
     async def ensure_in_my_spools(self, tdfp_id: int) -> None: ...
 
     async def export(self, tdfp_id: int, printer_model: str, nozzle: str) -> ExportedFile: ...
+
+    async def search(self, ask: SearchAsk) -> SearchAnswer: ...
+
+    async def create(self, ask: CreateAsk) -> CreateAnswer: ...
 
 
 class SiteHolder:
