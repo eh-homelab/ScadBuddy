@@ -50,7 +50,7 @@ Today's code still breaks the rule: two processes hold a Postgres secret (the AP
 agent-durable). The agent sidecar and the agent worker have no SQL client and read no KEK
 (#5299 step 12): they reach the `ai_*` tables only through the API's CRUD routes, need a
 service-credential proof to start, and ignore `SCADBUDDY_DATABASE_URL` and
-`SCADBUDDY_SECRET_KEY_FILE` with a warning. The API revokes their old role
+`SCADBUDDY_SECRET_KEY_FILE` (and `_PREVIOUS_FILE`) with a warning. The API revokes their old role
 `scadbuddy_agent` at every start. The render, print and projects workers hold none: #5298 is done,
 and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` role and no
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
