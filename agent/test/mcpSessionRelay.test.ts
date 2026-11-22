@@ -94,13 +94,19 @@ describe('the /mcp relay counts a peer silent only while the channel carries its
     for (const relay of relays.splice(0)) relay.close()
   })
 
-  /** Owner A (listener 0) and relaying replica B (listener 1) on one channel; A's run waits for `answer`. */
+  /**
+   * Owner A (listener 0) and relaying replica B (listener 1) on one channel; A's run waits for
+   * `answer`. `reconnect.a()` and `reconnect.b()` signal a gap in that replica's change stream.
+   */
   function pair() {
     const channel = new Channel()
     const rows = new MemoryRows(channel)
     const options = { ackTimeoutMs: 1_000, beatMs: BEAT_MS, log: () => {} }
-    const a = new SharedMcpSessionRelay(rows, { ...options, listen: (_c, f) => channel.listen(f) })
-    const b = new SharedMcpSessionRelay(rows, { ...options, listen: (_c, f) => channel.listen(f) })
+    const gapsA: (() => void)[] = []
+    const gapsB: (() => void)[] = []
+    const a = new SharedMcpSessionRelay(rows, { ...options, listen: (_c, f) => channel.listen(f), onReconnect: (f) => gapsA.push(f) })
+    const b = new SharedMcpSessionRelay(rows, { ...options, listen: (_c, f) => channel.listen(f), onReconnect: (f) => gapsB.push(f) })
+    const reconnect = { a: () => gapsA.forEach((f) => f()), b: () => gapsB.forEach((f) => f()) }
     relays.push(a, b)
     let answer!: () => void
     const answered = new Promise<void>((r) => (answer = r))
@@ -114,7 +120,7 @@ describe('the /mcp relay counts a peer silent only while the channel carries its
     }
     a.serve(owner)
     const beatsFrom = (relay: SharedMcpSessionRelay) => channel.sent.filter((h) => h.t === 'beat' && h.to !== relay.replica).length
-    return { channel, rows, a, b, answer, isRunning: () => running, beatsFrom }
+    return { channel, rows, a, b, answer, isRunning: () => running, beatsFrom, reconnect }
   }
 
   it('keeps a live owner while the channel delivers nothing, however many beats that lasts', async () => {
@@ -131,6 +137,7 @@ describe('the /mcp relay counts a peer silent only while the channel carries its
     const sentA = beatsFrom(a)
     const sentB = beatsFrom(b)
     await until(() => settled || (beatsFrom(a) >= sentA + 12 && beatsFrom(b) >= sentB + 12))
+    expect(settled).toBe(false)
     channel.letGo()
     answer()
     const res = (await pending)!
@@ -169,6 +176,71 @@ describe('the /mcp relay counts a peer silent only while the channel carries its
       return listener === 0 && header.t === 'beat' && header.to === a.replica
     }
     const pending = b.forward('hash', PRINCIPAL, REQUEST, new AbortController().signal)
+    const res = (await pending)!
+    expect(aborted).toBe(true)
+    expect(res.status).toBe(200)
+    await expect(res.text()).rejects.toThrow(/failed while answering/)
+  })
+
+  it('ends a relayed answer with an error when the change stream had a gap that lost its messages', async () => {
+    const { channel, rows, a, b, reconnect } = pair()
+    await rows.register('hash', a.replica)
+    let body!: ReadableStreamDefaultController<Uint8Array>
+    let aborted = false
+    a.serve({
+      run: async (_hash, _principal, _request, signal) => {
+        signal.addEventListener('abort', () => (aborted = true), { once: true })
+        const stream = new ReadableStream<Uint8Array>({ start: (c) => void (body = c) })
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
+      },
+    })
+    const encoder = new TextEncoder()
+    const res = (await b.forward('hash', PRINCIPAL, REQUEST, new AbortController().signal))!
+    expect(res.status).toBe(200)
+    const reader = res.body!.getReader()
+    body.enqueue(encoder.encode('one'))
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe('one')
+    // B's change stream drops: the next chunk is NOTIFY-only, so nothing will ever replay it.
+    channel.drop = (_payload, listener) => listener === 1
+    body.enqueue(encoder.encode('two'))
+    await until(() => channel.sent.some((h) => h.t === 'chunk' && (h as { text?: string }).text === 'two'))
+    channel.drop = () => false
+    reconnect.b()
+    body.enqueue(encoder.encode('three'))
+    body.close()
+    let read = ''
+    const rest = (async () => {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) return read
+        read += new TextDecoder().decode(value)
+      }
+    })()
+    await expect(rest).rejects.toThrow(/lost/)
+    expect(read).toBe('')
+    // A gap is not a dead owner: its session stays in the directory.
+    expect(rows.owners.get('hash')).toBe(a.replica)
+    // The owner is told to stop, so a held GET stream does not refuse the client's reconnect.
+    await until(() => aborted)
+  })
+
+  it('stops the answers it runs as owner when its own change stream had a gap', async () => {
+    const { rows, a, b, reconnect } = pair()
+    await rows.register('hash', a.replica)
+    let running = false
+    let aborted = false
+    a.serve({
+      run: async (_hash, _principal, _request, signal) => {
+        running = true
+        await new Promise<void>((r) => signal.addEventListener('abort', () => r(), { once: true }))
+        aborted = true
+        return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
+      },
+    })
+    const pending = b.forward('hash', PRINCIPAL, REQUEST, new AbortController().signal)
+    await until(() => running)
+    // A may have missed B's cancel in the gap: it stops rather than hold the answer for nobody.
+    reconnect.a()
     const res = (await pending)!
     expect(aborted).toBe(true)
     expect(res.status).toBe(200)

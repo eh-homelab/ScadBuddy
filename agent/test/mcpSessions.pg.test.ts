@@ -148,6 +148,7 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
     const rows = over === 'sql' ? sql : new CrudRelayRows({ baseUrl: BACKEND, fetch: crudRoutes(sql) })
     const relay = new Relay(rows, {
       listen: (c, f) => listener.listenAlso(c, (payload) => (hears(payload, relay.replica) ? f(payload) : undefined)),
+      onReconnect: (f) => listener.onReconnect(f),
       ackTimeoutMs: liveness.ackTimeoutMs,
       beatMs: liveness.beatMs,
       log,

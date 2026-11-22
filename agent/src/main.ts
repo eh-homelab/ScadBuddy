@@ -318,7 +318,12 @@ const tabRelay = new TemporalTabRelay({
 void tabRelay.releaseAll()
 // /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), heard on the
 // change stream's `scadbuddy_mcp`. Its directory and messages are area `mcp-relay` (#5299 step 11).
-const mcpRelay = role.http ? new SharedMcpSessionRelay(new CrudRelayRows(crudTarget), { listen: (c, f) => events.listenAlso(c, f) }) : undefined
+const mcpRelay = role.http
+  ? new SharedMcpSessionRelay(new CrudRelayRows(crudTarget), {
+      listen: (c, f) => events.listenAlso(c, f),
+      onReconnect: (f) => events.onReconnect(f),
+    })
+  : undefined
 // #4975 phase 5 (spec 2026-11-01 §5.6): the signed-in person on /api/v1/ai/*, from the
 // backend's area `auth-sessions`; a revocation the backend publishes drops its cache.
 const browserSessions = role.http ? new BrowserSessions(new CrudSessionLookup(crudTarget)) : undefined
