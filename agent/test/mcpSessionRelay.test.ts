@@ -130,13 +130,15 @@ describe('the /mcp relay counts a peer silent only while the channel carries its
     let settled = false
     void pending.finally(() => (settled = true))
     await until(() => isRunning() && channel.sent.some((h) => h.t === 'ack'))
-    // Nothing is delivered for many times the beats that make a peer gone: both sides tick, and
+    // Nothing is delivered for twice the 4 ticks that make a peer gone: both sides tick, and
     // both still talk, but neither hears the other or itself. (A side that took the other for
-    // gone stops beating, and B then answers 503 at once.)
+    // gone stops beating, and B then answers 503 at once.) 8 ticks, well under the 15 of
+    // LOST_AFTER_UNHEARD_TICKS (#7051): beats sent stand in for B's liveness ticks, and timer
+    // drift between the two on a loaded runner stays far inside that margin.
     channel.hold()
     const sentA = beatsFrom(a)
     const sentB = beatsFrom(b)
-    await until(() => settled || (beatsFrom(a) >= sentA + 12 && beatsFrom(b) >= sentB + 12))
+    await until(() => settled || (beatsFrom(a) >= sentA + 8 && beatsFrom(b) >= sentB + 8))
     expect(settled).toBe(false)
     channel.letGo()
     answer()

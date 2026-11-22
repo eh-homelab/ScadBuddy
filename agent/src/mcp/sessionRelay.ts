@@ -92,8 +92,9 @@ const SILENT_AFTER_BEATS = 3
  * Uncounted ticks in a row (no echo and nothing from the peer) before a relayed call ends as
  * lost (#7048): 15 ticks, 150 s at BEAT_MS. A change stream that the API refuses in a loop never
  * reconnects, so `onReconnect` never ends the call, and without this bound it waits until the
- * client gives up. Five times the silence that makes a peer gone, so a lag that ends within it
- * still answers whole (#6563; the hold test lags 12 ticks).
+ * client gives up. It is 5 × SILENT_AFTER_BEATS ticks; a peer is taken for gone at the 4th
+ * counted tick (more than SILENT_AFTER_BEATS), so a lag of up to 14 ticks still answers whole
+ * (#6563; the hold test lags 8 ticks).
  */
 const LOST_AFTER_UNHEARD_TICKS = 5 * SILENT_AFTER_BEATS
 /**
