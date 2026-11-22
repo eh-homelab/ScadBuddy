@@ -681,6 +681,28 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       '(2026-11-17-machine-rate-actuals §5): machine_rate_get already reads the log after its live task read, ' +
       'and the housekeeping sweep reads it on its Schedule (§3.7).',
   },
+  ...(
+    [
+      'POST /api/v1/hosted-plugins',
+      'GET /api/v1/hosted-plugins',
+      'GET /api/v1/hosted-plugins/{name}',
+      'PATCH /api/v1/hosted-plugins/{name}',
+      'DELETE /api/v1/hosted-plugins/{name}',
+      'GET /api/v1/hosted-plugins/{name}/files',
+      'GET /api/v1/hosted-plugins/{name}/files/{path}',
+      'PUT /api/v1/hosted-plugins/{name}/files/{path}',
+      'DELETE /api/v1/hosted-plugins/{name}/files/{path}',
+      'POST /api/v1/hosted-plugins/{name}/files/moves',
+      'GET /api/v1/hosted-plugins/{name}/draft-diff',
+      'POST /api/v1/hosted-plugins/{name}/publish',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A hosted plugin's draft and publish (#6932, spec 2026-11-21 §6.2). Its MCP tools (hosted_plugin_create, " +
+      '_list, _update, _file_read, _file_write, _file_delete and _publish) follow in #6938; until then the routes are ' +
+      "Settings' and an access token's.",
+  })),
 ]
 
 /**

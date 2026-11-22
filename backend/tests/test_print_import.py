@@ -101,6 +101,64 @@ def _op(status: str) -> Operation:
     )
 
 
+class _TwoUnderOneKey:
+    """A key with two operations of one subject (#7030): ``older`` names this print file,
+    ``newest`` does not."""
+
+    def __init__(self, older: Operation, newest: Operation) -> None:
+        self.older, self.newest = older, newest
+
+    async def find(self, key: str) -> None:
+        return None
+
+    async def keyed_operation(
+        self, kind: str, subject: str, key: str, *, sent: dict[str, Any] | None = None
+    ) -> Operation:
+        return self.newest if sent is None else self.older
+
+
+def test_a_file_named_only_by_an_older_operation_is_no_change(tmp_path: Any) -> None:
+    """#7022, #7030: the 409 names the key's newest operation, so it says the file
+    changed only when that operation named this file; an older one that did is not it."""
+    from types import SimpleNamespace
+
+    from fastapi import Response
+
+    from scadbuddy.api.mesh_models import create_mesh_model
+    from scadbuddy.operations.component import OperationCommands
+
+    older, newest = _op("succeeded"), _op("succeeded").model_copy(update={"id": "op-2"})
+    ops = OperationCommands(
+        store=_TwoUnderOneKey(older, newest),  # type: ignore[arg-type]
+        client=None,  # type: ignore[arg-type]
+        queues={},
+        kinds={"mesh_model_create": SimpleNamespace(name="mesh_model_create", unkeyed=frozenset())},  # type: ignore[dict-item]
+    )
+    catalogue = SimpleNamespace(paths=SimpleNamespace(claims=tmp_path), exists=lambda slug: True)
+    seen: list[tuple[str, bool]] = []
+
+    def changed(first: Operation, made: bool, same_file: bool) -> str:
+        seen.append((first.id, same_file))
+        return "refused"
+
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(
+            create_mesh_model(
+                ops,
+                Response(),
+                catalogue,  # type: ignore[arg-type]
+                "k1",
+                name="Trophy",
+                description="",
+                source={"kind": "upload", "claim": "c" * 64, "name": "x.3mf", "origin": {}},
+                changed=changed,
+            )
+        )
+
+    assert refused.value.status == 409
+    assert seen == [("op-2", False)]
+
+
 # --- a mesh model from a print's file (#6916) ----------------------------------------
 
 

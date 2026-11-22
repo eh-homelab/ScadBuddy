@@ -115,9 +115,13 @@ async def test_a_glow_spool_in_the_named_tray_is_judged_abrasive() -> None:
     assert view.glow_unchecked is False
 
 
-async def test_a_spool_with_no_type_in_the_named_tray_leaves_glow_unchecked() -> None:
-    """R-6876-6: the SB spool in the tray has no material, so Glow rests on nothing."""
-    spool = sb_spool(7, material=None)
+@pytest.mark.parametrize("material", [None, "", "  "])
+async def test_a_spool_with_no_type_in_the_named_tray_leaves_glow_unchecked(
+    material: str | None,
+) -> None:
+    """R-6876-6: the SB spool in the tray has no material, so Glow rests on nothing. A blank
+    material name is no type, as a missing one is."""
+    spool = sb_spool(7, material=material)
     held = TrayView(
         trays=[TrayHolder(ams_id=128, tray_id=0, spool=spool, found_by="link")], shelf=[]
     )

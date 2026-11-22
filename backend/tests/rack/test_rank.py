@@ -493,6 +493,25 @@ def test_an_sb_row_with_no_type_is_named_by_its_slot_alone() -> None:
     )
 
 
+@pytest.mark.parametrize("material", [None, "", "  "])
+def test_an_untyped_sb_spool_whose_subtype_says_glow_is_abrasive(material: str | None) -> None:
+    """R-6876-6 / Decision 37: the spool's own subtype still counts. An untyped SB spool
+    whose subtype is Glow ranks abrasive and gets no ``rack-glow-unchecked`` warning; an
+    empty material name is untyped as ``None`` is."""
+    spool = SpoolOption(
+        spool_id=12, material="", sb_number=12, sb_material=material, sb_subtype="Glow"
+    )
+    [found] = rack_groups([requirement(1)], {1: spool}, chosen={1: 12})
+    assert found.abrasive
+    assert found.unchecked == (UncheckedSlot(slot_id=1, reason="no_type", spool_id=12),)
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    assert [
+        w
+        for w in rack_warnings([found], [slot(2)], "least_used", picks, {})
+        if w.kind == "rack-glow-unchecked"
+    ] == []
+
+
 def _ams(*trays: AmsTray) -> PrinterStatus:
     return PrinterStatus(id=1, name="H2C", connected=True, ams=[AmsUnit(id=0, tray=list(trays))])
 

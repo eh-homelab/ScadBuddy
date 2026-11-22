@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -19,9 +21,11 @@ from scadbuddy.filament.profile_fetch import (
     _merge_k_values,
     clean_preset,
 )
+from scadbuddy.filament.profile_fill import _over_parent, profile_values
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.profile_fetch.wire import ExportTarget, MissingKey
+from scadbuddy.slicing.profiles import Profiles
 from tests.conftest import PgPool
 from tests.filament.test_types import _body
 
@@ -211,18 +215,61 @@ def test_clean_preset_strips_gcode_and_post_process() -> None:
         {"type": "process"},
         {"printer_settings_id": "Bambu Lab H2C 0.4 nozzle"},
         {"print_settings_id": "0.20mm Standard @BBL H2C"},
-        {"inherits": ""},
         {"inherits": ["Generic PLA"]},
         {"inherits": None},
     ],
 )
 def test_clean_preset_refuses_what_is_not_a_filament_preset(over: dict[str, object]) -> None:
-    doc = {**PRESET, **over}
-    if over.get("inherits", "x") is None:
-        del doc["inherits"]
     with pytest.raises(ApiError) as caught:
-        clean_preset(json.dumps(doc).encode())
+        clean_preset(json.dumps({**PRESET, **over}).encode())
     assert caught.value.status == 422
+
+
+@pytest.mark.parametrize("inherits", ["", None])
+def test_clean_preset_takes_a_preset_with_no_base(inherits: str | None) -> None:
+    """#7029: a flattened preset names no base, by an empty ``inherits`` or none."""
+    doc: dict[str, object] = {**PRESET, "inherits": inherits}
+    if inherits is None:
+        del doc["inherits"]
+    name, body = clean_preset(json.dumps(doc).encode())
+    assert (name, json.loads(body)) == (PRESET["name"], doc)
+
+
+#: A real 3DFP export (#7029): 3DFP id 35902, SUNLU PLA+/Pro Silk Blue, for the H2C with a
+#: 0.4 mm nozzle, exported on 2026-11-22 by `.claude/skills/filament-intake/scripts/3dfp.mjs
+#: export`. Flattened: 145 keys and ``"inherits": ""``, as all 72 files exported that day.
+REAL_EXPORT = Path(__file__).parents[1] / "fixtures" / "3dfp" / "export-35902-h2c-0.4.json"
+
+
+def _real_export() -> dict[str, Any]:
+    doc: dict[str, Any] = json.loads(REAL_EXPORT.read_text())
+    return doc
+
+
+def test_a_real_3dfp_export_is_cleaned() -> None:
+    doc = _real_export()
+    assert (doc["inherits"], doc["type"]) == ("", "filament")
+    name, body = clean_preset(REAL_EXPORT.read_bytes())
+    assert name == "SUNLU PLA+/Pro Silk BLUE (250g) (3DFP OyJb4j0L7) @H2C"
+    gcode = {"filament_start_gcode", "filament_end_gcode"}
+    assert gcode <= doc.keys()
+    assert json.loads(body) == {k: v for k, v in doc.items() if k not in gcode}
+    assert clean_preset(body) == (name, body)
+
+
+def test_a_cleaned_real_export_flattens_and_fills_a_type(tmp_path: Path) -> None:
+    """The stored preset's readers need no base: the native slicer flattens it over
+    nothing (`Profiles.flatten_over`, which reads no tree file for it), and a type is
+    filled from its own values (`profile_fill`)."""
+    _, body = clean_preset(REAL_EXPORT.read_bytes())
+    doc = json.loads(body)
+    flat = Profiles(tmp_path).flatten_over("filament", doc["name"], doc)
+    assert "inherits" not in flat
+    assert flat["filament_type"] == ["PLA"]
+    assert flat == {k: v for k, v in doc.items() if k != "inherits"}
+    values = profile_values(_over_parent(doc, None))
+    assert values["density_g_cm3"] == Decimal("1.250")
+    assert (values["nozzle_temp_min"], values["nozzle_temp_max"]) == (210, 230)
 
 
 def test_a_kept_k_value_of_the_same_number_leaves_no_note(pg_pool: PgPool) -> None:

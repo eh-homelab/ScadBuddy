@@ -407,3 +407,21 @@ def test_a_full_usage_body_stays_under_the_body_gate() -> None:
         archives=[archive] * ARCHIVES_MAX,
     )
     assert len(body.model_dump_json()) < MAX_TEXT_BODY_BYTES // 2
+
+
+def test_a_full_usage_read_is_one_body_and_a_small_part_of_the_pull_body() -> None:
+    """#7002 R-7002-1, R-7002-2: the read's most (`USAGE_READ_ROWS` rows of distinct prints,
+    every field filled) books in one body, so `_cover` sees every row of the read, and it
+    is about 1.2 MiB of the pull's body (measured), under a sixth of the gate."""
+    rows = [
+        SpoolUsage.model_validate(
+            USAGE
+            | {"id": 2**31 - i, "spool_id": 2**31, "printer_id": 2**31, "print_name": "x" * 64}
+            | {"percent_used": 100.0, "status": "completed", "weight_used": 1234.5678}
+            | {"created_at": datetime(2026, 11, 14, 10, 0, 0, 1 + i).isoformat()}
+        )
+        for i in range(bb_pull_run.USAGE_READ_ROWS)
+    ]
+    assert len(bb_pull_run.usage_bodies(rows, [], bb_pull_run.USAGE_BODY_ROWS)) == 1
+    body = PullBody(instance=INSTANCE, pull_id=PULL_ID, pulls=Pulls(), spools=[], usage=rows)
+    assert len(body.model_dump_json()) < MAX_TEXT_BODY_BYTES // 6

@@ -605,11 +605,17 @@ def _depth(doc: Any) -> int:
 def clean_preset(body: bytes) -> tuple[str, bytes]:
     """A site's preset file as Bambuddy may take it: its ``name``, and the document
     without a top-level key whose name ends in ``gcode`` or ``post_process`` (the printer
-    runs that G-code; the preset inherits its base's), as JSON again. 422 unless it is a
-    filament preset: a JSON object, at most `MAX_DEPTH` levels deep and with no NaN,
-    Infinity or number too large for a float, with a ``name`` of 1 to `MAX_NAME` characters, a
-    ``type`` that is absent or ``filament``, a non-empty ``inherits``, and no
+    runs that G-code; the slicer then uses its base's, or its built-in default), as JSON
+    again. 422 unless it is a filament preset: a JSON object, at most `MAX_DEPTH` levels
+    deep and with no NaN, Infinity or number too large for a float, with a ``name`` of 1 to
+    `MAX_NAME` characters, a ``type`` that is absent or ``filament``, and no
     ``printer_settings_id`` or ``print_settings_id`` (a printer or process preset's).
+    ``inherits``, when present, is a string, and may be empty (#7029): 3DFP exports
+    flattened presets, every option written out, with ``"inherits": ""`` (all 72 files
+    exported on 2026-11-22).
+    Bambuddy's import then keeps the document as it is (``services/orca_profiles.py``
+    ``resolve_preset`` returns a preset with no ``inherits`` unchanged), and the native
+    slicer flattens it over nothing (``slicing/profiles.py`` ``flatten``).
     Stable: the bytes it gives are cleaned to themselves."""
     try:
         doc = json.loads(body, parse_constant=_no_constant, parse_float=_finite)
@@ -626,9 +632,8 @@ def clean_preset(body: bytes) -> tuple[str, bytes]:
         )
     if doc.get("type", "filament") != "filament" or SETTINGS_IDS & doc.keys():
         raise _unfit("a preset file is a filament preset, not a printer or process preset")
-    inherits = doc.get("inherits")
-    if not isinstance(inherits, str) or not inherits:
-        raise _unfit("a preset file inherits a base preset: its inherits is a non-empty string")
+    if not isinstance(doc.get("inherits", ""), str):
+        raise _unfit("a preset file's inherits, when it has one, is a string")
     kept = {
         key: value
         for key, value in doc.items()
