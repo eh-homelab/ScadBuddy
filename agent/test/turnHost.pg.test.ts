@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { AuditLog } from '../src/audit/log.js'
 import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
 import { SessionBlobs } from './support/sql/sessionBlobs.js'
@@ -13,6 +12,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, costStateEntry, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 import { hostStores } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // An AgentSession placement's spend (sessions/turnHost.ts) over a `cost-state` its process
 // carries in. The real SDK loads the transcript a resume restores from through the session
@@ -70,7 +70,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
       loads,
       ...(carried === 'between' ? { beforeLoad: costState } : {}),
     })
-    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: new AuditLog({ sql: db.sql }) })
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: sqlAuditLog(db.sql) })
     const { session } = await m.start(browser, { origin: 'chat' })
     id = session.id
     await store.append({ projectKey: '', sessionId: id }, [{ type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'outlast the restart' } }])
@@ -121,7 +121,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
   it('a PDF blob the turn names reaches the SDK user message as a document block (#6267)', async () => {
     const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.from('invoice')])
     const scripted = scriptedRunner(() => ({ reply: 'read it', costUsd: R }))
-    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: new AuditLog({ sql: db.sql }) })
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: sqlAuditLog(db.sql) })
     const { session } = await m.start(browser, { origin: 'chat' })
     const id = session.id
     const blobs = new SessionBlobs(db.sql)

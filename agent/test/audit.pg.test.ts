@@ -21,7 +21,6 @@ import { browser } from './support/sessions.js'
 import { sqlAuditLog } from './support/sql/audit.js'
 import { SqlApprovals } from './support/sql/approvals.js'
 import { PgEventRows } from './support/sql/eventRows.js'
-import { PostgresTokenStore } from './support/sql/tokens.js'
 
 // The audit log (#258, src/audit/log.ts) against Postgres: what is recorded,
 // that the table is append-only, retention, and the read route.

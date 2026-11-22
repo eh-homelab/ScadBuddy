@@ -1,7 +1,7 @@
 import type { Sql, TransactionSql } from 'postgres'
 import { type AccessRow, SOURCE_ITEM, type ToolAccess } from '../../../src/access/model.js'
 import type { AccessEdit, AccessRows } from '../../../src/access/store.js'
-import { notifyWarmEvict } from '../../../src/sessions/warmEvict.js'
+import { notifyWarmEvict } from './publisher.js'
 
 // Test-only: `ai_access` over SQL, the transaction the API's `…/access/write` runs (its warm
 // eviction included), for the tests that run on a throwaway database. The agent itself goes

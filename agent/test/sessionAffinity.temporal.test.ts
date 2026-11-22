@@ -12,7 +12,6 @@ import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Sql } from 'postgres'
 import { z } from 'zod'
-import { AuditLog } from '../src/audit/log.js'
 import { connectDatabase, type Database } from './support/database.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
@@ -43,6 +42,7 @@ import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores, hostStores } from './support/agentSessions.js'
 import { sqlGateDb } from './support/sql/gate.js'
 import { sqlSettings } from './support/sql/settings.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // Session affinity (unified runtime spec 2026-10-13 §5.2, plan Task 5.2) end to end: AgentSession
 // on a Temporal dev server, two replicas (A, B), each with its own manager, warm cache, shared
@@ -323,7 +323,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       tierOf: (n) => (n === 'mcp__stub__slow' ? 'read' : undefined),
       warm: { maxEntries: options.maxEntries ?? 8 },
       // Each turn's cost as its own audit row (#1922): what each placement that ended wrote.
-      audit: new AuditLog({ sql: pool.sql }),
+      audit: sqlAuditLog(pool.sql),
       run: (run) =>
         runHarness({
           ...run,

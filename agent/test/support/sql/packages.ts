@@ -17,7 +17,7 @@ import type { FileList } from '../../../src/plugins/packages/hash.js'
 import type { PackageSource } from '../../../src/plugins/packages/source.js'
 import type { PackageReview } from '../../../src/plugins/packages/vet.js'
 import { PluginError } from '../../../src/plugins/registry.js'
-import { notifyWarmEvict } from '../../../src/sessions/warmEvict.js'
+import { notifyWarmEvict } from './publisher.js'
 
 // Test-only: the package store over SQL, with the prune of stale access rows the API runs
 // (backend api/crud_agent_packages.py). The agent itself goes through the API

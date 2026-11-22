@@ -9,7 +9,6 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Sql } from 'postgres'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
-import { AuditLog } from '../src/audit/log.js'
 import { connectDatabase, type Database } from './support/database.js'
 import { PgEventListener } from './support/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
@@ -48,6 +47,7 @@ import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores, hostStores } from './support/agentSessions.js'
 import { sqlGateDb } from './support/sql/gate.js'
 import { sqlSettings } from './support/sql/settings.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // Parks through the session's workflow, held warm (unified runtime spec 2026-10-13 §5.4 "Open"
 // and "Hold", plan Task 5.3), end to end: AgentSession on a Temporal dev server, one replica
@@ -175,7 +175,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     const tag = randomUUID().slice(0, 8)
     const identity = `park-${tag}`
     const hostQueue = sessionHostQueue(identity)
-    const audit = new AuditLog({ sql: pool.sql })
+    const audit = sqlAuditLog(pool.sql)
     m = manager({
       sql: pool.sql,
       paths,

@@ -19,6 +19,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, durableStores } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #1885: archiving a chat (PATCH /api/v1/ai/sessions/:id {archived}). An archived
 // chat leaves the panel's snapshot and the default lists, is read-only (a send or a
@@ -48,7 +49,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session arc
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
+    audit = sqlAuditLog(db.sql, { onError: (err) => failures.push(err) })
     next = { reply: 'hello there' }
     const { runner } = scriptedRunner(() => next)
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, audit })

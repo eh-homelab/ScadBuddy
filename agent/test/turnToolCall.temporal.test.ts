@@ -5,7 +5,6 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { AuditLog } from '../src/audit/log.js'
 import type { Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
@@ -29,6 +28,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
 import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // A turn's plugin and http tools as activities (unified runtime plan 2026-10-13 Step 9.3): an
 // AgentSession turn (the real SDK and its bundled Claude Code against the fake Anthropic endpoint) is given in-process proxies of its remote plugins in place of the
@@ -128,7 +128,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's plug
       hostQueue: host,
       clients: new SessionClients<ListedTools>(),
       approvals: new PgApprovalRecords(db.sql, new SqlFlowRunReads(db.sql)),
-      audit: new AuditLog({ sql: db.sql, hashKey: Buffer.alloc(32, 5) }),
+      audit: sqlAuditLog(db.sql, { hashKey: () => Buffer.alloc(32, 5) }),
     }
     const listDeps = deps
     const start = toolCallStarter({ client: agentSessionsEnv().client, blobs: new SessionBlobs(db.sql), queue: shared })

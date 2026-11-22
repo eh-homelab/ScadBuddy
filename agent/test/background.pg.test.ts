@@ -10,7 +10,6 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import { AuditLog } from '../src/audit/log.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
@@ -32,6 +31,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, hostStores } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // A session's background built-ins (src/background/, builtins/background.ts): the
 // tools' answers, which are Claude Code's (measured on 2.1.296 in a classic turn) where
@@ -855,7 +855,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
         spend = deps.spent
         return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
       },
-      audit: new AuditLog({ sql: db.sql }),
+      audit: sqlAuditLog(db.sql),
     })
     const { session } = await unified.start(browser, { origin: 'chat' })
     // The row runs the turn as DurableTurns.send claims it; session_turn runs it here as TurnHost.

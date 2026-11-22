@@ -28,6 +28,7 @@ import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores } from './support/agentSessions.js'
+import { sqlGateDb } from './support/sql/gate.js'
 
 // AgentSession (unified runtime spec 2026-10-13 §5.1, plan Task 5.1) on a Temporal dev
 // server: send, busy, end, continue-as-new after each turn and the replay of recorded
@@ -1226,7 +1227,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const m = await durableManager()
       finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
       // The real store writes (gate/store.ts), so the row is what a person's panel and the next send see.
-      writes = { open: (args) => openInput({ sql: db.sql, events: m.events }, args), resolve: (args) => resolveInput({ sql: db.sql, events: m.events }, args) }
+      writes = { open: (args) => openInput(sqlGateDb(db.sql, m.events), args), resolve: (args) => resolveInput(sqlGateDb(db.sql, m.events), args) }
       const describing = held()
       describeHold = describing.promise
       runTurn = async (input) => {

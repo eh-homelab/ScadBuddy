@@ -12,7 +12,6 @@ import {
   summariseInput,
   sweepErrorText,
 } from '../src/approvals/service.js'
-import { SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -224,12 +223,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const boom = new Error('invalid input syntax for type uuid: "f"')
     const append = m.events.append.bind(m.events)
     let failed = false
-    m.events.append = async (sessionId, events, tx) => {
+    m.events.append = async (sessionId, events) => {
       if (sessionId === first.session.id && !failed) {
         failed = true
         throw boom
       }
-      return append(sessionId, events, tx)
+      return append(sessionId, events)
     }
     await expect(m.approvals.expireDue()).rejects.toBe(boom)
     const decisions = async () =>
@@ -250,9 +249,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${later.approval.id}`
     const failing = new Set(stuck.map((o) => o.session.id))
     const append = m.events.append.bind(m.events)
-    m.events.append = async (sessionId, events, tx) => {
+    m.events.append = async (sessionId, events) => {
       if (sessionId && failing.has(sessionId)) throw new Error('boom')
-      return append(sessionId, events, tx)
+      return append(sessionId, events)
     }
     const thrown = await m.approvals.expireDue(2).then(
       () => undefined,
@@ -371,12 +370,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     // `approval.required` is written: the fastest possible decision.
     let raced: unknown
     const events = Object.create(m.events) as EventLog
-    events.append = async (sessionId, batch, tx) => {
+    events.append = async (sessionId, batch) => {
       const required = batch.find((e) => e.type === 'approval.required')
       if (required && 'id' in required) {
         raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
       }
-      return m.events.append(sessionId, batch, tx)
+      return m.events.append(sessionId, batch)
     }
     const service = new ApprovalService({ routes: new SqlApprovals(db.sql), events, hashKey: () => TEST_HASH_KEY })
     const approval = await service.create({

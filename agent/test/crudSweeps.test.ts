@@ -1,7 +1,6 @@
 import { mkdir, mkdtemp, readdir } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { CrudForgetRows, CrudSubjectKeys, forgetRoutes, forgetSubject } from '../src/sessions/forget.js'
 import { CrudSessionReads } from '../src/sessions/sessionReads.js'
@@ -45,15 +44,6 @@ class FakeApi {
     return new Response(JSON.stringify({ detail: 'no route' }), { status: 404, headers })
   }
 }
-
-const noSql = new Proxy(() => {}, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
 
 const target = (api: FakeApi) => ({ baseUrl: BASE, fetch: api.fetch })
 

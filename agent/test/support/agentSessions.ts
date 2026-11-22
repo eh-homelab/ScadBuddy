@@ -30,6 +30,7 @@ import { gateActivities } from '../../src/temporal/toolActivities.js'
 import { PgSessionOwners } from './sql/approvalRecords.js'
 import { sqlAuditLog } from './sql/audit.js'
 import { sqlGateDb } from './sql/gate.js'
+import { sqlSettings } from './sql/settings.js'
 import { SqlSweep } from './sql/sweep.js'
 import { PgTurnRows } from './sql/turnRows.js'
 import { SqlTurnRoutes } from './sql/turnRoutes.js'
@@ -125,7 +126,7 @@ export function agentSessions(): void {
     const routed = (build: (served: Served) => Record<string, (args: never) => Promise<unknown>>, names: readonly string[]) =>
       Object.fromEntries(names.map((name) => [name, (args: never) => build(now())[name]!(args)]))
     const finishNames = Object.keys(sessionFinishActivities(undefined as never, undefined as never))
-    const gateNames = Object.keys(sessionGateActivities(undefined as never))
+    const gateNames = Object.keys(sessionGateActivities(undefined as never, undefined as never))
     const describeNames = Object.keys(gateActivities({ audit: undefined, sessions: undefined as never }))
     const tools = AgentWorker.start({
       address: env.address,
@@ -135,7 +136,7 @@ export function agentSessions(): void {
       activities: {
         [ACQUIRE_WORKER_ACTIVITY]: acquire,
         ...routed((x) => sessionFinishActivities(new PgTurnRows(x.sql), x.m.events) as never, finishNames),
-        ...routed((x) => sessionGateActivities(sqlGateDb(x.sql, x.m.events), x.settings) as never, gateNames),
+        ...routed((x) => sessionGateActivities(sqlGateDb(x.sql, x.m.events), x.settings ?? sqlSettings(x.sql)) as never, gateNames),
         ...routed((x) => gateActivities({ audit: x.audit, sessions: new PgSessionOwners(x.sql) }) as never, describeNames),
       },
       shutdownGraceMs: 1_000,

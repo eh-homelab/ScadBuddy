@@ -22,6 +22,7 @@ import { createBackendClient } from '../src/api/backend.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
 import { PgPublisher } from './support/sql/publisher.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // The `sessions_*` tools (#300) end to end: real /mcp clients with bearer
 // tokens, a real SessionManager on Postgres (with a scripted stand-in for the
@@ -392,7 +393,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
     })
 
     it('records a fork made through sessions_fork as a resource row on the child (#2159)', async () => {
-      const audit = new AuditLog({ sql: db.sql })
+      const audit = sqlAuditLog(db.sql)
       const { agent, sessions } = await setup(undefined, {}, { audit })
       const a = await agent('write')
       const { session } = ok<{ session: { id: string } }>(

@@ -24,7 +24,7 @@ import {
   validateToolTiers,
 } from '../../../src/plugins/registry.js'
 import { type Envelope, type Kek, last4, openSecret, SealError, sealSecret } from '../../../src/secrets.js'
-import { notifyWarmEvict } from '../../../src/sessions/warmEvict.js'
+import { notifyWarmEvict } from './publisher.js'
 import { forgetSource, writeEnabled, writeTools } from './access.js'
 
 // Test-only: the plugin registry over SQL, sealing with the test's KEK as the API does, for

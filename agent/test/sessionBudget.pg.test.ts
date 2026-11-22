@@ -20,6 +20,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #790: the session limits in Settings (routes/sessionLimits.ts), raising one
 // session's budget (POST /api/v1/ai/sessions/:id/budget, manager.ts
@@ -49,7 +50,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    audit = new AuditLog({ sql: db.sql, settings: () => settings, onError: (err) => failures.push(err) })
+    audit = sqlAuditLog(db.sql, { settings: () => settings, onError: (err) => failures.push(err) })
     settings = sqlSettings(db.sql, audit)
     next = { reply: 'hello there', costUsd: 0.4 }
     const { runner, runs: made, prompts: pushed } = scriptedRunner(() => next)

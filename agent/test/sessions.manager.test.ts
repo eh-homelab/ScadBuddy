@@ -17,7 +17,6 @@ import { sessionWorkDir } from '../src/harness/stateDirs.js'
 import { BROWSER_TOOLS_GUIDE, SessionError, SETTING_SESSION_BUDGET_USD, SETTING_SESSION_MAX_TURNS, TITLE_MAX, systemAppend, titleFrom, type TurnOutcome } from '../src/sessions/manager.js'
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
-import { AuditLog } from '../src/audit/log.js'
 import { drainRetains, SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
 import { sqlSettings } from './support/sql/settings.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
@@ -26,6 +25,7 @@ import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptTe
 import { warmHarness } from './support/warm.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 import { listQuery } from './support/sql/sessionRows.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 /** `text` as a regular expression that matches only itself. */
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -507,7 +507,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
           Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
-        const audit = new AuditLog({ sql: db.sql })
+        const audit = sqlAuditLog(db.sql)
         const pooled = (id: string, secret: string) => ({
           id,
           epoch: 0,
@@ -652,7 +652,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       const store = new SqlCredentials(db.sql, kek)
       await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-first-key-aaaa', name: 'Personal Max' })
       await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-second-key-bbbb', name: 'Team Work' })
-      const audit = new AuditLog({ sql: db.sql })
+      const audit = sqlAuditLog(db.sql)
       const logged: string[] = []
       const credentials = new CredentialPool({ repo: store, audit, log: (line) => logged.push(line) })
       // Both credentials are refused: the first after its init, the second at once.
@@ -719,7 +719,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         const remotePlugins = (): Promise<PluginsForRun> =>
           Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const failures: unknown[] = []
-        const audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
+        const audit = sqlAuditLog(db.sql, { onError: (err) => failures.push(err) })
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, audit })
         // The scripted process fires the hooks as Claude Code does (test/support/sessions.ts).
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
