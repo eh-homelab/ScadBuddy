@@ -65,7 +65,8 @@ describe('CustomizePage', () => {
     const sent = renders()
     show()
     expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
-    expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+    // The first test of the file loads the lazy viewer's chunk: under load it can come after the price.
+    expect(await screen.findByTestId('preview')).toHaveAttribute('data-status', 'done')
     expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, colours: {} }])
     expect(screen.queryByRole('button', { name: 'Render' })).toBeNull()
   })
