@@ -540,8 +540,8 @@ def _quiet(store: Filament, run: _Run, spools: Sequence[BbSpool]) -> dict[int, _
             " WHERE l.bb_spool_id = ANY(%s)",
             (list(timed),),
         ).fetchall():
-            at = as_utc(timed[row["bb_spool_id"]].updated_at)
-            same = at == row["bb_updated_at"] or (row["archived"] and at > row["bb_updated_at"])
+            at, held = as_utc(timed[row["bb_spool_id"]].updated_at), row["bb_updated_at"]
+            same = held is not None and (at == held or (row["archived"] and at > held))
             if same and row["bb_seen"] is not None and row["bb_seen_at"] is not None:
                 links[row["bb_spool_id"]] = row
         if not links:
