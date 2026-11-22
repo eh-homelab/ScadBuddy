@@ -368,7 +368,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const spy = vi.spyOn(env.client.workflow, 'executeUpdateWithStart').mockImplementation(() => Promise.reject(ended()))
     try {
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-      await expect(m.send(session.id, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/did not take the message/) })
+      await expect(m.send(session.id, browser, 'hello')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/still ending/) })
       expect(spy).toHaveBeenCalledTimes(2)
       const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
       expect(row).toEqual({ status: 'idle', durable_turn_id: null })

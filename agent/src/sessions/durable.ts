@@ -373,7 +373,7 @@ export class DurableTurns {
    * Queues a turn whose claim found the row running another (#6386), or undefined when the row
    * cannot take it (another owner, done, archived, spent, a closed DurableSession, or no turn runs
    * after all: the manager says why, or the caller sends again). Refused `queue_full` past the
-   * workflow's cap, `closed` once the session was marked done.
+   * workflow's cap, `unavailable` while its workflow ends after an `end`.
    */
   async #queue(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
     const id = session.id
@@ -576,12 +576,16 @@ export class DurableTurns {
           { ...update, startWorkflowOperation: operation() },
         ),
       )
+    const stillEnding = () => new SessionError('unavailable', `session ${session.id}'s workflow is still ending; send the message again in a moment`)
+    const refusedEnded = (err: unknown) => {
+      const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
+      return cause instanceof ApplicationFailure && cause.type === ENDED
+    }
     try {
       try {
         await send()
       } catch (err) {
-        const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
-        if (!(cause instanceof ApplicationFailure && cause.type === ENDED)) throw err
+        if (!refusedEnded(err)) throw err
         // The run was told to end (an archive just before an unarchive, #7031; a done whose edit
         // did not land) and is closing. The claim passed, so the row is not done: once that run
         // closes, the same Update starts a new one. The closing run refused it, so it never took it.
@@ -589,8 +593,11 @@ export class DurableTurns {
         await this.#client.withDeadline(deadline, () => this.#client.workflow.getHandle(workflowId).result()).catch(() => undefined)
         const state = Date.now() < deadline ? await this.#describe(workflowId).catch(() => 'open' as const) : 'open'
         // Still closing, or no time left for the Update: nothing took the message, so the claim is given back.
-        if (state !== 'closed' && state !== 'not_found') throw new SessionError('unavailable', `session ${session.id}'s workflow is still ending; send the message again in a moment`)
-        await send()
+        if (state !== 'closed' && state !== 'not_found') throw stillEnding()
+        // A new run told to end in the meantime (another archive) refuses it too.
+        await send().catch((retryErr: unknown) => {
+          throw refusedEnded(retryErr) ? stillEnding() : retryErr
+        })
       }
     } catch (err) {
       // A refusal made here (the run still ending), which gives the claim back.
