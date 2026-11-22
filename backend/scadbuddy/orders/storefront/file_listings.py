@@ -32,7 +32,6 @@ from xml.etree import ElementTree
 import trimesh
 from fastapi import UploadFile, status
 
-from scadbuddy.bambuddy.client import maybe_client
 from scadbuddy.bambuddy.filaments3mf import UnreadableFilamentsError, read_filaments
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.options import library_options_scope
@@ -62,7 +61,6 @@ from scadbuddy.orders.storefront.wire import (
 )
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.ids import is_native_id
-from scadbuddy.print_library.reads import served_reads
 from scadbuddy.render.bambu3mf import PartSettingsUnwritableError, part_settings_slots, plates_of
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import write_glb
@@ -74,6 +72,7 @@ from scadbuddy.store.refs import BlobRefs
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
+    from scadbuddy.orders.bambuddy import ServedLibrary
     from scadbuddy.store.content import ContentStore
 
 logger = logging.getLogger(__name__)
@@ -122,24 +121,24 @@ class HeldBytes:
 # -- the library's file (§5.1 rows 1 to 4) ------------------------------------------------
 
 
-async def served_file(state: AppState, file_id: int) -> LibraryFile | None:
-    """The file in the library that serves, or None when it is not there."""
+def _served(state: AppState) -> ServedLibrary:
     # Here, not at the top: the orders' Bambuddy module imports the storefront's.
     from scadbuddy.orders.bambuddy import ServedLibrary
 
-    served = ServedLibrary(state.settings_store, state.components.get(PRINT_LIBRARY).serving_native)
-    return await served.file(file_id)
+    return ServedLibrary(state.settings_store, state.components.get(PRINT_LIBRARY).serving_native)
+
+
+async def served_file(state: AppState, file_id: int) -> LibraryFile | None:
+    """The file in the library that serves, or None when it is not there."""
+    return await _served(state).file(file_id)
 
 
 async def download(state: AppState, file_id: int) -> AsyncGenerator[bytes]:
-    """The file's bytes, from the library that serves."""
-    native = await state.components.get(PRINT_LIBRARY).serving_native()
-    stored = await asyncio.to_thread(state.settings_store.load)
-    async with maybe_client(stored, native=native is not None) as client:
-        reads = served_reads(file_id, client, native)
-        async with aclosing(reads.download_library_file(file_id)) as chunks:
-            async for chunk in chunks:
-                yield chunk
+    """The file's bytes, from the library that serves (`ServedLibrary.download`: only the
+    orders' Bambuddy module reaches the client, #4253)."""
+    async with aclosing(_served(state).download(file_id)) as chunks:
+        async for chunk in chunks:
+            yield chunk
 
 
 def _type_of(file: LibraryFile) -> Literal["3mf", "stl"]:
