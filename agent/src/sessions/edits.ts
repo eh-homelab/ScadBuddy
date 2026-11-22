@@ -16,7 +16,8 @@ import type { WarmSessions } from './warm.js'
 // still continues it. A rename shows through the panel's snapshot, which the chat
 // socket re-reads; done is also a `session.status` event, so open panels show it at once.
 //
-// Archive (`archived_at`) puts a chat away without ending it: the snapshot and the
+// Archive (`archived_at`) puts a chat away without marking it done (its workflow ends, and
+// the first send after an unarchive starts a new one, #7031): the snapshot and the
 // default lists leave it out, a send or a handoff is refused (`archived`) and never
 // unarchives it, and a fork is allowed. It is refused, like done, while a turn runs,
 // and also while anything is parked on the user (an approval, a question, an
@@ -31,8 +32,10 @@ import type { WarmSessions } from './warm.js'
 // sent again, told. A refusal, a 503 or a lost answer on the first call ends no workflow. What
 // changes between the two calls (a turn claimed, a call parked) can still refuse the second with
 // the workflow told, and a 503 or a lost answer on the told send, tried twice, leaves the
-// workflow told and the row not done: either way a later send reads it `closed`, and the edit sent
-// again marks it done. When the told send's first answer
+// workflow told and the row not done: either way the edit sent again marks it done (a send
+// meanwhile is refused while that workflow closes, then starts a new run, durable.ts). An archive
+// needs no telling first: its workflow is told to end once the archive is written, best-effort
+// (#7031), since a session archived with its workflow still running loses nothing. When the told send's first answer
 // is lost after it committed, the retry finds the row already archived and answers no dismissed
 // `done` summaries, so those dismissals (their events committed on the API) get no audit row here.
 
@@ -46,6 +49,8 @@ export type SessionEditsDeps = {
   audit?: AuditSink
   /** Ends a durable session's workflow (#1056); refuses when it cannot be told. */
   endDurable: (id: string) => Promise<void>
+  /** Tells an archived session's workflow to end (#7031), best-effort; absent with no Temporal. */
+  endArchived?: ((id: string) => Promise<void>) | undefined
   /** Ends a session's background tasks (src/background/) when it is archived or marked done. */
   endBackground?: ((id: string, why: string) => Promise<unknown>) | undefined
   /** This replica's warm processes (warm.ts): a session marked done or archived loses its own. */
@@ -182,6 +187,14 @@ export class SessionEdits {
       (sid) => this.deps.endDurable(sid),
     )
     if (logged) this.deps.events.committed(id, logged.events, logged.seqs)
+    // An archived chat runs nothing (#7031): its workflow ends and releases its warm place, as a
+    // done one's does. Best-effort, once the edit passed: a workflow that misses it keeps waiting,
+    // and the archive stands. A send after an unarchive starts a new run (durable.ts).
+    if (archive && this.deps.endArchived) {
+      await this.deps.endArchived(id).catch(() => {
+        console.warn(`session edit: archived session ${id}'s workflow could not be told to end`)
+      })
+    }
     // Its cron jobs, wakeups and monitors end with it: nothing fires into an archived or done chat.
     if (archive || done) await this.deps.endBackground?.(id, archive ? 'the chat was archived' : 'the chat was marked done')
     if (done || archive) void this.deps.warm?.evict(id, done ? 'marked done' : 'archived')

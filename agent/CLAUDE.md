@@ -131,7 +131,10 @@ and its backend module:
   (`durable.ts` `#claim`). `CrudEditRows`: under the row's lock and only while the principal
   owns it, the rename, done and archive, the warm eviction, an archive's `done` summaries; the
   edit is sent untold first, and a newly done session not `told` is refused `untold` only
-  after every other check passed, so a refusal, a 503 or a lost answer ends no workflow.
+  after every other check passed, so a refusal, a 503 or a lost answer ends no workflow. An
+  archive is not told first: once it is written, its workflow is sent `end`, best-effort
+  (#7031), and the first send after an unarchive starts a new run (`durable.ts`,
+  `ALLOW_DUPLICATE`).
 - `gate`, `pending-input`, `audit`, `approvals`, `questions`, `escalations` (#5299 step 10,
   `GATE_AREAS`, `api/crud_agent_gate.py` and siblings): `src/gate/crudStore.ts` `CrudGate`
   (`openInput`, `resolveInput`, `denyInput`, `decideInput`, `readInput`, `grantInput`; the API

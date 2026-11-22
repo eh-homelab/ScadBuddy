@@ -1,7 +1,6 @@
 import {
   type Client,
   WithStartWorkflowOperation,
-  WorkflowExecutionAlreadyStartedError,
   WorkflowUpdateFailedError,
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
@@ -33,12 +32,13 @@ import type { SendClaim, SendClaimed, TurnRows } from './turnRows.js'
 // - send: claim the row (`status = 'running'`, `durable_turn_id`: the workflow owns the turn),
 //   put the turn's images in ai_session_blobs (the claim check, by name), write `user.turn` and
 //   `session.status running`, then update-with-start `send_message` (update id: the turn id),
-//   starting the workflow on the first message. An ended workflow still retained is refused
-//   `closed` (REJECT_DUPLICATE). Once retention removes it, the same session's next send starts
-//   it again, on purpose: the turn resumes the transcript in ai_session_entries, so it never runs
-//   empty (#2078 refused it for good because DurableSession's history held the chat; plan
-//   Phase 10). Only a definite refusal (the validator's
-//   `busy`, a failed Update, an ended workflow)
+//   starting the workflow on the first message. A send to a session whose workflow ended (an
+//   archive or a forget ended it, #7031; a failure; a terminate) starts a new run under the same
+//   id (ALLOW_DUPLICATE), on purpose: the turn resumes the transcript in ai_session_entries, so it
+//   never runs empty (#2078 refused it for good because DurableSession's history held the chat;
+//   plan Phase 10). The row decides who may send: the claim refuses a session that is done
+//   (`closed`), archived or spent. Only a definite refusal (the validator's
+//   `busy`, a failed Update)
 //   gives the claim back. An Update not accepted in time keeps it: Temporal may already hold the
 //   message, which a worker delivers later, so the turn is handed back and `done` follows the log.
 // - `done` follows the event log from the turn's own `session.status running` to the status the
@@ -87,6 +87,8 @@ const ACTIVITY_TASK_QUEUE = 2
 
 /** What the workflow's validator refuses a second turn with (temporal/session/workflow.ts). */
 const BUSY = 'busy'
+/** What the validator refuses a message with once the run was told to end. */
+const ENDED = 'ended'
 const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
 export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
@@ -200,7 +202,9 @@ function queueRefusal(err: unknown, id: string, what: string): SessionError {
   if (cause instanceof ApplicationFailure) {
     if (cause.type === QUEUE_FULL) return new SessionError('queue_full', cause.message)
     if (cause.type === NOT_QUEUED) return new SessionError('not_queued', cause.message)
-    if (cause.type === 'ended') return new SessionError('closed', `session ${id} is done`)
+    // The row refuses a done session first (manager.ts `mayQueue`): a run refuses `ended` only while
+    // it closes after an `end` (an archive, #7031, or a done whose edit has not landed).
+    if (cause.type === ENDED) return new SessionError('unavailable', `session ${id}'s workflow is ending; send the message again in a moment`)
     if (cause.type === 'invalid') return new SessionError('invalid', cause.message)
   }
   if (err instanceof WorkflowNotFoundError) return new SessionError('unavailable', `session ${id}'s workflow is not running; send the message again once its turn has ended`)
@@ -369,7 +373,7 @@ export class DurableTurns {
    * Queues a turn whose claim found the row running another (#6386), or undefined when the row
    * cannot take it (another owner, done, archived, spent, a closed DurableSession, or no turn runs
    * after all: the manager says why, or the caller sends again). Refused `queue_full` past the
-   * workflow's cap, `closed` once the session was marked done.
+   * workflow's cap, `unavailable` while its workflow ends after an `end`.
    */
   async #queue(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {
     const id = session.id
@@ -407,7 +411,8 @@ export class DurableTurns {
     } catch (err) {
       const refusal = queueRefusal(err, id, 'queue the message')
       // Refused, it was never queued: what its write made goes. Any other failure may have queued it.
-      if (refusal.code === 'queue_full' || refusal.code === 'closed') {
+      const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
+      if (refusal.code === 'queue_full' || (cause instanceof ApplicationFailure && cause.type === ENDED)) {
         for (const write of made) {
           await this.#blobs.delete(id, write).catch(() => {
             console.warn(`durable send: session ${id}: a refused message's images were not deleted`)
@@ -548,34 +553,58 @@ export class DurableTurns {
       words: turn.prompt,
       ...(traceparent ? { traceparent } : {}),
     }
-    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
+    // One per attempt: an operation can be executed only once.
+    const operation = () => new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
       taskQueue: this.#sessionQueue,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
-      // A session whose workflow ended (failed, or terminated) is refused `closed` while Temporal
-      // still holds that run: its end (a failure, a terminate) is what the panel shows, and a send
-      // must not paper over it at once. Once retention removes the run, a send starts it again
-      // and the turn resumes from ai_session_entries (see the header).
-      workflowIdReusePolicy: 'REJECT_DUPLICATE',
+      // A session whose workflow ended (archived and unarchived since, #7031; failed; terminated)
+      // starts a new run, which resumes from ai_session_entries (see the header). The claim above
+      // already refused a session that is done, archived or spent.
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
     // The turn id as the update id: a re-send of the same turn is the same Update.
     const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
-    try {
-      await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
+    // One deadline for the whole send: the Update, and, when it meets a run that is ending, the
+    // wait for that run to close and the Update once more.
+    const deadline = Date.now() + this.#sendTimeoutMs
+    const send = () =>
+      this.#client.withDeadline(deadline, () =>
         this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
           SEND_MESSAGE_UPDATE,
-          { ...update, startWorkflowOperation: operation },
+          { ...update, startWorkflowOperation: operation() },
         ),
       )
+    const stillEnding = () => new SessionError('unavailable', `session ${session.id}'s workflow is still ending; send the message again in a moment`)
+    const refusedEnded = (err: unknown) => {
+      const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
+      return cause instanceof ApplicationFailure && cause.type === ENDED
+    }
+    try {
+      try {
+        await send()
+      } catch (err) {
+        if (!refusedEnded(err)) throw err
+        // The run was told to end (an archive just before an unarchive, #7031; a done whose edit
+        // did not land) and is closing. The claim passed, so the row is not done: once that run
+        // closes, the same Update starts a new one. The closing run refused it, so it never took it.
+        const workflowId = sessionWorkflowId(session.id)
+        await this.#client.withDeadline(deadline, () => this.#client.workflow.getHandle(workflowId).result()).catch(() => undefined)
+        const state = Date.now() < deadline ? await this.#describe(workflowId).catch(() => 'open' as const) : 'open'
+        // Still closing, or no time left for the Update: nothing took the message, so the claim is given back.
+        if (state !== 'closed' && state !== 'not_found') throw stillEnding()
+        // A new run told to end in the meantime (another archive) refuses it too.
+        await send().catch((retryErr: unknown) => {
+          throw refusedEnded(retryErr) ? stillEnding() : retryErr
+        })
+      }
     } catch (err) {
+      // A refusal made here (the run still ending), which gives the claim back.
+      if (err instanceof SessionError) throw err
       const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)
-      }
-      // An ended workflow still retained refuses the start (REJECT_DUPLICATE).
-      if (err instanceof WorkflowExecutionAlreadyStartedError) {
-        throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
       }
       if (err instanceof WorkflowUpdateFailedError) {
         throw new SessionError('unavailable', `session ${session.id}'s workflow did not take the message; send it again in a moment`)

@@ -161,7 +161,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
       taskQueue: SESSION_QUEUE,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
-      workflowIdReusePolicy: 'REJECT_DUPLICATE',
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
     await client.workflow.executeUpdateWithStart(SEND_MESSAGE_UPDATE, { args: [message('t1')], updateId: 't1', startWorkflowOperation: operation })
   }

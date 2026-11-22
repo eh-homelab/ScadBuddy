@@ -347,7 +347,7 @@ lack them (§2.3).
 | activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
 | the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
 | `workflow.RecreateSession` | on a lost home (`ScheduleToStart`, `Heartbeat`, `ShuttingDown`, `NoCapacity`): `acquire_worker` again, naming the homes the turn was lost on (`exclude`: a lost home that is asked refers the turn to the other live replicas, and takes it only when none can; the last placement names none), then `session_turn` with `continuation: restarted` (§5.5) | workflow |
-| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs when the workflow ends (handoff, archive and forget end it). A move releases nothing: the old home is gone, or its placement has cut itself off and closed its process (the fence below) | `home` |
+| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs when the workflow ends on `end`: marking the session done, archiving it and forgetting it send `end` (#7031; archive and forget best-effort, after the edit or before the forget's tombstone). A handoff does not end it: the workflow takes the new owner (`owner_changed`). A move releases nothing: the old home is gone, or its placement has cut itself off and closed its process (the fence below) | `home` |
 
 - **Why not `agent-tools.<hostname>`.** That queue carries `DurableSession`'s pinned calls
   (`http_request`, the browser, kept plugin clients, and the `turn_tools` listing with its
@@ -713,7 +713,10 @@ never did (`questions/service.ts:34-38`).
   (`durable.ts:198-214`) and starts or updates `AgentSession`
   (`executeUpdateWithStart('send_message')`, update id = turn id, `durable.ts:264-300`).
   The answers keep their meanings: `busy`, `closed`, `budget_exhausted` and
-  `OutcomeUnknown`.
+  `OutcomeUnknown`. As built (#7031): the start is `USE_EXISTING` with `ALLOW_DUPLICATE`, so
+  a send to a session whose workflow has ended (archived, then unarchived) starts a new run
+  under `session-<id>`, which resumes from `ai_session_entries`. The row's claim decides who
+  may send: a done session is refused `closed`, an archived one `archived`.
 - **Events.** The activity writes `ai_session_events` directly through the classic
   translation (`agent/src/sessions/sdkEvents.ts`), with `event_seq` and `pg_notify`. So
   the chat socket, attach and the panel are unchanged.

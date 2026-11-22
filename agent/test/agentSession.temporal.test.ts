@@ -8,13 +8,15 @@ import { randomUUID } from 'node:crypto'
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { sessionWorkflowId } from '../src/gate/durable.js'
+import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
 import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
 import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
 import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import type { UserImage } from '../src/sessions/images.js'
 import { type SessionManager } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
@@ -84,6 +86,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   /** Each acquire_worker's `exclude`: the homes the turn was lost on. */
   let excluded: string[][]
   let released: string[]
+  /** What release_worker waits on: a run that holds it is still closing. */
+  let releaseHold: Promise<void>
   /** The gate's activities (stubs): what describe_call and resolve_input wait on, and what each was sent. */
   let describeHold: Promise<void>
   let resolveHold: Promise<void>
@@ -156,6 +160,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
           },
           [RELEASE_WORKER_ACTIVITY]: async ({ sessionId }: { sessionId: string }) => {
             released.push(sessionId)
+            await releaseHold
           },
         },
         {},
@@ -175,6 +180,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     acquired = 0
     excluded = []
     released = []
+    releaseHold = Promise.resolve()
     describeHold = Promise.resolve()
     resolveHold = Promise.resolve()
     described = 0
@@ -223,7 +229,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       taskQueue: SESSION_QUEUE,
       args: [start(id)],
       workflowIdConflictPolicy: 'USE_EXISTING',
-      workflowIdReusePolicy: 'REJECT_DUPLICATE',
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE',
     })
     return client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, { accepted: boolean; turn_id: string }, [Message]>(SEND_MESSAGE_UPDATE, {
       args: [m],
@@ -1175,6 +1181,131 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
       // The turn is a stub here; that a placement resumes from the transcript is warm.ts's
       // (the store's `head`), whichever run placed it, as turnHost.pg.test.ts shows.
+    })
+
+    // #7031: an archived session's workflow ends, and an unarchived one's next send starts a new
+    // run under the same id (ALLOW_DUPLICATE) that resumes from the transcript.
+    it('archive sends `end`: the workflow completes and releases its home (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      expect((await handleOf(session.id).describe()).status.name).toBe('RUNNING')
+      await m.edits.update(session.id, browser, { archived: true })
+      await handleOf(session.id).result()
+      expect((await handleOf(session.id).describe()).status.name).toBe('COMPLETED')
+      expect(released).toEqual([session.id])
+    })
+
+    it('archive, unarchive, then a send within retention runs a turn in a new run, with the earlier transcript (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const key = (sessionId: string) => ({ projectKey: 'p', sessionId })
+      // The first turn writes its transcript; the next reads what its placement would resume from.
+      const seen: number[] = []
+      runTurn = async (input) => {
+        const earlier = (await m.store.load(key(input.sessionId))) ?? []
+        seen.push(earlier.length)
+        await m.store.append(key(input.sessionId), [{ type: 'user', uuid: randomUUID(), message: { role: 'user', content: input.message?.text } }])
+        return { status: 'done', hostQueue: '' }
+      }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      await m.edits.update(session.id, browser, { archived: true })
+      await handleOf(session.id).result()
+      const archivedRun = await runIdOf(session.id)
+      // Archived: the row refuses a send, and no run starts.
+      await expect(m.send(session.id, browser, 'too soon')).rejects.toMatchObject({ code: 'archived' })
+      expect(await runIdOf(session.id)).toBe(archivedRun)
+
+      await m.edits.update(session.id, browser, { archived: false })
+      const again = await m.send(session.id, browser, 'and a lid')
+      expect(await again.done).toMatchObject({ kind: 'result' })
+      // A new run of the same workflow id, though the closed one is still retained.
+      expect(await runIdOf(session.id)).not.toBe(archivedRun)
+      expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
+      expect(seen).toEqual([0, 1])
+    })
+
+    it('a send right after an archive and an unarchive waits for the ending run to close, then runs once in a new run (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      const closing = held()
+      releaseHold = closing.promise
+      await m.edits.update(session.id, browser, { archived: true })
+      // The run took `end` and is releasing its home: it refuses a message (`ended`) until it closes.
+      await poll(() => released.length, 1)
+      const endingRun = await runIdOf(session.id)
+      await m.edits.update(session.id, browser, { archived: false })
+      const sending = m.send(session.id, browser, 'and a lid')
+      setTimeout(() => closing.release(), 500)
+      const again = await sending
+      expect(await again.done).toMatchObject({ kind: 'result' })
+      expect(await runIdOf(session.id)).not.toBe(endingRun)
+      expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
+    })
+
+    it('a send that meets a run still ending past its wait is refused `unavailable`, and its claim given back (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      m.durableTurns = new DurableTurns({ client: env.client, ...durableStores(db.sql), events: m.events, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST), sendTimeoutMs: 5_000 })
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      const closing = held()
+      releaseHold = closing.promise
+      await m.edits.update(session.id, browser, { archived: true })
+      await poll(() => released.length, 1)
+      await m.edits.update(session.id, browser, { archived: false })
+      try {
+        await expect(m.send(session.id, browser, 'too soon')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/still ending/) })
+        const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
+        expect(row).toEqual({ status: 'idle', durable_turn_id: null })
+      } finally {
+        closing.release()
+      }
+      await handleOf(session.id).result()
+      expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result' })
+      expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
+    })
+
+    it('forget sends `end`: the run completes and releases its home before the tombstone, not by the terminate (#7031)', async () => {
+      const m = await durableManager()
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      const deps = sqlForget(db.sql, { client: env.client })
+      const tombstone = deps.crud.forget
+      let atTombstone: string | undefined
+      deps.crud = {
+        forget: async (subject) => {
+          atTombstone = (await handleOf(session.id).describe()).status.name
+          return tombstone(subject)
+        },
+      }
+      expect(await forgetSubject(deps, sessionWorkflowId(session.id))).toMatchObject({ workflow: 'deleted' })
+      expect(atTombstone).toBe('COMPLETED')
+      expect(released).toEqual([session.id])
+    })
+
+    it('still refuses `closed` a send to a done session, and starts no run for it', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      await m.edits.update(session.id, browser, { done: true })
+      await handleOf(session.id).result()
+      const doneRun = await runIdOf(session.id)
+      await expect(m.send(session.id, browser, 'one more')).rejects.toMatchObject({ code: 'closed', message: `session ${session.id} is done` })
+      expect(await runIdOf(session.id)).toBe(doneRun)
+      expect((await handleOf(session.id).describe()).status.name).toBe('COMPLETED')
+      expect(turns).toHaveLength(1)
     })
 
     it('refuses `closed` a send to a session still recorded as DurableSession, and starts no workflow (plan Step 8.1)', async () => {
