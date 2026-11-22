@@ -39,7 +39,7 @@ import os
 import resource
 import signal
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Final
@@ -305,6 +305,24 @@ def _parse[M: BaseModel](model: type[M], ask: bytes) -> M | None:
         return None
 
 
+async def _until_stop(work: Coroutine[object, object, None], stop: asyncio.Event) -> None:
+    """Runs ``work`` until it ends or ``stop`` is set, whichever is first. The start's
+    sign-in can take minutes with its retries; a SIGTERM in that window cancels it, so a
+    rollout ends the pod before its grace period (claude-review on #6947)."""
+    task = asyncio.ensure_future(work)
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopping.cancel()
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    if not task.cancelled():
+        task.result()
+
+
 async def serve(
     settings: BrowserSettings,
     *,
@@ -331,7 +349,7 @@ async def serve(
     logger.info("profile-fetch browser service serving on %s", server.sockets[0].getsockname()[1])
     try:
         async with service.lock:
-            await sign_in_at_start(sites)
+            await _until_stop(sign_in_at_start(sites), stop)
         await stop.wait()
     finally:
         server.close()
