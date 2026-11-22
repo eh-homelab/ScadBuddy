@@ -1,3 +1,5 @@
+import { filamentLinks } from '../../lib/filamentLinks'
+
 /**
  * #6262 — the Filament section's tabs, in spec §10's order
  * (`docs/superpowers/specs/2026-11-14-filament-management-design.md`). The section shows
@@ -39,4 +41,4 @@ export const FILAMENT_TABS: readonly FilamentTab[] = [
 ]
 
 /** Where `/filament` opens. */
-export const FILAMENT_HOME = '/filament/spools'
+export const FILAMENT_HOME = filamentLinks.spools

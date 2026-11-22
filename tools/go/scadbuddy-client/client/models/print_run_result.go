@@ -21,6 +21,8 @@ type PrintRunResult struct {
 	lan []LanStartedable
 	// The lan_awaiting_clear property
 	lan_awaiting_clear *bool
+	// The lan_queued property
+	lan_queued LanQueuedable
 	// The lan_stopped property
 	lan_stopped LanStoppedable
 	// The lan_waiting property
@@ -712,6 +714,16 @@ func (m *PrintRunResult) GetFieldDeserializers() map[string]func(i878a80d2330e89
 		}
 		return nil
 	}
+	res["lan_queued"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLanQueuedFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetLanQueued(val.(LanQueuedable))
+		}
+		return nil
+	}
 	res["lan_stopped"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateLanStoppedFromDiscriminatorValue)
 		if err != nil {
@@ -897,6 +909,12 @@ func (m *PrintRunResult) GetLanAwaitingClear() *bool {
 	return m.lan_awaiting_clear
 }
 
+// GetLanQueued gets the lan_queued property value. The lan_queued property
+// returns a LanQueuedable when successful
+func (m *PrintRunResult) GetLanQueued() LanQueuedable {
+	return m.lan_queued
+}
+
 // GetLanStopped gets the lan_stopped property value. The lan_stopped property
 // returns a LanStoppedable when successful
 func (m *PrintRunResult) GetLanStopped() LanStoppedable {
@@ -1015,6 +1033,12 @@ func (m *PrintRunResult) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 	}
 	{
 		err := writer.WriteBoolValue("lan_awaiting_clear", m.GetLanAwaitingClear())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("lan_queued", m.GetLanQueued())
 		if err != nil {
 			return err
 		}
@@ -1155,6 +1179,11 @@ func (m *PrintRunResult) SetLanAwaitingClear(value *bool) {
 	m.lan_awaiting_clear = value
 }
 
+// SetLanQueued sets the lan_queued property value. The lan_queued property
+func (m *PrintRunResult) SetLanQueued(value LanQueuedable) {
+	m.lan_queued = value
+}
+
 // SetLanStopped sets the lan_stopped property value. The lan_stopped property
 func (m *PrintRunResult) SetLanStopped(value LanStoppedable) {
 	m.lan_stopped = value
@@ -1233,6 +1262,7 @@ type PrintRunResultable interface {
 	GetFolderId() PrintRunResult_PrintRunResult_folder_idable
 	GetLan() []LanStartedable
 	GetLanAwaitingClear() *bool
+	GetLanQueued() LanQueuedable
 	GetLanStopped() LanStoppedable
 	GetLanWaiting() []int32
 	GetLibraryFileId() *int32
@@ -1252,6 +1282,7 @@ type PrintRunResultable interface {
 	SetFolderId(value PrintRunResult_PrintRunResult_folder_idable)
 	SetLan(value []LanStartedable)
 	SetLanAwaitingClear(value *bool)
+	SetLanQueued(value LanQueuedable)
 	SetLanStopped(value LanStoppedable)
 	SetLanWaiting(value []int32)
 	SetLibraryFileId(value *int32)

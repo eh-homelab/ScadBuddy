@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Spinner } from '../ui/spinner'
 import { NeedsTypeBadge } from '../filament/NeedsTypeBadge'
+import { SpoolNumberLink } from '../filament/SpoolNumberLink'
 import { RgbaSwatch } from '../filament/RgbaSwatch'
 import { Swatch } from './Swatch'
 
@@ -106,7 +107,9 @@ export function TrayQuestion({ tray, spools, onAssigned, onDecline, ...target }:
       <span>{candidateName(spool)}</span>
       {howFull(spool) && <span className="text-muted-foreground">{howFull(spool)}</span>}
       {spool.storage_location && <span className="text-muted-foreground">· kept in {spool.storage_location}</span>}
-      <span className="text-muted-foreground">· spool #{native ? spool.sb_number : spool.spool_id}</span>
+      <span className="text-muted-foreground">
+        · {native ? <SpoolNumberLink spool={spool}>spool #{spool.sb_number}</SpoolNumberLink> : `spool #${spool.spool_id}`}
+      </span>
       <NeedsTypeBadge spool={spool} />
     </>
   )

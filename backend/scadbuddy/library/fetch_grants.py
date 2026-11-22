@@ -75,7 +75,8 @@ def _digest(url: str) -> str:
 
 
 def mint(key: bytes, host: str, url: str, *, now: datetime) -> str:
-    """A grant for one fetch of ``url`` from ``host`` (`api/crud_agent_keys.py`)."""
+    """The grant the agent's CRUD route ``…/agent/fetch-grants`` (`api/crud_agent_keys.py`)
+    mints, and the one tests use: the format's one Python spelling."""
     expires = int(now.timestamp()) + FETCH_GRANT_TTL_SECONDS
     body = f"{_PURPOSE}\n{host}\n{_digest(url)}\n{expires}\n{secrets.token_hex(16)}".encode()
     return f"{_b64(body)}.{_b64(_mac(key, body))}"

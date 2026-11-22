@@ -1,9 +1,12 @@
 import { Fragment, useState } from 'react'
-import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
 import type { SpoolType } from '../../../api/filament'
 import { patchProduct, type SupplierProduct } from '../../../api/filamentPurchasing'
 import { Button } from '@/components/ui/button'
+import { anchors, filamentLinks } from '../../../lib/filamentLinks'
+import { useHashTarget } from '../../../lib/useHashTarget'
+import { cn } from '@/lib/utils'
+import { EntityLink } from '../EntityLink'
 import { TD, TH } from '../formClasses'
 import { RgbaSwatch } from '../RgbaSwatch'
 import { AddPriceForm } from './AddPriceForm'
@@ -29,6 +32,8 @@ export function ProductsTable({
 }) {
   const [adding, setAdding] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // A link to one product (`filamentLinks.supplierProduct`) scrolls to its row and marks it (#6869).
+  const target = useHashTarget(products.length > 0)
 
   async function archive(product: SupplierProduct) {
     setError(null)
@@ -69,13 +74,18 @@ export function ProductsTable({
               const open = adding === product.id
               return (
                 <Fragment key={product.id}>
-                  <tr data-product={product.id} className={`border-t align-top ${product.archived_at ? 'text-muted-foreground' : ''}`}>
+                  <tr
+                    id={anchors.supplierProduct(product.id)}
+                    data-product={product.id}
+                    aria-current={target === anchors.supplierProduct(product.id) ? 'location' : undefined}
+                    className={cn('scroll-mt-24 border-t align-top aria-[current=location]:bg-secondary/60', product.archived_at && 'text-muted-foreground')}
+                  >
                     <td className={`${TD} font-mono text-[12px]`}>{product.sku}</td>
                     <td className={TD}>
-                      <Link to={`/filament/types/${product.type_id}`} className="inline-flex items-center gap-2 underline-offset-4 hover:underline">
+                      <EntityLink to={filamentLinks.type(product.type_id)} className="inline-flex items-center gap-2">
                         {type && <RgbaSwatch rgba={type.rgba ?? '#FFFFFFFF'} size="sm" />}
                         <span>{type?.code ?? 'Unknown type'}</span>
-                      </Link>
+                      </EntityLink>
                       {product.archived_at && <span className="ml-2 text-[12px]">Archived</span>}
                     </td>
                     <td className={`${TD} text-right tabular-nums`}>{product.pack_size}</td>

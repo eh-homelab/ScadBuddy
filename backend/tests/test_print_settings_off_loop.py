@@ -25,6 +25,9 @@ class SlowReader:
     def plate_clear_required(self) -> bool:
         return False
 
+    def queue_when_busy(self) -> bool:
+        return True
+
 
 async def test_a_slow_settings_read_does_not_block_the_loop() -> None:
     reader = SlowReader()
