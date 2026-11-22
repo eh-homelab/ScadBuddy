@@ -261,7 +261,9 @@ class ListedFileInput(BaseModel):
     repin: bool | None = None
     #: What `Listing.library_file` answers, accepted so a client can send back the
     #: object it read. It is ignored: no body sets the pin. A value that is not a
-    #: sha256 is refused (422), so a malformed body does not save silently.
+    #: lowercase hex sha256 is refused (422), so a malformed body does not save
+    #: silently. `Listing.library_file` always answers it lowercase, so a read-back
+    #: object passes; a client that upper-cases hashes gets the 422.
     pinned: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 ```
 
