@@ -96,6 +96,20 @@ describe('the colour catalog', () => {
     expect(screen.getByRole('button', { name: /Sync from filamentcolors/ })).toBeEnabled()
   })
 
+  it('says a sync is already running when the press is refused', async () => {
+    const detail = 'a bambu colour sync is running; follow it on GET /filament/colour-syncs'
+    server.use(
+      http.post('/api/v1/filament/colour-syncs', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail, reason: 'colour_sync_running' }, { status: 409 }),
+      ),
+    )
+    const { user } = renderPage(<CatalogList kind="colours" />)
+    await screen.findByRole('row', { name: /^Jade White/ })
+    await user.click(screen.getByRole('button', { name: /Add Bambu Lab colours/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+    expect(screen.getByRole('button', { name: /Add Bambu Lab colours/ })).toBeEnabled()
+  })
+
   it('says why a filamentcolors sync stopped', async () => {
     const failed = {
       id: '8d6f3c1e-0000-4000-8000-0000000061a1',

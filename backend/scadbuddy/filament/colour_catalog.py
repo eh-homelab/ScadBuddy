@@ -1,5 +1,5 @@
 """The colour catalog's sources (#6907, plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`
-Decisions 206-218): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
+Decisions 206-220): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
 filamentcolors.xyz and Bambu Studio's colour codes (`ColourSyncs`, run as the operation
 ``filament_colour_sync`` on the ``library`` queue, `filament/operations.py`).
 
@@ -189,7 +189,8 @@ _COLUMNS = "id, name, manufacturer, rgba, material_name, material_id, extra_colo
 def upsert_colours(conn: Conn, rows: Iterable[ColourIn], source: ColourSource) -> ColourCounts:
     """Write ``rows`` as the module says, in the caller's transaction, under the catalog's
     advisory lock, stamped with the database's ``now()``. Each row is its own savepoint,
-    so one that fails is ``skipped``."""
+    so one the database refuses (a key another row holds, a CHECK, a bad value) is
+    ``skipped``."""
     counts = ColourCounts()
     conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_LOCK,))
     stamp = conn.execute("SELECT now() AS now").fetchone()
@@ -210,7 +211,10 @@ def upsert_colours(conn: Conn, rows: Iterable[ColourIn], source: ColourSource) -
         try:
             with conn.transaction():
                 outcome = _one(conn, row, source, now, materials, effects)
-        except errors.UniqueViolation:
+        except (errors.IntegrityError, errors.DataError) as refused:
+            logger.warning(
+                "a %s colour was skipped", source, extra={"error": type(refused).__name__}
+            )
             outcome = "skipped"
         setattr(counts, outcome, getattr(counts, outcome) + 1)
     return counts
@@ -580,6 +584,11 @@ async def run_filamentcolors(
             )
             if not data.get("next") or not results:
                 break
+        else:
+            # Pages are left: the run did not read every swatch, so it records no version.
+            raise ColourSourceError(
+                f"filamentcolors.xyz has more than {MAX_PAGES} pages; the rest were not read"
+            )
         return await asyncio.to_thread(syncs.finish, sync_id, "done", db_last_modified=modified)
     except ColourSourceError as error:
         logger.warning("the filamentcolors.xyz sync failed: %s", error)

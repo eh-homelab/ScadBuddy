@@ -246,17 +246,23 @@ function countsLine(counts: SyncStatus['counts']): string {
   return `${parts.join(', ')}.`
 }
 
-/** #6773 — each thing a reset of the Bambuddy links deletes, in the order the dialog lists it. */
+/**
+ * #6773 — each thing a reset of the Bambuddy links deletes, in the order the dialog lists it; the
+ * first `LINK_ROWS` are links (a colour's link to Bambuddy's colour catalog too, #6907).
+ */
 const RESET_ROWS: { key: keyof LinksResetCounts; one: string; many: string }[] = [
   { key: 'spools', one: 'spool link', many: 'spool links' },
   { key: 'filaments', one: 'spool type link', many: 'spool type links' },
   { key: 'insert_types', one: 'insert type link', many: 'insert type links' },
   { key: 'suppliers', one: 'supplier link', many: 'supplier links' },
   { key: 'locations', one: 'location link', many: 'location links' },
+  { key: 'colours', one: 'colour link', many: 'colour links' },
   { key: 'intents', one: 'unfinished create', many: 'unfinished creates' },
   { key: 'errors', one: 'listed sync error', many: 'listed sync errors' },
   { key: 'ignored', one: 'ignored Bambuddy spool', many: 'ignored Bambuddy spools' },
 ]
+
+const LINK_ROWS = 6
 
 /** What a refused reset says, in plain words. */
 function resetProblem(cause: unknown): string {
@@ -473,7 +479,7 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
       setNote('Links kept. A full pass now syncs with the Bambuddy at its new address.')
       if (data) setData(statusAfterKeptReset(data, done), { supersede: true })
     } else {
-      const deleted = RESET_ROWS.slice(0, 5).reduce((sum, row) => sum + done.deleted[row.key], 0)
+      const deleted = RESET_ROWS.slice(0, LINK_ROWS).reduce((sum, row) => sum + done.deleted[row.key], 0)
       setNote(`${plural(deleted, 'link', 'links')} reset. A full pass now links the new Bambuddy.`)
       if (data) setData({ ...data, instance: null, instance_changed: false, errors: [] }, { supersede: true })
     }

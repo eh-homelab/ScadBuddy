@@ -2246,6 +2246,16 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     interrupted") a `running` row of the same operation before it checks for another run.
     Why: a retried attempt of a run whose worker died would otherwise answer 409
     `colour_sync_running` against its own dead row until `RUN_STALE` passed.
+219. R-6907-14 (review of f98609a3): a row the database refuses in `upsert_colours` (any
+    `IntegrityError` or `DataError`: a key another row holds, a CHECK such as the `rgba`
+    format, a value out of range) is `skipped` in its own savepoint and logged by its error
+    class; the rest of the batch lands. Why: a source's one bad entry must not fail a
+    Bambuddy pull or a sync run whole, and the row-level savepoint already isolates it.
+220. R-6907-15 (review of f98609a3): a filamentcolors run that reads `MAX_PAGES` pages and
+    is still told there is a next one ends `failed` ("filamentcolors.xyz has more than 200
+    pages; the rest were not read") and records no `db_last_modified`. What it wrote
+    stays. Why: a version recorded from a partial read would make the next run
+    `unchanged` and skip the swatches it never read.
 
 ## Self-review
 

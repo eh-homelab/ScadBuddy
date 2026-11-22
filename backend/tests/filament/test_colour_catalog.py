@@ -13,6 +13,7 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy.models import BbColour
+from scadbuddy.filament import colour_catalog
 from scadbuddy.filament.bb_pull_apply import LocalBbPull
 from scadbuddy.filament.bb_pull_models import ColoursBody, PullInstanceChangedError
 from scadbuddy.filament.bb_sync_nudge import instance_for
@@ -306,6 +307,43 @@ async def test_filamentcolors_pages_fill_the_catalog(pg_pool: PgPool) -> None:
         "PLA",
         "filamentcolors",
     )
+
+
+@pg
+async def test_pages_left_past_the_bound_fail_the_run_and_keep_no_version(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(colour_catalog, "MAX_PAGES", 2)
+    with respx.mock() as router:
+        router.get(f"{FILAMENTCOLORS_API}/version/").respond(json={"db_last_modified": 100})
+        router.get(f"{FILAMENTCOLORS_API}/swatch/").mock(
+            side_effect=lambda request: httpx.Response(
+                200,
+                json=_page(
+                    [_swatch(int(request.url.params["page"]), "Page", "123456")],
+                    count=900,
+                    more=True,
+                ),
+            )
+        )
+        done = await _run(pg_pool)
+    assert (done.state, done.pages_read) == ("failed", 2)
+    assert done.error == "filamentcolors.xyz has more than 2 pages; the rest were not read"
+    assert ColourSyncs(pg_pool).last_modified("filamentcolors") is None
+
+
+@pg
+def test_a_row_the_database_refuses_is_skipped(pg_pool: PgPool) -> None:
+    # The rgba CHECK refuses a value no source should send; the rest of the batch lands.
+    counts = ColourSyncs(pg_pool).upsert(
+        [
+            ColourIn(manufacturer="Maker", name="Bad", rgba="#12345"),
+            ColourIn(manufacturer="Maker", name="Good", rgba="#123456FF"),
+        ],
+        "bambu",
+    )
+    assert (counts.added, counts.skipped) == (1, 1)
+    assert [row.name for row in _colours(pg_pool)] == ["Good"]
 
 
 @pg
