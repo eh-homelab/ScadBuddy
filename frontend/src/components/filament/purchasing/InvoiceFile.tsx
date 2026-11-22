@@ -5,11 +5,14 @@ import { getInvoiceFileBlob, invoiceFileUrl, uploadInvoiceFile, type FileRef } f
 import { Button } from '@/components/ui/button'
 import { AppLink } from '../../AppLink'
 import { acceptableInvoiceFile } from './invoiceLines'
-import { downloadBlob, NEW_TAB } from '../../../lib/embed'
+import { InvoicePhoto } from './InvoicePhoto'
+import { downloadBlob, isEmbedded, NEW_TAB } from '../../../lib/embed'
 
 /**
- * #6266 — an invoice's file beside its lines: a PDF in an `<object>`, a photo in an `<img>`,
- * "Open" in a new tab and "Download" through `downloadBlob` (the app can run in a sandboxed
+ * #6266 — an invoice's file beside its lines: a PDF in an `<iframe>` (#6889: the page CSP's
+ * `object-src 'none'` blocks an `<object>`; `frame-src 'self'` allows a same-origin frame), a
+ * photo in `InvoicePhoto` (zoom and pan), any other file (and a PDF inside Bambuddy's sandboxed frame, which has no PDF viewer) a line that points at Open and
+ * Download, "Open" in a new tab and "Download" through `downloadBlob` (the app can run in a sandboxed
  * frame, which drops a plain download). The file can be added or replaced on a confirmed
  * invoice too. `onChanged` runs after an upload.
  */
@@ -18,7 +21,11 @@ export function InvoiceFile({ invoiceId, file, onChanged }: { invoiceId: string;
   const [busy, setBusy] = useState(false)
   const picker = useRef<HTMLInputElement>(null)
   const url = invoiceFileUrl(invoiceId)
-  const isImage = file?.media_type.startsWith('image/') ?? false
+  const kind = file?.media_type.toLowerCase() ?? ''
+  const isImage = kind.startsWith('image/')
+  const isPdf = kind === 'application/pdf'
+  // Chromium runs no PDF viewer (a plugin) in Bambuddy's sandboxed frame: the iframe would be blank.
+  const embedded = isEmbedded()
 
   async function upload(chosen: File | undefined) {
     if (!chosen) return
@@ -52,11 +59,13 @@ export function InvoiceFile({ invoiceId, file, onChanged }: { invoiceId: string;
       <div className="flex min-h-72 items-stretch overflow-hidden rounded-md border bg-muted/30 lg:min-h-[32rem]">
         {file ? (
           isImage ? (
-            <img key={`${file.name}-${file.size}`} src={url} alt={`Photo of the invoice, ${file.name}`} className="max-h-[75vh] w-full object-contain" />
+            <InvoicePhoto key={`${file.name}-${file.size}`} src={url} alt={`Photo of the invoice, ${file.name}`} />
+          ) : isPdf && !embedded ? (
+            <iframe key={`${file.name}-${file.size}`} src={url} title={`Invoice PDF, ${file.name}`} className="h-[75vh] min-h-72 w-full border-0 bg-background lg:min-h-[32rem]" />
           ) : (
-            <object key={`${file.name}-${file.size}`} data={url} type={file.media_type} title="Invoice file" className="min-h-72 w-full lg:min-h-[32rem]">
-              <p className="p-4 text-[13px] text-muted-foreground">This browser cannot show the file here. Use Open or Download.</p>
-            </object>
+            <p className="flex w-full items-center justify-center p-6 text-center text-[13px] text-muted-foreground">
+              {isPdf ? 'A PDF cannot be shown inside Bambuddy. Use Open or Download.' : 'This file cannot be shown here. Use Open or Download.'}
+            </p>
           )
         ) : (
           <div className="flex w-full flex-col items-center justify-center gap-2 p-6 text-center text-[13px] text-muted-foreground">

@@ -2,9 +2,10 @@
 ``/api/v1/internal/crud/agent/``, for the ``agent`` credential only (`crud_router`).
 
 Area ``changes``: ``GET …/agent/changes``, a server-sent event stream of what the agent's own
-``LISTEN`` connection heard, on the six channels (``scadbuddy_events``, ``_input``,
-``_pending``, ``_mcp``, ``_warm_evict``, ``_settings``), with ``Last-Event-ID`` replay of the
-backend's ``events`` log (`agent_changes/hub.py` has the design). Frames:
+``LISTEN`` connection used to hear (the agent opens none now), on the six channels
+(``scadbuddy_events``, ``_input``, ``_pending``, ``_mcp``, ``_warm_evict``, ``_settings``),
+with ``Last-Event-ID`` replay of the backend's ``events`` log (`agent_changes/hub.py` has
+the design). Frames:
 
 - ``change``: ``{"c": <channel>, "p": <the NOTIFY payload>}``, with ``id`` when it is a logged
   event;

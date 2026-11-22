@@ -5,6 +5,7 @@ import (
 	"errors"
 	abstractions "github.com/microsoft/kiota-abstractions-go"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -30,18 +31,30 @@ func NewFormSerializationWriter() *FormSerializationWriter {
 	}
 }
 func (w *FormSerializationWriter) writeRawValue(value string) {
+	if w == nil {
+		return
+	}
 	w.writer = append(w.writer, url.QueryEscape(value))
 }
 func (w *FormSerializationWriter) writeStringValue(value string) {
 	w.writeRawValue(value)
 }
 func (w *FormSerializationWriter) writePropertyName(key string) {
+	if w == nil {
+		return
+	}
 	w.writer = append(w.writer, url.QueryEscape(key)+"=")
 }
 func (w *FormSerializationWriter) writePropertySeparator() {
+	if w == nil {
+		return
+	}
 	w.writer = append(w.writer, "&")
 }
 func (w *FormSerializationWriter) trimLastPropertySeparator() {
+	if w == nil {
+		return
+	}
 	lastIdx := len(w.writer) - 1
 	if lastIdx > -1 && w.writer[lastIdx] == "&" {
 		w.writer[lastIdx] = ""
@@ -50,6 +63,9 @@ func (w *FormSerializationWriter) trimLastPropertySeparator() {
 
 // WriteStringValue writes a String value to underlying the byte array.
 func (w *FormSerializationWriter) WriteStringValue(key string, value *string) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -64,6 +80,9 @@ func (w *FormSerializationWriter) WriteStringValue(key string, value *string) er
 
 // WriteBoolValue writes a Bool value to underlying the byte array.
 func (w *FormSerializationWriter) WriteBoolValue(key string, value *bool) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -78,6 +97,9 @@ func (w *FormSerializationWriter) WriteBoolValue(key string, value *bool) error 
 
 // WriteByteValue writes a Byte value to underlying the byte array.
 func (w *FormSerializationWriter) WriteByteValue(key string, value *byte) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if value != nil {
 		cast := int64(*value)
 		return w.WriteInt64Value(key, &cast)
@@ -87,6 +109,9 @@ func (w *FormSerializationWriter) WriteByteValue(key string, value *byte) error 
 
 // WriteInt8Value writes a int8 value to underlying the byte array.
 func (w *FormSerializationWriter) WriteInt8Value(key string, value *int8) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if value != nil {
 		cast := int64(*value)
 		return w.WriteInt64Value(key, &cast)
@@ -96,6 +121,9 @@ func (w *FormSerializationWriter) WriteInt8Value(key string, value *int8) error 
 
 // WriteInt32Value writes a Int32 value to underlying the byte array.
 func (w *FormSerializationWriter) WriteInt32Value(key string, value *int32) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if value != nil {
 		cast := int64(*value)
 		return w.WriteInt64Value(key, &cast)
@@ -105,6 +133,9 @@ func (w *FormSerializationWriter) WriteInt32Value(key string, value *int32) erro
 
 // WriteInt64Value writes a Int64 value to underlying the byte array.
 func (w *FormSerializationWriter) WriteInt64Value(key string, value *int64) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -119,6 +150,9 @@ func (w *FormSerializationWriter) WriteInt64Value(key string, value *int64) erro
 
 // WriteFloat32Value writes a Float32 value to underlying the byte array.
 func (w *FormSerializationWriter) WriteFloat32Value(key string, value *float32) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if value != nil {
 		cast := float64(*value)
 		return w.WriteFloat64Value(key, &cast)
@@ -128,6 +162,9 @@ func (w *FormSerializationWriter) WriteFloat32Value(key string, value *float32) 
 
 // WriteFloat64Value writes a Float64 value to underlying the byte array.
 func (w *FormSerializationWriter) WriteFloat64Value(key string, value *float64) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -142,6 +179,9 @@ func (w *FormSerializationWriter) WriteFloat64Value(key string, value *float64) 
 
 // WriteTimeValue writes a Time value to underlying the byte array.
 func (w *FormSerializationWriter) WriteTimeValue(key string, value *time.Time) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -156,6 +196,9 @@ func (w *FormSerializationWriter) WriteTimeValue(key string, value *time.Time) e
 
 // WriteISODurationValue writes a ISODuration value to underlying the byte array.
 func (w *FormSerializationWriter) WriteISODurationValue(key string, value *absser.ISODuration) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -170,6 +213,9 @@ func (w *FormSerializationWriter) WriteISODurationValue(key string, value *absse
 
 // WriteTimeOnlyValue writes a TimeOnly value to underlying the byte array.
 func (w *FormSerializationWriter) WriteTimeOnlyValue(key string, value *absser.TimeOnly) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -184,6 +230,9 @@ func (w *FormSerializationWriter) WriteTimeOnlyValue(key string, value *absser.T
 
 // WriteDateOnlyValue writes a DateOnly value to underlying the byte array.
 func (w *FormSerializationWriter) WriteDateOnlyValue(key string, value *absser.DateOnly) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -198,6 +247,9 @@ func (w *FormSerializationWriter) WriteDateOnlyValue(key string, value *absser.D
 
 // WriteUUIDValue writes a UUID value to underlying the byte array.
 func (w *FormSerializationWriter) WriteUUIDValue(key string, value *uuid.UUID) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -212,6 +264,9 @@ func (w *FormSerializationWriter) WriteUUIDValue(key string, value *uuid.UUID) e
 
 // WriteByteArrayValue writes a ByteArray value to underlying the byte array.
 func (w *FormSerializationWriter) WriteByteArrayValue(key string, value []byte) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" && value != nil {
 		w.writePropertyName(key)
 	}
@@ -224,53 +279,75 @@ func (w *FormSerializationWriter) WriteByteArrayValue(key string, value []byte) 
 	return nil
 }
 
+func isNil(val any) bool {
+	if val == nil {
+		return true
+	}
+	v := reflect.ValueOf(val)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.UnsafePointer, reflect.Interface, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
 // WriteObjectValue writes a Parsable value to underlying the byte array.
 func (w *FormSerializationWriter) WriteObjectValue(key string, item absser.Parsable, additionalValuesToMerge ...absser.Parsable) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if w.depth > 0 {
 		return errors.New("nested objects serialization is not supported with FormSerializationWriter")
 	}
 	w.depth++
-	additionalValuesLen := len(additionalValuesToMerge)
-	if item != nil || additionalValuesLen > 0 {
-		if key != "" {
-			w.writePropertyName(key)
+	defer func() {
+		w.depth--
+	}()
+	var values []absser.Parsable
+	if !isNil(item) {
+		values = append(values, item)
+	}
+	for _, additionalValue := range additionalValuesToMerge {
+		if !isNil(additionalValue) {
+			values = append(values, additionalValue)
 		}
-		abstractions.InvokeParsableAction(w.GetOnBeforeSerialization(), item)
-		if item != nil {
-			err := abstractions.InvokeParsableWriter(w.GetOnStartObjectSerialization(), item, w)
-			if err != nil {
-				return err
-			}
-			err = item.Serialize(w)
+	}
+	if len(values) == 0 {
+		return nil
+	}
 
-			abstractions.InvokeParsableAction(w.GetOnAfterObjectSerialization(), item)
-			if err != nil {
-				return err
-			}
-		}
+	if key != "" {
+		w.writePropertyName(key)
+	}
 
-		for _, additionalValue := range additionalValuesToMerge {
-			abstractions.InvokeParsableAction(w.GetOnBeforeSerialization(), additionalValue)
-			err := abstractions.InvokeParsableWriter(w.GetOnStartObjectSerialization(), additionalValue, w)
-			if err != nil {
-				return err
-			}
-			err = additionalValue.Serialize(w)
-			if err != nil {
-				return err
-			}
-			abstractions.InvokeParsableAction(w.GetOnAfterObjectSerialization(), additionalValue)
+	for _, val := range values {
+		abstractions.InvokeParsableAction(w.GetOnBeforeSerialization(), val)
+		err := abstractions.InvokeParsableWriter(w.GetOnStartObjectSerialization(), val, w)
+		if err != nil {
+			return err
 		}
+		err = val.Serialize(w)
+		if err != nil {
+			return err
+		}
+		abstractions.InvokeParsableAction(w.GetOnAfterObjectSerialization(), val)
+	}
 
-		if key != "" {
-			w.writePropertySeparator()
-		}
+	if key != "" {
+		w.writePropertySeparator()
 	}
 	return nil
 }
 
 // WriteCollectionOfObjectValues writes a collection of Parsable values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfObjectValues(key string, collection []absser.Parsable) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
+	if collection == nil {
+		return nil
+	}
 	return errors.New("collections serialization is not supported with FormSerializationWriter")
 }
 
@@ -288,66 +365,105 @@ func writeCollectionOfPrimitiveValues[T interface{}](key string, writer func(str
 
 // WriteCollectionOfStringValues writes a collection of String values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfStringValues(key string, collection []string) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteStringValue, collection)
 }
 
 // WriteCollectionOfInt32Values writes a collection of Int32 values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfInt32Values(key string, collection []int32) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteInt32Value, collection)
 }
 
 // WriteCollectionOfInt64Values writes a collection of Int64 values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfInt64Values(key string, collection []int64) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteInt64Value, collection)
 }
 
 // WriteCollectionOfFloat32Values writes a collection of Float32 values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfFloat32Values(key string, collection []float32) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteFloat32Value, collection)
 }
 
 // WriteCollectionOfFloat64Values writes a collection of Float64 values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfFloat64Values(key string, collection []float64) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteFloat64Value, collection)
 }
 
 // WriteCollectionOfTimeValues writes a collection of Time values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfTimeValues(key string, collection []time.Time) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteTimeValue, collection)
 }
 
 // WriteCollectionOfISODurationValues writes a collection of ISODuration values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfISODurationValues(key string, collection []absser.ISODuration) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteISODurationValue, collection)
 }
 
 // WriteCollectionOfTimeOnlyValues writes a collection of TimeOnly values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfTimeOnlyValues(key string, collection []absser.TimeOnly) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteTimeOnlyValue, collection)
 }
 
 // WriteCollectionOfDateOnlyValues writes a collection of DateOnly values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfDateOnlyValues(key string, collection []absser.DateOnly) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteDateOnlyValue, collection)
 }
 
 // WriteCollectionOfUUIDValues writes a collection of UUID values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfUUIDValues(key string, collection []uuid.UUID) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteUUIDValue, collection)
 }
 
 // WriteCollectionOfBoolValues writes a collection of Bool values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfBoolValues(key string, collection []bool) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteBoolValue, collection)
 }
 
 // WriteCollectionOfByteValues writes a collection of Byte values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfByteValues(key string, collection []byte) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteByteValue, collection)
 }
 
 // WriteCollectionOfInt8Values writes a collection of int8 values to underlying the byte array.
 func (w *FormSerializationWriter) WriteCollectionOfInt8Values(key string, collection []int8) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	return writeCollectionOfPrimitiveValues(key, w.WriteInt8Value, collection)
 }
 
@@ -363,14 +479,23 @@ func (w *FormSerializationWriter) GetSerializedContent() ([]byte, error) {
 
 // WriteAnyValue an unknown value as a parameter.
 func (w *FormSerializationWriter) WriteAnyValue(key string, value interface{}) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
+	if isNil(value) {
+		return nil
+	}
 	return errors.New("serialization of any value is not supported with FormSerializationWriter")
 }
 
 // WriteAdditionalData writes additional data to underlying the byte array.
 func (w *FormSerializationWriter) WriteAdditionalData(value map[string]interface{}) error {
-	var err error
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if len(value) != 0 {
 		for key, input := range value {
+			var err error
 			switch value := input.(type) {
 			case absser.Parsable:
 				err = w.WriteObjectValue(key, value)
@@ -388,6 +513,14 @@ func (w *FormSerializationWriter) WriteAdditionalData(value map[string]interface
 				err = w.WriteCollectionOfInt32Values(key, value)
 			case []int64:
 				err = w.WriteCollectionOfInt64Values(key, value)
+			case []int:
+				if value != nil {
+					vals := make([]int64, len(value))
+					for i, v := range value {
+						vals[i] = int64(v)
+					}
+					err = w.WriteCollectionOfInt64Values(key, vals)
+				}
 			case []float32:
 				err = w.WriteCollectionOfFloat32Values(key, value)
 			case []float64:
@@ -426,6 +559,14 @@ func (w *FormSerializationWriter) WriteAdditionalData(value map[string]interface
 				err = w.WriteInt64Value(key, value)
 			case int64:
 				err = w.WriteInt64Value(key, &value)
+			case *int:
+				if value != nil {
+					val64 := int64(*value)
+					err = w.WriteInt64Value(key, &val64)
+				}
+			case int:
+				val64 := int64(value)
+				err = w.WriteInt64Value(key, &val64)
 			case *float32:
 				err = w.WriteFloat32Value(key, value)
 			case float32:
@@ -455,9 +596,12 @@ func (w *FormSerializationWriter) WriteAdditionalData(value map[string]interface
 			case absser.DateOnly:
 				err = w.WriteDateOnlyValue(key, &value)
 			}
+			if err != nil {
+				return err
+			}
 		}
 	}
-	return err
+	return nil
 }
 
 // Close clears the internal buffer.
@@ -466,10 +610,14 @@ func (w *FormSerializationWriter) Close() error {
 		return nil
 	}
 	w.writer = make([]string, 0)
+	w.depth = 0
 	return nil
 }
 
 func (w *FormSerializationWriter) WriteNullValue(key string) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	if key != "" {
 		w.writePropertyName(key)
 	}
@@ -484,28 +632,46 @@ func (w *FormSerializationWriter) WriteNullValue(key string) error {
 }
 
 func (w *FormSerializationWriter) GetOnBeforeSerialization() absser.ParsableAction {
+	if w == nil {
+		return nil
+	}
 	return w.onBeforeAssignFieldValues
 }
 
 func (w *FormSerializationWriter) SetOnBeforeSerialization(action absser.ParsableAction) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	w.onBeforeAssignFieldValues = action
 	return nil
 }
 
 func (w *FormSerializationWriter) GetOnAfterObjectSerialization() absser.ParsableAction {
+	if w == nil {
+		return nil
+	}
 	return w.onAfterAssignFieldValues
 }
 
 func (w *FormSerializationWriter) SetOnAfterObjectSerialization(action absser.ParsableAction) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	w.onAfterAssignFieldValues = action
 	return nil
 }
 
 func (w *FormSerializationWriter) GetOnStartObjectSerialization() absser.ParsableWriter {
+	if w == nil {
+		return nil
+	}
 	return w.onStartObjectSerialization
 }
 
 func (w *FormSerializationWriter) SetOnStartObjectSerialization(writer absser.ParsableWriter) error {
+	if w == nil {
+		return errors.New("writer cannot be nil")
+	}
 	w.onStartObjectSerialization = writer
 	return nil
 }

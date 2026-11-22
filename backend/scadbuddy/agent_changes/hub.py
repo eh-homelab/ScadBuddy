@@ -1,6 +1,6 @@
-"""The agent's change stream (#5299 D4, step 11): what the agent heard on its own ``LISTEN``
-connection, served by the CRUD service as one server-sent event stream per agent process
-(`api/crud_agent_changes.py`, ``GET …/crud/agent/changes``).
+"""The agent's change stream (#5299 D4, step 11): what the agent's own ``LISTEN`` connection
+used to hear (the agent opens none now), served by the CRUD service as one server-sent event
+stream per agent process (`api/crud_agent_changes.py`, ``GET …/crud/agent/changes``).
 
 **One LISTEN per API process.** The hub registers the agent's five channels
 (:data:`CHANNELS`) on the process's one `PgListener` connection, and taps the event bus for
