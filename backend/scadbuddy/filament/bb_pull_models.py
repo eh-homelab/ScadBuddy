@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.bambuddy.errors import UpstreamAnswer
 from scadbuddy.bambuddy.models import (
     Archive,
+    BbColour,
     BbLocation,
     BbSupplier,
     SpoolAssignment,
@@ -157,6 +158,12 @@ class PullReport(BaseModel):
     locations: int = 0
     moved: int = 0
     conflicts: int = 0
+    #: #6907: Bambuddy's colour catalog, read under ``pulls.spools`` and sent apart from the
+    #: spools (`ColoursBody`): the colours it added or changed, those a person made or edited
+    #: (left as they are), and whether the read or the write failed (logged).
+    colours: int = 0
+    colours_kept: int = 0
+    colours_failed: bool = False
 
 
 class PullInstanceChangedError(Exception):
@@ -289,6 +296,24 @@ class HaBody(_Body):
     states: Annotated[dict[str, str | None], Field(max_length=ROWS_MAX)] | None
 
 
+class ColoursBody(_Body):
+    """Bambuddy's colour catalog (``GET /inventory/colors``), sent apart from `PullBody` so
+    an API without the route (a roll) fails it alone (#6907, Decision 207)."""
+
+    colours: list[BbColour] = Field(max_length=ROWS_MAX)
+
+
+class ColoursApplied(BaseModel):
+    """What the colour catalog write did (`colour_catalog.ColourCounts`) and how many
+    entries had no colour."""
+
+    added: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    kept: int = 0
+    skipped: int = 0
+
+
 class TraysBody(_Body):
     """Bambuddy's tray assignments, to set right the untagged trays (#6713)."""
 
@@ -310,3 +335,5 @@ class BbPullApi(Protocol):
     async def ha_states(self, body: HaBody) -> None: ...
 
     async def reconcile_trays(self, body: TraysBody) -> int: ...
+
+    async def colours(self, body: ColoursBody) -> ColoursApplied: ...

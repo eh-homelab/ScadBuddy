@@ -718,6 +718,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
   'filament_catalog_set_aliases',
+  // #6907: a colour sync writes catalog rows only.
+  'filament_colour_sync',
   'filament_type_upsert',
   // #6701: the proposed types a person confirmed, and their spools' `edited` events.
   'filament_type_proposals_confirm',

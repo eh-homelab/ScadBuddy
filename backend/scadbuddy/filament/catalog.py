@@ -135,6 +135,9 @@ CATALOGS: dict[str, CatalogSpec] = {
 }
 
 
+#: The text columns a catalog search (`CatalogStore.list` ``q``) reads, where a kind has them.
+_SEARCHED = ("name", "manufacturer", "material_name", "rgba")
+
 #: The kind of each catalog table.
 KIND_OF_TABLE = {spec.table: kind for kind, spec in CATALOGS.items()}
 
@@ -366,13 +369,25 @@ class CatalogStore:
     def __init__(self, pool: ConnectionPool[Conn]) -> None:
         self._pool = pool
 
-    def list(self, kind: str, *, include_archived: bool = False) -> list[BaseModel]:
+    def list(
+        self, kind: str, *, include_archived: bool = False, q: str | None = None
+    ) -> list[BaseModel]:
+        """A catalog in sort order. ``q``: every word must match some text of the row, in
+        any case (its name; a colour's maker, material and ``#RRGGBBAA`` too, #6907)."""
         spec = _spec(kind)
-        where = "" if include_archived else " WHERE archived_at IS NULL"
+        where: list[str] = [] if include_archived else ["archived_at IS NULL"]
+        params: list[Any] = []
+        texts = [n for n in _SEARCHED if n in spec.out.model_fields]
+        for word in (q or "").split():
+            where.append("(" + " OR ".join(f"{n} ILIKE %s" for n in texts) + ")")
+            escaped = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.extend([f"%{escaped}%"] * len(texts))
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_columns(spec)} FROM {spec.table}{where}"
-                " ORDER BY sort_order, upper(name), id"
+                f"SELECT {_columns(spec)} FROM {spec.table}{clause}"
+                " ORDER BY sort_order, upper(name), id",
+                params,
             ).fetchall()
         return [spec.out.model_validate(row) for row in rows]
 

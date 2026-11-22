@@ -17,6 +17,9 @@ pull needs, in the order `bambuddy_pull.read_and_pull` and `scheduled_pull` read
    the date it names; then the usage rows with them, to book.
 4. After the Schedule's pull, Bambuddy's tray assignments, to set right the untagged
    trays (#6713).
+
+After the spools (step 2), under ``pulls.spools``, Bambuddy's colour catalog is read and
+sent to SB's colour catalog (#6907): its own GET and route, each failing alone.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from scadbuddy.bambuddy.errors import BAD_BODY_PROBLEM, not_configured
 from scadbuddy.bambuddy.linking import ARCHIVE_OVERLAP, ARCHIVE_PAGE, MAX_ARCHIVE_PAGES
 from scadbuddy.bambuddy.models import (
     Archive,
+    BbColour,
     BbLocation,
     BbSupplier,
     SpoolCatalogEntry,
@@ -45,6 +49,7 @@ from scadbuddy.filament.bambuddy_pull import try_assignments
 from scadbuddy.filament.bb_pull_models import (
     PULL_READ_ACTIVITY,
     BbPullApi,
+    ColoursBody,
     HaBody,
     PullBody,
     PullInstanceChangedError,
@@ -202,6 +207,8 @@ async def read_and_pull(
         )
     )
     report = applied.report
+    if pulls.spools:
+        await _pull_colours(api, settings, instance, report)
     if usage:
         archives: list[Archive] = []
         if applied.archives_since is not None:
@@ -283,6 +290,50 @@ async def read_catalog(settings: StoredSettings) -> list[SpoolCatalogEntry] | No
                 type(error).__name__,
             )
     return None
+
+
+async def read_colours(settings: StoredSettings) -> list[BbColour] | None:
+    """Bambuddy's colour catalog (``GET /inventory/colors``, #6907), or ``None``, logged,
+    as `read_catalog` reads the spool catalog: bounded by `CATALOG_TIMEOUT`, a refusal or
+    another shape logged with no Bambuddy text."""
+    async with waiting_on_bambuddy():
+        try:
+            async with asyncio.timeout(CATALOG_TIMEOUT), client_for(settings) as client:
+                return await client.colour_catalog()
+        except TimeoutError:
+            logger.warning(
+                "no colour catalog from Bambuddy: no answer within %s s", CATALOG_TIMEOUT
+            )
+        except ApiError as error:
+            logger.warning("no colour catalog from Bambuddy: %s", error.detail)
+        except ValueError as error:
+            logger.warning(
+                "no colour catalog from Bambuddy: an answer of another shape (%s)",
+                type(error).__name__,
+            )
+        except Exception as error:
+            # The colours never hold the pull up (Decision 207): any other failure too.
+            _failed("could not read Bambuddy's colour catalog", error)
+    return None
+
+
+async def _pull_colours(
+    api: BbPullApi, settings: StoredSettings, instance: str, report: PullReport
+) -> None:
+    """Read Bambuddy's colour catalog and send it to SB's (#6907, Decisions 206-207): after
+    the spools, under ``pulls.spools``, each step failing alone (``colours_failed``)."""
+    colours = await read_colours(settings)
+    if colours is None:
+        report.colours_failed = True
+        return
+    try:
+        applied = await api.colours(ColoursBody(instance=instance, colours=colours))
+    except Exception as error:
+        _failed("could not fill the colour catalog from Bambuddy's", error)
+        report.colours_failed = True
+        return
+    report.colours = applied.added + applied.updated
+    report.colours_kept = applied.kept
 
 
 async def read_ha_sensors(api: BbPullApi, settings: StoredSettings, instance: str) -> None:

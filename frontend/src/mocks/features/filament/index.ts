@@ -113,8 +113,24 @@ function writeKValues(typeId: string, rows: S['TypeKValueCreate'][], result: S['
 
 let state: Seed = seed()
 
+type ColourSync = components['schemas']['ColourSync']
+/** #6907: each source's newest run; empty until a sync runs. */
+let colourSyncs: ColourSync[] = []
+/** What a mock sync adds: a few colours of each source. */
+const MOCK_SYNC_COLOURS = {
+  bambu: [
+    { name: 'Black', manufacturer: 'Bambu Lab', rgba: '#000000FF', material_name: 'PLA Basic' },
+    { name: 'Translucent Yellow', manufacturer: 'Bambu Lab', rgba: '#F4EE2A80', material_name: 'PLA Translucent' },
+  ],
+  filamentcolors: [
+    { name: 'Galaxy Black', manufacturer: 'Polymaker', rgba: '#1A1A1EFF', material_name: 'PLA' },
+    { name: 'Clear Red', manufacturer: 'Prusament', rgba: '#D0102080', material_name: 'PETG' },
+  ],
+} as const
+
 export function reset() {
   state = seed()
+  colourSyncs = []
   bambuddyKValues.clear()
   imports.clear()
   invoicedLine.clear()
@@ -573,7 +589,7 @@ function cleared(body: Record<string, unknown>, fields: readonly string[]): stri
 const CATALOG_FIELDS = Object.fromEntries(
   Object.entries(seed().catalogs).map(([kind, rows]) => [
     kind,
-    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases'].includes(field))),
+    new Set(Object.keys(rows[0]!).filter((field) => !['id', 'created_at', 'updated_at', 'archived_at', 'bb_catalog_id', 'aliases', 'source', 'synced_at', 'bb_colour_id'].includes(field))),
   ]),
 ) as Record<keyof Catalogs, Set<string>>
 
@@ -1518,9 +1534,46 @@ export const handlers = [
     const rows = state.catalogs[params.kind as keyof Catalogs] as { archived_at: string | null; sort_order: number; name: string }[] | undefined
     if (!rows) return problem(404, `no catalog ${String(params.kind)}`)
     const archived = flag(request, 'include_archived')
+    // #6907: every word of `q` matches some text of the row (`CatalogStore.list`).
+    const words = (new URL(request.url).searchParams.get('q') ?? '').toLowerCase().split(/\s+/).filter(Boolean)
+    const texts = (row: object) =>
+      ['name', 'manufacturer', 'material_name', 'rgba'].map((field) => (row as Record<string, unknown>)[field]).filter((v): v is string => typeof v === 'string').map((v) => v.toLowerCase())
     return HttpResponse.json(
-      rows.filter((row) => archived || !row.archived_at).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)),
+      rows
+        .filter((row) => archived || !row.archived_at)
+        .filter((row) => words.every((word) => texts(row).some((text) => text.includes(word))))
+        .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)),
     )
+  }),
+  // -- the colour catalog's syncs (#6907) --
+  http.get(`${BASE}/colour-syncs`, () => HttpResponse.json(colourSyncs)),
+  http.post(`${BASE}/colour-syncs`, async ({ request }) => {
+    const { source } = (await request.json()) as { source?: string }
+    if (source !== 'filamentcolors' && source !== 'bambu') return problem(422, "source: Input should be 'filamentcolors' or 'bambu'")
+    const made = MOCK_SYNC_COLOURS[source].filter(
+      (colour) => !state.catalogs.colours.some((row) => row.name === colour.name && row.manufacturer === colour.manufacturer && row.material_name === colour.material_name),
+    )
+    for (const colour of made) {
+      state.catalogs.colours.push({ ...colour, id: newId(), sort_order: 0, material_id: null, effect_id: null, extra_colours: null, bb_colour_id: null, source, archived_at: null, created_at: now(), updated_at: now(), synced_at: now() })
+    }
+    const run: ColourSync = {
+      id: newId(),
+      source,
+      state: 'done',
+      pages_read: 1,
+      pages_total: 1,
+      total: MOCK_SYNC_COLOURS[source].length,
+      added: made.length,
+      updated: 0,
+      unchanged: MOCK_SYNC_COLOURS[source].length - made.length,
+      kept: 0,
+      skipped: 0,
+      error: null,
+      started_at: now(),
+      finished_at: now(),
+    }
+    colourSyncs = [...colourSyncs.filter((one) => one.source !== source), run]
+    return HttpResponse.json(run)
   }),
   http.post(`${BASE}/catalog/:kind`, async ({ params, request }) => {
     const kind = params.kind as keyof Catalogs

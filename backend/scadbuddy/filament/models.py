@@ -304,6 +304,9 @@ class ColourCreate(_In):
     manufacturer: Text | None = None
     rgba: Rgba
     material_id: UUID | None = None
+    #: The material as the source names it ("PLA Basic"); with the maker and the name it
+    #: is the row's identity (#6907).
+    material_name: Text | None = None
     extra_colours: Colours | None = None
     effect_id: UUID | None = None
 
@@ -315,17 +318,30 @@ class ColourPatch(_Patch):
     manufacturer: Text | None = None
     rgba: Rgba | None = None
     material_id: UUID | None = None
+    material_name: Text | None = None
     extra_colours: Colours | None = None
     effect_id: UUID | None = None
     archived: bool | None = None
+
+
+#: Where a colour catalog row came from (#6907): a sync's source, else ``None``, a person's.
+ColourSource = Literal["bambuddy", "filamentcolors", "bambu"]
 
 
 class Colour(_Catalog):
     manufacturer: str | None
     rgba: Rgba
     material_id: UUID | None
+    material_name: str | None = None
     extra_colours: list[Rgba] | None
     effect_id: UUID | None
+    #: The sync that made or last wrote the row; ``None`` for a person's own row.
+    source: ColourSource | None = None
+    #: That sync write's time. A row whose ``updated_at`` is later was edited by a person
+    #: since: no sync writes it again (#6907, Decision 208).
+    synced_at: datetime | None = None
+    #: Bambuddy's colour catalog entry the row is linked to (`GET /inventory/colors`).
+    bb_colour_id: int | None = None
 
 
 # -- locations ------------------------------------------------------------------------

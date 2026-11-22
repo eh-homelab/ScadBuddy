@@ -2153,6 +2153,76 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     main, run 44936881958, and on this PR). With no body to write there is no race, and
     the test still proves the answer comes from the headers alone. Cost: none.
 
+### #6907: the colour catalog's sources
+
+206. R-6907-1 (#6907): Bambuddy's colour catalog (`GET /inventory/colors`, GET only, its
+    `ColorEntryResponse` read from Bambuddy's source at
+    https://github.com/maziggy/bambuddy/tree/b7d894b57c0a373f66dc0de49680865b02b3aae5,
+    `backend/app/api/routes/inventory.py` lines 470-481; the 1.2.6b1 OpenAPI names the route
+    only) is pulled under `pulls(spools)`, as the spool catalog is. Bambuddy to ScadBuddy only:
+    no `filament_sync` data type of its own and no push. Why: the spec (§5) asks for parity, and
+    the spool catalog already rides on `spools`; a seventh direction setting would add a
+    Settings row for a read-only catalog. Cost: switching `spools` off stops the colours too.
+207. R-6907-2: the worker reads the colours after the pull's body and sends them on a route of
+    their own (`…/print/filament/pull/colours`, `ColoursBody`), each step failing alone
+    (`PullReport.colours_failed`). Why: `PullBody` forbids extra fields, so a new field would
+    make an older API refuse the whole pull during a roll; a 404 from an older API now loses
+    the colours only. No new Temporal workflow or activity type: `FilamentBbPull`'s one
+    activity reads one GET more.
+208. R-6907-3: "a person's edit wins" is the row's own times: a sync's write sets `updated_at`
+    and `synced_at` to one time, and a row whose `synced_at` is NULL (a person's) or whose
+    `updated_at` is later (edited since) is `kept`; a Bambuddy entry still links to it. Why:
+    every catalog write already sets `updated_at` (`CatalogStore.update`), so no new
+    bookkeeping is needed, and it is #6688's rule. Cost: an edit that changes nothing still
+    makes the row a person's.
+209. R-6907-4: identity is the manufacturer, the name and the source's material label
+    (`material_name`, new), case-blind, archived rows included; the unique index moves to
+    those three (`20261121T2327Z_filament_colour_sources.sql`). Why: Bambu Lab's "Black" is a
+    PLA Basic, a PLA Matte and a PETG HF colour, and filamentcolors has one name in several
+    filament types; maker and name alone would fold them into one hex. Bambuddy's own
+    filamentcolors sync matches on the same three. An archived row is found, so a sync never
+    adds back a row a person archived, and no sync deletes a row. `material_id` is resolved
+    from the label by key (the label, else its first word: "PLA Basic" is PLA), the effect by
+    key; neither adds a catalog row.
+210. R-6907-5: the filamentcolors and Bambu syncs are the operation `filament_colour_sync` on
+    the `library` queue (`filament/operations.py`), started by `POST /filament/colour-syncs`
+    and the agent's `filament_colour_sync`. Why: the library worker runs in the API process
+    (the CRUD service, which holds SQL), so the outside read needs no new route or worker;
+    an operation gives the idempotency key, the 202 and the follow for free. No new workflow
+    type (an `OperationWorkflow` kind), so no Recreate. Each run is a `filament_colour_syncs`
+    row whose counts and pages the run writes as it goes, which `GET /filament/colour-syncs`
+    and `filament_colour_sync_status` read for the progress; a run still `running` after 30
+    minutes is ended `failed` by the next start, and finished runs older than 30 days but the
+    newest are deleted.
+211. R-6907-6: a filamentcolors run reads `GET /api/version/` first and reads no page when its
+    `db_last_modified` equals the last finished run's (`unchanged`); `force` reads anyway. Why:
+    the site's README asks callers to check it before reading again ("Please cache", at
+    https://github.com/itsthejoker/filamentcolors.xyz/tree/c660d80a5ebb5902c2ecc1cebd2b47a5960e9b88).
+212. R-6907-7: pages of 100 (the API's most, same README), in the API's default order (newest
+    first), at most 200 pages. Why: a swatch added while the run reads moves the rest later,
+    so one is read twice and none is missed; 2,256 swatches were 23 pages (measured
+    2026-11-21 with `curl https://filamentcolors.xyz/api/swatch/?page_size=100`).
+213. R-6907-8: a read that may pass later (no answer, 429, 5xx) is tried three times (waits of 2
+    and 4 s, or `Retry-After` up to 30 s); any other status, no JSON or another shape stops at
+    once. The run ends `failed` with the reason in words (no body text), and what it wrote
+    stays. The route answers the run (200), not an error status. Why: "network failures are
+    reported, not crashed" (#6907).
+214. R-6907-9: a filamentcolors swatch of the translucent family (`color_parent` or
+    `alt_color_parent` `TRN`, the README's family table) takes alpha `80`, as Bambu's
+    translucent filaments; any other swatch is opaque. Bambu's colour codes keep the alpha the
+    table gives (`80` for a translucent one), the first colour of a code is its colour and the
+    rest its extra colours, the maker is "Bambu Lab" and the material label the code's
+    `fila_type`.
+215. R-6907-10: the Colours tab searches on the server (`GET /filament/catalog/{kind}?q=`, every
+    word in the name, maker, material label or `#RRGGBBAA`), draws at most 200 rows, and offers
+    no up and down buttons. Why: a synced catalog holds thousands of rows, and a move writes
+    `sort_order` for every row between, which on a filtered list would also move rows that
+    are not shown. `sort_order` can still be set through the API and the agent.
+216. R-6907-11: the RGBA field's catalog picker on the type and spool pages and the invoice
+    import's catalog lookup (#6907 item 4) are a follow-up issue under #6260, so this PR stays
+    a reviewable size. The agent's `filament_catalog_list` takes `q` now, which the follow-up
+    builds on.
+
 ## Self-review
 
 - Spec coverage: §8 "one setting per data type" → Task 1; §8.1 rows: types on spools with

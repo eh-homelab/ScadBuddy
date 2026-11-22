@@ -166,6 +166,8 @@ from scadbuddy.crud.render import WriteKeys
 from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.filament.bb_pull_models import (
     INSTANCE_CHANGED,
+    ColoursApplied,
+    ColoursBody,
     HaBody,
     PullApplied,
     PullBody,
@@ -1548,6 +1550,9 @@ class RemoteBbPull:
 
     async def reconcile_trays(self, body: TraysBody) -> int:
         return TraysReconciled.model_validate(await self._post("/trays", body)).moved
+
+    async def colours(self, body: ColoursBody) -> ColoursApplied:
+        return ColoursApplied.model_validate(await self._post("/colours", body))
 
 
 class RemoteSensorNotifications:

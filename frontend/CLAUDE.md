@@ -285,7 +285,10 @@ same way, `vite.config.ts`).
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
   `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`). The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
-  configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
+  configuration (`pages/settings/sections/filament.tsx`). The Catalog tab's Colours (#6907) adds
+  `ColourSources` ("Sync from filamentcolors", "Add Bambu Lab colours", each run's progress read
+  while it runs) and a server search (`q`, at most `SHOWN_MAX` rows drawn, no re-order); mocks in
+  `mocks/features/filament/index.ts` (`MOCK_SYNC_COLOURS`). #6265 (plan
   `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
   Bambuddy" has one `ChoiceSelect` row per data type (spools and types, weights, tags,
   suppliers and prices, locations, presets and K values; `SYNC_ROWS`, `SYNC_KINDS` in
