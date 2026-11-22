@@ -62,6 +62,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY
 from scadbuddy.spools.activities import filament_pull_activity
 from tests.conftest import PgPool
+from tests.filament import bb_sync_scale as scale
 from tests.filament.pull_support import read_and_pull, read_ha_sensors, scheduled_pull
 from tests.filament.test_bb_sync_plan import SPOOLS, _only, _plan, _snap
 from tests.filament.test_bb_sync_plan import _row as _plan_row
@@ -2803,3 +2804,75 @@ def test_a_pull_that_sees_nothing_new_keeps_the_seen_time(pg_pool: PgPool) -> No
 
     pull(f, [bb(updated_at=_bb_time(-1), color_name="Blue")], now=NOW + timedelta(hours=2))
     assert _link_times(pg_pool, spool)[1] == NOW + timedelta(hours=2)
+
+
+def _quiet_rows(count: int) -> list[BbSpool]:
+    """``count`` linked-to-be BB spools with what a pull reads of each: a weighing, a
+    drying, a preset, a K-profile and a place; two archived."""
+    return [
+        bb(
+            id=100 + i,
+            tag_uid=f"{i:016X}",
+            tray_uuid=f"{i:032X}",
+            weight_used=float(10 * i),
+            last_scale_weight=900.0,
+            last_weighed_at="2026-11-14T09:00:00",
+            last_dried_at="2026-11-13T09:00:00",
+            slicer_filament="GFA00",
+            slicer_filament_name="Bambu PLA Basic",
+            k_profiles=[
+                {"printer_id": 1, "extruder": 0, "nozzle_diameter": "0.4", "k_value": 0.02}
+            ],
+            archived_at="2026-11-14T09:30:00" if i < 2 else None,
+        )
+        for i in range(count)
+    ]
+
+
+@pytest.mark.parametrize("count", [4, 12])
+def test_an_unchanged_pull_reads_in_a_fixed_number_of_queries(pg_pool: PgPool, count: int) -> None:
+    """#6768: a linked spool whose BB row and seen copy have not changed since the last
+    pull is skipped: the pull reads what it needs of every such spool at once, opens no
+    transaction of its own for it and writes nothing, whatever the number of spools."""
+    f = _filament(pg_pool)
+    rows = _quiet_rows(count)
+    assert pull(f, rows, now=NOW).created == count
+    before = _quiet_state(pg_pool)
+    with scale.counting() as counts:
+        report = pull(f, rows, now=NOW + timedelta(minutes=1))
+    # The pull's reads before the spools and `_quiet`'s; 259 statements and 13
+    # transactions for 12 spools before #6768.
+    assert counts.transactions == 2
+    assert counts.statements <= 20
+    assert report.archived == 2
+    assert (report.created, report.linked, report.updated, report.failed_bb_ids) == (0, 0, 0, [])
+    assert _quiet_state(pg_pool) == before
+
+
+def test_a_quiet_pull_still_takes_the_one_row_bambuddy_changed(pg_pool: PgPool) -> None:
+    """#6768: the skip leaves out only the rows that did not change; a row BB changed
+    (a new colour, a new weighing with the same ``updated_at``) is pulled as before."""
+    f = _filament(pg_pool)
+    rows = _quiet_rows(4)
+    # The live spools are made first: ``made`` is BB spools 102, 103, 100, 101.
+    made = pull(f, rows, now=NOW).created_ids
+    rows[2] = rows[2].model_copy(update={"color_name": "Blue", "updated_at": NOW})
+    rows[3] = rows[3].model_copy(update={"last_weighed_at": datetime(2026, 11, 14, 11, tzinfo=UTC)})
+    report = pull(f, rows, now=NOW + timedelta(minutes=1))
+    assert sorted(report.updated_ids) == sorted(made[:2])
+    got = f.spools.get(made[0])
+    assert got is not None and got.effective.colour_name == "Blue"
+    weighed = [e for e in f.spools.events(made[1]) if e.kind == "weighed"]
+    assert len(weighed) == 2
+
+
+def _quiet_state(pool: PgPool) -> Any:
+    """Every link and the number of ledger events and presets: what a pull writes."""
+    with pool.connection() as conn:
+        links = conn.execute("SELECT * FROM filament_bb_links ORDER BY spool_id").fetchall()
+        counts = conn.execute(
+            "SELECT (SELECT count(*) FROM filament_spool_events) AS events,"
+            " (SELECT count(*) FROM filament_spool_presets) AS presets,"
+            " (SELECT count(*) FROM filament_spool_k_values) AS k"
+        ).fetchone()
+    return links, counts
