@@ -1553,11 +1553,28 @@ export const handlers = [
   http.post(`${BASE}/colour-syncs`, async ({ request }) => {
     const { source } = (await request.json()) as { source?: string }
     if (source !== 'filamentcolors' && source !== 'bambu') return problem(422, "source: Input should be 'filamentcolors' or 'bambu'")
-    const made = MOCK_SYNC_COLOURS[source].filter(
-      (colour) => !state.catalogs.colours.some((row) => row.name === colour.name && row.manufacturer === colour.manufacturer && row.material_name === colour.material_name),
-    )
-    for (const colour of made) {
-      state.catalogs.colours.push({ ...colour, id: newId(), sort_order: 0, material_id: null, effect_id: null, extra_colours: null, bb_colour_id: null, source, archived_at: null, created_at: now(), updated_at: now(), synced_at: now() })
+    // `colour_catalog.upsert_colours`: a row is found by maker, name and material, case-blind;
+    // a person's row (`synced_at` null), an archived one or another source's is kept as it is
+    // (Decisions 209, 217, 221). As `_one` on its name path (the mock has no `bb_colour_id`
+    // lookup), it compares `upper(...)` with no trim, and of several matches takes an
+    // unarchived row first, then the oldest.
+    const counts = { added: 0, updated: 0, unchanged: 0, kept: 0 }
+    const same = (a: string | null | undefined, b: string) => (a ?? '').toUpperCase() === b.toUpperCase()
+    for (const colour of MOCK_SYNC_COLOURS[source]) {
+      const row = state.catalogs.colours
+        .filter((one) => same(one.manufacturer, colour.manufacturer) && same(one.name, colour.name) && same(one.material_name, colour.material_name))
+        .sort((a, b) => Number(a.archived_at !== null) - Number(b.archived_at !== null) || a.created_at.localeCompare(b.created_at))[0]
+      if (!row) {
+        state.catalogs.colours.push({ ...colour, id: newId(), sort_order: 0, material_id: null, effect_id: null, extra_colours: null, bb_colour_id: null, source, archived_at: null, created_at: now(), updated_at: now(), synced_at: now() })
+        counts.added += 1
+      } else if (row.synced_at === null || row.archived_at !== null || row.source !== source) {
+        counts.kept += 1
+      } else if (row.rgba === colour.rgba) {
+        counts.unchanged += 1
+      } else {
+        Object.assign(row, { rgba: colour.rgba, synced_at: now(), updated_at: now() })
+        counts.updated += 1
+      }
     }
     const run: ColourSync = {
       id: newId(),
@@ -1566,10 +1583,7 @@ export const handlers = [
       pages_read: 1,
       pages_total: 1,
       total: MOCK_SYNC_COLOURS[source].length,
-      added: made.length,
-      updated: 0,
-      unchanged: MOCK_SYNC_COLOURS[source].length - made.length,
-      kept: 0,
+      ...counts,
       skipped: 0,
       error: null,
       started_at: now(),
@@ -1585,7 +1599,9 @@ export const handlers = [
     const refused = catalogRefusal(kind, body, body)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
-    const made = { ...blank, sort_order: 0, ...body, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    // #6907: a person's colour has no source, no sync time and no Bambuddy link.
+    const own = kind === 'colours' ? { source: null, synced_at: null, bb_colour_id: null } : {}
+    const made = { ...blank, sort_order: 0, ...body, ...own, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
     return HttpResponse.json(made, { status: 201 })
   }),

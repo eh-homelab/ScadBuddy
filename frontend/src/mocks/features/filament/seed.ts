@@ -206,6 +206,9 @@ function catalogs(): Catalogs {
       { ...row(70, 'Jade White'), manufacturer: 'Bambu Lab', rgba: '#FFFFFFFF', material_id: M.PLA, material_name: 'PLA Basic', extra_colours: null, effect_id: null, source: 'bambu', synced_at: AT, bb_colour_id: null },
       { ...row(71, 'Hot Pink'), manufacturer: 'Bambu Lab', rgba: '#F5547CFF', material_id: M.PLA, material_name: null, extra_colours: null, effect_id: null, source: null, synced_at: null, bb_colour_id: null },
       { ...row(72, 'Translucent Orange'), manufacturer: 'Bambu Lab', rgba: '#FF6A1380', material_id: M.PETG, material_name: null, extra_colours: null, effect_id: E.TRANSLUCENT, source: null, synced_at: null, bb_colour_id: null },
+      // #6912: a multi-colour row, whose pick fills the extra colours, and an archived one no pick offers.
+      { ...row(73, 'Galaxy Duo'), manufacturer: 'Elegoo', rgba: '#1B3A8CFF', material_id: M.PLA, material_name: 'PLA Silk Dual', extra_colours: ['#2E8B57FF'], effect_id: E.SILK, source: 'filamentcolors', synced_at: AT, bb_colour_id: null },
+      { ...row(74, 'Retired Grey'), archived_at: AT, manufacturer: 'Sunlu', rgba: '#808080FF', material_id: M.PLA, material_name: null, extra_colours: null, effect_id: null, source: null, synced_at: null, bb_colour_id: null },
     ],
     'location-kinds': [
       { ...row(80, 'Room'), dry_storage: false, ams: false },

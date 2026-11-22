@@ -1220,9 +1220,9 @@ async def _publish(
     check_sliceable(profile, listing, materials)
     refs = BlobRefs(core.projection.pool)
     try:
-        key = await snapshots.ensure(facts_slug := listing.slug, listing.commit)
+        key = await snapshots.ensure(listing.slug, listing.commit)
         await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
-        media = await _copy_media(core, refs, listing, facts_slug, facts.template_name)
+        media = await _copy_media(core, refs, listing, listing.slug, facts.template_name)
         return await asyncio.to_thread(
             store.mark_published,
             listing.id,

@@ -70,6 +70,11 @@ def test_types_lists_only_those_types_whatever_all_says() -> None:
     assert (found.total, found.hidden) == (2, 0)
     only_stl = search_library(FOLDERS, rows, "dino", show_all=True, types=["stl"])
     assert [hit.id for hit in only_stl.files] == [14]
+    assert (only_stl.total, only_stl.hidden) == (1, 0)
+    # The answer never says every type was searched when only some were.
+    assert not found.all and not only_stl.all
+    only_3mf = search_library(FOLDERS, rows, "dino", show_all=True, types=["3mf"])
+    assert [hit.id for hit in only_3mf.files] == [10]
 
 
 def test_a_match_in_the_name_comes_before_one_in_the_folder() -> None:

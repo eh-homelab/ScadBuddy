@@ -1,14 +1,17 @@
 """The printer path a print import may read (#4698 review)."""
 
 import asyncio
+from typing import Any
 
 import httpx
 import pytest
 import respx
 from pydantic import ValidationError
 
+from scadbuddy.api.print_imports import _source_changed
 from scadbuddy.bambuddy.print_import import SourceChoice
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.store import Operation
 
 
 @pytest.mark.parametrize(
@@ -51,28 +54,51 @@ def test_library_candidates_are_newest_first_and_undated_last() -> None:
 @pytest.mark.parametrize(
     ("status", "made", "says"),
     [
-        ("succeeded", True, "no longer the file the model 'trophy' was made from"),
+        ("succeeded", True, "made the model 'trophy', which stays"),
         ("succeeded", False, "made the model 'trophy', which was deleted since"),
         ("running", False, "operation op-1, `GET /api/v1/operations/op-1`"),
-        ("running", False, "if it never finishes, send the request with a new Idempotency-Key"),
+        ("running", False, "send the request with a new Idempotency-Key and another model name"),
         ("failed", False, "made no model: its operation op-1 failed"),
     ],
 )
 def test_a_changed_retry_says_what_its_first_send_did(status: str, made: bool, says: str) -> None:
-    """#5979 review: the 409 names a model only by what the key's operation did."""
+    """#5979 review: the 409 names a model only by what the key's operation did. A key
+    first sent for another body may have made it from another print's file (#6984)."""
+    text = _source_changed("x.3mf", "trophy", _op(status), made, same_file=False)
+    assert says in text
+    assert "first sent for another print file, name or description" in text
+    assert "or before this server recorded which print file a request names" in text
+    assert "import the print onto it" not in text
+
+
+@pytest.mark.parametrize(
+    ("status", "made", "says"),
+    [
+        ("succeeded", True, "no longer the file the model 'trophy' was made from"),
+        ("succeeded", False, "made the model 'trophy', which was deleted since"),
+        ("running", False, "once it is done, import the print onto it with `slug`"),
+        ("failed", False, "made no model: its operation op-1 failed"),
+    ],
+)
+def test_a_retry_of_the_same_file_says_it_changed(status: str, made: bool, says: str) -> None:
+    """#7019: the key's first request named this print file, name and description, so
+    only the file's bytes moved (a printer overwrites its files): its model is from this
+    print's file, and may be offered."""
+    text = _source_changed("x.3mf", "trophy", _op(status), made, same_file=True)
+    assert says in text
+    assert text.startswith("x.3mf changed since this request was first sent")
+
+
+def _op(status: str) -> Operation:
     from datetime import UTC, datetime
 
-    from scadbuddy.api.print_imports import _source_changed
-    from scadbuddy.operations.store import Operation
-
-    first = Operation(
+    return Operation(
         id="op-1",
         kind="mesh_model_create",
         subject="trophy",
         status=status,  # type: ignore[arg-type]
         created_at=datetime(2026, 11, 10, tzinfo=UTC),
     )
-    assert says in _source_changed("x.3mf", "trophy", first, made)
 
 
 # --- a mesh model from a print's file (#6916) ----------------------------------------
@@ -157,10 +183,12 @@ class _Operations:
 
     def __init__(self, first: object) -> None:
         self.first = first
-        self.asked: list[tuple[str, str, str]] = []
+        self.asked: list[tuple[str, str, str, dict[str, Any] | None]] = []
 
-    async def keyed_operation(self, kind: str, subject: str, key: str) -> object:
-        self.asked.append((kind, subject, key))
+    async def keyed_operation(
+        self, kind: str, subject: str, key: str, *, sent: dict[str, Any] | None = None
+    ) -> object:
+        self.asked.append((kind, subject, key, sent))
         return self.first
 
 
@@ -240,7 +268,12 @@ def test_a_resend_gets_the_first_model_and_reads_no_print_again() -> None:
     )
 
     assert isinstance(made, ModelRecord) and made.slug == "trophy"
-    assert ops.store.asked == [("mesh_model_create", "trophy", "k1")]  # type: ignore[attr-defined]
+    origin = {
+        "archive_id": ARCHIVE,
+        "source": {"kind": "printer", "library_file_id": None, "path": "/cache/demo_elan.3mf"},
+    }
+    sent = {"name": "Trophy", "description": "", "source": {"origin": origin}}
+    assert ops.store.asked == [("mesh_model_create", "trophy", "k1", sent)]  # type: ignore[attr-defined]
     assert not respx.calls
 
 

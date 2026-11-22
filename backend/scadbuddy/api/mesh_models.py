@@ -121,15 +121,16 @@ async def create_mesh_model(
     description: str,
     source: dict[str, Any],
     claim: Callable[[ClaimStore], Awaitable[Held]] | None = None,
-    changed: Callable[[Operation, bool], str] | None = None,
+    changed: Callable[[Operation, bool, bool], str] | None = None,
 ) -> ModelRecord | JSONResponse:
     """The ``mesh_model_create`` operation. ``claim`` holds an upload's bytes by claim,
     called only when no record answers the request: a repeat holds nothing. With
     ``changed``, a key on record for another body of this model is a 409 whose text is
-    ``changed(first, made)``: ``first`` the operation that key started (it may have
-    succeeded, failed or still be running), ``made`` whether the model exists now (it may
-    have been deleted since). #5979: the source's bytes moved between a request and its
-    retry."""
+    ``changed(first, made, same_file)``: ``first`` the operation that key started (it may
+    have succeeded, failed or still be running), ``made`` whether the model exists now (it
+    may have been deleted since), ``same_file`` whether that request named this print file,
+    name and description, so only the file's bytes moved (#5979; #7019). Otherwise the key
+    was first sent for another body, or before the request recorded its print file."""
     slug = _slug_from_name(name)
     request = {"slug": slug, "name": name, "description": description, "source": source}
     kind = ops.kinds["mesh_model_create"]
@@ -147,9 +148,26 @@ async def create_mesh_model(
             else None
         )
         if changed is not None and first is not None:
+            assert idempotency_key is not None
+            same = (
+                await ops.store.keyed_operation(
+                    kind.name,
+                    slug,
+                    idempotency_key,
+                    sent={
+                        "name": name,
+                        "description": description,
+                        "source": {"origin": source["origin"]},
+                    },
+                )
+                if "origin" in source
+                else None
+            )
+            # Only `first` itself: the 409 names its id and says what it did (#7022).
+            same_file = same is not None and same.id == first.id
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                changed(first, catalogue.exists(slug)),
+                changed(first, catalogue.exists(slug), same_file),
                 operation_id=first.id,
             )
         _require_new(catalogue, slug)
@@ -167,16 +185,34 @@ async def create_mesh_model(
     return operation_answer(result, ModelRecord)
 
 
+def print_file_origin(archive_id: int, choice: SourceChoice) -> dict[str, Any]:
+    """Which print's file a model is made from (#6984): kept in the operation's request,
+    so a resend that names another print or source is not answered the first model. One
+    shape for both routes that read a print's file (from-mesh and Import print's new
+    model), so a key sent to both with one name, description and source is one resend."""
+    return {"archive_id": archive_id, "source": choice.model_dump(mode="json")}
+
+
 async def made_before(
-    ops: OperationCommands, response: Response, name: str, idempotency_key: str
+    ops: OperationCommands,
+    response: Response,
+    idempotency_key: str,
+    *,
+    name: str,
+    description: str,
+    origin: dict[str, Any],
 ) -> ModelRecord | None:
     """The model a finished ``mesh_model_create`` sent with ``idempotency_key`` made for
     ``name``, or its problem raised (#6969). A route that reads a print's file asks this
     first: a resend after a lost answer then gets the first send's answer, the printer is
     not read again, and a file deleted since is no 404. None when no such operation
-    finished: the route reads the file, and `create_mesh_model` answers the rest."""
+    finished, or when it was sent with another name, description or ``origin``
+    (#6984): the route reads the file, and `create_mesh_model` answers the rest."""
     first = await ops.store.keyed_operation(
-        ops.kinds["mesh_model_create"].name, _slug_from_name(name), idempotency_key
+        ops.kinds["mesh_model_create"].name,
+        _slug_from_name(name),
+        idempotency_key,
+        sent={"name": name, "description": description, "source": {"origin": origin}},
     )
     if first is None or first.status == "running":
         return None
@@ -194,10 +230,12 @@ async def create_from_read(
     name: str,
     description: str,
     read: SourceFile,
-    changed: Callable[[Operation, bool], str],
+    origin: dict[str, Any],
+    changed: Callable[[Operation, bool, bool], str],
 ) -> ModelRecord | JSONResponse:
     """`create_mesh_model` from a print's file the route read (Import print's new model,
-    #4698, and a print's file here, #6916): its bytes held by claim, as an upload's are."""
+    #4698, and a print's file here, #6916): its bytes held by claim, as an upload's are.
+    ``origin`` (`print_file_origin`) names the print and source in the request."""
 
     async def claim(claims: ClaimStore) -> Held:
         return await asyncio.to_thread(claims.hold, read.data)
@@ -209,24 +247,33 @@ async def create_from_read(
         idempotency_key,
         name=name,
         description=description,
-        source={"kind": "upload", "claim": read.sha256, "name": read.name},
+        source={"kind": "upload", "claim": read.sha256, "name": read.name, "origin": origin},
         claim=claim,
         changed=changed,
     )
 
 
-def _print_file_changed(name: str, slug: str, first: Operation, made: bool) -> str:
-    """The 409 of a retry whose print file changed since its first send (#5979): a
-    printer overwrites its files, so the retry read other bytes."""
-    changed = f"{name} changed since this request was first sent"
+def key_sent_before(name: str, same_file: bool) -> str:
+    """Why a key on record answers another body (#5979, #6984, #7019): the print file's
+    bytes changed since (a printer overwrites its files), or the key was first sent for
+    another body, or before the request recorded which print file it names."""
+    if same_file:
+        return f"{name} changed since this request was first sent"
+    return (
+        "this Idempotency-Key was first sent for another print file, name or description,"
+        " or before this server recorded which print file a request names"
+    )
+
+
+def _print_file_changed(name: str, slug: str, first: Operation, same_file: bool) -> str:
+    """The 409 of a key on record for another body of this model (#5979, #6984)."""
+    why = key_sent_before(name, same_file)
     if first.status == "running":
         return (
-            f"{changed}, and the model {slug!r} that request started is still being made"
+            f"{why}; the model {slug!r} that request started is still being made"
             f" (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
         )
-    if made:
-        return f"{changed}; the model {slug!r} was made from the file as it was then, and stays"
-    return f"{changed}; send the request with a new Idempotency-Key to open the file as it is now"
+    return f"{why} (operation {first.id}): send the request with a new Idempotency-Key"
 
 
 async def _read_print_file(
@@ -261,8 +308,10 @@ async def _read_print_file(
         "the new model's `meshes/`, and a `scene.json` that compiles to its `model.scad` "
         "(spec 2026-10-11). Nothing is written to Bambuddy, and the model is no print of "
         "the archive (Import print links one). A sliced file is a 422. A print's file needs "
-        "an `Idempotency-Key` (428 without one); a resend under the key of a finished "
-        "create answers what that create answered, and reads nothing again."
+        "an `Idempotency-Key` (428 without one); a resend of the same body under "
+        "the key of a finished create answers what that create answered, and reads nothing "
+        "again. The key sent with another description or print file, or a name of the "
+        "same slug, is a 409; a name of another slug makes another model."
     ),
 )
 async def create_from_mesh(
@@ -280,7 +329,15 @@ async def create_from_mesh(
                 KEY_REQUIRED_DETAIL,
                 type_=KEY_REQUIRED_PROBLEM,
             )
-        made = await made_before(ops, response, body.name, idempotency_key)
+        origin = print_file_origin(body.archive_id, body.archive_source)
+        made = await made_before(
+            ops,
+            response,
+            idempotency_key,
+            name=body.name,
+            description=body.description,
+            origin=origin,
+        )
         if made is not None:
             return made
         read = await _read_print_file(store, body.archive_id, body.archive_source)
@@ -293,8 +350,11 @@ async def create_from_mesh(
             name=body.name,
             description=body.description,
             read=read,
+            origin=origin,
             # A retry reads the file again: other bytes are named, never opened.
-            changed=lambda first, made: _print_file_changed(read.name, slug, first, made),
+            changed=lambda first, _made, same_file: _print_file_changed(
+                read.name, slug, first, same_file
+            ),
         )
     source: dict[str, Any] = (
         {"kind": "bambuddy_library", "file_id": body.library_file_id}

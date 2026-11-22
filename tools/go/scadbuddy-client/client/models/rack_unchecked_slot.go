@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// RackUncheckedSlot a rack-side slot whose spool Glow could not be checked on (spec §3, #6872), named so a person can act: why, the SB number the plan names, else the tray it names, and what that tray or slot holds. “reason“ is “no_spool“ when the plan chose no spool, “empty_tray“ when it chose a tray that holds none, and “not_in_inventory“ when the spool, or the spool in the tray, is not in the inventory.
+// RackUncheckedSlot a rack-side slot whose spool Glow could not be checked on (spec §3, #6872), named so a person can act: why, the SB number the plan names, else the tray it names, and what that tray or slot holds. “reason“ is “no_spool“ when the plan chose no spool, “empty_tray“ when it chose a tray that holds none, “not_in_inventory“ when the spool, or the spool in the tray, is not in the inventory, and “no_type“ when that SB spool has no type, so no material to test (R-6876-6).
 type RackUncheckedSlot struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any

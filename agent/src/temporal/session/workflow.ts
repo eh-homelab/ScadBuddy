@@ -61,6 +61,7 @@ import {
 import {
   ACQUIRE_WORKER_ACTIVITY,
   EDIT_QUEUED_UPDATE,
+  BACKEND_UNREACHABLE,
   NO_CAPACITY,
   OPEN_INPUT_UPDATE,
   OWNER_CHANGED_SIGNAL,
@@ -115,10 +116,10 @@ import {
 // turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity), or whose
 // placement another placement took the row from (PlacementMoved, PLACEMENT_MOVED_PATCH), is placed
 // again: acquire on the shared `agent-tools` (not one of the homes it was lost on while another
-// replica can take it, and the last placement unrestricted; a PlacementMoved home answered and is
-// alive, so it is never one of them), then the turn on the new home,
+// replica can take it, and the last placement unrestricted; a PlacementMoved or BackendUnreachable
+// home answered and is alive, so it is never one of them), then the turn on the new home,
 // resumed from its transcript (`restarted`), at most PLACEMENTS times, waiting PLACEMENT_BACKOFF
-// after each one that timed out (#6353). A home kept from an
+// after each one that timed out (#6353) or lost the API (BackendUnreachable, #6994). A home kept from an
 // earlier turn re-reserves as the turn arrives, and refuses NoCapacity when every slot there
 // runs a turn: that move is free, once per turn (FULL_HOME_PATCH). Each placement carries
 // its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never
@@ -186,6 +187,13 @@ const PLACEMENT_BACKOFF = ['10s', '30s'] as const
  */
 const PLACEMENT_MOVED_PATCH = 'agent-session-placement-moved'
 /**
+ * A placement that failed because its connection to the API dropped (BackendUnreachable) is placed
+ * again after PLACEMENT_BACKOFF's wait, as a timed-out one is, so a rollout of the API can end
+ * (#6994). On 2026-11-22, in a rollout, a fork's transcript load failed `UND_ERR_SOCKET` and the
+ * person read it. Asked only when such a failure arrives, which no older worker sent.
+ */
+const BACKEND_UNREACHABLE_PATCH = 'agent-session-backend-unreachable'
+/**
  * An attention request may name `on_timeout` `wait` or `stop` (#5003): the turn acts on its
  * timeout, so the entry records what it will do. Asked only of such a request, which no earlier
  * history opened (its turns answered every attention request NO_PARKS).
@@ -251,7 +259,8 @@ export function movesWorker(err: unknown): boolean {
   if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' || cause.timeoutType === 'HEARTBEAT'
   const type = failureType(err)
   // Another placement took the turn's row: the workflow, which owns placement, places it again (#6387).
-  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY || type === PLACEMENT_MOVED
+  // The API's connection dropped under the turn: placed again once the API answers (#6994).
+  return type === SHUTTING_DOWN_FAILURE || type === NO_CAPACITY || type === PLACEMENT_MOVED || type === BACKEND_UNREACHABLE
 }
 
 /** Why a placement was lost, in the user's words: what the turn's failure says once the placements run out. */
@@ -260,6 +269,7 @@ function lostWhy(err: unknown): string {
   if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' ? 'no worker took the turn up in time' : 'its worker stopped answering'
   const type = failureType(err)
   if (type === PLACEMENT_MOVED) return 'another placement took the turn over'
+  if (type === BACKEND_UNREACHABLE) return 'the backend could not be reached'
   if (type === SHUTTING_DOWN_FAILURE) return 'its worker was shutting down'
   if (type === NO_CAPACITY) return 'every worker was busy with other turns'
   return failureText(err)
@@ -629,19 +639,22 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         // An interrupt cancels the turn; it never moves the session (BudgetExhausted, CredentialRefused, SessionGone: the turn's end).
         if (isCancellation(err) || interrupted !== undefined || !movesWorker(err)) throw err
         if (failureType(err) === PLACEMENT_MOVED && !patched(PLACEMENT_MOVED_PATCH)) throw err
+        const dropped = failureType(err) === BACKEND_UNREACHABLE
+        if (dropped && !patched(BACKEND_UNREACHABLE_PATCH)) throw err
         last = err
         // A kept home whose slots all run turns refused this one as it arrived (session_turn
         // re-reserves there, TurnHost.run): nothing ran, and its place was never this turn's, so
         // the move costs no placement. Only the first cycle's home is kept, so this happens once.
         if (kept && failureType(err) === NO_CAPACITY && patched(FULL_HOME_PATCH)) placements++
-        else if ((err instanceof ActivityFailure ? err.cause : err) instanceof TimeoutFailure) {
-          // A timeout (schedule-to-start, heartbeat) is what delivery loss looks like; a refusal
-          // (NoCapacity, ShuttingDown) is a live replica's answer, and the next is tried at once.
+        else if (dropped || (err instanceof ActivityFailure ? err.cause : err) instanceof TimeoutFailure) {
+          // A timeout (schedule-to-start, heartbeat) is what delivery loss looks like, and a dropped
+          // API connection what its rollout does: each waits; a refusal (NoCapacity, ShuttingDown)
+          // is a live replica's answer, and the next is tried at once.
           lostPlacements++
           waitFirst = true
         }
-        // A home cut off by another placement (PlacementMoved) answered and is alive: never steered away from.
-        if (home && !lost.includes(home) && failureType(err) !== PLACEMENT_MOVED) lost.push(home)
+        // A home cut off by another placement (PlacementMoved), or that lost the API (BackendUnreachable), answered and is alive: never steered away from.
+        if (home && !lost.includes(home) && failureType(err) !== PLACEMENT_MOVED && !dropped) lost.push(home)
         home = undefined
         // `restarted` after a refusal too (a full home, NoCapacity): it only asks the next worker to
         // read the transcript, and the turn's message, not landed there, is sent as itself (§5.5).

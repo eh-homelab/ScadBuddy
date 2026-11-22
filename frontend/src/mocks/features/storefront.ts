@@ -145,7 +145,7 @@ function fields(body: StorefrontListingInput) {
     source: body.source ?? 'template',
     slug: body.slug ?? null,
     commit: body.commit ?? null,
-    library_file: null,
+    library_file: body.library_file ? { ...body.library_file, repin: body.library_file.repin ?? false } : null,
     title: body.title,
     description: body.description ?? '',
     params: storedBounds(body.params ?? {}),

@@ -226,6 +226,81 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('button', { name: /Rim colour/ })).toHaveAccessibleName('Rim colour Teal')
   })
 
+  it('never starts the same choices again when the page re-runs its render effect (clash flake)', async () => {
+    // The effect also runs when the preview on screen changes. An older render that showed
+    // its preview after the newer one started ran it again: the second start cleared the
+    // refusal on screen, then showed it again.
+    const sent = renders()
+    const { user, rerender } = show(CHARM_ID)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    const refusal = await screen.findByRole('alert')
+    const starts = () => sent.filter((body) => Object.keys((body as { values: object }).values).length === 2).length
+    expect(starts()).toBe(1)
+    rerender(<CustomizePage id={CHARM_ID} timing={FAST} debounceMs={11} />)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(starts()).toBe(1)
+    expect(refusal).toBeInTheDocument()
+  })
+
+  it('keeps a running render of choices the visitor changed away from and back to (#7007 review)', async () => {
+    server.use(http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)))
+    const sent = renders()
+    // A long time limit: a render past it ends as too slow and would start again.
+    const { user } = show(CHARM_ID, { ...FAST, limitMs: 60_000 }, 300)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await waitFor(() => expect(sent).toHaveLength(2))
+    // Away and back before the debounce ends, while the render of these choices still runs.
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(sent).toHaveLength(2)
+  })
+
+  it('renders choices again after a change and back once their render ended as too slow (#7010 review)', async () => {
+    server.use(http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)))
+    const sent = renders()
+    // The two one-second debounces take about 2.5 s; the 15 s timeout leaves room on a loaded machine.
+    const { user } = show(CHARM_ID, { ...FAST, limitMs: 100 }, 1_000)
+    await screen.findByRole('alert')
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await waitFor(() => expect(sent).toHaveLength(2), { timeout: 2_000 })
+    // Away while the render of Rust runs; it ends as too slow before the visitor comes back.
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument(), { timeout: 2_000 })
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await waitFor(() => expect(sent).toHaveLength(3), { timeout: 2_000 })
+    expect(sent[2]).toEqual(sent[1])
+  }, 15_000)
+
+  it('renders refused choices again after a change and back inside the debounce (#7000 review)', async () => {
+    const sent = renders()
+    const { user } = show(CHARM_ID, FAST, 300)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await screen.findByRole('alert')
+    const rims = (colour: string) => sent.filter((body) => (body as { values: Record<string, string> }).values.rim_colour === colour).length
+    const teal = sent.find((body) => Object.keys((body as { values: object }).values).length === 2) as { values: { rim_colour: string } }
+    expect(rims(teal.values.rim_colour)).toBe(1)
+    // Away and back before the debounce ends: the change away never renders.
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await waitFor(() => expect(rims(teal.values.rim_colour)).toBe(2))
+    expect(sent).toHaveLength(3)
+  })
+
   it('says the preview must show before an add, with a retry, when the preview fails (#6152 review)', async () => {
     // A colour the visitor set (saved), so the first render is the one that fails.
     window.localStorage.setItem('scadbuddy.storefront.customize.l1', JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1 }))

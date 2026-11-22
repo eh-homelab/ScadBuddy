@@ -1893,7 +1893,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     Tests: `test_crud_filament_pull.py` refuses a body with `actor` on the pull and usage
     routes, and `test_the_events_name_the_actor_the_api_kept_never_the_workers` checks the
     events name the kept person.
-182. PR #6858 review (Blocking): the pull's routes had a cap of their own,
+182. (corrected by 230) PR #6858 review (Blocking): the pull's routes had a cap of their own,
     `PULL_BODY_BYTES_MAX` (32 MiB) with a 411 for no `Content-Length`, checked in a
     dependency. Neither held: the CRUD listener serves the same app, whose `BodySizeGate`
     (`api/limits.py`, `main.py`) refuses an `application/json` body past
@@ -2267,6 +2267,129 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     what the Colours tab ("From …, edited since") and the agent's `filament_catalog_list`
     read. Why: clearing `source` would lose that provenance, and a row with `source` and
     `synced_at` NULL is already never written by a sync (Decision 217).
+223. R-6907-18 (review of f417b327): no map from Bambu Studio's `fila_type` to Bambuddy's
+    material labels. Measured 2026-11-22: they are the same labels. Bambu Studio v02.08.02.61's
+    `resources/profiles/BBL/filament/filaments_color_codes.json`
+    (https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/resources/profiles/BBL/filament/filaments_color_codes.json,
+    314 codes) names materials "PLA Basic", "PLA Matte", "PETG HF" and so on, as Bambuddy's
+    `DEFAULT_COLOR_CATALOG` does
+    (https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/core/catalog_defaults.py,
+    180 Bambu Lab rows). 171 of those 180 rows have the same maker, name and material as a
+    Bambu code, so the two sources find one row. The other 9 have no code of their own: six
+    are "TPU 95A", "PLA Tough" or "ABS" colours that Bambu's table names under another
+    material ("TPU 95A HF", "TPU for AMS", "PLA Tough+", "PLA Matte"), and the two
+    "Natural" "PLA Support" and "PVA Support" rows match no support code by name or colour
+    (Bambu's are "Support for PLA" "White", "PVA" "Clear"), and "Blue Grey" "PLA Basic"
+    is a name the table does not have. Mapping them would guess
+    between products, so they stay rows of their own. Compared by a script over both
+    files (each Bambuddy row's upper-cased name and material against each code's English
+    name and `fila_type`).
+224. R-6912-1: the RGBA field's catalog pick (`frontend/src/components/filament/CatalogColourPick.tsx`,
+    "From the catalog" beside the presets) searches on the server, as the Colours tab does
+    (Decision 215): `GET /filament/catalog/colours?q=`, every word in the name, maker,
+    material label or `#RRGGBBAA`, any case, a hex with or without its `#`. It asks 200 ms
+    after the last key, drops an answer to an older query, and draws at most 50 rows
+    ("50 of N, type more to narrow"). It lists nothing until a word is typed. Why: a synced
+    catalog holds thousands of rows (2,256 filamentcolors swatches alone, Decision 212), and
+    the quick find's client-side `lib/filamentSearch.ts` would need the whole catalog read at
+    every open. The one difference from that search: a hex word of 1 or 2 characters also
+    matches the `#RRGGBBAA` on the server.
+225. R-6912-2: a row shows its swatch (the alpha over the checkerboard, and up to three extra
+    colours behind it), its name, its maker, its material (the maker's `material_name`, else
+    the materials catalog's name of `material_id`), "translucent" or "clear" by its alpha, and
+    its `#RRGGBBAA`. The material catalog's name is shown but not searched: the route does
+    not search it.
+226. R-6912-3: a pick sets the field to the row's whole `#RRGGBBAA`: the catalog colour keeps
+    its own alpha, so a translucent row stays translucent (`80`, Decision 214). Why: the
+    alpha is part of the maker's colour, and a later preset or slider still changes it. The
+    value stays the field's own: typing any RGBA, the picker or a preset replace it, and
+    nothing links the type or spool to the catalog row.
+227. R-6912-4: a pick replaces the form's extra colours with the row's, and clears them for a
+    row with none. On a spool, cleared extra colours are not an override, so the spool shows
+    its type's (the data has no "no extra colours" override). The colour name is not filled:
+    #6912 asks for the RGBA and the extra colours only.
+228. R-6912-5: the pick is offered where the form asks for it (`RgbaColourField` `catalog`):
+    the type page and the spool page. The Catalog tab's own rows do not offer it.
+229. R-6912-6: an invoice import that makes a type looks the line's colour up with
+    `filament_catalog_list` kind `colours` and `q` (the maker and the colour name). For a
+    Bambu Lab line it does so only when `filament_bambu_colour` gives no colour for the code;
+    Bambu's table stays first, as the exact source (Decision 214). One row that fits by maker,
+    name and material gives the RGBA as it is and its extra colours, before a hex from
+    3dfilamentprofiles.com; none or several fitting rows are asked about. The prompt
+    (`agent/src/filament/invoiceImportPrompt.ts`) and the `filament` skill (tools step 3,
+    rule 5) say the same; the plugin is 0.1.53.
+
+### #6860: the usage rows in bodies under the gate
+
+230. R-6860-1 (#6860; corrects 182's "Bambuddy's listing is not paged"): Bambuddy's
+    `GET /inventory/usage` takes `limit` (default 100), `printer_id` and `spoolman`, and no
+    offset or date; it answers newest first (`order_by(created_at.desc()).limit(limit)`,
+    https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/inventory.py#L3128-L3158).
+    So it cannot be paged, or windowed by `since`, on Bambuddy's side. ScadBuddy has read it
+    with `limit=200` since #6263 (`BambuddyClient.spool_usage`), so the pull reads at most
+    the newest 200 rows, and 182's 10,000- and 20,000-row cases cannot happen with this read.
+    The read's window stays that `limit`. A gap of more than 200 rows between two pulls that
+    book loses the older rows; that is #7002, not this change.
+231. R-6860-2: the worker books the rows in bodies of at most `USAGE_BODY_ROWS` (5,000)
+    rows (`bb_pull_run.usage_bodies`), oldest first, and never splits the rows of one
+    `created_at` (one print's, spec §8.2), so `bambuddy_usage._cover` sees a print's rows
+    together. Each body carries only the archives that can match its rows
+    (`[first created_at, last created_at + ARCHIVE_AFTER]`). Measured with
+    `UsageBody.model_dump_json()`: a body at its most (5,000 rows and `ARCHIVES_MAX`
+    archives, every field filled, a 64-character job name) is 1,688,112 B, a fifth of the
+    8 MiB gate; `test_a_full_usage_body_stays_under_the_body_gate` pins it under half. With
+    today's read that is one body; the cut keeps the gate whatever `limit` a later change
+    reads. `PullBody.usage` still carries what was read (`pull` times an archived spool's
+    reading by it, and `LocalBbPull._unbooked` names the archives' date from it).
+232. R-6860-3: a body that fails (logged) ends the booking; the rows of it and the newer
+    ones wait for the next pull. Each row books once by its ref (`ledger.BB_USAGE` and its
+    id), so a body sent again books nothing twice. Oldest first, so what waits is always
+    the newest rows, which stay inside the next read's window.
+
+### #6768: the pull skips the linked spools that did not change
+
+233. R-6768-1 (#6768): a linked BB spool is skipped (`bambuddy_pull._quiet`) only when
+    every step `_one` takes on it would change nothing. The issue's "BB `updated_at` and
+    `bb_seen` have not changed" is read that way, because `_one` also acts on a row whose
+    `updated_at` did not move: a weighing or a drying (`_book`), a preset or K-profiles
+    (`_bb_presets`, `_bb_k_values`), an insert type mapped since (`_backfill_insert_type`),
+    a seed of the place or the archive state, and a field that newly agrees with SB
+    (`_write_seen`). So a spool is quiet when BB's `updated_at` is the link's
+    `bb_updated_at` (an archived SB spool: not older; a link with none is never quiet), its
+    archive state and place agree with the seen copy, the last `synced_from_bb` reading
+    is BB's row (after the push's echo, every seen field too), the insert type BB names is unmapped or already the
+    spool's or its type's, BB's weighing and drying are booked, the link holds BB's preset
+    and K-profiles, and the seen copy `_write_seen` would merge is the one the link holds.
+    A skipped spool gets the outcome `_one` would give (`archived` for an archived SB
+    spool), so the report is unchanged. Anything else goes through `_one` as before.
+234. R-6768-2: the skip's facts are read for every linked spool at once, in one
+    transaction and a fixed number of queries: the links with their spools, the last
+    reading of each, the booked weighings and dryings, the mapped insert types and places,
+    and SB's values through `bb_sync_plan.SpoolFacts` (as the plan reads them, #6902).
+    `_write_seen`'s merge is shared (`_seen_parts`), so the skip and the write cannot
+    differ. A spool that is not skipped keeps its own reads (`_write_seen`'s desired
+    values, `_bb_k_values`, `_sb_newer`, `sb_changed_at`): each runs after that spool's
+    own writes in its transaction, so a value read before the loop would be stale.
+    Measured with `tests/filament/bb_sync_scale.counting` on the pull after the one that
+    made them: 12 linked spools (2 archived), each with a weighing, a drying, a preset and
+    a K-profile, took 259 statements in 13 transactions before, and 19 statements in 2
+    transactions after; 4 spools took 75 in 5 before and 19 in 2 after.
+235. R-6768-3: the skip's reads are not under each spool's advisory lock. A write that
+    lands after them (a person's edit, the push's results, another pull) is taken by the
+    next pull. A skipped spool writes nothing, so it can never overwrite that write.
+236. R-6768-4 (PR #7013 review): the skip's batch read never fails the pull. A failure
+    is logged ("could not read which Bambuddy spools are unchanged") and no spool is quiet,
+    so each takes its own guarded path, as before #6768; a cancel still stops the pull,
+    and the read runs under `watched(cancel, conn)` as each spool's transaction does.
+    `test_a_failed_quiet_read_pulls_each_spool_on_its_own` injects the fault.
+237. R-6768-5 (PR #7013 review): the skip compares the last `synced_from_bb` reading with
+    BB's row in the form `_update` records it (`_reading`, then `_seen`): an unmapped
+    catalog id keeps the last id or stays out, and a field of a type that does not pull
+    keeps its last value. Before, a spool whose BB catalog entry SB has not mapped was
+    never quiet.
+238. R-6768-6 (PR #7013 review): a spool whose insert type a person edited after the link
+    is quiet, as `_backfill_insert_type` never sets it again; the batch reads those
+    `edited` events once for every spool (`_insert_edited_since_link`'s condition).
 
 ## Self-review
 

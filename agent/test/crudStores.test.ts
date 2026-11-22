@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { crudUpsertActivityKinds } from '../src/activity/kinds.js'
-import { CrudReadError } from '../src/api/crudRead.js'
+import { backendDropped, CrudReadError } from '../src/api/crudRead.js'
 import { crudCall, CrudPathError, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
 import { CrudTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { CrudPairingStore, hashCode, PairingError } from '../src/bridge/pairings.js'
@@ -445,5 +445,60 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     const call = new CrudSessionTabStore({ baseUrl: BASE, fetch: never }).get(SESSION, stop.signal)
     stop.abort(new Error('the call gave up'))
     await expect(call).rejects.toThrow('the call gave up')
+  })
+
+  it('sends a GET or an idempotent call again when the connection drops, never another write, and an abort stops the wait (#6994)', async () => {
+    const reset = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) })
+    const methods: string[] = []
+    /** Drops the first call of each method, then answers as the route. */
+    const flaky: typeof fetch = async (_input, init) => {
+      const method = init?.method ?? 'GET'
+      methods.push(method)
+      if (methods.filter((m) => m === method).length === 1) throw reset()
+      return new Response('{"ok":true}', { headers: { 'x-scadbuddy-crud': '1' } })
+    }
+    expect(await (await crudCall(flaky, BASE, 'a read', '/session-tabs')).json()).toEqual({ ok: true })
+    await expect(crudCall(flaky, BASE, 'a write', '/session-tabs', { method: 'PUT', body: { a: 1 } })).rejects.toThrow('the backend could not be reached (a write: UND_ERR_SOCKET)')
+    expect(await (await crudCall(flaky, BASE, 'a checked read', '/session-tabs', { body: { a: 1 }, idempotent: true })).json()).toEqual({ ok: true })
+    expect(methods).toEqual(['GET', 'GET', 'PUT', 'POST', 'POST'])
+    const stop = new AbortController()
+    const dropping: typeof fetch = async () => {
+      stop.abort(new Error('the call gave up'))
+      throw reset()
+    }
+    await expect(crudCall(dropping, BASE, 'a read', '/session-tabs', { signal: stop.signal })).rejects.toThrow('the call gave up')
+  })
+
+  it('never sends a GET again after a refusal, which still counts as a dropped connection the turn is placed again for (#6994)', async () => {
+    let calls = 0
+    const refused: typeof fetch = async () => {
+      calls += 1
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })
+    }
+    const error = await crudCall(refused, BASE, 'a read', '/session-tabs').catch((e: unknown) => e)
+    expect(calls).toBe(1)
+    expect((error as CrudReadError).message).toBe('the backend is not up yet (a read: ECONNREFUSED)')
+    expect(backendDropped(error)).toBe(true)
+  })
+
+  it('keeps one deadline for a call and all its retries: one that fires during a try ends the call there (#6994)', async () => {
+    const deadline = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
+    let calls = 0
+    // The deadline fires while the first try is out; the API then drops the connection.
+    const dropping: typeof fetch = async () => {
+      calls += 1
+      deadline.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) })
+    }
+    try {
+      const error = await crudCall(dropping, BASE, 'a read', '/session-tabs', { timeoutMs: 600 }).catch((e: unknown) => e)
+      expect(timeout).toHaveBeenCalledOnce()
+      expect(timeout).toHaveBeenCalledWith(600)
+      expect(calls).toBe(1)
+      expect((error as CrudReadError).message).toBe('the backend could not be reached (a read: UND_ERR_SOCKET)')
+    } finally {
+      timeout.mockRestore()
+    }
   })
 })

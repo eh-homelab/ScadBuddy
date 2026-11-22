@@ -563,3 +563,21 @@ def test_a_project_with_no_colour_for_the_slot_has_no_plan(
     with caplog.at_level(logging.WARNING):
         assert read_rack_plan(_rewritten("plate3-one-filament", two_colours), 3) is None
     assert "names no filament_colour for slot 3" in caplog.text
+
+
+def test_the_lan_pick_names_each_slot_glow_was_not_checked_on() -> None:
+    """#6876: with the plan's ids, the LAN pick says why Glow went unchecked per slot."""
+    plan = read_rack_plan(sliced(), 1)
+    assert plan is not None
+    chosen = choose_nozzles(
+        plan,
+        idle_status(),
+        algorithm="least_used",
+        manual_position=None,
+        usage={},
+        spools={},
+        chosen={},
+    )
+    glow = [w.message for w in chosen.warnings if w.kind == "rack-glow-unchecked"]
+    assert len(glow) == 4
+    assert all("has no spool chosen" in message for message in glow)

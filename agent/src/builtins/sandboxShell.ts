@@ -9,7 +9,7 @@ import type { BuiltinResult } from './result.js'
 
 // Bash and PowerShell in a sandbox pod (#5864, issue comment "Design"): the session's own tools of
 // those names, served on its `builtin` server in place of Claude Code's, which would run in the
-// worker pod beside the database URL and the KEK (rule #5295). Each call syncs the session's
+// worker pod beside the `agent` credential's proof and the Temporal client (rule #5295). Each call syncs the session's
 // directory into the session's sandbox pod, runs the command there, and brings back what it
 // changed (sandbox/client.ts). One switch governs each: the item `Bash` or `PowerShell` of
 // `builtin:claude-code` (access/nativeBuiltins.ts), `outward` by default once a sandbox is set up.

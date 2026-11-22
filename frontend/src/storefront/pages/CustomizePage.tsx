@@ -198,6 +198,20 @@ export function CustomizePage({
   const latest = useRef(0)
   /** Whether the page rendered yet: the first render does not wait out the debounce. */
   const started = useRef(false)
+  /**
+   * The choices of the latest render started. The effect below also runs when the preview on
+   * screen changes: an older render can show its preview just after a newer one started, and
+   * starting those choices again cleared the refusal on screen, then showed it again. It holds
+   * only while those choices stay on screen: a change away and back renders them again once
+   * their render has ended (a running one goes on, `runningKey`), even when the change away
+   * never rendered (#7000 review).
+   */
+  const startedKey = useRef<string | undefined>(undefined)
+  /**
+   * The choices of the latest render while it runs. A change away and back to them keeps it
+   * running rather than starting them again (#7007 review).
+   */
+  const runningKey = useRef<string | undefined>(undefined)
   const renderNow = useRef<(key: string, retry: boolean) => Promise<void>>(async () => undefined)
   /** The choices on screen, and whether the page refuses them: what a delayed retry checks. */
   const choicesNow = useRef({ key: '', blocked: true })
@@ -238,7 +252,8 @@ export function CustomizePage({
   }, [current, blocked])
 
   useEffect(() => {
-    if (blocked || shown?.key === current) return
+    if (blocked || startedKey.current !== current) startedKey.current = undefined
+    if (blocked || shown?.key === current || startedKey.current === current || runningKey.current === current) return
     const timer = setTimeout(
       () => {
         started.current = true
@@ -375,6 +390,8 @@ export function CustomizePage({
     if (!listing) return
     const body: RenderInput = { ...input(listing), colours: {} }
     const mine = ++latest.current
+    startedKey.current = key
+    runningKey.current = key
     const live = () => alive.current && latest.current === mine
     setRendering(true)
     setRenderError(null)
@@ -432,7 +449,10 @@ export function CustomizePage({
         }, after)
       }
     } finally {
-      if (live()) setRendering(false)
+      if (live()) {
+        setRendering(false)
+        runningKey.current = undefined
+      }
     }
   }
   useEffect(() => {

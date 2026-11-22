@@ -508,6 +508,20 @@ async def test_a_bambu_code_with_no_material_is_added_without_one(
 
 
 @pg
+async def test_bambu_s_code_and_bambuddy_s_entry_are_one_row(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    # Bambu Studio's `fila_type` is the label Bambuddy's catalog uses ("PLA Basic"), so
+    # the two sources find one row, which the Bambuddy pull links (Decision 223).
+    syncs = ColourSyncs(pg_pool)
+    await run_bambu(syncs, syncs.start("bambu"), _profiles(tmp_path))
+    applied = await _send(pg_pool, _bb(color_name="Black", hex_color="#000000"))
+    assert (applied.added, applied.kept) == (0, 1)
+    (black,) = [row for row in _colours(pg_pool) if row.name == "Black"]
+    assert (black.material_name, black.source, black.bb_colour_id) == ("PLA Basic", "bambu", 1)
+
+
+@pg
 async def test_a_missing_bambu_table_fails_the_run(pg_pool: PgPool, tmp_path: Path) -> None:
     syncs = ColourSyncs(pg_pool)
     done = await run_bambu(syncs, syncs.start("bambu"), tmp_path)

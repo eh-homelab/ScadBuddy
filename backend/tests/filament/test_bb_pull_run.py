@@ -12,11 +12,15 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
 from scadbuddy.bambuddy.errors import UpstreamAnswer
+from scadbuddy.bambuddy.models import Archive, SpoolUsage
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.filament import bb_pull_run
 from scadbuddy.filament.bambuddy_pull import PullReport, Pulls
 from scadbuddy.filament.bb_pull_models import (
+    ARCHIVES_MAX,
     ColoursApplied,
     ColoursBody,
     HaBody,
@@ -385,3 +389,21 @@ async def test_the_trays_are_reconciled_only_after_a_pull_that_asks(status: int)
         )
         await run_pull(api, _load, _start())
     assert ("trays" in api.names()) is (status == 200)
+
+
+def test_a_full_usage_body_stays_under_the_body_gate() -> None:
+    """#6860 R-6860-2: a booking body at its most (`USAGE_BODY_ROWS` rows and
+    `ARCHIVES_MAX` archives, every field filled) is well under the API's gate."""
+    row = SpoolUsage.model_validate(
+        USAGE
+        | {"id": 2**31, "spool_id": 2**31, "printer_id": 2**31, "print_name": "x" * 64}
+        | {"percent_used": 100.0, "status": "completed"}
+    )
+    archive = Archive(id=2**31, printer_id=2**31, completed_at=datetime(2026, 11, 14, 10, 0, 0, 1))
+    body = UsageBody(
+        instance=INSTANCE,
+        pull_id=PULL_ID,
+        usage=[row] * bb_pull_run.USAGE_BODY_ROWS,
+        archives=[archive] * ARCHIVES_MAX,
+    )
+    assert len(body.model_dump_json()) < MAX_TEXT_BODY_BYTES // 2

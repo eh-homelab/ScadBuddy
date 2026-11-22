@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { ApplicationFailure } from '@temporalio/common'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { CrudReadError } from '../src/api/crudRead.js'
 import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
 import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TranscriptStore } from '../src/sessions/store.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
+import { BACKEND_UNREACHABLE } from '../src/temporal/session/names.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, costStateEntry, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -59,18 +62,38 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
    * A session whose earlier placement spent R (on the row), its transcript one user entry, then a
    * placement of its turn here whose process reports `reported` as its total. `carried`: the
    * cost-state of R is in the transcript `before` the spawn, lands `between` the spawn's start
-   * and the process's load, or is not there (`none`).
+   * and the process's load, or is not there (`none`). `beforeLoad` runs as the SDK starts its load,
+   * in place of the `between` append. The placement's answer, or what it threw.
    */
-  async function place(reported: number, { carried, loads = true }: { carried: 'before' | 'between' | 'none'; loads?: boolean }) {
+  async function place(
+    reported: number,
+    {
+      carried,
+      loads = true,
+      beforeLoad,
+      landed,
+      landedWaitMs,
+      settled,
+    }: {
+      carried: 'before' | 'between' | 'none'
+      loads?: boolean
+      beforeLoad?: () => Promise<void>
+      landed?: () => Promise<void>
+      landedWaitMs?: number
+      /** Told as `host.run` settles, before the reads that follow it. */
+      settled?: () => void
+    },
+  ) {
     let id = ''
     const store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
     // One Claude Code restores (warm.ts `restoredCostUsd`): this session's, whole.
     const costState = () => store.append({ projectKey: '', sessionId: id }, [costStateEntry(id, R)])
     const scripted = scriptedRunner(() => ({ reply: 'carried on', costUsd: reported }), {
       loads,
-      ...(carried === 'between' ? { beforeLoad: costState } : {}),
+      ...(beforeLoad ? { beforeLoad } : carried === 'between' ? { beforeLoad: costState } : {}),
     })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: sqlAuditLog(db.sql) })
+    if (landed) vi.spyOn(m.warm, 'landed').mockImplementation(landed)
     const { session } = await m.start(browser, { origin: 'chat' })
     id = session.id
     await store.append({ projectKey: '', sessionId: id }, [{ type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'outlast the restart' } }])
@@ -81,11 +104,13 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
         cost_usd = ${R}, updated_at = now()
       WHERE id = ${id}`
     const deltas: number[] = []
-    const host = new TurnHost({ core: m.turnCore, ...hostStores(recording(db.sql, deltas)), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
+    const host = new TurnHost({ core: m.turnCore, ...hostStores(recording(db.sql, deltas)), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', ...(landedWaitMs === undefined ? {} : { landedWaitMs }) })
     const result = await host.run(
       { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'outlast the restart', images: [], system_append: null } },
       { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
     )
+      .catch((err: unknown) => err)
+      .finally(() => settled?.())
     const [row] = await db.sql<{ cost_usd: string }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}`
     const audit = await db.sql<{ cost_usd: string }[]>`SELECT cost_usd FROM ai_audit WHERE session_id = ${id} AND kind = 'turn'`
     await host.stop({ graceMs: 0, abortWaitMs: 0 })
@@ -116,6 +141,46 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
 
   it('guard, not a state the real SDK produces: a resume that loads nothing is priced at what it reports, R', async () => {
     pricedAtR(await place(R, { carried: 'before', loads: false }))
+  })
+
+  it('a transcript load whose connection the API dropped fails the placement as the retryable BackendUnreachable, never a failed turn the person reads; its spend is still written (#6994)', async () => {
+    const reset = new CrudReadError('the backend could not be reached (the transcript of session s: UND_ERR_SOCKET)', undefined, false, {}, 'UND_ERR_SOCKET')
+    const placed = await place(R, { carried: 'none', beforeLoad: () => Promise.reject(reset) })
+    expect(placed.result).toBeInstanceOf(ApplicationFailure)
+    const failure = placed.result as ApplicationFailure
+    expect(failure.type).toBe(BACKEND_UNREACHABLE)
+    expect(failure.nonRetryable).toBe(false)
+    expect(failure.message).toContain('could not reach the backend: the backend could not be reached (the transcript of session s: UND_ERR_SOCKET)')
+    expect(placed.audit).toHaveLength(1)
+  })
+
+  const reset = () => Promise.reject(new CrudReadError('the backend could not be reached (the transcript of session s: UND_ERR_SOCKET)', undefined, false, {}, 'UND_ERR_SOCKET'))
+
+  it("waits for the process's appends to land before it fails the placement as BackendUnreachable (#6994)", async () => {
+    const order: string[] = []
+    const placed = await place(R, {
+      carried: 'none',
+      beforeLoad: reset,
+      landed: async () => {
+        order.push('landing')
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        order.push('landed')
+      },
+      settled: () => order.push('thrown'),
+    })
+    expect((placed.result as ApplicationFailure).type).toBe(BACKEND_UNREACHABLE)
+    expect(order).toEqual(['landing', 'landed', 'thrown'])
+  })
+
+  it('waits for appends that never land (the API still away) only for landedWaitMs (#6994)', async () => {
+    const stuck = await place(R, { carried: 'none', beforeLoad: reset, landed: () => new Promise<void>(() => {}), landedWaitMs: 50 })
+    expect((stuck.result as ApplicationFailure).type).toBe(BACKEND_UNREACHABLE)
+  })
+
+  it('a transcript load the API refused (HTTP 500) still fails the turn, as its words: only a dropped connection is placed again', async () => {
+    const refused = new CrudReadError('the backend refused the transcript of session s (HTTP 500)', 500, true)
+    const placed = await place(R, { carried: 'none', beforeLoad: () => Promise.reject(refused) })
+    expect(placed.result).toMatchObject({ status: 'failed', error: expect.stringContaining('HTTP 500') })
   })
 
   it('a PDF blob the turn names reaches the SDK user message as a document block (#6267)', async () => {
