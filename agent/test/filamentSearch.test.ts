@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -8,7 +9,7 @@ import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6894: the Filament page's text search in filament_spool_list and filament_type_list `q`.
-// The matcher is a copy of frontend/src/lib/filamentSearch.ts; these cases are its tests' too.
+// The matcher is a copy of frontend/src/lib/filamentSearch.ts; both run test-fixtures/filament/search-vectors.json.
 
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
@@ -45,41 +46,20 @@ const spool = (values: Partial<Spool>) =>
     ...values,
   }) as Spool
 
-const find = (query: string) =>
-  matchesSearch(spoolSearchDoc(spool({}), { typeCode: 'BL-PLA-BASIC-HOT-PINK', skus: ['A00-R3'], tray: 'H2C AMS-A slot 2' }), parseSearch(query))
+type Cases = { query: string; match: boolean }[]
+type Vector =
+  | { name: string; kind: 'spool'; spool: Spool; extras: Parameters<typeof spoolSearchDoc>[1]; cases: Cases }
+  | { name: string; kind: 'type'; type: SpoolType; names: Record<string, string>; skus: string[]; cases: Cases }
+
+const { groups } = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/filament/search-vectors.json`, 'utf8')) as { groups: Vector[] }
 
 describe('the filament search matcher', () => {
-  it('finds a spool by #number or number, and #87 only as a number', () => {
-    expect(find('#87')).toBe(true)
-    expect(find('87')).toBe(true)
-    expect(find('#8')).toBe(false)
-    const grey = spoolSearchDoc(spool({ number: 3, effective: { colour_name: 'Grey', rgba: '#878787FF' }, names: { location: 'Bin 87' } }))
-    expect(matchesSearch(grey, parseSearch('#87'))).toBe(false)
-    expect(matchesSearch(grey, parseSearch('87'))).toBe(true)
-  })
-
-  it('matches every field in any case, every token somewhere', () => {
-    for (const query of ['bambu', 'BASIC', 'hot pink', 'shelf', 'bl-pla-basic', 'a00-r3', 'h2c slot', 'pink pla']) expect(find(query), query).toBe(true)
-    expect(find('pink petg')).toBe(false)
-  })
-
-  it('matches a hex with or without #, from 3 characters', () => {
-    expect(find('#F5547C')).toBe(true)
-    expect(find('f5547c')).toBe(true)
-    expect(find('#00FF00')).toBe(false)
-    expect(find('f5')).toBe(false)
-  })
-
-  it('searches a type by code, catalog names, colour, hex and SKU', () => {
-    const type = { id: 't', code: 'EL-PLA-SILK-GOLD', brand_id: 'b', material_id: 'm', subtype_id: 's', colour_name: 'Gold', rgba: '#D4AF37FF' } as SpoolType
-    const names = new Map([
-      ['b', 'Elegoo'],
-      ['m', 'PLA'],
-      ['s', 'Silk'],
-    ])
-    const doc = typeSearchDoc(type, names, ['ELG-SILK-GLD'])
-    for (const query of ['elegoo silk', 'gold', 'd4af37', 'elg-silk', 'el-pla']) expect(matchesSearch(doc, parseSearch(query)), query).toBe(true)
-  })
+  for (const group of groups) {
+    it(`matches the shared vectors: ${group.name}`, () => {
+      const doc = group.kind === 'spool' ? spoolSearchDoc(group.spool, group.extras) : typeSearchDoc(group.type, new Map(Object.entries(group.names)), group.skus)
+      for (const { query, match } of group.cases) expect(matchesSearch(doc, parseSearch(query)), JSON.stringify(query)).toBe(match)
+    })
+  }
 })
 
 const SUPPLIER = '8d6f3c1e-0000-4000-8000-00000000a001'

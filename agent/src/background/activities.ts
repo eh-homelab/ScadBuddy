@@ -1,6 +1,6 @@
 import { Context } from '@temporalio/activity'
 import { createHash } from 'node:crypto'
-import { type SessionFiles, workspacePath } from '../workspace/store.js'
+import { type WorkspaceFiles, workspacePath } from '../workspace/store.js'
 import { type SessionDirectory, watchCaps } from '../workspace/directory.js'
 import type { HarnessPaths } from '../harness/options.js'
 import { ensureSessionDir, sessionWorkDir } from '../harness/stateDirs.js'
@@ -103,7 +103,7 @@ export type BackgroundActivityDeps = {
   /** Runs a Workflow's agent() calls (workflowAgents.ts); without it, a workflow fails saying so. */
   agents?: WorkflowAgents | undefined
   /** The session workspace, where a workflow({scriptPath}) script is read. */
-  workspace?: Pick<SessionFiles, 'read'> | undefined
+  workspace?: Pick<WorkspaceFiles, 'read'> | undefined
 }
 
 /** The root an earlier build's Workflow named its script under (`/workspace/<workspace path>`), still read. */

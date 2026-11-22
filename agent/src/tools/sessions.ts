@@ -94,7 +94,7 @@ const PROGRESS_EVERY_MS = 5000
 
 function manager(ctx: ToolContext): SessionManager {
   if (!ctx.sessions) {
-    throw new ToolError('agent sessions need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)', 503)
+    throw new ToolError('agent sessions are not set up in this process', 503)
   }
   return ctx.sessions
 }

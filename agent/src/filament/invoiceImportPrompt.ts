@@ -14,6 +14,7 @@ export function invoiceImportPrompt(invoiceId: string): string {
     '- Offer uncosted candidates first, then costed ones. A costed candidate with no invoice_line_id is often a spool that the Bambuddy import costed: offer to link it to the line, show the person its old cost per kg and the new one, and add it to update_spool_ids only when the person says yes. The confirm replaces its cost. Never offer a spool that has an invoice_line_id: it belongs to another invoice.',
     '- The cost of one spool is (line subtotal + line tax + the line\'s share of shipping) ÷ quantity. Shipping is shared over the lines by value. The confirm computes this number; show the person the same one.',
     '- For a Bambu Lab line, find the colour with filament_bambu_colour, from the code in the SKU.',
+    '- When a line makes a new type, look its colour up in the colour catalog with filament_catalog_list with kind colours and q: the maker and the colour name, as `polymaker galaxy black`. For a Bambu Lab line, do this only when filament_bambu_colour has no colour for the code. When exactly one row fits the line by maker, name and material, take its RGBA as it is (alpha included) and its extra colours, before a hex from any other source.',
     '- If a line is ambiguous (more than one possible spool, an unknown colour or material, a total that does not add up), ask the person. Do not guess.',
     '- Never confirm the invoice without the person. Show what you will confirm, and wait for a yes.',
   ].join('\n')

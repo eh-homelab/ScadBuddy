@@ -2,11 +2,12 @@ import { createServer, type IncomingHttpHeaders, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { ChannelStore } from '../src/notify/channels.js'
+import { SqlChannelRows } from './support/sql/channels.js'
 import { NotificationDispatcher, type AttentionNotice } from '../src/notify/dispatcher.js'
-import { PushStore } from '../src/notify/pushStore.js'
+import { PushStore } from './support/sql/push.js'
 import { NOTIFY_CHANNELS_PATH, registerNotifyChannelRoutes } from '../src/routes/notifyChannels.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -34,7 +35,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`notification channels${TEST_DATABASE_URL ? 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    channels = new ChannelStore(db.sql, KEK)
+    channels = new ChannelStore(new SqlChannelRows(db.sql, KEK))
     received = []
     server = createServer((req, res) => {
       const chunks: Buffer[] = []
@@ -109,7 +110,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`notification channels${TEST_DATABASE_URL ? 
 
   it('refuses plain http to a public address and any address the egress check refuses', async () => {
     const resolve = (host: string) => Promise.resolve(host === 'meta.example' ? ['169.254.169.254'] : ['203.0.113.5'])
-    const strict = new ChannelStore(db.sql, KEK, resolve)
+    const strict = new ChannelStore(new SqlChannelRows(db.sql, KEK), resolve)
     await expect(strict.create({ kind: 'ntfy', name: 'x', url: 'http://ntfy.example/t' })).rejects.toThrow(/https/)
     await expect(strict.create({ kind: 'ntfy', name: 'x', url: 'https://meta.example/t' })).rejects.toThrow(/link-local|metadata/)
     await expect(strict.create({ kind: 'home_assistant', name: 'x', url: 'https://ha.example', target: 'phone' })).rejects.toThrow(/token/)

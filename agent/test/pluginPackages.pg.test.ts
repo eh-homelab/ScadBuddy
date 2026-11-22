@@ -4,19 +4,21 @@ import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import { loadPackagesForRun, PackageInstaller, verifiedReview } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
-import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
+import type { PackageView } from '../src/plugins/packages/store.js'
+import { PackageStore } from './support/sql/packages.js'
 import { PluginError } from '../src/plugins/registry.js'
 import { ownPluginEnabled } from '../src/plugins/packages/builtins.js'
 import { BUILTIN_SOURCES } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { AccessStore } from '../src/access/store.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 import { InlineCommands } from './support/commands.js'
@@ -507,7 +509,6 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     const appDeps = (): AppDeps => ({
         database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
         backend: () => Promise.resolve(true),
-        kek: { ok: false, reason: 'not configured' },
         credentials: new MemoryCredentials(),
         pluginPackages: store,
         packageInstaller: installer,
@@ -603,7 +604,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     })
 
     it('lists the built-in plugins first; they switch through ai_access, and are never removed', async () => {
-      const access = new AccessStore(db.sql)
+      const access = new AccessStore(new SqlAccessRows(db.sql))
       const a = createApp({ ...appDeps(), access })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
         name: string
@@ -652,7 +653,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       expect(loaded.paths).toEqual([])
       expect(loaded.problems).toEqual([expect.stringMatching(/scadbuddy was not loaded: "scadbuddy" is built in/)])
 
-      const a = createApp({ ...appDeps(), access: new AccessStore(db.sql) })
+      const a = createApp({ ...appDeps(), access: new AccessStore(new SqlAccessRows(db.sql)) })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
         name: string
         built_in?: boolean
@@ -714,7 +715,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     })
 
     it("serves a built-in plugin's files, and has no re-pin of one", async () => {
-      const a = createApp({ ...appDeps(), access: new AccessStore(db.sql) })
+      const a = createApp({ ...appDeps(), access: new AccessStore(new SqlAccessRows(db.sql)) })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages/scadbuddy/files', { headers: READ })).json()) as {
         files: { path: string }[]
       }
@@ -880,7 +881,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     })
 
     it('loads ScadBuddy\'s own plugin unless Settings switched it off', async () => {
-      const access = new AccessStore(db.sql)
+      const access = new AccessStore(new SqlAccessRows(db.sql))
       const runs: HarnessRun[] = []
       const scripted = scriptedRunner(() => ({ reply: 'hi' }))
       const m = manager({

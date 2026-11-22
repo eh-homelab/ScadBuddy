@@ -54,8 +54,8 @@ declare module '../app.js' {
 const TOOL = 'filament_invoice_import'
 const Body = z.strictObject({ invoice_id: z.string().uuid() })
 const READABLE: readonly string[] = [...IMAGE_MEDIA_TYPES, ...DOCUMENT_MEDIA_TYPES]
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 /** A session that no longer takes messages: ended, or put away. */
 const ENDED = new Set(['done', 'failed'])
 /** The backend's own refusals the route forwards as they are; any other is the agent's problem. */
@@ -216,7 +216,7 @@ export function registerInvoiceImportRoutes(app: Hono, deps: InvoiceImportDeps):
     if (!body.success) {
       return c.json({ detail: body.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') }, 400)
     }
-    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!deps.backend) return c.json({ detail: 'this agent cannot reach the backend' }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     const owner = browserUser(c)

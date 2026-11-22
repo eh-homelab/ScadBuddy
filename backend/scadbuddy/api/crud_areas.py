@@ -22,6 +22,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``…/turnstile/verify``, the bot check (#5283). The storefront ``accounts`` area is
 #: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283). The
 #: storefront ``order`` area is ``…/storefront/order/*``, the customer's order page (#5283).
+#: The storefront ``variants`` area is ``…/storefront/listings/{id}/variant`` and
+#: ``…/storefront/variants/{key}/preview.glb``, the instant read of a visitor's choices
+#: (#6921).
 #: The agent's ``workspace-blob-refs`` area is ``…/agent/workspace-blob-refs`` and its
 #: ``/release`` (#5299), the holds of its workspace files' blobs. Its ``events`` area is
 #: ``…/agent/events`` and ``…/events/head``, the event log's gap and head; its ``flows``
@@ -162,6 +165,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: row, for its directory sweeps; its ``forget-rows`` area is
 #: ``…/agent/sessions/{id}/forget-rows``, a forgotten session's last rows deleted with its
 #: unnamed workspace bytes and its warm-evict NOTIFY (#6501, `api/crud_agent_sweeps.py`).
+#: Its ``keys`` area is ``…/agent/keys/input-hash``, the approvals' input-hash key, and
+#: ``…/agent/fetch-grants``, a one-off fetch's grant minted here, so the agent mounts no KEK
+#: (#5299 step 12, `api/crud_agent_keys.py`).
 #: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
 #: ``…/import`` and ``…/failed``: a fetch's preset files, their import into Bambuddy as the
 #: type's presets, and its failure (#6625, `api/crud_profile_fetch.py`).
@@ -200,6 +206,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "accounts",
         "order",
         "models",
+        "variants",
     ],
     "agent": [
         "order-costs",
@@ -248,6 +255,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "auth-sessions",
         "session-sweeps",
         "forget-rows",
+        "keys",
     ],
     "intake": ["sources"],
     "profile-fetch": ["runs"],

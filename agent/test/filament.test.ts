@@ -7,6 +7,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
 import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { toolCallActivity } from '../src/temporal/toolCall.js'
+import { withUiPaths } from '../src/tools/filamentLinks.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -54,7 +55,7 @@ describe('filament catalog tools', () => {
       }),
     )
     const listed = await runTool(tool('filament_catalog_list'), { kind: 'brands', include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: '/filament/catalog?kind=brands' }])
   })
 
   it('adds a row with the fields given', async () => {
@@ -179,9 +180,9 @@ describe('filament type tools', () => {
       http.get(TYPE, () => HttpResponse.json({ id: ROW, presets: [], k_values: [] })),
     )
     const listed = await runTool(tool('filament_type_list'), { include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/types/${ROW}` }])
     const one = await runTool(tool('filament_type_get'), { type_id: ROW }, ctx())
-    expect(firstText(one)).toEqual({ id: ROW, presets: [], k_values: [] })
+    expect(firstText(one)).toEqual({ id: ROW, ui_path: `/filament/types/${ROW}`, presets: [], k_values: [] })
   })
 
   it('adds a type, then edits and archives it', async () => {
@@ -267,7 +268,7 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     expect(start).toContain('Bambuddy')
     expect(start).toContain('3dfilamentprofiles.com')
     expect(tool('filament_type_upsert').description).toContain('tdfp_id')
-    expect(start).toMatch(/Approved first\.$/)
+    expect(start).toMatch(/Approved first\./)
   })
 
   it('takes the drying values in the upsert fields (#6720)', () => {
@@ -338,7 +339,7 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     const gaps = [{ printer_model: 'H2C', nozzle_diameter: '0.2', reason: 'the dialog offers no 0.2 mm nozzle' }]
     server.use(http.get(FETCH, () => HttpResponse.json({ run: RUN, gaps })))
     const read = await runTool(tool('filament_type_profile_fetch'), { type_id: ROW }, ctx())
-    expect(firstText(read)).toEqual({ run: RUN, gaps })
+    expect(firstText(read)).toEqual(withUiPaths({ run: RUN, gaps }))
   })
 
   it('reads a type that never had a fetch', async () => {
@@ -383,8 +384,8 @@ describe('filament spool tools', () => {
       http.get(`${SPOOL}/events`, () => HttpResponse.json([{ kind: 'created' }])),
     )
     const listed = await runTool(tool('filament_spool_list'), { needs_type: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW }])
-    expect(firstText(await runTool(tool('filament_spool_get'), { spool_id: ROW }, ctx()))).toEqual({ id: ROW })
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/spools/${ROW}` }])
+    expect(firstText(await runTool(tool('filament_spool_get'), { spool_id: ROW }, ctx()))).toEqual({ id: ROW, ui_path: `/filament/spools/${ROW}` })
     const events = await runTool(tool('filament_spool_events'), { spool_id: ROW }, ctx())
     expect(firstText(events)).toEqual([{ kind: 'created' }])
   })
@@ -534,7 +535,7 @@ describe('filament location tools', () => {
       }),
     )
     const listed = await runTool(tool('filament_location_list'), { include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW, children: [] }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/spools?place=${ROW}`, children: [] }])
     const fields = { name: 'Shelf A', kind_id: ROW }
     expect((await runTool(tool('filament_location_upsert'), { fields }, ctx())).isError).toBeFalsy()
     const edit = { location_id: ROW, fields: { note: null }, archived: true }
@@ -868,6 +869,8 @@ const SYNC = `${BACKEND}/api/v1/filament/sync`
 describe('filament Bambuddy sync tools (#6265)', () => {
   it.each([
     ['filament_sync_status', 'read', false],
+    // #6905: the pass history reads ScadBuddy only.
+    ['filament_sync_passes', 'read', false],
     // It writes Bambuddy, as filament_rfid_reconcile does: outward and approved first.
     ['filament_sync_run', 'outward', true],
     // #6773: it deletes the links and asks for a pass that writes Bambuddy.
@@ -941,7 +944,7 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
     const activities = toolActivities(ALL_TOOLS, deps)
     const calls = toolCallActivities(ALL_TOOLS, deps)
-    for (const name of ['filament_sync_status', 'filament_sync_run']) {
+    for (const name of ['filament_sync_status', 'filament_sync_passes', 'filament_sync_run']) {
       expect(activities[name]).toBeTypeOf('function')
       expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
     }
@@ -957,6 +960,25 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     const status = { instance: null, errors: [], skipped: 'no_bambuddy' }
     server.use(http.get(`${SYNC}/status`, () => HttpResponse.json(status)))
     expect(firstText(await runTool(tool('filament_sync_status'), {}, ctx()))).toEqual(status)
+  })
+
+  it('reads the pass history a page at a time (#6905)', async () => {
+    const queries: Record<string, string>[] = []
+    const page = {
+      passes: [{ id: ROW, trigger: 'timer', error: 'crud_unavailable:transport', written: 0 }],
+      next_cursor: 'abc',
+    }
+    server.use(
+      http.get(`${SYNC}/passes`, ({ request }) => {
+        queries.push(Object.fromEntries(new URL(request.url).searchParams))
+        return HttpResponse.json(page)
+      }),
+    )
+    const t = tool('filament_sync_passes')
+    expect(firstText(await runTool(t, {}, ctx()))).toEqual(page)
+    await runTool(t, { cursor: 'abc', limit: 5 }, ctx())
+    expect(queries).toEqual([{ limit: '20' }, { cursor: 'abc', limit: '5' }])
+    expect(() => t.parse({ limit: 201 })).toThrow()
   })
 
   it('asks for a full pass with POST', async () => {
@@ -1103,10 +1125,10 @@ describe('filament_type_fill_from_profile (#6714)', () => {
         return HttpResponse.json(fill)
       }),
     )
-    expect(firstText(await runTool(tool('filament_type_fill_from_profile'), { refresh: true }, ctx()))).toEqual([fill])
+    expect(firstText(await runTool(tool('filament_type_fill_from_profile'), { refresh: true }, ctx()))).toEqual(withUiPaths([fill]))
     const shown = [{ printer_id: ROW, extruder: 0, nozzle_diameter: '0.4', k_value: '0.02' }]
     const one = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown }, ctx())
-    expect(firstText(one)).toEqual(fill)
+    expect(firstText(one)).toEqual(withUiPaths(fill))
     expect(sent).toEqual([
       { url: `${TYPES}/fill-from-profile`, body: { refresh: true } },
       { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown } },
@@ -1179,7 +1201,7 @@ describe('filament type proposal tools (#6701)', () => {
       }),
     )
     const done = await runTool(tool('filament_type_proposals_confirm'), { groups: [group] }, ctx())
-    expect(firstText(done)).toEqual(result)
+    expect(firstText(done)).toEqual(withUiPaths(result))
     expect(bodies).toEqual([{ groups: [group] }])
     expect(tool('filament_type_proposals_confirm').summarize({ groups: [group] })).toBe(
       'Make 1 spool type for 1 spool',
@@ -1229,5 +1251,66 @@ describe('filament type proposal tools (#6701)', () => {
       ctx(),
     )
     expect(refused.isError).toBe(true)
+  })
+})
+
+describe('the colour catalog syncs (#6907)', () => {
+  const SYNCS = `${BACKEND}/api/v1/filament/colour-syncs`
+  const RUN = {
+    id: ROW,
+    source: 'bambu',
+    state: 'done',
+    pages_read: 1,
+    pages_total: 1,
+    total: 4,
+    added: 4,
+    updated: 0,
+    unchanged: 0,
+    kept: 0,
+    skipped: 0,
+    error: null,
+    started_at: '2026-11-21T12:00:00Z',
+    finished_at: '2026-11-21T12:00:01Z',
+  }
+
+  it.each([
+    ['filament_colour_sync', 'write'],
+    ['filament_colour_sync_status', 'read'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('starts a sync with a key and answers the run', async () => {
+    const seen: { body: unknown; key: string | null }[] = []
+    server.use(
+      http.post(SYNCS, async ({ request }) => {
+        seen.push({ body: await request.json(), key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json(RUN)
+      }),
+    )
+    const result = await runTool(tool('filament_colour_sync'), { source: 'bambu' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.body).toEqual({ source: 'bambu', force: false })
+    expect(seen[0]!.key).toBeTruthy()
+    expect(firstText(result)).toMatchObject({ state: 'done', added: 4 })
+  })
+
+  it('reads the newest runs', async () => {
+    server.use(http.get(SYNCS, () => HttpResponse.json([RUN])))
+    const result = await runTool(tool('filament_colour_sync_status'), {}, ctx())
+    expect(firstText(result)).toEqual([RUN])
+  })
+
+  it('passes a colour search to the catalog list', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/catalog/colours`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('q')).toBe('jade white')
+        return HttpResponse.json([])
+      }),
+    )
+    const result = await runTool(tool('filament_catalog_list'), { kind: 'colours', q: 'jade white' }, ctx())
+    expect(result.isError).toBeFalsy()
   })
 })

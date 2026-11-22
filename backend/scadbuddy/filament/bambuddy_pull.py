@@ -6,7 +6,8 @@ the pull: the print worker reads it (`bb_pull_run.py`) and sends the rows, and
 view reads the assignments too.
 
 `pull` takes each BB spool in its own transaction, under an advisory lock on its id, in
-this order:
+this order, except a linked one on which nothing would change (`_quiet`, #6768): those are
+read for every spool at once and get no transaction of their own.
 
 1. A `filament_bb_links` row names it: the SB spool takes what BB changed since the last
    pull. "Changed" compares BB's values with the ones the last pull saw, kept in the
@@ -108,10 +109,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
@@ -132,6 +134,7 @@ from scadbuddy.bambuddy.models import (
     as_utc,
 )
 from scadbuddy.bambuddy.models import Spool as BbSpool
+from scadbuddy.core.cancel import CancelledError, CancelToken, check, watched
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import ledger
@@ -283,6 +286,7 @@ ANY_LINK = (
     " OR EXISTS (SELECT 1 FROM filament_locations WHERE bb_location_id IS NOT NULL)"
     " OR EXISTS (SELECT 1 FROM filament_insert_types WHERE bb_catalog_id IS NOT NULL)"
     " OR EXISTS (SELECT 1 FROM filament_spool_types WHERE bb_filament_id IS NOT NULL)"
+    " OR EXISTS (SELECT 1 FROM filament_colours WHERE bb_colour_id IS NOT NULL)"
 )
 
 
@@ -322,6 +326,7 @@ def pull(
     suppliers: Sequence[BbSupplier] | None = None,
     locations: Sequence[BbLocation] | None = None,
     instance: str | None = None,
+    cancel: CancelToken | None = None,
 ) -> PullReport:
     """Pull ``spools`` (BB's ``GET /inventory/spools``) into ``store``, as the module
     says, after ``catalog`` (BB's spool catalog) is mapped to insert types, and BB's
@@ -342,7 +347,13 @@ def pull(
 
     ``instance`` is the Bambuddy read (`bb_sync_nudge.instance_for`): each transaction
     that links a row or a spool records it as the links' instance when none is
-    (`record_instance`, Decision 12)."""
+    (`record_instance`, Decision 12).
+
+    ``cancel`` (the CRUD route's, cancelled when the print worker goes away, #6902) stops
+    the pull between BB spools and cancels the running statement, so the spool in flight
+    rolls back (unless its transaction had already reached its commit, after its last
+    check) and `CancelledError` or ``QueryCanceled`` is raised; the spools pulled before it
+    stay, each a whole transaction that the next pull leaves as it is."""
     report = PullReport()
     newest: dict[int, datetime] = {}
     for row in usage:
@@ -368,14 +379,35 @@ def pull(
         setattr(report, f"{kind}s", changed)
         report.conflicts += conflicts
         report.claimed += claimed
+    check(cancel)
     run = _Run(store, now, actor, pulls, defer_archived, *_context(store, pulls))
+    try:
+        quiet = _quiet(store, run, spools, cancel)
+    except (CancelledError, errors.QueryCanceled):
+        raise
+    except Exception as error:
+        # R-6768-4: the batch read never fails the pull; each spool takes its own path.
+        logger.warning(
+            "could not read which Bambuddy spools are unchanged; each is pulled",
+            extra={"error": type(error).__name__},
+            exc_info=True,
+        )
+        quiet = {}
     for bb in sorted(spools, key=lambda s: s.archived_at is not None):
+        check(cancel)
+        skipped: list[str] = []
         try:
-            with store.spools.transaction() as conn:
-                conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
-                skipped: list[str] = []
-                outcome = _one(conn, run, bb, skipped, newest.get(bb.id))
-                record_instance(conn, instance)
+            if bb.id in quiet:
+                outcome = quiet[bb.id]
+            else:
+                with store.spools.transaction() as conn, watched(cancel, conn):
+                    conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", (_LOCK, bb.id))
+                    outcome = _one(conn, run, bb, skipped, newest.get(bb.id))
+                    record_instance(conn, instance)
+                    check(cancel)
+        except (CancelledError, errors.QueryCanceled):
+            # The caller went away: the pull stops, never a spool that failed.
+            raise
         except Exception as error:
             logger.warning(
                 "could not pull a Bambuddy spool",
@@ -473,6 +505,201 @@ def _context(store: Filament, pulls: Pulls) -> tuple[BbRefs, list[_Claim]]:
             body, now = plan.claim_form(known)
             claims.append(_Claim(body, row["sent"], now, row["started_at"]))
     return refs, claims
+
+
+#: What `_one` answers for a BB spool: what came of it, its SB spool, whether it needs a type.
+_Outcome = tuple[str, UUID | None, bool] | None
+
+
+def _quiet(
+    store: Filament, run: _Run, spools: Sequence[BbSpool], cancel: CancelToken | None = None
+) -> dict[int, _Outcome]:
+    """#6768 (R-6768-1, R-6768-2): the linked BB spools on which `_one` would change
+    nothing, by BB id, with what it would answer (``archived`` for an archived SB spool,
+    else None). Read for every spool at once, in a fixed number of queries, after the
+    catalog, suppliers and locations are pulled: the pull then opens no transaction for
+    them. A BB spool is quiet only when each step of `_one` is a no-op for it:
+
+    - BB's ``updated_at`` is the link's ``bb_updated_at`` (an archived SB spool: not
+      older), and the link has a seen copy with a time;
+    - its archive state and place agree with the seen copy, or the copy has none
+      (`_archive_state`, `_follow_location`);
+    - for a spool that is not archived, the last ``synced_from_bb`` reading is BB's row as
+      `_update` records it (`_reading`, `_seen`: an unmapped catalog id kept or left out,
+      a type that does not pull kept, R-6768-5), and after the push's echo every seen
+      field is BB's (`_update`); the insert type BB names is unmapped, the spool's own or
+      its type's, or a person edited it since the link (`_backfill_insert_type`,
+      R-6768-6); under ``weights`` BB's weighing and drying are booked
+      (`_book`); under ``presets`` the link holds BB's preset and K-profiles
+      (`_bb_presets`, `_bb_k_values`);
+    - the seen copy `_write_seen` would merge is the one the link holds.
+
+    Anything else, or a doubt (a value of another JSON form), goes through `_one`. The
+    reads are not under the spools' locks: a write that lands after them is taken by the
+    next pull (R-6768-3). ``cancel`` stops the read as it stops a spool's transaction; any
+    other failure is the caller's to log, and then no spool is quiet (R-6768-4)."""
+    from scadbuddy.filament import bb_sync_plan as plan
+
+    timed = {bb.id: bb for bb in spools if bb.updated_at is not None}
+    if not timed:
+        return {}
+    pulls = run.pulls
+    with store.spools.transaction() as conn, watched(cancel, conn):
+        links: dict[int, Any] = {}
+        for row in conn.execute(
+            "SELECT l.bb_spool_id, l.spool_id, l.bb_updated_at, l.bb_seen, l.bb_seen_at,"
+            " l.bb_k_profiles, l.bb_slicer_filament, l.bb_slicer_filament_name,"
+            " s.archived_at IS NOT NULL AS archived, s.insert_type_id AS own,"
+            " t.insert_type_id AS typed"
+            " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
+            " LEFT JOIN filament_spool_types t ON t.id = s.type_id"
+            " WHERE l.bb_spool_id = ANY(%s)",
+            (list(timed),),
+        ).fetchall():
+            at, held = as_utc(timed[row["bb_spool_id"]].updated_at), row["bb_updated_at"]
+            same = held is not None and (at == held or (row["archived"] and at > held))
+            if same and row["bb_seen"] is not None and row["bb_seen_at"] is not None:
+                links[row["bb_spool_id"]] = row
+        if not links:
+            return {}
+        ids = [row["spool_id"] for row in links.values()]
+        last = {
+            row["spool_id"]: row
+            for row in conn.execute(
+                "SELECT DISTINCT ON (spool_id) spool_id, data -> 'bb' AS bb,"
+                " data @> '{\"pushed\": true}' AS pushed FROM filament_spool_events"
+                " WHERE spool_id = ANY(%s) AND kind = 'synced_from_bb' AND data ? 'bb'"
+                " ORDER BY spool_id, at DESC, seq DESC",
+                (ids,),
+            ).fetchall()
+        }
+        refs = [ref for bb_id in links for _, _, ref in _book_refs(timed[bb_id])]
+        booked = {
+            (row["spool_id"], row["kind"], row["ref_kind"], row["ref_id"])
+            for row in conn.execute(
+                "SELECT spool_id, kind, ref_kind, ref_id FROM filament_spool_events"
+                " WHERE spool_id = ANY(%s) AND ref_kind IN ('bb_scale', 'bb_dried')"
+                " AND ref_id = ANY(%s)",
+                (ids, refs),
+            ).fetchall()
+        }
+        inserts = {
+            row["bb_catalog_id"]: row["id"]
+            for row in conn.execute(
+                "SELECT bb_catalog_id, id FROM filament_insert_types"
+                " WHERE bb_catalog_id = ANY(%s) AND archived_at IS NULL",
+                ([timed[i].core_weight_catalog_id for i in links],),
+            ).fetchall()
+        }
+        edited = {
+            row["spool_id"]
+            for row in conn.execute(
+                "SELECT DISTINCT e.spool_id FROM filament_spool_events e"
+                " JOIN filament_bb_links l ON l.spool_id = e.spool_id"
+                " WHERE e.spool_id = ANY(%s) AND e.kind = 'edited' AND e.at > l.linked_at"
+                " AND jsonb_typeof(e.data -> 'changes') = 'object'"
+                " AND e.data -> 'changes' ? 'insert_type_id'",
+                (ids,),
+            ).fetchall()
+        }
+        named = {timed[i].location_id for i in links} | {
+            row["bb_seen"].get("location_id") for row in links.values()
+        }
+        places = conn.execute(
+            "SELECT bb_location_id, archived_at IS NULL AND printer_id IS NULL AS open"
+            " FROM filament_locations WHERE bb_location_id = ANY(%s)",
+            ([p for p in named if isinstance(p, int)],),
+        ).fetchall()
+        ever = {row["bb_location_id"] for row in places}
+        open_places = {row["bb_location_id"] for row in places if row["open"]}
+        steady = {
+            bb_id: link
+            for bb_id, link in links.items()
+            if _steady(
+                timed[bb_id], link, last.get(link["spool_id"]), booked, inserts, edited, pulls
+            )
+        }
+        if not steady:
+            return {}
+        facts = plan.SpoolFacts.read(conn, [link["spool_id"] for link in steady.values()], _ALL)
+        quiet: dict[int, _Outcome] = {}
+        for bb_id, link in steady.items():
+            stored: dict[str, Any] = link["bb_seen"]
+            desired, _ = plan.desired_and_unmapped(conn, link["spool_id"], run.refs, _ALL, facts)
+            seeds, stale, agree = _seen_parts(
+                run,
+                timed[bb_id],
+                desired,
+                set(),
+                held=partial(stored.get, "location_id"),
+                mapped=lambda place: place in open_places,
+                ever_mapped=lambda place: place in ever,
+            )
+            kept = {k: v for k, v in stored.items() if not (stale and k == "location_id")}
+            if seeds | kept | agree != stored:
+                continue
+            quiet[bb_id] = ("archived", link["spool_id"], False) if link["archived"] else None
+    return quiet
+
+
+def _steady(
+    bb: BbSpool,
+    link: Mapping[str, Any],
+    last: Mapping[str, Any] | None,
+    booked: set[tuple[UUID, str, str, str]],
+    inserts: Mapping[int, UUID],
+    edited: set[UUID],
+    pulls: Pulls,
+) -> bool:
+    """`_quiet`'s checks of one linked BB spool but the seen copy's merge."""
+    from scadbuddy.filament.bb_sync_plan import k_form
+
+    stored: dict[str, Any] = link["bb_seen"]
+    seen = seen_row(bb)
+    if (
+        pulls.spools
+        and "archived_at" in stored
+        and (stored["archived_at"] is None) != (bb.archived_at is None)
+    ):
+        return False
+    if pulls.locations and "location_id" in stored and stored["location_id"] != seen["location_id"]:
+        return False
+    if link["archived"]:
+        return True
+    if last is None:
+        return False
+    before: dict[str, Any] = last["bb"] or {}
+    insert = None if bb.core_weight_catalog_id is None else inserts.get(bb.core_weight_catalog_id)
+    after = _reading(bb, before, insert)
+    if _seen(after, before, pulls) != before:
+        return False
+    if last["pushed"] and any(
+        pulls.of_field(k)
+        and (_SEEN_NAMES[k] not in stored or stored[_SEEN_NAMES[k]] != seen.get(_SEEN_NAMES[k]))
+        for k in after
+        if k in _SEEN_NAMES
+    ):
+        return False
+    spool_id = link["spool_id"]
+    if (
+        pulls.spools
+        and insert is not None
+        and link["own"] is None
+        and link["typed"] != insert
+        and spool_id not in edited
+    ):
+        return False
+    if pulls.weights and any((spool_id, *ref) not in booked for ref in _book_refs(bb)):
+        return False
+    if pulls.presets:
+        if (link["bb_slicer_filament"], link["bb_slicer_filament_name"]) != _preset_sent(bb):
+            return False
+        sent = json_form([k.model_dump() for k in bb.k_profiles])
+        if link["bb_k_profiles"] is None or k_form(link["bb_k_profiles"]) != k_form(
+            cast("list[Any]", sent)
+        ):
+            return False
+    return True
 
 
 #: Every data type both ways: the compare values of every field a seen copy holds.
@@ -677,6 +904,14 @@ def _one(
     return "created", made, typeless
 
 
+def _preset_sent(bb: BbSpool) -> tuple[str | None, str | None]:
+    """BB's ``slicer_filament`` and its name as `_bb_presets` keeps them on the link."""
+    return (
+        _text(bb.slicer_filament),
+        _text(bb.slicer_filament_name) if bb.slicer_filament else None,
+    )
+
+
 #: The H2C nozzle sizes a Bambuddy spool's one preset is written for (ruling R1).
 BB_PRESET_NOZZLES = ("0.2", "0.4", "0.6", "0.8")
 
@@ -704,10 +939,7 @@ def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
     from scadbuddy.bambuddy.resolver import PRINTER_MODEL
 
     conn.execute("SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,))
-    sent = (
-        _text(bb.slicer_filament),
-        _text(bb.slicer_filament_name) if bb.slicer_filament else None,
-    )
+    sent = _preset_sent(bb)
     link = conn.execute(
         "SELECT l.bb_slicer_filament, l.bb_slicer_filament_name, s.type_id IS NOT NULL AS typed"
         " FROM filament_bb_links l JOIN filament_spools s ON s.id = l.spool_id"
@@ -1151,15 +1383,7 @@ def _update(
             data={"bb_spool_id": bb.id, "bb": before, "changes": {"insert_type_id": insert}},
         )
         return True
-    after = snapshot(bb)
-    if insert_id is None and bb.core_weight_catalog_id is not None:
-        # Its entry is not mapped (the read failed, or it was skipped or archived): the
-        # reading keeps the last id, so the pull that maps it sees the change. With no
-        # last id the key stays absent, so the pull that maps it reads it for the first time.
-        if "core_weight_catalog_id" in before:
-            after["core_weight_catalog_id"] = before["core_weight_catalog_id"]
-        else:
-            del after["core_weight_catalog_id"]
+    after = _reading(bb, before, insert_id)
     keys = (after["tag_uid"], after["tray_uuid"])
     retag = (
         pulls.tags
@@ -1255,6 +1479,21 @@ def _update(
     return bool(changes) or retag or reading is not None
 
 
+def _reading(bb: BbSpool, before: Mapping[str, Any], insert_id: UUID | None) -> dict[str, Any]:
+    """`snapshot` as `_update` records it, ``insert_id`` the insert type BB's catalog id
+    maps to. When the entry is not mapped (the read failed, or it was skipped or
+    archived), the reading keeps the last id, so the pull that maps it sees the change;
+    with no last id the key stays absent, so the pull that maps it reads it for the first
+    time."""
+    after = snapshot(bb)
+    if insert_id is None and bb.core_weight_catalog_id is not None:
+        if "core_weight_catalog_id" in before:
+            after["core_weight_catalog_id"] = before["core_weight_catalog_id"]
+        else:
+            del after["core_weight_catalog_id"]
+    return after
+
+
 def _seen(after: dict[str, Any], before: dict[str, Any], pulls: Pulls) -> dict[str, Any]:
     """BB's reading as the pull records it: ``after`` for the fields of a type that pulls,
     the last recorded value (or none) for the rest."""
@@ -1300,6 +1539,21 @@ def _core_g(conn: Conn, spool_id: UUID, bb: BbSpool) -> tuple[int | None, str | 
     return None, None
 
 
+def _book_ref(bb: BbSpool, at: datetime) -> str:
+    """The ref id of a weighing or drying `_book` books once: BB's spool and its time."""
+    return f"{bb.id}/{at.isoformat()}"
+
+
+def _book_refs(bb: BbSpool) -> set[tuple[str, str, str]]:
+    """What `_book` would book under ``weights``: each event's kind, ref kind and ref id."""
+    refs: set[tuple[str, str, str]] = set()
+    if bb.last_weighed_at is not None and bb.last_scale_weight is not None:
+        refs.add(("weighed", "bb_scale", _book_ref(bb, bb.last_weighed_at)))
+    if bb.last_dried_at is not None:
+        refs.add(("dried", "bb_dried", _book_ref(bb, bb.last_dried_at)))
+    return refs
+
+
 def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = True) -> bool:
     """BB's last weighing as a ``weighed`` event and its last drying as a ``dried`` one,
     each once: ref ``bb_scale``/``bb_dried`` and ``<bb id>/<time>``, at BB's time. The
@@ -1333,7 +1587,7 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = T
                 absolute_g=net,
                 at=bb.last_weighed_at,
                 ref_kind="bb_scale",
-                ref_id=f"{bb.id}/{bb.last_weighed_at.isoformat()}",
+                ref_id=_book_ref(bb, bb.last_weighed_at),
                 actor=actor,
                 data=data,
             )
@@ -1348,7 +1602,7 @@ def _book(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, weights: bool = T
                 source="bb",
                 at=bb.last_dried_at,
                 ref_kind="bb_dried",
-                ref_id=f"{bb.id}/{bb.last_dried_at.isoformat()}",
+                ref_id=_book_ref(bb, bb.last_dried_at),
                 actor=actor,
             )
             is not None
@@ -1407,9 +1661,49 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
     newer one as `results` writing it after its snapshot (F11)."""
     from scadbuddy.filament import bb_sync_plan as plan
 
+    desired, _ = plan.desired_and_unmapped(conn, spool_id, run.refs, _ALL)
+    seeds, stale, agree = _seen_parts(
+        run,
+        bb,
+        desired,
+        taken,
+        held=lambda: _link_seen(conn, spool_id).get("location_id"),
+        mapped=lambda place: _mapped_place(conn, place) is not None,
+        ever_mapped=lambda place: _place_ever_mapped(conn, place),
+    )
+    # The seeds go first, so a seen value the link holds already wins over them.
+    conn.execute(
+        "UPDATE filament_bb_links SET bb_seen = n.seen, bb_seen_at = CASE WHEN"
+        " n.seen IS DISTINCT FROM l.bb_seen OR l.bb_seen_at IS NULL THEN %s"
+        " ELSE l.bb_seen_at END"
+        " FROM filament_bb_links l, LATERAL (SELECT %s ||"
+        " (coalesce(l.bb_seen, '{}'::jsonb) - CASE WHEN %s THEN 'location_id' ELSE '' END)"
+        " || %s AS seen) n"
+        " WHERE filament_bb_links.spool_id = %s AND l.spool_id = filament_bb_links.spool_id",
+        (run.now, Jsonb(seeds), stale, Jsonb(agree), spool_id),
+    )
+
+
+def _seen_parts(
+    run: _Run,
+    bb: BbSpool,
+    desired: Mapping[str, Any],
+    taken: set[str],
+    *,
+    held: Callable[[], Any],
+    mapped: Callable[[int], bool],
+    ever_mapped: Callable[[int], bool],
+) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+    """What `_write_seen` merges into the link's ``bb_seen``, in order: the seeds, whether
+    the held location goes (``stale``), and the fields that agree with SB's ``desired``
+    values (`bb_sync_plan.desired_and_unmapped`). ``held`` is the link's seen location,
+    ``mapped`` whether BB's place maps to an open SB place in no printer's place, and
+    ``ever_mapped`` whether SB has mapped it in any state; `_quiet` answers them from its
+    one read, `_write_seen` with a query each."""
+    from scadbuddy.filament import bb_sync_plan as plan
+
     seen = seen_row(bb)
     k_rows = json_form([k.model_dump() for k in bb.k_profiles])
-    desired, _ = plan.desired_and_unmapped(conn, spool_id, run.refs, _ALL)
     sb = {
         n: plan.compare_form(n, v)
         for n, v in desired.items()
@@ -1427,24 +1721,14 @@ def _write_seen(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, taken: set[s
         if on
     }
     if "location_id" in seeds:
-        if seen["location_id"] is not None and _mapped_place(conn, seen["location_id"]) is None:
+        if seen["location_id"] is not None and not mapped(seen["location_id"]):
             del seeds["location_id"]
-        held = _link_seen(conn, spool_id).get("location_id")
-        # Decision 171: a seed of a place SB has never mapped is no seed. The merge below
-        # drops the link's seen value, so `bb_seen_at` moves with it (M2) and the first pull
-        # where BB's place maps seeds it fresh.
-        stale = held is not None and not _place_ever_mapped(conn, held)
-    # The seeds go first, so a seen value the link holds already wins over them.
-    conn.execute(
-        "UPDATE filament_bb_links SET bb_seen = n.seen, bb_seen_at = CASE WHEN"
-        " n.seen IS DISTINCT FROM l.bb_seen OR l.bb_seen_at IS NULL THEN %s"
-        " ELSE l.bb_seen_at END"
-        " FROM filament_bb_links l, LATERAL (SELECT %s ||"
-        " (coalesce(l.bb_seen, '{}'::jsonb) - CASE WHEN %s THEN 'location_id' ELSE '' END)"
-        " || %s AS seen) n"
-        " WHERE filament_bb_links.spool_id = %s AND l.spool_id = filament_bb_links.spool_id",
-        (run.now, Jsonb(seeds), stale, Jsonb(agree), spool_id),
-    )
+        place = held()
+        # Decision 171: a seed of a place SB has never mapped is no seed. The merge
+        # drops the link's seen value, so `bb_seen_at` moves with it (M2) and the first
+        # pull where BB's place maps seeds it fresh.
+        stale = place is not None and not ever_mapped(place)
+    return seeds, stale, agree
 
 
 def _link_seen(conn: Conn, spool_id: UUID) -> dict[str, Any]:

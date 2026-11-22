@@ -70,9 +70,9 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 // GET /api/v1/ai/operations/{id}.
 
 export type PackageRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   packages: PackageRepo | undefined
-  /** The plugins that ship with the agent (builtins.ts), listed first; undefined without the database. */
+  /** The plugins that ship with the agent (builtins.ts), listed first; undefined when this process was not given it (tests). */
   builtIns: BuiltInPackages | undefined
   installer: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> | undefined
   /** A pending re-pin's review with its hooks' ids, for one stored without them (#4757); kept as stored when omitted or failing. */
@@ -84,8 +84,8 @@ export type PackageRouteDeps = {
   origins: OriginPolicy
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 const Source = z.discriminatedUnion('kind', [
   z.strictObject({
@@ -151,7 +151,7 @@ async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.
 export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): void {
   const base = '/api/v1/ai/plugin-packages'
   async function store(): Promise<PackageRepo | string> {
-    if (!deps.packages) return NO_DATABASE
+    if (!deps.packages) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.packages : NOT_READY
   }
 
@@ -369,7 +369,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
 
 declare module '../app.js' {
   interface AppDeps {
-    /** Installed plugin packages (#297, plugins/packages/); undefined when there is no database. */
+    /** Installed plugin packages (#297, plugins/packages/); undefined when this process was not given it (tests). */
     pluginPackages?: PackageRepo | undefined
     /** Fetches and caches plugin packages; undefined disables installing. */
     packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile' | 'acquire'> | undefined

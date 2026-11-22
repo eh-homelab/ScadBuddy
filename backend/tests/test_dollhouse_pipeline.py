@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 
+from scadbuddy.core.input_schema import value_problems
+from scadbuddy.library.pipelines import inputs_schema_problems
 from tests.support.pipelines import FakeWorld, a_job, run_job
 from tests.support.temporal import temporal_client
 
@@ -196,3 +198,35 @@ async def test_changing_wallpaper_rerenders_walls_but_not_floors() -> None:
     assert before["wall:lower"] != after["wall:lower"]
     assert before["floor_tile"] == after["floor_tile"]
     assert before["roof_panel"] == after["roof_panel"]
+
+
+def _declared() -> tuple[dict[str, Any], dict[str, Any]]:
+    """model.json's `pipeline`, and the inputs schema it names (spec 2026-11-17 §4.1)."""
+    pipeline = json.loads((TEMPLATE / "model.json").read_text(encoding="utf-8"))["pipeline"]
+    schema = json.loads((TEMPLATE / pipeline["inputs"]).read_text(encoding="utf-8"))
+    return pipeline, schema
+
+
+def test_the_inputs_schema_is_in_the_pipeline_subset() -> None:
+    """#5701: a pipeline template declares `pipeline.inputs` (owner, 2026-11-18)."""
+    assert inputs_schema_problems(_declared()[1]) == []
+
+
+def test_the_inputs_schema_bounds_are_the_pipelines_limits() -> None:
+    house = _declared()[1]["properties"]["house"]["properties"]
+    bounds = {name: (spec["minimum"], spec["maximum"]) for name, spec in house.items()}
+    assert bounds == _module().LIMITS
+
+
+def test_every_verify_case_fits_the_inputs_schema() -> None:
+    """A listing's inputs are a case less `params` and `v` (spec 2026-11-17 §4.2)."""
+    schema = _declared()[1]
+    cases = json.loads((TEMPLATE / "pipeline" / "verify-inputs.json").read_text(encoding="utf-8"))
+    for case in cases:
+        own = {k: v for k, v in case.items() if k not in ("params", "v")}
+        assert value_problems(schema, own) == [], case
+
+
+def test_the_declared_sets_params_are_the_pipelines_shape() -> None:
+    """Spec 2026-11-17 §6.1: the parameters the pipeline sets itself."""
+    assert set(_declared()[0]["sets_params"]) == _module().SHAPE

@@ -10,6 +10,24 @@ import type { Owner } from '../../src/sessions/protocol.js'
 import { testPayloadKeys } from './payloadKeys.js'
 import { serveManager } from './agentSessions.js'
 import { SqlFlowRunReads } from './sqlFlowRunReads.js'
+import type { Sql } from 'postgres'
+import { BrowserOrigins } from '../../src/browser/store.js'
+import { MemorySessionOrigins } from './memoryOrigins.js'
+import { SqlApprovals } from './sql/approvals.js'
+import { TEST_HASH_KEY } from './sql/audit.js'
+import { PgEditRows } from './sql/editRows.js'
+import { SqlEscalations } from './sql/escalations.js'
+import { PgEventRows } from './sql/eventRows.js'
+import { pgHttpBodies } from './sql/httpBodies.js'
+import { SqlPendingProjection } from './sql/pendingProjection.js'
+import { PgPublisher } from './sql/publisher.js'
+import { SqlQuestions } from './sql/questions.js'
+import { PgResourceRows } from './sql/resourceRows.js'
+import { SessionBlobs } from './sql/sessionBlobs.js'
+import { SessionFiles } from './sql/sessionFiles.js'
+import { PgSessionReads } from './sql/sessionReads.js'
+import { PgSessionRows } from './sql/sessionRows.js'
+import { PgTranscriptRows } from './sql/transcriptRows.js'
 
 export const browser: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 export const agentA: Owner = { kind: 'bearer', id: 'token:a', label: 'Agent A' }
@@ -267,6 +285,32 @@ export async function tempPaths(): Promise<{ stateDir: string }> {
   return { stateDir: await mkdtemp(path.join(os.tmpdir(), 'sessions-')) }
 }
 
+/**
+ * The manager's stores straight on the test database (support/sql/), for tests with no API: the
+ * statements the API's CRUD routes run (#5299). The approval hash key is the audit log's
+ * (sql/audit.ts `TEST_HASH_KEY`), as main.ts keys both.
+ */
+export function sqlSessionStores(sql: Sql) {
+  return {
+    rows: new PgSessionRows(sql),
+    resourceRows: new PgResourceRows(sql),
+    transcripts: new PgTranscriptRows(sql, testPayloadKeys(sql)),
+    eventRows: new PgEventRows(sql),
+    sessionReads: new PgSessionReads(sql),
+    publish: new PgPublisher(sql),
+    editRows: new PgEditRows(sql),
+    pendingRoutes: new SqlPendingProjection(sql),
+    approvalRoutes: new SqlApprovals(sql),
+    questionRoutes: new SqlQuestions(sql),
+    escalationRoutes: new SqlEscalations(sql),
+    blobs: new SessionBlobs(sql),
+    httpBodies: pgHttpBodies(sql),
+    browserOrigins: new BrowserOrigins(undefined, new MemorySessionOrigins()),
+    flowReads: new SqlFlowRunReads(sql),
+    approvalHashKey: () => TEST_HASH_KEY,
+  } satisfies Partial<SessionManagerDeps>
+}
+
 /** Every manager `manager()` made that `stopManagers()` has not stopped yet. */
 const unstopped = new Set<SessionManager>()
 
@@ -275,14 +319,16 @@ const unstopped = new Set<SessionManager>()
  * (support/agentSessions.ts) its sessions run on AgentSession on that file's Temporal dev
  * server; elsewhere it has no Temporal, so it starts no session (spec 2026-10-13 §10.1).
  */
-export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'sql' | 'paths'>): SessionManager {
+export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'paths'> & { sql: Sql }): SessionManager {
+  const { sql, ...rest } = deps
   const m = new SessionManager({
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     renewMs: 50,
     pollMs: 50,
-    payloadKeys: testPayloadKeys(deps.sql),
-    flowReads: new SqlFlowRunReads(deps.sql),
-    ...deps,
+    ...sqlSessionStores(sql),
+    workspace: new SessionFiles(sql, { settings: deps.settings }),
+    currentTiers: () => Promise.resolve(undefined),
+    ...rest,
   })
   serveManager(m, deps)
   unstopped.add(m)

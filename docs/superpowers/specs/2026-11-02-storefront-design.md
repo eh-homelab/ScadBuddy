@@ -99,7 +99,7 @@ a slug and a commit, so it fits the same reference. Nothing references a raw fil
 - `model`: has a reference from revision 1.
 - `custom`: never has a reference or revisions (a title, a quantity, a price).
 - `request`: a design request. It holds the customer's text and attachments
-  (`order_attachments` role `reference`) and has no reference until its first revision.
+  (`entity_attachments`, formerly `order_attachments`, role `reference`) and has no reference until its first revision.
   It cannot be quoted, sliced or printed until then; `quote` and `order_item_print` refuse
   it with `item_has_no_design`. Its first revision gives it a reference, and from then
   on it behaves as a `model` item. The kind stays `request`, so the shop can see where
@@ -159,7 +159,7 @@ The owner needs each job's real cost, so a test print is recorded on the order
   never counts toward the fulfilled quantity, and is ignored by `derive` (it is not in
   `attempted`), `accept_fulfilment` and `unfulfil_item`.
 - `test_print` attachments stay on the revision's subject and may name their attempt
-  (`order_attachments.fulfilment_id`, nullable).
+  (`entity_attachments.fulfilment_id`, formerly `order_attachments`, nullable).
 - Job costing reads every attempt, test, failed and production; it is a separate
   spec.
 

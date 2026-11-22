@@ -18,7 +18,7 @@ import logging
 from collections.abc import Sequence
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -54,6 +54,9 @@ from scadbuddy.orders.integrations import (
 )
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
+
+if TYPE_CHECKING:
+    from scadbuddy.orders.storefront.held_file import HeldFile
 
 logger = logging.getLogger(__name__)
 
@@ -297,13 +300,16 @@ async def start_library_quote_preview(
     *,
     lan: bool,
     native_reads: NativeCopies | None,
+    held: HeldFile | None = None,
     **kwargs: Any,
 ) -> list[PreviewStarted]:
     """A library file item's slice (#5544): :func:`start_quote_preview` of the file, read
     as the dialog's background slice of a library file reads it (``bambuddy/operations.py``
     ``preview_run``): its slots from the download it uploads (#2550), and a native run's
     copy into the native library. A sliced file is refused there (422): it has nothing to
-    slice."""
+    slice. With ``held`` (a file listing's price, #6710 §7.3.1) the file is read from its
+    held copy in place of the library, and its copies name the copy's version; the rest of
+    the slice is the same."""
     async with maybe_client(settings, native=lan) as client:
         source = await LibrarySource.load(
             client,
@@ -311,8 +317,9 @@ async def start_library_quote_preview(
             uploads=uploads,
             settings=settings,
             read_own=True,
-            files=reads_for(file_id, client, native_reads),
+            files=held if held is not None else reads_for(file_id, client, native_reads),
             native=native_reads if lan else None,
+            held=held is not None,
         )
         return await start_preview_plates(
             client, source, settings, uploads, request, native_reads=native_reads, **kwargs

@@ -13,9 +13,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from scadbuddy.api import media as media_api
+from scadbuddy.api.attachment_serving import INERT, NOSNIFF
 from scadbuddy.api.deps import PathsDep, StateDep
 from scadbuddy.api.filament import actor, nudge_after_write
-from scadbuddy.api.order_attachments import INERT, NOSNIFF
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import purchasing_models as pm

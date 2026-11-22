@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
+import { command } from './command.js'
+import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
   matchesSearch,
@@ -123,7 +125,7 @@ const csvRows = z
   .max(5000)
   .describe('One object per CSV row, column name to cell text')
 
-export const filamentTools: Tool[] = [
+const tools: Tool[] = [
   defineTool({
     name: 'filament_catalog_list',
     label: 'List a filament catalog',
@@ -131,16 +133,23 @@ export const filamentTools: Tool[] = [
       "One of ScadBuddy's filament catalogs, in sort order: materials (print and drying defaults, handling " +
       'flags), subtypes, brands, categories, effects, insert-materials, insert-types, colours (a maker\'s named ' +
       'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`. A material, ' +
-      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases).',
-    input: z.object({ kind, include_archived: z.boolean().default(false) }),
+      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases). The ' +
+      "colours catalog holds thousands of rows once synced (filament_colour_sync): pass `q` (every word must match a " +
+      "row's name, maker, `material_name` or `#RRGGBBAA`, e.g. `bambu jade white`) rather than listing it whole. A " +
+      'colour with `source` came from a sync; one with `source` and a null `synced_at` was edited by a person since (syncs leave it as it is).',
+    input: z.object({
+      kind,
+      include_archived: z.boolean().default(false),
+      q: z.string().max(200).optional().describe('Text search: every word must match some text of the row, in any case'),
+    }),
     risk: 'read',
     source: SOURCE,
     routes: ['GET /api/v1/filament/catalog/{kind}'],
-    handler: async ({ kind, include_archived }, { backend }) =>
+    handler: async ({ kind, include_archived, q }, { backend }) =>
       json(
         await ok(
           backend.GET('/api/v1/filament/catalog/{kind}', {
-            params: { path: { kind }, query: { include_archived } },
+            params: { path: { kind }, query: { include_archived, q } },
           }),
           `list the ${kind} catalog`,
         ),
@@ -245,6 +254,50 @@ export const filamentTools: Tool[] = [
           `set the aliases of ${kind} row ${row_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_colour_sync',
+    label: 'Fill the colour catalog',
+    description:
+      "Fill ScadBuddy's colour catalog from a public source (#6907). `filamentcolors`: every swatch of " +
+      'filamentcolors.xyz (maker, name, material, hex; a translucent swatch gets alpha `80`), skipped when the site has ' +
+      "no new swatch since the last run unless `force`. `bambu`: Bambu Studio's colour codes as Bambu Lab's colours, " +
+      'exact RGBA (`80` for a translucent one). A colour is added, or updated by its maker, name and material; a row ' +
+      'a person made or edited, or another source wrote, is left as it is (`kept`), and nothing is deleted. Answers the run: `state` `done`, ' +
+      '`unchanged` or `failed` (`error` says why, e.g. the site did not answer; what it wrote stays) with its counts. ' +
+      'A filamentcolors run reads about 23 pages: an answer with `status: running` is still running; follow it with ' +
+      'get_operation, or read its progress with filament_colour_sync_status. 409 while a run of that source runs. ' +
+      'Only when the user asks. Reads the source only and writes ScadBuddy only.',
+    input: z.object({
+      source: z.enum(['filamentcolors', 'bambu']).describe('Which source to read'),
+      force: z.boolean().default(false).describe('filamentcolors only: read every page even when the site has no new swatch'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/colour-syncs'],
+    keyed: true,
+    summarize: ({ source }) => `Fill the colour catalog from ${source === 'bambu' ? "Bambu's colour codes" : 'filamentcolors.xyz'}`,
+    handler: async ({ source, force }, ctx) =>
+      json(
+        await command(ctx, `sync the colour catalog from ${source}`, (headers) =>
+          ctx.backend.POST('/api/v1/filament/colour-syncs', { body: { source, force }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_colour_sync_status',
+    label: "Read the colour catalog's syncs",
+    description:
+      'The newest run of each colour sync (filament_colour_sync): `state` `running` (with `pages_read` of `pages_total` ' +
+      'and the counts so far), `done`, `unchanged` or `failed` with `error`. A source never run is absent.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/colour-syncs'],
+    handler: async (_, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/colour-syncs'), "read the colour catalog's syncs")),
   }),
 
   defineTool({
@@ -1177,6 +1230,32 @@ export const filamentTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_sync_passes',
+    label: 'Read the Bambuddy sync history',
+    description:
+      "The ScadBuddy-to-Bambuddy filament sync's passes, newest first, failed ones too (filament_sync_status " +
+      'holds only the last). Each has its `id`, the Bambuddy `instance`, its `trigger` (`timer`, `change`: a ' +
+      'write\'s nudge, `full`: a full pass asked for such as Sync now, `more`: the pass before it left writes; ' +
+      'null when unknown), `started_at`, `ended_at`, the counts `written`, `failed`, `deferred`, `conflicts` and ' +
+      '`unmapped_k`, `skipped` (`no_bambuddy` or `nothing_pushes`), `instance_changed` and `error` (a label, null ' +
+      "when it worked; `crud_unavailable:<failure>` or `crud_refused:<status>` when ScadBuddy's own API failed " +
+      'during the pass, `internal` for any other failure outside Bambuddy). A page holds up to `limit` passes (at most 200); when `next_cursor` is set, pass it back ' +
+      'as `cursor` for the next page. Passes older than the setting `filament_sync_pass_ttl_days` (30 by default) ' +
+      'are gone. Reads ScadBuddy only.',
+    input: z.object({
+      cursor: z.string().optional(),
+      limit: z.number().int().min(1).max(200).default(20),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/sync/passes'],
+    handler: async (query, { backend }) =>
+      json(
+        await ok(backend.GET('/api/v1/filament/sync/passes', { params: { query } }), 'read the Bambuddy sync history'),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_sync_run',
     label: 'Sync with Bambuddy now',
     description:
@@ -1207,7 +1286,10 @@ export const filamentTools: Tool[] = [
       "`expect_kept: true`: it reads the configured Bambuddy's spools, and when that Bambuddy holds every linked " +
       'spool as ScadBuddy last saw it (the same Bambuddy at a new address), nothing is deleted: every link now ' +
       'belongs to it, and the answer has `kept: true` and zero counts. When it cannot prove that (Bambuddy could ' +
-      'not be read, or it is another Bambuddy), it answers 409 `proof_changed` and deletes nothing. Only then, ' +
+      'not be read, or it is another Bambuddy, or every linked spool ScadBuddy could compare (a time on both sides) was edited in Bambuddy since the last pull so ' +
+      'none matches what ScadBuddy saw and the proof has nothing to stand on), it answers 409 `proof_changed` and ' +
+      'deletes nothing; tell the user which case it is if you know (the dry run `GET /filament/sync/reset-links` ' +
+      'has `changed_since_pull`). Only then, ' +
       'and only after the user agreed to the delete below, call it again with `expect_kept: false` (the default), ' +
       'which reads no Bambuddy and deletes, in one transaction, every spool link, the ' +
       'supplier, location, insert type and spool type links (their Bambuddy ids, hashes and seen copies), the open ' +
@@ -1705,3 +1787,23 @@ export const filamentTools: Tool[] = [
       ),
   }),
 ]
+
+const catalogRow = (args: Record<string, unknown>): LinkKind => `catalog:${String(args.kind)}`
+
+/** #6869: each answer's entities carry their `ui_path` (`filamentLinks.ts`); these tools answer one kind of entity, or a list of it. */
+export const filamentTools: Tool[] = linkingTools(tools, {
+  filament_catalog_list: catalogRow,
+  filament_catalog_upsert: catalogRow,
+  filament_catalog_resolve: catalogRow,
+  filament_catalog_set_aliases: catalogRow,
+  filament_type_list: 'type',
+  filament_type_get: 'type',
+  filament_type_upsert: 'type',
+  filament_spool_list: 'spool',
+  filament_spool_get: 'spool',
+  filament_spool_upsert: 'spool',
+  filament_spool_archive: 'spool',
+  filament_spool_move: 'spool',
+  filament_location_list: 'location',
+  filament_location_upsert: 'location',
+})

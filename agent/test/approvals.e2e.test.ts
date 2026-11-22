@@ -4,7 +4,7 @@ import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { SETTING_APPROVAL_EXPIRY_SECONDS } from '../src/approvals/service.js'
-import { connectDatabase, type Database } from '../src/db.js'
+import { connectDatabase, type Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
@@ -92,7 +92,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`approvals aga
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       tierOf: (name) => tiers[name],
       mcpServers: () => ({ stub: stubServer() }),
-      approvalHashKey: HASH_KEY,
+      approvalHashKey: () => HASH_KEY,
       ...extra,
     })
   }
@@ -216,14 +216,14 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`approvals aga
     // canUseTool as soon as Claude Code does. Hold the turn's append of the call
     // until the entry exists, or 3 s have passed if it never will before the call.
     const append = m.events.append.bind(m.events)
-    m.events.append = async (sessionId, events, tx) => {
-      if (tx === undefined && events.some((e) => e.type === 'tool.call')) {
+    m.events.append = async (sessionId, events) => {
+      if (events.some((e) => e.type === 'tool.call')) {
         const deadline = performance.now() + 3000
         while (performance.now() < deadline && (await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${sessionId}`).length === 0) {
           await new Promise((r) => setTimeout(r, 50))
         }
       }
-      return append(sessionId, events, tx)
+      return append(sessionId, events)
     }
     const { session, turn, requestId } = await parked(m)
     expect(await respond(m, browser, requestId, { kind: 'approval', decision: 'approve' })).toMatchObject({ outcome: 'approved' })
@@ -345,9 +345,14 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`approvals aga
 
   it('expires a parked approval at its time, and the model is told', async () => {
     script = printing(() => 'box.3mf')
-    const m = await replica()
-    // The shortest window Settings takes, read by the gate when the call parks.
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SETTING_APPROVAL_EXPIRY_SECONDS}, ${db.sql.json(10)})`
+    // The shortest window Settings takes, read by the gate when the call parks (from the API's
+    // settings area, which this manager's settings stand in for).
+    const m = await replica({
+      settings: {
+        get: <T>(key: string) =>
+          Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_APPROVAL_EXPIRY_SECONDS ? 10 : undefined) as T),
+      },
+    })
     const { session, turn, requestId } = await parked(m)
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(printed).toEqual([])

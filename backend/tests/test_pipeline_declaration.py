@@ -25,6 +25,7 @@ from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.models import LoadRequest
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
+from scadbuddy.workflows.verify_pipeline import declared_inputs_failures
 from tests.support.media import MemoryMediaStore
 
 PIPELINE = "INPUTS_VERSION = 3\n\nasync def run(ctx, inputs):\n    return None\n"
@@ -89,6 +90,45 @@ def test_a_malformed_pipeline_costs_only_the_pipeline() -> None:
     assert "pipeline_error" not in dumped and "pipeline_raw" not in dumped
     assert dumped["pipeline"] is None  # the API never shows a malformed declaration
     assert meta.pipeline_raw == {"module": "../x.py", "api": 1}
+
+
+def test_a_pipeline_declares_its_inputs_and_the_params_it_sets() -> None:
+    """#5701 (spec 2026-11-17 §4.1, §6.1)."""
+    declared = {
+        "module": "pipeline/pipeline.py",
+        "api": 1,
+        "inputs": "pipeline/inputs.json",
+        "sets_params": ["piece", "width_units"],
+    }
+    meta = ModelMeta.model_validate({"name": "Demo", "pipeline": declared})
+    assert meta.pipeline is not None and meta.pipeline_error is None
+    assert meta.pipeline.inputs == "pipeline/inputs.json"
+    assert meta.pipeline.sets_params == ["piece", "width_units"]
+    assert meta.model_dump()["pipeline"] == declared
+
+
+def test_an_old_pipeline_declaration_still_loads() -> None:
+    old = {"module": "pipeline/pipeline.py", "api": 1}
+    meta = ModelMeta.model_validate({"name": "Demo", "pipeline": old})
+    assert meta.pipeline is not None and meta.pipeline_error is None
+    assert meta.pipeline.inputs is None and meta.pipeline.sets_params == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"inputs": "../inputs.json"},
+        {"inputs": "pipeline/sub/inputs.json"},
+        {"inputs": "pipeline/inputs.py"},
+        {"sets_params": ["not a name"]},
+        {"sets_params": ["x"] * 201},
+    ],
+)
+def test_a_bad_inputs_or_sets_params_costs_only_the_pipeline(bad: dict[str, object]) -> None:
+    declared = {"module": "pipeline/pipeline.py", "api": 1, **bad}
+    meta = ModelMeta.model_validate({"name": "Demo", "pipeline": declared})
+    assert meta.pipeline is None
+    assert meta.pipeline_error is not None and next(iter(bad)) in meta.pipeline_error
 
 
 def test_writing_model_json_keeps_a_malformed_pipeline(tmp_path: Path) -> None:
@@ -252,3 +292,71 @@ async def test_a_template_without_model_json_loads_the_default(tmp_path: Path) -
         _acts(paths).load_pipeline, LoadRequest(slug="demo", revision=None)
     )
     assert loaded.version == "default"
+
+
+SMALL_SCHEMA = {
+    "type": "object",
+    "properties": {"n": {"type": "integer", "minimum": 1, "maximum": 3}},
+    "required": ["n"],
+    "additionalProperties": False,
+}
+
+
+def _declaring(tmp_path: Path, schema: object) -> Path:
+    template = tmp_path / "declared"
+    (template / "pipeline").mkdir(parents=True)
+    pipeline = {"module": "pipeline/pipeline.py", "api": 1, "inputs": "pipeline/inputs.json"}
+    (template / "model.json").write_text(json.dumps({"name": "Demo", "pipeline": pipeline}))
+    (template / "pipeline" / "inputs.json").write_text(json.dumps(schema))
+    return template
+
+
+def test_verify_holds_every_case_to_the_declared_inputs(tmp_path: Path) -> None:
+    """#5701 (spec 2026-11-17 §10.2): `verify.sh` checks each case, less `params` and `v`,
+    against the schema `pipeline.inputs` names."""
+    template = _declaring(tmp_path, SMALL_SCHEMA)
+    good = {"params": {"width": 3}, "v": 1, "n": 2}
+    assert declared_inputs_failures(template, [good]) == []
+    failures = declared_inputs_failures(template, [good, {"params": {}, "n": 9}, {"x": 1}])
+    assert [line.split(":")[0] for line in failures] == ["case 2", "case 3", "case 3"]
+    assert "maximum" in failures[0]
+
+
+def test_verify_refuses_a_declared_schema_outside_the_subset(tmp_path: Path) -> None:
+    template = _declaring(tmp_path, {**SMALL_SCHEMA, "properties": {"v": {"type": "integer"}}})
+    failures = declared_inputs_failures(template, [{"v": 1}])
+    assert failures and all(line.startswith("pipeline/inputs.json: ") for line in failures)
+
+
+def test_verify_without_declared_inputs_checks_nothing_more(tmp_path: Path) -> None:
+    template = tmp_path / "plain"
+    template.mkdir()
+    (template / "model.json").write_text(json.dumps({"name": "Demo", **DECLARED}))
+    assert declared_inputs_failures(template, [{"anything": 1}]) == []
+
+
+def test_verify_refuses_a_declaration_the_catalogue_refuses(tmp_path: Path) -> None:
+    """#6913 review: `verify.sh` reads `pipeline` as the catalogue does, so a path the
+    catalogue refuses (it makes the pipeline unreadable) fails here too."""
+    template = tmp_path / "escaping"
+    template.mkdir()
+    (template / "inputs.json").write_text(json.dumps(SMALL_SCHEMA))
+    pipeline = {"module": "pipeline/pipeline.py", "api": 1, "inputs": "../escaping/inputs.json"}
+    (template / "model.json").write_text(json.dumps({"name": "Demo", "pipeline": pipeline}))
+    failures = declared_inputs_failures(template, [{"n": 2}])
+    assert failures and all(line.startswith("model.json pipeline: ") for line in failures)
+
+
+@pytest.mark.parametrize("content", [None, "{not json"])
+def test_verify_reports_an_unreadable_inputs_file(tmp_path: Path, content: str | None) -> None:
+    """#6913 review: a missing or broken `pipeline.inputs` file is a failure line, not a
+    traceback."""
+    template = _declaring(tmp_path, SMALL_SCHEMA)
+    target = template / "pipeline" / "inputs.json"
+    if content is None:
+        target.unlink()
+    else:
+        target.write_text(content)
+    failures = declared_inputs_failures(template, [{"n": 2}])
+    assert len(failures) == 1
+    assert failures[0].startswith("pipeline/inputs.json: cannot be read: ")

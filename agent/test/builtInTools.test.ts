@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { ApplicationFailure } from '@temporalio/common'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -16,7 +15,6 @@ import { BuiltInTools, builtInToolSets, type BuiltInToolSet } from '../src/plugi
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import type { PluginRepo } from '../src/plugins/registry.js'
 import type { SettingsRepo } from '../src/credentials.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -112,7 +110,6 @@ describe('the built-in tool sets', () => {
 
 // ---------------------------------------------------------------- the routes
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const UI = {
   host: 'scadbuddy.example',
   origin: 'https://scadbuddy.example',
@@ -137,7 +134,7 @@ function remoteRepo(): PluginRepo {
           disabled_tools: [],
           created_at: '2026-10-10T00:00:00.000Z',
           updated_at: '2026-10-10T00:00:00.000Z',
-          kekId: null,
+          opens: true,
           oauth: null,
         },
       ]),
@@ -155,7 +152,6 @@ function app(settings: SettingsRepo, plugins: PluginRepo = remoteRepo(), access 
     access: access as never,
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     plugins,
     settings,

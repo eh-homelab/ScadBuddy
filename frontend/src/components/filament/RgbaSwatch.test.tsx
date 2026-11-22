@@ -11,7 +11,8 @@ describe('RgbaSwatch', () => {
     const colour = chip.querySelector<HTMLElement>('[data-layer="colour"]')
     expect(checker).not.toBeNull()
     expect(checker?.className).toContain('conic-gradient')
-    expect(colour?.style.backgroundColor).toBe('rgba(255, 255, 255, 0.502)')
+    // The chip writes alpha 0.502 (0x80 / 255); jsdom 31 serializes it back as 0.5.
+    expect(colour?.style.backgroundColor).toBe('rgba(255, 255, 255, 0.5)')
     // The checker is under the colour.
     expect(checker!.compareDocumentPosition(colour!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })

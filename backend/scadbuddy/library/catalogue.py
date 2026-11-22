@@ -280,6 +280,10 @@ class UiDeclaration(BaseModel):
 
 #: `pipeline/` plus a Python module name: no `..`, no subdirectory, nothing outside it.
 PIPELINE_MODULE_PATTERN = r"^pipeline/[A-Za-z0-9_]+\.py$"
+#: The same rule for the inputs schema (#5701): a JSON file directly under `pipeline/`.
+PIPELINE_INPUTS_PATTERN = r"^pipeline/[A-Za-z0-9_]+\.json$"
+#: A customizer parameter's name: an OpenSCAD identifier.
+PARAM_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 
 
 class PipelineDeclaration(BaseModel):
@@ -288,6 +292,15 @@ class PipelineDeclaration(BaseModel):
     module: str = Field(pattern=PIPELINE_MODULE_PATTERN, max_length=200)
     #: The pipeline-API major (§8.1). The worker decides whether it can run it.
     api: int = Field(ge=1)
+    #: The JSON Schema of the pipeline's own inputs, every key but ``params`` and ``v``
+    #: (spec 2026-11-17 §4.1), in `core.input_schema`'s subset with one level of objects.
+    #: None: undeclared, as every template before #5701; such a template cannot be listed.
+    inputs: str | None = Field(default=None, pattern=PIPELINE_INPUTS_PATTERN, max_length=200)
+    #: The ``model.scad`` parameters the pipeline sets itself (spec 2026-11-17 §6.1): the
+    #: listing editor hides them, and publish refuses a bound on one.
+    sets_params: list[
+        Annotated[str, StringConstraints(pattern=PARAM_NAME_PATTERN, max_length=128)]
+    ] = Field(default_factory=list, max_length=200)
 
 
 #: Bambu's ``print_sequence`` (#907): the values the print's own ``print_sequence`` takes.

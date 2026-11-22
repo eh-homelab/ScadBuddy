@@ -23,9 +23,10 @@ module is a port of that runner, so a database it migrated reads the same to bot
 RULES FOR ADDING ONE (#491):
 
 - Add a NEW file to ``migrations_agent/``, named ``<UTC timestamp>_<slug>.sql``
-  (``date -u +%Y%m%dT%H%MZ``), and its id and SHA-256 to the agent's
-  ``agent/src/db/expected-migrations.json`` (``UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec
-  vitest run test/schema.test.ts`` writes it), so the agent waits for it.
+  (``date -u +%Y%m%dT%H%MZ``), and its id and SHA-256 to the agent tests' list
+  ``agent/test/support/expected-migrations.json`` (``UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec
+  vitest run test/schema.test.ts`` writes it), which `schema.test.ts` checks against this
+  runner; the agent itself waits for no ledger (#5299 step 12).
 - Never edit, rename or remove a merged file (even whitespace counts; ``.editorconfig``
   leaves this directory's whitespace alone).
 - One story per file, named in a leading comment. Prefix every table ``ai_``.

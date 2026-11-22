@@ -117,6 +117,33 @@ async def test_another_target_uploads_another_copy(
     assert {f.id for f in await native.library_listing(folder_id=None)} == {h2d, x1c}
 
 
+async def test_a_held_copys_native_copy_names_its_version(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches
+) -> None:
+    """#6710 §7.3.1: a held copy and the live file are recorded under one key, so a held
+    copy's native copy carries its version in its target key, and neither is reused for
+    the other."""
+    live = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=H2D, folder_id=None
+    )
+    held = Printable(
+        key=KEY,
+        colours=("#FF6AC1", "#1F6FEB"),
+        inbox_name="bracket.3mf",
+        fetch=fetches.printable().fetch,
+        version="a" * 64,
+    )
+    first = await ensure_native_copy(native, uploads, held, target=H2D, folder_id=None)
+    again = await ensure_native_copy(native, uploads, held, target=H2D, folder_id=None)
+    live_again = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=H2D, folder_id=None
+    )
+
+    assert first == again != live == live_again
+    keys = {c.id: c.target_key for c in await uploads.for_output(KEY, native=True)}
+    assert keys[first] == f"v={'a' * 64}|{keys[live]}"
+
+
 async def test_a_trashed_native_copy_is_uploaded_again(
     native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches
 ) -> None:

@@ -4,7 +4,7 @@ import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
-import { INVOICE } from '../../mocks/features/filamentPurchasingSeed'
+import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
@@ -37,10 +37,10 @@ function recorded(method: string, match: RegExp) {
 }
 
 describe('the spool page', () => {
-  it('has the six sections, each a landmark with a heading, and an index', async () => {
+  it('has the seven sections, each a landmark with a heading, and an index', async () => {
     open(1)
     await heading(1)
-    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'History']) {
+    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'Files and links', 'History']) {
       expect(screen.getByRole('region', { name })).toBeInTheDocument()
       expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
       expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${name.toLowerCase().replace(/ /g, '-')}`)
@@ -229,6 +229,19 @@ describe('the spool page', () => {
     open(1)
     await heading(1)
     expect(screen.getByRole('group', { name: 'Colour' })).toContainElement(screen.getByLabelText('Colour (hex)'))
+  })
+
+  it('overrides the colour and the extra colours with a catalog colour (#6912)', async () => {
+    const patches = recorded('PATCH', /\/spools\//)
+    const { user } = open(1)
+    await heading(1)
+    await user.click(screen.getByRole('button', { name: 'From the catalog' }))
+    await user.type(screen.getByRole('combobox', { name: 'Search the colour catalog' }), 'galaxy')
+    await user.click(await screen.findByRole('option', { name: /Galaxy Duo/ }))
+    expect(screen.getByLabelText('Extra colours')).toHaveValue('#2E8B57FF')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(patches).toEqual([{ rgba: '#1B3A8CFF', extra_colours: ['#2E8B57FF'] }])
   })
 
   it('jumps to the same section twice from the select', async () => {
@@ -427,12 +440,13 @@ describe('the spool page', () => {
     expect(temp).toHaveValue('300')
   })
 
-  it("links the invoice the spool was bought on, and lists the type's suppliers", async () => {
+  it("links the invoice line the spool was bought on and its supplier, and lists the type's suppliers (#6869)", async () => {
     open(1)
     await heading(1)
-    const link = await screen.findByRole('link', { name: /Invoice US-441907 · Bambu Lab/ })
-    expect(link).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_A}`)
-    expect(link.parentElement).toHaveTextContent(/line 1/)
+    const link = await screen.findByRole('link', { name: 'Invoice US-441907' })
+    expect(link).toHaveAttribute('href', `/filament/invoices/${INVOICE.CONFIRMED_A}#line-${LINE.CONFIRMED_A1}`)
+    expect(link.parentElement).toHaveTextContent(/from Bambu Lab \(line 1/)
+    expect(within(link.parentElement!).getByRole('link', { name: 'Bambu Lab' })).toHaveAttribute('href', `/filament/suppliers/${SUPPLIER.BAMBU}`)
     const purchasing = screen.getByText('Purchasing').parentElement!
     expect(purchasing).toHaveTextContent('Bambu Lab')
     expect(purchasing).toHaveTextContent('A00-W1')

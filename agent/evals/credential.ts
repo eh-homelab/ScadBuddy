@@ -1,16 +1,19 @@
 import postgres from 'postgres'
-import { type Credential, CredentialStore, SettingsStore } from '../src/credentials.js'
-import { loadKek } from '../src/secrets.js'
+import type { Credential } from '../src/credentials.js'
+import { SqlCredentials } from '../test/support/sql/credentials.js'
+import { sqlSettings } from '../test/support/sql/settings.js'
+import { readFile } from 'node:fs/promises'
+import { type Kek, kekFromBase64 } from '../src/secrets.js'
 import { SETTING_MODEL } from '../src/sessions/manager.js'
 
 // Where a live eval run gets its Claude credential (issue #259: "with a
 // credential supplied to that job only"). In order:
 //
-//   1. The credential configured in Settings, read from the agent's own
-//      database exactly as the service reads it (src/main.ts: CredentialStore
-//      `reveal` under the KEK in SCADBUDDY_SECRET_KEY_FILE). This is the local
-//      path: point SCADBUDDY_DATABASE_URL and SCADBUDDY_SECRET_KEY_FILE at a
-//      running deployment's database and key. The model chosen in Settings
+//   1. The credential configured in Settings, read from the agents' tables and
+//      opened under the KEK in SCADBUDDY_SECRET_KEY_FILE, as the API opens it
+//      (test/support/sql/credentials.ts). This is the local path: point
+//      SCADBUDDY_DATABASE_URL and SCADBUDDY_SECRET_KEY_FILE at a running
+//      deployment's database and key. The model chosen in Settings
 //      (ai_settings `model`) is used too, unless SCADBUDDY_EVAL_MODEL is set.
 //   2. SCADBUDDY_EVAL_ANTHROPIC_API_KEY, for the opt-in CI job only
 //      (.github/workflows/ai-evals.yml passes it from a repository secret). A
@@ -33,8 +36,24 @@ const present = (v: string | undefined) => (v?.trim() ? v.trim() : undefined)
 /** `searchPath` is for tests, which use a throwaway schema (test/support/postgres.ts). */
 export type ResolveOptions = { searchPath?: string }
 
+/** The key file, as the API reads it: 32 random bytes, base64. Never throws. */
+async function readKek(file: string | undefined): Promise<{ ok: true; kek: Kek } | { ok: false; reason: string }> {
+  if (file === undefined) return { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' }
+  let text: string
+  try {
+    text = await readFile(file, 'utf8')
+  } catch {
+    return { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE cannot be read' }
+  }
+  try {
+    return { ok: true, kek: kekFromBase64(text) }
+  } catch {
+    return { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE does not hold a valid key (32 random bytes, base64)' }
+  }
+}
+
 async function fromDatabase(url: string, keyFile: string | undefined, options: ResolveOptions): Promise<EvalCredential> {
-  const kek = await loadKek(keyFile)
+  const kek = await readKek(keyFile)
   if (!kek.ok) return { ok: false, reason: `SCADBUDDY_DATABASE_URL is set but ${kek.reason}` }
   const sql = postgres(url, {
     max: 1,
@@ -43,9 +62,9 @@ async function fromDatabase(url: string, keyFile: string | undefined, options: R
     ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
   })
   try {
-    const credential = await new CredentialStore(sql).reveal(kek.kek)
+    const credential = await new SqlCredentials(sql, kek.kek).reveal()
     if (!credential) return { ok: false, reason: 'no Claude credential is saved in Settings (ai_credentials is empty)' }
-    const model = await new SettingsStore(sql).get<string>(SETTING_MODEL).catch(() => undefined)
+    const model = await sqlSettings(sql).get<string>(SETTING_MODEL).catch(() => undefined)
     return {
       ok: true,
       credential,

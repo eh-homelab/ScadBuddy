@@ -633,7 +633,11 @@ if out is not None and out.endswith(".3mf"):
             if pathlib.Path(hold["release"]).exists():
                 break
             time.sleep(0.05)
-    if "FAKE_3MF" in settings:
+    picked = settings.get("FAKE_3MF_IF")
+    if picked and any(picked["arg"] in arg for arg in args):
+        # Another 3MF for a render of that arg (#6922).
+        shutil.copyfile(picked["file"], out)
+    elif "FAKE_3MF" in settings:
         shutil.copyfile(settings["FAKE_3MF"], out)
     raise SystemExit(0)
 
@@ -689,6 +693,9 @@ def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: st
         # Off, so no test's flow list holds a flow it did not register;
         # `tests/flows/test_order_fulfilment_flow.py` registers it itself.
         orders_builtin_flow=False,
+        # Off, so no publish renders and slices behind a test's back;
+        # `tests/api/test_storefront_warm_prices.py` turns it on (#6922).
+        storefront_warm_prices=False,
     )
 
 

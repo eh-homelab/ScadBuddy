@@ -10,9 +10,11 @@ from pydantic import ValidationError
 
 from scadbuddy.api.storefront_slice import profile_errors
 from scadbuddy.bambuddy.models import NozzleChoice
+from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import EffectivePreset
+from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.orders.storefront.listings import check_sliceable
 from scadbuddy.orders.storefront.slice_profile import (
     ProfileMissingMaterialError,
@@ -52,7 +54,7 @@ def test_each_slot_gets_its_materials_type_and_no_spool() -> None:
     assert slot_presets(types, rows) == {1: rows[PLA], 2: rows[PETG], 3: rows[PLA]}
     # A type with no presets gives none, which the resolver refuses.
     assert slot_presets([PETG], {}) == {1: []}
-    request = slice_request(PROFILE, CHOICES)
+    request = slice_request(PROFILE, CHOICES, None)
     assert request.filament_plan.slots == []
     # The dialog's choices are kept as they are.
     assert request.choices == CHOICES
@@ -63,6 +65,28 @@ def test_each_slot_gets_its_materials_type_and_no_spool() -> None:
     assert request.prime_tower is None
     assert request.print_sequence is None
     assert request.part_settings is None
+    assert request.process_overrides is None
+
+
+def test_the_request_takes_the_setup_the_dialog_seeds_from_the_remembered_choices() -> None:
+    """#6710 §7.2: the print sequence, the process overrides and the settings per part the
+    dialog seeds from the remembered entry (`usePrintChoices.ts` `seedDialog`), as any
+    Bambu Studio key through the one `process_overrides` (#2998)."""
+    remembered = ModelPrintChoices(
+        print_sequence="by object",
+        process_overrides={"enable_support": "1", "brim_width": "4"},
+        part_settings={1: PartSettings(wall_loops=4)},
+        tier="fine",
+    )
+    request = slice_request(PROFILE, CHOICES, remembered)
+    assert request.print_sequence == "by object"
+    assert request.process_overrides == {"enable_support": "1", "brim_width": "4"}
+    assert request.part_settings == {1: PartSettings(wall_loops=4)}
+    # The opening choices are the caller's: the request keeps them as they are.
+    assert request.choices == CHOICES
+    # A remembered entry that names none of the three sets none.
+    bare = slice_request(PROFILE, CHOICES, ModelPrintChoices(tier="fine"))
+    assert (bare.print_sequence, bare.process_overrides, bare.part_settings) == (None, None, None)
 
 
 def test_material_is_casefolded() -> None:

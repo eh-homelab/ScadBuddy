@@ -5,13 +5,15 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
 import { AgentCommands } from '../src/operations/run.js'
 import { OperationStore } from '../src/operations/store.js'
+import { SqlOperations } from './support/sql/operations.js'
 import { PackageInstaller } from '../src/plugins/packages/install.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
-import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
+import type { PackageView } from '../src/plugins/packages/store.js'
+import { PackageStore } from './support/sql/packages.js'
 import { operationActivities } from '../src/temporal/operationActivities.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
@@ -63,7 +65,7 @@ describe.skipIf(skip)(`plugin package install on Temporal${TEMPORAL_SKIP}`, () =
     const packages = new PackageStore(db.sql)
     const installer = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver() })
     const kinds = packageKinds({ packages, installer })
-    const store = new OperationStore(db.sql)
+    const store = new OperationStore(new SqlOperations(db.sql))
     agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -74,7 +76,6 @@ describe.skipIf(skip)(`plugin package install on Temporal${TEMPORAL_SKIP}`, () =
     app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'not configured' },
       credentials: new MemoryCredentials(),
       pluginPackages: packages,
       packageInstaller: installer,

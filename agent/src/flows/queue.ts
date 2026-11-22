@@ -1,6 +1,5 @@
-import type { Sql } from 'postgres'
 import { flowRequestId, parseRequestId } from '../gate/ids.js'
-import { PgSessionReads, type SessionReads } from '../sessions/sessionReads.js'
+import type { SessionReads } from '../sessions/sessionReads.js'
 import type { FlowRunReads, QueueHop, StepRow, WaitingOn } from './backendReads.js'
 import type { EscalationRoutes } from './crudEscalations.js'
 
@@ -13,7 +12,8 @@ import type { EscalationRoutes } from './crudEscalations.js'
 //     the run's `flow_run_id`;
 //   - its grant while it is requested: `flow_grants`.
 //
-// The backend's tables are read through its CRUD routes (backendReads.ts, #5299 D7).
+// The backend's tables are read through its CRUD routes (backendReads.ts, #5299 D7), and the
+// child entries through the agent's (crudEscalations.ts, area `escalations`).
 //
 // Each entry keeps its own id and is answered where it is today: a `flow:` entry by the
 // backend's `POST /workflow-runs/{id}/decide`, a `durable:` one by
@@ -70,7 +70,7 @@ export type QueueEntry =
       input_hash: string | null
       created_at: string
       expires_at: string
-      /** Past its timer, its worker not yet resolved it: no one can decide it now (as `PendingProjection`'s). */
+      /** Past its timer, its worker not yet resolved it: no one can decide it now (as the projection's `expiring`). */
       expiring: boolean
       /** The child's text before the call, untrusted; empty when none was written. */
       reasoning: string
@@ -162,48 +162,32 @@ function ownEntry(run: { id: string; workflow_run_id: string }, steps: readonly 
 }
 
 /**
- * A hop's deadline for the queue. A deny's claim holds it at `infinity` (an Invalid Date from the
- * SQL), which is no time to show: the entry is read with none. The panel then says "with this
+ * A hop's deadline for the queue. A deny's claim holds it at `infinity`, which is no time to show: the entry is read with none. The panel then says "with this
  * session" and the run page's card "With the session that started the run", each with no time.
  */
 const iso = (d: Date | string | null): string | null =>
   d === null ? null : typeof d === 'string' ? d : Number.isNaN(d.getTime()) ? null : d.toISOString()
 
 export class FlowQueue {
-  readonly #sql: Sql
   readonly #reads: FlowRunReads
-
-  readonly #routes: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean } | undefined
+  readonly #routes: Pick<EscalationRoutes, 'runEntries'>
   readonly #sessionReads: Pick<SessionReads, 'reasoningDeltas'>
 
   /**
    * `reads`: the backend's flow tables, through its CRUD routes (backendReads.ts). `routes`: a
-   * run's child entries through the API once it lists area `escalations` (#5299 step 10).
-   * `sessionReads`: a child's reasoning (`gated` in main.ts; SQL on `sql` when omitted).
+   * run's child entries through the API (area `escalations`). `sessionReads`: a child's reasoning.
    */
-  constructor(
-    sql: Sql,
-    reads: FlowRunReads,
-    routes?: { crud: Pick<EscalationRoutes, 'runEntries'>; use: () => boolean },
-    sessionReads: Pick<SessionReads, 'reasoningDeltas'> = new PgSessionReads(sql),
-  ) {
-    this.#sql = sql
+  constructor(reads: FlowRunReads, routes: Pick<EscalationRoutes, 'runEntries'>, sessionReads: Pick<SessionReads, 'reasoningDeltas'>) {
     this.#reads = reads
     this.#routes = routes
     this.#sessionReads = sessionReads
   }
 
   async #children(runId: string): Promise<ChildRow[]> {
-    if (this.#routes?.use()) {
-      const rows = await this.#routes.crud.runEntries(runId)
-      // An ISO time as the SQL's Date gave it; `infinity` (a deny's claim) is no time: `iso` shows none.
-      const at = (s: string | null) => (s === null || Number.isNaN(Date.parse(s)) ? null : new Date(s).toISOString())
-      return rows.map((r) => ({ ...r, hop_until: at(r.hop_until), hops: (r.hops as QueueHop[] | null) ?? null }))
-    }
-    return await this.#sql<ChildRow[]>`
-      SELECT request_id, kind, session_id::text, tool, summary, input_hash, hop, hop_until, outside_reason, hops,
-             created_at, expires_at, (expires_at <= now()) AS expiring
-        FROM ai_pending_input WHERE flow_run_id = ${runId} ORDER BY created_at, request_id`
+    const rows = await this.#routes.runEntries(runId)
+    // `infinity` (a deny's claim) is no time: `iso` shows none.
+    const at = (s: string | null) => (s === null || Number.isNaN(Date.parse(s)) ? null : new Date(s).toISOString())
+    return rows.map((r) => ({ ...r, hop_until: at(r.hop_until), hops: (r.hops as QueueHop[] | null) ?? null }))
   }
 
   /** The run's one queue, or undefined when there is no such run (or no flows on this deployment). */

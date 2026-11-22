@@ -2,9 +2,10 @@ import { randomBytes } from 'node:crypto'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
-import { loadEnabledPlugins, PluginStore } from '../src/plugins/registry.js'
+import { loadEnabledPlugins } from '../src/plugins/registry.js'
+import { PostgresPluginStore } from './support/sql/plugins.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -13,6 +14,7 @@ import { liveAccess } from '../src/access/live.js'
 import { packageServerSource } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { AccessStore } from '../src/access/store.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import { forwardPackageServers } from '../src/plugins/packages/mcp.js'
 import { turnServers } from '../src/temporal/turnServers.js'
@@ -29,16 +31,16 @@ const skip = TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is no
 describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
   let db: Database
   let drop: () => Promise<void>
-  let store: PluginStore
+  let store: PostgresPluginStore
   let forwarder: PluginForwarder
   let mcp: FakeMcp
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
-    store = new PluginStore(db.sql)
+    store = new PostgresPluginStore(db.sql, kek)
     forwarder = await PluginForwarder.start()
     mcp = await startFakeMcp({ extraTools: ['a', 'b'] })
-    await store.create({ name: 'mem', url: mcp.url }, kek)
+    await store.create({ name: 'mem', url: mcp.url })
   })
   afterEach(async () => {
     await mcp.close()
@@ -47,8 +49,8 @@ describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
   })
 
   it('a tool set off in ai_access is refused by the forwarder', async () => {
-    await store.update('mem', { enabled: true, disabled_tools: ['b'] }, kek)
-    const [plugin] = (await store.enabled(kek)).plugins
+    await store.update('mem', { enabled: true, disabled_tools: ['b'] })
+    const [plugin] = (await store.enabled()).plugins
     const registration = forwarder.register(plugin!, '127.0.0.1')
     const client = new Client({ name: 't', version: '0' })
     try {
@@ -66,9 +68,9 @@ describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
   })
 
   it('turn_tool_tier answers outward for an unlisted tool and the stored tier for a listed one', async () => {
-    await store.update('mem', { enabled: true, tool_tiers: { a: 'read' } }, kek)
+    await store.update('mem', { enabled: true, tool_tiers: { a: 'read' } })
     const loopback = () => Promise.resolve(['127.0.0.1'])
-    const build = turnServers({ remotePlugins: async () => forwardForRun(await loadEnabledPlugins(store, kek, loopback), forwarder) })
+    const build = turnServers({ remotePlugins: async () => forwardForRun(await loadEnabledPlugins(store, loopback), forwarder) })
     const { servers } = await build({ session: 's', owner: agentA, signal: new AbortController().signal })
     const [server] = servers
     expect(server?.name).toBe('mem')
@@ -83,7 +85,7 @@ describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
     await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
     await writeFile(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { api: { type: 'http', url: mcp.url } } }))
     const pkg = { name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
-    const access = new AccessStore(db.sql)
+    const access = new AccessStore(new SqlAccessRows(db.sql))
     const resolver = new AccessResolver(access)
     const loopback = async () => ['127.0.0.1']
     const on = await forwardPackageServers([pkg], forwarder, loopback, { access: resolver })

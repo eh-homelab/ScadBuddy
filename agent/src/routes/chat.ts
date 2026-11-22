@@ -2,6 +2,7 @@ import { context as otelContext } from '@opentelemetry/api'
 import type { Hono, MiddlewareHandler } from 'hono'
 import { WebSocket } from 'ws'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
+import { KeyNotReleasedError } from '../api/agentKeys.js'
 import { ApprovalError } from '../approvals/service.js'
 import { QuestionError } from '../gate/questions.js'
 import { contextFrom } from '../telemetry/trace.js'
@@ -165,8 +166,8 @@ export type ChatRouteDeps = {
   authMode?: AuthMode | undefined
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 /**
  * The session and question a malformed `question.answer` frame names, when it
@@ -197,6 +198,11 @@ function errorEvent(
   const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}), ...(queuedId ? { queuedId } : {}) }
   if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
+  }
+  // An answer or a decision is audited with its input's hash; a replica that has just started
+  // holds no key yet (api/agentKeys.ts). The panel may send it again.
+  if (err instanceof KeyNotReleasedError) {
+    return event({ type: 'error', ...where, code: 'unavailable', message: 'The assistant is still starting, so this was not done. Send it again.' })
   }
   // Anything else is ours, not the user's: log it, and say only that it failed.
   log(`chat: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`)
@@ -432,7 +438,7 @@ export class ChatConnection {
   /** The attachments a message names, read for this connection's principal; undefined for none. */
   private async resolveAttachments(images: AttachmentRef[] | undefined): Promise<ResolvedAttachment[] | undefined> {
     if (!images) return undefined
-    if (!this.attachments) throw new SessionError('invalid', 'image uploads need the database: SCADBUDDY_DATABASE_URL is not set')
+    if (!this.attachments) throw new SessionError('invalid', 'image uploads are not set up in this process')
     let resolved: ResolvedAttachment[]
     try {
       resolved = await this.attachments.resolve(this.principal, images)
@@ -627,7 +633,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
   const gate: MiddlewareHandler = async (c, next) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'the assistant socket')
     if (problem) return c.json({ detail: problem }, 403)
-    if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
+    if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') {
       return c.json({ detail: 'this is a WebSocket endpoint' }, 426)
@@ -657,7 +663,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
       return {
         onOpen: (_evt: Event, ws: WSContext) => {
           const sessions = deps.sessions
-          if (!sessions) return ws.close(1011, 'no database')
+          if (!sessions) return ws.close(1011, 'not set up')
           const raw = ws.raw as { bufferedAmount?: number } | undefined
           connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
             log,

@@ -35,9 +35,9 @@ export const MAX_IMAGE_LONG_EDGE = 2576
 export const IMAGE_SETTINGS_PATH = '/api/v1/ai/settings/images'
 
 export type ImageSettingsRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   settings: SettingsRepo | undefined
-  /** Applies migrations; the routes answer 503 until it resolves true. */
+  /** True once the API serves the agent's CRUD areas; the routes answer 503 until then. */
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -48,8 +48,8 @@ export type ImageSettingsView = { long_edge: number; min: number; max: number }
 const LongEdge = z.number().int().min(MIN_IMAGE_LONG_EDGE).max(MAX_IMAGE_LONG_EDGE)
 const PutBody = z.strictObject({ long_edge: LongEdge })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'assistant image settings'
 
 /** The stored long edge, or the default for anything the PUT could not have written. */
@@ -64,7 +64,7 @@ function view(longEdge: number): ImageSettingsView {
 
 export function registerImageSettingsRoutes(app: Hono, deps: ImageSettingsRouteDeps): void {
   async function repo(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
 

@@ -201,6 +201,14 @@ SCRIPTLESS_GETS = frozenset(
             "scadbuddy.api.order_attachments",
             "/orders/{order_id}/attachments/{attachment_id}/thumbnail",
         ),
+        (
+            "scadbuddy.api.entity_attachments",
+            "/entities/{ref}/attachments/{attachment_id}/content",
+        ),
+        (
+            "scadbuddy.api.entity_attachments",
+            "/entities/{ref}/attachments/{attachment_id}/thumbnail",
+        ),
         ("scadbuddy.api.flows", "/workflow-runs/{run_id}/images/{name}"),
     }
 )

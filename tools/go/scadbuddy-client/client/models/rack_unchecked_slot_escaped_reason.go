@@ -9,10 +9,11 @@ const (
 	NO_SPOOL_RACKUNCHECKEDSLOT_REASON RackUncheckedSlot_reason = iota
 	EMPTY_TRAY_RACKUNCHECKEDSLOT_REASON
 	NOT_IN_INVENTORY_RACKUNCHECKEDSLOT_REASON
+	NO_TYPE_RACKUNCHECKEDSLOT_REASON
 )
 
 func (i RackUncheckedSlot_reason) String() string {
-	return []string{"no_spool", "empty_tray", "not_in_inventory"}[i]
+	return []string{"no_spool", "empty_tray", "not_in_inventory", "no_type"}[i]
 }
 
 func ParseRackUncheckedSlot_reason(v string) (any, error) {
@@ -24,6 +25,8 @@ func ParseRackUncheckedSlot_reason(v string) (any, error) {
 		result = EMPTY_TRAY_RACKUNCHECKEDSLOT_REASON
 	case "not_in_inventory":
 		result = NOT_IN_INVENTORY_RACKUNCHECKEDSLOT_REASON
+	case "no_type":
+		result = NO_TYPE_RACKUNCHECKEDSLOT_REASON
 	default:
 		return nil, nil
 	}

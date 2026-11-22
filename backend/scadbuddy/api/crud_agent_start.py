@@ -3,10 +3,10 @@
 (`crud_router`).
 
 Area ``migrations``: ``POST …/migrations/ledger``, the rows of ``ai_migrations`` for the files
-the agent's build expects (``agent/src/db/schema.ts`` ``readLedger``): whether the ledger
-exists, whether it is keyed by file id (#491), and each expected file's checksum. The API
-applies the agent's migrations at its start (#5299 D6); the agent waits until every file it
-expects is in the ledger.
+an agent build names: whether the ledger exists, whether it is keyed by file id (#491), and
+each named file's checksum. The API applies the agent's migrations at its start (#5299 D6).
+No agent build reads it since #5299 step 12: it stays for an older agent pod during a roll,
+which waits until every file it expects is in the ledger.
 
 Area ``auth-sessions``: ``POST …/auth-sessions/lookup``, the live signed-in session whose
 cookie hashes to ``id_hash`` (``agent/src/auth/browserSession.ts``), as the view

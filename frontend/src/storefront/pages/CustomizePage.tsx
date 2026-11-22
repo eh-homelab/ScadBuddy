@@ -10,6 +10,8 @@ import {
   type RenderInput,
   type StoreEstimate,
   type StoreRender,
+  type StoreVariant,
+  type VariantPreview,
 } from '../api/client'
 import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
@@ -84,6 +86,28 @@ function changedListing(error: unknown): boolean {
   return error instanceof StoreError && error.slug === 'listing_changed'
 }
 
+/**
+ * #6921: a cached variant's preview as the viewer reads a done render. It has no plates to
+ * pick: the preview route serves the whole mesh only.
+ */
+function previewJob(preview: VariantPreview): StoreRender {
+  return {
+    id: preview.url,
+    status: 'done',
+    stage: null,
+    plates: [],
+    bbox_mm: preview.bbox_mm,
+    colors: preview.colors,
+    preview_url: preview.url,
+    error: null,
+  }
+}
+
+/** Whether a price has a number to show: a firm one, or the last one (#6921). */
+function hasNumber(estimate: StoreEstimate): boolean {
+  return (estimate.source === 'slice' || estimate.source === 'last') && estimate.price_minor != null
+}
+
 /** A done render and the choices it was made of (`choicesKey`). */
 interface Shown {
   job: StoreRender
@@ -152,11 +176,14 @@ export function CustomizePage({
   const [settled, setSettled] = useState<{ key: string; values: Record<string, ParamValue> }>()
   const [renderError, setRenderError] = useState<string | null>(null)
   /**
-   * The price of the render `job` names (a slice's, pending, or none: #6153), for the
-   * choices `key` (`choicesKey`): two listings of one design can share a render, so the
-   * job alone does not tell the price.
+   * The price on screen and the choices `key` (`choicesKey`) it is the price of: a slice's
+   * or none from the estimate of the render on screen (#6153), or the instant read's
+   * `slice` or `last` (#6921). The owner's rule is "always show a price": after a change, the
+   * price stays on screen, marked as updating, until the price of the new choices answers.
    */
-  const [estimate, setEstimate] = useState<{ job: string; key: string; estimate: StoreEstimate }>()
+  const [priced, setPriced] = useState<{ key: string; estimate: StoreEstimate }>()
+  /** The choices whose render's price is being worked out (the estimate answered `pending`). */
+  const [pendingFor, setPendingFor] = useState<string>()
   const [quantity, setQuantity] = useState(1)
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
@@ -171,6 +198,20 @@ export function CustomizePage({
   const latest = useRef(0)
   /** Whether the page rendered yet: the first render does not wait out the debounce. */
   const started = useRef(false)
+  /**
+   * The choices of the latest render started. The effect below also runs when the preview on
+   * screen changes: an older render can show its preview just after a newer one started, and
+   * starting those choices again cleared the refusal on screen, then showed it again. It holds
+   * only while those choices stay on screen: a change away and back renders them again once
+   * their render has ended (a running one goes on, `runningKey`), even when the change away
+   * never rendered (#7000 review).
+   */
+  const startedKey = useRef<string | undefined>(undefined)
+  /**
+   * The choices of the latest render while it runs. A change away and back to them keeps it
+   * running rather than starting them again (#7007 review).
+   */
+  const runningKey = useRef<string | undefined>(undefined)
   const renderNow = useRef<(key: string, retry: boolean) => Promise<void>>(async () => undefined)
   /** The choices on screen, and whether the page refuses them: what a delayed retry checks. */
   const choicesNow = useRef({ key: '', blocked: true })
@@ -211,7 +252,8 @@ export function CustomizePage({
   }, [current, blocked])
 
   useEffect(() => {
-    if (blocked || shown?.key === current) return
+    if (blocked || startedKey.current !== current) startedKey.current = undefined
+    if (blocked || shown?.key === current || startedKey.current === current || runningKey.current === current) return
     const timer = setTimeout(
       () => {
         started.current = true
@@ -320,18 +362,49 @@ export function CustomizePage({
     }
   }
 
-  /** Renders the values on screen (`key`), and shows the render once it is done, unless a newer one started. */
+  /**
+   * #6921: what the shop holds of the choices `key`, read at once: a cached preview is shown,
+   * and a `slice` or `last` price. Whether the render may be skipped: only with a preview
+   * and a firm price. A read that fails leaves the render to answer, as before.
+   */
+  const instant = async (body: RenderInput, key: string, live: () => boolean): Promise<boolean> => {
+    let held: StoreVariant
+    try {
+      held = await store.variant(body)
+    } catch {
+      return false
+    }
+    if (!live()) return true
+    if (held.values) setSettled({ key, values: held.values })
+    if (hasNumber(held.price)) setPriced({ key, estimate: held.price })
+    if (held.preview) setShown({ job: previewJob(held.preview), key })
+    return held.preview !== null && held.price.source === 'slice'
+  }
+
+  /**
+   * Shows what the shop holds of the values on screen (`key`) at once (#6921); then, unless
+   * that was a cached preview with a firm price, renders them and shows the render once it is
+   * done, unless a newer one started.
+   */
   const render = async (key: string, retry: boolean) => {
     if (!listing) return
     const body: RenderInput = { ...input(listing), colours: {} }
     const mine = ++latest.current
+    startedKey.current = key
+    runningKey.current = key
     const live = () => alive.current && latest.current === mine
     setRendering(true)
     setRenderError(null)
-    // #6152: the old price is hidden until the new one is read (spec 2026-11-13 §5.3).
-    setEstimate(undefined)
+    // #6921: the price on screen stays, marked as updating, until the new one answers.
+    setPendingFor(undefined)
+    // #6921: a render of `key` that ends with no price leaves no other price on screen, and
+    // no last price: nothing works on it now, so it is never shown as updating. Call it only
+    // while `live()`.
+    const unpriced = () => setPriced((p) => (p && (p.key !== key || p.estimate.source === 'last') ? undefined : p))
     let begun = false
     try {
+      if (await instant(body, key, live)) return
+      if (!live()) return
       const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
       begun = true
       renderKey.current.done()
@@ -341,19 +414,30 @@ export function CustomizePage({
       if (first.values) setSettled({ key, values: first.values })
       setJob(onScreen(first))
       const done = await follow(first, live)
-      if (!live() || done === null) return
+      if (!live()) return
+      if (done === null) {
+        unpriced()
+        return
+      }
       if (done.status !== 'done') {
+        unpriced()
         setRenderError(done.error ?? 'This preview could not be made. Change something and try again.')
         return
       }
       setShown({ job: done, key })
-      const price = await estimateOf(done.id, live, (pending) => setEstimate({ job: done.id, key, estimate: pending }))
-      if (price && live()) setEstimate({ job: done.id, key, estimate: price })
+      const price = await estimateOf(done.id, live, () => setPendingFor(key))
+      if (price && live()) {
+        setPendingFor(undefined)
+        setPriced({ key, estimate: price })
+      }
     } catch (caught) {
       if (!live()) return
       // A start refused or failed settled nothing: the parts the visitor did not set show
       // the page's prediction again (#6258, #6302 review).
       if (!begun) setSettled(undefined)
+      unpriced()
+      // An estimate read that failed after a pending answer works on nothing now.
+      setPendingFor(undefined)
       if (changedListing(caught)) setStale(true)
       setRenderError(refusalText(caught, listing))
       if (retryable(caught) && !retry) {
@@ -365,7 +449,10 @@ export function CustomizePage({
         }, after)
       }
     } finally {
-      if (live()) setRendering(false)
+      if (live()) {
+        setRendering(false)
+        runningKey.current = undefined
+      }
     }
   }
   useEffect(() => {
@@ -454,7 +541,7 @@ export function CustomizePage({
         )}
         {rendering && (
           <p className="sf-hint" role="status">
-            {shown ? 'Updating your preview and price…' : 'Making your preview and price…'}
+            {shown || priced ? 'Updating your preview and price…' : 'Making your preview and price…'}
           </p>
         )}
         {renderError && (
@@ -469,7 +556,15 @@ export function CustomizePage({
             )}
           </div>
         )}
-        {estimate && shownIsCurrent && estimate.key === current && estimate.job === shown.job.id && <Estimate estimate={estimate.estimate} />}
+        {priced && hasNumber(priced.estimate) ? (
+          // #6921: a price is always shown once one is known; it is firm only for the choices
+          // on screen and once nothing is still working it out.
+          <Estimate estimate={priced.estimate} updating={priced.key !== current || priced.estimate.source !== 'slice' || pendingFor === current} />
+        ) : priced && priced.key === current ? (
+          <Estimate estimate={priced.estimate} />
+        ) : (
+          pendingFor === current && <Estimate estimate={{ source: 'pending', price_minor: null, currency: null, minor_exponent: null, retry_after: null }} />
+        )}
         <div className="sf-order">
           <p className="sf-label" id="sf-quantity">
             How many

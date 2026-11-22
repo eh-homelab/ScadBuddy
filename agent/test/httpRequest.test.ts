@@ -30,7 +30,8 @@ import {
 import { decide } from '../src/harness/permissions.js'
 import { assertHostAllowed, assertHttpUrl, EgressError } from '../src/http/egress.js'
 import { UNTRUSTED_KEY } from '../src/safety/untrusted.js'
-import type { SessionFiles, WorkspaceFileInfo } from '../src/workspace/store.js'
+import type { WorkspaceFileInfo } from '../src/workspace/store.js'
+import type { SessionFiles } from './support/sql/sessionFiles.js'
 
 // The assistant's http_request tool (#827): tiers by method, the guards that
 // stay while reach is open (no actor header, nothing but the model's own

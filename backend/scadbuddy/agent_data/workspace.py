@@ -6,9 +6,9 @@ opened here, since the KEK is only in the API (#5299 D5).
 A workspace is a session's (``session:<id>``, deleted with its session) or a principal's
 own outside any session (``principal:<kind>:<id>``, swept a day after its last write). A
 file's bytes are, on a backend with a content store, a blob ``workspace-<sha256 of the
-sealed bytes>`` sealed under a file key of its own in segments (``seal_file``, the
-agent's ``workspace/sealing.ts`` format byte for byte, so either side opens what the
-other sealed); the row keeps the file key wrapped in the context
+sealed bytes>`` sealed under a file key of its own in segments (``seal_file``; the agent
+seals nothing, and the tests' copy of the format, ``agent/test/support/sql/workspaceSealing.ts``,
+opens what this seals and the reverse); the row keeps the file key wrapped in the context
 ``workspace-file-key:<workspace>:<path>:<blob key>``, under the session's payload data key
 or, for a principal's file, under the KEK (``key_kek_id``). On ``store_backend`` local
 (no content store) the bytes stay in Postgres: one ``ai_session_file_bytes`` row per
@@ -39,7 +39,7 @@ from scadbuddy.agent_data import settings as agent_settings
 from scadbuddy.agent_data.payload_keys import KeyNotHeldError, key_in
 from scadbuddy.core.secrets import KEK_BYTES, Kek, SealError, open_bytes, seal_bytes
 
-#: The plaintext of one sealed segment (``workspace/sealing.ts`` ``SEGMENT_BYTES``).
+#: The plaintext of one sealed segment (the tests' ``workspaceSealing.ts`` ``SEGMENT_BYTES``).
 SEGMENT_BYTES = 1024 * 1024
 #: What ``seal_bytes`` adds to a segment: the version byte, the IV and the tag.
 SEAL_OVERHEAD = 1 + 12 + 16
@@ -145,7 +145,10 @@ def file_key_context(workspace: str, path: str, blob_key: str) -> str:
 
 
 def seal_file(file_key: bytes, data: bytes, digest: str) -> bytes:
-    """``data`` sealed under ``file_key`` segment by segment (``sealing.ts`` ``sealFile``)."""
+    """``data`` sealed under ``file_key`` segment by segment.
+
+    The tests' ``workspaceSealing.ts`` ``sealFile`` is the same format.
+    """
     parts: list[bytes] = []
     offset = index = 0
     while True:

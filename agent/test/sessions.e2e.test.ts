@@ -5,34 +5,26 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
-import { CredentialStore } from '../src/credentials.js'
-import { connectDatabase, type Database } from '../src/db.js'
+import { SqlCredentials } from './support/sql/credentials.js'
+import { connectDatabase, type Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import type { SessionManager, SessionManagerDeps } from '../src/sessions/manager.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { evictOnNotify, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
-import {
-  displayUpdates,
-  type FakeAnthropic,
-  type RecordedRequest,
-  type Reply,
-  REPLY_COST_USD,
-  STALL,
-  STALL_COST_USD,
-  startFakeAnthropic,
-} from './support/fakeAnthropic.js'
+import { displayUpdates, type FakeAnthropic, type RecordedRequest, type Reply, REPLY_COST_USD, STALL, STALL_COST_USD, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, sessionWorkflow } from './support/agentSessions.js'
 import { SESSION_QUEUE, SESSION_WORKFLOW } from '../src/temporal/session/names.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 
 // Sessions end to end: the real Agent SDK and its bundled Claude Code binary,
 // pointed at the local fake Anthropic endpoint as a gateway (as
@@ -506,7 +498,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: false, reason: 'unused' },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
       remoteAddress: () => '10.0.0.7',
@@ -661,9 +652,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     expect(rows.length).toBeGreaterThan(0)
     expect(rows.every((r) => r.sealed && !r.plain)).toBe(true)
     const keys = testPayloadKeys(db.sql)
-    const asParent = new PostgresSessionStore(db.sql, { keys: { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) } })
+    const asParent = new TranscriptStore(new PgTranscriptRows(db.sql, { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) }))
     await expect(asParent.load({ projectKey: '', sessionId: child.id })).rejects.toBeInstanceOf(SealError)
-    const asChild = new PostgresSessionStore(db.sql, { keys })
+    const asChild = new TranscriptStore(new PgTranscriptRows(db.sql, keys))
     expect((await asChild.load({ projectKey: '', sessionId: child.id }))!.length).toBeGreaterThan(0)
   }, 60_000)
 
@@ -976,7 +967,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     await (await b.send(two.session.id, browser, 'two')).done
     expect([a.warm.size(), b.warm.size()]).toEqual([1, 1])
     const kek = kekFromBase64(randomBytes(32).toString('base64'))
-    await new CredentialStore(db.sql).put({ kind: 'gateway', base_url: fake.url, secret: 'gw-another-token' }, kek)
+    await new SqlCredentials(db.sql, kek).put({ kind: 'gateway', base_url: fake.url, secret: 'gw-another-token' })
     await expect.poll(() => [a.warm.size(), b.warm.size()]).toEqual([0, 0])
   }, 60_000)
 })

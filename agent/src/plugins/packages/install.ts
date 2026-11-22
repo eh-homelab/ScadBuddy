@@ -83,7 +83,7 @@ export type InstallerOptions = {
   /** Where materialised packages live; a `.tmp/` under it holds fetches in progress. */
   cacheRoot: string
   resolve?: Resolver
-  /** The bytes pins' mirror, when the API serves area `package-mirrors`; without it a bytes install or load is a 503. */
+  /** The bytes pins' mirror (the API's area `package-mirrors`); without one a bytes install or load is a 503. */
   mirror?: () => PackageMirror | undefined
   /** The HTTP download (download.ts `egressDownload`, which runs the egress check at every hop). */
   download?: Downloader

@@ -840,7 +840,7 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     await expect(cut.headerSecrets(pin)).rejects.toThrow(/hash to sha256:[0-9a-f]{64}, not the pinned sha256:0{64}/)
     expect(existsSync(cut.cacheDir(pin))).toBe(false)
     await expect(
-      readPluginSecrets({ kek: undefined, packages: { store: { enabledPins: () => Promise.resolve([pin]) }, installer: cut } }),
+      readPluginSecrets({ packages: { store: { enabledPins: () => Promise.resolve([pin]) }, installer: cut } }),
     ).rejects.toThrow(/not the pinned/)
   })
 

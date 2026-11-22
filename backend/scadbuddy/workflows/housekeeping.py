@@ -118,6 +118,12 @@ ACTIVITY_PATCH = "housekeeping-activity"
 #: and after `ACTIVITY_SWEEP`, so a run without the patch is today's run exactly.
 ATTACHMENTS_SWEEP = "housekeeping_sweep_print_attachments"
 ATTACHMENTS_PATCH = "housekeeping-sweep-print-attachments"
+#: #6950 (spec D4, phase 1): remove the entities whose owner's row is gone, their files
+#: and holds first, then the row and its links (`entities/sweep.py`
+#: `sweep_orphan_entities`); an order's kinds only once they hold no file. After the
+#: print attachments, behind its own patch; on the sweeps' Schedule only, as they are.
+ENTITY_ORPHANS_SWEEP = "housekeeping_sweep_entity_orphans"
+ENTITY_ORPHANS_PATCH = "housekeeping-sweep-entity-orphans"
 #: The native print library's trash purge and orphan blobs (#3827); after the attachments.
 LIBRARY_SWEEP = "housekeeping_sweep_library"
 LIBRARY_PATCH = "housekeeping-sweep-library"
@@ -233,7 +239,9 @@ AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: (`bambuddy.runs.reap_run_holds`): a slice attempt that outlived its run's end, and the
 #: runs the retention prune deleted. Last, behind its own patch; on the prune Schedule
 #: too, as the quote holds' reaper is, so a hold an end left keeps its blob for at most
-#: `PRUNE_INTERVAL`.
+#: `PRUNE_INTERVAL`. #6871: it first records the LAN runs whose sequence is gone as
+#: stopped (`api.printing.end_gone_sequences`), so a gone run heads a printer's card on
+#: the Prints page for at most `PRUNE_INTERVAL` too.
 RUN_HOLDS_SWEEP = "housekeeping_reap_print_run_holds"
 RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
@@ -251,6 +259,7 @@ SWEEPS = (
     GIT_SWEEP,
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
+    ENTITY_ORPHANS_SWEEP,
     LIBRARY_SWEEP,
     NATIVE_SLICES_SWEEP,
     TRANSFER_PUTS_SWEEP,
@@ -343,6 +352,8 @@ GIT_TIMEOUT = timedelta(minutes=12)
 ACTIVITY_TIMEOUT = timedelta(minutes=5)
 #: One Bambuddy archive read per print with attachments, and a delete per gone one.
 ATTACHMENTS_TIMEOUT = timedelta(minutes=10)
+#: A read per kind and up to 500 short transactions, each a few deletes.
+ENTITY_ORPHANS_TIMEOUT = timedelta(minutes=5)
 #: The library sweep purges trash past 30 days and deletes the blobs no row names.
 LIBRARY_TIMEOUT = timedelta(minutes=10)
 #: A delete, and a describe per running native slice past `LOST_AFTER`.
@@ -400,7 +411,9 @@ STOREFRONT_MAIL_TIMEOUT = timedelta(minutes=10)
 #: and a few Bambuddy reads, and with the printer allowed an FTP listing and a read:
 #: most passes take none or one. Not imported, as `GIT_TIMEOUT`'s is not.
 AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
-#: One delete.
+#: Two describes per LAN run with prints still to start (`end_gone_sequences`, each run
+#: bounded by its `SEQUENCE_CHECK_TIMEOUT`, 10 s, and the pass by half of this), then one
+#: delete.
 RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
@@ -420,6 +433,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return ACTIVITY_TIMEOUT
     if sweep == ATTACHMENTS_SWEEP:
         return ATTACHMENTS_TIMEOUT
+    if sweep == ENTITY_ORPHANS_SWEEP:
+        return ENTITY_ORPHANS_TIMEOUT
     if sweep == LIBRARY_SWEEP:
         return LIBRARY_TIMEOUT
     if sweep == NATIVE_SLICES_SWEEP:
@@ -486,6 +501,8 @@ class Housekeeping:
             if sweep == ACTIVITY_SWEEP and not workflow.patched(ACTIVITY_PATCH):
                 continue
             if sweep == ATTACHMENTS_SWEEP and not workflow.patched(ATTACHMENTS_PATCH):
+                continue
+            if sweep == ENTITY_ORPHANS_SWEEP and not workflow.patched(ENTITY_ORPHANS_PATCH):
                 continue
             if sweep == LIBRARY_SWEEP and not workflow.patched(LIBRARY_PATCH):
                 continue

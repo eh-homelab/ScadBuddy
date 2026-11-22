@@ -1,9 +1,9 @@
 import { ArchiveIcon, ArchiveRestoreIcon, PencilIcon } from 'lucide-react'
-import { Link } from 'react-router'
 import type { LocationNode, Sensor, Spool } from '../../api/filament'
 import { Button } from '@/components/ui/button'
 import { LocationSensors } from './LocationSensors'
-import { spoolPath } from './spoolsQuery'
+import { filamentLinks } from '../../lib/filamentLinks'
+import { EntityLink } from './EntityLink'
 
 export interface LocationTreeProps {
   nodes: LocationNode[]
@@ -29,8 +29,15 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
   return (
     <li data-place={node.id}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
-        <span className={archived ? 'font-medium text-muted-foreground line-through' : 'font-medium'}>{node.name}</span>
-        <span className="text-muted-foreground">{tree.kinds.get(node.kind_id) ?? ''}</span>
+        {/* A place's page is the spools in it (R-6869-6). */}
+        <EntityLink to={filamentLinks.location(node.id)} className={archived ? 'font-medium text-muted-foreground line-through' : 'font-medium'}>
+          {node.name}
+        </EntityLink>
+        {tree.kinds.has(node.kind_id) && (
+          <EntityLink to={filamentLinks.catalog('location-kinds')} className="text-muted-foreground">
+            {tree.kinds.get(node.kind_id)}
+          </EntityLink>
+        )}
         {node.identifier && <span className="text-muted-foreground">{node.identifier}</span>}
         <span
           aria-label={`${node.spool_count} ${node.spool_count === 1 ? 'spool' : 'spools'}`}
@@ -62,9 +69,7 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
         <ul className="flex flex-wrap gap-x-3 gap-y-0.5 pb-1.5 pl-4 text-[12px]">
           {spools.map((spool) => (
             <li key={spool.id}>
-              <Link to={spoolPath(spool)} className="underline-offset-4 hover:underline">
-                {spoolLabel(spool)}
-              </Link>
+              <EntityLink to={filamentLinks.spool(spool.id)}>{spoolLabel(spool)}</EntityLink>
             </li>
           ))}
         </ul>

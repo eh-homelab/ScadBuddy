@@ -138,3 +138,27 @@ def test_a_failed_revoke_still_rotates_the_credentials(
     rows = client.get("/api/v1/auth/service-credentials").json()
     projects = [row for row in rows if row["caller"] == "projects"]
     assert len(projects) == 1 and not projects[0]["live"] and projects[0]["revoked_at"]
+
+
+def test_a_failed_state_read_is_logged_and_still_rotates_the_credentials(
+    client: TestClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#5299 step 12: a `retired_state` that raises is logged, and the start still
+    rotates its credentials (the step is never fatal)."""
+
+    def refuse(conn: object) -> list[object]:
+        raise RuntimeError("state read failed")
+
+    monkeypatch.setattr(main, "retired_state", refuse)
+    state = getattr(app.state, STATE_ATTR)
+    with state.settings_store.pool.connection() as conn:
+        _insert(conn, state.settings_store.kek, "projects", datetime.now(UTC))
+    with caplog.at_level("ERROR", logger=main.logger.name):
+        _grant_and_rotate_at_start(state)
+    assert "could not read what the retired callers' roles still have" in caplog.text
+    rows = client.get("/api/v1/auth/service-credentials").json()
+    projects = [row for row in rows if row["caller"] == "projects"]
+    assert len(projects) == 1 and not projects[0]["live"] and projects[0]["revoked_at"]

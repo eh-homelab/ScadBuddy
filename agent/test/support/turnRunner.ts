@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { randomUUID } from 'node:crypto'
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
@@ -14,10 +13,13 @@ import type { PackagesForRun } from '../../src/plugins/packages/install.js'
 import type { ClaimedSession, TurnPrincipal } from '../../src/sessions/manager.js'
 import { TurnRunner, type TurnRunnerDeps } from '../../src/sessions/turnRunner.js'
 import type { TurnContext } from '../../src/sessions/turnSlot.js'
-import type { SessionFiles } from '../../src/workspace/store.js'
+import type { SessionFiles } from './sql/sessionFiles.js'
 import type { BackgroundTasks } from '../../src/background/service.js'
 import { TurnTrace } from '../../src/telemetry/turn.js'
+import { BrowserOrigins } from '../../src/browser/store.js'
+import type { SavedBodies } from '../../src/harness/httpRequest.js'
 import { fixedCredentials } from './fixedCredentials.js'
+import { MemorySessionOrigins } from './memoryOrigins.js'
 import { memoryAccess } from './memoryAccess.js'
 import { browser, tempPaths } from './sessions.js'
 
@@ -67,15 +69,15 @@ export type TurnRunnerTestOptions = {
   turnTools?: string[]
 }
 
-/** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
-export const unusedSql = new Proxy(
+/** A session's saved bodies, which only http_request would use: these tests save none. */
+export const unusedBodies: SavedBodies = new Proxy(
   {},
   {
     get() {
-      throw new Error('turnRunnerForTest has no database')
+      throw new Error('turnRunnerForTest saves no http_request body')
     },
   },
-) as unknown as Sql
+) as unknown as SavedBodies
 
 export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const paths = await tempPaths()
@@ -120,7 +122,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   /** What each assembly gave the in-process servers. */
   const serverExtras: unknown[] = []
   const runner = new TurnRunner({
-    sql: unusedSql,
+    httpBodies: () => unusedBodies,
+    browserOrigins: new BrowserOrigins(undefined, new MemorySessionOrigins()),
     rows: { get: () => Promise.resolve(undefined) },
     paths,
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
