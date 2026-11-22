@@ -8,8 +8,10 @@ import pytest
 import respx
 from pydantic import ValidationError
 
+from scadbuddy.api.print_imports import _source_changed
 from scadbuddy.bambuddy.print_import import SourceChoice
 from scadbuddy.core.problems import ApiError
+from scadbuddy.operations.store import Operation
 
 
 @pytest.mark.parametrize(
@@ -60,24 +62,43 @@ def test_library_candidates_are_newest_first_and_undated_last() -> None:
     ],
 )
 def test_a_changed_retry_says_what_its_first_send_did(status: str, made: bool, says: str) -> None:
-    """#5979 review: the 409 names a model only by what the key's operation did."""
+    """#5979 review: the 409 names a model only by what the key's operation did. A key
+    first sent for another body may have made it from another print's file (#6984)."""
+    text = _source_changed("x.3mf", "trophy", _op(status), made, same_file=False)
+    assert says in text
+    assert "first sent for another print file, name or description" in text
+    assert "or before this server recorded which print file a request names" in text
+    assert "import the print onto it" not in text
+
+
+@pytest.mark.parametrize(
+    ("status", "made", "says"),
+    [
+        ("succeeded", True, "no longer the file the model 'trophy' was made from"),
+        ("succeeded", False, "made the model 'trophy', which was deleted since"),
+        ("running", False, "once it is done, import the print onto it with `slug`"),
+        ("failed", False, "made no model: its operation op-1 failed"),
+    ],
+)
+def test_a_retry_of_the_same_file_says_it_changed(status: str, made: bool, says: str) -> None:
+    """#7019: the key's first request named this print file, name and description, so
+    only the file's bytes moved (a printer overwrites its files): its model is from this
+    print's file, and may be offered."""
+    text = _source_changed("x.3mf", "trophy", _op(status), made, same_file=True)
+    assert says in text
+    assert text.startswith("x.3mf changed since this request was first sent")
+
+
+def _op(status: str) -> Operation:
     from datetime import UTC, datetime
 
-    from scadbuddy.api.print_imports import _source_changed
-    from scadbuddy.operations.store import Operation
-
-    first = Operation(
+    return Operation(
         id="op-1",
         kind="mesh_model_create",
         subject="trophy",
         status=status,  # type: ignore[arg-type]
         created_at=datetime(2026, 11, 10, tzinfo=UTC),
     )
-    text = _source_changed("x.3mf", "trophy", first, made)
-    assert says in text
-    # #6984: the key may have named another print's file, so its model is never offered.
-    assert "first sent for another print file, name or description" in text
-    assert "import the print onto it" not in text
 
 
 # --- a mesh model from a print's file (#6916) ----------------------------------------
