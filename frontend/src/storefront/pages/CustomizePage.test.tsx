@@ -245,6 +245,26 @@ describe('CustomizePage', () => {
     expect(refusal).toBeInTheDocument()
   })
 
+  it('renders refused choices again after a change and back inside the debounce (#7000 review)', async () => {
+    const sent = renders()
+    const { user } = show(CHARM_ID, FAST, 300)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await screen.findByRole('alert')
+    const rims = (colour: string) => sent.filter((body) => (body as { values: Record<string, string> }).values.rim_colour === colour).length
+    const teal = sent.find((body) => Object.keys((body as { values: object }).values).length === 2) as { values: { rim_colour: string } }
+    expect(rims(teal.values.rim_colour)).toBe(1)
+    // Away and back before the debounce ends: the change away never renders.
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust' }))
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Teal' }))
+    await waitFor(() => expect(rims(teal.values.rim_colour)).toBe(2))
+    expect(sent).toHaveLength(3)
+  })
+
   it('says the preview must show before an add, with a retry, when the preview fails (#6152 review)', async () => {
     // A colour the visitor set (saved), so the first render is the one that fails.
     window.localStorage.setItem('scadbuddy.storefront.customize.l1', JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1 }))
