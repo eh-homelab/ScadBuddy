@@ -19,8 +19,9 @@ run waited out carries how it ended (`LanStarted.ended`), since the printer repo
 next one by then, and each start still to come (`PrintRunResult.lan_waiting`) is a copy
 ``queued``, as one waiting in Bambuddy's queue is, until the run stops (``lan_stopped``).
 While the run waits for a cleared plate (#4939, ``lan_awaiting_clear``) the next one says
-so (`AWAITING_CLEAR`). The progress names the run's controls (`lan_control`, #4942): stop
-the rest, and say the plate is clear.
+so (`AWAITING_CLEAR`). A run queued on a busy printer (#6871, ``lan_queued``) has
+started none, and says so (`QUEUED_BUSY`). The progress names the run's controls
+(`lan_control`, #4942): stop the rest, and say the plate is clear.
 """
 
 from __future__ import annotations
@@ -136,11 +137,14 @@ def lan_ended(
     print (`shows`). ``started_at`` is the print worker's clock and the report's time the
     watch's, maybe another pod's, and the watch may not have merged the start's delta yet,
     so a report from before the start can look newer. Read as an end, it would start the
-    next copy over this one."""
+    next copy over this one.
+
+    A start with no name is a print a queued run waits out whose report named none
+    (#6871, `busy_with`): no report can name it, so any end after the check counts."""
     if report is None or report[1] <= started.started_at:
         return None
     data, seen_at = report
-    if not seen and not shows(report, started):
+    if not seen and started.subtask_name and not shows(report, started):
         return None
     state = data.get("gcode_state")
     if state in _RUNNING:
@@ -176,6 +180,8 @@ WAITING = "Waiting for the printer to finish the print before it."
 #: The next copy, once the printer has ended the one before, while the run waits for
 #: someone to say the plate is clear (#4939, ``lan_require_plate_clear``).
 AWAITING_CLEAR = "Waiting for someone to say the plate of {printer} is clear."
+#: A run's first print, queued because the printer was busy with another (#6871).
+QUEUED_BUSY = "Queued: {printer} is busy with another print. Nothing was sent to it yet."
 
 
 def waiting_plate(
@@ -209,7 +215,10 @@ def lan_control(run: PrintRun) -> LanRunControl | None:
     if not result.lan_waiting or result.lan_stopped is not None:
         return None
     return LanRunControl(
-        run_id=run.id, waiting=len(result.lan_waiting), awaiting_clear=result.lan_awaiting_clear
+        run_id=run.id,
+        waiting=len(result.lan_waiting),
+        awaiting_clear=result.lan_awaiting_clear,
+        queued=result.lan_queued is not None,
     )
 
 
@@ -250,7 +259,8 @@ class LanProgress:
             return None
         started = run.result.lan
         printer = run.printer
-        if not started or printer is None:
+        # A run queued on a busy printer (#6871) has started nothing yet.
+        if not (started or run.result.lan_queued) or printer is None:
             return None
         try:
             report = await asyncio.to_thread(self.reports.get, printer)
@@ -270,9 +280,12 @@ class LanProgress:
         reasons = [WAITING] * len(result.lan_waiting)
         if reasons and result.lan_awaiting_clear:
             reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
+        elif reasons and result.lan_queued is not None:
+            reasons[0] = QUEUED_BUSY.format(printer=name or "the printer")
         plates += [waiting_plate(name, result.lan_stopped, reason) for reason in reasons]
         if len(plates) == 1:
-            return plates[0].model_copy(update={"run_id": run.id})
+            # A run of one print queued on a busy printer still has its controls.
+            return plates[0].model_copy(update={"run_id": run.id, "lan_run": lan_control(run)})
         merged = from_plates(
             plates,
             [

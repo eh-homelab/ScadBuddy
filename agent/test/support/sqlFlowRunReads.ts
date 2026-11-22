@@ -15,7 +15,7 @@ import type {
 // agent's Postgres tests have no API to ask. The agent itself reads these tables only through
 // the routes (src/flows/backendReads.ts `CrudFlowRunReads`, #5299). test/retiredTables.test.ts
 // guards that, since the agent still connects as the database owner and the API's revoke of
-// its role's grants (backend auth/revoke.py `RETIRED_GRANTS`) binds nothing until #5299 step 12.
+// its role's grants (backend auth/revoke.py `RETIRED_ROLES`) binds nothing until #5299 step 12.
 
 /** A deployment without flows has no `workflow_runs`. */
 function noFlows(err: unknown): boolean {

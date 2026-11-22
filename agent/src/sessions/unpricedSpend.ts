@@ -126,6 +126,9 @@ type Open = { model: string | undefined; usage: Usage; reportedOutput: boolean; 
  * Watches a turn's SDK messages and prices the requests that started and never
  * finished: a message_start with no message_stop. A completed request is
  * Claude Code's to price, so it is dropped here, and nothing is counted twice.
+ * Claude Code's own close of a request the user stopped (a message_delta whose
+ * `stop_reason` is null, then message_stop) counts as finished: Claude Code
+ * prices it since SDK 0.3.327.
  */
 export class UnpricedSpend {
   /** The request each stream (the main one, or a subagent's) has open. */

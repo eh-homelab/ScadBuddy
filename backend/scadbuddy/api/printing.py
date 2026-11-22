@@ -860,11 +860,27 @@ async def _scadbuddy_jobs(
         return JobMatches()
 
 
+#: How many times the strip reads the waiting runs again after it recorded a gone one
+#: stopped (`_end_gone`); a printer with more gone runs than that is cleared on later reads.
+LAN_CONTROL_PASSES = 3
+#: How long the strip waits for Temporal to say whether the runs' sequences run: past it,
+#: the runs are shown as read.
+SEQUENCE_CHECK_TIMEOUT = timedelta(seconds=5)
+
+
 async def _lan_controls(runs: PrintCommands, cards: PrintersNow) -> dict[str, LanRunControl]:
-    """Each card's waiting native run (#4942); none when the runs cannot be read, so a
-    database blip costs the controls, never the strip."""
+    """Each card's oldest waiting native run (#4942), the first in its queue (#6871);
+    none when the runs cannot be read, so a database blip costs the controls, never the
+    strip. An oldest run whose sequence is gone is recorded stopped first, as
+    `end_gone_sequences` does, so it never hides the newer runs' controls (review of
+    #6882)."""
+    printers = [card.id for card in cards.printers]
     try:
-        waiting = await runs.store.lan_waiting([card.id for card in cards.printers])
+        waiting = await runs.store.lan_waiting(printers)
+        for _ in range(LAN_CONTROL_PASSES):
+            if not await _end_gone(runs, list(waiting.values())):
+                break
+            waiting = await runs.store.lan_waiting(printers)
     except DATABASE_ERRORS:
         logger.warning("print runs unreadable; the strip shows no run controls")
         return {}
@@ -1389,6 +1405,36 @@ async def end_gone_sequences(runs: PrintCommands) -> None:
         await _to_sequence(runs, run_id, _leave_running)
 
 
+async def _end_gone(runs: PrintCommands, waiting: list[PrintRun]) -> bool:
+    """Record each of ``waiting`` whose ``PrintLanSequence`` is gone, and whose own
+    ``PrintRun`` has closed, as stopped (`SEQUENCE_GONE_STOP`), as `end_gone_sequences`
+    does; whether it recorded any. One describe per run while its sequence runs. Temporal
+    that does not answer within `SEQUENCE_CHECK_TIMEOUT`, or fails, records nothing."""
+    try:
+        async with asyncio.timeout(SEQUENCE_CHECK_TIMEOUT.total_seconds()):
+            gone = [
+                run.id
+                for run in waiting
+                if not await _execution_open(runs, lan_sequence_id(run.id))
+            ]
+            if not gone:
+                return False
+            parents = dict(await runs.store.lan_waiting_runs())
+            ended = False
+            for run_id in gone:
+                parent = parents.get(run_id)
+                if parent is None or await _execution_open(runs, parent):
+                    continue
+                await runs.store.record_lan_stopped(run_id, SEQUENCE_GONE_STOP)
+                ended = True
+            return ended
+    except DATABASE_ERRORS:
+        raise
+    except Exception:
+        logger.warning("could not check the waiting runs' sequences; shown as read")
+        return False
+
+
 async def _execution_open(runs: PrintCommands, workflow_id: str) -> bool:
     """Whether workflow ``workflow_id``'s latest execution is running; one gone (past
     its retention) is not."""
@@ -1441,7 +1487,8 @@ async def _to_sequence(
 )
 async def post_stop_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     """A native run of several plates or copies starts each once the printer has ended
-    the one before (#4541). This stops the ones it has not started (#4942): it cancels
+    the one before (#4541); a run queued on a busy printer (#6871, ``lan_queued``), even
+    of one print, has started none yet. This stops the ones it has not started (#4942): it cancels
     the run's ``PrintLanSequence``, which records the stop on the run (``lan_stopped``),
     and the progress shows them cancelled. The print on the printer carries on; one
     being started as the stop arrives still starts. Answers **202** with the run as it
@@ -1462,11 +1509,12 @@ async def post_stop_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
 async def post_plate_cleared(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     """With ``lan_require_plate_clear`` on (#4939), a native run of several prints waits,
     once the printer has ended each, for someone to say the plate is clear, as Bambuddy's
-    queue does with its ``require_plate_clear``. While it waits its result says so
-    (``lan_awaiting_clear``). This tells it the plate is clear, and it starts the next
-    print. Answers **202** with the run as it was read; 409 when the run is not waiting
-    for a clear, or its sequence is no longer running (the run then records its prints
-    still to start as stopped)."""
+    queue does with its ``require_plate_clear``. A run queued on a busy printer
+    (#6871, ``lan_queued``), even of one print, waits so before its first print whatever
+    the setting says. While it waits its result says so (``lan_awaiting_clear``). This
+    tells it the plate is clear, and it starts the next print. Answers **202** with the
+    run as it was read; 409 when the run is not waiting for a clear, or its sequence is
+    no longer running (the run then records its prints still to start as stopped)."""
     run = await _waiting_run(runs, run_id)
     assert run.result is not None  # `_waiting_run` answers a run with a result
     if not run.result.lan_awaiting_clear:

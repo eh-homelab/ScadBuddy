@@ -70,12 +70,10 @@ from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.auth.authorship_rule import AuthorshipRule
-from scadbuddy.auth.caller_grants import grant_callers
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
-from scadbuddy.auth.revoke import revoke_retired
-from scadbuddy.auth.service_credentials import grant_caller_views
+from scadbuddy.auth.revoke import RetiredState, retired_state, revoke_retired
 from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -1232,26 +1230,35 @@ def _migrate_agent_at_start(state: AppState) -> None:
 
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
-    """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
-    taken back (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is
+    """At start, after the migrations: a retired caller's role nothing (#5298 Tasks 11, 22
+    and 35, #5299 step 12), what each retired role still has logged (`auth/revoke.py`
+    `retired_state`, the retirement order's checks), and the credentials due. A failure is
     logged, never fatal."""
     try:
         with state.settings_store.pool.connection() as conn:
-            granted = grant_caller_views(conn)
-            tables = grant_callers(conn)
             revoked: list[str] = []
+            states: list[RetiredState] = []
             try:
                 revoked = revoke_retired(conn)
             except Exception:
                 # A revoke that fails must not cost the start its credentials' rotation.
                 logger.exception("could not revoke the retired callers' roles")
-        if granted:
-            logger.info("granted the callers' credential views", extra={"roles": granted})
-        if tables:
-            logger.info("granted the callers' tables", extra={"roles": tables})
+            try:
+                states = retired_state(conn)
+            except Exception:
+                logger.exception("could not read what the retired callers' roles still have")
         if revoked:
             logger.info("revoked the retired callers' roles", extra={"roles": revoked})
+        for left in states:
+            logger.info(
+                "a retired caller's role still exists",
+                extra={
+                    "role": left.role,
+                    "granted_relations": left.granted,
+                    "owned_relations": left.owned,
+                    "sessions": left.sessions,
+                },
+            )
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")
@@ -1755,6 +1762,8 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
         uses=PoolPrintUses(state.settings_store.pool),
+        # A run queued on a busy printer says its place (#6871).
+        runs=state.print_runs.store,
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities: list[Callable[..., Any]] = [

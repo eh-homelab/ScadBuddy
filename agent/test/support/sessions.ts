@@ -48,7 +48,8 @@ export type FakeTurn =
    * so the result leaves it out, as Claude Code through SDK 0.3.314 did. With
    * `closes` the request is closed first, as Claude Code does since SDK 0.3.327
    * (content_block_stop, a message_delta whose `stop_reason` is null, then
-   * message_stop; sessions/unpricedSpend.ts), and `resultCostUsd` includes it.
+   * message_stop; sessions/unpricedSpend.ts), and `resultCostUsd` includes it;
+   * with `closes` and no `resultCostUsd` the process dies after the close.
    */
   | {
       stall: { model: string; usage: Record<string, number>; text?: string }
@@ -189,12 +190,12 @@ export function scriptedRunner(
           yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })
           if (turn.dies !== undefined) throw new Error(turn.dies)
           if ((await whenStopped()) === 'close') return
-          if (turn.resultCostUsd === undefined) throw new Error('Claude Code process aborted by user')
           if (turn.closes) {
             yield stream({ type: 'content_block_stop', index: 0 })
             yield stream({ type: 'message_delta', delta: { stop_reason: null }, usage })
             yield stream({ type: 'message_stop' })
           }
+          if (turn.resultCostUsd === undefined) throw new Error('Claude Code process aborted by user')
           total = turn.resultCostUsd
           inTurn = false
           yield result({ subtype: 'error_during_execution', is_error: true, errors: [], num_turns: 0, terminal_reason: 'aborted_streaming' })

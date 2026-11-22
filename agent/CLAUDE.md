@@ -12,7 +12,7 @@ step 10), and the agent's other reads of backend tables (the event log, flow run
 decisions and grants) go only through CRUD routes (#5299 D7, below); the API revokes its
 role's grants on `events`, `workflow_runs`, `workflow_run_decisions`, `flow_grants` and
 `flow_grant_uses` at every start
-(`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`), which binds nothing while the agent
+(`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`), which binds nothing while the agent
 connects as the owner (until #5299 step 12); `test/retiredTables.test.ts` is the guard. The workspace files' `blob_refs` holds go through CRUD routes
 (#5299, below), no longer a trigger. The agent grants and revokes nothing at its start
 (#6501): the API's role owns or is the `ai_*` tables' owner, and the API revokes the retired

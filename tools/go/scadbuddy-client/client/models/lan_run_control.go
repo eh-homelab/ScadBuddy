@@ -13,6 +13,8 @@ type LanRunControl struct {
 	additionalData map[string]any
 	// The awaiting_clear property
 	awaiting_clear *bool
+	// The queued property
+	queued *bool
 	// The run_id property
 	run_id *string
 	// The waiting property
@@ -25,6 +27,8 @@ func NewLanRunControl() *LanRunControl {
 	m.SetAdditionalData(make(map[string]any))
 	awaiting_clearValue := false
 	m.SetAwaitingClear(&awaiting_clearValue)
+	queuedValue := false
+	m.SetQueued(&queuedValue)
 	return m
 }
 
@@ -60,6 +64,16 @@ func (m *LanRunControl) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 		}
 		return nil
 	}
+	res["queued"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetQueued(val)
+		}
+		return nil
+	}
 	res["run_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetStringValue()
 		if err != nil {
@@ -83,6 +97,12 @@ func (m *LanRunControl) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 	return res
 }
 
+// GetQueued gets the queued property value. The queued property
+// returns a *bool when successful
+func (m *LanRunControl) GetQueued() *bool {
+	return m.queued
+}
+
 // GetRunId gets the run_id property value. The run_id property
 // returns a *string when successful
 func (m *LanRunControl) GetRunId() *string {
@@ -99,6 +119,12 @@ func (m *LanRunControl) GetWaiting() *int32 {
 func (m *LanRunControl) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
 		err := writer.WriteBoolValue("awaiting_clear", m.GetAwaitingClear())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("queued", m.GetQueued())
 		if err != nil {
 			return err
 		}
@@ -134,6 +160,11 @@ func (m *LanRunControl) SetAwaitingClear(value *bool) {
 	m.awaiting_clear = value
 }
 
+// SetQueued sets the queued property value. The queued property
+func (m *LanRunControl) SetQueued(value *bool) {
+	m.queued = value
+}
+
 // SetRunId sets the run_id property value. The run_id property
 func (m *LanRunControl) SetRunId(value *string) {
 	m.run_id = value
@@ -148,9 +179,11 @@ type LanRunControlable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetAwaitingClear() *bool
+	GetQueued() *bool
 	GetRunId() *string
 	GetWaiting() *int32
 	SetAwaitingClear(value *bool)
+	SetQueued(value *bool)
 	SetRunId(value *string)
 	SetWaiting(value *int32)
 }

@@ -103,6 +103,13 @@ function retryAfter(response: Response): number | null {
   return Number.isNaN(date) ? null : Math.max(0, Math.ceil((date - Date.now()) / 1000))
 }
 
+/** Whether the shop wrote a problem of this type: its own storefront problems, or the
+ * edge's plain ones (`about:blank`). A proxy in front of the shop (Cloudflare's 504,
+ * #6918) sends a problem of its own type, whose text a visitor must not see. */
+function shopProblem(type: string | null): boolean {
+  return type === null || type === 'about:blank' || type.startsWith(PROBLEMS)
+}
+
 async function refusal(response: Response): Promise<StoreError> {
   let type: string | null = null
   let detail = FALLBACK
@@ -110,7 +117,7 @@ async function refusal(response: Response): Promise<StoreError> {
   try {
     const body = (await response.json()) as { type?: unknown; detail?: unknown; parts?: unknown }
     if (typeof body.type === 'string') type = body.type
-    if (typeof body.detail === 'string' && body.detail.trim()) detail = body.detail
+    if (typeof body.detail === 'string' && body.detail.trim() && shopProblem(type)) detail = body.detail
     if (Array.isArray(body.parts)) parts = body.parts.filter((part): part is string => typeof part === 'string')
   } catch {
     // Not JSON: the fallback text stands.

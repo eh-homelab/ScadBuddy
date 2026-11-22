@@ -246,6 +246,9 @@ class _Settings:
     def plate_clear_required(self) -> bool:
         return False
 
+    def queue_when_busy(self) -> bool:
+        return True
+
 
 def _vp(vp_id: int) -> dict[str, Any]:
     return {
