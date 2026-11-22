@@ -9,6 +9,7 @@ holds: a variant with no room waits for one."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -228,9 +229,10 @@ def test_a_publish_answers_when_temporal_does_not(
     template: dict[str, Any],
     dense_red: str,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Review of #6970: a start that stalls is given up after `WARM_START_TIMEOUT` and
-    logged, as a failed one is; the publish answers."""
+    logged as given up (the run may yet start); the publish answers."""
 
     async def stalls(_self: prepare.TemporalPreparer, _listing_id: str) -> None:
         await asyncio.sleep(60)
@@ -238,6 +240,10 @@ def test_a_publish_answers_when_temporal_does_not(
     monkeypatch.setattr(prepare.TemporalPreparer, "start_default", stalls)
     monkeypatch.setattr(prepare, "WARM_START_TIMEOUT", 0.2)
     began = time.monotonic()
-    listing = publish(client, create(client, listing_body(template, dense_red))["id"])
+    with caplog.at_level(logging.WARNING, logger=prepare.logger.name):
+        listing = publish(client, create(client, listing_body(template, dense_red))["id"])
     assert listing["published"] is True
     assert time.monotonic() - began < 30
+    given_up = f"gave up waiting for the default price run of listing {listing['id']} to start"
+    [record] = [r for r in caplog.records if r.getMessage() == given_up]
+    assert record.exc_info is not None

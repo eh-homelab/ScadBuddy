@@ -2301,7 +2301,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `prepare-listing-default:<listing id>`, `default_only`, `TERMINATE_EXISTING`: the listing
   may have moved; `default_combination`, a listing with no colour parameter included), so
   the instant read has a firm price before any visitor asks. A start that fails, or takes
-  more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error. `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
+  more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error (a start
+  given up on is logged as given up: it may still have reached Temporal). `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it
   on) switches both.
 - A customer's own models (#6133, spec 2026-11-13; migration
