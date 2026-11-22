@@ -291,14 +291,14 @@ def test_a_listing_republished_at_another_commit_renders_its_values(listing: Lis
 
 
 def _with_captions(listing: Listing, captions: dict[str, str]) -> Listing:
-    assert listing.snapshot is not None
+    snapshot = listing.design[2]
     parameters = [
         p.model_copy(update={"caption": captions.get(p.name, p.caption)})
-        for p in listing.snapshot.schema_.parameters
+        for p in snapshot.schema_.parameters
     ]
-    schema = listing.snapshot.schema_.model_copy(update={"parameters": parameters})
+    schema = snapshot.schema_.model_copy(update={"parameters": parameters})
     return listing.model_copy(
-        update={"snapshot": listing.snapshot.model_copy(update={"schema_": schema})}
+        update={"snapshot": snapshot.model_copy(update={"schema_": schema})}
     )
 
 
@@ -929,10 +929,9 @@ def test_a_lock_and_an_offered_colour_of_two_materials_print_in_none(listing: Li
     # visitor's colour, and its card and page say it cannot be ordered.
     colours = {f.id: f.colour for f in LOCKED.values()}
     materials = {f.id: f.material for f in LOCKED.values()}
-    assert shown.snapshot is not None
     with pytest.raises(ApiError) as refused:
         check_locked_colours(
-            BASE_AND_TEXT, shown.snapshot.fixed, shown, colours, materials, PETG_FIRST
+            BASE_AND_TEXT, shown.design[2].fixed, shown, colours, materials, PETG_FIRST
         )
     assert refused.value.type.endswith("listing_locked_colours_unprintable")
     assert refused.value.extensions["names"] == ["base"]

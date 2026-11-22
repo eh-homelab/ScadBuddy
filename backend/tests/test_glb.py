@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import trimesh
 
 from scadbuddy.render.colours import MIN_PART_ALPHA
-from scadbuddy.render.glb import bounding_box, read_glb, write_glb
+from scadbuddy.render.glb import SLOT_EXTRA, bounding_box, read_glb, write_glb
 from scadbuddy.render.paint import PaintCodeError
 from scadbuddy.render.split import ColourPart, Paint, painted_pieces
 
@@ -105,6 +106,21 @@ def test_a_translucent_parts_alpha_is_its_meshs_extra_and_reads_back(tmp_path: P
     assert {part.name: part.alpha for part in read_glb(out)} == {"Color 1": 128, "Color 2": 255}
 
 
+def test_a_part_that_knows_its_slot_writes_it_as_its_meshs_extra(tmp_path: Path) -> None:
+    """#6710 §8.2: a file listing's page recolours each mesh by its slot."""
+    out = tmp_path / "preview.glb"
+    first, second = _parts()
+    write_glb([replace(first, slot=2), second], out)
+
+    data = out.read_bytes()
+    length = struct.unpack("<I", data[12:16])[0]
+    extras = {
+        mesh["name"]: mesh.get("extras", {}).get(SLOT_EXTRA)
+        for mesh in json.loads(data[20 : 20 + length])["meshes"]
+    }
+    assert extras == {"Color 1": 2, "Color 2": None}
+
+
 def test_a_glb_alpha_of_zero_reads_back_at_the_floor(tmp_path: Path) -> None:
     """#6243 review: a file written otherwise never gives a part alpha 0, which the
     covers would divide by."""
@@ -170,6 +186,16 @@ def test_a_painted_part_is_one_mesh_per_colour_it_prints(tmp_path: Path) -> None
     write_glb([part], tmp_path / "p.glb")
     faces = {p.colour: len(p.mesh.faces) for p in read_glb(tmp_path / "p.glb")}
     assert faces == {"#FFFFFF": 10, "#00FF00": 2, "#FF0000": 1}
+
+
+def test_only_a_painted_parts_own_colour_keeps_its_slot() -> None:
+    """#6710 §8.2: a painted colour prints in another slot, which the part does not know."""
+    box = trimesh.creation.box(extents=(10, 10, 10))
+    codes = ["" for _ in box.faces]
+    codes[0] = "8"
+    paint = Paint(tuple(codes), ("#FF0000", "#00FF00"))
+    part = ColourPart(1, "Color 1", "#FFFFFF", box, paint, slot=0)
+    assert {p.colour: p.slot for p in painted_pieces([part])} == {"#FFFFFF": 0, "#00FF00": None}
 
 
 def test_a_painting_that_names_an_extruder_with_no_colour_is_refused() -> None:

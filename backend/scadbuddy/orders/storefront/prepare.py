@@ -195,8 +195,7 @@ def colour_choices(
 
 def _material_choices(listing: Listing, offered: Sequence[Filament]) -> dict[str, list[str]]:
     """`colour_choices` of one material, whose customer filaments are ``offered``."""
-    assert listing.snapshot is not None
-    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    by_name = {p.name: p for p in listing.design[2].schema_.parameters}
     spellings: dict[str, list[str]] = {}
     for filament in offered:
         same = spellings.setdefault(filament.colour.casefold(), [])
@@ -247,8 +246,7 @@ def _build(
     out. Then it goes through the visitor's render path (`renders.py` `checked_choice`):
     `listing_values`, `resolve_choice` with the asked names as given, `listing_reference`.
     A clash is left out, and of the combinations with one render key the first is kept."""
-    assert listing.snapshot is not None
-    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    by_name = {p.name: p for p in listing.design[2].schema_.parameters}
     built: dict[str, Combination] = {}
     for each in choices.values():
         names = list(each)
@@ -370,7 +368,8 @@ def _published(orders: OrdersComponent, listing_id: str) -> Listing:
     listing = orders.listings.get(listing_id)
     if listing is None:
         raise listing_not_found(listing_id)
-    if not listing.published or listing.snapshot is None:
+    if not listing.published or listing.template_snapshot is None:
+        # A file listing has no colour combinations to render (#6710).
         raise problem(
             status.HTTP_409_CONFLICT,
             "listing_not_published",
@@ -598,7 +597,7 @@ async def progress(state: AppState, orders: OrdersComponent, listing_id: str) ->
         # Up to the cap of references and keys: off the event loop (#6299 review).
         every = combinations(facts.listing, facts.filaments, facts.materials)
         keys = [c.reference.render_key for c in every]
-        return keys, job_states(state, facts.listing.slug, keys)
+        return keys, job_states(state, facts.listing.design[0], keys)
 
     keys, states = await asyncio.to_thread(read_states)
     seen = [states.get(key) for key in keys]
@@ -652,9 +651,9 @@ async def submit(
     if target is None:
         return Submitted(outcome="end")
     listing, combination = target
-    assert listing.snapshot is not None
+    slug, _, snapshot = listing.design
     reference = combination.reference
-    job = OpenJob(slug=listing.slug, render_key=reference.render_key)
+    job = OpenJob(slug=slug, render_key=reference.render_key)
     found = (await asyncio.to_thread(job_states, state, job.slug, [job.render_key])).get(
         job.render_key
     )
@@ -669,7 +668,7 @@ async def submit(
             params if isinstance(params, dict) else {},
             model_version=reference.commit,
             inputs=reference.inputs,
-            whole_inputs=listing.snapshot.pipeline,
+            whole_inputs=snapshot.pipeline,
             # One claim per run and key (#6299 review): a retry of this submit joins it,
             # and "Prepare again" makes a new one, so a failed render is rendered again.
             request_id=request_id(listing.id, run_id, reference.render_key),
@@ -737,7 +736,9 @@ async def warm(state: AppState, orders: OrdersComponent, ask: SubmitAsk) -> Warm
     if target is None:
         return Warmed(outcome="end")
     listing, combination = target
-    job = await asyncio.to_thread(_done_job, state, listing.slug, combination.reference.render_key)
+    job = await asyncio.to_thread(
+        _done_job, state, listing.design[0], combination.reference.render_key
+    )
     if job is None or job.result is None:
         return Warmed(outcome="settled")
     estimate = await estimate_of(
