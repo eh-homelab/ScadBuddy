@@ -169,7 +169,11 @@ from scadbuddy.profile_fetch.wire import (
 )
 from scadbuddy.profile_fetch.workflow import NOT_STARTED as TDFP_NOT_STARTED
 from scadbuddy.rows.component import ROWS, Rows
-from scadbuddy.workflows.commands import TemporalUnavailableError, temporal_failure
+from scadbuddy.workflows.commands import (
+    TemporalUnavailableError,
+    TemporalUnreachableError,
+    temporal_failure,
+)
 
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
@@ -821,10 +825,13 @@ def _tdfp_temporal(
     R-7025-15, R-7025-16): unavailable, busy or unreached (the lazy client's first connect
     failed, or the call timed out) is 503 `temporal-unavailable` with `Retry-After`, worth
     sending again; a refusal is 500 `temporal-refused`. ``None`` for a failure that is not
-    Temporal's, which the caller raises again."""
+    Temporal's, which the caller raises again. A client that never connected wrote no
+    request, so nothing can have started (`may_have_started` false where the route says it)."""
     failure = temporal_failure(error, what)
     if failure is None:
         return None
+    if isinstance(failure, TemporalUnreachableError) and may_have_started is not None:
+        may_have_started = False
     if isinstance(failure, TemporalUnavailableError):
         return temporal_unavailable(
             what,

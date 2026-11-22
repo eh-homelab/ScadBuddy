@@ -238,6 +238,8 @@ def test_a_client_that_never_connected_is_503_on_every_route(
     assert (search.status_code, search.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
     create = client.post(f"{URL}/tdfp/filaments", json=BODY, headers=KEY)
     assert (create.status_code, create.json()["type"]) == (503, TEMPORAL_UNAVAILABLE_PROBLEM)
+    # No request was written, so the create cannot have started.
+    assert create.json()["may_have_started"] is False
     type_id = _type(client, code="PLA-WHT", tdfp_id=30173)
     runner.started = _never_connected  # type: ignore[method-assign]
     checked = client.post(f"{URL}/tdfp/filaments", json={**BODY, "type_id": type_id}, headers=KEY)
