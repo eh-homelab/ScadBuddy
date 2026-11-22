@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import time
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -686,14 +687,59 @@ def test_an_import_waiting_on_another_is_refused_in_time(
     assert import_print(client, {"source": {"kind": "archive"}, "slug": model}).status_code == 201
 
 
+def _lost_first_import(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], key: dict[str, str]
+) -> None:
+    """A first request that makes the model but records no import: its answer is lost."""
+    from scadbuddy.api import print_imports as route
+
+    record = route._record
+
+    async def lost(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the answer never arrived")
+
+    monkeypatch.setattr(route, "_record", lost)
+    with pytest.raises(RuntimeError):
+        import_print(client, body, **key)
+    monkeypatch.setattr(route, "_record", record)
+    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+
+
+@pytest.mark.requires_git
 @respx.mock
-def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
+def test_a_retry_links_the_model_its_first_send_made_and_reads_no_source(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#5979: a first request makes the model but records no import; its retry with the
-    same key reads the source again, now other bytes, as a printer file overwritten in
-    between would be. The retry links nothing, and names the model only while it exists."""
-    from scadbuddy.api import print_imports as route
+    """#5979, #6969: the retry with the same key links the model the first request made
+    before it reads the source again, so a source gone since is no 404."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    answers = iter([httpx.Response(200, content=painted_3mf())])
+    download = respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        side_effect=lambda request: next(answers, httpx.Response(404))
+    )
+    body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
+    key = press()
+    _lost_first_import(client, monkeypatch, body, key)
+
+    made = import_print(client, body, **key)
+
+    assert made.status_code == 201, made.text
+    assert (made.json()["slug"], made.json()["created_model"]) == ("trophy", True)
+    assert download.call_count == 1
+    assert client.get(f"/api/v1/prints/{ARCHIVE}").json()["slug"] == "trophy"
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_retry_whose_model_was_deleted_and_source_changed_links_nothing(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5979: once the model the first request made is deleted, the retry reads the
+    source again, now other bytes, as a printer file overwritten in between would be. The
+    retry links nothing, and says the model was deleted."""
     from tests.api.test_mesh_models import painted_3mf
 
     configure(client)
@@ -702,32 +748,17 @@ def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
     respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
         side_effect=lambda request: httpx.Response(200, content=content["bytes"])
     )
-    record = route._record
-
-    async def lost(*args: Any, **kwargs: Any) -> None:
-        raise RuntimeError("the answer never arrived")
-
     body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
     key = press()
-    monkeypatch.setattr(route, "_record", lost)
-    with pytest.raises(RuntimeError):
-        import_print(client, body, **key)
-    monkeypatch.setattr(route, "_record", record)
-    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+    _lost_first_import(client, monkeypatch, body, key)
     content["bytes"] = a_3mf()
-
-    made = import_print(client, body, **key)
-
-    assert made.status_code == 409, made.text
-    assert "the model 'trophy' was made from" in made.json()["detail"]
-    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
-
     assert client.delete("/api/v1/models/trophy", headers=press()).status_code == 204
+
     gone = import_print(client, body, **key)
 
     assert gone.status_code == 409, gone.text
     assert "that request made the model 'trophy', which was deleted since" in gone.json()["detail"]
-    assert gone.json()["operation_id"] == made.json()["operation_id"]
+    assert gone.json()["operation_id"]
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
 
 
@@ -998,3 +1029,165 @@ def test_one_target_only(client: TestClient, model: str) -> None:
     )
 
     assert both.status_code == 422
+
+
+# --- a mesh model from a print's file (#6916) ----------------------------------------
+
+
+def _wait_finished(client: TestClient, slug: str, key: str, timeout: float = 30) -> None:
+    """Wait until the ``mesh_model_create`` sent with ``key`` for ``slug`` has its
+    finished row, or fail after ``timeout`` seconds."""
+    from scadbuddy.api.deps import STATE_ATTR
+    from scadbuddy.operations.component import OPERATIONS
+
+    store = getattr(client.app.state, STATE_ATTR).components.get(OPERATIONS).store  # type: ignore[attr-defined]
+    deadline = time.monotonic() + timeout
+    while True:
+        op = asyncio.run(store.keyed_operation("mesh_model_create", slug, key))
+        if op is not None and op.status != "running":
+            return
+        assert time.monotonic() < deadline, f"the operation is still {op and op.status}"
+        time.sleep(0.1)
+
+
+def from_mesh(client: TestClient, body: dict[str, Any], **headers: str) -> httpx.Response:
+    response: httpx.Response = client.post(
+        "/api/v1/models/from-mesh", json=body, headers=headers or None
+    )
+    return response
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_print_s_slicer_project_opens_as_a_mesh_model(client: TestClient, model: str) -> None:
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        return_value=httpx.Response(200, content=painted_3mf())
+    )
+    body = {"name": "Trophy", "archive_id": ARCHIVE, "archive_source": {"kind": "archive_source"}}
+    key = press()
+
+    made = from_mesh(client, body, **key)
+
+    assert made.status_code == 201, made.text
+    assert made.json()["slug"] == "trophy"
+    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+    # The model is no print of the archive: nothing links it.
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+    again = from_mesh(client, body, **key)
+    assert (again.status_code, again.json()["slug"]) == (201, "trophy")
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_printer_file_opens_as_a_mesh_model_and_is_not_kept(
+    client: TestClient, model: str
+) -> None:
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(
+        printer_files={
+            "path": "/cache",
+            "files": [{"name": "demo_elan.3mf", "path": "/cache/demo_elan.3mf", "size": 10}],
+            "warnings": [],
+        }
+    )
+    download = respx.get(
+        f"{API}/printers/1/files/download", params={"path": "/cache/demo_elan.3mf"}
+    ).mock(return_value=httpx.Response(200, content=painted_3mf()))
+    upload = respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(500, json={"detail": "no upload expected"})
+    )
+    body = {
+        "name": "From the printer",
+        "archive_id": ARCHIVE,
+        "archive_source": {"kind": "printer", "path": "/cache/demo_elan.3mf"},
+    }
+
+    made = from_mesh(client, body, **press())
+
+    assert made.status_code == 201, made.text
+    assert download.called and not upload.called
+    assert made.json()["mesh_source"]["name"] == "demo_elan.3mf"
+
+
+@pytest.mark.requires_git
+@respx.mock
+def test_a_resend_gets_the_first_model_after_the_printer_file_is_gone(
+    client: TestClient, model: str
+) -> None:
+    """#6969: a resend under the same key answers the model the first send made before
+    it reads the print's file, so the printer is read once, and a file it deleted since
+    is no 404."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    on_printer = {"name": "demo_elan.3mf", "path": "/cache/demo_elan.3mf", "size": 10}
+    bambuddy(printer_files={"path": "/cache", "files": [on_printer], "warnings": []})
+    download = respx.get(
+        f"{API}/printers/1/files/download", params={"path": "/cache/demo_elan.3mf"}
+    ).mock(return_value=httpx.Response(200, content=painted_3mf()))
+    body = {
+        "name": "From the printer",
+        "archive_id": ARCHIVE,
+        "archive_source": {"kind": "printer", "path": "/cache/demo_elan.3mf"},
+    }
+    key = press()
+    first = from_mesh(client, body, **key)
+    assert first.status_code == 201, first.text
+    # The 201 comes from the workflow's answer, before it writes the finished row; a
+    # resend after a lost answer comes later, so it reads the row finished.
+    _wait_finished(client, "from-the-printer", key["Idempotency-Key"])
+    listing = respx.get(f"{API}/printers/1/files", params={"path": "/cache"}).mock(
+        return_value=httpx.Response(200, json={"path": "/cache", "files": [], "warnings": []})
+    )
+    # respx reuses `bambuddy()`'s route of the same pattern, with the first send's call.
+    listed = listing.call_count
+
+    again = from_mesh(client, body, **key)
+
+    assert again.status_code == 201, again.text
+    assert again.json()["slug"] == first.json()["slug"] == "from-the-printer"
+    assert download.call_count == 1
+    assert listing.call_count == listed
+
+
+@respx.mock
+def test_a_print_s_sliced_file_does_not_open_as_a_mesh_model(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    bambuddy()
+    body = {"name": "Trophy", "archive_id": ARCHIVE, "archive_source": {"kind": "archive"}}
+
+    without_key = from_mesh(client, body)
+    sliced = from_mesh(client, body, **press())
+
+    assert without_key.status_code == 428
+    assert sliced.status_code == 422, sliced.text
+    assert "sliced file" in sliced.json()["detail"]
+    assert not [call for call in respx.calls if "/download" in call.request.url.path]
+
+
+@respx.mock
+def test_a_mesh_model_names_one_source_and_a_print_with_its_place(client: TestClient) -> None:
+    configure(client)
+
+    no_place = from_mesh(client, {"name": "T", "archive_id": ARCHIVE}, **press())
+    no_print = from_mesh(client, {"name": "T", "archive_source": {"kind": "archive"}}, **press())
+    two = from_mesh(
+        client,
+        {
+            "name": "T",
+            "archive_id": ARCHIVE,
+            "archive_source": {"kind": "archive"},
+            "library_file_id": 7,
+        },
+        **press(),
+    )
+
+    assert (no_place.status_code, no_print.status_code, two.status_code) == (422, 422, 422)

@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, type Throwaway, throwawayDatabase } from './support/postgres.js'
-import type { PostgresSessionStore } from '../src/sessions/store.js'
+import type { TranscriptStore } from '../src/sessions/store.js'
 import { warmHarness } from './support/warm.js'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** The next transcript-tail read waits until the test lets it go (or fails it). */
-type Moved = PostgresSessionStore['moved']
+type Moved = TranscriptStore['moved']
 
 /** The store's tail read (`moved`), held at its next call until released or failed. */
 function gatedMoved(real: Moved) {

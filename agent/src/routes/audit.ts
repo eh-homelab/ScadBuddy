@@ -31,15 +31,15 @@ import { ready, type RouteModule } from './module.js'
 // Error bodies use `{ detail }`, the backend's FastAPI shape.
 
 export type AuditRouteDeps = {
-  /** Undefined when there is no database (spec §9). */
+  /** Undefined when this process was not given it (tests). */
   audit: AuditRepo | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 const Instant = z.iso.datetime({ offset: true }).transform((s) => new Date(s))
 
@@ -68,7 +68,7 @@ export function registerAuditRoutes(app: Hono, deps: AuditRouteDeps): void {
   const base = '/api/v1/ai/audit'
 
   async function repo(): Promise<AuditRepo | string> {
-    if (!deps.audit) return NO_DATABASE
+    if (!deps.audit) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.audit : NOT_READY
   }
 

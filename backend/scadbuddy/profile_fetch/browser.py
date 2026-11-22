@@ -21,11 +21,12 @@ step runs at a time (a lock), on one signed-in browser (`steps.SiteHolder`). Whe
 goes away during a step (its activity was cancelled or timed out), the service cancels the
 step and closes the browser, since the page may be wedged mid-export.
 
-At start it serves, then signs in once. A refused login, or a browser that does not launch
-(Chromium's sandbox cannot start, plan Decision 6), ends the process with 1: every fetch
-would fail the same way. A bot check, a timeout or a browser failure after the launch is
-logged, and the first call signs in again. It sets ``RLIMIT_CORE`` to 0 before any browser
-launches, and makes itself non-dumpable (`hardening.forbid_dumping`).
+At start it serves, then signs in. A login refused on three tries (`LOGIN_RETRY_DELAYS`
+apart), or a browser that does not launch (Chromium's sandbox cannot start, plan
+Decision 6), ends the process with 1: every fetch would fail the same way. A bot check, a
+timeout or a browser failure after the launch is logged, and the first call signs in again.
+It sets ``RLIMIT_CORE`` to 0 before any browser launches, and makes itself non-dumpable
+(`hardening.forbid_dumping`).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ import os
 import resource
 import signal
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Final
@@ -81,6 +82,8 @@ SECRETS_DIR: Path = Path("/var/run/secrets")
 #: How long an ask's body may take to arrive once its head did.
 BODY_TIMEOUT: Final = 10.0
 BROWSER_DID_NOT_START: Final = "the browser did not start"
+#: The pauses between the start's sign-in tries after a refused login (#6941): three tries.
+LOGIN_RETRY_DELAYS: Final = (10.0, 30.0)
 
 Answer = tuple[int, dict[str, str], bytes]
 
@@ -98,25 +101,35 @@ class StartRefusedError(Exception):
     launch. Its text is fixed and holds no secret."""
 
 
-async def sign_in_at_start(sites: SiteHolder) -> None:
-    """Sign in once at start (the module docstring)."""
+async def sign_in_at_start(
+    sites: SiteHolder, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+) -> None:
+    """Sign in at start (the module docstring). A refused login is tried again after
+    each of `LOGIN_RETRY_DELAYS` before it refuses the start: on prod the site refused three
+    starts in a row and signed in the fourth, with the same login (#6941)."""
     refused: str | None = None
-    try:
-        await sites.get()
-    except SiteError as error:
-        if error.kind == "login_failed":
-            refused = "3DFP login failed"
-        else:
-            # The driver's own text, which never holds the login.
-            logger.warning(
-                "3DFP sign-in at start failed (%s): %s; the first call signs in again",
-                error.kind,
-                error,
-            )
-    except Exception as error:
-        # Logged by its class only: a launch error's text can quote the environment.
-        logger.error("the browser did not start (%s)", type(error).__name__)
-        refused = BROWSER_DID_NOT_START
+    for delay in (*LOGIN_RETRY_DELAYS, None):
+        refused = None
+        try:
+            await sites.get()
+        except SiteError as error:
+            if error.kind == "login_failed":
+                refused = "3DFP login failed"
+            else:
+                # The driver's own text, which never holds the login.
+                logger.warning(
+                    "3DFP sign-in at start failed (%s): %s; the first call signs in again",
+                    error.kind,
+                    error,
+                )
+        except Exception as error:
+            # Logged by its class only: a launch error's text can quote the environment.
+            logger.error("the browser did not start (%s)", type(error).__name__)
+            refused = BROWSER_DID_NOT_START
+        if refused != "3DFP login failed" or delay is None:
+            break
+        logger.warning("3DFP login failed at start; trying again in %.0f s", delay)
+        await sleep(delay)
     if refused is not None:
         # Raised outside the handler: the text is fixed, and no chain rides along.
         raise StartRefusedError(refused)
@@ -292,6 +305,24 @@ def _parse[M: BaseModel](model: type[M], ask: bytes) -> M | None:
         return None
 
 
+async def _until_stop(work: Coroutine[object, object, None], stop: asyncio.Event) -> None:
+    """Runs ``work`` until it ends or ``stop`` is set, whichever is first. The start's
+    sign-in can take minutes with its retries; a SIGTERM in that window cancels it, so a
+    rollout ends the pod before its grace period (claude-review on #6947)."""
+    task = asyncio.ensure_future(work)
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopping.cancel()
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    if not task.cancelled():
+        task.result()
+
+
 async def serve(
     settings: BrowserSettings,
     *,
@@ -318,7 +349,7 @@ async def serve(
     logger.info("profile-fetch browser service serving on %s", server.sockets[0].getsockname()[1])
     try:
         async with service.lock:
-            await sign_in_at_start(sites)
+            await _until_stop(sign_in_at_start(sites), stop)
         await stop.wait()
     finally:
         server.close()

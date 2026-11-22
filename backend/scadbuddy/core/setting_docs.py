@@ -328,6 +328,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "On, the API registers the built-in order-fulfilment flow at start when it has no"
             " version, or updates an unedited older built-in version.",
         ),
+        "storefront_warm_prices": SettingDoc(
+            "Warm storefront prices",
+            "On, publish renders a listing's default variant and slices its price, and"
+            " Prepare colours slices each prepared variant's, before a visitor asks.",
+        ),
         # -- Fonts ---------------------------------------------------------------------
         "google_fonts_api_key": SettingDoc(
             "Google Fonts API key",
@@ -434,6 +439,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
             " shopping list, with a note that names the spool. Nothing is added while an item"
             " for that type is still to buy. It orders nothing.",
+        ),
+        "filament_sync_pass_ttl_days": SettingDoc(
+            "Keep sync history for (days)",
+            "How long the list of Bambuddy sync passes keeps a pass, failed ones too. 1 to"
+            " 3650. Empty is the default, 30 days.",
         ),
         "filament_burn_window_days": SettingDoc(
             "Burn window, days",

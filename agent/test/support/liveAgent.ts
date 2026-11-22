@@ -25,7 +25,6 @@ export async function startLiveAgent(sessions: SessionManager, overrides: Partia
   const app = createApp({
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: false, reason: 'not needed here' },
     credentials,
     testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
     remoteAddress: (c) => {

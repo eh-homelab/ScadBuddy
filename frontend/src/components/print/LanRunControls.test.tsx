@@ -22,7 +22,7 @@ function posted(action: 'stop' | 'plate-cleared', status = 202) {
 }
 
 function controls(control: Partial<LanRunControl> = {}) {
-  render(<LanRunControls control={{ run_id: RUN, waiting: 2, awaiting_clear: false, queued: false, ...control }} printerName="H2C" />)
+  render(<LanRunControls control={{ run_id: RUN, waiting: 2, awaiting_clear: false, queued: false, queued_for_print: false, printer_idle: false, ...control }} printerName="H2C" />)
 }
 
 describe('LanRunControls (#4942, #4939)', () => {
@@ -74,9 +74,25 @@ describe('LanRunControls (#4942, #4939)', () => {
 // #6871 — a run queued on a busy printer has started nothing yet.
 describe('LanRunControls · a run queued on a busy printer', () => {
   it('says it waits for the print the printer runs', () => {
-    controls({ waiting: 1, queued: true })
+    controls({ waiting: 1, queued: true, queued_for_print: true })
     expect(screen.getByTestId('lan-run-controls')).toHaveTextContent(
       'Queued until H2C has finished the print it is running. 1 print still to start.',
     )
+  })
+
+  it('says the plate may still hold the print before when the printer reads idle', () => {
+    controls({ waiting: 1, queued: true, queued_for_print: false, printer_idle: true })
+    const text = screen.getByTestId('lan-run-controls')
+    expect(text).toHaveTextContent(
+      'Queued until the plate of H2C is said clear. It reads idle, but its plate may still hold the print before: clear it if so.',
+    )
+    expect(text).not.toHaveTextContent('holds a print that has ended')
+  })
+
+  it('says it waits for a cleared plate when no print is running', () => {
+    controls({ waiting: 1, queued: true, queued_for_print: false })
+    const text = screen.getByTestId('lan-run-controls')
+    expect(text).toHaveTextContent('Queued until the plate of H2C is clear: it holds a print that has ended.')
+    expect(text).not.toHaveTextContent('the print it is running')
   })
 })

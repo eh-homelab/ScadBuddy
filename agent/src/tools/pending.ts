@@ -10,10 +10,10 @@ import type { WorkspaceRef } from '../workspace/store.js'
 //
 // Two stores implement `OutwardActions`:
 //   - approvals/mcp.ts `ApprovalActions`, over `ai_approvals` (#258): the one
-//     main.ts uses whenever there is a database. The UI decides there, and a
+//     main.ts uses. The UI decides there, and a
 //     confirm runs the call once, for the principal that prepared it, with the
 //     input that was approved.
-//   - `PendingActionStore` below, in memory, when there is no database: with
+//   - `PendingActionStore` below, in memory, for a process with no session manager (tests): with
 //     nowhere for a human to approve, its actions are never confirmed. The
 //     safe direction: nothing outward runs without the approval store.
 
@@ -134,7 +134,7 @@ export class PendingActionStore implements OutwardActions {
       status: 'refused',
       reason:
         `Not confirmed: "${action.summary}" needs a human approval in the ScadBuddy UI, and approvals need the ` +
-        "agent's database (SCADBUDDY_DATABASE_URL), which is not configured. Nothing was sent.",
+        "agent's session manager, which is not set up in this process. Nothing was sent.",
     }
   }
 

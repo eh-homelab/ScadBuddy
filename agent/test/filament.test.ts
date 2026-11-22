@@ -869,6 +869,8 @@ const SYNC = `${BACKEND}/api/v1/filament/sync`
 describe('filament Bambuddy sync tools (#6265)', () => {
   it.each([
     ['filament_sync_status', 'read', false],
+    // #6905: the pass history reads ScadBuddy only.
+    ['filament_sync_passes', 'read', false],
     // It writes Bambuddy, as filament_rfid_reconcile does: outward and approved first.
     ['filament_sync_run', 'outward', true],
     // #6773: it deletes the links and asks for a pass that writes Bambuddy.
@@ -942,7 +944,7 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
     const activities = toolActivities(ALL_TOOLS, deps)
     const calls = toolCallActivities(ALL_TOOLS, deps)
-    for (const name of ['filament_sync_status', 'filament_sync_run']) {
+    for (const name of ['filament_sync_status', 'filament_sync_passes', 'filament_sync_run']) {
       expect(activities[name]).toBeTypeOf('function')
       expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
     }
@@ -958,6 +960,25 @@ describe('filament Bambuddy sync tools (#6265)', () => {
     const status = { instance: null, errors: [], skipped: 'no_bambuddy' }
     server.use(http.get(`${SYNC}/status`, () => HttpResponse.json(status)))
     expect(firstText(await runTool(tool('filament_sync_status'), {}, ctx()))).toEqual(status)
+  })
+
+  it('reads the pass history a page at a time (#6905)', async () => {
+    const queries: Record<string, string>[] = []
+    const page = {
+      passes: [{ id: ROW, trigger: 'timer', error: 'crud_unavailable:transport', written: 0 }],
+      next_cursor: 'abc',
+    }
+    server.use(
+      http.get(`${SYNC}/passes`, ({ request }) => {
+        queries.push(Object.fromEntries(new URL(request.url).searchParams))
+        return HttpResponse.json(page)
+      }),
+    )
+    const t = tool('filament_sync_passes')
+    expect(firstText(await runTool(t, {}, ctx()))).toEqual(page)
+    await runTool(t, { cursor: 'abc', limit: 5 }, ctx())
+    expect(queries).toEqual([{ limit: '20' }, { cursor: 'abc', limit: '5' }])
+    expect(() => t.parse({ limit: 201 })).toThrow()
   })
 
   it('asks for a full pass with POST', async () => {
@@ -1230,5 +1251,66 @@ describe('filament type proposal tools (#6701)', () => {
       ctx(),
     )
     expect(refused.isError).toBe(true)
+  })
+})
+
+describe('the colour catalog syncs (#6907)', () => {
+  const SYNCS = `${BACKEND}/api/v1/filament/colour-syncs`
+  const RUN = {
+    id: ROW,
+    source: 'bambu',
+    state: 'done',
+    pages_read: 1,
+    pages_total: 1,
+    total: 4,
+    added: 4,
+    updated: 0,
+    unchanged: 0,
+    kept: 0,
+    skipped: 0,
+    error: null,
+    started_at: '2026-11-21T12:00:00Z',
+    finished_at: '2026-11-21T12:00:01Z',
+  }
+
+  it.each([
+    ['filament_colour_sync', 'write'],
+    ['filament_colour_sync_status', 'read'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('starts a sync with a key and answers the run', async () => {
+    const seen: { body: unknown; key: string | null }[] = []
+    server.use(
+      http.post(SYNCS, async ({ request }) => {
+        seen.push({ body: await request.json(), key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json(RUN)
+      }),
+    )
+    const result = await runTool(tool('filament_colour_sync'), { source: 'bambu' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.body).toEqual({ source: 'bambu', force: false })
+    expect(seen[0]!.key).toBeTruthy()
+    expect(firstText(result)).toMatchObject({ state: 'done', added: 4 })
+  })
+
+  it('reads the newest runs', async () => {
+    server.use(http.get(SYNCS, () => HttpResponse.json([RUN])))
+    const result = await runTool(tool('filament_colour_sync_status'), {}, ctx())
+    expect(firstText(result)).toEqual([RUN])
+  })
+
+  it('passes a colour search to the catalog list', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/catalog/colours`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('q')).toBe('jade white')
+        return HttpResponse.json([])
+      }),
+    )
+    const result = await runTool(tool('filament_catalog_list'), { kind: 'colours', q: 'jade white' }, ctx())
+    expect(result.isError).toBeFalsy()
   })
 })

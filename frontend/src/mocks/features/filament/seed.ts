@@ -202,9 +202,10 @@ function catalogs(): Catalogs {
       { ...row(61, 'Cardboard spool', 1), empty_weight_g: 180, insert_material_id: catalogId(51), note: null, bb_catalog_id: null },
     ],
     colours: [
-      { ...row(70, 'Jade White'), manufacturer: 'Bambu Lab', rgba: '#FFFFFFFF', material_id: M.PLA, extra_colours: null, effect_id: null },
-      { ...row(71, 'Hot Pink'), manufacturer: 'Bambu Lab', rgba: '#F5547CFF', material_id: M.PLA, extra_colours: null, effect_id: null },
-      { ...row(72, 'Translucent Orange'), manufacturer: 'Bambu Lab', rgba: '#FF6A1380', material_id: M.PETG, extra_colours: null, effect_id: E.TRANSLUCENT },
+      // #6907: a synced row (`source`, `synced_at` its `updated_at`), and a person's own.
+      { ...row(70, 'Jade White'), manufacturer: 'Bambu Lab', rgba: '#FFFFFFFF', material_id: M.PLA, material_name: 'PLA Basic', extra_colours: null, effect_id: null, source: 'bambu', synced_at: AT, bb_colour_id: null },
+      { ...row(71, 'Hot Pink'), manufacturer: 'Bambu Lab', rgba: '#F5547CFF', material_id: M.PLA, material_name: null, extra_colours: null, effect_id: null, source: null, synced_at: null, bb_colour_id: null },
+      { ...row(72, 'Translucent Orange'), manufacturer: 'Bambu Lab', rgba: '#FF6A1380', material_id: M.PETG, material_name: null, extra_colours: null, effect_id: E.TRANSLUCENT, source: null, synced_at: null, bb_colour_id: null },
     ],
     'location-kinds': [
       { ...row(80, 'Room'), dry_storage: false, ams: false },

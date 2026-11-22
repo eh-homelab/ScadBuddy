@@ -935,7 +935,7 @@ export async function command<T>(
  * upload progress; a video runs to a gigabyte. `onProgress` gets the fraction sent, 0
  * to 1. `form` builds the body afresh for each re-send.
  */
-function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
+export function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fraction: number) => void): Promise<T> {
   // A command (#1054): one key for this upload, kept on a re-send after an answer
   // that never arrived, so the server adds the item once.
   const key = newRequestId()

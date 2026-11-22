@@ -40,6 +40,7 @@ from scadbuddy.auth.routes import (
     Route,
     endpoint_name,
     route_class,
+    scriptless,
     would_refuse,
 )
 from scadbuddy.auth.service_credentials import SCOPES
@@ -102,6 +103,20 @@ def test_every_scriptless_get_is_a_get_route() -> None:
         if isinstance(route, APIRoute) and "GET" in (route.methods or ())
     }
     assert gets >= SCRIPTLESS_GETS, SCRIPTLESS_GETS - gets
+
+
+def test_a_files_bytes_are_scriptless_gets_on_every_entity() -> None:
+    """An `<img>`, `<video>` or download link carries no header, so an entity's file
+    and its thumbnail pass on the cookie as an order's do."""
+    served = {
+        route.path
+        for route in ROUTES
+        if route.endpoint.__module__ == "scadbuddy.api.entity_attachments" and scriptless(route)
+    }
+    assert served == {
+        "/entities/{ref}/attachments/{attachment_id}/content",
+        "/entities/{ref}/attachments/{attachment_id}/thumbnail",
+    }
 
 
 def test_an_endpoint_only_a_person_may_call_is_person() -> None:

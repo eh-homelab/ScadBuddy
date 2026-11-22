@@ -58,7 +58,7 @@ from scadbuddy.orders.storefront.model_requests import (
     draft_sources,
     insert_links,
 )
-from scadbuddy.orders.storefront.renders import checked_choice
+from scadbuddy.orders.storefront.renders import checked_choice, variant_colours, variant_key
 from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
@@ -375,10 +375,13 @@ async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
     return None if order is None else await _view(state, order)
 
 
-async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> list[str] | None:
-    """The slot colours of the visitor's own done render of ``render_key``, or None when
-    it has none (#6152): the add fills each slot the page left out with the filament of
-    its colour in the resolved material (#6258)."""
+async def _render_colours(
+    state: AppState, visitor_id: str, render_key: str, variant: str
+) -> list[str] | None:
+    """The slot colours of the visitor's own done render of ``render_key``, else those a
+    priced slice of the choices' variant ``variant`` recorded (#6921: the page showed its
+    preview with no render), or None when there are none (#6152): the add fills each slot
+    the page left out with the filament of its colour in the resolved material (#6258)."""
 
     def read() -> list[str] | None:
         visitor = VisitorStore(state.projection.pool).find(visitor_id)
@@ -395,7 +398,8 @@ async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> 
             return None
         return list(job.result.colors)
 
-    return await asyncio.to_thread(read)
+    found = await asyncio.to_thread(read)
+    return found if found is not None else await variant_colours(state, variant)
 
 
 async def add_listing_item(
@@ -419,7 +423,7 @@ async def add_listing_item(
         orders,
         body,
         shop.storefront_materials,
-        render_colours=lambda key: _render_colours(state, visitor_id, key),
+        render_colours=lambda key, variant: _render_colours(state, visitor_id, key, variant),
     )
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     by = visitor_actor(visitor)
@@ -431,6 +435,7 @@ async def add_listing_item(
         render_key=resolved.reference.render_key,
         colours=body.colours,
         material=choice.material,
+        variant_key=variant_key(listing, choice, body.colours),
     )
     price = None if variant is None else await price_of(state, resolved.reference, variant)
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])

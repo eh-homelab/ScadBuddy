@@ -189,6 +189,7 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
+from scadbuddy.api.disconnect import until_disconnect
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, RouteLimit
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
@@ -216,6 +217,7 @@ from scadbuddy.bambuddy.uploads import (
     ProjectTarget,
     SlicedCopy,
 )
+from scadbuddy.core.cancel import CancelToken
 from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -246,6 +248,8 @@ from scadbuddy.filament import print_uses, sensors
 from scadbuddy.filament.bb_pull_apply import LocalBbPull
 from scadbuddy.filament.bb_pull_models import (
     INSTANCE_CHANGED,
+    ColoursApplied,
+    ColoursBody,
     HaBody,
     PullApplied,
     PullBody,
@@ -256,6 +260,7 @@ from scadbuddy.filament.bb_pull_models import (
     UsageBooked,
 )
 from scadbuddy.filament.bb_sync_models import (
+    SYNC_BUSY,
     PlanRequest,
     ResultsReport,
     ResultsRequest,
@@ -263,6 +268,7 @@ from scadbuddy.filament.bb_sync_models import (
     SyncPlan,
     without_empty_unconfirmed,
 )
+from scadbuddy.filament.bb_sync_plan import SyncBusyError
 from scadbuddy.filament.bb_sync_results import LocalFilamentSync
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.models import EffectivePreset, FilamentInventorySpool, TrayView
@@ -303,12 +309,12 @@ from scadbuddy.store.content_models import content_index_key
 
 logger = logging.getLogger(__name__)
 
-#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's four routes, whatever the
+#: For ``main.py``'s `BodySizeGate` (#6861): the Bambuddy pull's five routes (#6907), whatever the
 #: content type. The gate counts only a type in its table, and FastAPI reads a body with
 #: no Content-Type as JSON, so without this a header left out would skip the cap.
 PULL_ROUTE_LIMIT = RouteLimit(
     "POST",
-    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays)?$"),
+    re.compile(rf"^{re.escape(BASE)}/filament/pull(?:/usage|/ha-states|/trays|/colours)?$"),
     MAX_TEXT_BODY_BYTES,
     "a Bambuddy pull",
     "fixed, api/limits.py MAX_TEXT_BODY_BYTES",
@@ -1941,14 +1947,20 @@ async def filament_sync_directions(sync: SyncDep) -> FilamentSync:
         " records its intent in this call, so a plan sent again plans the same create"
         " from that intent. A snapshot of another Bambuddy than the configured one plans"
         " nothing and answers `instance_changed` (#6773). `unconfirmed` is left out when"
-        " it is empty (#6688)."
+        " it is empty (#6688). A caller that goes away rolls the plan back unless it had"
+        " already reached its commit; a plan sent again is safe either way. A call while"
+        " another plan or results call of the instance runs is 503 `sync_busy` (#6902)."
     ),
     response_model=SyncPlan,
 )
-async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> JSONResponse:
+async def filament_sync_plan(body: PlanRequest, sync: SyncDep, request: Request) -> JSONResponse:
     """Natural: a plan sent again finds the intent it recorded. With nothing unconfirmed
-    the key is left out, so a print worker from before it takes the plan (R-6688-11)."""
-    return JSONResponse(without_empty_unconfirmed(await sync.plan(body.snapshot, body.limit)))
+    the key is left out, so a print worker from before it takes the plan (R-6688-11).
+    Single-flight and cancelled with its caller (#6902): `_sync_call`."""
+    planned = await _sync_call(
+        request, lambda token: sync.plan(body.snapshot, body.limit, cancel=token)
+    )
+    return JSONResponse(without_empty_unconfirmed(planned))
 
 
 @router.post(
@@ -1960,15 +1972,35 @@ async def filament_sync_plan(body: PlanRequest, sync: SyncDep) -> JSONResponse:
         " a result whose write names no SB item, or another Bambuddy row, is ignored. A"
         ' list `PUT`\'s answer is `{"k_profiles": rows}` or `{"suppliers": rows}`. Answers'
         " the counts of items linked, updated, failed and unlinked. Results for another"
-        " Bambuddy than the configured one are all ignored (#6773)."
+        " Bambuddy than the configured one are all ignored (#6773). The round is one"
+        " transaction: a caller that goes away rolls it back whole unless it had already"
+        " reached its commit; results sent again are safe either way. A call while"
+        " another plan or results call of the instance runs is 503 `sync_busy` (#6902)."
     ),
 )
-async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsReport:
+async def filament_sync_results(
+    body: ResultsRequest, sync: SyncDep, request: Request
+) -> ResultsReport:
     """Natural: a result sent again finds its item linked or recorded and is ignored, and a
-    refusal sent again with the plan's `pass_id` adds no attempt (R-T6-5)."""
-    return await sync.results(
-        body.instance, body.writes, body.results, body.pass_id, body.unconfirmed
+    refusal sent again with the plan's `pass_id` adds no attempt (R-T6-5). Single-flight
+    and cancelled with its caller (#6902): `_sync_call`."""
+    return await _sync_call(
+        request,
+        lambda token: sync.results(
+            body.instance, body.writes, body.results, body.pass_id, body.unconfirmed, token
+        ),
     )
+
+
+async def _sync_call[T](request: Request, work: Callable[[CancelToken], Awaitable[T]]) -> T:
+    """A plan or results call (#6902): its work stops and rolls back when the print worker
+    goes away (`until_disconnect`) before the work reached its commit, and a call while
+    another of the instance runs is 503 `SYNC_BUSY`, which the worker's client tries again
+    after a backoff, so a retry never runs beside a call that has not ended yet."""
+    try:
+        return await until_disconnect(request, work)
+    except SyncBusyError as busy:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(busy), reason=SYNC_BUSY) from None
 
 
 @router.post(
@@ -1978,11 +2010,13 @@ async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsR
     status_code=status.HTTP_204_NO_CONTENT,
     description=(
         "Writes the sync's state row (#6265): the pass's time and counts, its error, and"
-        " the time of the last clean pass only when `error` is null."
+        " the time of the last clean pass only when `error` is null; and the pass's history"
+        " row (#6905), the history row only for an `instance_changed` pass."
     ),
 )
 async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
-    """Natural: the row is set, not added to."""
+    """Natural: the state row is set, and the history row is keyed by ``pass_id``, so a
+    second send of one pass adds nothing."""
     await sync.record_pass(body)
 
 
@@ -2019,9 +2053,12 @@ async def _for_configured[T](write: Awaitable[T]) -> T:
         " Bambuddy (#6845)."
     ),
 )
-async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
-    """Natural: a pull of the same rows changes nothing the first did not."""
-    return await _for_configured(sync.apply(body))
+async def filament_pull(body: PullBody, sync: PullDep, request: Request) -> PullApplied:
+    """Natural: a pull of the same rows changes nothing the first did not. It stops when
+    the print worker goes away (#6902, `until_disconnect`)."""
+    return await _for_configured(
+        until_disconnect(request, lambda token: sync.apply(body, cancel=token))
+    )
 
 
 @router.post(
@@ -2033,9 +2070,13 @@ async def filament_pull(body: PullBody, sync: PullDep) -> PullApplied:
         " (#6772, `filament/bambuddy_usage.py`). 409 `instance_changed` as the pull's."
     ),
 )
-async def filament_pull_usage(body: UsageBody, sync: PullDep) -> UsageBooked:
-    """Natural: a row's ``bb_usage`` event names it, so it is booked once."""
-    return await _for_configured(sync.book_usage(body))
+async def filament_pull_usage(body: UsageBody, sync: PullDep, request: Request) -> UsageBooked:
+    """Natural: a row's ``bb_usage`` event names it, so it is booked once. It rolls back
+    when the print worker goes away before the booking reached its commit (#6902,
+    `until_disconnect`)."""
+    return await _for_configured(
+        until_disconnect(request, lambda token: sync.book_usage(body, cancel=token))
+    )
 
 
 @router.post(
@@ -2068,6 +2109,22 @@ async def filament_pull_ha_states(body: HaBody, sync: PullDep) -> None:
 async def filament_pull_trays(body: TraysBody, sync: PullDep) -> TraysReconciled:
     """Natural: a tray already set right is left alone."""
     return TraysReconciled(moved=await _for_configured(sync.reconcile_trays(body)))
+
+
+@router.post(
+    "/filament/pull/colours",
+    name="crud_print_filament_pull_colours",
+    summary="Fill the colour catalog from Bambuddy's",
+    description=(
+        "Bambuddy's colour catalog (`GET /inventory/colors`) the worker read, written into"
+        " SB's (#6907, `filament/colour_catalog.py`): each entry linked by its Bambuddy id,"
+        " else matched by maker, name and material; a row a person made or edited is left"
+        " as it is. 409 `instance_changed` as the pull's."
+    ),
+)
+async def filament_pull_colours(body: ColoursBody, sync: PullDep) -> ColoursApplied:
+    """Natural: the same entries write nothing the first did not."""
+    return await _for_configured(sync.colours(body))
 
 
 # -- a sensor's alert notifications (area ``sensor-notify``, #6646) ----------------------

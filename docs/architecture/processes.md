@@ -162,12 +162,14 @@ Fetches a new spool type's slicer presets per printer model and nozzle from
 One image, two roles ([agent.md](agent.md#processes-and-roles)). The sidecar serves
 `/api/v1/ai/*` and `/mcp` in the API pod; the worker runs the turns.
 
-- **Reads.** `ENV_VARS` (`agent/src/config.ts:113-138`): today's code includes
-  `SCADBUDDY_DATABASE_URL` and the KEK, plus Temporal, a service proof and the sandbox
-  settings.
-- **Zone.** Today's code still breaks the database rule: both roles connect to Postgres
-  (#5299), though the agent's data now goes through CRUD routes and SQL remains only as a
-  fallback while the API does not list an area ([agent.md](agent.md#trust-zone)). Claude Code and plugin code run in the worker.
+- **Reads.** `ENV_VARS` (`agent/src/config.ts`): the backend URL, Temporal, a required
+  service proof and the sandbox settings. It ignores `SCADBUDDY_DATABASE_URL`,
+  `SCADBUDDY_SECRET_KEY_FILE` and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` with one warning
+  (`IGNORED_VARS`).
+- **Zone.** Neither role holds a database client or a KEK (#5299 step 12): the agent's data
+  is the API's CRUD routes, and it is not ready until the API lists every area it wants and
+  has released the input-hash key ([agent.md](agent.md#trust-zone)). Claude Code and plugin
+  code run in the worker, with its service credential and its Temporal client.
 
 ## Session sandbox and egress proxy
 
@@ -180,7 +182,7 @@ The agent worker creates the pods through the Kubernetes API (`agent/src/sandbox
 Serves only `/healthz` and runs no Temporal worker
 (`agent-durable/src/scadbuddy_durable/__main__.py:25-37`,
 `agent-durable/src/scadbuddy_durable/worker.py:21-24`). Its Deployment is at zero replicas
-and still mounts the database secret and the KEK; see
+and mounts no database secret and no KEK; see
 [`agent-durable/CLAUDE.md`](../../agent-durable/CLAUDE.md).
 
 ## Slicer worker

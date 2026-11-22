@@ -4,6 +4,7 @@ a fake `FilamentSyncApi`; no call reaches a live Bambuddy."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -18,6 +19,7 @@ import respx
 
 from scadbuddy.bambuddy.errors import BAD_BODY_PROBLEM
 from scadbuddy.core.settings import FilamentSync
+from scadbuddy.filament import bb_sync_run
 from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
     BbWrite,
@@ -185,7 +187,8 @@ async def test_another_instance_calls_nothing() -> None:
 
     assert result.instance_changed is True
     assert not respx.calls
-    assert sync.plans == [] and sync.recorded == []
+    # #6905: a history row only; `record_pass` leaves the state row alone for it.
+    assert sync.plans == [] and sync.recorded == [result]
 
 
 @respx.mock
@@ -494,6 +497,28 @@ async def test_every_write_heartbeats() -> None:
 
     # Five listings, the first plan, three writes, the results, and the empty second plan.
     assert len(beats) == 5 + 1 + 3 + 1 + 1
+
+
+@respx.mock
+async def test_a_slow_plan_call_heartbeats_while_it_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6902: a plan or results call may take longer than the pass's heartbeat timeout,
+    so the pass heartbeats every `CALL_BEAT_S` while one runs."""
+    monkeypatch.setattr(bb_sync_run, "CALL_BEAT_S", 0.01)
+    _listings()
+
+    class Slow(FakeSync):
+        async def plan(self, snap: BbSnapshot, limit: int) -> SyncPlan:
+            await asyncio.sleep(0.2)
+            return await super().plan(snap, limit)
+
+    beats, beat = _beats()
+
+    await _run(Slow([_plan([])]), heartbeat=beat)
+
+    # Five listings and the plan's own beat, and more while the plan ran.
+    assert len(beats) > 5 + 1 + 5
 
 
 @respx.mock
@@ -887,8 +912,9 @@ async def test_a_plan_for_another_instance_stops_the_pass() -> None:
     result = await _run(sync)
 
     assert result.instance_changed is True and len(sync.plans) == 1
-    # R-T7-7: SB's links belong to another Bambuddy; the pass records nothing.
-    assert sync.recorded == []
+    # R-T7-7: SB's links belong to another Bambuddy; the pass records its history row only
+    # (#6905: `record_pass` writes no state row for an `instance_changed` pass).
+    assert sync.recorded == [result]
 
 
 @respx.mock

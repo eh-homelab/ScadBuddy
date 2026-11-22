@@ -1,4 +1,4 @@
-import { type AccessReader, type AccessWriter, checkItem, checkSwitch } from '../../src/access/store.js'
+import { type AccessEdit, type AccessReader, type AccessRows, type AccessWriter, checkItem, checkSwitch } from '../../src/access/store.js'
 import { type AccessRow, SOURCE_ITEM } from '../../src/access/model.js'
 
 /** An in-memory AccessStore for tests with no Postgres; `reads.n` counts `rows()` calls. */
@@ -64,4 +64,63 @@ export function rowsFromOverrides(
     if (!disabled_tools.includes(item)) out.push({ source, item, access, updated_by })
   }
   return out
+}
+
+/** `rows` (of any sources) as they stand after `edit`. */
+function applyEdit(rows: readonly AccessRow[], edit: AccessEdit, by: string): AccessRow[] {
+  const mine = (r: AccessRow): boolean => r.source === edit.source
+  if (edit.kind === 'forget') return rows.filter((r) => !mine(r))
+  if (edit.kind === 'replace') {
+    const kept = rows.filter((r) => !mine(r) || r.item === SOURCE_ITEM)
+    return [...kept, ...Object.entries(edit.tools).map(([item, access]) => ({ source: edit.source, item, access, updated_by: by }))]
+  }
+  let out = [...rows]
+  for (const [item, access] of Object.entries(edit.items)) {
+    out = out.filter((r) => !(mine(r) && r.item === item))
+    if (access !== null) out.push({ source: edit.source, item, access, updated_by: by })
+  }
+  return out
+}
+
+/** The source's rows as `item=access`, sorted: what a write changes (`updated_by` aside). */
+function shape(rows: readonly AccessRow[], source: string): string {
+  return rows
+    .filter((r) => r.source === source)
+    .map((r) => `${r.item}=${r.access}`)
+    .sort()
+    .join('\n')
+}
+
+/**
+ * `ai_access` as the API's `…/access/*` routes keep it, for `AccessStore` without the API: a
+ * write is all or nothing (a write touching `refuse` fails and changes nothing), and
+ * `skipUnchanged` drops an edit that leaves its source's rows as they are.
+ */
+export class MemoryAccessRows implements AccessRows {
+  stored: AccessRow[] = []
+  refuse: string | undefined
+
+  async rows(sources: readonly string[]): Promise<AccessRow[]> {
+    const key = (r: AccessRow) => `${r.source}\u0000${r.item}`
+    return this.stored
+      .filter((r) => sources.includes(r.source))
+      .sort((a, b) => (key(a) < key(b) ? -1 : 1))
+      .map((r) => ({ ...r }))
+  }
+
+  async row(source: string, item: string): Promise<AccessRow | undefined> {
+    const row = this.stored.find((r) => r.source === source && r.item === item)
+    return row && { ...row }
+  }
+
+  async write(edits: readonly AccessEdit[], by: string, skipUnchanged: boolean): Promise<number[]> {
+    const applied = edits.flatMap((e, i) =>
+      !skipUnchanged || shape(applyEdit(this.stored, e, by), e.source) !== shape(this.stored, e.source) ? [i] : [],
+    )
+    if (applied.some((i) => edits[i]!.source === this.refuse)) throw new Error('refused for the test')
+    let next = this.stored
+    for (const i of applied) next = applyEdit(next, edits[i]!, by)
+    this.stored = next
+    return applied
+  }
 }

@@ -1,19 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import type { Sql, TransactionSql } from 'postgres'
 import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import type { AttentionReason, OnTimeout } from '../harness/attention.js'
-import { ATTENTION_TOOL, parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
+import { parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
-import { event, type Owner, PROTOCOL_VERSION, type QuestionAnswerMessage, type QuestionView, type ServerEvent } from '../sessions/protocol.js'
+import { type Owner, PROTOCOL_VERSION, type QuestionAnswerMessage, type QuestionView } from '../sessions/protocol.js'
 import type { Logged } from './crudStore.js'
 import { QuestionRefused, type QuestionRoutes } from './crudQuestions.js'
-import { doneSummary, loadDoneSummary } from './doneSummary.js'
-import { WAIT_FOR_USER } from './entry.js'
+import { doneSummary } from './doneSummary.js'
 import { parseRequestId } from './ids.js'
-import { inputRequested, inputResolved, questionEntry } from './projection.js'
-import { isDoneSummary } from './waiting.js'
 
 // The gate's questions outside the workflow (#940, #815), folded here from
 // agent/src/questions/ (unified runtime plan Steps 8.2 and 9.7). Every session is an
@@ -29,6 +25,8 @@ import { isDoneSummary } from './waiting.js'
 //   - #815 §5's rate limits on an AgentSession's attention requests and tab waits
 //     (`attentionLimit`), which count the gate's own `wait_for_user` entries.
 //   - The `question` audit row of an answered entry (`auditGateAnswer`, #1075).
+//
+// The rows live on the API (gate/crudQuestions.ts, area `questions`, #5299 step 10).
 //
 // The question timer's settings (`question_expiry_seconds`) are the gate's
 // (temporal/session/gateActivities.ts).
@@ -62,16 +60,12 @@ export const TAB_WAIT_RATE_LIMIT = 10
  * model looping on done is bounded here, before each post scans the turn's touches.
  */
 export const DONE_POSTS_PER_TURN = 3
-/** The advisory lock the rate limit's count and the entry's open are taken under. */
-export const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
-/** How long `attentionLimit` holds its lock for the entry's open (a workflow Update round trip). */
+/** How long `attentionLimit` holds its lease for the entry's open (a workflow Update round trip). */
 const OPEN_WAIT_MS = 10_000
-/** How long `attentionLimit` waits before it tries the lock again, at most; it holds no connection meanwhile. */
+/** How long `attentionLimit` waits before it tries the lease again, at most. */
 const RATE_LOCK_RETRY_MS = 50
-/** How long `attentionLimit` tries the lock before it refuses: past one holder's OPEN_WAIT_MS, twice over (#5053). */
+/** How long `attentionLimit` tries the lease before it refuses: past one holder's OPEN_WAIT_MS, twice over (#5053). */
 const RATE_LOCK_WAIT_MS = 2 * OPEN_WAIT_MS + 5_000
-/** Why a newer summary ended an older one. */
-const REPLACED = 'replaced by a newer request for the same reason'
 
 export type QuestionErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'invalid'
 
@@ -86,15 +80,14 @@ export class QuestionError extends Error {
 }
 
 export type QuestionServiceDeps = {
-  sql: Sql
+  /** The API's routes, area `questions` (gate/crudQuestions.ts). */
+  routes: QuestionRoutes
   /** The session event log the question events go to. */
   events: EventLog
   /** The AI audit log (#1075): one `question` row per answer. */
   audit?: Pick<AuditLog, 'record' | 'hash'>
-  /** Tests only: how long `attentionLimit` tries the rate lock before it refuses (default RATE_LOCK_WAIT_MS). */
+  /** Tests only: how long `attentionLimit` tries the rate lease before it refuses (default RATE_LOCK_WAIT_MS). */
   rateLockWaitMs?: number
-  /** The API's routes, once it lists area `questions` (#5299 step 10); the SQL above until then. */
-  routes?: { crud: QuestionRoutes; use: () => boolean } | undefined
 }
 
 /** What `gate()` needs to know about the turn that posts. */
@@ -114,14 +107,11 @@ export type QuestionGateContext = {
    */
   turnStartedAt: string
   /**
-   * The turn's placement (`turn_attempt`): through the API a post lands only while it and
-   * `turnId` still hold the session. Without it no post is made through the API.
+   * The turn's placement (`turn_attempt`): a post lands only while it and `turnId` still hold
+   * the session. Without it no post is made.
    */
   attempt?: string
 }
-
-/** A row's columns the audit log needs. */
-type Resolved = { id: string; turn_id: string; tool: string; tool_use_id: string; created_at: Date }
 
 type Outcome = 'answered' | 'cancelled' | 'timed_out' | 'reconnected' | null
 
@@ -145,7 +135,7 @@ export type PendingQuestion = {
 /** What a post that was not made tells the model. */
 const NOT_ASKED = 'The question was not asked: the session is no longer the user’s, or its turn ended.'
 
-/** Runs `open`, waiting for it at most OPEN_WAIT_MS: the rate lock or lease is every session's. */
+/** Runs `open`, waiting for it at most OPEN_WAIT_MS: the rate lease is every session's. */
 async function openBounded(open: () => Promise<void>): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined
   await Promise.race([open(), new Promise<void>((resolve) => (timer = setTimeout(resolve, OPEN_WAIT_MS)))]).finally(() => clearTimeout(timer))
@@ -173,33 +163,9 @@ export class QuestionService {
     this.deps = deps
   }
 
-  /** The API's routes once it lists area `questions`, else undefined (the SQL). */
-  private get crud(): QuestionRoutes | undefined {
-    const routes = this.deps.routes
-    return routes?.use() ? routes.crud : undefined
-  }
-
   /** Hands the batches the API appended to the event log's followers. */
   private committed(logged: readonly Logged[]): void {
     for (const l of logged) this.deps.events.committed(l.session_id, l.events, l.seqs)
-  }
-
-  /**
-   * Runs `change` in one transaction with the append of the events it returns, so a row and
-   * the event that reports it commit together: a watcher never sees a summary the log does not
-   * show. The session row is locked first, as every gate writer does (store.ts lockSessionOf).
-   * Followers are woken once it has committed.
-   */
-  private async atomically<T>(sessionId: string, change: (tx: TransactionSql) => Promise<{ value: T; events: ServerEvent[] }>): Promise<T> {
-    let logged: { events: ServerEvent[]; seqs: number[] } | undefined
-    const value = await this.deps.sql.begin(async (tx) => {
-      await tx`SELECT 1 FROM ai_sessions WHERE id = ${sessionId} FOR UPDATE`
-      const { value, events } = await change(tx)
-      if (events.length) logged = { events, seqs: await this.deps.events.append(sessionId, events, tx) }
-      return value
-    })
-    if (logged) this.deps.events.committed(sessionId, logged.events, logged.seqs)
-    return value as T
   }
 
   /**
@@ -210,13 +176,7 @@ export class QuestionService {
     id: string,
   ): Promise<{ sessionId: string; kind: 'question' | 'attention'; questions: QuestionView[]; pending: boolean; outcome: Outcome; reason: string | null } | undefined> {
     if (!isUuid(id)) return undefined
-    const crud = this.crud
-    if (crud) {
-      const row = await crud.entry(id)
-      return row && { sessionId: row.session_id, kind: row.kind, questions: row.questions, pending: row.outcome === null, outcome: row.outcome, reason: row.reason }
-    }
-    const [row] = await this.deps.sql<{ session_id: string; kind: 'question' | 'attention'; questions: QuestionView[]; outcome: Outcome; reason: string | null }[]>`
-      SELECT session_id, kind, questions, outcome, reason FROM ai_questions WHERE id = ${id}`
+    const row = await this.deps.routes.entry(id)
     return row && { sessionId: row.session_id, kind: row.kind, questions: row.questions, pending: row.outcome === null, outcome: row.outcome, reason: row.reason }
   }
 
@@ -227,8 +187,7 @@ export class QuestionService {
    * every session was an AgentSession) is not listed: nobody would read its answer.
    */
   async listPending(principal: Owner): Promise<{ questions: PendingQuestion[]; summariesTruncated: boolean }> {
-    const crud = this.crud
-    const done = crud ? (await crud.pending(principal)).map((r) => ({ ...r, created_at: new Date(r.created_at), expires_at: r.expires_at === null ? null : new Date(r.expires_at) })) : await this.#pendingRows(principal)
+    const done = (await this.deps.routes.pending(principal)).map((r) => ({ ...r, created_at: new Date(r.created_at), expires_at: r.expires_at === null ? null : new Date(r.expires_at) }))
     const questions = done.slice(0, PENDING_CAP).map((r) => ({
       id: r.id,
       sessionId: r.session_id,
@@ -245,31 +204,6 @@ export class QuestionService {
     return { questions, summariesTruncated: done.length > PENDING_CAP }
   }
 
-  async #pendingRows(principal: Owner) {
-    return await this.deps.sql<
-      {
-        id: string
-        session_id: string
-        kind: 'question' | 'attention'
-        tool: string
-        tool_use_id: string
-        questions: QuestionView[]
-        attention_reason: AttentionReason | null
-        on_timeout: OnTimeout | null
-        summary: string | null
-        created_at: Date
-        expires_at: Date | null
-      }[]
-    >`
-      SELECT q.id, q.session_id, q.kind, q.tool, q.tool_use_id, q.questions, q.attention_reason, q.on_timeout, q.summary,
-             q.created_at, q.expires_at
-      FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
-      -- D8 (#4975 phase 5): a person acts on the rows that say \`browser\`, as edits.ts does.
-      WHERE s.owner_kind = ${principal.kind} AND (s.owner_id = ${principal.id} OR s.owner_kind = 'browser')
-        AND q.outcome IS NULL AND ${isDoneSummary(this.deps.sql, 'q')}
-      ORDER BY q.created_at DESC, q.id DESC LIMIT ${PENDING_CAP + 1}`
-  }
-
   /**
    * The `question` audit row of an AgentSession's answered entry (`requestId`, a gate id) (#1075):
    * who answered, from where, the call, and the answers as a hash, never their text. Read from
@@ -277,12 +211,7 @@ export class QuestionService {
    */
   async auditGateAnswer(principal: Owner, requestId: string, where: { clientIp?: string | undefined } = {}): Promise<void> {
     if (!this.deps.audit) return
-    const crud = this.crud
-    const [row] = crud
-      ? [await crud.gateAnswer(requestId)]
-      : await this.deps.sql<{ session_id: string; tool: string | null; requested_at: Date | null; response: { answers?: unknown } | null }[]>`
-          SELECT session_id, tool, requested_at, response FROM ai_input_responses
-           WHERE request_id = ${requestId} AND kind = 'answer' AND outcome = 'answered'`
+    const row = await this.deps.routes.gateAnswer(requestId)
     if (!row) return
     const parsed = parseRequestId(requestId)
     const tool = row.tool ?? 'question'
@@ -319,73 +248,25 @@ export class QuestionService {
     }
     const { sessionId, id, answers } = message
     if (!isUuid(id) || !isUuid(sessionId)) throw new QuestionError('not_found', `no question ${id} in this session`)
-    const crud = this.crud
-    if (crud) {
-      // The tool keys the answers' hash; the API checks the row again under its lock, and
-      // writes the dismissal, its events and its audit row in one transaction.
-      const asked = await crud.entry(id)
-      if (!asked || asked.session_id !== sessionId) throw new QuestionError('not_found', `no question ${id} in this session`)
-      try {
-        const logged = await crud.answer({
-          id,
-          sessionId,
-          answers,
-          by: principal,
-          inputHash: this.deps.audit?.hash(asked.tool, { answers }),
-          surface: where.surface ?? 'http',
-          clientIp: where.clientIp,
-        })
-        this.committed(logged)
-      } catch (err) {
-        if (err instanceof QuestionRefused) throw new QuestionError(err.code, err.message)
-        throw err
-      }
-      return
-    }
-    const [asked] = await this.deps.sql<{ questions: QuestionView[]; outcome: Outcome }[]>`
-      SELECT questions, outcome FROM ai_questions WHERE id = ${id} AND session_id = ${sessionId}`
-    if (!asked) throw new QuestionError('not_found', `no question ${id} in this session`)
-    if (asked.outcome !== null) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
-    if (answers.length !== asked.questions.length || answers.some((a) => !a.trim())) {
-      throw new QuestionError('invalid', `question ${id} needs one answer for each of its ${asked.questions.length} questions`)
-    }
-    const answered = await this.atomically(sessionId, async (tx) => {
-      const [row] = await tx<Resolved[]>`
-        UPDATE ai_questions
-        SET outcome = 'answered', answers = ${tx.json(answers)}, resolved_at = now(),
-            answered_by_kind = ${principal.kind}, answered_by_id = ${principal.id}, answered_by_label = ${principal.label}
-        WHERE id = ${id} AND session_id = ${sessionId} AND outcome IS NULL
-        RETURNING id, turn_id, tool, tool_use_id, created_at`
-      return row
-        ? {
-            value: row,
-            events: [
-              event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal }),
-              inputResolved(sessionId, `question:${id}`, 'answer', 'answered'),
-            ],
-          }
-        : { value: undefined, events: [] }
-    })
-    if (!answered) throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer`)
-    // Hashed, never stored as text: an answer may be anything the user typed.
-    await this.audited([
-      {
-        kind: 'question',
-        action: 'answered',
-        surface: where.surface ?? 'http',
-        actor: principal,
-        clientIp: where.clientIp,
+    // The tool keys the answers' hash; the API checks the row again under its lock, and
+    // writes the dismissal, its events and its audit row in one transaction.
+    const asked = await this.deps.routes.entry(id)
+    if (!asked || asked.session_id !== sessionId) throw new QuestionError('not_found', `no question ${id} in this session`)
+    try {
+      const logged = await this.deps.routes.answer({
+        id,
         sessionId,
-        turnId: answered.turn_id,
-        toolUseId: answered.tool_use_id,
-        tier: 'read',
-        inputHash: this.deps.audit?.hash(answered.tool, { answers }),
-        outcome: 'ok',
-        detail: `${answered.tool} question ${id}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
-        startedAt: answered.created_at,
-        finishedAt: new Date(),
-      },
-    ])
+        answers,
+        by: principal,
+        inputHash: this.deps.audit?.hash(asked.tool, { answers }),
+        surface: where.surface ?? 'http',
+        clientIp: where.clientIp,
+      })
+      this.committed(logged)
+    } catch (err) {
+      if (err instanceof QuestionRefused) throw new QuestionError(err.code, err.message)
+      throw err
+    }
   }
 
   /**
@@ -399,39 +280,20 @@ export class QuestionService {
   }
 
   /**
-   * Runs `work` in a transaction that holds ATTENTION_RATE_LOCK. The lock is tried, not waited
-   * on: its holder may wait up to OPEN_WAIT_MS on a workflow Update, whose activity needs a
-   * connection of the same pool, and a waiter blocked in the lock would hold one all that time.
-   * Undefined when the lock was not had within `rateLockWaitMs` (#5053).
-   */
-  private async underRateLock<T>(work: (tx: TransactionSql) => Promise<T>): Promise<{ value: T } | undefined> {
-    const until = performance.now() + (this.deps.rateLockWaitMs ?? RATE_LOCK_WAIT_MS)
-    for (;;) {
-      const done = await this.deps.sql.begin(async (tx) => {
-        const [lock] = await tx<{ held: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0)) AS held`
-        return lock?.held ? { value: await work(tx) } : undefined
-      })
-      if (done) return done
-      if (performance.now() >= until) return undefined
-      await new Promise((resolve) => setTimeout(resolve, Math.ceil(Math.random() * RATE_LOCK_RETRY_MS)))
-    }
-  }
-
-  /**
-   * `underRateLock` through the API: the count read while this process holds the lease
-   * `attention-rate`, which the API grants only while no SQL-path pod holds ATTENTION_RATE_LOCK,
-   * and `open` run before the lease is released. A busy lease is tried again until `rateLockWaitMs`.
+   * Runs `open` under the lease `attention-rate` (#5053): the count read while this process holds
+   * it, and `open` run before it is released, so two requests raised at once cannot both pass at
+   * the limit. The lease is tried, not waited on: a busy one is tried again until `rateLockWaitMs`.
    * Undefined, a refusal, when the lease was not had in time, the API did not answer, or the
    * lease was lost before the count: never a count it could not vouch for.
    */
-  private async underRateLease(crud: QuestionRoutes, own: boolean, limit: number, open: () => Promise<void>): Promise<{ value: number } | undefined> {
+  private async underRateLease(own: boolean, limit: number, open: () => Promise<void>): Promise<{ value: number } | undefined> {
     const until = performance.now() + (this.deps.rateLockWaitMs ?? RATE_LOCK_WAIT_MS)
     for (;;) {
-      // An open that fails is the caller's error, as under the SQL lock; the rest refuses.
+      // An open that fails is the caller's error; the rest refuses.
       const opened: { failed: boolean; err?: unknown } = { failed: false }
       let done: { value: number } | 'busy'
       try {
-        done = await crud.rateLeased(async (count) => {
+        done = await this.deps.routes.rateLeased(async (count) => {
           const n = await count(own)
           if (n < limit) {
             await openBounded(open).catch((err: unknown) => {
@@ -459,35 +321,19 @@ export class QuestionService {
    * the gate's `wait_for_user` entries, open (`ai_pending_input`) or resolved
    * (`ai_input_responses`), a tab wait's call id `tab:<tool_use id>` (TurnHost's; any other
    * entry is a model's own request, whatever its reason). Undefined when it was asked: `open`,
-   * which the workflow's entry is written by, runs under the lock, so two requests raised at once
-   * cannot both pass at the limit. Else the refusal the model reads, audited, and `open` never
-   * runs. Best effort past OPEN_WAIT_MS: an open that takes longer goes on outside the lock, so
-   * a request counted meanwhile does not see its entry. A lock not had within RATE_LOCK_WAIT_MS
-   * refuses the request, as the limit does (#5053).
+   * which the workflow's entry is written by, runs under the lease, so two requests raised at
+   * once cannot both pass at the limit. Else the refusal the model reads, audited, and `open`
+   * never runs. Best effort past OPEN_WAIT_MS: an open that takes longer goes on outside the
+   * lease, so a request counted meanwhile does not see its entry. A lease not had within
+   * RATE_LOCK_WAIT_MS refuses the request, as the limit does (#5053).
    */
   async attentionLimit(
     context: { sessionId: string; turnId: string; toolUseId: string; tool: string; reason: string; own: boolean },
     open: () => Promise<void>,
   ): Promise<string | undefined> {
     const { own } = context
-    const tab = '%:tab:%'
     const limit = own ? ATTENTION_RATE_LIMIT : TAB_WAIT_RATE_LIMIT
-    const crud = this.crud
-    const counted = crud ? await this.underRateLease(crud, own, limit, open) : await this.underRateLock(async (tx) => {
-      const [row] = await tx<{ n: number }[]>`
-        SELECT
-          (SELECT count(*) FROM ai_pending_input
-             WHERE tool = ${WAIT_FOR_USER} AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})
-               AND (request_id LIKE ${tab}) <> ${own})
-          + (SELECT count(*) FROM ai_input_responses
-             WHERE tool = ${WAIT_FOR_USER} AND requested_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})
-               AND (request_id LIKE ${tab}) <> ${own}) AS n`
-      const n = Number(row?.n ?? 0)
-      // Bounded: the lock is every session's, and a slow or absent workflow must not hold it.
-      // Past OPEN_WAIT_MS the entry opens outside it, so the limit may then let one more through.
-      if (n < limit) await openBounded(open)
-      return n
-    })
+    const counted = await this.underRateLease(own, limit, open)
     if (!counted) {
       return own
         ? 'The user was not asked: ScadBuddy could not check the attention request limit in time. Say what you need in your reply instead.'
@@ -520,18 +366,18 @@ export class QuestionService {
   }
 
   /**
-   * `gate`'s post through the API: the turn's facts read, the summary written here with the
+   * `gate`'s post: the turn's facts read, the summary written here with the
    * turn's secrets redacted, then posted. The API writes it only while the turn's placement
    * (`attempt` and `turnId`) holds the session, with the cap, the replaced summaries, the events
    * and the audit rows in one transaction. The facts are read before that transaction, so a touch
    * committed between the two is not in the summary; the turn's own calls are done by then.
    */
-  private async postThroughApi(crud: QuestionRoutes, context: QuestionGateContext, request: QuestionRequest, id: string, questions: QuestionView[]): Promise<QuestionVerdict> {
+  private async post(context: QuestionGateContext, request: QuestionRequest, id: string, questions: QuestionView[]): Promise<QuestionVerdict> {
     const { sessionId, turnId, attempt } = context
     if (attempt === undefined) return { answered: false, message: NOT_ASKED }
-    const facts = await crud.doneFacts(sessionId, turnId, context.turnStartedAt)
+    const facts = await this.deps.routes.doneFacts(sessionId, turnId, context.turnStartedAt)
     const summary = doneSummary(facts.touches, facts.windows, context.secrets())
-    const posted = await crud.done({
+    const posted = await this.deps.routes.done({
       id,
       sessionId,
       turnId,
@@ -567,92 +413,7 @@ export class QuestionService {
           message: `The question could not be shown: with secrets redacted it is not a valid question (${shown.error}). Ask it without the secret.`,
         }
       }
-      const { sessionId, turnId } = context
-      const crud = this.crud
-      if (crud) return await this.postThroughApi(crud, context, request, id, questions)
-      const startedAt = new Date()
-      const posted = await this.atomically(sessionId, async (tx) => {
-        const none = { asked: false, superseded: [] as Resolved[], limited: undefined as string | undefined }
-        // Still this turn's, and still the user's: after a handoff mid-turn the new owner is not posted to.
-        const [owner] = await tx<{ owner_kind: string }[]>`
-          SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND durable_turn_id = ${turnId} FOR UPDATE`
-        if (owner?.owner_kind !== 'browser') return { value: none, events: [] }
-        // Capped per turn (DONE_POSTS_PER_TURN), a count the session row locked above serialises.
-        const [count] = await tx<{ n: number }[]>`
-          SELECT count(*)::int AS n FROM ai_questions
-          WHERE session_id = ${sessionId} AND turn_id = ${turnId} AND kind = 'attention' AND attention_reason = 'done'`
-        if ((count?.n ?? 0) >= DONE_POSTS_PER_TURN) {
-          return { value: { ...none, limited: `The summary was not posted: this turn already posted ${DONE_POSTS_PER_TURN}, the most a turn may.` }, events: [] }
-        }
-        // A summary that recorded unattended actions (`unattended`) is not replaced by a later
-        // turn's: that record is the user's check on what ran while nobody answered, and the later
-        // summary covers only its own turn. It stays until dismissed. The same turn's earlier
-        // summary is replaced as usual: the newer one covers the same windows.
-        const superseded = await tx<Resolved[]>`
-          UPDATE ai_questions SET outcome = 'cancelled', reason = ${REPLACED}, resolved_at = now()
-          WHERE session_id = ${sessionId} AND kind = 'attention' AND attention_reason = 'done'
-            AND outcome IS NULL AND (NOT unattended OR turn_id = ${turnId}) AND (tool = ${ATTENTION_TOOL}) = ${request.tool === ATTENTION_TOOL}
-          RETURNING id, turn_id, tool, tool_use_id, created_at`
-        const tail: ServerEvent[] = superseded.flatMap((r) => [
-          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: REPLACED }),
-          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', REPLACED),
-        ])
-        const done = await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt, context.secrets())
-        const [inserted] = await tx<{ created_at: Date }[]>`
-          INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, unattended)
-          VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
-                  'attention', 'done', ${done.summary}, ${done.unattended})
-          RETURNING created_at`
-        const createdAt = inserted?.created_at ?? new Date()
-        tail.push(
-          event({ type: 'question.asked', sessionId, id, tool: request.toolUseId, questions, attention: { reason: 'done' as const, summary: done.summary } }),
-          inputRequested(
-            sessionId,
-            questionEntry({ id, sessionId, tool: request.tool, questions, attentionReason: 'done', onTimeout: null, summary: done.summary, createdAt: createdAt.toISOString(), expiresAt: null }),
-          ),
-        )
-        // A done summary waits for nobody: the session goes on as it was.
-        return { value: { ...none, asked: true, superseded }, events: tail }
-      })
-      await this.audited(
-        posted.superseded.map((r) => ({
-          kind: 'question',
-          action: 'cancelled',
-          surface: 'system',
-          actor: SYSTEM_ACTOR,
-          sessionId,
-          turnId: r.turn_id,
-          toolUseId: r.tool_use_id,
-          tier: 'read',
-          outcome: 'refused',
-          detail: safeDetail(`${r.tool} attention request ${r.id}: ${REPLACED}`),
-          startedAt: r.created_at,
-          finishedAt: new Date(),
-        })),
-      )
-      if (posted.limited !== undefined) {
-        // #1205: a refused post leaves a trail, so a looping agent shows in the audit log. A done
-        // post is the turn's summary, which waits for nothing: not an attention request (#3236).
-        await this.audited([
-          {
-            kind: 'question',
-            action: 'rate_limited',
-            surface: 'system',
-            actor: SYSTEM_ACTOR,
-            sessionId,
-            turnId,
-            toolUseId: request.toolUseId,
-            tier: 'read',
-            outcome: 'refused',
-            detail: safeDetail(`${request.tool} done summary refused: ${posted.limited}`),
-            startedAt,
-            finishedAt: new Date(),
-          },
-        ])
-        return { answered: false, message: posted.limited }
-      }
-      if (!posted.asked) return { answered: false, message: NOT_ASKED }
-      return { answered: false, posted: true, message: 'posted' }
+      return await this.post(context, request, id, questions)
     }
   }
 }

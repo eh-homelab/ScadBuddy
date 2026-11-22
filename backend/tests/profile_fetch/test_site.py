@@ -46,6 +46,7 @@ def _quick(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(site, "PACE", 0.05)
     monkeypatch.setattr(site, "BOT_CHECK_SECONDS", 1.0)
     monkeypatch.setattr(site, "STEP_TIMEOUT_MS", 3_000)
+    monkeypatch.setattr(site, "LOGIN_WAIT_MS", 1_500)
 
 
 @pytest.fixture
@@ -75,6 +76,46 @@ async def test_login_fills_the_form_and_reaches_my_spools(
     await browser.login()
     assert replica.site.logins == 1
     assert len(replica.site.sessions) == 1
+
+
+async def test_a_slow_sign_in_waits_for_the_site(
+    browser: ThreeDfpSite, replica: ReplicaServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The site signs in from its script and then goes to ``/my/dashboard``. A sign-in
+    that takes longer than the old fixed pause (6 s at `PACE`, here 0.3 s) still signs in:
+    the driver waits for the page to leave ``/login`` before it opens My Spools (#6941)."""
+    monkeypatch.setattr(site, "LOGIN_WAIT_MS", 10_000)
+    replica.site.scripted_login_delay_s = 1.0
+    await browser.login()
+    assert replica.site.logins == 1
+    assert browser.page.url.endswith("/my/spools")
+
+
+async def test_a_scripted_sign_in_slower_than_the_wait_is_login_failed(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """A scripted sign-in that has not set its session when `LOGIN_WAIT_MS` (here 1.5 s)
+    ends is judged by My Spools, which sends the browser back to ``/login``: the login is
+    ``login_failed``, not ``timeout`` (claude-review on #6947)."""
+    replica.site.scripted_login_delay_s = 3.0
+    with pytest.raises(SiteError) as caught:
+        await browser.login()
+    assert caught.value.kind == "login_failed"
+    _chain_holds_no_secret(caught.value)
+
+
+async def test_a_scripted_sign_in_refused_is_login_failed(
+    replica: ReplicaServer, tmp_path: Path
+) -> None:
+    """The script's refusal leaves the page on ``/login``: once the wait ends, the login
+    is ``login_failed``."""
+    replica.site.scripted_login_delay_s = 0.0
+    async with _site(replica, tmp_path, password="wrong-" + PASSWORD) as driver:
+        with pytest.raises(SiteError) as caught:
+            await driver.login()
+    assert caught.value.kind == "login_failed"
+    assert replica.site.logins == 0
+    _chain_holds_no_secret(caught.value)
 
 
 def _no_secret(text: str) -> None:

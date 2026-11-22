@@ -88,6 +88,12 @@ export type AgentWorkerOptions = {
    * `ignoreMissingTaskQueues` for it, or its rollout waits at /readyz.
    */
   deployment?: { name: string; buildId: string; queues?: () => readonly string[] }
+  /**
+   * Awaited before the first connection: the worker polls nothing until it settles (main.ts: the
+   * input-hash key the API releases, #5299 step 12, since an activity hashes a call's input after
+   * it ran). Its state stays `connecting` meanwhile, and `stop()` ends the wait.
+   */
+  before?: () => Promise<void>
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
   /** The most workflows its sticky cache keeps; the SDK's default (sized by memory) when omitted. */
@@ -213,6 +219,7 @@ export class AgentWorker {
 
   async #run(options: AgentWorkerOptions): Promise<void> {
     const log = options.log ?? ((message: string) => console.error(message))
+    if (options.before && (await Promise.race([options.before().then(() => 'go' as const), this.#stopped])) === 'stopped') return
     while (!this.#stopping) {
       let connection: NativeConnection | undefined
       try {

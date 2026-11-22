@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import postgres from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createLockClient, type Database } from '../src/db.js'
+import { createLockClient, type Database } from './support/database.js'
 import { WriteTimeout } from '../src/db/bounded.js'
 import type { Risk } from '../src/tools/registry.js'
-import { OrderCosts, PgOrderCostRows, type AssistantCostReport, type ReportAnswer } from '../src/sessions/orderCosts.js'
+import { OrderCosts, type AssistantCostReport, type ReportAnswer } from '../src/sessions/orderCosts.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { PgOrderCostRows } from './support/sql/orderCostRows.js'
 
 // The assistant's spend on an order (#5330, job cost spec 2026-11-05 §4.4): a session that
 // gives an order item a design revision is reported to the backend's CRUD route as one

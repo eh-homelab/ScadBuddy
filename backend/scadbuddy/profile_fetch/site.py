@@ -24,6 +24,7 @@ import os
 import re
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
@@ -50,6 +51,10 @@ BOT_CHECK_SECONDS: float = 15.0
 PACE: float = 1.0
 #: The longest one Playwright step (a click, a fill, the download) may take.
 STEP_TIMEOUT_MS: float = 30_000
+#: How long the page may take to leave ``/login`` after "Sign In" before the driver opens My
+#: Spools to judge the login. On a sign-in that works the site goes to ``/my/dashboard``
+#: (measured on prod, #6941); a fixed 6 s pause read a slow sign-in as a refused one.
+LOGIN_WAIT_MS: float = 30_000
 #: How long the export's blob may take to reach the hook after "Download" (`3dfp.mjs`'s).
 BLOB_WAIT_MS: float = 15_000
 #: How long an opened combobox may take to show its first option before the option the
@@ -241,7 +246,9 @@ class ThreeDfpSite:
     async def login(self) -> None:
         """`3dfp.mjs login`: fill the form, sign in, and check that My Spools opens.
         `SiteError` ``login_failed`` only when the site sends the browser back to
-        ``/login`` (its own refusal). A step that times out is ``timeout``; any other
+        ``/login`` (its own refusal): it waits up to `LOGIN_WAIT_MS` for the page to leave
+        ``/login`` after the click, then opens My Spools, which sends a refused login back
+        there. A step that times out is ``timeout``; any other
         Playwright error (a refused connection, a failed navigation, a crash) is
         ``browser``: both are retried, so a network blip never reads as a bad password
         (R-F1, which replaces build Decision 48)."""
@@ -258,8 +265,14 @@ class ThreeDfpSite:
             await page.fill("input[name=email]", self._email.get_secret_value())
             await page.fill("input[name=password]", self._password.get_secret_value())
             await page.get_by_role("button", name="Sign In", exact=True).click()
-            await page.wait_for_load_state()
-            await self._pause(6000)
+            # A timeout means the page is still on the form after the whole wait: with
+            # ``wait_until="commit"`` the wait ends as soon as the URL leaves ``/login``.
+            # My Spools then tells a refusal (it sends the browser back to ``/login``) from
+            # a network failure (it fails).
+            with suppress(PlaywrightTimeoutError):
+                await page.wait_for_url(
+                    lambda url: "/login" not in url, wait_until="commit", timeout=LOGIN_WAIT_MS
+                )
             await self._goto("/my/spools", settle_ms=4000)
         except SiteError:
             raise

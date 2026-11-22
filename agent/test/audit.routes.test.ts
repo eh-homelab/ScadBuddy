@@ -1,13 +1,10 @@
-import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { auditedTokenStore, REFUSAL_WINDOW_MS, RefusalCoalescer, UI_ACTOR, UNVERIFIED_ACTOR } from '../src/audit/writes.js'
-import type { Sql } from 'postgres'
 import { cap } from '../src/audit/log.js'
 import type { TokenStore } from '../src/auth/tokens.js'
-import { SettingsStore } from '../src/credentials.js'
+import { SettingsStore, type SettingsRows } from '../src/credentials.js'
 import { originPolicy } from '../src/http/origins.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { MemoryAudit } from './support/memoryAudit.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
@@ -15,7 +12,6 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // guard, validation and wiring. The log itself against Postgres is
 // test/audit.pg.test.ts.
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
 /** The UI through the TLS ingress (routes/guard.ts). */
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 /** A same-origin GET sends no Origin (Fetch standard). */
@@ -25,7 +21,6 @@ function app(overrides: Partial<AppDeps> = {}) {
   return createApp({
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     testPlugin: vi.fn(),
     testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
@@ -74,7 +69,7 @@ describe('GET /api/v1/ai/audit', () => {
   })
 
   it('answers 503 without a database', async () => {
-    const res = await app({ database: undefined, credentials: undefined }).request('/api/v1/ai/audit', { headers: UI_READ })
+    const res = await app({ credentials: undefined }).request('/api/v1/ai/audit', { headers: UI_READ })
     expect(res.status).toBe(503)
   })
 })
@@ -237,16 +232,16 @@ describe('cap', () => {
 })
 
 describe('SettingsStore', () => {
-  /** A `sql` whose transactions run and write nothing. */
-  const quietSql = () =>
-    Object.assign(() => Promise.resolve([]), {
-      json: (value: unknown) => value,
-      begin: (fn: (tx: unknown) => Promise<unknown>) => fn(Object.assign(() => Promise.resolve([]), { json: (v: unknown) => v })),
-    }) as unknown as Sql
+  /** Rows that take every write and keep nothing; `check` runs over no values. */
+  const quietRows = (): SettingsRows => ({
+    get: () => Promise.resolve(undefined),
+    write: () => Promise.resolve(true),
+    compareAndSet: (_values, check) => check({ get: () => Promise.resolve(undefined) }),
+  })
 
   it('audits each key setMany writes, as whoever the context names (#831)', async () => {
     const audit = new MemoryAudit()
-    const settings = new SettingsStore(quietSql(), audit)
+    const settings = new SettingsStore(quietRows(), audit)
     const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: '10.0.0.7' }
     expect(await settings.setMany({ mcp_auth_mode: 'disabled', mcp_anonymous_cap: 'read' }, async () => true, context)).toBe(true)
     expect(audit.entries).toEqual([
@@ -257,16 +252,14 @@ describe('SettingsStore', () => {
 
   it('records nothing when the setMany check refuses the write', async () => {
     const audit = new MemoryAudit()
-    const settings = new SettingsStore(quietSql(), audit)
+    const settings = new SettingsStore(quietRows(), audit)
     expect(await settings.setMany({ mcp_auth_mode: 'disabled' }, async () => false)).toBe(false)
     expect(audit.entries).toEqual([])
   })
 
   it('audits a failed write whose rejection is not an Error, and rethrows it as it was', async () => {
     const audit = new MemoryAudit()
-    const query = Object.assign(() => Promise.reject('connection reset'), { json: (value: unknown) => value })
-    const sql = Object.assign(query, { begin: (fn: (tx: typeof query) => unknown) => fn(query) }) as unknown as Sql
-    const settings = new SettingsStore(sql, audit)
+    const settings = new SettingsStore({ ...quietRows(), write: () => Promise.reject('connection reset') }, audit)
     await expect(settings.set('model', 'claude-sonnet-4-5')).rejects.toBe('connection reset')
     expect(audit.entries).toEqual([
       expect.objectContaining({

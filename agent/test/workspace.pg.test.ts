@@ -4,7 +4,7 @@ import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { dirBodies, HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { turnToolActivity } from '../src/temporal/turnTools.js'
 import { turnServers } from '../src/temporal/turnServers.js'
@@ -15,10 +15,13 @@ import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities } from '../src/t
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { humanSize, SessionFiles, sha256, type WorkspaceRef, WorkspaceError, withWorkspaceSize } from '../src/workspace/store.js'
+import { sqlForget } from './support/sql/forget.js'
+import { humanSize, sha256, type WorkspaceRef, WorkspaceError, withWorkspaceSize } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { pgHttpBodies } from './support/sql/httpBodies.js'
 
 // #2329: the assistant's workspace in ai_session_files: the store's caps,
 // conflicts, scoping, fork copy, cascade and sweep; the workspace_* tools over
@@ -184,7 +187,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       await files.write(ws, 'a.txt', Buffer.from('kept by the fork'))
       await files.copy(sessionId, child.id)
       await files.write(ws, 'b.txt', Buffer.from('only the parent'))
-      await forgetSubject({ sql: db.sql }, `session-${sessionId}`)
+      await forgetSubject(sqlForget(db.sql), `session-${sessionId}`)
       const left = await db.sql<{ sha256: string }[]>`SELECT sha256 FROM ai_session_file_bytes`
       expect(left.map((r) => r.sha256)).toEqual([sha256(Buffer.from('kept by the fork'))])
       expect((await files.read({ kind: 'session', sessionId: child.id }, 'a.txt'))?.bytes.toString()).toBe('kept by the fork')
@@ -669,7 +672,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
         }),
       }
       const out = await new MockActivityEnvironment({
@@ -699,7 +702,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
         }),
       }
       const out = String(
@@ -734,7 +737,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         sessions: { ownerOf: async () => undefined },
         flows: { startedBy: async (run: string) => (run === flow ? browser : undefined), approved: async () => false },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
         }),
       }
       const out = String(

@@ -33,7 +33,7 @@ function memoryPlugins(names: readonly string[], initial: AccessRow[] = []) {
       disabled_tools: disabledTools,
       created_at: '2026-10-10T00:00:00.000Z',
       updated_at: '2026-10-10T00:00:00.000Z',
-      kekId: null,
+      opens: true,
       oauth: null,
     }
   }
@@ -46,7 +46,7 @@ function memoryPlugins(names: readonly string[], initial: AccessRow[] = []) {
     if (!names.includes(name)) throw new PluginError(`no plugin named "${name}"`, 404)
   }
   const reject = () => Promise.reject(new Error('not called'))
-  const update = vi.fn(async (name: string, patch: PluginPatch, _kek?: unknown, context?: AuditContext): Promise<PluginSummary> => {
+  const update = vi.fn(async (name: string, patch: PluginPatch, context?: AuditContext): Promise<PluginSummary> => {
     known(name)
     if (patch.enabled !== undefined) put(remoteSource(name), SOURCE_ITEM, patch.enabled ? 'on' : 'off', by(context))
     return summary(name)
@@ -282,7 +282,7 @@ describe('remote MCP plugins as capability sources', () => {
   it('switching the source on calls update({ enabled: true })', async () => {
     const { caps, update, rows } = setup()
     const source = await caps.setEnabled('remote:hs', true, ctx)
-    expect(update).toHaveBeenCalledWith('hs', { enabled: true }, undefined, ctx)
+    expect(update).toHaveBeenCalledWith('hs', { enabled: true }, ctx)
     expect(source.enabled).toBe(true)
     expect(rows).toEqual([{ source: 'remote:hs', item: '*', access: 'on', updated_by: 'browser:browser' }])
   })

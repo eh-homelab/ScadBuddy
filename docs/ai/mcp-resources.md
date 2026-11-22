@@ -188,9 +188,9 @@ over one server-sent event stream from the backend, `GET /api/v1/internal/crud/a
 opened with the agent's service credential. The agent opens no `LISTEN` connection: each API
 process registers those channels on its one `LISTEN` connection
 ([`agent_changes/hub.py`](../../backend/scadbuddy/agent_changes/hub.py)) and hands every
-NOTIFY to each stream it serves, in the order Postgres delivered them. Without a service
-credential (no database and no proof) `/mcp` is not served at all (`createApp()`,
-[`agent/src/app.ts`](../../agent/src/app.ts)).
+NOTIFY to each stream it serves, in the order Postgres delivered them. The agent does not
+start without a service-credential proof (#5299 step 12), and `/mcp` answers 503 until the
+API lists the agent's CRUD areas (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
 
 - **Point the API's URL at the primary.** On a hot standby `LISTEN` and `NOTIFY` are refused
   ([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html)).
@@ -232,11 +232,10 @@ subscriptions and replay log are live objects in that process. A load balancer w
 session affinity (the deployed `/mcp` route has none) sends the client's next request to
 any replica, so a request for a session another replica holds is relayed there through
 Postgres ([`agent/src/mcp/sessionRelay.ts`](../../agent/src/mcp/sessionRelay.ts)). The
-directory and the messages are written through the backend's CRUD routes once the API
-lists area `mcp-relay` (`…/crud/agent/mcp-relay/*`,
+directory and the messages are written through the backend's CRUD routes, area `mcp-relay`
+(`…/crud/agent/mcp-relay/*`,
 [`crud_agent_mcp.py`](../../backend/scadbuddy/api/crud_agent_mcp.py), #5299 step 11;
-[`relayRows.ts`](../../agent/src/mcp/relayRows.ts)), and over the agent's own SQL until
-then. Either way a message's row and its `scadbuddy_mcp` NOTIFY commit in one
+[`relayRows.ts`](../../agent/src/mcp/relayRows.ts)). A message's row and its `scadbuddy_mcp` NOTIFY commit in one
 transaction; the diagram's Postgres steps are those routes' statements. Over the routes each
 message (an ack, a beat, the head, each chunk, the end) is one HTTP call to the API, sent in
 order per request, so a relayed answer's latency grows by one round trip per message; watch

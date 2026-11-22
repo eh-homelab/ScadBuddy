@@ -1,5 +1,3 @@
-import { randomBytes } from 'node:crypto'
-import type { Sql } from 'postgres'
 import { crudRead, wellFormed } from '../api/crudRead.js'
 import type { Owner } from '../sessions/protocol.js'
 
@@ -8,9 +6,8 @@ import type { Owner } from '../sessions/protocol.js'
 // Workflow left running past their turn. The store is the record the panel lists; each
 // active row's workflow (temporal/backgroundTask.ts) is what fires it.
 //
-// Since #5299 step 8 the API owns these tables: once `GET …/crud/agent/areas` lists
-// `background-tasks` (api/crudAreas.ts), every method goes through `CrudBackgroundTasks`, the
-// backend's api/crud_agent_tasks.py routes, one transaction each; until then, its own SQL.
+// Since #5299 step 8 the API owns these tables: every method goes through `CrudBackgroundTasks`,
+// the backend's api/crud_agent_tasks.py routes, one transaction each.
 
 export type TaskKind = 'cron' | 'wakeup' | 'monitor' | 'workflow'
 export type TaskState = 'active' | 'done' | 'cancelled' | 'failed'
@@ -47,40 +44,6 @@ export const NOTICE_MAX_CHARS = 16384
  */
 export const DELIVER_MAX_CHARS = 64_000
 
-type Row = {
-  id: string
-  session_id: string
-  kind: TaskKind
-  description: string
-  spec: Record<string, unknown>
-  created_by: Owner
-  state: TaskState
-  next_at: Date | null
-  fired: number
-  last_fired_at: Date | null
-  expires_at: Date | null
-  detail: string | null
-  created_at: Date
-  updated_at: Date
-}
-
-const task = (r: Row): BackgroundTask => ({
-  id: r.id,
-  sessionId: r.session_id,
-  kind: r.kind,
-  description: r.description,
-  spec: r.spec,
-  createdBy: r.created_by,
-  state: r.state,
-  nextAt: r.next_at,
-  fired: r.fired,
-  lastFiredAt: r.last_fired_at,
-  expiresAt: r.expires_at,
-  detail: r.detail,
-  createdAt: r.created_at,
-  updatedAt: r.updated_at,
-})
-
 export type NewTask = {
   sessionId: string
   kind: TaskKind
@@ -91,211 +54,130 @@ export type NewTask = {
   expiresAt?: Date | undefined
 }
 
-/** The CRUD routes while the API serves them (`use`), else the store's own SQL. */
-export type RemoteBackgroundTasks = { crud: CrudBackgroundTasks; use: () => boolean }
+/** What `BackgroundTaskStore` reads and writes through: the API's CRUD routes (`CrudBackgroundTasks`). */
+export type BackgroundTaskRows = Pick<
+  CrudBackgroundTasks,
+  | 'create'
+  | 'get'
+  | 'list'
+  | 'activeRecurringCrons'
+  | 'scheduled'
+  | 'fired'
+  | 'finish'
+  | 'appendEvent'
+  | 'appendNotice'
+  | 'pendingEvents'
+  | 'eventCount'
+  | 'delivered'
+  | 'setSpec'
+  | 'progress'
+  | 'journalled'
+  | 'recordChild'
+  | 'openChildren'
+  | 'journal'
+>
 
+/** A session's background tasks, a Monitor's events and a Workflow's journal, through the API (#5299 step 8). */
 export class BackgroundTaskStore {
-  readonly #sql: Sql
-  readonly #remote: RemoteBackgroundTasks | undefined
-  constructor(sql: Sql, remote?: RemoteBackgroundTasks) {
-    this.#sql = sql
-    this.#remote = remote
-  }
-
-  #crud(): CrudBackgroundTasks | undefined {
-    return this.#remote?.use() ? this.#remote.crud : undefined
+  readonly #rows: BackgroundTaskRows
+  constructor(rows: BackgroundTaskRows) {
+    this.#rows = rows
   }
 
   /** Inserts an active task, or returns undefined when the session already has MAX_ACTIVE. */
-  async create(t: NewTask): Promise<BackgroundTask | undefined> {
-    const crud = this.#crud()
-    if (crud) return crud.create(t)
-    return this.#sql.begin(async (tx) => {
-      // One writer per session at a time, so two creates cannot both pass the count.
-      await tx`SELECT pg_advisory_xact_lock(hashtext(${`bgtask:${t.sessionId}`}))`
-      const [{ n }] = (await tx`
-        SELECT count(*)::int AS n FROM ai_background_tasks WHERE session_id = ${t.sessionId} AND state = 'active'`) as unknown as [
-        { n: number },
-      ]
-      if (n >= MAX_ACTIVE) return undefined
-      const [row] = (await tx`
-        INSERT INTO ai_background_tasks (id, session_id, kind, description, spec, created_by, next_at, expires_at)
-        VALUES (${randomBytes(4).toString('hex')}, ${t.sessionId}, ${t.kind}, ${t.description}, ${tx.json(t.spec as never)},
-                ${tx.json(t.createdBy as never)}, ${t.nextAt ?? null}, ${t.expiresAt ?? null})
-        RETURNING *`) as unknown as Row[]
-      return task(row!)
-    }) as Promise<BackgroundTask | undefined>
+  create(t: NewTask): Promise<BackgroundTask | undefined> {
+    return this.#rows.create(t)
   }
 
-  async get(id: string): Promise<BackgroundTask | undefined> {
-    const crud = this.#crud()
-    if (crud) return crud.get(id)
-    const [row] = await this.#sql<Row[]>`SELECT * FROM ai_background_tasks WHERE id = ${id}`
-    return row ? task(row) : undefined
+  get(id: string): Promise<BackgroundTask | undefined> {
+    return this.#rows.get(id)
   }
 
   /** A session's tasks, newest first; the active ones only unless `all`. */
-  async list(sessionId: string, options: { all?: boolean } = {}): Promise<BackgroundTask[]> {
-    const crud = this.#crud()
-    if (crud) return crud.list(sessionId, options)
-    const rows = options.all
-      ? await this.#sql<Row[]>`SELECT * FROM ai_background_tasks WHERE session_id = ${sessionId} ORDER BY created_at DESC, id`
-      : await this.#sql<Row[]>`
-          SELECT * FROM ai_background_tasks WHERE session_id = ${sessionId} AND state = 'active' ORDER BY created_at DESC, id`
-    return rows.map(task)
+  list(sessionId: string, options: { all?: boolean } = {}): Promise<BackgroundTask[]> {
+    return this.#rows.list(sessionId, options)
   }
 
   /** Every session's active recurring cron jobs, for the start-time pass that makes each a Schedule (temporal.ts). */
-  async activeRecurringCrons(): Promise<BackgroundTask[]> {
-    const crud = this.#crud()
-    if (crud) return crud.activeRecurringCrons()
-    const rows = await this.#sql<Row[]>`
-      SELECT * FROM ai_background_tasks
-       WHERE state = 'active' AND kind = 'cron' AND coalesce(spec->>'recurring', 'true') <> 'false'
-       ORDER BY created_at, id`
-    return rows.map(task)
+  activeRecurringCrons(): Promise<BackgroundTask[]> {
+    return this.#rows.activeRecurringCrons()
   }
 
   /** Records the next fire time of an active task. */
-  async scheduled(id: string, nextAt: Date): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.scheduled(id, nextAt)
-    await this.#sql`UPDATE ai_background_tasks SET next_at = ${nextAt}, updated_at = now() WHERE id = ${id} AND state = 'active'`
+  scheduled(id: string, nextAt: Date): Promise<void> {
+    return this.#rows.scheduled(id, nextAt)
   }
 
   /** Counts a fire of an active task. */
-  async fired(id: string, at: Date): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.fired(id, at)
-    await this.#sql`
-      UPDATE ai_background_tasks SET fired = fired + 1, last_fired_at = ${at}, next_at = NULL, updated_at = now()
-      WHERE id = ${id} AND state = 'active'`
+  fired(id: string, at: Date): Promise<void> {
+    return this.#rows.fired(id, at)
   }
 
   /** Ends an active task; false when it had ended already. */
-  async finish(id: string, state: Exclude<TaskState, 'active'>, detail?: string): Promise<boolean> {
-    const crud = this.#crud()
-    if (crud) return crud.finish(id, state, detail)
-    const rows = await this.#sql`
-      UPDATE ai_background_tasks SET state = ${state}, detail = ${detail ?? null}, next_at = NULL, updated_at = now()
-      WHERE id = ${id} AND state = 'active' RETURNING id`
-    return rows.length === 1
+  finish(id: string, state: Exclude<TaskState, 'active'>, detail?: string): Promise<boolean> {
+    return this.#rows.finish(id, state, detail)
   }
 
   /** Records one event of a monitor; false once it has MAX_EVENTS (it is then stopped). */
-  async appendEvent(taskId: string, text: string): Promise<boolean> {
-    const crud = this.#crud()
-    if (crud) return crud.appendEvent(taskId, text)
-    const rows = await this.#sql`
-      INSERT INTO ai_background_events (task_id, text)
-      SELECT ${taskId}, ${text.slice(0, NOTICE_MAX_CHARS)}
-      WHERE (SELECT count(*) FROM ai_background_events WHERE task_id = ${taskId}) < ${MAX_EVENTS}
-      RETURNING seq`
-    return rows.length === 1
+  appendEvent(taskId: string, text: string): Promise<boolean> {
+    return this.#rows.appendEvent(taskId, text)
   }
 
   /** Records a monitor's last notice (its end), past MAX_EVENTS. */
-  async appendNotice(taskId: string, text: string): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.appendNotice(taskId, text)
-    await this.#sql`INSERT INTO ai_background_events (task_id, text) VALUES (${taskId}, ${text.slice(0, NOTICE_MAX_CHARS)})`
+  appendNotice(taskId: string, text: string): Promise<void> {
+    return this.#rows.appendNotice(taskId, text)
   }
 
   /**
    * A task's events not yet sent to its session, oldest first, as many as fit in
    * `maxChars` of text, and always the oldest one (a notice is at most NOTICE_MAX_CHARS).
-   * Ordered by the bigint `seq`, not the text it is answered as ("10" sorts before "9"), so
-   * the last one is the newest, which `delivered` marks up to.
+   * Ordered by the bigint `seq`, so the last one is the newest, which `delivered` marks up to.
    */
-  async pendingEvents(taskId: string, maxChars = DELIVER_MAX_CHARS): Promise<{ seq: string; text: string }[]> {
-    const crud = this.#crud()
-    if (crud) return crud.pendingEvents(taskId, maxChars)
-    return this.#sql<{ seq: string; text: string }[]>`
-      SELECT seq::text AS seq, text FROM (
-        SELECT seq, text,
-          sum(length(text)) OVER (ORDER BY seq) AS through,
-          row_number() OVER (ORDER BY seq) AS n
-        FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL
-      ) pending
-      WHERE n = 1 OR through <= ${maxChars}
-      ORDER BY pending.seq`
+  pendingEvents(taskId: string, maxChars = DELIVER_MAX_CHARS): Promise<{ seq: string; text: string }[]> {
+    return this.#rows.pendingEvents(taskId, maxChars)
   }
 
   /** How many of a task's events are not yet sent to its session. */
-  async pendingCount(taskId: string): Promise<number> {
-    const crud = this.#crud()
-    if (crud) return crud.eventCount(taskId, { pending: true })
-    const [row] = await this.#sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL`
-    return row?.n ?? 0
+  pendingCount(taskId: string): Promise<number> {
+    return this.#rows.eventCount(taskId, { pending: true })
   }
 
-  async delivered(taskId: string, upTo: string): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.delivered(taskId, upTo)
-    await this.#sql`
-      UPDATE ai_background_events SET delivered_at = now() WHERE task_id = ${taskId} AND seq <= ${upTo} AND delivered_at IS NULL`
+  delivered(taskId: string, upTo: string): Promise<void> {
+    return this.#rows.delivered(taskId, upTo)
   }
 
-  async eventCount(taskId: string): Promise<number> {
-    const crud = this.#crud()
-    if (crud) return crud.eventCount(taskId)
-    const [row] = await this.#sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_background_events WHERE task_id = ${taskId}`
-    return row?.n ?? 0
+  eventCount(taskId: string): Promise<number> {
+    return this.#rows.eventCount(taskId)
   }
 
   /** Replaces a task's spec (a Workflow's, once its script is kept). */
-  async setSpec(id: string, spec: Record<string, unknown>): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.setSpec(id, spec)
-    await this.#sql`UPDATE ai_background_tasks SET spec = ${this.#sql.json(spec as never)}, updated_at = now() WHERE id = ${id}`
+  setSpec(id: string, spec: Record<string, unknown>): Promise<void> {
+    return this.#rows.setSpec(id, spec)
   }
 
   /** A running task's latest progress (a Workflow's phase or log line), shown in the panel. */
-  async progress(id: string, detail: string): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.progress(id, detail)
-    await this.#sql`UPDATE ai_background_tasks SET detail = ${detail}, updated_at = now() WHERE id = ${id} AND state = 'active'`
+  progress(id: string, detail: string): Promise<void> {
+    return this.#rows.progress(id, detail)
   }
 
   /** A Workflow's journalled agent() result (ai_workflow_calls), or undefined. */
-  async journalled(taskId: string, key: string, occurrence: number): Promise<{ result: unknown; ok: boolean } | undefined> {
-    const crud = this.#crud()
-    if (crud) return crud.journalled(taskId, key, occurrence)
-    const [row] = await this.#sql<{ result: { value: unknown }; ok: boolean }[]>`
-      SELECT result, ok FROM ai_workflow_calls WHERE task_id = ${taskId} AND call_key = ${key} AND occurrence = ${occurrence}`
-    // Kept as {value}, so a null result is a row too.
-    return row ? { result: row.result.value, ok: row.ok } : undefined
+  journalled(taskId: string, key: string, occurrence: number): Promise<{ result: unknown; ok: boolean } | undefined> {
+    return this.#rows.journalled(taskId, key, occurrence)
   }
 
   /** Records a child chat a Workflow's run started (#3395). */
-  async recordChild(taskId: string, childId: string): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.recordChild(taskId, childId)
-    await this.#sql`INSERT INTO ai_workflow_children (task_id, child_id) VALUES (${taskId}, ${childId}) ON CONFLICT DO NOTHING`
+  recordChild(taskId: string, childId: string): Promise<void> {
+    return this.#rows.recordChild(taskId, childId)
   }
 
   /** The child chats a Workflow's earlier attempts left open: not done, and named by no journal row. */
-  async openChildren(taskId: string): Promise<string[]> {
-    const crud = this.#crud()
-    if (crud) return crud.openChildren(taskId)
-    const rows = await this.#sql<{ child_id: string }[]>`
-      SELECT c.child_id FROM ai_workflow_children c
-        JOIN ai_sessions s ON s.id = c.child_id AND s.status <> 'done'
-       WHERE c.task_id = ${taskId}
-         AND NOT EXISTS (SELECT 1 FROM ai_workflow_calls w WHERE w.task_id = c.task_id AND w.child_id = c.child_id)
-       ORDER BY c.created_at`
-    return rows.map((r) => r.child_id)
+  openChildren(taskId: string): Promise<string[]> {
+    return this.#rows.openChildren(taskId)
   }
 
   /** Records one agent() result in a Workflow's journal; a second write of the same call keeps the first. */
-  async journal(taskId: string, key: string, occurrence: number, entry: { result: unknown; ok: boolean; childId?: string | undefined }): Promise<void> {
-    const crud = this.#crud()
-    if (crud) return crud.journal(taskId, key, occurrence, entry)
-    await this.#sql`
-      INSERT INTO ai_workflow_calls (task_id, call_key, occurrence, result, ok, child_id)
-      VALUES (${taskId}, ${key}, ${occurrence}, ${this.#sql.json({ value: entry.result } as never)}, ${entry.ok}, ${entry.childId ?? null})
-      ON CONFLICT DO NOTHING`
+  journal(taskId: string, key: string, occurrence: number, entry: { result: unknown; ok: boolean; childId?: string | undefined }): Promise<void> {
+    return this.#rows.journal(taskId, key, occurrence, entry)
   }
 }
 
@@ -334,11 +216,10 @@ const fromWire = (w: WireTask): BackgroundTask => ({
 const TASK_ID = /^[0-9a-f]{8}$/
 
 /**
- * Whether `id` can name a task. The routes refuse any other id (422), where the SQL found no row:
+ * Whether `id` can name a task. The routes refuse any other id (422):
  * a model's or a browser's id (a Workflow's `wf_<id>`, a shell id, none at all) reads as no task
  * here too, so `TaskStop` still answers "No task found" and the panel's cancel 404, without a call.
- * A write that inserts (an event, a journal row, a child) is left to the route: on SQL it failed
- * too, on the foreign key.
+ * A write that inserts (an event, a journal row, a child) is left to the route.
  */
 function isTaskId(id: string): boolean {
   return TASK_ID.test(id)
@@ -461,8 +342,8 @@ export class CrudBackgroundTasks {
   }
 
   async journal(taskId: string, key: string, occurrence: number, entry: { result: unknown; ok: boolean; childId?: string | undefined }): Promise<void> {
-    // JSON has no undefined, so an undefined result is sent, and kept, as null: `{"value": null}`
-    // where the SQL kept `{}`. A replay reads `.value` from either as nothing (null, or undefined).
+    // JSON has no undefined, so an undefined result is sent, and kept, as null: `{"value": null}`.
+    // A replay reads `.value` as nothing.
     const body = { key, occurrence, result: entry.result ?? null, ok: entry.ok, child_id: entry.childId ?? null }
     await this.#post("a Workflow's call journalled", `/${encodeURIComponent(taskId)}/calls`, body)
   }

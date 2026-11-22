@@ -123,7 +123,7 @@ describe('QueuedPanel · a LAN run of several plate copies', () => {
   it("offers the run's controls while its progress says prints are still to start", () => {
     const progress: PrintProgress = {
       ...lanProgress,
-      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: true, queued: false },
+      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: true, queued: false, queued_for_print: false, printer_idle: false },
     }
     render(
       <QueuedPanel result={{ ...queuedResult, path: 'native', copies: 2, lan_waiting: [1] }} printerName="H2C" progress={progress} polling />,
@@ -167,7 +167,9 @@ describe('QueuedPanel · a run queued on a busy printer', () => {
     expect(items).toHaveTextContent(
       'ScadBuddy sends it once the printer has finished and someone says the plate is clear.',
     )
-    expect(screen.getByTestId('lan-queued-place')).toHaveTextContent('Place 2 in the queue for H2C.')
+    expect(screen.getByTestId('lan-queued-place')).toHaveTextContent(
+      '1 earlier run waits for H2C. The run whose plate is said clear first starts first.',
+    )
     expect(screen.getByRole('link', { name: 'Open the queue' })).toHaveAttribute('href', '/prints')
     expect(items).not.toHaveTextContent('Sliced and sent')
     expect(items).not.toHaveTextContent('may still have been queued')
@@ -178,6 +180,64 @@ describe('QueuedPanel · a run queued on a busy printer', () => {
     expect(screen.getByTestId('queued-items')).toHaveTextContent(
       'Queued for H2C: its plate must be cleared first, so nothing was sent to it yet.',
     )
+    expect(screen.getByTestId('lan-queued-place')).toHaveTextContent('No earlier ScadBuddy run waits for H2C.')
+  })
+
+  // Review of #6939: the print it waited for may have ended since; the progress reads it live.
+  it('turns to the plate once the live read says the print it waited for has ended', () => {
+    const control = { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: false, queued: true }
+    const progress = (queued_for_print: boolean): PrintProgress => ({
+      route: 'lan',
+      stage: 'queued',
+      settled: false,
+      copies: 1,
+      copies_completed: 0,
+      copies_failed: 0,
+      copies_cancelled: 0,
+      copies_in_progress: 0,
+      bambuddy_url: '',
+      lan_run: { ...control, queued_for_print, printer_idle: false },
+    })
+    const { rerender } = render(
+      <MemoryRouter>
+        <QueuedPanel result={queued} printerName="H2C" progress={progress(true)} polling />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('queued-items')).toHaveTextContent('it is busy with another print')
+    expect(screen.getByTestId('lan-run-controls')).toHaveTextContent('has finished the print it is running')
+    rerender(
+      <MemoryRouter>
+        <QueuedPanel result={queued} printerName="H2C" progress={progress(false)} polling />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('queued-items')).toHaveTextContent('its plate must be cleared first')
+    expect(screen.getByTestId('lan-run-controls')).toHaveTextContent(
+      'Queued until the plate of H2C is clear: it holds a print that has ended.',
+    )
+  })
+
+  it('says the plate may still hold the print before when the printer reads idle', () => {
+    const progress: PrintProgress = {
+      route: 'lan',
+      stage: 'queued',
+      settled: false,
+      copies: 1,
+      copies_completed: 0,
+      copies_failed: 0,
+      copies_cancelled: 0,
+      copies_in_progress: 0,
+      bambuddy_url: '',
+      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: false, queued: true, queued_for_print: false, printer_idle: true },
+    }
+    render(
+      <MemoryRouter>
+        <QueuedPanel result={queued} printerName="H2C" progress={progress} polling />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('queued-items')).toHaveTextContent(
+      'Queued for H2C: it reads idle, but its plate may still hold the print before, so nothing was sent to it yet. Clear it if so.',
+    )
+    expect(screen.getByTestId('lan-run-controls')).toHaveTextContent('It reads idle')
   })
 
   it('names no place when it could not be read', () => {

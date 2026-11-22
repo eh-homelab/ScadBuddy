@@ -1,18 +1,16 @@
 import { SearchIcon } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { activeDialog } from '../../agent/dom'
+import { isTyping } from '../../lib/isTyping'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
-function isTyping(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
-  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
-}
 
 /**
  * #6894 — the Spools and Types tabs' text search (`lib/filamentSearch.ts`), kept in the URL
  * as `q=` by the tab. Each keystroke filters at once: the lists are already loaded. "/" puts
  * the cursor in it, as on the other lists, never while typing elsewhere or behind a dialog.
+ * Ctrl+K (⌘K) still opens the quick find from inside it (`data-quick-find`).
  */
 export function FilamentSearchBox({
   value,
@@ -54,6 +52,7 @@ export function FilamentSearchBox({
       <Input
         ref={input}
         type="search"
+        data-quick-find=""
         aria-label={label}
         placeholder={placeholder}
         value={text}

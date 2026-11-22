@@ -178,7 +178,7 @@ from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
-from scadbuddy.printers.progress import LanProgress, lan_control
+from scadbuddy.printers.progress import LanProgress, idle_now, lan_control, printing_now
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
@@ -860,31 +860,23 @@ async def _scadbuddy_jobs(
         return JobMatches()
 
 
-#: How many times the strip reads the waiting runs again after it recorded a gone one
-#: stopped (`_end_gone`); a printer with more gone runs than that is cleared on later reads.
-LAN_CONTROL_PASSES = 3
-#: How long the strip waits for Temporal to say whether the runs' sequences run: past it,
-#: the runs are shown as read.
-SEQUENCE_CHECK_TIMEOUT = timedelta(seconds=5)
-
-
 async def _lan_controls(runs: PrintCommands, cards: PrintersNow) -> dict[str, LanRunControl]:
     """Each card's oldest waiting native run (#4942), the first in its queue (#6871);
     none when the runs cannot be read, so a database blip costs the controls, never the
-    strip. An oldest run whose sequence is gone is recorded stopped first, as
-    `end_gone_sequences` does, so it never hides the newer runs' controls (review of
-    #6882)."""
-    printers = [card.id for card in cards.printers]
+    strip. It only reads: a run whose sequence is gone is recorded stopped by the sweep
+    (`end_gone_sequences`) or by a control sent to it (`_to_sequence`), so the next run's
+    controls show after it (review of #6882)."""
     try:
-        waiting = await runs.store.lan_waiting(printers)
-        for _ in range(LAN_CONTROL_PASSES):
-            if not await _end_gone(runs, list(waiting.values())):
-                break
-            waiting = await runs.store.lan_waiting(printers)
+        waiting = await runs.store.lan_waiting([card.id for card in cards.printers])
     except DATABASE_ERRORS:
         logger.warning("print runs unreadable; the strip shows no run controls")
         return {}
-    controls = {printer: lan_control(run) for printer, run in waiting.items()}
+    # The card's live state: a queued run waits for a print only while one runs (#6871).
+    states = {card.id: card.state for card in cards.printers}
+    controls = {
+        printer: lan_control(run, printing_now(states.get(printer)), idle_now(states.get(printer)))
+        for printer, run in waiting.items()
+    }
     return {printer: control for printer, control in controls.items() if control is not None}
 
 
@@ -1362,6 +1354,8 @@ SEQUENCE_GONE = (
     "This run's later prints are no longer running in ScadBuddy's background service, so"
     " they will never start; the run now records them as stopped."
 )
+#: How long `end_gone_sequences` waits on one run's describes and record.
+SEQUENCE_CHECK_TIMEOUT = timedelta(seconds=10)
 #: What a run whose sequence closed without recording its end records: its controls
 #: would otherwise stand for good, each answering `SEQUENCE_GONE`.
 SEQUENCE_GONE_STOP = LanStopped(
@@ -1392,47 +1386,39 @@ async def _waiting_run(runs: PrintCommands, run_id: str) -> PrintRun:
     return run
 
 
-async def end_gone_sequences(runs: PrintCommands) -> None:
+async def end_gone_sequences(runs: PrintCommands, budget: timedelta | None = None) -> None:
     """Record every native run with prints still to start whose ``PrintLanSequence`` is
     gone as stopped (`SEQUENCE_GONE_STOP`), as a control sent to it would (#4337): a
     sequence terminated, or never started, writes no end of its own, and its run would
     otherwise keep its subject's files in use for good. Only once the run's own
     ``PrintRun`` execution has closed: until then it may still start the sequence, which
-    it does after it records the run succeeded (`workflows/printing.py`)."""
-    for run_id, workflow_id in await runs.store.lan_waiting_runs():
-        if workflow_id is None or await _execution_open(runs, workflow_id):
-            continue
-        await _to_sequence(runs, run_id, _leave_running)
+    it does after it records the run succeeded (`workflows/printing.py`).
 
-
-async def _end_gone(runs: PrintCommands, waiting: list[PrintRun]) -> bool:
-    """Record each of ``waiting`` whose ``PrintLanSequence`` is gone, and whose own
-    ``PrintRun`` has closed, as stopped (`SEQUENCE_GONE_STOP`), as `end_gone_sequences`
-    does; whether it recorded any. One describe per run while its sequence runs. Temporal
-    that does not answer within `SEQUENCE_CHECK_TIMEOUT`, or fails, records nothing."""
+    Each run's check (its describes and its record) is bounded by
+    `SEQUENCE_CHECK_TIMEOUT`; one that fails or does not answer in time is skipped and
+    left waiting. The whole pass is bounded by ``budget`` (the caller's share of its own
+    activity timeout): the runs it did not reach wait for the next pass, so the sweep that
+    calls this (the run-holds reap, #6871) goes on within its timeout however many runs
+    hang."""
     try:
-        async with asyncio.timeout(SEQUENCE_CHECK_TIMEOUT.total_seconds()):
-            gone = [
-                run.id
-                for run in waiting
-                if not await _execution_open(runs, lan_sequence_id(run.id))
-            ]
-            if not gone:
-                return False
-            parents = dict(await runs.store.lan_waiting_runs())
-            ended = False
-            for run_id in gone:
-                parent = parents.get(run_id)
-                if parent is None or await _execution_open(runs, parent):
+        async with asyncio.timeout(budget.total_seconds() if budget is not None else None):
+            for run_id, workflow_id in await runs.store.lan_waiting_runs():
+                if workflow_id is None:
                     continue
-                await runs.store.record_lan_stopped(run_id, SEQUENCE_GONE_STOP)
-                ended = True
-            return ended
-    except DATABASE_ERRORS:
-        raise
-    except Exception:
-        logger.warning("could not check the waiting runs' sequences; shown as read")
-        return False
+                try:
+                    async with asyncio.timeout(SEQUENCE_CHECK_TIMEOUT.total_seconds()):
+                        if await _execution_open(runs, workflow_id):
+                            continue
+                        await _to_sequence(runs, run_id, _leave_running)
+                except TimeoutError:
+                    logger.warning("a LAN run's sequence did not answer; it is left waiting")
+                except Exception as error:
+                    logger.warning(
+                        "a LAN run's sequence could not be checked; it is left waiting",
+                        extra={"error": type(error).__name__},
+                    )
+    except TimeoutError:
+        logger.warning("the LAN runs' sequence checks ran out of time; the rest wait")
 
 
 async def _execution_open(runs: PrintCommands, workflow_id: str) -> bool:

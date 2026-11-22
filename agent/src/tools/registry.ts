@@ -83,7 +83,7 @@ export type ToolServices = {
   backend: BackendClient
   /**
    * Where a gated outward call is prepared and later confirmed (spec §8.2):
-   * `ai_approvals` through approvals/mcp.ts when there is a database, else
+   * the approvals through approvals/mcp.ts when there is a session manager, else
    * the in-memory store in pending.ts, whose actions can never be confirmed.
    */
   pending: OutwardActions
@@ -144,7 +144,7 @@ export type ToolServices = {
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
-  /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
+  /** Asks the API for the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts). */
   fetchGrant?: FetchGrantMinter | undefined
   /**
    * The messaging plugin a customer notice is sent through (#5660, orders/messaging.ts):

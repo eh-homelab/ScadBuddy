@@ -14,10 +14,11 @@ import { resolveEvalCredential, EVAL_API_KEY_ENV } from '../evals/credential.js'
 import { collectWithin, type Scenario, score } from '../evals/runner.js'
 import { customise, isRed, SCENARIOS, saysNotPrinted } from '../evals/scenarios.js'
 import { createBackendClient } from '../src/api/backend.js'
-import { CredentialStore, SettingsStore } from '../src/credentials.js'
+import { SqlCredentials } from './support/sql/credentials.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { SETTING_MODEL } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { readBambu3mf, readZip, writeZip } from '../evals/threemf.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
@@ -357,8 +358,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`eval credential from the database${TEST_DAT
       const empty = await resolveEvalCredential(env, { searchPath: schema })
       expect(empty).toEqual({ ok: false, reason: expect.stringContaining('no Claude credential is saved in Settings') })
 
-      await new CredentialStore(db.sql).put({ kind: 'gateway', base_url: 'https://llm.example', secret: 'gw-saved-token' }, kekFromBase64(key))
-      await new SettingsStore(db.sql).set(SETTING_MODEL, 'settings-model')
+      await new SqlCredentials(db.sql, kekFromBase64(key)).put({ kind: 'gateway', base_url: 'https://llm.example', secret: 'gw-saved-token' })
+      await sqlSettings(db.sql).set(SETTING_MODEL, 'settings-model')
       // The saved credential wins over the CI variable.
       expect(await resolveEvalCredential({ ...env, [EVAL_API_KEY_ENV]: 'sk-ant-ci' }, { searchPath: schema })).toEqual({
         ok: true,

@@ -5,6 +5,7 @@ import { ApiError } from '../../api/client'
 import { getInventory, listCatalog, listTypes, type SpoolType } from '../../api/filament'
 import type { FilamentInventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
+import { isTyping } from '../../lib/isTyping'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { readPickerFilters, writePickerFilters, type PickerFilters } from '../../lib/filamentPickerFilters'
@@ -66,7 +67,8 @@ async function load(): Promise<Loaded> {
  * the swatch, the name, then the number, the place and what is left; it shares the picker's
  * remembered material and "Loaded in a printer" filters (a type counts as loaded when one of
  * its spools is). The search is the tabs' (`lib/filamentSearch.ts`); Enter opens the spool or
- * the type. The lists are read each time it opens.
+ * the type. The lists are read each time it opens. Ctrl+K stays out of every text field except
+ * one marked `data-quick-find` (the tabs' own `FilamentSearchBox`).
  */
 export function FilamentQuickFind() {
   const [open, setOpen] = useState(false)
@@ -74,6 +76,7 @@ export function FilamentQuickFind() {
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (!isQuickFindKey(event) || event.defaultPrevented) return
+      if (isTyping(event.target) && !(event.target as HTMLElement).hasAttribute('data-quick-find')) return
       event.preventDefault()
       setOpen(true)
     }
@@ -156,7 +159,9 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
 
   const go = (path: string) => {
     onDone()
-    void navigate(path, { state: { back: location.search } })
+    // Only the Spools and Types tabs keep a search in the address that the page can go back to.
+    const searchable = location.pathname === '/filament/spools' || location.pathname === '/filament/types'
+    void navigate(path, searchable ? { state: { back: location.search } } : undefined)
   }
 
   return (

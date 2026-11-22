@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mcpAuthSettings } from '../src/auth/authenticate.js'
-import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import { sqlSettings } from './support/sql/settings.js'
+import type { Database } from './support/database.js'
 import { migrate } from './support/migrations.js'
 import { appFetch, connect, INGRESS, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -28,7 +28,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     function replica() {
-      const settings = new SettingsStore(db.sql)
+      const settings = sqlSettings(db.sql)
       const made = testApp({ authSettings: mcpAuthSettings(settings, () => {}), deps: { aiSettings: settings } })
       return { app: made.app, fetch: appFetch(made.app, { address: INGRESS, headers: UI }) }
     }
@@ -83,7 +83,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     }
 
     it('compare-and-set: a check that fails writes nothing, and concurrent writers are serialised', async () => {
-      const settings = new SettingsStore(db.sql)
+      const settings = sqlSettings(db.sql)
       expect(await settings.setMany({ mcp_auth_mode: 'disabled' }, async () => false)).toBe(false)
       expect(await settingsRow('mcp_auth_mode')).toBeUndefined()
 
@@ -98,7 +98,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     it('writes the mode and the cap in one transaction', async () => {
-      const settings = new SettingsStore(db.sql)
+      const settings = sqlSettings(db.sql)
       await settings.setMany({ mcp_auth_mode: 'bearer', mcp_anonymous_cap: 'outward' })
       // A value Postgres cannot store as JSON fails the second insert; the first must roll back with it.
       await expect(

@@ -1,14 +1,10 @@
-import type { Sql } from 'postgres'
 import type { SettingsRepo } from '../../credentials.js'
-import type { AppendHook } from '../../sessions/busEvents.js'
-import { EventLog } from '../../sessions/eventLog.js'
 import {
   DEFAULT_APPROVAL_EXPIRY_SECONDS,
   MAX_APPROVAL_EXPIRY_SECONDS,
   MIN_APPROVAL_EXPIRY_SECONDS,
   SETTING_APPROVAL_EXPIRY_SECONDS,
 } from '../../approvals/service.js'
-import type { GateRoutes } from '../../gate/crudStore.js'
 import { denyInput, type GateDb, grantInput, openInput, readInput, resolveInput } from '../../gate/store.js'
 import {
   DEFAULT_QUESTION_EXPIRY_SECONDS,
@@ -35,54 +31,24 @@ function seconds(value: unknown, fallback: number, min: number, max: number): nu
  * AgentSession's calls are tiered in its turn (the classic seam), so the gate needs only the
  * timers.
  */
-export async function gateSettings(source: Sql | Pick<SettingsRepo, 'get'>): Promise<GateSettings> {
-  // The settings store (credentials.ts SettingsStore) reads through the API's CRUD routes once it
-  // serves area `settings` (#5299 step 4); a bare connection is the tests' and the old wiring's.
-  const value =
-    typeof source === 'function'
-      ? await readTimers(source)
-      : await (async () => {
-          const [approval, question] = await Promise.all([
-            source.get<unknown>(SETTING_APPROVAL_EXPIRY_SECONDS),
-            source.get<unknown>(SETTING_QUESTION_EXPIRY_SECONDS),
-          ])
-          return (key: string) => (key === SETTING_APPROVAL_EXPIRY_SECONDS ? approval : question)
-        })()
+export async function gateSettings(settings: Pick<SettingsRepo, 'get'>): Promise<GateSettings> {
+  const [approval, question] = await Promise.all([
+    settings.get<unknown>(SETTING_APPROVAL_EXPIRY_SECONDS),
+    settings.get<unknown>(SETTING_QUESTION_EXPIRY_SECONDS),
+  ])
   return {
-    approvalExpiryS: seconds(value(SETTING_APPROVAL_EXPIRY_SECONDS), DEFAULT_APPROVAL_EXPIRY_SECONDS, MIN_APPROVAL_EXPIRY_SECONDS, MAX_APPROVAL_EXPIRY_SECONDS),
-    questionExpiryS: seconds(value(SETTING_QUESTION_EXPIRY_SECONDS), DEFAULT_QUESTION_EXPIRY_SECONDS, MIN_QUESTION_EXPIRY_SECONDS, MAX_QUESTION_EXPIRY_SECONDS),
+    approvalExpiryS: seconds(approval, DEFAULT_APPROVAL_EXPIRY_SECONDS, MIN_APPROVAL_EXPIRY_SECONDS, MAX_APPROVAL_EXPIRY_SECONDS),
+    questionExpiryS: seconds(question, DEFAULT_QUESTION_EXPIRY_SECONDS, MIN_QUESTION_EXPIRY_SECONDS, MAX_QUESTION_EXPIRY_SECONDS),
   }
-}
-
-async function readTimers(sql: Sql): Promise<(key: string) => unknown> {
-  const rows = await sql<{ key: string; value: unknown }[]>`
-    SELECT key, value FROM ai_settings WHERE key IN (${SETTING_APPROVAL_EXPIRY_SECONDS}, ${SETTING_QUESTION_EXPIRY_SECONDS})`
-  return (key: string) => rows.find((r) => r.key === key)?.value
-}
-
-/**
- * The gate's GateDb as main.ts builds it: the session manager's event log, or with none (no
- * credentials) a log of its own that only publishes, so a write still reaches the bus (#3365).
- * Nothing follows that log: with no session manager there are no followers on this replica.
- * `routes` are the API's (gate/crudStore.ts, #5299 step 10): the grant's always, every write's
- * while `routes.use` holds.
- */
-export function gateDb(
-  sql: Sql,
-  events: EventLog | undefined,
-  onAppend: AppendHook | undefined,
-  routes?: { crud: GateRoutes; use: () => boolean },
-): GateDb {
-  return { sql, events: events ?? new EventLog(sql, onAppend ? { onAppend } : {}), ...(routes ? { crud: routes.crud, useCrud: routes.use } : {}) }
 }
 
 /**
  * `db.events` is this replica's session event log, so a write wakes its followers at once (#3365).
- * `settings`, when given, is where the timers are read (main.ts: the settings store).
+ * `settings` is where the timers are read (main.ts: the settings store).
  */
-export function sessionGateActivities(db: GateDb, settings?: Pick<SettingsRepo, 'get'>) {
+export function sessionGateActivities(db: GateDb, settings: Pick<SettingsRepo, 'get'>) {
   return {
-    [SESSION_GATE_ACTIVITIES.settings]: () => gateSettings(settings ?? db.sql),
+    [SESSION_GATE_ACTIVITIES.settings]: () => gateSettings(settings),
     [SESSION_GATE_ACTIVITIES.open]: (args: Parameters<typeof openInput>[1]) => openInput(db, args),
     [SESSION_GATE_ACTIVITIES.grant]: (args: Parameters<typeof grantInput>[1]) => grantInput(db, args),
     [SESSION_GATE_ACTIVITIES.deny]: (args: Parameters<typeof denyInput>[1]) => denyInput(db, args),

@@ -58,6 +58,7 @@ from scadbuddy.bambuddy.models import (
     ArchiveRunList,
     ArchiveStats,
     AvailableFilament,
+    BbColour,
     BbLocation,
     BbSupplier,
     CatalogFilament,
@@ -265,6 +266,7 @@ Operation = Literal[
     "spools.link_tag",
     "spools.read",
     "spools.catalog",
+    "spools.colours",
     "spools.filament_presets",
     "spools.list",
     "spools.usage",
@@ -1171,6 +1173,19 @@ class BambuddyClient:
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
         return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def colour_catalog(self) -> list[BbColour]:
+        """``GET /api/v1/inventory/colors`` — Bambuddy's colour catalog (`BbColour`). The
+        pull fills ScadBuddy's colour catalog from it (#6907); GET only."""
+        what = "list the colour catalog"
+        response = await self._send(
+            "GET",
+            "/inventory/colors",
+            scope=Scope.READ_STATUS,
+            operation="spools.colours",
+            what=what,
+        )
+        return [BbColour.model_validate(row) for row in self._rows(response, what=what)]
 
     async def spool_catalog(self) -> list[SpoolCatalogEntry]:
         """``GET /api/v1/inventory/catalog`` — Bambuddy's empty-spool catalog, which a

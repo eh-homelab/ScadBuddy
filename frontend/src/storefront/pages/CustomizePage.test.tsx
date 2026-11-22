@@ -65,7 +65,8 @@ describe('CustomizePage', () => {
     const sent = renders()
     show()
     expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
-    expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+    // The first test of the file loads the lazy viewer's chunk: under load it can come after the price.
+    expect(await screen.findByTestId('preview')).toHaveAttribute('data-status', 'done')
     expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, colours: {} }])
     expect(screen.queryByRole('button', { name: 'Render' })).toBeNull()
   })
@@ -455,7 +456,7 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'running'))
   })
 
-  it('keeps the earlier preview on screen and hides its price while a change renders', async () => {
+  it('keeps the earlier preview and its price on screen, marked as updating, while a change renders (#6921)', async () => {
     let posts = 0
     server.use(
       http.post('/api/store/v1/renders', () => {
@@ -468,9 +469,94 @@ describe('CustomizePage', () => {
     const { user } = show('l1', { firstMs: 5, maxMs: 20, limitMs: 60_000 })
     await screen.findByText('$12.40 for one')
     await user.type(screen.getByLabelText('Name'), 'Bo')
-    expect(screen.queryByText('$12.40 for one')).toBeNull()
     expect(await screen.findByText('Updating your preview and price…')).toBeInTheDocument()
+    // The owner's rule: always show a price. The old one stays, marked as updating.
+    expect(screen.getByText('$12.40 for one')).toBeInTheDocument()
+    expect(screen.getByText('Updating this price…')).toBeInTheDocument()
     expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+  })
+
+  it('drops the earlier price when the render of a change is refused, and says nothing is updating (#6921)', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        // The load renders; the change is refused.
+        return posts === 1 ? undefined : HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '42' } })
+      }),
+    )
+    const { user } = show()
+    await screen.findByText('$12.40 for one')
+    await user.type(screen.getByLabelText('Name'), 'Bo')
+    expect(await screen.findByText('You have made a lot of previews. Try again in 42 seconds.')).toBeInTheDocument()
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(screen.queryByText('$12.40 for one')).toBeNull()
+  })
+
+  it('drops the earlier price when the render of a change fails (#6921)', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        return posts === 1 ? undefined : HttpResponse.json({ ...DONE, status: 'failed', error: 'It broke.' })
+      }),
+    )
+    const { user } = show()
+    await screen.findByText('$12.40 for one')
+    await user.type(screen.getByLabelText('Name'), 'Bo')
+    expect(await screen.findByText('It broke.')).toBeInTheDocument()
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(screen.queryByText('$12.40 for one')).toBeNull()
+  })
+
+  it('shows a cached preview and its firm price before any render, and renders nothing (#6921)', async () => {
+    const sent = renders()
+    server.use(
+      http.post('/api/store/v1/listings/:id/variant', () =>
+        HttpResponse.json({
+          price: ESTIMATE,
+          preview: { url: '/api/store/v1/variants/k/preview.glb', colors: ['#1B6CA8'], bbox_mm: DONE.bbox_mm, plates: [] },
+          render: null,
+          values: null,
+        }),
+      ),
+    )
+    show()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(screen.queryByText('Making your preview and price…')).toBeNull()
+    // The add needs no render of the visitor's own: the shop takes the variant it priced.
+    expect(screen.getByRole('button', { name: 'Add to order' })).toBeEnabled()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(sent).toEqual([])
+  })
+
+  it('shows the last price marked as updating, never as firm, until the render is priced (#6921)', async () => {
+    let release = () => {}
+    const sliced = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const sent = renders()
+    server.use(
+      http.post('/api/store/v1/listings/:id/variant', () =>
+        HttpResponse.json({ price: { ...ESTIMATE, source: 'last', price_minor: 990 }, preview: null, render: null, values: null }),
+      ),
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', async () => {
+        await sliced
+        return HttpResponse.json(ESTIMATE)
+      }),
+    )
+    show()
+    // Before the render answers, the last price shows, marked.
+    expect(await screen.findByText('$9.90 for one')).toBeInTheDocument()
+    expect(screen.getByText('Updating this price…')).toBeInTheDocument()
+    await waitFor(() => expect(sent).toHaveLength(1))
+    release()
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    expect(screen.queryByText('Updating this price…')).toBeNull()
+    expect(screen.queryByText('$9.90 for one')).toBeNull()
   })
 
   it('reads the price again after the proxy times out', async () => {
@@ -529,6 +615,23 @@ describe('CustomizePage', () => {
     expect(screen.queryByText(/\$/)).toBeNull()
     release()
     expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    expect(screen.queryByText('Working out the price…')).toBeNull()
+  })
+
+  it('stops saying the price is being worked out when the read of it fails (#6921 review)', async () => {
+    let reads = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => {
+        reads += 1
+        return reads < 2
+          ? HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })
+          : HttpResponse.json({ type: `${PROBLEMS}render_not_found`, status: 404, detail: 'gone' }, { status: 404, headers: { 'Content-Type': 'application/problem+json' } })
+      }),
+    )
+    show()
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(reads).toBe(2)
     expect(screen.queryByText('Working out the price…')).toBeNull()
   })
 
@@ -602,16 +705,38 @@ describe('CustomizePage', () => {
   })
 
   it('keeps the visitor’s choices when they leave and come back', async () => {
+    // A slow slice, as on the loaded CI runner of #6927: the load's price shows, marked as
+    // updating, while the price of the change is still read. The handler falls through to the
+    // mock's own.
+    server.use(http.get('/api/store/v1/renders/:id/estimate', () => new Promise<undefined>((resolve) => setTimeout(resolve, 200))))
     const first = show()
-    await first.user.type(await screen.findByLabelText('Name'), 'Ada')
+    // The load's render is priced before the visitor types (#6927 CI: a slow page did so).
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    await first.user.type(screen.getByLabelText('Name'), 'Ada')
     await first.user.click(screen.getByRole('button', { name: 'One more' }))
+    // The first page's render of these values was priced before it left: the price is firm,
+    // not the load's price still marked as updating.
+    await waitFor(
+      () => {
+        expect(screen.queryByText('Updating this price…')).toBeNull()
+        expect(screen.getByText('$12.40 for one')).toBeInTheDocument()
+      },
+      { timeout: 5_000 },
+    )
     first.unmount()
     const sent = renders()
+    const read: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (new URL(request.url).pathname === '/api/store/v1/listings/l1/variant') read.push(await request.clone().json())
+    })
     show()
     expect(await screen.findByLabelText('Name')).toHaveValue('Ada')
     expect(screen.getByText('2')).toBeInTheDocument()
-    await waitFor(() => expect(sent).toHaveLength(1))
-    expect(sent[0]).toMatchObject({ values: { name: 'Ada' } })
+    await waitFor(() => expect(read).toHaveLength(1))
+    expect(read[0]).toMatchObject({ values: { name: 'Ada' } })
+    // #6921: the shop held its preview and firm price, so nothing is rendered again.
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    expect(sent).toEqual([])
   })
 
   it('drops a kept value the listing no longer allows', async () => {

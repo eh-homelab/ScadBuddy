@@ -16,7 +16,7 @@ import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
-import { FileUploadDialog } from '../components/workspace/FileUploadDialog'
+import { MeshSourceDialog } from '../components/MeshSourceDialog'
 import { BoxIcon, ClipboardPasteIcon, LinkIcon, PlusIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -40,7 +40,7 @@ export const MODELS_PAGE_SIZE = 24
 export function CataloguePage() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
-  /** #4703 — a 3MF or STL is being opened as a mesh model: from disk, or from an assistant session's workspace. */
+  /** #4703, #6916 — a 3MF or STL is being opened as a mesh model, from any source Import print reads. */
   const [meshOpen, setMeshOpen] = useState(false)
   // One lightbox for the page: whichever card's media was clicked, at that item.
   const [lightbox, setLightbox] = useState<{
@@ -308,16 +308,7 @@ export function CataloguePage() {
           added(model)
         }}
       />
-      <FileUploadDialog
-        open={meshOpen}
-        title="Open a mesh as a model"
-        description="A 3MF or STL becomes an editable mesh model, named after the file."
-        onClose={() => setMeshOpen(false)}
-        accept=".3mf,.stl"
-        hint="3MF or STL"
-        onFile={async (file) => added(await api.createMeshModelFromUpload(file))}
-        workspace={{ resource: null, label: 'a model' }}
-      />
+      <MeshSourceDialog open={meshOpen} onClose={() => setMeshOpen(false)} onOpened={added} />
       <ImportDialog
         open={importOpen}
         onClose={() => setImportOpen(false)}

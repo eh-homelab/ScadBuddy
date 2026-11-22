@@ -1,11 +1,9 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { gated } from '../src/api/crudStores.js'
 import { childReasoning } from '../src/flows/queue.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { SessionEventPublisher } from '../src/sessions/busEvents.js'
-import { CrudPublisher, PgPublisher, type Publisher } from '../src/sessions/publish.js'
-import { CrudSessionReads, PgSessionReads, type SessionReads } from '../src/sessions/sessionReads.js'
+import { CrudPublisher } from '../src/sessions/publish.js'
+import { CrudSessionReads } from '../src/sessions/sessionReads.js'
 import { RowSessionOwners } from '../src/temporal/toolActivities.js'
 import type { TurnRow } from '../src/sessions/rows.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
@@ -42,23 +40,12 @@ class FakeApi {
   }
 }
 
-const noSql = new Proxy(() => {}, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
-
 const target = (api: FakeApi) => ({ baseUrl: BASE, fetch: api.fetch })
 
 describe('the publishes over the CRUD routes', () => {
-  it('sends a session event as the bus event the SQL NOTIFYed', async () => {
+  it('sends a session event as the bus event the API NOTIFYs', async () => {
     const api = new FakeApi().answer('POST /publish/session-event', { sent: true })
-    const publisher = new SessionEventPublisher(gated<Publisher>(new PgPublisher(noSql), new CrudPublisher(target(api)), () => true), {
-      replica: 'r1',
-    })
+    const publisher = new SessionEventPublisher(new CrudPublisher(target(api)), { replica: 'r1' })
     // An uppercase id goes as the lowercase UUID the API takes.
     publisher.onAppend(SESSION.toUpperCase(), [{ type: 'session.status', sessionId: SESSION, status: 'idle' } as ServerEvent], 7)
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -90,7 +77,7 @@ describe('the publishes over the CRUD routes', () => {
 })
 
 describe('the session reads over the CRUD routes', () => {
-  const reads = (api: FakeApi) => gated<SessionReads>(new PgSessionReads(noSql), new CrudSessionReads(target(api)), () => true)
+  const reads = (api: FakeApi) => new CrudSessionReads(target(api))
 
   it('reads the open calls, after a turn or all of them', async () => {
     const calls = [{ id: 'toolu_1', name: 'read' }]
@@ -120,7 +107,7 @@ describe('the session reads over the CRUD routes', () => {
     expect(await childReasoning(reads(api), durableRequestId(SESSION, 'run-1', 'toolu_x'))).toBeUndefined()
   })
 
-  it('sends no path for an id that is no UUID, and throws as the SQL cast did', async () => {
+  it('sends no path for an id that is no UUID, and throws', async () => {
     const api = new FakeApi()
     await expect(reads(api).openCalls('../areas')).rejects.toThrow(/not a session id/)
     await expect(reads(api).reasoningDeltas('../areas', 't', 10)).rejects.toThrow(/not a session id/)

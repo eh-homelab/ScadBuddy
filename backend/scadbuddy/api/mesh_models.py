@@ -12,16 +12,28 @@ from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import CatalogueDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, SettingsStoreDep, SlugPath
 from scadbuddy.api.media import receive_upload
 from scadbuddy.api.models import _require_new, _slug_from_name, require_mine, require_model_exists
 from scadbuddy.api.operations import (
+    KEY_REQUIRED_DETAIL,
+    KEY_REQUIRED_PROBLEM,
     OPERATION_RESPONSES,
     Claimed,
     IdempotencyKey,
+    answer_recorded,
     operation_answer,
     recorded,
     run_operation,
+)
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.print_import import (
+    SourceChoice,
+    SourceFile,
+    archive_detail,
+    chosen,
+    find_sources,
+    read_source,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, ModelRecord
@@ -48,11 +60,27 @@ class MeshModelCreate(BaseModel):
     description: str = Field(default="", max_length=MAX_DESCRIPTION_CHARS)
     library_file_id: int | None = Field(default=None, ge=1)
     output_id: str | None = Field(default=None, pattern=OUTPUT_ID_PATTERN)
+    archive_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="A Bambuddy archive whose file opens (#6916); `archive_source` names which",
+    )
+    archive_source: SourceChoice | None = Field(
+        default=None,
+        description=(
+            "Where the archive's 3MF is read from, one that `GET /print-imports/{archive_id}"
+            "/sources` lists as available: the archive's file, its slicer project, a library "
+            "file, or a file on the printer's storage"
+        ),
+    )
 
     @model_validator(mode="after")
     def _one_source(self) -> MeshModelCreate:
-        if (self.library_file_id is None) == (self.output_id is None):
-            raise ValueError("name exactly one of library_file_id and output_id")
+        if (self.archive_id is None) != (self.archive_source is None):
+            raise ValueError("archive_id and archive_source go together")
+        named = [self.library_file_id, self.output_id, self.archive_id]
+        if sum(source is not None for source in named) != 1:
+            raise ValueError("name exactly one of library_file_id, output_id and archive_id")
         return self
 
 
@@ -139,17 +167,102 @@ async def create_mesh_model(
     return operation_answer(result, ModelRecord)
 
 
+async def made_before(
+    ops: OperationCommands, response: Response, name: str, idempotency_key: str
+) -> ModelRecord | None:
+    """The model a finished ``mesh_model_create`` sent with ``idempotency_key`` made for
+    ``name``, or its problem raised (#6969). A route that reads a print's file asks this
+    first: a resend after a lost answer then gets the first send's answer, the printer is
+    not read again, and a file deleted since is no 404. None when no such operation
+    finished: the route reads the file, and `create_mesh_model` answers the rest."""
+    first = await ops.store.keyed_operation(
+        ops.kinds["mesh_model_create"].name, _slug_from_name(name), idempotency_key
+    )
+    if first is None or first.status == "running":
+        return None
+    made = operation_answer(answer_recorded(first, response), ModelRecord)
+    assert isinstance(made, ModelRecord)  # a finished operation is never a 202
+    return made
+
+
+async def create_from_read(
+    ops: OperationCommands,
+    response: Response,
+    catalogue: Catalogue,
+    idempotency_key: str | None,
+    *,
+    name: str,
+    description: str,
+    read: SourceFile,
+    changed: Callable[[Operation, bool], str],
+) -> ModelRecord | JSONResponse:
+    """`create_mesh_model` from a print's file the route read (Import print's new model,
+    #4698, and a print's file here, #6916): its bytes held by claim, as an upload's are."""
+
+    async def claim(claims: ClaimStore) -> Held:
+        return await asyncio.to_thread(claims.hold, read.data)
+
+    return await create_mesh_model(
+        ops,
+        response,
+        catalogue,
+        idempotency_key,
+        name=name,
+        description=description,
+        source={"kind": "upload", "claim": read.sha256, "name": read.name},
+        claim=claim,
+        changed=changed,
+    )
+
+
+def _print_file_changed(name: str, slug: str, first: Operation, made: bool) -> str:
+    """The 409 of a retry whose print file changed since its first send (#5979): a
+    printer overwrites its files, so the retry read other bytes."""
+    changed = f"{name} changed since this request was first sent"
+    if first.status == "running":
+        return (
+            f"{changed}, and the model {slug!r} that request started is still being made"
+            f" (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
+        )
+    if made:
+        return f"{changed}; the model {slug!r} was made from the file as it was then, and stays"
+    return f"{changed}; send the request with a new Idempotency-Key to open the file as it is now"
+
+
+async def _read_print_file(
+    store: SettingsStoreDep, archive_id: int, choice: SourceChoice
+) -> SourceFile:
+    """The bytes of the print's file at ``choice``, read as Import print reads them
+    (`find_sources`, `chosen`, `read_source`). A sliced file is a 422 before it is read."""
+    async with client_for(store.load()) as client:
+        archive = await archive_detail(client, archive_id)
+        sources = await find_sources(client, archive, printer=choice.kind == "printer")
+        source = chosen(sources, choice)
+        if source.sliced:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"{source.name} is a sliced file, which has no meshes to open as a model:"
+                " choose the archive's slicer project or an unsliced 3MF",
+            )
+        return await read_source(client, archive, source)
+
+
 @router.post(
     "/models/from-mesh",
     response_model=ModelRecord,
     status_code=status.HTTP_201_CREATED,
     responses=OPERATION_RESPONSES,
-    summary="Open a library file or an output as an editable mesh model",
+    summary="Open a library file, an output or a print's file as an editable mesh model",
     description=(
-        "Reads the 3MF (or STL) of a Bambuddy library file or an output, writes one mesh "
-        "per object and colour into the new model's `meshes/`, and a `scene.json` that "
-        "compiles to its `model.scad` (spec 2026-10-11). Nothing is written to Bambuddy. "
-        "A sliced file is a 422."
+        "Reads the 3MF (or STL) of a Bambuddy library file, an output, or a print's file "
+        "(`archive_id` with `archive_source`, #6916: the archive's file, its slicer project, "
+        "a library file or the printer's storage, as Import print reads it; the printer is "
+        "reached only for a `printer` source), writes one mesh per object and colour into "
+        "the new model's `meshes/`, and a `scene.json` that compiles to its `model.scad` "
+        "(spec 2026-10-11). Nothing is written to Bambuddy, and the model is no print of "
+        "the archive (Import print links one). A sliced file is a 422. A print's file needs "
+        "an `Idempotency-Key` (428 without one); a resend under the key of a finished "
+        "create answers what that create answered, and reads nothing again."
     ),
 )
 async def create_from_mesh(
@@ -157,8 +270,32 @@ async def create_from_mesh(
     response: Response,
     ops: OperationsDep,
     catalogue: CatalogueDep,
+    store: SettingsStoreDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
+    if body.archive_id is not None and body.archive_source is not None:
+        if idempotency_key is None:
+            raise ApiError(
+                status.HTTP_428_PRECONDITION_REQUIRED,
+                KEY_REQUIRED_DETAIL,
+                type_=KEY_REQUIRED_PROBLEM,
+            )
+        made = await made_before(ops, response, body.name, idempotency_key)
+        if made is not None:
+            return made
+        read = await _read_print_file(store, body.archive_id, body.archive_source)
+        slug = _slug_from_name(body.name)
+        return await create_from_read(
+            ops,
+            response,
+            catalogue,
+            idempotency_key,
+            name=body.name,
+            description=body.description,
+            read=read,
+            # A retry reads the file again: other bytes are named, never opened.
+            changed=lambda first, made: _print_file_changed(read.name, slug, first, made),
+        )
     source: dict[str, Any] = (
         {"kind": "bambuddy_library", "file_id": body.library_file_id}
         if body.library_file_id is not None

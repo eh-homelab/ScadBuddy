@@ -7,15 +7,98 @@ import {
   type CredentialStatus,
   type CredentialTransition,
   type CredentialUpdate,
+  credentialAad,
+  LEGACY_FORMAT_MESSAGE,
+  normaliseBaseUrl,
   normaliseCredentialName,
-  openCredential,
-  planPut,
   MAX_CREDENTIALS,
+  type OpenerStatus,
   STALE_ORDER_MESSAGE,
   TOO_MANY_MESSAGE,
   type StoredCredential,
+  type CredentialKind,
 } from '../../src/credentials.js'
-import { type Envelope, type Kek, SEAL_V1, sealedVersion } from '../../src/secrets.js'
+import { type Envelope, type Kek, last4, openSecret, SEAL_V1, SealError, sealedVersion, sealSecret } from '../../src/secrets.js'
+
+// The sealing the API does (backend agent_data/credentials.py), for the in-memory store below.
+
+export type PutPlan =
+  | { keep: StoredCredential }
+  | {
+      write: {
+        kind: CredentialKind
+        baseUrl: string | null
+        envelope: Envelope
+        last4: string
+      }
+    }
+
+/**
+ * Validates a save of row `id` and seals the new secret. A request without
+ * `secret` keeps the stored one, but only when it changes neither `kind` nor
+ * `base_url`: pointing an existing secret at a different host would send it
+ * somewhere its owner never entered it for, so that needs the secret typed in
+ * again. `current` is only consulted when `secret` is omitted.
+ */
+export function planPut(
+  update: CredentialUpdate,
+  current: StoredCredential | undefined,
+  kek: Kek | undefined,
+  id: string,
+): PutPlan {
+  let baseUrl: string | null = null
+  if (update.kind === 'gateway') {
+    if (!update.base_url) throw new CredentialError('kind "gateway" needs base_url', 400)
+    baseUrl = normaliseBaseUrl(update.base_url)
+  } else if (update.base_url) {
+    throw new CredentialError('base_url applies to kind "gateway" only', 400)
+  }
+
+  if (update.secret === undefined) {
+    if (!current) throw new CredentialError('no credential is stored yet; secret is required', 400)
+    if (current.kind !== update.kind || current.base_url !== baseUrl) {
+      throw new CredentialError(
+        'changing kind or base_url needs the secret again: the stored one is not sent to a new destination',
+        409,
+      )
+    }
+    if (current.legacyFormat) throw new CredentialError(LEGACY_FORMAT_MESSAGE, 409)
+    return { keep: current }
+  }
+
+  const secret = update.secret.trim()
+  if (!secret) throw new CredentialError('secret is empty', 400)
+  if (/\s/.test(secret)) throw new CredentialError('secret must not contain whitespace', 400)
+  if (!kek) {
+    throw new CredentialError(
+      'credentials cannot be saved: no key-encryption key is configured (SCADBUDDY_SECRET_KEY_FILE, spec §9)',
+      503,
+    )
+  }
+  return {
+    write: {
+      kind: update.kind,
+      baseUrl,
+      envelope: sealSecret(kek, secret, credentialAad(id, update.kind, baseUrl)),
+      last4: last4(secret),
+    },
+  }
+}
+
+/** Decrypts a stored row. Throws SealError on a wrong KEK, an altered row, or a v1 row. */
+export function openCredential(
+  kek: Kek,
+  row: { id: string; kind: CredentialKind; base_url: string | null; envelope: Envelope },
+): Credential {
+  if (sealedVersion(row.envelope.secretSealed) === SEAL_V1) throw new SealError(LEGACY_FORMAT_MESSAGE)
+  const secret = openSecret(kek, row.envelope, credentialAad(row.id, row.kind, row.base_url))
+  if (row.kind === 'gateway') {
+    if (row.base_url === null) throw new SealError('gateway credential has no base_url')
+    return { kind: 'gateway', baseUrl: row.base_url, secret }
+  }
+  return { kind: row.kind, secret }
+}
+
 
 type MemoryRow = Omit<StoredCredential, 'legacyFormat' | 'status' | 'cooldown_until' | 'priority'> & {
   envelope: Envelope
@@ -24,13 +107,48 @@ type MemoryRow = Omit<StoredCredential, 'legacyFormat' | 'status' | 'cooldown_un
 }
 
 /**
- * CredentialStore's behaviour without Postgres: the same `planPut` validation,
- * the same sealing and the same `openCredential`, and the same health rules
- * (an expired cooldown reads as active; disabled is not downgraded by a rate
- * limit; a stale epoch is ignored), kept in memory. The Postgres store itself
- * is covered by test/pg.test.ts.
+ * The API's credential store in memory: the same validation (`planPut`), sealing under
+ * `kek` (the API's key; undefined is an API with none) and `openCredential`, and the same
+ * health rules (an expired cooldown reads as active; disabled is not downgraded by a rate
+ * limit; a stale epoch is ignored).
  */
 export class MemoryCredentials implements CredentialRepo {
+  /** The API's key: it seals new secrets and opens stored ones. */
+  kek: Kek | undefined
+  /** Why the API has no key, when `kek` is undefined. */
+  readonly noKeyReason: string
+
+  constructor(kek?: Kek, noKeyReason = 'SCADBUDDY_SECRET_KEY_FILE is not set') {
+    this.kek = kek
+    this.noKeyReason = noKeyReason
+  }
+
+  opener(): Promise<OpenerStatus> {
+    return Promise.resolve(this.kek ? { ok: true, kek: this.kek } : { ok: false, reason: this.noKeyReason })
+  }
+
+  /** `create`, sealed under `other`: a credential saved under another key. */
+  async createUnder(other: Kek, update: CredentialUpdate): Promise<StoredCredential> {
+    const own = this.kek
+    this.kek = other
+    try {
+      return await this.create(update)
+    } finally {
+      this.kek = own
+    }
+  }
+
+  /** `put`, sealed under `other`. */
+  async putUnder(other: Kek, update: CredentialUpdate, id?: string): Promise<StoredCredential> {
+    const own = this.kek
+    this.kek = other
+    try {
+      return await this.put(update, id)
+    } finally {
+      this.kek = own
+    }
+  }
+
   /** In priority order. */
   rows: MemoryRow[] = []
   failing = false
@@ -76,22 +194,24 @@ export class MemoryCredentials implements CredentialRepo {
     return row ? this.view(row, this.rows.indexOf(row)) : undefined
   }
 
-  reveal(kek: Kek, id?: string): Promise<Credential | undefined> {
+  reveal(id?: string): Promise<Credential | undefined> {
     const row = this.find(id)
     if (!row) return Promise.resolve(undefined)
     try {
-      return Promise.resolve(openCredential(kek, row))
+      if (!this.kek) throw new SealError('no key-encryption key is mounted to open the credential')
+      return Promise.resolve(openCredential(this.kek, row))
     } catch (err) {
       return Promise.reject(err as Error)
     }
   }
 
-  async revealAll(kek: Kek): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
+  async revealAll(): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
     await this.read()
+    const kek = this.kek
     return this.rows.map((row, i) => {
       let credential: Credential | undefined
       try {
-        credential = openCredential(kek, row)
+        credential = kek ? openCredential(kek, row) : undefined
       } catch {
         credential = undefined
       }
@@ -99,13 +219,13 @@ export class MemoryCredentials implements CredentialRepo {
     })
   }
 
-  async put(update: CredentialUpdate, kek: Kek | undefined, id?: string): Promise<StoredCredential> {
+  async put(update: CredentialUpdate, id?: string): Promise<StoredCredential> {
     const row = this.find(id)
     if (!row) {
       if (id !== undefined) throw new CredentialError(`no credential ${id}`, 404)
-      return this.create(update, kek)
+      return this.create(update)
     }
-    const plan = planPut(update, await this.get(row.id), kek, row.id)
+    const plan = planPut(update, await this.get(row.id), this.kek, row.id)
     if ('keep' in plan) return plan.keep
     const { kind, baseUrl, envelope, last4 } = plan.write
     Object.assign(row, {
@@ -124,12 +244,12 @@ export class MemoryCredentials implements CredentialRepo {
     return (await this.get(row.id)) as StoredCredential
   }
 
-  async create(update: CredentialUpdate, kek: Kek | undefined): Promise<StoredCredential> {
+  async create(update: CredentialUpdate): Promise<StoredCredential> {
     if (update.secret === undefined) throw new CredentialError('secret is required for a new credential', 400)
     if (this.rows.length >= MAX_CREDENTIALS) throw new CredentialError(TOO_MANY_MESSAGE, 409)
     const id = randomUUID()
     const name = normaliseCredentialName(update.name)
-    const plan = planPut(update, undefined, kek, id)
+    const plan = planPut(update, undefined, this.kek, id)
     if ('keep' in plan) throw new Error('planPut kept a credential that does not exist')
     const { kind, baseUrl, envelope, last4 } = plan.write
     this.rows.push({

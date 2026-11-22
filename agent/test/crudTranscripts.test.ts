@@ -1,17 +1,15 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { gated } from '../src/api/crudStores.js'
 import { CrudReadError } from '../src/api/crudRead.js'
 import { APPEND_ENTRIES_MAX, CrudTranscriptRows, OWN_MAX, appendBatches } from '../src/sessions/crudTranscripts.js'
-import { PgTranscriptRows, PostgresSessionStore, type TranscriptRows } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import { SubjectForgotten } from '../src/temporal/payloadCodec.js'
 
 // A session's transcript through the API's CRUD routes (#5299 step 9, part b), against a fake API
 // that answers as the backend's api/crud_agent_transcripts.py does (the backend's
 // tests/crud/test_crud_agent_transcripts.py covers the routes, the sealing and the chain). An entry
 // travels as its JSON text, a session id goes into a path only as a lowercase UUID, and the store
-// keeps its interface: each method goes to its route once the area is listed, its SQL until then.
+// keeps its interface: each method goes to its route.
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
@@ -45,15 +43,6 @@ class FakeApi {
     return this
   }
 }
-
-const noSql = new Proxy(() => {}, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
 
 const rows = (api: FakeApi) => new CrudTranscriptRows(BASE, { fetch: api.fetch })
 
@@ -178,14 +167,9 @@ describe('a transcript over the CRUD routes', () => {
     expect(api.seen).toEqual([])
   })
 
-  it('keeps the store on its SQL until the area is listed, then on the routes, in append order', async () => {
+  it('keeps the store on the routes, in append order', async () => {
     const api = new FakeApi().answer(`GET /sessions/${SESSION}/transcript`, { entries: ['{"type":"x"}'] })
-    const listed = { on: false }
-    const sql = new PgTranscriptRows(noSql, undefined)
-    const chosen = gated<TranscriptRows>(sql, rows(api), () => listed.on)
-    const store = new PostgresSessionStore(noSql, { rows: chosen })
-    await expect(store.load(KEY)).rejects.toThrow('ran SQL')
-    listed.on = true
+    const store = new TranscriptStore(rows(api))
     expect(await store.load(KEY)).toEqual([{ type: 'x' }])
     await Promise.all([
       store.append(KEY, [{ type: 'a' }] as unknown as SessionStoreEntry[]),

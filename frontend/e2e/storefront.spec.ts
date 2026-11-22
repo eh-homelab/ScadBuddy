@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Response } from '@playwright/test'
 
 // #5282 (spec 2026-11-02 §5.1-§5.4): the public storefront page over the mocks
 // (src/mocks/features/storefrontPublic.ts), on a phone. `vite preview` serves the page
@@ -43,6 +43,54 @@ test.describe('the public storefront', () => {
     await page.getByRole('button', { name: 'Send my order' }).click()
     await expect(page.getByText('We have your order. We sent a link to ada@example.com.')).toBeVisible()
     await expect(page.locator('.sf-item')).toHaveCount(0)
+  })
+
+  test('shows the preview and price of choices priced before at once, with no render (#6921)', async ({ page }) => {
+    await page.goto('/store/l/l1')
+    const name = page.getByLabel('Name', { exact: true })
+    // Each name is priced before the next: the load's price is on screen too, so wait for
+    // the estimate of that name's own render, not for any price (#6921). The answers are
+    // recorded from the start, so an estimate that answers before the wait is not missed;
+    // only a firm or final answer counts, never a `pending` one.
+    const estimated = new Set<string>()
+    const onEstimate = async (response: Response) => {
+      const found = /\/renders\/([^/]+)\/estimate$/.exec(new URL(response.url()).pathname)
+      if (!found || !response.ok()) return
+      // A body that cannot be read counts as no answer, so the wait fails plainly.
+      const { source } = ((await response.json().catch(() => ({}))) as { source?: string })
+      if (source !== 'pending') estimated.add(found[1])
+    }
+    page.on('response', onEstimate)
+    const priced = async (value: string) => {
+      const posted = page.waitForRequest(
+        (request) =>
+          request.method() === 'POST' &&
+          new URL(request.url()).pathname.endsWith('/renders') &&
+          (request.postDataJSON() as { values?: { name?: string } } | null)?.values?.name === value,
+      )
+      await name.fill(value)
+      const answer = await (await posted).response()
+      const { id } = (await answer!.json()) as { id: string }
+      await expect.poll(() => estimated.has(id)).toBe(true)
+      await expect(page.getByText('Updating this price…')).toBeHidden()
+    }
+    await priced('Ada')
+    await expect(page.getByText('$12.40 for one')).toBeVisible()
+    await priced('Bo')
+    page.off('response', onEstimate)
+    const renders: string[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/renders')) renders.push(request.url())
+    })
+    const read = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/listings/l1/variant'))
+    await name.fill('Ada')
+    await read
+    await expect(page.getByText('$12.40 for one')).toBeVisible()
+    await expect(page.getByText('Updating this price…')).toBeHidden()
+    await expect(page.locator('canvas')).toBeVisible()
+    await page.getByRole('button', { name: 'Add to order' }).click()
+    await expect(page.getByText('Added to your order.')).toBeVisible()
+    expect(renders).toEqual([])
   })
 
   test("opens the customer's order from its link, accepts the design and sees Pay", async ({ page }) => {

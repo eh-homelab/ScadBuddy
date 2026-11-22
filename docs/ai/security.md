@@ -29,12 +29,12 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 ## MCP bearer tokens
 
 Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
-(hashed)" live in the database). The implementation is `PostgresTokenStore` in
+(hashed)" live in the database). The implementation is `CrudTokenStore` in
 [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
-([`backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql`](../../backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql)),
-and `CrudTokenStore` beside it once the API lists the agent's CRUD area `mcp-tokens`
+([`backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql`](../../backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql))
+through the agent's CRUD area `mcp-tokens`
 (#5299 step 5, [`backend/scadbuddy/api/crud_agent_stores.py`](../../backend/scadbuddy/api/crud_agent_stores.py)):
-the same statements, run by the API. The plaintext never leaves the agent: a mint sends
+the API runs the statements; the agent has no SQL client (#5299 step 12). The plaintext never leaves the agent: a mint sends
 the hash it made, and a verify sends the presented token's hash, which the API looks up
 by its unique index and compares as a hash only.
 
@@ -47,11 +47,11 @@ by its unique index and compares as a hash only.
   table therefore yields no usable token. The plaintext is returned once, by `mint`.
 - **Verify** is a single `UPDATE … RETURNING` that matches the hash, skips revoked and
   expired rows, and stamps `last_used_at` (only forwards, with `GREATEST`). Revoking on
-  one replica takes effect on every replica at the next request. Through the CRUD route
-  every expiry is judged by the database's clock, never the agent's.
-- **No other store.** There is no file or in-memory persistence. Without a database,
-  `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
-  `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
+  one replica takes effect on every replica at the next request. Every expiry is judged by
+  the database's clock, never the agent's.
+- **No other store.** There is no file or in-memory persistence. Until the API lists the
+  agent's CRUD areas, `/mcp` answers 503 before any token is looked at (`app.ts`).
+  `FailClosedTokenStore` verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
 - **Minting, listing and revoking** are Settings → MCP access → **Tokens** (shown only
   where `useAiAvailability()` says AI is available, that is, once a Claude credential is saved)
@@ -100,7 +100,7 @@ Specifications, as cited in the `oidc.ts` header:
 What is checked, in order:
 
 - **The mode.** OIDC runs only while `ai_settings.mcp_oidc.enabled` is true (`main.ts`
-  `authSettings`). `sbmcp_…` tokens still go to `PostgresTokenStore`; everything else
+  `authSettings`). `sbmcp_…` tokens still go to the token store (`CrudTokenStore`); everything else
   must be a JWT.
 - **`alg`** must be on the configured allowlist (default `RS256`, `ES256`). This is
   checked from the header *before* any key or metadata is fetched, so `none`, `HS256`
@@ -303,7 +303,9 @@ the UI approval". As built:
   ([`agent/src/approvals/mcp.ts`](../../agent/src/approvals/mcp.ts)) records a pending
   row in `ai_approvals` through `ApprovalService.create()`, with no session and no turn.
   The row holds the MCP principal (`requested_by`), the tool, the HMAC-SHA256 input hash
-  under the KEK-derived key (`approvalHashKey`) and the scrubbed input summary. It never
+  under a key the API derives from its KEK and releases to the agent (`InputHashKey`,
+  `GET …/crud/agent/keys/input-hash`, area `keys`, #5299 step 12) and the scrubbed input
+  summary. It never
   holds the full input. The row id is the `pending_action_id`.
 - **Bounds.** A caller keeps at most 50 pending actions; a 51st cancels that caller's
   oldest. At 10,000 pending sessionless rows, a new prepare is refused and nobody's row
@@ -391,17 +393,16 @@ drive sessions over `/mcp`. What bounds them:
 
 ## Envelope encryption and AAD binding
 
-Spec §9. The implementation is in [`agent/src/secrets.ts`](../../agent/src/secrets.ts)
-and [`agent/src/credentials.ts`](../../agent/src/credentials.ts), and for the Claude
-credentials and the payload data keys, in the CRUD service too
-([`backend/scadbuddy/agent_data/`](../../backend/scadbuddy/agent_data/), the same format and
-AAD, so a row either side seals opens on the other).
+Spec §9. The CRUD service seals and opens every agent secret
+([`backend/scadbuddy/agent_data/`](../../backend/scadbuddy/agent_data/)); the format and
+AAD are the ones [`agent/src/secrets.ts`](../../agent/src/secrets.ts) and
+[`agent/src/credentials.ts`](../../agent/src/credentials.ts) define, which the vectors pin.
+The agent reads no KEK (#5299 step 12).
 
-- **Where they are opened (#5299 step 4, D5; #5342).** Once the API lists the agent's CRUD
-  areas `credentials` and `payload-keys`
-  ([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
-  the API seals and opens the Claude credentials with the KEK, and the agent never opens
-  one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
+- **Where they are opened (#5299 step 4, D5; #5342).** The API seals and opens the Claude
+  credentials with the KEK (areas `credentials` and `payload-keys`,
+  [`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
+  and the agent never opens one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
   `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
@@ -414,34 +415,33 @@ AAD, so a row either side seals opens on the other).
   `payload_key.release` once per subject in 10 minutes (`agent_data/payload_keys.py`
   `RELEASE_AUDIT_WINDOW`), since the agent asks at transcript-read rate. A
   payload key is made there under the subject's advisory lock, never for a subject in
-  `ai_forgotten_subjects`. The agent keeps a released key 30 s at most, as before. Until the
-  API lists the areas (a rolling deploy), the agent opens them with its own KEK as before.
+  `ai_forgotten_subjects`. The agent keeps a released key 30 s at most.
   The Web Push keys and the notification channels' tokens are sealed and opened by the
-  API too once it lists area `notify` (#5299 step 5,
+  API too (area `notify`, #5299 step 5,
   [`backend/scadbuddy/api/crud_agent_notify.py`](../../backend/scadbuddy/api/crud_agent_notify.py)):
   the agent gets the VAPID private key, a subscription's keys and a channel's token only
-  from the routes that send with them, and with no KEK of its own Web Push and the
-  channels work from then on. The API re-wraps them at a rotation. So it is for the remote
-  plugins' header secrets and their OAuth sign-ins once the API lists area `plugins`
-  (#5299 step 5,
+  from the routes that send with them. The API re-wraps them at a rotation. So it is for
+  the remote plugins' header secrets and their OAuth sign-ins (area `plugins`, #5299 step 5,
   [`backend/scadbuddy/api/crud_agent_plugins.py`](../../backend/scadbuddy/api/crud_agent_plugins.py)):
   the API seals a header value or a sign-in's tokens under the agent's own AAD, and opens
   them only for the routes that load a plugin for a turn or a test, refresh a token, and
   list the secrets the tools redact. A token refresh holds the lease
   `plugin-oauth:<plugin>` on the API (#5299 D3) in place of the grant row's lock, and the
   refreshed tokens are stored only while that lease holds. Its workspace files are
-  sealed and opened on the API once it lists area `workspace` (#5299 step 7,
+  sealed and opened on the API (area `workspace`, #5299 step 7,
   [`backend/scadbuddy/api/crud_agent_workspace.py`](../../backend/scadbuddy/api/crud_agent_workspace.py)):
   the agent sends and gets plaintext and never holds a file key. Its session images, the staged attachments and the saved HTTP bodies
-  go through the API's routes too once it lists areas `session-blobs`, `attachments` and
-  `http-bodies` (#5299 step 7,
+  go through the API's routes too (areas `session-blobs`, `attachments` and
+  `http-bodies`, #5299 step 7,
   [`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)):
   the same statements, the owner's caps under the owner's lock there, the bytes as the
-  bodies' bytes, never base64. Until the API lists each area, the agent seals and opens that
-  area's secrets itself, as before.
+  bodies' bytes, never base64. The two keys the agent once derived from its KEK are the
+  API's too (area `keys`, #5299 step 12, `agent/src/api/agentKeys.ts`): the approvals'
+  input-hash key, released once per process, and the one-off fetch grants, minted per
+  fetch while their key stays on the API.
 
-- **Envelope.** `sealSecret()` draws a random 32-byte data key per secret, seals the
-  secret under it with AES-256-GCM, then seals the data key under the KEK (the key file,
+- **Envelope.** The seal draws a random 32-byte data key per secret, seals the secret
+  under it with AES-256-GCM, then seals the data key under the KEK (the API's key file,
   see [operating.md](operating.md#3-the-key-encryption-key)). The row stores
   `secret_sealed`, `dek_sealed` and `kek_id` (`Envelope`).
 - **Sealed format.** `version (1) | IV (12) | GCM tag (16) | ciphertext`, from the
@@ -746,9 +746,10 @@ through the real CLI.
 
 This is a decision to run someone else's code **as the agent service itself**. It runs
 as the agent's user in its container, so it can read the Claude credential in its own
-environment. It can also read the service's environment (`/proc/<agent pid>/environ`,
-which holds `SCADBUDDY_DATABASE_URL`) and the `SCADBUDDY_SECRET_KEY_FILE` key that
-decrypts every envelope-encrypted secret. It can use or send any of them, and it can
+environment. It can also read the service's environment (`/proc/<agent pid>/environ`) and
+its mounts: the service-credential proof, which gets the `agent` credential and every CRUD
+area it reaches, and the Temporal client's address (#5299 D10). The agent's pods hold no
+database URL and no KEK (#5299 step 12, eh-homelab/clusters#3965). It can use or send any of them, and it can
 decide tool calls itself (a `PreToolUse` or `PermissionRequest` hook). Its MCP tools stay `outward`, because they
 are not ScadBuddy's.
 
@@ -871,7 +872,8 @@ gets:
 ## Bash and PowerShell in a sandbox pod (#5864)
 
 Claude Code's own `Bash` and `PowerShell` run in its process, in the agent worker pod. That
-pod holds the database URL and the KEK, and rule #5295 forbids untrusted code there. Claude
+pod holds the `agent` service credential's proof and the Temporal client, and no database
+URL or KEK (#5299 step 12, eh-homelab/clusters#3965). Rule #5295 forbids untrusted code there. Claude
 Code's sandbox cannot run there either (no bwrap; AppArmor refuses `unshare --mount`,
 measured 2026-11-01, `agent/src/access/nativeBuiltins.ts`). So the native tools stay `off`.
 When the deployment sets up a sandbox, every session gets ScadBuddy's own `Bash` and
@@ -1032,8 +1034,9 @@ so a name re-pointed between check and connect reaches nothing new.
 
 A session's `Workflow` (Claude Code's tool, `docs/ai/operating.md`) runs a script the
 model wrote. The call is `outward`, so the user approves it, and sees the script, first.
-The script then runs on an agent replica, which holds the KEK and the database's
-credentials, so it never runs in the service's own JavaScript. Node's `vm`, Temporal's
+The script then runs on an agent replica, which holds the `agent` service credential (and no database URL or KEK since
+eh-homelab/clusters#3965), so it never
+runs in the service's own JavaScript. Node's `vm`, Temporal's
 workflow sandbox included, is not a boundary: a host object's `constructor` reaches the
 host's `Function`, and through it `process`. It runs in QuickJS compiled to WebAssembly
 (`background/workflowRunner.ts`, `quickjs-emscripten`, pinned exactly). That is an

@@ -22,13 +22,16 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.bambuddy.models import Archive, SpoolUsage
+from scadbuddy.core.cancel import CancelledError, CancelToken
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.listener import crud_listener_port
 from scadbuddy.crud.print import BASE, RemoteBbPull
+from scadbuddy.filament import bambuddy_usage
 from scadbuddy.filament.bambuddy_pull import ACTOR, Pulls
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, forget_actor, remember_actor
 from scadbuddy.filament.bb_pull_models import (
+    ColoursBody,
     HaBody,
     PullBody,
     PullInstanceChangedError,
@@ -53,7 +56,7 @@ BB = "https://bambuddy.test"
 INSTANCE = instance_for(BB)
 PULL_ID = f"filament-bb-pull-{'b' * 32}"
 PULL = f"{BASE}/filament/pull"
-PATHS = (PULL, f"{PULL}/usage", f"{PULL}/ha-states", f"{PULL}/trays")
+PATHS = (PULL, f"{PULL}/usage", f"{PULL}/ha-states", f"{PULL}/trays", f"{PULL}/colours")
 SPOOL = {
     "id": 7,
     "material": "PLA",
@@ -246,6 +249,7 @@ async def test_a_read_of_another_bambuddy_is_409_and_writes_nothing(
                 f"{PULL}/usage": {"instance": INSTANCE, "pull_id": PULL_ID, "usage": []},
                 f"{PULL}/ha-states": {"instance": INSTANCE, "states": None},
                 f"{PULL}/trays": {"instance": INSTANCE, "assignments": []},
+                f"{PULL}/colours": {"instance": INSTANCE, "colours": []},
             }[path]
             await crud.request("POST", path, json=body)
         assert (refused.value.status, refused.value.problem["reason"]) == (
@@ -318,6 +322,34 @@ async def test_usage_rows_name_the_archives_date_then_book(
 
 
 @pg
+async def test_a_cancel_between_the_bookings_statements_books_nothing(
+    store: SettingsStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6910 review: Postgres ignores a cancel that reaches the backend between
+    statements, so a cancel that lands after the booking's last statement is caught by
+    the check before the commit, and nothing is booked. Sent again, the rows book once."""
+    local = _local(store)
+    await local.apply(_body())
+    ended = datetime.now(UTC) + timedelta(minutes=1)
+    usage = [_usage(created_at=ended.replace(tzinfo=None).isoformat())]
+    archive = Archive(id=40, printer_id=1, completed_at=datetime(2026, 11, 14, 10, tzinfo=UTC))
+    body = UsageBody(instance=INSTANCE, pull_id=PULL_ID, usage=usage, archives=[archive])
+    token = CancelToken()
+    real = bambuddy_usage.book_usage
+
+    def then_cancel(*args: Any, **kwargs: Any) -> Any:
+        booked = real(*args, **kwargs)
+        token.cancel()
+        return booked
+
+    monkeypatch.setattr(bambuddy_usage, "book_usage", then_cancel)
+    with pytest.raises(CancelledError):
+        await local.book_usage(body, cancel=token)
+    monkeypatch.setattr(bambuddy_usage, "book_usage", real)
+    assert (await local.book_usage(body)).booked == 1
+
+
+@pg
 async def test_the_ha_and_trays_routes_answer_as_in_process(
     store: SettingsStore, crud: CrudClient
 ) -> None:
@@ -326,6 +358,33 @@ async def test_the_ha_and_trays_routes_answer_as_in_process(
         await api.ha_states(HaBody(instance=INSTANCE, states={"sensor.a": "18"}))
         await api.ha_states(HaBody(instance=INSTANCE, states=None))
         assert await api.reconcile_trays(TraysBody(instance=INSTANCE, assignments=[])) == 0
+
+
+COLOUR = {
+    "id": 9,
+    "manufacturer": "Bambu Lab",
+    "color_name": "Jade White",
+    "hex_color": "#ffffff",
+    "material": "PLA Basic",
+}
+
+
+@pg
+async def test_the_colours_route_fills_the_catalog_as_in_process(
+    store: SettingsStore, crud: CrudClient
+) -> None:
+    """#6907: Bambuddy's colour catalog through the route, linked by its id; the same
+    entries again change nothing, and a bad colour is skipped."""
+    body = ColoursBody.model_validate(
+        {"instance": INSTANCE, "colours": [COLOUR, COLOUR | {"id": 10, "hex_color": "bad"}]}
+    )
+    applied = await RemoteBbPull(crud).colours(body)
+    assert (applied.added, applied.skipped) == (1, 1)
+    again = await _local(store).colours(body)
+    assert (again.added, again.unchanged) == (0, 1)
+    with store.pool.connection() as conn:
+        row = conn.execute("SELECT bb_colour_id, rgba FROM filament_colours").fetchone()
+    assert row == {"bb_colour_id": 9, "rgba": "#FFFFFFFF"}
 
 
 @pg

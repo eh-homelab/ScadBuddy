@@ -159,6 +159,11 @@ class Printable:
     #: copies: not taken for one an earlier attempt left unrecorded, so never superseded
     #: or deleted, and read as it is when no copy is recorded.
     origin_id: int | None = None
+    #: The sha256 of a file listing's held copy (#6710 §7.3.1), ``None`` for any other
+    #: source. A held copy and the live library file are recorded under one key
+    #: (``library:<file id>``) but may hold other bytes, so each copy's ``target_key``
+    #: names its version (:func:`versioned`) and only copies of the same version meet.
+    version: str | None = None
 
     @classmethod
     def of_output(cls, store: OutputFiles, meta: OutputMeta) -> Printable:
@@ -249,6 +254,25 @@ def plate_settings_digest(settings: PlateOverrides) -> str:
     """A short, stable name for ``settings`` in a :attr:`Target.key` (#6820)."""
     canonical = json.dumps([list(pair) for pair in settings])
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+#: Starts the ``target_key`` of a held copy's copy (#6710 §7.3.1), before its version.
+_VERSION_MARK = "v="
+
+
+def versioned(key: str, version: str | None) -> str:
+    """``key`` as a copy of :attr:`Printable.version` ``version`` is recorded under:
+    ``v=<sha256>|`` before it for a held copy, ``key`` as it is for any other. No target
+    key starts with ``v=`` (a plate's key is its printer model or ``default``), so a live
+    copy's key is never a held one's, nor the reverse."""
+    return key if version is None else f"{_VERSION_MARK}{version}|{key}"
+
+
+def of_version(target_key: str, version: str | None) -> bool:
+    """Whether a copy recorded as ``target_key`` is of ``version`` (:func:`versioned`)."""
+    if version is None:
+        return not target_key.startswith(_VERSION_MARK)
+    return target_key.startswith(versioned("", version))
 
 
 def _hinted(key: str, filaments: int) -> str:
@@ -959,10 +983,11 @@ async def upload_copy(
     A folder carries ``project_id``, so the folder is what files the copy under a
     project (#79) and puts it on Bambuddy's project page.
 
-    In the inbox the new copy *supersedes* every other copy already there, so the inbox
-    holds one copy per output (or library file) rather than one per printer it was ever
-    aimed at. In a project's folder it supersedes only this output's copies nothing was
-    printed from (:func:`_supersede_unprinted`, #2476); a copy the project printed from
+    In the inbox the new copy *supersedes* every other copy of its version already there
+    (:func:`of_version`), so the inbox holds one copy per output (or library file) and
+    version rather than one per printer it was ever aimed at. In a project's folder it
+    supersedes only this output's copies of its version nothing was printed from
+    (:func:`_supersede_unprinted`, #2476); a copy the project printed from
     is never deleted, even when this upload is for another printer (#316). A project
     folder that already holds the same 3MF for the same target, filed by an identical
     output, gets nothing new (:func:`_same_content`).
@@ -992,7 +1017,7 @@ async def upload_copy(
         stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None
     )
 
-    target_key = _hinted(target.key, len(printable.colours))
+    target_key = versioned(_hinted(target.key, len(printable.colours)), printable.version)
     content = (
         await asyncio.to_thread(content_key, payload)
         if project_stem is not None and folder is not None
@@ -1024,11 +1049,17 @@ async def upload_copy(
     )
     if is_inbox(folder, settings):
         for copy in await uploads.for_output(printable.key):
-            if copy.id == uploaded.id or copy.folder_id != folder:
+            if (
+                copy.id == uploaded.id
+                or copy.folder_id != folder
+                or not of_version(copy.target_key, printable.version)
+            ):
                 continue
             await _delete_copy(client, uploads, printable.key, copy.id, strict=False)
         return uploaded.id, uploaded.filename, True
-    filename = await _supersede_unprinted(client, uploads, printable.key, folder, uploaded)
+    filename = await _supersede_unprinted(
+        client, uploads, printable.key, folder, uploaded, version=printable.version
+    )
     return uploaded.id, filename, True
 
 
@@ -1070,9 +1101,12 @@ async def _supersede_unprinted(
     key: str,
     folder: int | None,
     uploaded: LibraryFile,
+    *,
+    version: str | None,
 ) -> str:
-    """Replace ``key``'s other copies in the project's ``folder`` that nothing printed
-    from with ``uploaded`` (#2476); its file name, which takes theirs.
+    """Replace ``key``'s other copies of ``version`` in the project's ``folder`` that
+    nothing printed from with ``uploaded`` (#2476); its file name, which takes theirs.
+    A held copy and a live copy are never superseded for each other (:func:`of_version`).
 
     Generate files a copy laid out for its best guess at the printer; a print on another
     printer or nozzle then adds its own. Rather than leave both (and a third, its slice)
@@ -1083,7 +1117,10 @@ async def _supersede_unprinted(
     unprinted = [
         copy
         for copy in await uploads.for_output(key)
-        if copy.folder_id == folder and copy.id != uploaded.id and not copy.sliced
+        if copy.folder_id == folder
+        and copy.id != uploaded.id
+        and not copy.sliced
+        and of_version(copy.target_key, version)
     ]
     shared = await uploads.shared([copy.id for copy in unprinted], key)
     filename = uploaded.filename
@@ -1364,12 +1401,13 @@ async def _reusable(
     reuses it rather than uploading a duplicate.
     """
     own = [normalise_colour(colour) for colour in printable.colours]
-    uncoloured = _hinted(target.uncoloured_key, len(own))
-    keys = [_hinted(target.key, len(own))]
+    version = printable.version
+    uncoloured = versioned(_hinted(target.uncoloured_key, len(own)), version)
+    keys = [versioned(_hinted(target.key, len(own)), version)]
     own_colours = (
         target.colours is None or [normalise_colour(colour) for colour in target.colours] == own
     )
-    recoloured = f"{target.uncoloured_key}{_RECOLORED}"
+    recoloured = versioned(f"{target.uncoloured_key}{_RECOLORED}", version)
     extended = not is_inbox(folder, settings) and own_colours
     if extended and uncoloured != keys[0]:
         keys.append(uncoloured)
@@ -1519,6 +1557,7 @@ async def ensure_raw_copy(
     filename: str,
     media_type: str,
     write: Callable[[Sink], Awaitable[None]],
+    version: str | None = None,
 ) -> int:
     """A copy of a file Bambuddy does not hold, uploaded as it is into ``folder_id`` (the
     inbox when ``None``) and recorded under ``key`` as :data:`RAW_TARGET` (#3827): a
@@ -1527,12 +1566,15 @@ async def ensure_raw_copy(
     inbox the new copy supersedes the key's others there, as :func:`upload_copy`'s does.
     Held under the copy's folder lock, as :func:`ensure_uploaded` is. An upload an
     earlier attempt left unrecorded is taken rather than uploaded again, as
-    :func:`_left_unrecorded` takes one (#1145): the bytes are hashed as they spool."""
+    :func:`_left_unrecorded` takes one (#1145): the bytes are hashed as they spool. A held
+    copy's ``version`` (#6710) names its raw copy, and only copies of that version are
+    reused or superseded."""
     folder = folder_id if folder_id is not None else settings.library_folder_id
+    raw = versioned(RAW_TARGET, version)
     lock = _copy_lock_key(key, folder, settings)
     async with _copy_lock(lock), uploads.copy_lock(f"{lock[0] or ''}:{lock[1]}") as lease:
         for copy in await uploads.for_output(key):
-            if copy.folder_id != folder or copy.target_key != RAW_TARGET:
+            if copy.folder_id != folder or copy.target_key != raw:
                 continue
             if await _still_there(client, uploads, key, copy, tolerate_errors=True) is not None:
                 return copy.id
@@ -1540,11 +1582,15 @@ async def ensure_raw_copy(
             client, uploads, folder, filename=filename, media_type=media_type, write=write
         )
         await uploads.record(
-            key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=RAW_TARGET), lease
+            key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=raw), lease
         )
         if is_inbox(folder, settings):
             for copy in await uploads.for_output(key):
-                if copy.id != uploaded.id and copy.folder_id == folder:
+                if (
+                    copy.id != uploaded.id
+                    and copy.folder_id == folder
+                    and of_version(copy.target_key, version)
+                ):
                     await _delete_copy(client, uploads, key, copy.id, strict=False)
     return uploaded.id
 
@@ -1588,9 +1634,15 @@ async def recorded_copy_to_read(
     settings: StoredSettings,
 ) -> ReadableCopy | None:
     """:func:`copy_to_read` without the upload: a file Bambuddy already has, or ``None``
-    (#1050, for the print check, which uploads nothing)."""
+    (#1050, for the print check, which uploads nothing). Only a copy of the printable's
+    own version (#6710, :func:`of_version`): a held copy's bytes may not be the live
+    file's."""
     recorded = sorted(
-        await uploads.for_output(printable.key),
+        (
+            copy
+            for copy in await uploads.for_output(printable.key)
+            if of_version(copy.target_key, printable.version)
+        ),
         key=lambda copy: not is_inbox(copy.folder_id, settings),
     )
     for copy in recorded:

@@ -1,14 +1,17 @@
+import { hkdfSync } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { approvalHashKey, canonicalJson, inputHash } from '../src/approvals/service.js'
-import type { Kek } from '../src/secrets.js'
+import { canonicalJson, inputHash } from '../src/approvals/service.js'
 
 // The input hash a flow run's approval binds to (#2318) is computed by the backend
-// (backend/scadbuddy/flows/approval_hash.py) and checked here, by PgFlowRuns. These
+// (backend/scadbuddy/flows/approval_hash.py) and checked here, by CrudFlowRuns. These
 // vectors pin the two together: each input is JSON text that both sides parse as they
 // parse a payload, and backend/tests/test_approval_hash.py checks every one against
 // its copy in backend/tests/fixtures. Regenerate (then copy it there):
 // UPDATE_APPROVAL_HASH_VECTORS=1 pnpm vitest run test/approvalHashVectors.test.ts
+//
+// The key is the API's: it derives it from its KEK (HKDF-SHA256 below, the derivation the agent
+// ran before #5299 step 12) and releases it to the agent.
 const FILE = new URL('./fixtures/approval-hash-vectors.json', import.meta.url)
 
 const INPUTS: Array<[string, string]> = [
@@ -26,7 +29,7 @@ const INPUTS: Array<[string, string]> = [
 describe('approval hash vectors', () => {
   it('match what inputHash computes', () => {
     const kekKey = Buffer.alloc(32, 7)
-    const key = approvalHashKey({ id: 'k1', key: kekKey } as Kek)
+    const key = Buffer.from(hkdfSync('sha256', kekKey, Buffer.alloc(0), 'scadbuddy:ai_approvals:input_hash:v1', 32))
     const cases = INPUTS.map(([tool, json]) => {
       const input = JSON.parse(json) as Record<string, unknown>
       return { tool, input_json: json, canonical: canonicalJson({ tool, input }), hash: inputHash(key, tool, input) }
