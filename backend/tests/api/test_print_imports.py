@@ -762,6 +762,36 @@ def test_a_retry_whose_model_was_deleted_and_source_changed_links_nothing(
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
 
 
+@pytest.mark.requires_git
+@respx.mock
+def test_a_key_sent_again_with_another_body_links_no_model(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6984: the model a first send made is linked only for a resend of the same body.
+    The key sent again with another description, of the same file and bytes, reads the
+    source and is a 409 that offers no model: the first may be another print's."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    download = respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        return_value=httpx.Response(200, content=painted_3mf())
+    )
+    body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
+    key = press()
+    _lost_first_import(client, monkeypatch, body, key)
+    other = {**body, "new_model": {"name": "Trophy", "description": "another"}}
+
+    refused = import_print(client, other, **key)
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert "first sent for another print file, name or description" in detail
+    assert "import the print onto it" not in detail
+    assert download.call_count == 2
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+
 # --- the print watcher's activity row (#6029) -----------------------------------------
 
 

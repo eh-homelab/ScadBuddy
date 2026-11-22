@@ -608,6 +608,7 @@ async def import_print(
                 " choose that folder in Settings first",
             )
         made: str | None = None
+        origin = print_file_origin(archive_id, body.source)
         if body.new_model is not None and source.kind != "printer":
             assert idempotency_key is not None
             # #6969: a resend after a lost answer links the model its first send made,
@@ -619,7 +620,7 @@ async def import_print(
                 idempotency_key,
                 name=body.new_model.name,
                 description=body.new_model.description,
-                origin=print_file_origin(archive_id, body.source),
+                origin=origin,
             )
             if first is not None and catalogue.exists(first.slug):
                 made = first.slug
@@ -637,7 +638,7 @@ async def import_print(
                     idempotency_key,
                     body.new_model,
                     read,
-                    print_file_origin(archive_id, body.source),
+                    origin,
                 )
                 if isinstance(new, JSONResponse):
                     return new
@@ -706,30 +707,29 @@ async def _record(
 
 
 def _source_changed(name: str, slug: str, first: Operation, made: bool) -> str:
-    """The 409 of a new-model retry whose source changed since its first send (#5979):
-    what that send's operation (``first``) did, and whether its model is there now."""
-    changed = f"{name} changed since this request was first sent"
-    again = (
-        "send the request with a new Idempotency-Key to make the model from the file as it"
-        " is now, or choose another source"
+    """The 409 of a new-model request under a key on record for another body (#5979,
+    #6984): the key was first sent for another print file, name or description, or the
+    file changed since. What that send's operation (``first``) did, and whether its model
+    is there now; never a link to it, since it may be another print's file."""
+    sent = (
+        "this Idempotency-Key was first sent for another print file, name or description,"
+        f" or {name} changed since"
     )
+    again = "send the request with a new Idempotency-Key"
     if first.status == "running":
         return (
-            f"{changed}, and the model {slug!r} that request started is still being made, as"
-            f" its record says (operation {first.id}, `GET /api/v1/operations/{first.id}`):"
-            " once it is done, import the print onto it with `slug`; if it never finishes,"
-            f" {again}"
+            f"{sent}; the model {slug!r} that request started is still being made, as its"
+            f" record says (operation {first.id}, `GET /api/v1/operations/{first.id}`);"
+            f" {again} and another model name"
         )
     if first.status == "failed":
-        return (
-            f"{changed}, and that request made no model: its operation {first.id} failed; {again}"
-        )
+        return f"{sent}; that request made no model: its operation {first.id} failed; {again}"
     if made:
         return (
-            f"{changed}, so it is no longer the file the model {slug!r} was made from: that"
-            " model stays; import the print onto it with `slug`, or choose another source"
+            f"{sent}; that request made the model {slug!r}, which stays; {again} and another"
+            " model name"
         )
-    return f"{changed}; that request made the model {slug!r}, which was deleted since; {again}"
+    return f"{sent}; that request made the model {slug!r}, which was deleted since; {again}"
 
 
 async def _new_model(

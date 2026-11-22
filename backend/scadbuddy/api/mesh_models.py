@@ -234,15 +234,16 @@ async def create_from_read(
 
 
 def _print_file_changed(name: str, slug: str, first: Operation) -> str:
-    """The 409 of a key on record for another body of this model (#5979). While the first
-    create runs, its print file changed since (a printer overwrites its files, so the
-    retry read other bytes). Once it finished, `made_before` answers a resend of the same
-    body, so this key was first sent for another print file, name or description (#6984)."""
+    """The 409 of a key on record for another body of this model (#5979, #6984). While
+    the first create runs, the key was first sent for another print file, name or
+    description, or the file changed since (a printer overwrites its files). Once it
+    finished, `made_before` answers a resend of the same body, so the key was first sent
+    for another one."""
     if first.status == "running":
         return (
-            f"{name} changed since this request was first sent, and the model {slug!r} that"
-            f" request started is still being made"
-            f" (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
+            "this Idempotency-Key was first sent for another print file, name or description,"
+            f" or {name} changed since; the model {slug!r} that request started is still"
+            f" being made (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
         )
     return (
         "this Idempotency-Key was first sent for another print file, name or description"
