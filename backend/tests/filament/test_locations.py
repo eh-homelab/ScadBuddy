@@ -10,12 +10,15 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.bambuddy.trays import EXTERNAL
+from scadbuddy.filament.catalog import CatalogRefError, CatalogStore
 from scadbuddy.filament.locations import (
     LocationCycleError,
     LocationExistsError,
     LocationStore,
     MoveTargetError,
+    NoPrinterKindError,
+    repoint_printer_locations,
 )
 from scadbuddy.filament.models import (
     LocationCreate,
@@ -268,3 +271,101 @@ def test_a_spool_can_move_into_a_printer_place_with_no_ams(pg_pool: PgPool) -> N
         LocationCreate(name="Beside the H2C", kind_id=_kind(pg_pool), printer_id=printer)
     ).id
     assert store.move(spool, beside, actor="ann") is not None
+
+
+def _printer_named(pool: PgPool, name: str) -> UUID:
+    printer = uuid4()
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, %s, %s)",
+            (printer, f"SN{printer.hex[:8]}", name),
+        )
+    return printer
+
+
+def test_printer_place_is_made_once_and_named_as_the_printer(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    printer = _printer_named(pg_pool, "H2C")
+    first = store.ensure_printer(printer)
+    assert store.ensure_printer(printer) == first
+    place = store.get(first)
+    assert place is not None
+    assert (place.name, place.printer_id, place.ams_id, place.tray_id) == (
+        "H2C",
+        printer,
+        None,
+        None,
+    )
+    assert place.kind_id == _kind(pg_pool, "Printer")
+    with pytest.raises(CatalogRefError):
+        store.ensure_printer(uuid4())
+
+
+def test_two_threads_make_one_printer_place(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    barrier = threading.Barrier(4)
+
+    def call() -> UUID:
+        barrier.wait()
+        return store.ensure_printer(printer)
+
+    with ThreadPoolExecutor(4) as ex:
+        ids = {f.result() for f in [ex.submit(call) for _ in range(4)]}
+    assert len(ids) == 1
+
+
+def test_unit_places_made_before_hang_under_the_printer(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    with pg_pool.connection() as conn:
+        unit = LocationStore.ensure_ams_unit_on(conn, printer, 0)
+        conn.execute("UPDATE filament_locations SET parent_id = NULL WHERE id = %s", (unit,))
+    tray = store.ensure_ams(printer, 0, 1, label="T1")
+    root = store.ensure_printer(printer)
+    with pg_pool.connection() as conn:
+        assert LocationStore.ensure_ams_unit_on(conn, printer, 0) == unit
+    placed = store.get(unit)
+    assert placed is not None and placed.parent_id == root
+    assert tray.parent_id == unit
+
+
+def test_new_unit_and_external_tray_hang_under_the_printer(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    tray = store.ensure_ams(printer, 0, 2, label="T")
+    external = store.ensure_ams(printer, EXTERNAL, 0, label="Ext")
+    root = store.ensure_printer(printer)
+    unit = store.get(tray.parent_id) if tray.parent_id else None
+    assert unit is not None and unit.parent_id == root
+    assert external.parent_id == root
+
+
+def test_a_missing_printer_kind_leaves_the_unit_with_no_parent(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_location_kinds SET archived_at = now() WHERE name = 'Printer'"
+        )
+    tray = store.ensure_ams(printer, 0, 0, label="T")
+    unit = store.get(tray.parent_id) if tray.parent_id else None
+    assert unit is not None and unit.parent_id is None
+    with pytest.raises(NoPrinterKindError):
+        store.ensure_printer(printer)
+
+
+def test_merge_keeps_the_kept_printers_place(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    merged, into = _printer(pg_pool), _printer(pg_pool)
+    merged_tray = store.ensure_ams(merged, 0, 0, label="T")
+    store.ensure_ams(into, 0, 0, label="T")
+    root_merged, root_into = store.ensure_printer(merged), store.ensure_printer(into)
+    with pg_pool.connection() as conn, conn.transaction():
+        repoint_printer_locations(conn, merged, into)
+    old = store.get(root_merged)
+    assert old is not None and old.archived_at is not None
+    kept = store.get(root_into)
+    assert kept is not None and kept.archived_at is None
+    unit = store.get(merged_tray.parent_id) if merged_tray.parent_id else None
+    assert unit is not None and unit.parent_id == root_into
