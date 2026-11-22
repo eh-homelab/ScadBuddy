@@ -1017,7 +1017,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and `…/failed`). The public routes are `POST` and `GET /filament/types/{id}/profile-fetch`
   (`api/filament.py`). Invoice confirm starts a fetch for each new type with a `tdfp_id`.
   3DFP search and add (#7025, plan `docs/superpowers/plans/2026-11-22-3dfp-search-add.md`):
-  the workflows `TdfpSearch` and `TdfpCreate` on the same queue (`workflow.py`), their
+  the workflows `TdfpSearch` and `TdfpCreate` on the same queue (`workflow.py`; a search's activity
+  runs on `search_queue`, a second worker in the same process, `worker.temporal_workers`, #7062), their
   activities `TdfpActivities` (no CRUD call: the API awaits the outcome, `filament/tdfp.py`
   `TemporalTdfp`), the browser service's ``POST /search`` and ``/create`` (JSON answers the
   worker validates), `site.py` `search` and `create`, and `duplicates.py` (the likely-duplicate

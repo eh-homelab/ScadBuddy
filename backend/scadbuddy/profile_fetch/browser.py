@@ -17,9 +17,12 @@ The worker (`worker.py`, `remote.RemoteSite`) drives it over HTTP on
 `remote`'s docstring. ``GET /healthz`` answers 200 while it serves, with no token. Every other
 call must carry the token (``Authorization: Bearer <token>``, compared with
 `hmac.compare_digest`): without it the answer is 401 before any byte of the body is read. One
-step runs at a time (a lock), on one signed-in browser (`steps.SiteHolder`). When the worker
-goes away during a step (its activity was cancelled or timed out), the service cancels the
-step and closes the browser, since the page may be wedged mid-export.
+step runs at a time (a lock), on one signed-in browser (`steps.SiteHolder`); each step opens
+its own page path first, so a 3DFP search takes its turn between an export's steps (#7062,
+R-7062-2). When the worker goes away during a step (its activity was cancelled or timed
+out), the service cancels the step and closes the browser, since the page may be wedged
+mid-export; one that went away while its step still waited for its turn runs nothing and
+leaves the browser open.
 
 At start it serves, then signs in. A login refused on three tries (`LOGIN_RETRY_DELAYS`
 apart), or a browser that does not launch (Chromium's sandbox cannot start, plan
@@ -235,11 +238,29 @@ class BrowserService:
         ask: bytes,
     ) -> Answer | None:
         """The step's answer, one step at a time; None when the worker went away during
-        it: the step is cancelled and the browser closed."""
-        async with self.lock:
+        it: the step is cancelled and the browser closed. A worker that went away while its
+        step waited for its turn (a search waits for the export's step in hand, R-7062-2)
+        gets None and runs nothing, and the browser stays open for the export."""
+        # The ask is read whole; the next read ends only when the worker goes away.
+        watcher = asyncio.ensure_future(reader.read(1))
+        turn = asyncio.ensure_future(self.lock.acquire())
+        try:
+            await asyncio.wait({turn, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            turn.cancel()
+            watcher.cancel()
+            raise
+        if not turn.done():
+            turn.cancel()
+            with suppress(asyncio.CancelledError):
+                await turn
+        if watcher.done() or not turn.done() or turn.cancelled():
+            if turn.done() and not turn.cancelled():
+                self.lock.release()
+            watcher.cancel()
+            return None
+        try:
             running = asyncio.ensure_future(step(ask))
-            # The ask is read whole; the next read ends only when the worker goes away.
-            watcher = asyncio.ensure_future(reader.read(1))
             try:
                 await asyncio.wait({running, watcher}, return_when=asyncio.FIRST_COMPLETED)
             finally:
@@ -252,6 +273,8 @@ class BrowserService:
             await self._sites.drop()
             logger.info("the worker went away during a step; the browser is closed")
             return None
+        finally:
+            self.lock.release()
 
     async def _on_site(self, step: Callable[[Site], Awaitable[Answer]]) -> Answer:
         """``step`` on the signed-in browser; a failure as its kind only."""

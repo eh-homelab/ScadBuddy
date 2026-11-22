@@ -135,13 +135,46 @@ Rulings from the review of PR #7041 at 5c03d8850 (its non-blocking findings):
   (`api/operations.py` `temporal_unavailable`); a refusal is 500 `temporal-refused`. The
   check's 503 says `may_have_started: false`, the create's `true` (its start may have reached
   Temporal, and the same key joins it), and the search's leaves it out.
+- **R-7062-1 (a search has a slot of its own).** On prod a search answered 503
+  `not_started` while a preset fetch ran: the worker's one activity slot
+  (`max_concurrent_activities=1`, Decision 16) is held by a fetch's export for the whole
+  fetch (about 10 min), and a search waits at most 1 min in the queue (#7062). The worker
+  process now runs two Temporal workers (`worker.temporal_workers`). The first polls the
+  profile-fetch queue for the three workflows and runs the export, import, failed and create
+  activities, one at a time, as before. The second polls `workflow.search_queue` (the queue
+  plus `-search`) for the search activity only, one at a time, on a `SiteHolder` and
+  `RemoteSite` of its own. `TdfpSearch` schedules its activity there behind
+  `workflow.patched("tdfp-search-own-queue-7062")`, since the worker is not versioned. A
+  create stays on the fetch slot, so it never runs while an export activity runs. A search's
+  `not_started` now says "busy with another search"; a create's still says "busy with a
+  preset fetch". Chosen over (a) a priority for searches between a fetch's steps, which
+  needs the same second slot to start the search at all, and (b) a second page or context
+  on the signed-in browser, which runs two pages on one 3DFP login at once and has never
+  been tried against the site. The deployment needs no change: the same process and pod,
+  the new queue made by its first poll, no new env var or secret. The API's `no_worker`
+  probe still reads the fetch queue, which the same process polls.
+  `test_a_search_answers_while_a_preset_fetch_exports` holds a fake export and asks for a
+  search: before this change it answered `not_started`.
+- **R-7062-2 (the browser takes one step at a time).** The browser service still runs one
+  step at a time (`BrowserService.lock`), and each step opens its own page path first, so a
+  search takes its turn between an export's steps: it waits at most for the step in hand.
+  Measured on the local replica (`tests/profile_fetch/site`) with the production
+  `site.PACE` of 1.0, headless Chromium, three runs each: an export step held the browser
+  10.3 s, a search 6.0 s (its 6 s settle). The live site adds its own load time. A worker
+  that went away while its step still waited for the lock (its activity cancelled or timed
+  out) now runs nothing and leaves the browser open; before, the step ran on an already
+  closed connection, was cancelled at once, and the browser the export used was closed.
+  A search that fails with a fresh-browser kind still closes the shared browser (DELETE
+  `/session`), and the export's next step signs in again; that is as before.
 
 ## Timeouts
 
 A search waits at most 1 min in the queue and runs at most 3 min (1 attempt, R-7025-10); a
 create waits 2 min and runs 5 min (1 attempt). The routes wait every attempt's queue wait
 and run plus 30 s (`workflow.step_wait`): 4 min 30 s for a search, 7 min 30 s for a
-create, then 504 `no_outcome`. The worker runs one activity at a time, so either
-waits behind a preset export; past its wait it is 503 `not_started`. Each workflow ends 15
+create, then 504 `no_outcome`. The worker runs one fetch or create activity at a time, so
+a create waits behind a preset export; a search runs on a queue and slot of its own, so it
+waits only behind another search (#7062, R-7062-1). Past its wait either is 503
+`not_started`. Each workflow ends 15
 min after its start. The routes answer 503 `no_worker` when Temporal says no worker polls
 the queue.

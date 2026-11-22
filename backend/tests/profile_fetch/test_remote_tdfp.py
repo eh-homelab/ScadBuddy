@@ -3,14 +3,16 @@ JSON the worker validates; a failure crosses as its kind only."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
 
 from scadbuddy.profile_fetch.remote import RemoteSite
 from scadbuddy.profile_fetch.steps import SiteError
-from scadbuddy.profile_fetch.wire import CreateAnswer, CreateAsk, SearchAsk
+from scadbuddy.profile_fetch.wire import CreateAnswer, CreateAsk, SearchAnswer, SearchAsk
 from tests.profile_fetch.test_activities import SEARCH_ANSWER, FakeSite
 from tests.profile_fetch.test_remote import INJECTED, TOKEN, Service, _with_remote
 
@@ -131,3 +133,78 @@ async def test_the_create_ask_fits_the_services_ask_cap() -> None:
     async with Service(site) as running:
         answer = await _with_remote(running.url, lambda remote: remote.create(longest))
     assert answer == CreateAnswer(status="created", tdfp_id=40000, sent=["mpn"])
+
+
+class _HeldExport(FakeSite):
+    """An export step that holds the browser until the test lets it go."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.steps: list[str] = []
+
+    async def export(self, tdfp_id: int, printer_model: str, nozzle: str) -> Any:
+        self.started.set()
+        await self.release.wait()
+        self.steps.append("export")
+        return await super().export(tdfp_id, printer_model, nozzle)
+
+    async def search(self, ask: SearchAsk) -> SearchAnswer:
+        self.steps.append("search")
+        return await super().search(ask)
+
+
+async def test_a_search_takes_its_turn_after_the_export_step_in_hand() -> None:
+    """#7062 R-7062-2: a search sent while an export step holds the browser runs as soon as
+    that step ends, on its own connection, before the export's next step."""
+    site = _HeldExport()
+    async with (
+        Service(site) as running,
+        RemoteSite(running.url, TOKEN) as fetch,
+        RemoteSite(running.url, TOKEN) as searching,
+    ):
+        exporting = asyncio.create_task(fetch.export(30173, "H2C", "0.4"))
+        await asyncio.wait_for(site.started.wait(), 5)
+        search = asyncio.create_task(searching.search(SearchAsk(brand="SUNLU")))
+        # The search's call reaches the service and waits for its turn.
+        await _until(lambda: running.service.lock._waiters)
+        site.release.set()
+        answer = await asyncio.wait_for(search, 5)
+        await asyncio.wait_for(exporting, 5)
+        await asyncio.wait_for(fetch.export(30173, "H2C", "0.6"), 5)
+    assert answer == SEARCH_ANSWER
+    assert site.steps == ["export", "search", "export"]
+
+
+async def test_a_search_given_up_before_its_turn_runs_nothing_and_keeps_the_browser() -> None:
+    """A search whose worker went away while it waited for its turn runs nothing, and the
+    browser the export signed in stays open (only a step cut mid-way closes it)."""
+    site = _HeldExport()
+    async with Service(site) as running, RemoteSite(running.url, TOKEN) as fetch:
+        exporting = asyncio.create_task(fetch.export(30173, "H2C", "0.4"))
+        await asyncio.wait_for(site.started.wait(), 5)
+        searching = RemoteSite(running.url, TOKEN)
+        await searching.__aenter__()
+        search = asyncio.create_task(searching.search(SearchAsk(brand="SUNLU")))
+        await _until(lambda: running.service.lock._waiters)
+        search.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await search
+        # The worker's connection closes with its activity; no DELETE /session is sent.
+        assert searching._client is not None
+        await searching._client.aclose()
+        searching._client = None
+        await _until(lambda: not running.service.lock._waiters)
+        site.release.set()
+        await asyncio.wait_for(exporting, 5)
+        await asyncio.wait_for(fetch.export(30173, "H2C", "0.6"), 5)
+        assert site.steps == ["export", "export"]
+        assert site.closed == 0
+
+
+async def _until(ready: Any) -> None:
+    """Wait (bounded, no fixed sleep) until ``ready()`` holds."""
+    async with asyncio.timeout(5):
+        while not ready():
+            await asyncio.sleep(0.01)

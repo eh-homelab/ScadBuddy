@@ -2497,7 +2497,9 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   (`POST /api/v1/filament/tdfp/search`, agent `filament_tdfp_search`) and add a filament it
   lacks (`POST /api/v1/filament/tdfp/filaments`, agent `filament_tdfp_create`, approved
   first) as the `TdfpSearch` and `TdfpCreate` workflows on the same queue, which the API
-  waits for. The create stops on a likely duplicate in the site's own list, refuses a brand,
+  waits for. A search's step runs on a queue and slot of its own (`profile-fetch-search`,
+  #7062), so it never waits for a preset fetch; on the browser it takes its turn between the
+  export's steps. The create stops on a likely duplicate in the site's own list, refuses a brand,
   material and type with no site defaults, is tried once, and sets the new id as the type's
   `tdfp_id`. Neither needs a new setting, secret or CRUD area. The plan is
   `docs/superpowers/plans/2026-11-22-3dfp-search-add.md`.
