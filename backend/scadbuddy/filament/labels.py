@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,11 +14,14 @@ from psycopg.rows import DictRow
 from scadbuddy.bambuddy.trays import EXTERNAL, place_label
 from scadbuddy.codes.parse import format_code
 from scadbuddy.filament import models as m
+from scadbuddy.filament import prints
 from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.locations import LocationStore, NoAmsKindError
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.status import status_from_report
 from scadbuddy.printers.store import PrinterStore
+
+logger = logging.getLogger(__name__)
 
 
 def label_base_url(read: Mapping[str, Any]) -> str | None:
@@ -113,9 +117,19 @@ def _ensure_reported(conn: Connection[DictRow], printer_id: UUID) -> bool:
     if row is None or printer is None:
         return False
     at = row["seen_at"]
-    status = status_from_report(
-        printer, LanReport(serial=printer.serial, received_at=at, print=dict(row["report"])), now=at
-    )
+    try:
+        status = status_from_report(
+            printer,
+            LanReport(serial=printer.serial, received_at=at, print=dict(row["report"])),
+            now=at,
+        )
+    except Exception as error:
+        # A stored report that cannot be read is one printer's problem, as in `reconcile_all`.
+        logger.warning(
+            prints.FILAMENT_CAPTURE_FAILED,
+            extra={"printer_id": str(printer_id), "what": "labels", "error": type(error).__name__},
+        )
+        return False
     slots = [(unit.id, tray.id) for unit in status.ams for tray in unit.tray]
     slots += [(EXTERNAL, tray.id - 254) for tray in status.vt_tray]
     if not status.ams and not slots:

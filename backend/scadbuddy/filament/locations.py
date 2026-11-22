@@ -245,10 +245,21 @@ class LocationStore:
         )
         key = (printer_id, ams_id, tray_id)
         try:
-            # The external holder's parent is the printer's place; making it first also
-            # hangs a holder whose parent is gone under the new one.
-            root = LocationStore._printer_parent(conn, printer_id) if ams_id == EXTERNAL else None
+            # The external holder's parent is the printer's place.
             found = conn.execute(select, key).fetchone()
+            root = None
+            if ams_id == EXTERNAL and not (
+                found is not None
+                and found["parent_id"] is not None
+                and conn.execute(
+                    "SELECT 1 FROM filament_locations WHERE id = %s AND archived_at IS NULL",
+                    (found["parent_id"],),
+                ).fetchone()
+            ):
+                # Only a holder with no live parent needs the printer's place: making it
+                # also hangs that holder under it, so the holder is read again.
+                root = LocationStore._printer_parent(conn, printer_id)
+                found = conn.execute(select, key).fetchone()
             if found is not None and found["parent_id"] is not None:
                 if ams_id != EXTERNAL:
                     LocationStore.hang_orphans_on(conn, printer_id)

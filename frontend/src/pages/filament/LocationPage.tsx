@@ -108,7 +108,7 @@ export function LocationPage() {
                         {spool.code}
                         {spool.material ? ` ${spool.material}` : ''}
                       </span>
-                      {spool.grams_left != null && <span className="tabular-nums text-muted-foreground">{spool.grams_left} g</span>}
+                      {spool.grams_left != null && <span className="tabular-nums text-muted-foreground">{Number(spool.grams_left.toFixed(1))} g</span>}
                     </SpoolLink>
                   </li>
                 ))}

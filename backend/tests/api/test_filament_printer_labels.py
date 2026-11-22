@@ -9,7 +9,9 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.filament import labels
 from scadbuddy.filament.component import FILAMENT
+from scadbuddy.printers.status import status_from_report
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -161,3 +163,26 @@ def test_printer_labels_name_a_printer_with_no_report(client: TestClient) -> Non
     body = client.post(LABELS, json={"printer_ids": [printer]}).json()
     assert [label["depth"] for label in body["labels"]] == [0, 1, 2]
     assert body["no_report"] == ["H2C"]
+
+
+def test_printer_labels_survive_an_unreadable_report(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored report that cannot be read is one printer's problem: the others keep
+    their labels, and that printer is named in `no_report`."""
+    broken = _printer(client, "A1")
+    fine = _printer(client, "H2C")
+    _tray(client, fine, 0, 1)
+    _report(client, broken, {"ams": {"ams": [{"id": "0", "tray": [{"id": "0"}]}]}})
+    _report(client, fine, {"ams": {"ams": [{"id": "0", "tray": [{"id": "1"}]}]}})
+    real = status_from_report
+
+    def status(printer, report, *, now):  # type: ignore[no-untyped-def]
+        if str(printer.id) == broken:
+            raise ValueError("unreadable")
+        return real(printer, report, now=now)
+
+    monkeypatch.setattr(labels, "status_from_report", status)
+    body = client.post(LABELS, json={"printer_ids": [broken, fine]}).json()
+    assert body["no_report"] == ["A1"]
+    assert [label["depth"] for label in body["labels"]] == [0, 0, 1, 2]
