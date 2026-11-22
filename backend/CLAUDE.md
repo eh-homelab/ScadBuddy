@@ -320,7 +320,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   so a run moves to each new build and a change must replay
   `tests/fixtures/project_workflow_histories/`. A run whose start names a host function
   (`FlowStart.host_functions`) its worker lacks waits after `flow_record` for a build
-  that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
+  that has it (`project.offers_host_functions`). A run that gets no `execute` Update within
+  `FlowStart.script_wait_s` (300 s; a failed first workflow task loses the start's Update)
+  writes its row `failed` (`NO_SCRIPT_REASON`) and closes (#7032, `NO_SCRIPT_PATCH`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
   `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the

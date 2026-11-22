@@ -30,8 +30,10 @@ on #4262's (a `turn_tool_tier` whose three attempts missed their beats, asked on
 with no heartbeat timeout, recorded by
 `test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_beats`); `lowered` on
 #2171's (a tool lowered from outward while the run waited, run without approval, recorded by
-`test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`). Never
-re-record them.
+`test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`);
+`unscripted` on #7032's (a run whose `execute` never came, failed and closed after its
+`script_wait_s`) and `scripted` (a run whose `execute` came, so the wait ended unfired),
+both recorded by `test_no_script.py`. Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -70,6 +72,8 @@ NAMES = [
     "beatless",
     "lowered",
     "unregistered",
+    "unscripted",
+    "scripted",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 

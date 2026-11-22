@@ -5,12 +5,14 @@ the script through the Code Mode tool over ScadBuddy's host functions.
 
 It registers no Update, Query or Signal of its own: answers, approvals and status are the
 harness's (`provide_callback_result`, `tool_approval`, `agent_status`), and `close` ends
-it. AUTO_UPGRADE on the versioned ``scadbuddy-projects`` worker (#4146; never pinned,
-Ruling 13: a flow may run for weeks): an open run moves to each new build at its next
-task and replays there, so a change must replay
-`tests/fixtures/project_workflow_histories/`, or go behind `workflow.patched()`.
+it. A run that gets no `execute` within `FlowStart.script_wait_s` records itself failed
+and closes (#7032, behind `NO_SCRIPT_PATCH`). AUTO_UPGRADE on the versioned
+``scadbuddy-projects`` worker (#4146; never pinned, Ruling 13: a flow may run for weeks):
+an open run moves to each new build at its next task and replays there, so a change must
+replay `tests/fixtures/project_workflow_histories/`, or go behind `workflow.patched()`.
 """
 
+import asyncio
 from datetime import timedelta
 from typing import Any, Literal
 
@@ -43,6 +45,13 @@ KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
 SUBJECT = SearchAttributeKey.for_keyword("ScadbuddySubject")
 STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 _ACTIVITY = timedelta(seconds=8)
+#: A run that gets no `execute` within `FlowStart.script_wait_s` fails and closes (#7032).
+NO_SCRIPT_PATCH = "flow-no-script-7032"
+#: What such a run's row says.
+NO_SCRIPT_REASON = (
+    "the run's script never reached it (Temporal lost the start's `execute` Update); "
+    "start the run again"
+)
 
 
 class RunFlow(BaseModel):
@@ -95,6 +104,10 @@ class FlowStart(BaseModel):
     #: that the projects worker's credential may name `started_by` as their author; ""
     #: from an API from before, whose runs' calls name no author, as they never did.
     run_token: str = ""
+    #: Seconds the run waits for its `execute` Update before it fails and closes (#7032).
+    #: The Update rides on the run's first workflow task, and a task that fails loses it.
+    #: Tests shorten it.
+    script_wait_s: int = 300
 
 
 class UnregisteredHostFunctionError(Exception):
@@ -128,6 +141,9 @@ class ProjectWorkflow:
     def __init__(self, config: AgentConfig, data: FlowStart) -> None:
         self._start = data
         self._executed = False
+        #: The run failed for want of a script (#7032): a later `execute` is refused.
+        self._unscripted = False
+        self._script_wait: asyncio.Task[None] | None = None
         self._seq = 0
         self._started: set[str] = set()
         self._runner = AgentWorkflowRunner(
@@ -184,9 +200,61 @@ class ProjectWorkflow:
     def started(self, call_id: str) -> bool:
         return call_id in self._started
 
+    @agent.setup
+    async def setup(self) -> None:
+        """Starts the wait for the run's script (#7032). Behind its patch: a run started
+        before has no timer to replay."""
+        if workflow.patched(NO_SCRIPT_PATCH):
+            self._script_wait = asyncio.create_task(self._fail_without_script())
+
+    async def _fail_without_script(self) -> None:
+        """No `execute` in `script_wait_s`: the run's start lost it (the first workflow
+        task failed, and the retry completed with no Update). The row is written failed,
+        and the run closes, so it does not wait for a script for ever."""
+        try:
+            await workflow.wait_condition(
+                lambda: self._executed, timeout=timedelta(seconds=self._start.script_wait_s)
+            )
+            return
+        except TimeoutError:
+            pass
+        self._unscripted = True
+        info = workflow.info()
+        start = self._start
+        await workflow.execute_activity(
+            FLOW_RECORD,
+            FlowRecord(
+                run_id=start.run_id,
+                definition_id=start.definition_id,
+                version=start.version,
+                name=start.name,
+                workflow_id=info.workflow_id,
+                workflow_run_id=info.run_id,
+                started_by=start.started_by,
+                approval_timeout_s=start.approval_timeout_s,
+                commit=start.commit,
+            ),
+            start_to_close_timeout=_ACTIVITY,
+        )
+        await project(
+            ProjectionWrite(
+                run_id=start.run_id,
+                workflow_run_id=info.run_id,
+                status="failed",
+                result=NO_SCRIPT_REASON,
+            )
+        )
+        self._upsert("failed")
+        await workflow.execute_activity(
+            FLOW_CLOSE, info.workflow_id, start_to_close_timeout=_ACTIVITY
+        )
+
     @agent.accepts(mid_turn=MidTurn.REJECT)
     async def execute(self, message: RunFlow) -> TextReply:
         """Run the flow's script, no model in the loop, then close the run."""
+        if self._unscripted:
+            # Too late (#7032): the run is recorded failed and closing.
+            raise ApplicationError(NO_SCRIPT_REASON, type="NoScript", non_retryable=True)
         if self._executed:
             # One script per run (Ruling 3): a second `execute` under another update id.
             raise ApplicationError(
@@ -218,8 +286,9 @@ class ProjectWorkflow:
         # A build without a host function the start names defers here, before the script
         # (#4146), by failing the workflow task, never the run. Not earlier: the first
         # task carries the start's `execute` Update, which a failed task loses (measured,
-        # tests/flows/test_projects_versioning.py), and the run would wait for a script
-        # for ever. Not by raising here either: this handler runs in the harness's own
+        # tests/flows/test_projects_versioning.py), and the run would fail with no script
+        # once `script_wait_s` passed (#7032; before NO_SCRIPT_PATCH it waited for ever).
+        # Not by raising here either: this handler runs in the harness's own
         # task, which turns any Exception into the message's error. The SDK checks a
         # condition in its event loop, outside every task, so one that raises fails the
         # activation. It adds no command: a run that does not wait replays unchanged.

@@ -143,6 +143,7 @@ class Flows:
         update_id: str | None = None,
         inputs_schema: dict[str, Any] | None = None,
         inputs: dict[str, Any] | None = None,
+        script_wait_s: int = 300,
     ) -> Any:
         return await AgentClient(self.client, f"flow-{run_id}").start_and_submit_message(
             "execute",
@@ -156,6 +157,7 @@ class Flows:
                 version=1,
                 name="t",
                 started_by={"kind": "browser"},
+                script_wait_s=script_wait_s,
             ),
             update_id=update_id,
         )
