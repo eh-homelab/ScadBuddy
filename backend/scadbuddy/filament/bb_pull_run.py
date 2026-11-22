@@ -85,8 +85,9 @@ USAGE_BODY_ROWS = 5_000
 #: ``limit`` rows, with no offset or date (R-6860-1), and puts no cap on ``limit``, so a
 #: row older than this read is never booked. Prod wrote 471 rows in 60 days (at most 36
 #: in a day, 304 in 30 days, measured 2026-11-22), so this is more than a year of rows at
-#: the busiest month's rate: one read covers any realistic gap between two pulls. It is one body's rows, so a read is one body and
-#: `bambuddy_usage._cover` sees every row of the read together (R-7002-2).
+#: the busiest month's rate: one read covers any realistic gap between two pulls. It is
+#: one body's rows, so a read is one body and `bambuddy_usage._cover` sees every row of
+#: the read together (R-7002-2).
 USAGE_READ_ROWS = USAGE_BODY_ROWS
 
 #: The import's answer when the Bambuddy URL changed between the route and the read.
