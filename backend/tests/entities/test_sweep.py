@@ -199,3 +199,23 @@ def test_a_printer_merge_keeps_the_gone_printers_files_and_links(
             "SELECT subject FROM entity_attachments WHERE id = %s", (manual,)
         ).fetchone()
     assert row is not None and row["subject"] == f"printer:{mine.id}"
+
+
+def test_an_owner_back_under_the_same_id_keeps_its_links(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #6961: `orphans` reads outside the delete's transaction, so the sweep
+    checks the owner again before it removes anything."""
+    entities = EntityStore(pg_pool)
+    attachments = EntityAttachmentStore(pg_pool, entities)
+    links = EntityLinkStore(pg_pool, entities)
+    spool = _spool(pg_pool)
+    links.add(spool, LinkInput(url="https://example.com/spool"), BY)
+    with pg_pool.connection() as conn:
+        entity_id = entities.find(conn, spool)
+    assert entity_id is not None
+    monkeypatch.setattr(entities, "orphans", lambda conn, limit, guarded=(): [(entity_id, spool)])
+
+    assert sweep_orphan_entities(entities, attachments) == 0
+
+    assert [link.url for link in links.list(spool)] == ["https://example.com/spool"]
