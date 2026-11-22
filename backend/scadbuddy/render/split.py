@@ -146,7 +146,9 @@ def painted_pieces(parts: Sequence[ColourPart]) -> list[ColourPart]:
             # Another colour is another slot: only the part's own keeps its slot.
             slot = part.slot if colour == own else None
             out.append(
-                replace(part, name=name, colour=colour, mesh=mesh, paint=None, alpha=alpha, slot=slot)
+                replace(
+                    part, name=name, colour=colour, mesh=mesh, paint=None, alpha=alpha, slot=slot
+                )
             )
     return out
 

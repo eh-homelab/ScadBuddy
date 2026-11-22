@@ -409,9 +409,7 @@ async def get_library_search(
     source = f"{config.base_url}#{hashlib.sha256((config.api_key or '').encode()).hexdigest()}"
     # One config for the key and the client, so the two cannot drift apart.
     snapshot = await index.snapshot(source, partial(BambuddyClient, config), fresh=fresh)
-    found = search_library(
-        snapshot.folders, snapshot.files, q, show_all=show_all, types=types
-    )
+    found = search_library(snapshot.folders, snapshot.files, q, show_all=show_all, types=types)
     made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in found.files))
     for entry in found.files:
         entry.output_id = made.get(entry.id)

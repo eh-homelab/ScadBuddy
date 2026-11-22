@@ -297,9 +297,7 @@ def _with_captions(listing: Listing, captions: dict[str, str]) -> Listing:
         for p in snapshot.schema_.parameters
     ]
     schema = snapshot.schema_.model_copy(update={"parameters": parameters})
-    return listing.model_copy(
-        update={"snapshot": snapshot.model_copy(update={"schema_": schema})}
-    )
+    return listing.model_copy(update={"snapshot": snapshot.model_copy(update={"schema_": schema})})
 
 
 @pytest.mark.parametrize(

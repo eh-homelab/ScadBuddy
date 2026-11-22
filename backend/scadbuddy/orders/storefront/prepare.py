@@ -554,6 +554,9 @@ async def warm_default(state: AppState, listing: Listing) -> None:
     log says it was given up, not that it failed."""
     if not state.settings.storefront_warm_prices or not listing.published:
         return
+    if listing.template_snapshot is None:
+        # A file listing has no render to make (#6710): its price is read by its colours.
+        return
     try:
         # A Temporal that does not answer never holds up the publish (review of #6970).
         await asyncio.wait_for(preparer(state).start_default(listing.id), WARM_START_TIMEOUT)
