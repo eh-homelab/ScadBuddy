@@ -265,6 +265,7 @@ describe('CustomizePage', () => {
   it('renders choices again after a change and back once their render ended as too slow (#7010 review)', async () => {
     server.use(http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)))
     const sent = renders()
+    // The two one-second debounces take about 2.5 s; the 15 s timeout leaves room on a loaded machine.
     const { user } = show(CHARM_ID, { ...FAST, limitMs: 100 }, 1_000)
     await screen.findByRole('alert')
     await user.click(await screen.findByRole('button', { name: /Body colour/ }))
@@ -278,7 +279,6 @@ describe('CustomizePage', () => {
     await user.click(await screen.findByRole('radio', { name: 'Rust' }))
     await waitFor(() => expect(sent).toHaveLength(3), { timeout: 2_000 })
     expect(sent[2]).toEqual(sent[1])
-    // The two one-second debounces take about 2.5 s; the 15 s timeout leaves room on a loaded machine.
   }, 15_000)
 
   it('renders refused choices again after a change and back inside the debounce (#7000 review)', async () => {
