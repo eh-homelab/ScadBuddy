@@ -373,7 +373,8 @@ export const handlers = [
     const held = renders.get(String(params.id))
     if (held?.render.status !== 'done') return refused(404, 'render_not_found', 'There is no such render.')
     // The slice works the price out first: one `pending` answer per render, as the shop
-    // gives while its slice runs, then the price.
+    // gives while its slice runs, then the price. The page reads again after its first
+    // poll wait (`POLL.firstMs`, 1 s), so each render's price shows about 1 s later.
     held.estimates += 1
     if (held.estimates === 1) return HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })
     // #6921: the priced slice records the variant, with the output it saved.
