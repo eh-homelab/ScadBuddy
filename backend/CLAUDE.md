@@ -2158,6 +2158,34 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and `print_seconds` for the shop and the checkout (`estimate.py` `SHOP_ONLY_FIELDS`); the
   edge sends only `routes.py` `ESTIMATE_FIELDS`. The volume analysis (`storefront_job_parts`)
   is no longer read; `rough_estimate` stays for the back office.
+  The instant read (#6921, migration `20261122T0128Z_storefront_variant_prices.sql`): the
+  visitor's choices have a key known before any render, `renders.py` `variant_key` (the
+  sha256 of the listing id, its `updated_at` and the choices as `checked_choice` settled
+  them: the render's values, the material and the body's slot filaments). The render row
+  keeps it (`storefront_renders.variant_key`), the slice's operation carries it
+  (`SliceVariant.variant_key`, with its `listing_id`), and its `done` row records them with
+  the slot filaments, the slot colours and the output the slice saved (`variant_key`,
+  `listing_id`, `slot_filaments`, `slot_colours`, `output_id`; a finish that names none of
+  these keeps the row's, `coalesce`); a `done` row from before takes the key and listing of
+  the first render whose estimate reads it (`SlicePrices.adopt`, no output). The instant
+  read, the preview and the cart add all take one row of the key,
+  `SlicePrices.variant_row`: the newest that names an output, else the newest. `POST …/listings/{id}/variant`
+  (area `variants`; edge `/api/store/v1/listings/{id}/variant`, counted as a read,
+  `ratelimit.py` `READ_POSTS`) takes the render's body, checks it as the render does,
+  starts no render and no slice, and answers `StoreVariant`: `price` from
+  `slice_price.py` `instant_price` (that row, re-keyed with
+  `price_key` from its `model_sha256` and slot filaments and the shop's settings now:
+  `slice` when that key has a `done` row, else that row's price as `last`, else
+  `none`; each read runs `_planned`, whose live rate and printer opening are kept
+  `RATE_TTL` per process), `preview` (that row's output, while it is of
+  the listing's slug and commit, as `/api/store/v1/variants/{key}/preview.glb`, which
+  `…/variants/{key}/preview.glb` streams; 404 `variant_not_found` for none, or when the
+  row's listing is not published; never the output id), `render` (the visitor's own render of these choices while it is held) and
+  `values`. `last` is never a line's price: `firm_price` and `line_prices.py` read by key
+  only. A cart add with no done render of the visitor's takes the variant a priced slice
+  recorded, while its output is of the listing's design (`line_prices.py`
+  `_priced_variant`; its slot colours, `drafts.py` `_render_colours`), and still reads the
+  firm price by key.
   Checkout charges that price (#6153 PR B, `orders/storefront/line_prices.py`, migration
   `20261115T1823Z_storefront_item_prices.sql`). The server never takes a price from the
   browser: `add_listing_item` makes the line's key as the estimate does
