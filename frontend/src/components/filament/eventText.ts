@@ -103,7 +103,7 @@ const DECIMAL = /^-?\d+(\.\d+)?$/
 
 const fieldText = (field: string) => FIELD_TEXT[field] ?? field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' ')
 
-function valueText(field: string, value: unknown, names: EventNames): string {
+export function valueText(field: string, value: unknown, names: EventNames): string {
   if (value == null || value === '') return 'not set'
   if (typeof value === 'boolean') return value ? 'on' : 'off'
   if (Array.isArray(value)) return value.length === 0 ? 'not set' : value.map((one) => valueText(field, one, names)).join(', ')
@@ -116,18 +116,36 @@ function valueText(field: string, value: unknown, names: EventNames): string {
   return JSON.stringify(value)
 }
 
+/** One changed field of an `edited` event: its label and values, or one line for a whole list (`whole`). */
+export interface ChangeEntry {
+  field: string
+  label: string
+  /** `undefined` when the event names only the new value. */
+  before?: unknown
+  after: unknown
+  whole?: string
+}
+
+/** Each changed field of an `edited` event's `data.changes` (`{field: [before, after]}`). */
+export function changeEntries(changes: unknown): ChangeEntry[] {
+  if (changes === null || typeof changes !== 'object' || Array.isArray(changes)) return []
+  return Object.entries(changes as Record<string, unknown>).map(([field, pair]) => {
+    if (field in WHOLE_LIST) return { field, label: fieldText(field), after: undefined, whole: WHOLE_LIST[field]! }
+    const [before, after] = Array.isArray(pair) && pair.length === 2 ? pair : [undefined, pair]
+    return { field, label: fieldText(field), before, after }
+  })
+}
+
 /**
  * One line per changed field of an `edited` event's `data.changes` (`{field: [before,
  * after]}`): `Cost per kg: 20.00 → 25.00`. Ids read as their names through `names`; a
  * spool's presets and K values read as one line each.
  */
 export function changeLines(changes: unknown, names: EventNames): string[] {
-  if (changes === null || typeof changes !== 'object' || Array.isArray(changes)) return []
-  return Object.entries(changes as Record<string, unknown>).map(([field, pair]) => {
-    if (field in WHOLE_LIST) return WHOLE_LIST[field]!
-    const [before, after] = Array.isArray(pair) && pair.length === 2 ? pair : [undefined, pair]
-    if (before === undefined) return `${fieldText(field)}: ${valueText(field, after, names)}`
-    return `${fieldText(field)}: ${valueText(field, before, names)} → ${valueText(field, after, names)}`
+  return changeEntries(changes).map(({ field, label, before, after, whole }) => {
+    if (whole) return whole
+    if (before === undefined) return `${label}: ${valueText(field, after, names)}`
+    return `${label}: ${valueText(field, before, names)} → ${valueText(field, after, names)}`
   })
 }
 

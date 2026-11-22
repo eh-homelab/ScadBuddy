@@ -7,6 +7,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
 import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { toolCallActivity } from '../src/temporal/toolCall.js'
+import { withUiPaths } from '../src/tools/filamentLinks.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -54,7 +55,7 @@ describe('filament catalog tools', () => {
       }),
     )
     const listed = await runTool(tool('filament_catalog_list'), { kind: 'brands', include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: '/filament/catalog?kind=brands' }])
   })
 
   it('adds a row with the fields given', async () => {
@@ -179,9 +180,9 @@ describe('filament type tools', () => {
       http.get(TYPE, () => HttpResponse.json({ id: ROW, presets: [], k_values: [] })),
     )
     const listed = await runTool(tool('filament_type_list'), { include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/types/${ROW}` }])
     const one = await runTool(tool('filament_type_get'), { type_id: ROW }, ctx())
-    expect(firstText(one)).toEqual({ id: ROW, presets: [], k_values: [] })
+    expect(firstText(one)).toEqual({ id: ROW, ui_path: `/filament/types/${ROW}`, presets: [], k_values: [] })
   })
 
   it('adds a type, then edits and archives it', async () => {
@@ -267,7 +268,7 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     expect(start).toContain('Bambuddy')
     expect(start).toContain('3dfilamentprofiles.com')
     expect(tool('filament_type_upsert').description).toContain('tdfp_id')
-    expect(start).toMatch(/Approved first\.$/)
+    expect(start).toMatch(/Approved first\./)
   })
 
   it('takes the drying values in the upsert fields (#6720)', () => {
@@ -338,7 +339,7 @@ describe('filament type 3DFP preset fetch tools (#6625)', () => {
     const gaps = [{ printer_model: 'H2C', nozzle_diameter: '0.2', reason: 'the dialog offers no 0.2 mm nozzle' }]
     server.use(http.get(FETCH, () => HttpResponse.json({ run: RUN, gaps })))
     const read = await runTool(tool('filament_type_profile_fetch'), { type_id: ROW }, ctx())
-    expect(firstText(read)).toEqual({ run: RUN, gaps })
+    expect(firstText(read)).toEqual(withUiPaths({ run: RUN, gaps }))
   })
 
   it('reads a type that never had a fetch', async () => {
@@ -383,8 +384,8 @@ describe('filament spool tools', () => {
       http.get(`${SPOOL}/events`, () => HttpResponse.json([{ kind: 'created' }])),
     )
     const listed = await runTool(tool('filament_spool_list'), { needs_type: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW }])
-    expect(firstText(await runTool(tool('filament_spool_get'), { spool_id: ROW }, ctx()))).toEqual({ id: ROW })
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/spools/${ROW}` }])
+    expect(firstText(await runTool(tool('filament_spool_get'), { spool_id: ROW }, ctx()))).toEqual({ id: ROW, ui_path: `/filament/spools/${ROW}` })
     const events = await runTool(tool('filament_spool_events'), { spool_id: ROW }, ctx())
     expect(firstText(events)).toEqual([{ kind: 'created' }])
   })
@@ -534,7 +535,7 @@ describe('filament location tools', () => {
       }),
     )
     const listed = await runTool(tool('filament_location_list'), { include_archived: true }, ctx())
-    expect(firstText(listed)).toEqual([{ id: ROW, children: [] }])
+    expect(firstText(listed)).toEqual([{ id: ROW, ui_path: `/filament/spools?place=${ROW}`, children: [] }])
     const fields = { name: 'Shelf A', kind_id: ROW }
     expect((await runTool(tool('filament_location_upsert'), { fields }, ctx())).isError).toBeFalsy()
     const edit = { location_id: ROW, fields: { note: null }, archived: true }
@@ -1103,10 +1104,10 @@ describe('filament_type_fill_from_profile (#6714)', () => {
         return HttpResponse.json(fill)
       }),
     )
-    expect(firstText(await runTool(tool('filament_type_fill_from_profile'), { refresh: true }, ctx()))).toEqual([fill])
+    expect(firstText(await runTool(tool('filament_type_fill_from_profile'), { refresh: true }, ctx()))).toEqual(withUiPaths([fill]))
     const shown = [{ printer_id: ROW, extruder: 0, nozzle_diameter: '0.4', k_value: '0.02' }]
     const one = await runTool(tool('filament_type_fill_from_profile'), { type_id: ROW, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown }, ctx())
-    expect(firstText(one)).toEqual(fill)
+    expect(firstText(one)).toEqual(withUiPaths(fill))
     expect(sent).toEqual([
       { url: `${TYPES}/fill-from-profile`, body: { refresh: true } },
       { url: `${TYPES}/${ROW}/fill-from-profile`, body: { refresh: false, apply: { density_g_cm3: '1.32' }, k_values: true, shown_k_values: shown } },
@@ -1179,7 +1180,7 @@ describe('filament type proposal tools (#6701)', () => {
       }),
     )
     const done = await runTool(tool('filament_type_proposals_confirm'), { groups: [group] }, ctx())
-    expect(firstText(done)).toEqual(result)
+    expect(firstText(done)).toEqual(withUiPaths(result))
     expect(bodies).toEqual([{ groups: [group] }])
     expect(tool('filament_type_proposals_confirm').summarize({ groups: [group] })).toBe(
       'Make 1 spool type for 1 spool',

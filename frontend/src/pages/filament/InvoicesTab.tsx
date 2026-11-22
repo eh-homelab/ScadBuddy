@@ -1,10 +1,12 @@
 import { PaperclipIcon } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listInvoices, listSuppliers, type Invoice, type Supplier } from '../../api/filamentPurchasing'
 import { TD, TH } from '../../components/filament/formClasses'
 import { InvoiceUpload } from '../../components/filament/purchasing/InvoiceUpload'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { readQuery, remember, rememberedQuery, remembering, setRemembering, writeQuery, type InvoicesQuery, type InvoiceStatusFilter } from '../../components/filament/purchasing/invoicesQuery'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
@@ -77,7 +79,7 @@ export function InvoicesTab() {
 
   return (
     <div className="flex flex-col gap-4">
-      <InvoiceUpload onCreated={(id) => navigate(`/filament/invoices/${id}`)} />
+      <InvoiceUpload onCreated={(id) => navigate(filamentLinks.invoice(id))} />
       <div className="flex flex-wrap items-center gap-3 text-[13px]">
         <Select value={status} onValueChange={(next) => change({ ...query, status: next as InvoiceStatusFilter })}>
           <SelectTrigger size="sm" aria-label="Status" className="w-40">
@@ -143,11 +145,13 @@ export function InvoicesTab() {
               {rows.map((invoice) => (
                 <tr key={invoice.id} data-invoice={invoice.id} className="border-t">
                   <td className={`${TD} whitespace-nowrap tabular-nums`}>{invoice.invoice_date}</td>
-                  <td className={TD}>{names.get(invoice.supplier_id) ?? ''}</td>
                   <td className={TD}>
-                    <Link to={`/filament/invoices/${invoice.id}`} className="font-medium underline-offset-4 hover:underline">
+                    {names.has(invoice.supplier_id) && <EntityLink to={filamentLinks.supplier(invoice.supplier_id)}>{names.get(invoice.supplier_id)}</EntityLink>}
+                  </td>
+                  <td className={TD}>
+                    <EntityLink to={filamentLinks.invoice(invoice.id)} className="font-medium">
                       {invoice.number ?? 'No number'}
-                    </Link>
+                    </EntityLink>
                   </td>
                   <td className={TD}>
                     <Badge variant={invoice.status === 'draft' ? 'outline' : 'secondary'}>{invoice.status === 'draft' ? 'Draft' : 'Confirmed'}</Badge>

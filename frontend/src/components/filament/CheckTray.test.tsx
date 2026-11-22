@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { FilamentInventoryView } from '../../api/filament'
+import { renderPage } from '../../test/utils'
 import { CheckTray, trayChecks } from './CheckTray'
 
 const tray = (over: Partial<FilamentInventoryView['trays'][number]['trays'][number]>) => ({
@@ -37,10 +38,12 @@ describe('check this tray (#6713)', () => {
     expect(checks.get('spool-76')).toEqual({ place: 'H2C HT-A', reportedType: 'PETG', reportedRgba: '#A7AEB2FF' })
   })
 
-  it('names what the printer reports', () => {
-    render(<CheckTray check={{ place: 'H2C HT-A', reportedType: 'PETG', reportedRgba: '#A7AEB2FF' }} />)
+  it('names what the printer reports, and links the printer to the printers list (#6869)', () => {
+    renderPage(<CheckTray check={{ place: 'H2C HT-A', reportedType: 'PETG', reportedRgba: '#A7AEB2FF' }} />)
     expect(screen.getByText('Check this tray')).toBeInTheDocument()
-    expect(screen.getByText('H2C HT-A reports PETG #A7AEB2')).toBeInTheDocument()
+    const printer = screen.getByRole('link', { name: 'H2C HT-A' })
+    expect(printer).toHaveAttribute('href', '/settings/printing#printers')
+    expect(printer.parentElement).toHaveTextContent('H2C HT-A reports PETG #A7AEB2')
   })
 
   it('shows nothing without a check', () => {

@@ -92,6 +92,8 @@ class PricePoint(_Row):
     on_date: date
     source: Source
     invoice_line_id: UUID | None
+    #: The invoice of ``invoice_line_id`` (#6869), for a link to its line.
+    invoice_id: UUID | None = None
     price_per_kg: Decimal | None = None
 
 

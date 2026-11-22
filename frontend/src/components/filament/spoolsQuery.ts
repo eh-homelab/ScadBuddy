@@ -1,6 +1,6 @@
 /**
  * #6262 — the Spools tab's view, filters, grouping, columns and sort, kept in the URL
- * (`?q=&view=&status=&needs_type=&low=&used=&new=&loaded=&material=&brand=&insert=&location=&group=&cols=&sort=`)
+ * (`?q=&view=&status=&needs_type=&low=&used=&new=&loaded=&material=&brand=&insert=&location=&place=&group=&cols=&sort=`)
  * as `listingsQuery.ts` keeps the Storefront list's, so back, reload and a shared link show
  * the same rows. The columns are also remembered per viewer (`readStoredColumns`), a view
  * convenience used when the URL names none.
@@ -63,6 +63,8 @@ export interface SpoolsQuery {
   brand?: string
   insertType?: string
   location?: string
+  /** One place by id (#6869: the links to a place), where `location` matches every place of a name. */
+  place?: string
   group?: SpoolsGroup
   columns: ColumnId[]
   sort: string
@@ -83,6 +85,7 @@ const NAMES = [
   ['brand', 'brand'],
   ['insertType', 'insert'],
   ['location', 'location'],
+  ['place', 'place'],
 ] as const
 const GROUPS: readonly SpoolsGroup[] = ['material', 'brand', 'type', 'location']
 const VIEWS: readonly SpoolsView[] = ['table', 'cards', 'forecast']
@@ -139,9 +142,6 @@ export const listBack = (state: unknown): string => {
   return typeof back === 'string' && back.startsWith('?') ? back : ''
 }
 
-/** A spool's page (Task 17). */
-export const spoolPath = (spool: Pick<Spool, 'id'>) => `/filament/spools/${encodeURIComponent(spool.id)}`
-
 /** Grams as a whole number with the viewer's grouping; empty when unknown. */
 export const grams = (value: number | null | undefined) => (value == null ? '' : Math.round(value).toLocaleString())
 
@@ -196,6 +196,7 @@ export function filterSpools(
     if (q.brand && !same(spool.names?.brand, q.brand)) return false
     if (q.insertType && !same(spool.names?.insert_type, q.insertType)) return false
     if (q.location && !same(spool.names?.location, q.location)) return false
+    if (q.place && spool.location_id !== q.place) return false
     if (tokens.length && !matchesSearch(searchDoc(spool), tokens)) return false
     return true
   })

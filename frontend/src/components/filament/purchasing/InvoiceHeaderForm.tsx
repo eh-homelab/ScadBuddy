@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cmpDecimals, parseDecimal } from '../../../lib/decimal'
+import { filamentLinks } from '../../../lib/filamentLinks'
 
 type MoneyField = 'subtotal' | 'shipping' | 'tax' | 'total'
 const MONEY: { field: MoneyField; label: string }[] = [
@@ -183,7 +184,7 @@ export function InvoiceHeaderForm({
       ) : (
         <p className="text-[13px]">
           <span className="text-muted-foreground">Supplier </span>
-          <Link to={`/filament/suppliers/${invoice.supplier_id}`} className="font-medium underline-offset-4 hover:underline">
+          <Link to={filamentLinks.supplier(invoice.supplier_id)} className="font-medium underline-offset-4 hover:underline">
             {suppliers.find((one) => one.id === invoice.supplier_id)?.name ?? 'Unknown supplier'}
           </Link>
         </p>
@@ -201,7 +202,7 @@ export function InvoiceHeaderForm({
           {refused.existing && (
             <>
               {' '}
-              <Link to={`/filament/invoices/${refused.existing}`} className="underline underline-offset-4">
+              <Link to={filamentLinks.invoice(refused.existing)} className="underline underline-offset-4">
                 Open that invoice
               </Link>
             </>

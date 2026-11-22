@@ -94,7 +94,7 @@ describe('TagPanel', () => {
     await waitFor(() => expect(screen.getByLabelText('Tag UID')).toHaveValue('04A1B2C3'))
     expect(screen.getByLabelText('Tray UUID')).toHaveValue('')
     expect(screen.getByRole('combobox', { name: 'Tag kind' })).toHaveTextContent('OpenTag (NTAG)')
-    expect(screen.getByText(/Spool #5 already holds this tag/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Spool #5' }).parentElement).toHaveTextContent('Spool #5 already holds this tag')
   })
 
   it('waits for the reader and sends the 30 second window', async () => {

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import type { Spool } from '../../../api/filament'
+import type { InvoiceLine } from '../../../api/filamentPurchasing'
 import { formatCost } from '../../../lib/decimal'
 import { InvoiceLinesTable } from './InvoiceLinesTable'
 import { blankLine } from './invoiceLines'
@@ -49,5 +50,46 @@ describe('the invoice lines table', () => {
   it('marks nothing when no filled spool has a cost', () => {
     show([spool('b', 13, null)], ['b'])
     expect(screen.queryByText(/replaces/)).not.toBeInTheDocument()
+  })
+
+  it('links a confirmed line to its spools, type and product, marks a deleted spool and the line a link names (#6869)', () => {
+    const line = {
+      id: 'l1',
+      invoice_id: 'i1',
+      position: 1,
+      description: 'PLA white',
+      sku: 'A00-W1',
+      colour_code: null,
+      quantity: 2,
+      unit_price: '20.0000',
+      type_id: 't1',
+      supplier_product_id: 'p1',
+      allocated_cost: '40.0000',
+      line_tax: '0.0000',
+      tax_basis: 'none',
+      spool_ids: ['a', 'gone'],
+    } as unknown as InvoiceLine
+    render(
+      <MemoryRouter initialEntries={['/filament/invoices/i1#line-l1']}>
+        <InvoiceLinesTable
+          editable={false}
+          lines={[line]}
+          supplierId="s1"
+          types={[{ id: 't1', code: 'BL-PLA-WHITE', rgba: '#FFFFFFFF' } as never]}
+          spools={[spool('a', 12, null)]}
+          spoolsCurrent
+          money={(amount) => formatCost(amount, 'USD', 2)}
+        />
+      </MemoryRouter>,
+    )
+    const row = screen.getByRole('row', { name: /PLA white/ })
+    expect(row).toHaveAttribute('id', 'line-l1')
+    expect(row).toHaveAttribute('aria-current', 'location')
+    expect(within(row).getByRole('link', { name: 'Spool #12' })).toHaveAttribute('href', '/filament/spools/a')
+    expect(within(row).getByRole('link', { name: /BL-PLA-WHITE/ })).toHaveAttribute('href', '/filament/types/t1')
+    expect(within(row).getByRole('link', { name: 'A00-W1' })).toHaveAttribute('href', '/filament/suppliers/s1#product-p1')
+    const items = within(row).getAllByRole('listitem').map((item) => item.textContent)
+    expect(items).toEqual(['Spool #12', 'Spool (deleted)'])
+    expect(within(row).getAllByRole('link').map((one) => one.getAttribute('href'))).not.toContain('/filament/spools/gone')
   })
 })

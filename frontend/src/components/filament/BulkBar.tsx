@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /** A place to move to, its path from the top ("Room / Shelf A"). */
 export interface Place {
@@ -115,7 +116,7 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
-      <Button size="sm" variant="outline" disabled={busy || !selected.length} onClick={() => navigate(`/filament/labels?ids=${ordered.map((spool) => spool.id).join(',')}`)}>
+      <Button size="sm" variant="outline" disabled={busy || !selected.length} onClick={() => navigate(filamentLinks.labels(ordered.map((spool) => spool.id)))}>
         Labels
       </Button>
       <Button size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={onClear}>
