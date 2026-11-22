@@ -451,7 +451,7 @@ data, with the readers the back office uses.
 
 ### 5.3 What a change of the file does
 
-A published listing never moves (decided by the owner, 2026-11-21). the `library_file` column's `pinned`
+A published listing never moves (decided by the owner, 2026-11-21). The `library_file` column's `pinned`
 names the sha256, and the held copy keeps the bytes: the held copy is the listing's
 version of the file. A file renamed or moved in the library keeps its id, so nothing
 changes. A file deleted, or one whose bytes are no longer the pinned ones, changes
