@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../../api/client'
 import {
   getResetPreview,
@@ -50,6 +50,7 @@ import {
   SYNC_PASS_TTL,
   syncParts,
   syncValue,
+  toPatchValue,
   type SyncDirection,
   type SyncKind,
 } from '../values'
@@ -622,10 +623,16 @@ function SyncPassesRow({ lastPassAt, form }: { lastPassAt: string | null | undef
   const [passes, setPasses] = useState<SyncPass[] | null>(null)
   const [cursor, setCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [reading, setReading] = useState(true)
   const [failed, setFailed] = useState(false)
+  // Bumped by each read of the first page, so an older page asked for before it is dropped:
+  // appended to the new first page, it would skip the rows the new passes pushed down.
+  const generation = useRef(0)
 
   useEffect(() => {
     let stopped = false
+    const mine = ++generation.current
+    setReading(true)
     listSyncPasses({ limit: PASS_PAGE })
       .then((page) => {
         if (stopped) return
@@ -636,6 +643,9 @@ function SyncPassesRow({ lastPassAt, form }: { lastPassAt: string | null | undef
       .catch(() => {
         if (!stopped) setFailed(true)
       })
+      .finally(() => {
+        if (generation.current === mine) setReading(false)
+      })
     return () => {
       stopped = true
     }
@@ -643,27 +653,31 @@ function SyncPassesRow({ lastPassAt, form }: { lastPassAt: string | null | undef
 
   async function older() {
     if (!cursor) return
+    const mine = generation.current
     setLoading(true)
     try {
       const page = await listSyncPasses({ limit: PASS_PAGE, cursor })
+      if (generation.current !== mine) return
       setPasses((now) => [...(now ?? []), ...page.passes])
       setCursor(page.next_cursor)
       setFailed(false)
     } catch {
-      setFailed(true)
+      if (generation.current === mine) setFailed(true)
     } finally {
       setLoading(false)
     }
   }
 
-  const ttl = form.value('filament_sync_pass_ttl_days')
-  const kept = ttl === '' ? SYNC_PASS_TTL.default : Number(ttl)
+  // The stored value while the field holds one save would refuse.
+  const typed = toPatchValue('filament_sync_pass_ttl_days', form.value('filament_sync_pass_ttl_days'), form.settings)
+  const stored = form.settings.filament_sync_pass_ttl_days
+  const kept = typeof typed === 'number' ? typed : typed === null ? SYNC_PASS_TTL.default : (stored ?? SYNC_PASS_TTL.default)
   return (
     <FieldRow id="filament-sync-passes" label="Recent passes" help={`Every pass, failed ones too, kept for ${plural(kept, 'day', 'days')}.`}>
-      <div id="filament-sync-passes" className="flex flex-col gap-2 text-sm">
+      <div className="flex flex-col gap-2 text-sm">
         {passes && passes.length === 0 && <p className="text-muted-foreground">No pass recorded yet.</p>}
         {passes && passes.length > 0 && (
-          <ol aria-label="Recent sync passes" className="flex flex-col gap-1.5">
+          <ol id="filament-sync-passes" aria-label="Recent sync passes" className="flex flex-col gap-1.5">
             {passes.map((pass) => {
               const state = outcome(pass)
               const took = duration(pass)
@@ -689,7 +703,7 @@ function SyncPassesRow({ lastPassAt, form }: { lastPassAt: string | null | undef
         {failed && <p className="text-warn">The recent passes could not be read. Reload the page to try again.</p>}
         {cursor && (
           <div>
-            <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={() => void older()}>
+            <Button type="button" size="sm" variant="ghost" disabled={loading || reading} onClick={() => void older()}>
               {loading && <Spinner />}
               Show older passes
             </Button>
