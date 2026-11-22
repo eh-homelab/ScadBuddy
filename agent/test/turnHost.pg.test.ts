@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { ApplicationFailure } from '@temporalio/common'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CrudReadError } from '../src/api/crudRead.js'
 import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
@@ -67,7 +67,13 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
    */
   async function place(
     reported: number,
-    { carried, loads = true, beforeLoad }: { carried: 'before' | 'between' | 'none'; loads?: boolean; beforeLoad?: () => Promise<void> },
+    {
+      carried,
+      loads = true,
+      beforeLoad,
+      landed,
+      landedWaitMs,
+    }: { carried: 'before' | 'between' | 'none'; loads?: boolean; beforeLoad?: () => Promise<void>; landed?: () => Promise<void>; landedWaitMs?: number },
   ) {
     let id = ''
     const store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
@@ -78,6 +84,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
       ...(beforeLoad ? { beforeLoad } : carried === 'between' ? { beforeLoad: costState } : {}),
     })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: sqlAuditLog(db.sql) })
+    if (landed) vi.spyOn(m.warm, 'landed').mockImplementation(landed)
     const { session } = await m.start(browser, { origin: 'chat' })
     id = session.id
     await store.append({ projectKey: '', sessionId: id }, [{ type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'outlast the restart' } }])
@@ -88,7 +95,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
         cost_usd = ${R}, updated_at = now()
       WHERE id = ${id}`
     const deltas: number[] = []
-    const host = new TurnHost({ core: m.turnCore, ...hostStores(recording(db.sql, deltas)), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
+    const host = new TurnHost({ core: m.turnCore, ...hostStores(recording(db.sql, deltas)), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', ...(landedWaitMs === undefined ? {} : { landedWaitMs }) })
     const result = await host.run(
       { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'outlast the restart', images: [], system_append: null } },
       { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
@@ -134,6 +141,28 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
     expect(failure.nonRetryable).toBe(false)
     expect(failure.message).toContain('could not reach the backend: the backend could not be reached (the transcript of session s: UND_ERR_SOCKET)')
     expect(placed.audit).toHaveLength(1)
+  })
+
+  it("waits for the process's appends to land before it fails the placement as BackendUnreachable, and at most landedWaitMs (#6994)", async () => {
+    const reset = () => Promise.reject(new CrudReadError('the backend could not be reached (the transcript of session s: UND_ERR_SOCKET)', undefined, false, {}, 'UND_ERR_SOCKET'))
+    const order: string[] = []
+    const landing = place(R, {
+      carried: 'none',
+      beforeLoad: reset,
+      landed: async () => {
+        order.push('landing')
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        order.push('landed')
+      },
+    }).then((placed) => {
+      order.push('thrown')
+      return placed
+    })
+    expect(((await landing).result as ApplicationFailure).type).toBe(BACKEND_UNREACHABLE)
+    expect(order).toEqual(['landing', 'landed', 'thrown'])
+    // Appends that never land (the API still away) hold it only for landedWaitMs.
+    const stuck = await place(R, { carried: 'none', beforeLoad: reset, landed: () => new Promise<void>(() => {}), landedWaitMs: 50 })
+    expect((stuck.result as ApplicationFailure).type).toBe(BACKEND_UNREACHABLE)
   })
 
   it('a transcript load the API refused (HTTP 500) still fails the turn, as its words: only a dropped connection is placed again', async () => {

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { crudUpsertActivityKinds } from '../src/activity/kinds.js'
 import { backendDropped, CrudReadError } from '../src/api/crudRead.js'
 import { crudCall, CrudPathError, segment, STORE_AREAS, TABS_PER_CALL, UUID_SEGMENT } from '../src/api/crudStores.js'
@@ -481,17 +481,24 @@ describe('the small stores through CRUD routes (#5299 step 5)', () => {
     expect(backendDropped(error)).toBe(true)
   })
 
-  it('keeps one deadline for a call and all its retries (#6994)', async () => {
+  it('keeps one deadline for a call and all its retries: one that fires during a try ends the call there (#6994)', async () => {
+    const deadline = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
     let calls = 0
+    // The deadline fires while the first try is out; the API then drops the connection.
     const dropping: typeof fetch = async () => {
       calls += 1
+      deadline.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
       throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) })
     }
-    const started = Date.now()
-    // The first wait (RETRY_DELAYS_MS[0], 250 ms) fits in 600 ms; the second (1 s) does not.
-    const error = await crudCall(dropping, BASE, 'a read', '/session-tabs', { timeoutMs: 600 }).catch((e: unknown) => e)
-    expect(Date.now() - started).toBeLessThan(1_000)
-    expect(calls).toBe(2)
-    expect((error as CrudReadError).message).toBe('the backend could not be reached (a read: UND_ERR_SOCKET)')
+    try {
+      const error = await crudCall(dropping, BASE, 'a read', '/session-tabs', { timeoutMs: 600 }).catch((e: unknown) => e)
+      expect(timeout).toHaveBeenCalledOnce()
+      expect(timeout).toHaveBeenCalledWith(600)
+      expect(calls).toBe(1)
+      expect((error as CrudReadError).message).toBe('the backend could not be reached (a read: UND_ERR_SOCKET)')
+    } finally {
+      timeout.mockRestore()
+    }
   })
 })
