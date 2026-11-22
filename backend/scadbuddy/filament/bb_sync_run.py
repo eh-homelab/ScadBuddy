@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import uuid4
@@ -72,7 +73,9 @@ async def run_pass(
     ``results`` that timed out, the settings read) is recorded too, with its
     `failure_label` as ``error``, and then raised again, so the activity's retries and the
     workflow go on as before. When that record fails as well (the API is down), it is
-    logged and the first error is raised.
+    logged and the first error is raised. The failed record carries the counts the rounds
+    reached before the step raised (`_Counts`), so writes Bambuddy already took are not
+    under-reported.
 
     ``written`` counts the writes Bambuddy answered ok (a probe writes nothing),
     ``failed`` the writes it refused (a probe's 404 is an answer: the row is gone). The
@@ -92,10 +95,20 @@ async def run_pass(
         instance=instance,
         trigger=trigger,
     )
+    counts = _Counts()
     try:
-        result = await _pass(api, load, instance, full, heartbeat, max_rounds, empty)
+        result = await _pass(api, load, instance, full, heartbeat, max_rounds, empty, counts)
     except Exception as exc:
-        failed = empty.model_copy(update={"error": failure_label(exc)})
+        failed = empty.model_copy(
+            update={
+                "error": failure_label(exc),
+                "written": counts.written,
+                "failed": counts.failed,
+                "deferred": counts.deferred,
+                "conflicts": counts.conflicts,
+                "unmapped_k": counts.unmapped_k,
+            }
+        )
         try:
             await api.record_pass(failed)
         except Exception as record_exc:
@@ -116,6 +129,7 @@ async def _pass(
     heartbeat: Callable[[], None],
     max_rounds: int,
     empty: SyncPassResult,
+    counts: _Counts,
 ) -> SyncPassResult:
     """The pass `run_pass` records."""
     settings = await load()
@@ -131,7 +145,19 @@ async def _pass(
             snap = await _read(client, instance, full, heartbeat)
         except ApiError as exc:
             return empty.model_copy(update={"error": error_label(exc)})
-        return await _rounds(api, client, snap, heartbeat, max_rounds, empty)
+        return await _rounds(api, client, snap, heartbeat, max_rounds, empty, counts)
+
+
+@dataclass
+class _Counts:
+    """What a pass's rounds have counted so far (#6905), which `run_pass` records when a
+    later step raises."""
+
+    written: int = 0
+    failed: int = 0
+    deferred: int = 0
+    conflicts: int = 0
+    unmapped_k: int = 0
 
 
 def failure_label(exc: BaseException) -> str:
@@ -195,8 +221,9 @@ async def _rounds(
     heartbeat: Callable[[], None],
     max_rounds: int,
     empty: SyncPassResult,
+    counts: _Counts,
 ) -> SyncPassResult:
-    calls = written = failed = conflicts = unmapped_k = deferred = 0
+    calls = 0
     interval_s = empty.interval_s
     instance_changed = False
     for _ in range(max_rounds):
@@ -205,9 +232,9 @@ async def _rounds(
         plan = await api.plan(snap, WRITE_CAP - calls)
         heartbeat()
         interval_s = plan.interval_s
-        deferred = plan.deferred
-        conflicts = max(conflicts, plan.conflicts)
-        unmapped_k = max(unmapped_k, plan.unmapped_k)
+        counts.deferred = plan.deferred
+        counts.conflicts = max(counts.conflicts, plan.conflicts)
+        counts.unmapped_k = max(counts.unmapped_k, plan.unmapped_k)
         if plan.instance_changed:
             instance_changed = True
             break
@@ -219,20 +246,20 @@ async def _rounds(
             results.append(result)
             if result.ok:
                 if write.op != "probe":
-                    written += 1
+                    counts.written += 1
             elif not (write.op == "probe" and result.status == 404):
-                failed += 1
+                counts.failed += 1
             heartbeat()
         calls += len(plan.writes)
         await api.results(snap.instance, plan.writes, results, plan.pass_id, plan.unconfirmed)
         heartbeat()
     return SyncPassResult(
-        written=written,
-        failed=failed,
-        deferred=deferred,
-        more=deferred > 0,
-        conflicts=conflicts,
-        unmapped_k=unmapped_k,
+        written=counts.written,
+        failed=counts.failed,
+        deferred=counts.deferred,
+        more=counts.deferred > 0,
+        conflicts=counts.conflicts,
+        unmapped_k=counts.unmapped_k,
         instance_changed=instance_changed,
         interval_s=interval_s,
         started_at=empty.started_at,

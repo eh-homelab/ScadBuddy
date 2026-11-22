@@ -1186,7 +1186,7 @@ export const filamentTools: Tool[] = [
       'null when unknown), `started_at`, `ended_at`, the counts `written`, `failed`, `deferred`, `conflicts` and ' +
       '`unmapped_k`, `skipped` (`no_bambuddy` or `nothing_pushes`), `instance_changed` and `error` (a label, null ' +
       "when it worked; `crud_unavailable:<failure>` or `crud_refused:<status>` when ScadBuddy's own API failed " +
-      'during the pass). A page holds up to `limit` passes (at most 200); when `next_cursor` is set, pass it back ' +
+      'during the pass, `internal` for any other failure outside Bambuddy). A page holds up to `limit` passes (at most 200); when `next_cursor` is set, pass it back ' +
       'as `cursor` for the next page. Passes older than the setting `filament_sync_pass_ttl_days` (30 by default) ' +
       'are gone. Reads ScadBuddy only.',
     input: z.object({

@@ -138,6 +138,8 @@ async def test_a_refused_results_call_is_recorded_with_its_status() -> None:
 
     [recorded] = sync.recorded
     assert recorded.error == "crud_refused:409"
+    # Bambuddy took the write before the results call failed, so the row counts it.
+    assert recorded.written == 1 and recorded.failed == 0
 
 
 async def test_a_settings_read_that_fails_is_recorded_as_internal() -> None:
