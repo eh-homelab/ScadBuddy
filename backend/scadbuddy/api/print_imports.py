@@ -36,6 +36,7 @@ from scadbuddy.api.mesh_models import (
     MAX_DESCRIPTION_CHARS,
     MAX_NAME_CHARS,
     create_from_read,
+    key_sent_before,
     made_before,
     print_file_origin,
 )
@@ -706,30 +707,39 @@ async def _record(
     return owner
 
 
-def _source_changed(name: str, slug: str, first: Operation, made: bool) -> str:
+def _source_changed(name: str, slug: str, first: Operation, made: bool, same_file: bool) -> str:
     """The 409 of a new-model request under a key on record for another body (#5979,
-    #6984): the key was first sent for another print file, name or description, or the
-    file changed since. What that send's operation (``first``) did, and whether its model
-    is there now; never a link to it, since it may be another print's file."""
-    sent = (
-        "this Idempotency-Key was first sent for another print file, name or description,"
-        f" or {name} changed since"
-    )
+    #6984): what that send's operation (``first``) did, and whether its model is there
+    now. Its model is offered only when that request named this print file (#7019): a
+    key first sent for another body may have made it from another print's file."""
+    why = key_sent_before(name, same_file)
     again = "send the request with a new Idempotency-Key"
     if first.status == "running":
+        if same_file:
+            return (
+                f"{why}, and the model {slug!r} that request started is still being made, as"
+                f" its record says (operation {first.id}, `GET /api/v1/operations/{first.id}`):"
+                " once it is done, import the print onto it with `slug`; if it never"
+                f" finishes, {again} to make the model from the file as it is now"
+            )
         return (
-            f"{sent}; the model {slug!r} that request started is still being made, as its"
+            f"{why}; the model {slug!r} that request started is still being made, as its"
             f" record says (operation {first.id}, `GET /api/v1/operations/{first.id}`);"
             f" {again} and another model name"
         )
     if first.status == "failed":
-        return f"{sent}; that request made no model: its operation {first.id} failed; {again}"
+        return f"{why}; that request made no model: its operation {first.id} failed; {again}"
+    if made and same_file:
+        return (
+            f"{why}, so it is no longer the file the model {slug!r} was made from: that model"
+            f" stays; import the print onto it with `slug`, or {again} and another model name"
+        )
     if made:
         return (
-            f"{sent}; that request made the model {slug!r}, which stays; {again} and another"
+            f"{why}; that request made the model {slug!r}, which stays; {again} and another"
             " model name"
         )
-    return f"{sent}; that request made the model {slug!r}, which was deleted since; {again}"
+    return f"{why}; that request made the model {slug!r}, which was deleted since; {again}"
 
 
 async def _new_model(
@@ -754,8 +764,8 @@ async def _new_model(
         origin=origin,
         # A retry reads its source again, and a printer overwrites its files: a model the
         # first read made is no longer this file's, so it is named, never linked.
-        changed=lambda first, made: _source_changed(
-            read.name, _slug_from_name(new_model.name), first, made
+        changed=lambda first, made, same_file: _source_changed(
+            read.name, _slug_from_name(new_model.name), first, made, same_file
         ),
     )
     if isinstance(made, JSONResponse):

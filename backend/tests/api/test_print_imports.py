@@ -792,6 +792,43 @@ def test_a_key_sent_again_with_another_body_links_no_model(
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
 
 
+@pytest.mark.requires_git
+@respx.mock
+def test_a_key_sent_again_for_another_source_links_no_model(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7019: the key sent again naming another source of the print, a library file of the
+    same name and bytes, reads it and is a 409 that offers no model, as another
+    description is (#6984): the first model may be another file's."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    rows = [library_row(n, "demo_elan.3mf", f"{n}" * 64, file_type="3mf") for n in (7, 8)]
+    bambuddy(library=rows)
+    downloads = {
+        n: respx.get(f"{API}/library/files/{n}/download").mock(
+            return_value=httpx.Response(200, content=painted_3mf())
+        )
+        for n in (7, 8)
+    }
+    body = {
+        "source": {"kind": "library", "library_file_id": 7},
+        "new_model": {"name": "Trophy"},
+    }
+    key = press()
+    _lost_first_import(client, monkeypatch, body, key)
+    other = {**body, "source": {"kind": "library", "library_file_id": 8}}
+
+    refused = import_print(client, other, **key)
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert "first sent for another print file, name or description" in detail
+    assert "import the print onto it" not in detail
+    assert (downloads[7].call_count, downloads[8].call_count) == (1, 1)
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+
 # --- the print watcher's activity row (#6029) -----------------------------------------
 
 

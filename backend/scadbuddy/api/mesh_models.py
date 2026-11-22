@@ -121,15 +121,16 @@ async def create_mesh_model(
     description: str,
     source: dict[str, Any],
     claim: Callable[[ClaimStore], Awaitable[Held]] | None = None,
-    changed: Callable[[Operation, bool], str] | None = None,
+    changed: Callable[[Operation, bool, bool], str] | None = None,
 ) -> ModelRecord | JSONResponse:
     """The ``mesh_model_create`` operation. ``claim`` holds an upload's bytes by claim,
     called only when no record answers the request: a repeat holds nothing. With
     ``changed``, a key on record for another body of this model is a 409 whose text is
-    ``changed(first, made)``: ``first`` the operation that key started (it may have
-    succeeded, failed or still be running), ``made`` whether the model exists now (it may
-    have been deleted since). #5979: the source's bytes moved between a request and its
-    retry."""
+    ``changed(first, made, same_file)``: ``first`` the operation that key started (it may
+    have succeeded, failed or still be running), ``made`` whether the model exists now (it
+    may have been deleted since), ``same_file`` whether that request named this print file,
+    name and description, so only the file's bytes moved (#5979; #7019). Otherwise the key
+    was first sent for another body, or before the request recorded its print file."""
     slug = _slug_from_name(name)
     request = {"slug": slug, "name": name, "description": description, "source": source}
     kind = ops.kinds["mesh_model_create"]
@@ -147,9 +148,23 @@ async def create_mesh_model(
             else None
         )
         if changed is not None and first is not None:
+            assert idempotency_key is not None
+            same_file = "origin" in source and (
+                await ops.store.keyed_operation(
+                    kind.name,
+                    slug,
+                    idempotency_key,
+                    sent={
+                        "name": name,
+                        "description": description,
+                        "source": {"origin": source["origin"]},
+                    },
+                )
+                is not None
+            )
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                changed(first, catalogue.exists(slug)),
+                changed(first, catalogue.exists(slug), same_file),
                 operation_id=first.id,
             )
         _require_new(catalogue, slug)
@@ -169,7 +184,9 @@ async def create_mesh_model(
 
 def print_file_origin(archive_id: int, choice: SourceChoice) -> dict[str, Any]:
     """Which print's file a model is made from (#6984): kept in the operation's request,
-    so a resend that names another print or source is not answered the first model."""
+    so a resend that names another print or source is not answered the first model. One
+    shape for both routes that read a print's file (from-mesh and Import print's new
+    model), so a key sent to both with one name, description and source is one resend."""
     return {"archive_id": archive_id, "source": choice.model_dump(mode="json")}
 
 
@@ -211,7 +228,7 @@ async def create_from_read(
     description: str,
     read: SourceFile,
     origin: dict[str, Any],
-    changed: Callable[[Operation, bool], str],
+    changed: Callable[[Operation, bool, bool], str],
 ) -> ModelRecord | JSONResponse:
     """`create_mesh_model` from a print's file the route read (Import print's new model,
     #4698, and a print's file here, #6916): its bytes held by claim, as an upload's are.
@@ -233,23 +250,27 @@ async def create_from_read(
     )
 
 
-def _print_file_changed(name: str, slug: str, first: Operation) -> str:
-    """The 409 of a key on record for another body of this model (#5979, #6984). While
-    the first create runs, the key was first sent for another print file, name or
-    description, or the file changed since (a printer overwrites its files). Once it
-    finished, `made_before` answers a resend of the same body, so the key was first sent
-    for another one."""
-    if first.status == "running":
-        return (
-            "this Idempotency-Key was first sent for another print file, name or description,"
-            f" or {name} changed since; the model {slug!r} that request started is still"
-            f" being made (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
-        )
+def key_sent_before(name: str, same_file: bool) -> str:
+    """Why a key on record answers another body (#5979, #6984, #7019): the print file's
+    bytes changed since (a printer overwrites its files), or the key was first sent for
+    another body, or before the request recorded which print file it names."""
+    if same_file:
+        return f"{name} changed since this request was first sent"
     return (
         "this Idempotency-Key was first sent for another print file, name or description,"
         " or before this server recorded which print file a request names"
-        f" (operation {first.id}): send the request with a new Idempotency-Key"
     )
+
+
+def _print_file_changed(name: str, slug: str, first: Operation, same_file: bool) -> str:
+    """The 409 of a key on record for another body of this model (#5979, #6984)."""
+    why = key_sent_before(name, same_file)
+    if first.status == "running":
+        return (
+            f"{why}; the model {slug!r} that request started is still being made"
+            f" (operation {first.id}, `GET /api/v1/operations/{first.id}`)"
+        )
+    return f"{why} (operation {first.id}): send the request with a new Idempotency-Key"
 
 
 async def _read_print_file(
@@ -328,7 +349,9 @@ async def create_from_mesh(
             read=read,
             origin=origin,
             # A retry reads the file again: other bytes are named, never opened.
-            changed=lambda first, _made: _print_file_changed(read.name, slug, first),
+            changed=lambda first, _made, same_file: _print_file_changed(
+                read.name, slug, first, same_file
+            ),
         )
     source: dict[str, Any] = (
         {"kind": "bambuddy_library", "file_id": body.library_file_id}
