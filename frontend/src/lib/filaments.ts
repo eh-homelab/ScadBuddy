@@ -31,14 +31,169 @@ export function fromTrays(options: Pick<FilamentOptions, 'source'> | { source?: 
 }
 
 /**
- * #3818 — a loaded tray as a native run's choice: `"PLA blue in AMS-A slot 1"`, from the
- * tray's material, its `colour_word` and its `label`, each the backend's (`trays.py`
- * `colour_word`, `tray_label`): nothing about the colour is worked out here.
+ * #6885 — the one name of a spool's colour. On a native run (`trays`) it is the SB
+ * spool's own colour name when the tray holds one, else the tray's `colour_word`
+ * (`trays.py`). On the Bambuddy path a tray offered as itself has `color_name` "what's
+ * in AMS-D slot 4", which is a place, not a colour, so it takes the `colour_word`. Last,
+ * the hex code: never an empty name.
+ */
+export function colourName(spool: SpoolOption, trays: boolean): string {
+  const own = spool.tray_only && !trays ? null : spool.color_name
+  return own || spool.colour_word || (spool.colour ? spool.colour.toUpperCase() : 'no colour')
+}
+
+/**
+ * #3818 — a loaded tray as a native run's choice: `"PLA Blue in AMS-A slot 1"`, from the
+ * tray's material, its one colour name (`colourName`, #6885) and its `label`, each the
+ * backend's (`trays.py` `colour_word`, `tray_label`): nothing about the colour is worked
+ * out here.
  */
 export function trayChoiceLabel(spool: SpoolOption): string {
   const where = spool.label ?? (spool.loaded ? trayPlace(spool.loaded) : null)
-  const what = [spool.material, spool.colour_word].filter(Boolean).join(' ')
+  const name = spool.color_name || spool.colour_word
+  const what = [spool.material, name].filter(Boolean).join(' ')
   return where ? `${what} in ${where}` : what
+}
+
+/**
+ * #6885 — a tray's short code, as Bambu Studio's filament mapping prints it on a tray:
+ * "A1" for AMS-A slot 1, "HT-A", "L2" for the AMS Lite, "Ext" (or the backend's "External
+ * L" as "Ext L") for the external holder.
+ */
+export function trayCode(spool: Pick<SpoolOption, 'loaded' | 'label'>): string | null {
+  const loaded = spool.loaded
+  if (!loaded) return null
+  if (loaded.ams_id === 255) return spool.label?.startsWith('External') ? spool.label.replace('External', 'Ext') : 'Ext'
+  if (loaded.ams_id >= 128) return amsUnitLabel(loaded.ams_id)
+  if (loaded.ams_id === 6) return `L${loaded.tray_id + 1}`
+  return `${String.fromCharCode(65 + loaded.ams_id)}${loaded.tray_id + 1}`
+}
+
+/**
+ * What can share a hotend: the material's first word, so "PLA Basic", "PLA-Matte" and
+ * "PLA-CF" are one family. The backend's `filaments.py` `family`, word for word.
+ */
+export function materialFamily(material: string | null | undefined): string {
+  return (material ?? '').toUpperCase().split(/[-\s_]+/).find(Boolean) ?? ''
+}
+
+/**
+ * Whether `spool` is a close match for `slot`: the slot's material family (any for a
+ * slot that declares none) and a colour the server says fits (`colour_matches`, the
+ * auto-match's own cut-off). A spool with no colour is no match for a coloured slot: it
+ * says nothing about the colour.
+ */
+export function closeMatch(slot: SlotNeed, spool: SpoolOption): boolean {
+  if (slot.material && materialFamily(slot.material) !== materialFamily(spool.material)) return false
+  if (slot.colour && !spool.colour) return false
+  return (slot.colour_matches ?? []).includes(spool.spool_id)
+}
+
+/**
+ * #6885 — why the spool chosen for a slot is not what the file asks for, in words: "PETG
+ * instead of the file's PLA", "Red, not the file's colour". Empty when it is. The server's
+ * suggestion falls back to another material or colour only when nothing closer is
+ * loaded (`filaments.py` `_fallback`), and the slot then says so. A slot that declares no
+ * material is judged by the plate's families (`plateFamilies`), as `_fallback` ranks it.
+ */
+export function choiceReasons(
+  slot: SlotNeed,
+  spool: SpoolOption,
+  trays: boolean,
+  plate: readonly string[] = [],
+): string[] {
+  const reasons: string[] = []
+  const family = materialFamily(spool.material)
+  if (slot.material && materialFamily(slot.material) !== family) {
+    reasons.push(`${spool.material || 'Another material'} instead of the file's ${slot.material}`)
+  } else if (!slot.material && plate.length > 0 && !plate.includes(family)) {
+    reasons.push(`${spool.material || 'Another material'} instead of the plate's ${plate.join(' or ')}`)
+  }
+  if (slot.colour && spool.colour && !(slot.colour_matches ?? []).includes(spool.spool_id)) {
+    reasons.push(`${colourName(spool, trays)}, not the file's colour`)
+  }
+  return reasons
+}
+
+/**
+ * #6885 review — the material families of the plate, for a slot that declares none: the
+ * families the other slots declare, as `filaments.py` `suggest` takes them. With none
+ * declared, the family most of the chosen spools share; none on a tie. This follows the
+ * plan on screen, so it follows the user's edits: the server's `_anchor_family` prefers the
+ * slots with a loaded spool, so it can differ once the user changes a slot.
+ */
+export function plateFamilies(options: Pick<FilamentOptions, 'slots' | 'spools'>, plan: SlotChoice[]): string[] {
+  const declared = [
+    ...new Set((options.slots ?? []).filter((slot) => slot.material).map((slot) => materialFamily(slot.material))),
+  ]
+  if (declared.length > 0) return declared
+  const byId = new Map((options.spools ?? []).map((spool) => [spool.spool_id, spool]))
+  const counts = new Map<string, number>()
+  for (const choice of plan) {
+    const spool = byId.get(choice.spool_id)
+    if (spool) counts.set(materialFamily(spool.material), (counts.get(materialFamily(spool.material)) ?? 0) + 1)
+  }
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1])
+  if (ranked.length === 0 || (ranked.length > 1 && ranked[0]![1] === ranked[1]![1])) return []
+  return [ranked[0]![0]]
+}
+
+/** One heading of the tray grid and the spools under it. */
+export interface TileGroup {
+  key: string
+  label: string
+  spools: SpoolOption[]
+}
+
+/**
+ * #6885 — a slot's choices as the tray grid shows them. First the close matches for the
+ * slot (`closeMatch`), then the trays loaded in this printer by unit, in the order Bambu
+ * Studio maps them (AMS-A to AMS-D, the AMS Lite, HT-A, the external holder last), then
+ * spools loaded in another printer, then the shelf. The spools keep the server's order
+ * inside each group. A slot with no colour has no close-match group: there is nothing to
+ * compare.
+ */
+export function tileGroups(spools: SpoolOption[], slot: SlotNeed, printerId: number | null | undefined): TileGroup[] {
+  const best = slot.colour ? spools.filter((spool) => closeMatch(slot, spool)) : []
+  const inBest = new Set(best.map((spool) => spool.spool_id))
+  const units = new Map<string, { order: [string, number, number]; group: TileGroup }>()
+  const elsewhere: SpoolOption[] = []
+  const shelf: SpoolOption[] = []
+  for (const spool of spools) {
+    if (inBest.has(spool.spool_id)) continue
+    const loaded = spool.loaded
+    if (!loaded) {
+      shelf.push(spool)
+      continue
+    }
+    const here = printerId === null || printerId === undefined || loaded.printer_id === printerId
+    if (!here) {
+      elsewhere.push(spool)
+      continue
+    }
+    const key = `unit:${loaded.printer_id ?? ''}:${loaded.ams_id}`
+    const entry = units.get(key)
+    if (entry) {
+      entry.group.spools.push(spool)
+      continue
+    }
+    const unit = amsUnitLabel(loaded.ams_id)
+    const label = printerId === null || printerId === undefined ? `${loaded.printer_name ?? 'A printer'} · ${unit}` : unit
+    units.set(key, {
+      // The printer first, so one printer's units stay together when no printer is chosen.
+      order: [String(loaded.printer_id ?? ''), Number(loaded.ams_id === 255), loaded.ams_id],
+      group: { key, label, spools: [spool] },
+    })
+  }
+  const byUnit = [...units.values()]
+    .sort((a, b) => a.order[0].localeCompare(b.order[0], undefined, { numeric: true }) || a.order[1] - b.order[1] || a.order[2] - b.order[2])
+    .map((entry) => entry.group)
+  return [
+    ...(best.length > 0 ? [{ key: 'best', label: 'Closest to the file', spools: best }] : []),
+    ...byUnit,
+    ...(elsewhere.length > 0 ? [{ key: 'elsewhere', label: 'In another printer', spools: elsewhere }] : []),
+    ...(shelf.length > 0 ? [{ key: 'shelf', label: 'Not loaded', spools: shelf }] : []),
+  ]
 }
 
 /**

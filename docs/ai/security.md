@@ -385,8 +385,9 @@ drive sessions over `/mcp`. What bounds them:
   nobody can follow a session it may not see. Notifications carry only the URI.
 - **`session.*` events** carry ids and a seq, never content
   ([`agent/src/sessions/busEvents.ts`](../../agent/src/sessions/busEvents.ts)). Anyone
-  who can LISTEN on the database can see that sessions are active and when; that is the
-  same exposure as every other event on the channel (spec §7).
+  who can LISTEN on the database, or holds the `agent` service credential (the change
+  stream, #5299 D4), can see that sessions are active and when; that is the same exposure
+  as every other event on the channel (spec §7).
 
 ## Envelope encryption and AAD binding
 

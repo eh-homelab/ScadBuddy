@@ -11,10 +11,11 @@ type Props = {
 }
 
 /**
- * Simple shows only what the user has to choose (#768): the printer when there is more
- * than one, the spools and Print. Advanced adds the nozzles with per-side flow, the full
- * process list, the plate type, the print options, the project, copies and a per-slot
- * filament preset override; Simple sends their defaults.
+ * Simple shows what the user has to choose (#768): the summary row (the printer, the
+ * nozzle, the bed plate and the quality, #6885), the spools and Print. Advanced adds the
+ * side and rack choices, supports, the prime tower, the print sequence, the print
+ * options, the project, copies, a per-slot filament preset override and any slicer
+ * setting, in sections; Simple sends their defaults.
  */
 export function AdvancedSwitch({ value, onToggle, disabled, native = false }: Props) {
   return (
@@ -28,7 +29,8 @@ export function AdvancedSwitch({ value, onToggle, disabled, native = false }: Pr
       />
       <Label htmlFor="print-advanced">Advanced</Label>
       <span id="print-advanced-help" className="text-xs text-muted-foreground">
-        Choose the nozzle, process, plate, options, {native ? 'folder' : 'project'} and copies.
+        Choose the sides, supports, prime tower, options, {native ? 'folder' : 'project'}, copies and slicer
+        settings.
       </span>
     </div>
   )

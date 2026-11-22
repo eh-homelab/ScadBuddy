@@ -23,7 +23,9 @@ test.describe('library', () => {
 
     await page.getByTestId('library-print-89').click()
     dialog = page.getByRole('dialog', { name: 'Print' })
-    // Simple mode again (#768): the remembered size is sent unseen, and shown in Advanced.
+    // Simple mode again (#768): the summary row names the remembered size (#6885), and
+    // Advanced's step has it chosen.
+    await expect(dialog.getByTestId('print-summary-nozzle')).toContainText('0.2 mm')
     await dialog.getByRole('switch', { name: 'Advanced' }).click()
     await expect(dialog.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
   })

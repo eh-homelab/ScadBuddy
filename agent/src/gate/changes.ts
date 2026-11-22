@@ -1,13 +1,13 @@
 // #815: who is told that the pending-input read may have changed. The tables of calls
 // parked on a person NOTIFY `scadbuddy_pending` on every write (migration
-// 20261103T1944Z_pending_input_notify.sql), heard on the event bus's own connection
-// (events/pgListener.ts `listenAlso`). A NOTIFY sent while that connection is down is lost,
+// 20261103T1944Z_pending_input_notify.sql), heard on the API's change stream
+// (events/changeStream.ts `listenAlso`). A NOTIFY sent while that stream is down is lost,
 // so a reconnect counts as a change too. The tick carries nothing: a subscriber re-reads.
 
 /** The channel the pending-input tables' triggers NOTIFY on. */
 export const PENDING_CHANNEL = 'scadbuddy_pending'
 
-/** What PendingChanges needs of the event bus (events/pgListener.ts `PgEventListener`). */
+/** What PendingChanges needs of the event bus (events/changeStream.ts `ChangeStream`). */
 export type ChannelListener = {
   listenAlso(channel: string, onNotify: (payload: string) => void): void
   onReconnect(fn: () => void): void

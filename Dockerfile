@@ -446,7 +446,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # volume, no credentials: its whole configuration is its environment (README.md,
 # "Slicer worker").
 #
-# The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.99.1);
+# The build image is the toolchain workers/rust/rust-toolchain.toml pins (1.100.0);
 # bump the two together, tag and digest. The Temporal Core SDK's build runs protoc,
 # and imports protobuf's well-known types (google/protobuf/field_mask.proto …), which
 # Debian ships in libprotobuf-dev, not protobuf-compiler: without it temporalio-protos'
@@ -458,7 +458,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # own code keeps the recipe, so the cook layer comes from the cache and only the
 # workspace crates compile. A change to a Cargo.toml or Cargo.lock cooks again.
 # build-image.yml keeps these layers in a GHCR registry cache at mode=max.
-FROM rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS slicer-chef
+FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS slicer-chef
 
 # hadolint ignore=DL3008
 RUN apt-get update \
