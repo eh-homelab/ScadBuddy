@@ -130,6 +130,7 @@ def test_a_storefront_route_needs_the_storefront_credential(
             "accounts",
             "order",
             "models",
+            "variants",
         ]
     }
 
@@ -215,6 +216,7 @@ def test_the_edge_waits_for_every_area_it_calls() -> None:
         "accounts",
         "order",
         "models",
+        "variants",
     } == EDGE_AREAS
     assert set(crud_areas.CRUD_AREAS["storefront"]) == EDGE_AREAS
 

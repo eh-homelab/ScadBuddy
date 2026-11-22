@@ -1301,6 +1301,7 @@ async def resolve_plates(
     *,
     presets: SpoolPresetSource | None = None,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
     early: EarlyPresets | None = None,
 ) -> tuple[list[Resolved], list[str]]:
     """Each plate resolved for ``plan``, and every slot refusal among them in the run's
@@ -1314,7 +1315,8 @@ async def resolve_plates(
     Bambuddy's rows for that spool, read only with a ``client``: a native run has none
     and reads nothing of Bambuddy. A Bambuddy-path row is an SB spool too (Task 7), so it
     reads its presets the same way. ``slot_presets`` are a storefront price's filament
-    types' presets, by slot id (#6574, ``resolver.resolve``). ``early`` is the check's
+    types' presets, by slot id (#6574, ``resolver.resolve``), and ``slot_colours`` the
+    colours a spool-less slot takes, by slot id (#6710). ``early`` is the check's
     read of the chosen spools' presets, started once the inventory was read (#4196):
     awaited here in place of a new read when it read the same spools, so it fails where
     a new read would."""
@@ -1332,7 +1334,13 @@ async def resolve_plates(
     errors: list[str] = []
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(
-            options, plan, choices, catalogue, spool_presets, slot_presets=slot_presets
+            options,
+            plan,
+            choices,
+            catalogue,
+            spool_presets,
+            slot_presets=slot_presets,
+            slot_colours=slot_colours,
         )
         for error in resolved.errors:
             message = (
@@ -3667,12 +3675,13 @@ async def plan_run(
     presets: SpoolPresetSource | None = None,
     reads: SbSpoolReads | None = None,
     slot_presets: Mapping[int, Sequence[EffectivePreset]] | None = None,
+    slot_colours: Mapping[int, str] | None = None,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
 
     With ``slot_presets`` (a storefront price's slice, #6574) a slot with no spool is
-    sliced with its filament type's preset in the file's own colour
-    (``resolver.resolve``).
+    sliced with its filament type's preset in the file's own colour, or in its
+    ``slot_colours`` entry, by slot id (#6710, ``resolver.resolve``).
 
     With ``slicer_backend`` ``native`` the plates are sliced by the native slicer
     (``native``, the image's profiles; a 503 without them), and a reprint reuses a
@@ -3905,6 +3914,7 @@ async def plan_run(
         catalogue,
         presets=presets,
         slot_presets=slot_presets,
+        slot_colours=slot_colours,
     )
     for plate_id, options, resolved in zip(plate_ids, per_plate, every, strict=True):
         if resolved.errors:

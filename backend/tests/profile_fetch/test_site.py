@@ -91,6 +91,19 @@ async def test_a_slow_sign_in_waits_for_the_site(
     assert browser.page.url.endswith("/my/spools")
 
 
+async def test_a_scripted_sign_in_slower_than_the_wait_is_login_failed(
+    browser: ThreeDfpSite, replica: ReplicaServer
+) -> None:
+    """A scripted sign-in that has not set its session when `LOGIN_WAIT_MS` (here 1.5 s)
+    ends is judged by My Spools, which sends the browser back to ``/login``: the login is
+    ``login_failed``, not ``timeout`` (claude-review on #6947)."""
+    replica.site.scripted_login_delay_s = 3.0
+    with pytest.raises(SiteError) as caught:
+        await browser.login()
+    assert caught.value.kind == "login_failed"
+    _chain_holds_no_secret(caught.value)
+
+
 async def test_a_scripted_sign_in_refused_is_login_failed(
     replica: ReplicaServer, tmp_path: Path
 ) -> None:

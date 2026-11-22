@@ -24,6 +24,7 @@ import os
 import re
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
@@ -264,15 +265,14 @@ class ThreeDfpSite:
             await page.fill("input[name=email]", self._email.get_secret_value())
             await page.fill("input[name=password]", self._password.get_secret_value())
             await page.get_by_role("button", name="Sign In", exact=True).click()
-            try:
+            # A timeout means the page is still on the form after the whole wait: with
+            # ``wait_until="commit"`` the wait ends as soon as the URL leaves ``/login``.
+            # My Spools then tells a refusal (it sends the browser back to ``/login``) from
+            # a network failure (it fails).
+            with suppress(PlaywrightTimeoutError):
                 await page.wait_for_url(
                     lambda url: "/login" not in url, wait_until="commit", timeout=LOGIN_WAIT_MS
                 )
-            except PlaywrightTimeoutError:
-                if "/login" not in page.url:
-                    raise
-                # Still on the form after the whole wait. My Spools tells a refusal (it
-                # sends the browser back to ``/login``) from a network failure (it fails).
             await self._goto("/my/spools", settle_ms=4000)
         except SiteError:
             raise
