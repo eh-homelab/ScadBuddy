@@ -277,6 +277,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sync_deposits", _broken_async)
     # #5282: the idle storefront carts.
     monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
+    # #6950: the entities whose owner is gone.
+    monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -311,6 +313,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 floor=_broken_async,
                 # #5774: the printers' maintenance logs, read from Bambuddy.
                 machine_rates=SimpleNamespace(read_logs=_broken_async),
+                attachments=None,  # #6950: read by the stubbed entity sweep
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),

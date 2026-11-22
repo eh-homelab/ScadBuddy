@@ -113,7 +113,7 @@ export type NotificationDispatcherDeps = {
   pinEndpoint?: (endpoint: string) => Promise<PinnedEndpoint>
   /** A pass's deadline, PASS_DEADLINE_MS unless a test sets it. */
   passDeadlineMs?: number
-  /** The out-of-browser channels (channels.ts), told of what the browser user may see; none without the database; with no KEK here, only once the API serves area `notify`. */
+  /** The out-of-browser channels (channels.ts), told of what the browser user may see; none without the API's stores. */
   channels?: ChannelStore | undefined
   /** SCADBUDDY_PUBLIC_URL: where a channel's link opens the session; no link without it. */
   publicUrl?: string | undefined
@@ -164,10 +164,8 @@ export class NotificationDispatcher {
     // A timer's pass with nothing young enough to push opens no subscription's keys.
     const waiting = await this.#waiting()
     if (scope === 'waiting' && waiting.length === 0) return
-    // With no KEK in this process, the records are reachable only once the API serves them (#5299 step 5).
-    const subscriptions = this.#deps.store.available?.() === false ? [] : await this.#deps.store.subscriptions()
-    const channelStore = this.#deps.channels?.available() === false ? undefined : this.#deps.channels
-    const channels = (await channelStore?.enabled()) ?? []
+    const subscriptions = await this.#deps.store.subscriptions()
+    const channels = (await this.#deps.channels?.enabled()) ?? []
     if (subscriptions.length === 0 && channels.length === 0) return
     const deadline = AbortSignal.timeout(this.#deps.passDeadlineMs ?? PASS_DEADLINE_MS)
     const byOwner = new Map<string, { owner: Owner; subs: PushSubscriptionRow[] }>()

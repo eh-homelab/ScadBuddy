@@ -6,7 +6,7 @@ import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event } from '../src/sessions/protocol.js'
-import { PgFlowRuns } from '../src/temporal/flowRuns.js'
+import { CrudFlowRuns } from '../src/temporal/flowRuns.js'
 import {
   FLOW_SESSION_CHECK,
   FLOW_SESSION_TURN,
@@ -18,6 +18,8 @@ import {
 import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from '../src/temporal/toolActivities.js'
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
+import { PgEventRows } from './support/sql/eventRows.js'
+import { PgSessionRows } from './support/sql/sessionRows.js'
 
 // A flow's `agent(...)` and `ask_session(...)` (#1057, phase 6g): the activities on
 // `agent-tools` that check a flow may talk to a session and wait for its turn's answer.
@@ -41,8 +43,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     await t.db.sql`
       INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by)
       VALUES (${runId}, 'd1', 1, 'swap', 'running', ${`flow-${runId}`}, 'wr1', '{"kind": "browser"}')`
-    log = new EventLog(t.db.sql)
-    acts = flowSessionActivities({ sql: t.db.sql, flows: new PgFlowRuns(t.db.sql, new SqlFlowRunReads(t.db.sql)), pollMs: 20 })
+    log = new EventLog(new PgEventRows(t.db.sql))
+    acts = flowSessionActivities({ events: new PgEventRows(t.db.sql), sessions: new PgSessionRows(t.db.sql), flows: new CrudFlowRuns(new SqlFlowRunReads(t.db.sql), new PgSessionRows(t.db.sql)), pollMs: 20 })
   })
   afterEach(async () => {
     await t?.drop()
@@ -150,7 +152,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       if (args[0].join('').includes('ai_session_events')) reads += 1
       return t.db.sql(...args)
     }, t.db.sql) as unknown as typeof t.db.sql
-    const watched = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(t.db.sql, new SqlFlowRunReads(t.db.sql)), pollMs: 20 })
+    const watched = flowSessionActivities({ events: new PgEventRows(counted), sessions: new PgSessionRows(counted), flows: new CrudFlowRuns(new SqlFlowRunReads(t.db.sql), new PgSessionRows(t.db.sql)), pollMs: 20 })
     // Handled from the start: the wait may refuse while the DELETE below is still awaited,
     // and a rejection with no handler yet fails the run as unhandled.
     const refused = failure(env().run(watched[FLOW_SESSION_TURN]!, { session_id: sid, turn_id: 't1' }))
@@ -179,7 +181,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       queries += 1
       return t.db.sql(...args)
     }, t.db.sql) as unknown as typeof t.db.sql
-    const guarded = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(counted, new SqlFlowRunReads(counted)) })
+    const guarded = flowSessionActivities({ events: new PgEventRows(counted), sessions: new PgSessionRows(counted), flows: new CrudFlowRuns(new SqlFlowRunReads(counted), new PgSessionRows(counted)) })
     for (const sid of ['-'.repeat(36), 'g'.repeat(8) + '-0000-0000-0000-' + '0'.repeat(12), ` ${randomUUID()}`]) {
       const err = await failure(env().run(guarded[FLOW_SESSION_CHECK]!, { session_id: sid }))
       expect([err.type, err.nonRetryable]).toEqual([SESSION_REFUSED, true])

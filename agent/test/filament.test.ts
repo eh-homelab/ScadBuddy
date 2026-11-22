@@ -1273,3 +1273,64 @@ describe('filament type proposal tools (#6701)', () => {
     expect(refused.isError).toBe(true)
   })
 })
+
+describe('the colour catalog syncs (#6907)', () => {
+  const SYNCS = `${BACKEND}/api/v1/filament/colour-syncs`
+  const RUN = {
+    id: ROW,
+    source: 'bambu',
+    state: 'done',
+    pages_read: 1,
+    pages_total: 1,
+    total: 4,
+    added: 4,
+    updated: 0,
+    unchanged: 0,
+    kept: 0,
+    skipped: 0,
+    error: null,
+    started_at: '2026-11-21T12:00:00Z',
+    finished_at: '2026-11-21T12:00:01Z',
+  }
+
+  it.each([
+    ['filament_colour_sync', 'write'],
+    ['filament_colour_sync_status', 'read'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('starts a sync with a key and answers the run', async () => {
+    const seen: { body: unknown; key: string | null }[] = []
+    server.use(
+      http.post(SYNCS, async ({ request }) => {
+        seen.push({ body: await request.json(), key: request.headers.get('Idempotency-Key') })
+        return HttpResponse.json(RUN)
+      }),
+    )
+    const result = await runTool(tool('filament_colour_sync'), { source: 'bambu' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.body).toEqual({ source: 'bambu', force: false })
+    expect(seen[0]!.key).toBeTruthy()
+    expect(firstText(result)).toMatchObject({ state: 'done', added: 4 })
+  })
+
+  it('reads the newest runs', async () => {
+    server.use(http.get(SYNCS, () => HttpResponse.json([RUN])))
+    const result = await runTool(tool('filament_colour_sync_status'), {}, ctx())
+    expect(firstText(result)).toEqual([RUN])
+  })
+
+  it('passes a colour search to the catalog list', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/catalog/colours`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('q')).toBe('jade white')
+        return HttpResponse.json([])
+      }),
+    )
+    const result = await runTool(tool('filament_catalog_list'), { kind: 'colours', q: 'jade white' }, ctx())
+    expect(result.isError).toBeFalsy()
+  })
+})

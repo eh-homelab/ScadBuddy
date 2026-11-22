@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
+import { command } from './command.js'
 import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
@@ -132,16 +133,23 @@ const tools: Tool[] = [
       "One of ScadBuddy's filament catalogs, in sort order: materials (print and drying defaults, handling " +
       'flags), subtypes, brands, categories, effects, insert-materials, insert-types, colours (a maker\'s named ' +
       'colours, `#RRGGBBAA`) or location-kinds. Archived rows only with `include_archived`. A material, ' +
-      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases).',
-    input: z.object({ kind, include_archived: z.boolean().default(false) }),
+      'subtype, brand, category or effect has `aliases`: its other names (filament_catalog_set_aliases). The ' +
+      "colours catalog holds thousands of rows once synced (filament_colour_sync): pass `q` (every word must match a " +
+      "row's name, maker, `material_name` or `#RRGGBBAA`, e.g. `bambu jade white`) rather than listing it whole. A " +
+      'colour with `source` came from a sync; one with `source` and a null `synced_at` was edited by a person since (syncs leave it as it is).',
+    input: z.object({
+      kind,
+      include_archived: z.boolean().default(false),
+      q: z.string().max(200).optional().describe('Text search: every word must match some text of the row, in any case'),
+    }),
     risk: 'read',
     source: SOURCE,
     routes: ['GET /api/v1/filament/catalog/{kind}'],
-    handler: async ({ kind, include_archived }, { backend }) =>
+    handler: async ({ kind, include_archived, q }, { backend }) =>
       json(
         await ok(
           backend.GET('/api/v1/filament/catalog/{kind}', {
-            params: { path: { kind }, query: { include_archived } },
+            params: { path: { kind }, query: { include_archived, q } },
           }),
           `list the ${kind} catalog`,
         ),
@@ -246,6 +254,50 @@ const tools: Tool[] = [
           `set the aliases of ${kind} row ${row_id}`,
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_colour_sync',
+    label: 'Fill the colour catalog',
+    description:
+      "Fill ScadBuddy's colour catalog from a public source (#6907). `filamentcolors`: every swatch of " +
+      'filamentcolors.xyz (maker, name, material, hex; a translucent swatch gets alpha `80`), skipped when the site has ' +
+      "no new swatch since the last run unless `force`. `bambu`: Bambu Studio's colour codes as Bambu Lab's colours, " +
+      'exact RGBA (`80` for a translucent one). A colour is added, or updated by its maker, name and material; a row ' +
+      'a person made or edited, or another source wrote, is left as it is (`kept`), and nothing is deleted. Answers the run: `state` `done`, ' +
+      '`unchanged` or `failed` (`error` says why, e.g. the site did not answer; what it wrote stays) with its counts. ' +
+      'A filamentcolors run reads about 23 pages: an answer with `status: running` is still running; follow it with ' +
+      'get_operation, or read its progress with filament_colour_sync_status. 409 while a run of that source runs. ' +
+      'Only when the user asks. Reads the source only and writes ScadBuddy only.',
+    input: z.object({
+      source: z.enum(['filamentcolors', 'bambu']).describe('Which source to read'),
+      force: z.boolean().default(false).describe('filamentcolors only: read every page even when the site has no new swatch'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/colour-syncs'],
+    keyed: true,
+    summarize: ({ source }) => `Fill the colour catalog from ${source === 'bambu' ? "Bambu's colour codes" : 'filamentcolors.xyz'}`,
+    handler: async ({ source, force }, ctx) =>
+      json(
+        await command(ctx, `sync the colour catalog from ${source}`, (headers) =>
+          ctx.backend.POST('/api/v1/filament/colour-syncs', { body: { source, force }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_colour_sync_status',
+    label: "Read the colour catalog's syncs",
+    description:
+      'The newest run of each colour sync (filament_colour_sync): `state` `running` (with `pages_read` of `pages_total` ' +
+      'and the counts so far), `done`, `unchanged` or `failed` with `error`. A source never run is absent.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/colour-syncs'],
+    handler: async (_, { backend }) =>
+      json(await ok(backend.GET('/api/v1/filament/colour-syncs'), "read the colour catalog's syncs")),
   }),
 
   defineTool({

@@ -86,6 +86,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'rack-unsafe-material': 'text-warn',
   'rack-left-to-bambuddy': 'text-subtle',
   'rack-manual-partial': 'text-subtle',
+  // #6876 — a rack group ranked by its type alone: Glow went unchecked on a named slot.
+  'rack-glow-unchecked': 'text-warn',
   // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
   'sequence-clearance': 'text-warn',
   'profile-not-applied': 'text-warn',

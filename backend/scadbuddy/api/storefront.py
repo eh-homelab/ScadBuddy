@@ -35,6 +35,7 @@ from scadbuddy.orders.storefront.prepare import (
     PrepareStarted,
     progress,
     start_run,
+    warm_default,
 )
 from scadbuddy.orders.storefront.wire import (
     Listing,
@@ -159,9 +160,12 @@ async def set_listing_media(
     ``listing_media_not_image`` or ``listing_media_duplicate`` (``name`` is the id); a
     republish refused answers as ``POST …/publish`` does, with ``pictures_saved: true``:
     the pictures are kept and the public site shows what was last published."""
-    return await change_media(
+    listing = await change_media(
         state, orders.listings, listing_id, body.media_ids, expected_updated_at=body.updated_at
     )
+    # A republish is a new version: its variants have new keys (#6922).
+    await warm_default(state, listing)
+    return listing
 
 
 @router.post(
@@ -182,8 +186,12 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     ``listing_material_unsliceable``: the shop slice profile has no filament type for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
-    runs as many publishes as it allows."""
-    return await publish(state, orders.listings, listing_id)
+    runs as many publishes as it allows. Once published, the shop renders the default
+    variant and starts its storefront slice price (#6922, `prepare.py` `warm_default`),
+    so its price is there before a visitor asks."""
+    listing = await publish(state, orders.listings, listing_id)
+    await warm_default(state, listing)
+    return listing
 
 
 @router.get(
@@ -214,8 +222,11 @@ async def post_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> P
     published listing, at the values a visitor's page sends for it, so a visitor's render
     of it reuses the job. Every other parameter stays at its default. The run renders a few
     at a time (`PREPARE_IN_FLIGHT`), at the default priority (#6299 review), so it never
-    holds up a visitor's render or the shop's own. It answers at once: ``started`` is false
-    when a run was open already, and this POST joined it. 404 ``listing_not_found``, 409
+    holds up a visitor's render or the shop's own. Once they settle, it starts each
+    combination's storefront slice price, one at a time under
+    ``storefront_slices_concurrent`` (#6922); a combination priced before is not sliced
+    again. It answers at once: ``started`` is false when a run was open already, and this
+    POST joined it. 404 ``listing_not_found``, 409
     ``listing_not_published``, 422 ``listing_no_colours``, 422
     ``listing_combinations_over_cap`` (with ``count`` and ``cap``), 503
     ``render_unavailable``.

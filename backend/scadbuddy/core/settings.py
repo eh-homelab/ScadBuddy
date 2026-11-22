@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     # start when its name never had a version, or this build's script when the newest
     # version is an unedited older built-in (orders spec §7.2, #4252, #4673).
     orders_builtin_flow: bool = True
+    # SCADBUDDY_STOREFRONT_WARM_PRICES: publish renders a listing's default variant and
+    # starts its storefront slice price, and Prepare colours starts each prepared
+    # variant's, before a visitor asks (#6922).
+    storefront_warm_prices: bool = True
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
     realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
@@ -975,6 +979,11 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Whether the API registers the built-in order-fulfilment flow at its start"
             " (#4252); the deployment's choice, read once, and nothing a running server"
             " can undo."
+        ),
+        "storefront_warm_prices": (
+            "Whether publish and Prepare colours start the storefront's slices before a"
+            " visitor asks (#6922); the deployment's choice, read at each publish and at each"
+            " price step of a run."
         ),
         "service_account_namespace": (
             "Whose ServiceAccounts may exchange for a service credential (#5494): the"

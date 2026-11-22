@@ -3,7 +3,8 @@
 // A one-off approval of a host off the asset allowlist IS the approval of the call that
 // names it (fetch_asset's `allow_host`), so that call is always parked for a person. A
 // call that reads the printer's storage (#4698: get_print_sources with `printer`,
-// import_print from a `printer` source) reaches the printer, so it is parked too.
+// import_print from a `printer` source, #6916: create_model_from_mesh from a print's
+// `printer` source) reaches the printer, so it is parked too.
 //
 // Read by every gate: the harness seam (harness/permissions.ts `decide`) and the
 // registry's effective tier (registry.ts `effectiveTool`), which /mcp, confirm_action,
@@ -35,13 +36,22 @@ export function pinnedOutwardReason(toolName: string, input: unknown): string | 
   if (name === 'get_print_sources' && ![undefined, false].includes(field(input, 'printer') as undefined | false)) {
     return `${toolName} asks to read the printer's storage, which reaches the printer and needs a human approval in the ScadBuddy UI.`
   }
-  if (name === 'import_print') {
-    const source = field(input, 'source')
-    if (typeof source !== 'object' || source === null || field(source, 'kind') !== 'archive' && field(source, 'kind') !== 'archive_source' && field(source, 'kind') !== 'library') {
-      return `${toolName} asks to read the print's file from the printer, which reaches the printer and needs a human approval in the ScadBuddy UI.`
-    }
+  if ((name === 'import_print' && readsPrinter(field(input, 'source'))) || (name === 'create_model_from_mesh' && field(input, 'archive_source') !== undefined && readsPrinter(field(input, 'archive_source')))) {
+    return `${toolName} asks to read the print's file from the printer, which reaches the printer and needs a human approval in the ScadBuddy UI.`
   }
   return null
+}
+
+/** The print-file places that never reach the printer (`get_print_sources`' kinds but `printer`). */
+const OFF_PRINTER_KINDS: readonly unknown[] = ['archive', 'archive_source', 'library']
+
+/**
+ * Whether a print's file `source` (import_print's `source`, create_model_from_mesh's
+ * `archive_source`) reads the printer. Fails closed: anything but one of the three kinds
+ * that stay off the printer counts.
+ */
+function readsPrinter(source: unknown): boolean {
+  return typeof source !== 'object' || source === null || !OFF_PRINTER_KINDS.includes(field(source, 'kind'))
 }
 
 /** Whether this call must be approved by a person whatever the tool's tier (`pinnedOutwardReason`). */

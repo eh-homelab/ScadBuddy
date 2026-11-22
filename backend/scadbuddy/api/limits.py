@@ -65,6 +65,8 @@ ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/prints/\d+/attachments$")
 ORDER_ATTACHMENT_UPLOAD_PATH = re.compile(
     r"^/api/v1/orders/[^/]+(?:/items/[^/]+(?:/(?:fulfilments|revisions)/[^/]+)?)?/attachments$"
 )
+#: A file attached to any entity (#6950): as large as a template's media.
+ENTITY_ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/entities/[^/]+/attachments$")
 #: A filament invoice's file (#6266): as large as a template's media.
 INVOICE_FILE_UPLOAD_PATH = re.compile(r"^/api/v1/filament/invoices/[^/]+/file$")
 #: A mesh model's upload (#2146): a 3MF up to the library download cap, streamed like

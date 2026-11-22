@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Slider } from '@/components/ui/slider'
 import { alphaOf, CLEAR_ALPHA, CLEAR_MAX_ALPHA, parseRgba, TRANSLUCENT_ALPHA, withAlpha } from '../../lib/rgba'
+import { CatalogColourPick } from './CatalogColourPick'
 import { RgbaSwatch } from './RgbaSwatch'
 
 /** spec §5.1's presets: the alpha each sets, and whether a colour is in it. */
@@ -23,15 +24,22 @@ export interface RgbaColourFieldProps {
   onChange: (rgba: string) => void
   /** The type's colour, shown as the placeholder and the swatch while `value` is `null`. */
   inherited?: string | null
+  /** Offer "From the catalog": a colour of the colour catalog, picked by name (#6912). */
+  catalog?: boolean
+  /** The form's extra colours, set from a catalog pick (none for a single-colour row). */
+  onExtraColours?: (extras: string[]) => void
 }
 
 /**
  * #6262 — an `#RRGGBBAA` colour: a hex field (six digits read as opaque), the browser's
  * colour picker for the RGB, an opacity slider and spec §5.1's presets (opaque `FF`,
  * translucent `80`, clear `10`), beside the spool chip it makes. The picker has no alpha
- * channel, so a new tint keeps the alpha it had.
+ * channel, so a new tint keeps the alpha it had. With `catalog`, "From the catalog" picks a
+ * catalog colour by name (#6912): its whole `#RRGGBBAA`, alpha included, and its extra
+ * colours through `onExtraColours`. The value is still the field's own, which any typed
+ * RGBA replaces.
  */
-export function RgbaColourField({ value, onChange, inherited = null }: RgbaColourFieldProps) {
+export function RgbaColourField({ value, onChange, inherited = null, catalog = false, onExtraColours }: RgbaColourFieldProps) {
   const id = useId()
   const [draft, setDraft] = useState(value ?? '')
   const [seen, setSeen] = useState(value)
@@ -118,6 +126,14 @@ export function RgbaColourField({ value, onChange, inherited = null }: RgbaColou
               {preset.label}
             </Button>
           ))}
+          {catalog && (
+            <CatalogColourPick
+              onPick={(colour) => {
+                if (colour.rgba !== value) onChange(colour.rgba)
+                onExtraColours?.(colour.extra_colours ?? [])
+              }}
+            />
+          )}
         </div>
       </div>
     </div>

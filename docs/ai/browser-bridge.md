@@ -213,7 +213,7 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   stops waiting.
 - **Errors.** The hub's own answers are ScadBuddy's words, returned as they are: `no
   browser attached: …` (with why: no tab for this session, no pairing for this caller,
-  the paired tab is not connected, or no database for pairing), a timeout, a tab that
+  the paired tab is not connected, or no pairing store from the API), a timeout, a tab that
   disconnected mid-call, or more than 8 calls waiting on one tab (`MAX_CALLS_PER_TAB`).
   `browser_status` on a tab whose replica did not answer in time says `no answer from the
   paired ScadBuddy tab in time: …` instead, a prefix of its own on purpose: the tab may
@@ -403,8 +403,8 @@ sequenceDiagram
   the row still names that replica, so a reconnect to another replica that overtakes the
   old socket keeps the newer owner. A replica drops its own rows at start (a container
   restart keeps its identity). A replica claims tabs only while its host worker serves
-  `bridge.tab`, and only with the KEK (#4949): without it, it could not open the sealed
-  calls that other replicas send it, so its tabs are reached only by calls made on it. Every 30 s (`OWNER_REFRESH_MS`) it refreshes the rows of the tabs it holds
+  `bridge.tab`, and only with the payload codec, whose data keys the API releases (#4949,
+  #5299 step 12): without it, it could not open the sealed calls that other replicas send it, so its tabs are reached only by calls made on it. Every 30 s (`OWNER_REFRESH_MS`) it refreshes the rows of the tabs it holds
   and makes a missing one again: a claim lost while the database was down, or a row that
   a missed call dropped. It never takes back a row that names another replica.
 - **One replica runs a call:** the activity is scheduled on the owner's queue only, with
@@ -419,17 +419,17 @@ sequenceDiagram
   matching is CPU-throttled (eh-homelab/clusters#3418): status reads took 2.3–4.0 s on 2026-11-10.
 - **Every call is sealed:** the arguments and the tab's result (page snapshots, form
   contents, the editor's text) are the workflow's payloads, and each `BridgeCall`
-  workflow, `bridge-<uuid>`, is a subject of its own with a key made for it under the
-  KEK ([`temporal/payloadCodec.ts`](../../agent/src/temporal/payloadCodec.ts)
+  workflow, `bridge-<uuid>`, is a subject of its own with a key the API makes for it under
+  its KEK ([`temporal/payloadCodec.ts`](../../agent/src/temporal/payloadCodec.ts)
   `subjectOf`), whether or not the call is for a session. The caller deletes the key
   once it has the answer, so the history cannot be read again. No replica caches a bridge
-  key (`PgPayloadKeys` reads it from the row each time), so no copy outlives the row in
-  memory. A key that a cancelled call left is deleted by the hourly sweep
-  (`sweepBridgeKeys`, older than an hour). Once the API lists the agent's CRUD area `forget`
-  (#5299 step 6), the API deletes both (`POST …/crud/agent/payload-keys/{subject}/drop` and
-  `…/payload-key-sweeps`, `backend/scadbuddy/api/crud_agent_forget.py`). Without
-  the KEK no call goes through Temporal: it is refused (`no_browser`, naming
-  `SCADBUDDY_SECRET_KEY_FILE`), and is never sent another way.
+  key (`CrudPayloadKeys` asks the API each time), so no copy outlives the row in memory. A
+  key that a cancelled call
+  left is deleted by the hourly sweep (older than an hour). The API deletes both
+  (`POST …/crud/agent/payload-keys/{subject}/drop` and `…/payload-key-sweeps`,
+  `backend/scadbuddy/api/crud_agent_forget.py`, area `forget`, #5299 step 6). Without the
+  payload codec no call goes through Temporal: it is refused (`no_browser`, asking the
+  operator to check the agent's service credential), and is never sent another way.
 - **Inline, capped:** a bridge payload is never kept in the payload store (only a
   session's are), so nothing is left on the data share. The request and the answer are
   each capped at 256 KiB of JSON (`MAX_BRIDGE_BYTES`), past a tab's own 200 000 bytes and
@@ -472,8 +472,8 @@ sequenceDiagram
   replica of the build before #4868 still wrote it; #5109 drops it
   ([`20261102T0038Z_drop_bridge_messages.sql`](../../backend/scadbuddy/migrations_agent/20261102T0038Z_drop_bridge_messages.sql)).
 - **Not covered:** a cancelled call cancels its workflow, but is not withdrawn from the
-  tab, as with a local call. Without a database there is no relay, and only tabs on the
-  same process can be reached.
+  tab, as with a local call. Without the payload codec (the data keys the API releases)
+  there is no relay, and only tabs on the same process can be reached.
 
 Pairing requests reach every tab whatever the replica: each replica re-reads them from
 Postgres every 3 s (`PAIRINGS_POLL_MS`).
@@ -510,7 +510,7 @@ reaches an agent.
   frames, the checks on its bytes, and its store); the tab's side is
   [`screenshot.test.tsx`](../../frontend/src/agent/screenshot.test.tsx) and `link.test.ts`,
   and `e2e/agent-bridge.spec.ts` takes one in Chromium under the page's CSP.
-  The Postgres store: [`bridgePairings.pg.test.ts`](../../agent/test/bridgePairings.pg.test.ts).
+  The pairings store over the API's routes: [`crudStores.test.ts`](../../agent/test/crudStores.test.ts).
   Two replicas through Temporal:
   [`bridgeRelay.temporal.test.ts`](../../agent/test/bridgeRelay.temporal.test.ts), and the
   relay alone: [`bridgeRelay.test.ts`](../../agent/test/bridgeRelay.test.ts).

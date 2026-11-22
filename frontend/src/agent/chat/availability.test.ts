@@ -54,11 +54,11 @@ describe('fetchAiAvailability', () => {
   })
 
   it('is unavailable when the agent answers but cannot serve', async () => {
-    const body = { available: false, state: 'unavailable', ai: 'unavailable (database unreachable)' }
+    const body = { available: false, state: 'unavailable', ai: "unavailable (the API does not answer the agent's CRUD areas)" }
     expect(await fetchAiAvailability(answer(body))).toEqual({
       available: false,
       state: 'unavailable',
-      reason: 'unavailable (database unreachable)',
+      reason: "unavailable (the API does not answer the agent's CRUD areas)",
     })
   })
 
@@ -68,7 +68,7 @@ describe('fetchAiAvailability', () => {
     const body = {
       available: false,
       state: 'unavailable',
-      ai: 'unavailable (database unreachable)',
+      ai: "unavailable (the API does not answer the agent's CRUD areas)",
       reason: 'The database is unreachable.',
       chat: 'refused',
     }

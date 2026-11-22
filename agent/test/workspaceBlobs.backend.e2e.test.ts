@@ -2,15 +2,17 @@ import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { withServiceCredential } from '../src/api/serviceCredential.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { PgPayloadKeys } from '../src/temporal/payloadCodec.js'
-import { BackendWorkspaceBlobs } from '../src/workspace/blobs.js'
+import { sqlForget } from './support/sql/forget.js'
+import { PgPayloadKeys } from './support/sql/payloadKeys.js'
+import { BackendWorkspaceBlobs } from './support/sql/workspaceBlobs.js'
 import { CrudSessionFiles } from '../src/workspace/crudStore.js'
-import { WorkspaceSealing } from '../src/workspace/sealing.js'
-import { SessionFiles, type WorkspaceRef } from '../src/workspace/store.js'
+import { WorkspaceSealing } from './support/sql/workspaceSealing.js'
+import { type WorkspaceRef } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { TEMPORAL_CLI, TEMPORAL_CLI_ENV } from './support/temporal.js'
@@ -21,8 +23,8 @@ import { TEMPORAL_CLI, TEMPORAL_CLI_ENV } from './support/temporal.js'
 // (docs/ai/operating.md §13). It also pins the holds the agent takes through its CRUD routes
 // (backend api/crud_agent.py, with the agent's service credential, #5299) to the backend's
 // own `blob_refs` rows: the agent's code never touches that table, the test reads it. And it
-// checks that the API's sealing (backend agent_data/workspace.py, #5299 step 7) and the agent's
-// (workspace/sealing.ts) open each other's files: the harness takes the test's KEK.
+// checks that the API's sealing (backend agent_data/workspace.py, #5299 step 7) and the tests' copy
+// of its format (support/sql/workspaceSealing.ts) open each other's files: the harness takes the test's KEK.
 
 const BACKEND_DIR = fileURLToPath(new URL('../../backend/', import.meta.url))
 
@@ -179,13 +181,13 @@ describe.skipIf(skip !== undefined)(`workspace files through the real backend${s
       ].sort((a, b) => a[1]!.localeCompare(b[1]!)),
     )
 
-    await forgetSubject({ sql: db.sql, keys }, `session-${parent.id}`)
+    await forgetSubject(sqlForget(db.sql, { keys }), `session-${parent.id}`)
     // The rows went in a cascade: reconcile releases the parent's hold through the routes.
     expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([[stored!.blob_key, `session:${fork.id}/downloads/part.bin`]])
     expect((await files.read(forkWs, 'downloads/part.bin'))?.bytes.equals(bytes)).toBe(true)
 
-    await forgetSubject({ sql: db.sql, keys }, `session-${fork.id}`)
+    await forgetSubject(sqlForget(db.sql, { keys }), `session-${fork.id}`)
     expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([])
     expect(await db.sql`SELECT 1 FROM ai_session_files`).toHaveLength(0)

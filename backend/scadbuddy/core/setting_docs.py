@@ -328,6 +328,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "On, the API registers the built-in order-fulfilment flow at start when it has no"
             " version, or updates an unedited older built-in version.",
         ),
+        "storefront_warm_prices": SettingDoc(
+            "Warm storefront prices",
+            "On, publish renders a listing's default variant and slices its price, and"
+            " Prepare colours slices each prepared variant's, before a visitor asks.",
+        ),
         # -- Fonts ---------------------------------------------------------------------
         "google_fonts_api_key": SettingDoc(
             "Google Fonts API key",

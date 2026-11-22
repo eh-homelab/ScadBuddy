@@ -13,6 +13,8 @@ type LanRunControl struct {
 	additionalData map[string]any
 	// The awaiting_clear property
 	awaiting_clear *bool
+	// The printer_idle property
+	printer_idle *bool
 	// The queued property
 	queued *bool
 	// The queued_for_print property
@@ -29,6 +31,8 @@ func NewLanRunControl() *LanRunControl {
 	m.SetAdditionalData(make(map[string]any))
 	awaiting_clearValue := false
 	m.SetAwaitingClear(&awaiting_clearValue)
+	printer_idleValue := false
+	m.SetPrinterIdle(&printer_idleValue)
 	queuedValue := false
 	m.SetQueued(&queuedValue)
 	queued_for_printValue := false
@@ -65,6 +69,16 @@ func (m *LanRunControl) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 		}
 		if val != nil {
 			m.SetAwaitingClear(val)
+		}
+		return nil
+	}
+	res["printer_idle"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrinterIdle(val)
 		}
 		return nil
 	}
@@ -111,6 +125,12 @@ func (m *LanRunControl) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 	return res
 }
 
+// GetPrinterIdle gets the printer_idle property value. The printer_idle property
+// returns a *bool when successful
+func (m *LanRunControl) GetPrinterIdle() *bool {
+	return m.printer_idle
+}
+
 // GetQueued gets the queued property value. The queued property
 // returns a *bool when successful
 func (m *LanRunControl) GetQueued() *bool {
@@ -139,6 +159,12 @@ func (m *LanRunControl) GetWaiting() *int32 {
 func (m *LanRunControl) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
 		err := writer.WriteBoolValue("awaiting_clear", m.GetAwaitingClear())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("printer_idle", m.GetPrinterIdle())
 		if err != nil {
 			return err
 		}
@@ -186,6 +212,11 @@ func (m *LanRunControl) SetAwaitingClear(value *bool) {
 	m.awaiting_clear = value
 }
 
+// SetPrinterIdle sets the printer_idle property value. The printer_idle property
+func (m *LanRunControl) SetPrinterIdle(value *bool) {
+	m.printer_idle = value
+}
+
 // SetQueued sets the queued property value. The queued property
 func (m *LanRunControl) SetQueued(value *bool) {
 	m.queued = value
@@ -210,11 +241,13 @@ type LanRunControlable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetAwaitingClear() *bool
+	GetPrinterIdle() *bool
 	GetQueued() *bool
 	GetQueuedForPrint() *bool
 	GetRunId() *string
 	GetWaiting() *int32
 	SetAwaitingClear(value *bool)
+	SetPrinterIdle(value *bool)
 	SetQueued(value *bool)
 	SetQueuedForPrint(value *bool)
 	SetRunId(value *string)

@@ -34,6 +34,7 @@ from scadbuddy.bambuddy.options import (
 from scadbuddy.bambuddy.print_run import (
     LAN_NEEDS_KEK,
     LAN_PATH_REFUSAL,
+    PreparedPlates,
     PreparedRun,
     PrintRunRequest,
     asked_path_refusal,
@@ -1037,3 +1038,87 @@ async def test_a_quotes_slice_takes_the_asked_path(monkeypatch: pytest.MonkeyPat
     with pytest.raises(_StopError):
         await order_operations.PreviewSlicer(core, components).start("o1", quote, "s")
     assert seen["asked"] == "bambuddy"
+
+
+async def test_a_library_files_quote_takes_slot_presets_and_colours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6710: `PreviewSlicer.start_library` hands a spool-less slot's presets and colour
+    to the library file's slice (`start_library_quote_preview`)."""
+    seen: dict[str, Any] = {}
+
+    async def no_route(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def started(*args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise _StopError
+
+    async def serving_native() -> None:
+        return None
+
+    monkeypatch.setattr(order_operations, "slice_route", no_route)
+    monkeypatch.setattr(order_operations, "start_library_quote_preview", started)
+    core = cast(
+        Any, SimpleNamespace(settings_store=SimpleNamespace(load=StoredSettings), uploads=None)
+    )
+    registry = SimpleNamespace(
+        store=None,
+        reports=None,
+        serving_native=serving_native,
+        starter=None,
+        temporal=lambda: None,
+        reads=None,
+    )
+    components = cast(Any, SimpleNamespace(get=lambda key: registry))
+    quote = SliceQuoteRequest.model_validate(
+        {
+            "printer_id": 1,
+            "filament_plan": {"slots": []},
+            "choices": {"nozzles": [{"size": "0.4"}]},
+        }
+    )
+    presets: Any = {1: []}
+    with pytest.raises(_StopError):
+        await order_operations.PreviewSlicer(core, components).start_library(
+            41, quote, "s", slot_presets=presets, slot_colours={1: "#123456"}
+        )
+    assert seen["slot_presets"] is presets
+    assert seen["slot_colours"] == {1: "#123456"}
+    # A back-office quote reads the library; a file listing's price its held copy (#6710).
+    assert seen["held"] is None
+    held: Any = object()
+    with pytest.raises(_StopError):
+        await order_operations.PreviewSlicer(core, components).start_library(
+            41, quote, "s", slot_presets=presets, held=held
+        )
+    assert seen["held"] is held
+
+
+async def test_every_plates_slice_takes_slot_colours(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6710: `start_preview_plates` hands `slot_colours` to the run's plan (`plan_run`),
+    which resolves each plate with them."""
+    seen: dict[str, Any] = {}
+
+    async def prepared(*args: Any, **kwargs: Any) -> Any:
+        return None
+
+    async def planned(*args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise _StopError
+
+    monkeypatch.setattr(preview, "prepare_run", prepared)
+    monkeypatch.setattr(PreparedPlates, "of", staticmethod(lambda one: one))
+    monkeypatch.setattr(preview, "plan_run", planned)
+    source = cast(Any, SimpleNamespace(is_sliced=False, native=None))
+    with pytest.raises(_StopError):
+        await preview.start_preview_plates(
+            None,
+            source,
+            StoredSettings(),
+            cast(Any, None),
+            run_request(printer_id=1),
+            subject="s",
+            slot_colours={1: "#123456"},
+        )
+    assert seen["slot_colours"] == {1: "#123456"}

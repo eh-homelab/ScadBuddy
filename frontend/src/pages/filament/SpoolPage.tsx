@@ -48,6 +48,8 @@ import { SpoolMetricsPanel } from '../../components/filament/SpoolMetricsPanel'
 import { SpoolTimeline } from '../../components/filament/SpoolTimeline'
 import { NtagPanel } from '../../components/filament/NtagPanel'
 import { TagPanel } from '../../components/filament/TagPanel'
+import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
+import { LinksPanel } from '../../components/entities/LinksPanel'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -824,7 +826,7 @@ export function SpoolPage() {
 
           <Section id="colour-and-cost" title="Colour and cost">
             <OverrideField name="rgba" label="Colour" group value={draft.rgba ?? ''} overridden={own('rgba')} hasType={hasType} onChange={() => {}} onReset={() => void reset('rgba')}>
-              <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} inherited={hasType ? eff('rgba') || null : null} />
+              <RgbaColourField value={draft.rgba} onChange={(next) => set('rgba', next)} inherited={hasType ? eff('rgba') || null : null} catalog onExtraColours={(extras) => set('extra_colours', extras.join(', '))} />
             </OverrideField>
             <div className="grid gap-3 sm:grid-cols-2">
               {field('colour_name', 'Colour name')}
@@ -945,6 +947,17 @@ export function SpoolPage() {
                 </form>
               )}
             </div>
+          </Section>
+
+          <Section id="files-and-links" title="Files and links">
+            {saved && !creating ? (
+              <div className="grid gap-6 xl:grid-cols-2">
+                <AttachmentsPanel entity={`spool:${saved.id}`} />
+                <LinksPanel entity={`spool:${saved.id}`} />
+              </div>
+            ) : (
+              <p className="text-[13px] text-muted-foreground">Save the spool first, then add its photos, receipts and links.</p>
+            )}
           </Section>
 
           <Section id="history" title="History">

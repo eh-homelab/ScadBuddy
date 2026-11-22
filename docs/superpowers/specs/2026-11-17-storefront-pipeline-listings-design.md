@@ -821,6 +821,9 @@ until the step that makes it safe.
    Each pipeline line is therefore "priced by hand", and `reprice` finds no row at
    submit either. `prepare.py` and the `PrepareListing` workflow start no slice: they
    only render (checked by reading both on `main`, and by scadify on #6581's tree).
+   Since #6922 they also start each combination's slice price, through the estimate's
+   own path (`renders.py` `estimate_of`), so a pipeline render gets what a visitor's
+   estimate of it gets.
 3. **`feat(storefront): price a pipeline listing`** (backend). The rule of §7.2 in
    `render_estimate` and `reprice` (the inputs compared by deep equality of the parsed
    values, not by key order), the slice request through #6581's `plan_variant`

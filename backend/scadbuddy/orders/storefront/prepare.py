@@ -26,6 +26,15 @@ Its activities are `submit` and `still_open`. `progress` reads the newest job of
 combination's render key (no table of its own: the key is deterministic) and the run's
 state. No route enumerates a listing with more than `ENUMERATION_LIMIT` picks: that
 bound is a sum of products, computed first.
+
+Warming (#6922): once the renders settle, the run asks for each combination's storefront
+slice price (`warm`, activity `prepare_listing_warm`) as a visitor's estimate asks for it:
+the done render's 3MF and slots, with the combination's variant key, through
+`slice_price.py` `slice_estimate`, which claims and starts the slice under
+`storefront_slices_concurrent`. So there is no second slicer path, a variant with a
+``done`` price starts no slice, and a variant with no room waits. Publish starts a run of
+the default combination only (`warm_default`, `default_combination`), so the default
+variant has a price before a visitor asks. Both are off with `storefront_warm_prices`.
 """
 
 from __future__ import annotations
@@ -61,8 +70,9 @@ from scadbuddy.orders.storefront.inputs import (
     resolve_choice,
 )
 from scadbuddy.orders.storefront.listings import listing_not_found, problem
+from scadbuddy.orders.storefront.renders import estimate_of, variant_key
 from scadbuddy.orders.storefront.wire import ChoiceBound, Listing
-from scadbuddy.render.job_models import QueueFullError
+from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.commands import execution_gone
 from scadbuddy.workflows.prepare_listing import (
@@ -70,10 +80,13 @@ from scadbuddy.workflows.prepare_listing import (
     PREPARE_LISTING_WORKFLOW,
     SETTLED_ACTIVITY,
     SUBMIT_ACTIVITY,
+    WARM_ACTIVITY,
     OpenJob,
     PrepareListingStart,
     SubmitAsk,
     Submitted,
+    Warmed,
+    default_workflow_id,
     workflow_id,
 )
 
@@ -82,6 +95,9 @@ if TYPE_CHECKING:
     from scadbuddy.orders.component import OrdersComponent
 
 logger = logging.getLogger(__name__)
+
+#: How long a publish waits for its default price run to start (#6922).
+WARM_START_TIMEOUT: Final = 5.0
 
 #: A job state that is not settled yet.
 OPEN_STATES: Final = ("pending", "running")
@@ -120,10 +136,14 @@ class PrepareStarted(BaseModel):
 
 @dataclass(frozen=True)
 class Combination:
-    """One combination: the values a visitor's page sends for it, and its reference."""
+    """One combination: the values a visitor's page sends for it, its reference, the
+    material its colours resolve to, and its variant key (`renders.py` `variant_key`,
+    #6922): the key a visitor's choices of it have, which its warmed price records."""
 
     asked: dict[str, ParamValue]
     reference: Reference
+    material: str | None
+    variant_key: str
 
 
 @dataclass(frozen=True)
@@ -239,17 +259,47 @@ def _build(
             asked: dict[str, ParamValue] = {
                 n: value for n, value in zip(names, picked, strict=True) if value != defaults[n]
             }
-            values = listing_values(listing, asked, filaments, materials)
             try:
-                choice = resolve_choice(listing, values, asked.keys(), filaments, materials)
+                combination = _combination(listing, filaments, materials, asked)
             except ColoursClashError:
                 continue
             except LockedColoursClashError:
                 # No material can print it: no combination renders (#6302 review).
                 return []
-            reference = listing_reference(listing, choice.values, {}, filaments=filaments).reference
-            built.setdefault(reference.render_key, Combination(asked=asked, reference=reference))
+            built.setdefault(combination.reference.render_key, combination)
     return list(built.values())
+
+
+def _combination(
+    listing: Listing,
+    filaments: Mapping[str, Filament],
+    materials: Sequence[str],
+    asked: dict[str, ParamValue],
+) -> Combination:
+    """The combination a visitor's page asks for with ``asked``, through the visitor's
+    render path. Raises `ColoursClashError` and `LockedColoursClashError` as
+    `resolve_choice` does."""
+    values = listing_values(listing, asked, filaments, materials)
+    choice = resolve_choice(listing, values, asked.keys(), filaments, materials)
+    reference = listing_reference(listing, choice.values, {}, filaments=filaments).reference
+    return Combination(
+        asked=asked,
+        reference=reference,
+        material=choice.material,
+        # The page's first load, and a colour pick, choose no filament per slot.
+        variant_key=variant_key(listing, choice, {}),
+    )
+
+
+def default_combination(
+    listing: Listing, filaments: Mapping[str, Filament], materials: Sequence[str]
+) -> Combination | None:
+    """The published ``listing``'s default combination (#6922): what a visitor's page
+    renders on its first load, which sends no value. None when its colours clash."""
+    try:
+        return _combination(listing, filaments, materials, {})
+    except (ColoursClashError, LockedColoursClashError):
+        return None
 
 
 #: The newest built combinations, by what they are built from (`_cache_key`). A run
@@ -356,6 +406,31 @@ def _facts(state: AppState, orders: OrdersComponent, listing_id: str) -> _Facts:
     )
 
 
+def _target(
+    state: AppState, orders: OrdersComponent, ask: SubmitAsk
+) -> tuple[Listing, Combination] | None:
+    """Blocking: the published listing and the combination ``ask`` names, or None when
+    there is none at its index (or the listing is over the cap). A publish's run
+    (``default_only``) has one, the default (`default_combination`, #6922). Raises
+    `ApiError` when the listing is gone or not published."""
+    if not ask.default_only:
+        facts = _facts(state, orders, ask.listing_id)
+        if ask.index >= facts.count or facts.count > facts.cap:
+            return None
+        # `_facts` built them: this reads the cache.
+        found = combination_at(facts.listing, facts.filaments, facts.materials, ask.index)
+        return facts.listing, found
+    listing = _published(orders, ask.listing_id)
+    if ask.index > 0:
+        return None
+    filaments = {f.id: f for f in orders.store.filaments()}
+    materials = effective_materials(
+        listing, state.settings_store.snapshot().runtime.storefront_materials
+    )
+    default = default_combination(listing, filaments, materials)
+    return None if default is None else (listing, default)
+
+
 def job_states(state: AppState, slug: str, keys: Collection[str]) -> dict[str, str]:
     """The state of the newest render job of each of ``keys`` (of template ``slug``) that
     has one. Each half reads a partial index on ``slug``: the open jobs, and the settled
@@ -449,6 +524,19 @@ class TemporalPreparer:
         )
         return not (same_run or same_chain)
 
+    async def start_default(self, listing_id: str) -> None:
+        """Start a publish's run of the listing's default combination (#6922). A run of it
+        still open is ended and started again: the listing it read may have moved (a new
+        commit is a new render key, and a new version a new variant key)."""
+        await self.client.start_workflow(
+            PREPARE_LISTING_WORKFLOW,
+            PrepareListingStart(listing_id=listing_id, default_only=True),
+            id=default_workflow_id(listing_id),
+            task_queue=self.task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.TERMINATE_EXISTING,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        )
+
 
 def preparer(state: AppState) -> TemporalPreparer:
     """The app's preparer: the operations' client, on the ``library`` queue."""
@@ -456,6 +544,33 @@ def preparer(state: AppState) -> TemporalPreparer:
 
     ops = state.components.get(OPERATIONS)
     return TemporalPreparer(ops.client, state.settings.temporal_task_queue_library)
+
+
+async def warm_default(state: AppState, listing: Listing) -> None:
+    """After a publish (#6922): start the run that renders the published ``listing``'s
+    default combination and starts its storefront slice price, unless
+    `storefront_warm_prices` is off. A run that does not start is logged, never the
+    publish's failure, nor is one that takes past `WARM_START_TIMEOUT`: a visitor's read
+    still starts the slice. A start given up on may still have reached Temporal, so its
+    log says it was given up, not that it failed."""
+    if not state.settings.storefront_warm_prices or not listing.published:
+        return
+    try:
+        # A Temporal that does not answer never holds up the publish (review of #6970).
+        await asyncio.wait_for(preparer(state).start_default(listing.id), WARM_START_TIMEOUT)
+    except TimeoutError:
+        # Also a TimeoutError from inside start_default (a client timeout): that start
+        # too may have reached Temporal, so it is "given up", with its traceback. Keep
+        # the catch this wide.
+        logger.warning(
+            "gave up waiting for the default price run of listing %s to start",
+            listing.id,
+            exc_info=True,
+        )
+    except Exception:
+        logger.warning(
+            "could not start the default price run of listing %s", listing.id, exc_info=True
+        )
 
 
 async def progress(state: AppState, orders: OrdersComponent, listing_id: str) -> PrepareProgress:
@@ -528,21 +643,20 @@ async def start_run(state: AppState, orders: OrdersComponent, listing_id: str) -
 async def submit(
     state: AppState, orders: OrdersComponent, ask: SubmitAsk, run_id: str
 ) -> Submitted:
-    """One step of the run: submit the combination at ``ask.index`` with
+    """One step of the run: submit the combination at ``ask.index`` (`_target`) with
     ``reuse_finished``. A combination with an open job is left as it is (``open``), a done
     one answers ``settled``, and any other is rendered. ``end`` once the index is past the
     last combination, or the listing is not published (or is over the cap) any more.
     ``run_id`` is the prepare run's: it scopes the render's claim (`request_id`)."""
     try:
-        facts = await asyncio.to_thread(_facts, state, orders, ask.listing_id)
+        target = await asyncio.to_thread(_target, state, orders, ask)
     except ApiError:
         return Submitted(outcome="end")
-    listing = facts.listing
-    if ask.index >= facts.count or facts.count > facts.cap:
+    if target is None:
         return Submitted(outcome="end")
+    listing, combination = target
     assert listing.snapshot is not None
-    # `_facts` built them: this reads the cache.
-    reference = combination_at(listing, facts.filaments, facts.materials, ask.index).reference
+    reference = combination.reference
     job = OpenJob(slug=listing.slug, render_key=reference.render_key)
     found = (await asyncio.to_thread(job_states, state, job.slug, [job.render_key])).get(
         job.render_key
@@ -589,6 +703,57 @@ async def still_open(state: AppState, jobs: Sequence[OpenJob]) -> list[OpenJob]:
     return open_jobs
 
 
+def _done_job(state: AppState, slug: str, render_key: str) -> Job | None:
+    """The newest done render job of ``render_key`` (of template ``slug``), or None.
+    Blocking."""
+    with state.projection.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM render_jobs WHERE slug = %s AND state = 'done'"
+            " AND kind = 'render' AND render_key = %s"
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
+            (slug, render_key),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return state.render.store.read(row["id"])
+    except JobNotFoundError:
+        return None
+
+
+async def warm(state: AppState, orders: OrdersComponent, ask: SubmitAsk) -> Warmed:
+    """One step of the price phase (#6922): the storefront slice price of the combination
+    at ``ask.index``, asked for as a visitor's render of it asks (`renders.py`
+    `estimate_of`, `render_estimate`'s): its done render's 3MF and slots, with its variant
+    key, through `slice_estimate`, which claims and starts the slice under
+    `storefront_slices_concurrent`. ``settled`` once it has a price or none can be had (no
+    done render, its files lost, no shop slice profile, a failed slice); ``running`` while
+    its slice runs; ``waiting`` while its files are fetched or the cap leaves no room;
+    ``end`` past the last combination, for a listing not published, or with
+    `storefront_warm_prices` off."""
+    if not state.settings.storefront_warm_prices:
+        return Warmed(outcome="end")
+    try:
+        target = await asyncio.to_thread(_target, state, orders, ask)
+    except ApiError:
+        return Warmed(outcome="end")
+    if target is None:
+        return Warmed(outcome="end")
+    listing, combination = target
+    job = await asyncio.to_thread(_done_job, state, listing.slug, combination.reference.render_key)
+    if job is None or job.result is None:
+        return Warmed(outcome="settled")
+    estimate = await estimate_of(
+        state, listing, job, {}, combination.material, variant_key=combination.variant_key
+    )
+    if estimate.source != "pending":
+        return Warmed(outcome="settled")
+    # No key: its files are still being fetched. A key: its slice runs, or waits for room.
+    key = estimate.price_key
+    row = None if key is None else await asyncio.to_thread(orders.slice_prices.get, key)
+    return Warmed(outcome="running" if row is not None and row.status == "running" else "waiting")
+
+
 def prepare_activities(state: AppState, orders: Callable[[], OrdersComponent]) -> list[Any]:
     """The prepare run's activities, for the ``library`` worker."""
 
@@ -600,4 +765,8 @@ def prepare_activities(state: AppState, orders: Callable[[], OrdersComponent]) -
     async def prepare_listing_settled(jobs: list[OpenJob]) -> list[OpenJob]:
         return await still_open(state, jobs)
 
-    return [prepare_listing_submit, prepare_listing_settled]
+    @activity.defn(name=WARM_ACTIVITY)
+    async def prepare_listing_warm(ask: SubmitAsk) -> Warmed:
+        return await warm(state, orders(), ask)
+
+    return [prepare_listing_submit, prepare_listing_settled, prepare_listing_warm]

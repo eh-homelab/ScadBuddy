@@ -779,12 +779,14 @@ check passed it no inventory. So Decision 2's negative tray id was never found.
 17. R-6872-3: three reasons, each said in its own words. `no_spool`: a rack-side slot of
     the nozzle plan that the filament plan gives no spool. `empty_tray`: a tray chosen for
     itself that reports no filament. `not_in_inventory`: an SB number the inventory does
-    not have, or a filled tray that holds no SB spool. The reasons live in `print_run.py`
-    (`UncheckedReason`, `_unfound_reason`); `rank.py` is unchanged (R-6872-5). Why: issue
+    not have, or a filled tray that holds no SB spool. The reasons lived in `print_run.py`
+    (`UncheckedReason`, `_unfound_reason`); since #6876 they are `rank.py`'s
+    (`UncheckedReason`, `unfound_reason`, R-6876-3). Why: issue
     ruling 3; a slot with no spool is not "not in the inventory".
 18. R-6872-4: the run's ranking on a native run judges Glow on the tray option, whose
     material is the tray's reported `tray_type` and whose subtype is empty, not on the SB
-    spool's subtype. That is a separate gap, filed as #6876, not changed here. Why: it is
+    spool's subtype. That is a separate gap, filed as #6876, not changed here (fixed by
+    R-6876-1). Why: it is
     the run's choice, not the dialog's lookup, and its fix touches the picker's labels and
     the profile resolution.
 19. R-6869-1: every filament entity the UI names links to its page: spools, types, invoices and invoice lines, suppliers, supplier products, price sheet rows, places, insert types and other catalog entries, printers, shopping items, and the rows of the spool timeline, the ledger, the tags and the Bambuddy sync errors. Why: the owner asked for it on 2026-11-21 (#6869); a name a person reads should take them to the record.
@@ -805,6 +807,40 @@ check passed it no inventory. So Decision 2's negative tray id was never found.
 29. R-6869-10: a place links by its id: `filamentLinks.location(id)` and the agent's `location_ui_path` are `/filament/spools?place=<id>`, the Spools tab's `place` filter, which keeps the spools whose `location_id` is that id. Its chip names the place's path ("Location: Workshop / Shelf A"). The Filter menu's `location` filter, by name, stays. Why: a place's own name repeats under other parents (two "Shelf" boxes), and a link by name listed the spools of both (the review of #6878). As built in #6955: a place has its own page, so `filamentLinks.location(id)` and the agent's `location_ui_path` are `/filament/locations/<id>`; the spools filter is `filamentLinks.locationSpools(id)`.
 30. R-6869-11: a confirmed invoice's spools are links ("Spool #N", or "Spool #?" before the number is known) until a read of every spool that started after the confirm answers. Only a spool missing from that read is "(deleted)"; a failed read keeps the links. Why: the spool list read before the confirm lacks the spools the confirm made, so it said every new spool was deleted (the review of #6878); Decision 23 counts only a read that covers the spool.
 31. R-6869-12: the supplier page, opened at a product's anchor, lists that product even when it is archived and "Show archived" is off; the other archived products stay hidden, and the remembered toggle does not change. Why: a price sheet row's SKU links to its product's row, and an archived product's row was not on the page (the review of #6878).
+32. R-6876-1: a tray choice carries the SB spool's material and subtype names in fields of
+    their own, `SpoolOption.sb_material` and `sb_subtype` (from `HeldSpool`, which gains
+    `material` and `subtype`, through `trays._from_spool`). Only the rack's Glow and
+    abrasive tests read them (`rank.glow_or_abrasive_spool`: `glow` in any of the four,
+    or a `CF`/`GF` token in the SB spool's). The tray choice's `material` stays the
+    tray's `tray_type` and its `subtype` stays empty. Why: issue #6876; the picker's label
+    (`spool_label`) and the profile resolution (`filament_profiles.py`, which reads
+    `subtype`) must not change.
+33. R-6876-2: the run's ranking counts a tray choice that holds no SB spool as unchecked
+    (`not_in_inventory`), as the dialog's check does (R-6872-3). Its Glow test still reads
+    the tray's material, so a tray that reports Glow is still abrasive. Why: the AMS
+    report alone cannot say Glow (a Bambu PLA Glow preset is plain `PLA`, spec §3).
+34. R-6876-3: `RackGroup.unchecked` names each slot behind `glow_unchecked` with its
+    reason (`rank.UncheckedSlot`; `UncheckedReason` and `unfound_reason` move to
+    `rank.py` from `print_run.py`, which reuses them). `rack_groups` takes `chosen`, the
+    id the plan names per slot, and `status`: a slot not in `chosen` is `no_spool`; a
+    tray id whose tray the report says holds no filament is `empty_tray`; anything else
+    is `not_in_inventory`. Both production callers pass them: the LAN pick
+    (`choose_nozzles` from `LanPrintInput.plan`, against the report it reads) and
+    Bambuddy's (`rack_chooser` from `PlatePlan.chosen`, ranked again on its fresh status
+    read). `PlatePlan.chosen` is `None` in a plan recorded before it; then the group has
+    no reasons and `glow_unchecked` alone says so. Why: R-6872-5.
+35. R-6876-4: the reasons reach the run's result as the warning kind
+    `rack-glow-unchecked`, one per rack group that ScadBuddy picked a hotend for, that is
+    not abrasive, and that has a named unchecked slot ("Glow could not be checked for
+    group 0, so it was ranked by its type alone: filament 2 has no spool chosen."). An
+    abrasive group gets none: Glow cannot change its pick. The rack preview keeps its own
+    `RackPickView.unchecked` lines and gives no such warning. Why: a reason no production
+    path shows is the defect claude-review found on #6877.
+36. R-6876-5: not measured: what `tray_type` an AMS reports for a Bambu PLA Glow spool.
+    No LAN report fixture under `backend/tests` holds one, and on 2026-11-22 prod's
+    `GET /api/v1/filament/inventory` (read in the API pod) showed the SB Glow spools
+    (#48, #49, #90, #91) on the shelf, none in a tray. The fix judges Glow by the SB spool
+    whatever the tray reports.
 
 ## Entity links audit (#6869)
 

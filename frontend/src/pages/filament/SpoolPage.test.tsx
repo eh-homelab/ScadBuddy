@@ -37,10 +37,10 @@ function recorded(method: string, match: RegExp) {
 }
 
 describe('the spool page', () => {
-  it('has the six sections, each a landmark with a heading, and an index', async () => {
+  it('has the seven sections, each a landmark with a heading, and an index', async () => {
     open(1)
     await heading(1)
-    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'History']) {
+    for (const name of ['Identity', 'Weight', 'Colour and cost', 'Printers', 'Storage', 'Files and links', 'History']) {
       expect(screen.getByRole('region', { name })).toBeInTheDocument()
       expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
       expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${name.toLowerCase().replace(/ /g, '-')}`)
@@ -229,6 +229,19 @@ describe('the spool page', () => {
     open(1)
     await heading(1)
     expect(screen.getByRole('group', { name: 'Colour' })).toContainElement(screen.getByLabelText('Colour (hex)'))
+  })
+
+  it('overrides the colour and the extra colours with a catalog colour (#6912)', async () => {
+    const patches = recorded('PATCH', /\/spools\//)
+    const { user } = open(1)
+    await heading(1)
+    await user.click(screen.getByRole('button', { name: 'From the catalog' }))
+    await user.type(screen.getByRole('combobox', { name: 'Search the colour catalog' }), 'galaxy')
+    await user.click(await screen.findByRole('option', { name: /Galaxy Duo/ }))
+    expect(screen.getByLabelText('Extra colours')).toHaveValue('#2E8B57FF')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(patches).toEqual([{ rgba: '#1B3A8CFF', extra_colours: ['#2E8B57FF'] }])
   })
 
   it('jumps to the same section twice from the select', async () => {

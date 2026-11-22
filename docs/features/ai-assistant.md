@@ -45,9 +45,8 @@ whose activities call the API. The full map, with a sequence diagram, is in
 
 ## Limits and known issues
 
-- The agent still holds a database secret
-  ([#5299](https://github.com/eh-homelab/ScadBuddy/issues/5299)); its 8081 routes are not
-  authenticated ([#5297](https://github.com/eh-homelab/ScadBuddy/issues/5297)).
+- The agent's 8081 routes are not authenticated
+  ([#5297](https://github.com/eh-homelab/ScadBuddy/issues/5297)).
 - Sandboxed `Bash` and `PowerShell` for every session
   ([#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864)); each tool call spends about
   3 s in Temporal overhead ([#5865](https://github.com/eh-homelab/ScadBuddy/issues/5865));

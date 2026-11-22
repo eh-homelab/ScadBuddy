@@ -62,19 +62,17 @@ function callbackProblem(c: Context, deps: Parameters<RouteModule['register']>[1
 
 export const route: RouteModule = {
   register(app, deps) {
-    const kek = () => (deps.kek.ok ? deps.kek.kek : undefined)
-
     app.get(`${OAUTH_PATH}/authorize`, async (c) => {
       const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'a plugin sign-in')
       if (problem) return page(c, 403, 'Sign-in refused', problem)
       const oauth = deps.pluginOAuth
-      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in needs the AI database.')
+      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in is not set up in this process.')
       const ticket = c.req.query('ticket')
       if (!ticket) return page(c, 400, 'Sign-in link incomplete', 'This link has no ticket; start the sign-in again from Settings.')
       const binding = randomToken()
       let location: string | undefined
       try {
-        location = await oauth.authorize(ticket, binding, kek())
+        location = await oauth.authorize(ticket, binding)
       } catch (err) {
         if (err instanceof SealError) return page(c, 409, 'Sign-in failed', 'The sign-in could not be opened; start it again from Settings.')
         throw err
@@ -99,21 +97,18 @@ export const route: RouteModule = {
       const problem = callbackProblem(c, deps)
       if (problem) return page(c, 403, 'Sign-in refused', problem)
       const oauth = deps.pluginOAuth
-      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in needs the AI database.')
+      if (!oauth) return page(c, 503, 'Sign-in unavailable', 'Plugin sign-in is not set up in this process.')
       const binding = getCookie(c, COOKIE)
       deleteCookie(c, COOKIE, { path: COOKIE_PATH })
       try {
-        const { plugin } = await oauth.complete(
-          {
-            state: c.req.query('state'),
-            code: c.req.query('code'),
-            iss: c.req.query('iss'),
-            error: c.req.query('error'),
-            errorDescription: c.req.query('error_description'),
-            binding,
-          },
-          kek(),
-        )
+        const { plugin } = await oauth.complete({
+          state: c.req.query('state'),
+          code: c.req.query('code'),
+          iss: c.req.query('iss'),
+          error: c.req.query('error'),
+          errorDescription: c.req.query('error_description'),
+          binding,
+        })
         return page(c, 200, 'Signed in', `Plugin ${plugin} is signed in. You can close this window and go back to ScadBuddy.`)
       } catch (err) {
         if (err instanceof OAuthError) return page(c, err.status, 'Sign-in failed', err.message)

@@ -1,15 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import { NOT_UP, transportKind } from './backendUp.js'
-import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError } from './crudRead.js'
+import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError, crudFetch } from './crudRead.js'
 
 // The agent's small stores behind the API's CRUD routes (#5299 step 5; backend
 // api/crud_agent_stores.py, crud_agent_notify.py, crud_agent_access.py, crud_agent_plugins.py
 // and crud_agent_packages.py): activity kinds, browser origins, session tabs, tab owners, tab
 // images, pairings, MCP tokens, Web Push and notification channels (`notify`), tool access and
-// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages. Each store keeps its interface; its `Crud…` class is that
-// interface over the routes, one route per method, and `gated` picks it per call once the API
-// lists the store's area (api/crudAreas.ts), the SQL store until then (#5299 D9). Old API pods
-// may still answer during a roll, so the SQL stays until every pod lists the areas.
+// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages. Each
+// store keeps its interface; its `Crud…` class is that interface over the routes, one route per
+// method. The agent has no SQL path (#5299 step 12).
 
 /** The areas of the small stores (backend api/crud_areas.py `CRUD_AREAS["agent"]`). */
 export const STORE_AREAS = [
@@ -25,20 +23,6 @@ export const STORE_AREAS = [
   'plugin-packages',
 ] as const
 export type StoreArea = (typeof STORE_AREAS)[number]
-
-/**
- * `crud` while `use()` holds, `sql` otherwise, chosen at each method call: an object with
- * `sql`'s shape whose every method runs on the one picked then.
- */
-export function gated<T extends object>(sql: T, crud: T, use: () => boolean): T {
-  return new Proxy(sql, {
-    get(_target, prop) {
-      const pick = use() ? crud : sql
-      const value: unknown = Reflect.get(pick, prop, pick)
-      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(pick) : value
-    },
-  })
-}
 
 /** The `detail` and `reason` of a problem response. */
 async function problemOf(response: Response): Promise<{ detail: string; reason?: string }> {
@@ -58,16 +42,17 @@ export type CrudCallInit = {
   /** Stops waiting with the call it is for; the request is dropped. */
   signal?: AbortSignal | undefined
   timeoutMs?: number
+  /** A POST that only reads, so a dropped connection may send it again, as a GET is (`crudFetch`). */
+  idempotent?: boolean
 }
 
 /**
  * One call of the agent's CRUD route `path` (under `AGENT_CRUD`): the route's own answer (only
  * one with `X-ScadBuddy-Crud: 1` counts), or CrudReadError, as `crudRead` (api/crudRead.ts)
  * answers, for a call it cannot make: a PUT or a DELETE, bytes either way, a 204, or an abort signal.
+ * A GET, or a call marked `idempotent`, is tried again when its connection drops (`crudFetch`); no other is.
  */
 export async function crudCall(fetchImpl: typeof fetch, baseUrl: string, step: string, path: string, init: CrudCallInit = {}): Promise<Response> {
-  const timeout = AbortSignal.timeout(init.timeoutMs ?? CRUD_READ_TIMEOUT_MS)
-  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout
   init.signal?.throwIfAborted()
   const headers: Record<string, string> = {}
   let body: string | Uint8Array | undefined
@@ -78,18 +63,14 @@ export async function crudCall(fetchImpl: typeof fetch, baseUrl: string, step: s
     headers['content-type'] = 'application/json'
     body = JSON.stringify(init.body)
   }
-  let response: Response
-  try {
-    response = await fetchImpl(`${baseUrl.replace(/\/+$/, '')}${AGENT_CRUD}${path}`, {
-      method: init.method ?? (body === undefined ? 'GET' : 'POST'),
-      ...(body === undefined ? {} : { headers, body }),
-      signal,
-    })
-  } catch (error) {
-    if (init.signal?.aborted) throw init.signal.reason
-    const kind = transportKind(error)
-    throw new CrudReadError(`${kind === NOT_UP ? 'the backend is not up yet' : 'the backend could not be reached'} (${step}: ${kind})`)
-  }
+  const method = init.method ?? (body === undefined ? 'GET' : 'POST')
+  const response = await crudFetch(
+    fetchImpl,
+    `${baseUrl.replace(/\/+$/, '')}${AGENT_CRUD}${path}`,
+    step,
+    { method, ...(body === undefined ? {} : { headers, body }) },
+    { retry: method === 'GET' || init.idempotent === true, timeoutMs: init.timeoutMs ?? CRUD_READ_TIMEOUT_MS, signal: init.signal },
+  )
   const crud = response.headers.get('x-scadbuddy-crud') === '1'
   if (response.ok && crud) return response
   const problem = crud ? await problemOf(response) : { detail: '' }

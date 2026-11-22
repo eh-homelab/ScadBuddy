@@ -31,7 +31,7 @@ from scadbuddy.orders.lifecycle import FirmLine
 from scadbuddy.orders.models import Filament, OrderItem, Reference
 from scadbuddy.orders.pricing import Plate, PlateFilament
 from scadbuddy.orders.storefront.limits import RenderLimits
-from scadbuddy.orders.storefront.renders import fetch_files, variant_of
+from scadbuddy.orders.storefront.renders import fetch_files, output_of, variant_of
 from scadbuddy.orders.storefront.slice_price import PriceRow, firm_price
 from scadbuddy.orders.storefront.wire import Listing
 from scadbuddy.render.job_models import JobNotFoundError
@@ -136,12 +136,16 @@ async def variant_at_add(
     render_key: str,
     colours: Mapping[int, str],
     material: str | None,
+    variant_key: str | None = None,
 ) -> Variant | None:
     """The variant of the line the visitor adds: its own done render of ``render_key``
     (`RenderLimits.job_of`), the slot filaments of ``colours`` in ``material`` as the
-    estimate takes them (``renders.py`` `variant_of`). None when there is no done render
-    of the listing's design (slug and commit) whose files this process can read, or a
-    slot has no listing filament: the line has no firm price."""
+    estimate takes them (``renders.py`` `variant_of`). With no such render, the priced
+    slice of the choices' ``variant_key`` (`SlicePrices.variant_row`), while its saved
+    output is of the listing's design (#6921: the page showed that preview and price
+    with no render): its 3MF's sha256 and slot filaments, as the server recorded them.
+    The price is still read by the key (`price_of`), never from the browser. None when
+    there is neither, or a slot has no listing filament: the line has no firm price."""
 
     def job() -> Any:
         job_id = RenderLimits(state.projection.pool).job_of(visitor_id, render_key)
@@ -154,7 +158,7 @@ async def variant_at_add(
 
     found = await asyncio.to_thread(job)
     if found is None or found.state != "done" or found.result is None:
-        return None
+        return await _priced_variant(state, listing, variant_key)
     if found.slug != listing.slug or found.model_version != listing.commit:
         return None
     if not await fetch_files(state, found):
@@ -163,6 +167,23 @@ async def variant_at_add(
     if slots is None:
         return None
     return Variant(listing.id, digest, tuple(f.id for f in slots))
+
+
+async def _priced_variant(
+    state: AppState, listing: Listing, variant_key: str | None
+) -> Variant | None:
+    """The variant a priced slice of ``variant_key`` recorded, while its saved output is
+    of the listing's design (#6921), or None. The row is the one the instant read showed
+    (`SlicePrices.variant_row`), so the line is charged from the 3MF whose price showed."""
+    if variant_key is None:
+        return None
+    prices = _orders(state).slice_prices
+    row = await asyncio.to_thread(prices.variant_row, variant_key)
+    if row is None or row.slot_filaments is None:
+        return None
+    if await asyncio.to_thread(output_of, state, row, listing) is None:
+        return None
+    return Variant(listing.id, row.model_sha256, tuple(row.slot_filaments))
 
 
 async def price_of(state: AppState, reference: Reference, variant: Variant) -> PriceRow | None:

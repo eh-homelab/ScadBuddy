@@ -9,11 +9,10 @@ import type { AttentionNotice } from './dispatcher.js'
 // page's "Needs you" gives it (frontend `lib/needsYou.ts`), so a push and the page's own
 // notification share a tag.
 
-/** The flow grants waiting for a person, as the API lists them; none until it serves area `notify`. */
-export function crudGrantRequests(target: CrudTarget, available: () => boolean = () => true): () => Promise<AttentionNotice[]> {
+/** The flow grants waiting for a person, as the API lists them. */
+export function crudGrantRequests(target: CrudTarget): () => Promise<AttentionNotice[]> {
   const call = crudOf(target)
   return async () => {
-    if (!available()) return []
     const { requests } = await call<{ requests: { id: string; reason: string; since: string }[] }>('the flow grants waiting', '/push/waiting')
     return requests.map((r) => ({ id: r.id, sessionId: null, reason: r.reason, since: Date.parse(r.since) }))
   }
@@ -21,13 +20,11 @@ export function crudGrantRequests(target: CrudTarget, available: () => boolean =
 
 /**
  * Takes a timed poll's lease through the API (backend `push_poll_lease`, area `notify`): one
- * row per name, so one replica a window polls. Until the API serves area `notify`, every
- * replica polls (each send is still claimed once).
+ * row per name, so one replica a window polls.
  */
-export function crudPollLease(target: CrudTarget, available: () => boolean = () => true): (name: string, seconds: number) => Promise<boolean> {
+export function crudPollLease(target: CrudTarget): (name: string, seconds: number) => Promise<boolean> {
   const call = crudOf(target)
   return async (name, seconds) => {
-    if (!available()) return true
     const { held } = await call<{ held: boolean }>('the poll lease', '/push/poll-lease', { method: 'POST', body: { name, seconds } })
     return held
   }

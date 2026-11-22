@@ -8,22 +8,23 @@ import type { SandboxConfig } from './sandbox/pods.js'
 // Every AI-specific setting (credentials, MCP auth mode, plugins) lives in the
 // database and is edited in Settings, so do not add a variable here for one.
 //
-// What is here is infrastructure: where the database and backend are, the
-// key-encryption key (and the previous one while rotating it), and how the pod
-// is reached (its public URL and the proxies in front of it). The last two
-// cannot live in Settings: they decide which requests may change Settings.
-// The Temporal address and namespace are where the
-// `agent-tools` worker polls (#1055), infrastructure like the database URL.
+// What is here is infrastructure: where the backend is, the proof of who this
+// process is, and how the pod is reached (its public URL and the proxies in front
+// of it). The last two cannot live in Settings: they decide which requests may
+// change Settings. The Temporal address and namespace are where the
+// `agent-tools` worker polls (#1055). There is no database URL and no
+// key-encryption key: the agent's data is behind the API's CRUD routes, and the
+// API seals and opens it (#5299 step 12). Those variables, still set, are ignored
+// with a warning (`ignored`).
 
 export type Config = {
-  /** Postgres URL shared with the backend (#241). Unset → AI features are disabled. */
-  databaseUrl: string | undefined
   /** Where the Python backend listens; the sidecar reaches it over the pod's localhost (spec §4.3). */
   backendUrl: string
-  /** Key-encryption key file for envelope encryption (spec §9); format and loading in secrets.ts. */
-  secretKeyFile: string | undefined
-  /** The key being rotated away from; rows sealed under it are re-wrapped at start (spec §9). */
-  previousSecretKeyFile: string | undefined
+  /**
+   * The variables an older agent read that are set but ignored (#5299 step 12): the agent holds
+   * no database and no KEK, so `main.ts` warns once and reads neither.
+   */
+  ignored: (typeof IGNORED_VARS)[number][]
   /**
    * The UI's public URL, the same SCADBUDDY_PUBLIC_URL the backend reads
    * (backend/scadbuddy/core/settings.py `public_url`). Its origin is the one
@@ -86,8 +87,7 @@ export type Config = {
   /**
    * SCADBUDDY_SERVICE_TOKEN_FILE (#5494, spec 2026-11-05 §6.3): the agent's projected
    * ServiceAccount token (audience `scadbuddy`), exchanged at the backend for its service
-   * credential. Unset with SCADBUDDY_SERVICE_BOOTSTRAP_FILE unset too → the credential is
-   * read from the database view, as before.
+   * credential. One of it and SCADBUDDY_SERVICE_BOOTSTRAP_FILE is required (#5299 step 12).
    */
   serviceTokenFile?: string | undefined
   /** SCADBUDDY_SERVICE_BOOTSTRAP_FILE (§7.2): its bootstrap secret outside Kubernetes. Never with the above. */
@@ -136,6 +136,12 @@ export const ENV_VARS = [
   'SCADBUDDY_SANDBOX_KUBE_TOKEN_FILE',
   'SCADBUDDY_SANDBOX_KUBE_CA_FILE',
 ] as const
+
+/**
+ * The variables of an older agent's database and KEK (#5299 step 12): read only to say they are
+ * ignored, so a deployment that still sets them starts, and their values are never used.
+ */
+export const IGNORED_VARS = ['SCADBUDDY_DATABASE_URL', 'SCADBUDDY_SECRET_KEY_FILE', 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE'] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
 
@@ -190,22 +196,6 @@ function imageTag(value: string | undefined): string | undefined {
 }
 
 export function loadConfig(env: Env = process.env): Config {
-  const databaseUrl = present(env.SCADBUDDY_DATABASE_URL)
-  if (databaseUrl !== undefined) {
-    let scheme: string
-    try {
-      scheme = new URL(databaseUrl).protocol
-    } catch {
-      // The URL itself is not echoed: it normally carries the password.
-      throw new ConfigError('SCADBUDDY_DATABASE_URL is not a valid URL')
-    }
-    if (scheme !== 'postgres:' && scheme !== 'postgresql:') {
-      throw new ConfigError(
-        `SCADBUDDY_DATABASE_URL must be a postgres:// or postgresql:// URL, not ${scheme}//`,
-      )
-    }
-  }
-
   const backendUrl = present(env.SCADBUDDY_BACKEND_URL) ?? DEFAULT_BACKEND_URL
   let parsed: URL
   try {
@@ -228,11 +218,9 @@ export function loadConfig(env: Env = process.env): Config {
   }
 
   return {
-    databaseUrl,
+    ignored: IGNORED_VARS.filter((name) => present(env[name]) !== undefined),
     // No trailing slash, so `${backendUrl}/api/v1/...` never doubles it.
     backendUrl: backendUrl.replace(/\/+$/, ''),
-    secretKeyFile: present(env.SCADBUDDY_SECRET_KEY_FILE),
-    previousSecretKeyFile: present(env.SCADBUDDY_SECRET_KEY_PREVIOUS_FILE),
     publicUrl,
     allowedOrigins,
     trustedProxies,
@@ -288,13 +276,22 @@ function sandboxConfig(env: Env): Pick<Config, 'sandbox'> {
   return { sandbox: values as SandboxConfig }
 }
 
-/** One proof of who the agent is, never both (spec 2026-11-05 §7.2): both set is a start error. */
+/**
+ * One proof of who the agent is, never both (spec 2026-11-05 §7.2): both set is a start error.
+ * None set is one too (#5299 step 12): every store is a CRUD route that needs the agent's
+ * service credential, and with no database there is no view to read it from.
+ */
 function serviceProof(
   tokenFile: string | undefined,
   bootstrapFile: string | undefined,
 ): Pick<Config, 'serviceTokenFile' | 'serviceBootstrapFile'> {
   if (tokenFile !== undefined && bootstrapFile !== undefined) {
     throw new ConfigError('Set SCADBUDDY_SERVICE_TOKEN_FILE or SCADBUDDY_SERVICE_BOOTSTRAP_FILE, not both')
+  }
+  if (tokenFile === undefined && bootstrapFile === undefined) {
+    throw new ConfigError(
+      "Set SCADBUDDY_SERVICE_TOKEN_FILE (a projected ServiceAccount token) or SCADBUDDY_SERVICE_BOOTSTRAP_FILE: the agent reaches all its data through the API's CRUD routes with that proof's credential",
+    )
   }
   return {
     ...(tokenFile !== undefined ? { serviceTokenFile: tokenFile } : {}),

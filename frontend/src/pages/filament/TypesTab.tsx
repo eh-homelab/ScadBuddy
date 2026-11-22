@@ -265,7 +265,8 @@ export function TypesTab() {
                 {shown.length === 0 && (
                   <tr className="border-t">
                     <td colSpan={9} className="px-2 py-3 text-muted-foreground">
-                      {tokens.length && kept.length ? `No type matches “${search}”.` : 'No types yet. Add one, or make one from a price book row below.'}
+                      {/* With no search, the archived filter is the only one that hides a type; a new filter needs its own text here. */}
+                      {!data?.types.length ? 'No types yet. Add one, or make one from a price book row below.' : tokens.length ? `No type matches “${search}”.` : 'No types shown. Tick Show archived types.'}
                     </td>
                   </tr>
                 )}

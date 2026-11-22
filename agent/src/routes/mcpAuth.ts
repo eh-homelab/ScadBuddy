@@ -34,7 +34,7 @@ import { ready, type RouteModule } from './module.js'
 // Nothing here is secret. Error bodies are `{ detail }`, as in credentials.ts.
 
 export type McpAuthRouteDeps = {
-  /** Undefined when there is no database (spec §9, "No database"). */
+  /** Undefined when this process was not given it (tests). */
   repo: OidcConfigRepo | undefined
   ready: () => Promise<boolean>
   provider: OidcProvider
@@ -56,8 +56,8 @@ export type OidcView = {
   cannot_enable_reason: string | null
 }
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const NO_PUBLIC_URL =
   'SCADBUDDY_PUBLIC_URL is not set: /mcp has no resource URI for tokens to name as their audience (RFC 8707)'
 
@@ -78,7 +78,7 @@ export function registerMcpAuthRoutes(app: Hono, deps: McpAuthRouteDeps): void {
   const base = '/api/v1/ai/mcp/oidc'
 
   async function repo(): Promise<OidcConfigRepo | string> {
-    if (!deps.repo) return NO_DATABASE
+    if (!deps.repo) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.repo : NOT_READY
   }
 

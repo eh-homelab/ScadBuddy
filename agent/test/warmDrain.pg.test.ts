@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { userMessage } from '../src/harness/inbox.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { WarmSessions } from '../src/sessions/warm.js'
@@ -10,6 +10,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { scriptedRunner, tempPaths } from './support/sessions.js'
 import { nextResult } from './support/warm.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 
 // How the cache closes a process (sessions/warm.ts `drop`): a live one is let
 // end on its own, so what Claude Code writes as it exits (`last-prompt`,
@@ -24,13 +25,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
   let db: Database
   let drop: () => Promise<void>
   let warm: WarmSessions | undefined
-  let store: PostgresSessionStore
+  let store: TranscriptStore
   let scripted: ReturnType<typeof scriptedRunner>
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
+    store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
     warm = new WarmSessions({ store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
   })

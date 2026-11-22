@@ -6,9 +6,8 @@ import { type AuditEntry, type AuditFilter, type AuditPage, type AuditRecord, ca
 // The audit log through the API's CRUD routes (#5299 step 10; backend api/crud_agent_audit.py,
 // agent_data/audit_log.py), area `audit`: a row written (its approver copied in the same
 // statement on the API), a page listed, and the rows past the retention pruned. AuditLog
-// (audit/log.ts) calls these once the API lists the area, and its own SQL until then (D9).
-// Every text is capped here as the SQL caps it, so the API never refuses a row the SQL would
-// have written.
+// (audit/log.ts) calls only these. Every text is capped here, so the API never refuses a row
+// for its length.
 
 /** The audit log's routes, as AuditLog calls them. */
 export interface AuditRoutes {
@@ -65,7 +64,7 @@ export class CrudAudit implements AuditRoutes {
 
   async list(filter: AuditFilter): Promise<AuditPage> {
     const before = filter.before !== undefined && /^\d{1,18}$/.test(filter.before) ? Number(filter.before) : undefined
-    // A cursor that is no row id names no page, as the SQL's bigint cast refused it.
+    // A cursor that is no row id names no page, as the API refuses it.
     if (filter.before !== undefined && before === undefined) return { entries: [], next: null }
     const body = {
       kind: filter.kind ?? null,

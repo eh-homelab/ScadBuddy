@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { responseHash } from '../src/gate/canonical.js'
 import { CrudGate, REQUEST_ID_MAX } from '../src/gate/crudStore.js'
@@ -37,19 +36,11 @@ class FakeApi {
   }
 }
 
-/** A GateDb whose SQL must never be reached, and whose event log records what it is told. */
-function db(api: FakeApi, use = true): { db: GateDb; told: unknown[][] } {
+/** A GateDb over the fake API, whose event log records what it is told. */
+function db(api: FakeApi): { db: GateDb; told: unknown[][] } {
   const told: unknown[][] = []
-  const sql = new Proxy(() => undefined, {
-    apply: () => {
-      throw new Error('the store ran SQL')
-    },
-    get: () => {
-      throw new Error('the store ran SQL')
-    },
-  }) as unknown as Sql
   const events = { committed: (...args: unknown[]) => told.push(args) } as unknown as EventLog
-  return { db: { sql, events, crud: new CrudGate({ baseUrl: BASE, fetch: api.fetch }), useCrud: () => use }, told }
+  return { db: { events, crud: new CrudGate({ baseUrl: BASE, fetch: api.fetch }) }, told }
 }
 
 const open: OpenInput = {
@@ -153,15 +144,6 @@ describe('the gate through the CRUD routes', () => {
     expect(await grantInput(gate, grant)).toBe(false)
     await expect(decideInput(gate, { requestId: long, response: {}, responder: ME, role: 'browser' })).rejects.toMatchObject({ code: 'stale' })
     expect(api.seen).toEqual([])
-  })
-
-  it("grants through the API even before it lists the area, and runs the rest over SQL until then", async () => {
-    const api = new FakeApi()
-    const { db: gate } = db(api, false)
-    api.answers.push({ granted: true })
-    const grant = { requestId: RID, sessionId: SID, tool: 't', summary: '', inputHash: 'b'.repeat(64), grantId: 'g1', requestedBy: ME }
-    expect(await grantInput(gate, grant)).toBe(true)
-    await expect(readInput(gate, { requestId: RID })).rejects.toThrow('the store ran SQL')
   })
 
   it("decides on the API, asking Temporal only once the validator took it", async () => {

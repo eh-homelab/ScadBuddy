@@ -3,7 +3,7 @@ import type { LinksResetDone } from '../../../api/filament'
 import { statusAfterKeptReset } from './resetStatus'
 
 const status = { instance: '0ld0ld0ld0ld', instance_changed: true }
-const counts = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, intents: 0, errors: 0, ignored: 0 }
+const counts = { spools: 0, suppliers: 0, locations: 0, insert_types: 0, filaments: 0, colours: 0, intents: 0, errors: 0, ignored: 0 }
 
 describe('statusAfterKeptReset (#6845)', () => {
   it('shows the instance the kept reset recorded, and no longer a changed one', () => {

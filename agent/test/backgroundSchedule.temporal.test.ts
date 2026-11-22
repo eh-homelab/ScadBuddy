@@ -6,9 +6,11 @@ import { backgroundActivities, type FireResult } from '../src/background/activit
 import { nextFire, scheduleCrons } from '../src/background/schedule.js'
 import { BACKGROUND_FIRE_WORKFLOW, BACKGROUND_WORKFLOW, BackgroundTasks, backgroundFireId, backgroundWorkflowId } from '../src/background/service.js'
 import { BackgroundTaskStore } from '../src/background/store.js'
+import { SqlBackgroundTasks } from './support/sql/backgroundTasks.js'
 import { convertCronTasks, scheduleTask, temporalTaskRunner } from '../src/background/temporal.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { TEST_DATABASE_URL, throwawayDatabase } from './support/postgres.js'
@@ -42,7 +44,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`recurring cron jobs as Sch
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new BackgroundTaskStore(db.sql)
+    store = new BackgroundTaskStore(new SqlBackgroundTasks(db.sql))
     tasks = new BackgroundTasks({ store, runner: temporalTaskRunner(env.client, TASK_QUEUE, 200) })
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id
@@ -241,7 +243,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`recurring cron jobs as Sch
   it('forgetting the session deletes the Schedule', async () => {
     const t = (await cron())!
     expect(await gone(t.id)).toBe(false)
-    await forgetSubject({ sql: db.sql, client: env.client }, `session-${sessionId}`)
+    await forgetSubject(sqlForget(db.sql, { client: env.client }), `session-${sessionId}`)
     expect(await gone(t.id)).toBe(true)
     // And the session's rows with it.
     expect(await store.get(t.id)).toBeUndefined()

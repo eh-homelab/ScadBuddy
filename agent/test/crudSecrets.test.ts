@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { UpgradeWebSocket } from 'hono/ws'
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { CrudAreas, SECRET_AREAS } from '../src/api/crudAreas.js'
 import { aiStatus } from '../src/aiStatus.js'
@@ -11,7 +10,6 @@ import {
   CredentialError,
   CrudCredentials,
   CrudSettings,
-  gatedCredentials,
   type CredentialRepo,
   SETTINGS_CAS_TRIES,
   SETTINGS_READ_MAX,
@@ -21,10 +19,10 @@ import { CredentialPool } from '../src/harness/fallback.js'
 import { originPolicy } from '../src/http/origins.js'
 import { toolSecrets } from '../src/plugins/secrets.js'
 import type { CredentialEntryView, CredentialListView } from '../src/routes/credentials.js'
-import { type KekStatus, SealError } from '../src/secrets.js'
+import { SealError } from '../src/secrets.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { gateSettings } from '../src/temporal/session/gateActivities.js'
-import { CrudPayloadKeys, gatedPayloadKeys, PayloadKeyUnavailable, SubjectForgotten } from '../src/temporal/payloadCodec.js'
+import { CrudPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.js'
 
 // The agent's settings, Claude credentials and payload data keys through the API's CRUD routes
 // (#5299 step 4, D5; #5342), against a fake API that keeps them in memory as the backend's
@@ -33,7 +31,6 @@ import { CrudPayloadKeys, gatedPayloadKeys, PayloadKeyUnavailable, SubjectForgot
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
-const NO_KEK: KekStatus = { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' }
 const API_KEK_ID = 'a1b2c3d4e5f60718'
 
 type Stored = {
@@ -207,16 +204,6 @@ class FakeApi {
   }
 }
 
-/** A database this process must never reach: every store here goes through the API. */
-const NO_SQL = new Proxy(() => {}, {
-  apply() {
-    throw new Error('the store reached SQL')
-  },
-  get() {
-    throw new Error('the store reached SQL')
-  },
-}) as unknown as Sql
-
 const setup = () => {
   const api = new FakeApi()
   return { api, fetch: api.fetch }
@@ -243,7 +230,7 @@ describe('CrudAreas', () => {
     expect(await areas.refresh()).toBe(false)
     expect(await areas.refresh()).toBe(false)
     expect(logs).toEqual([
-      "CRUD areas: waiting for the backend's agent areas (missing settings, credentials, payload-keys); reading over SQL until it lists them",
+      "CRUD areas: waiting for the backend's agent areas (missing settings, credentials, payload-keys); not ready until it lists them",
     ])
     listed = ['settings']
     expect(await areas.refresh()).toBe(false)
@@ -290,16 +277,28 @@ describe('CrudAreas', () => {
     expect(calls).toBe(after)
     areas.stop()
   })
+
+  it('whenComplete resolves once every area is listed, and at once after that', async () => {
+    let listed: string[] = []
+    const areas = new CrudAreas(BASE, { fetch: areasApi(() => listing(listed)()), wanted: SECRET_AREAS, log: () => {} })
+    let done = false
+    const waiting = areas.whenComplete().then(() => (done = true))
+    await areas.refresh()
+    await new Promise((r) => setTimeout(r, 5))
+    expect(done).toBe(false)
+    listed = [...SECRET_AREAS]
+    await areas.refresh()
+    await waiting
+    expect(done).toBe(true)
+    await areas.whenComplete()
+  })
 })
 
 describe('CrudSettings and SettingsStore over the routes', () => {
-  it('reads and writes with no SQL, auditing each write here, and tells the API which caches to wake', async () => {
+  it('reads and writes, auditing each write here, and tells the API which caches to wake', async () => {
     const { api, fetch } = setup()
     const audited: AuditEntry[] = []
-    const store = new SettingsStore(NO_SQL, { record: (e: AuditEntry) => Promise.resolve(void audited.push(e)) }, {
-      crud: new CrudSettings(BASE, { fetch }),
-      use: () => true,
-    })
+    const store = new SettingsStore(new CrudSettings(BASE, { fetch }), { record: (e: AuditEntry) => Promise.resolve(void audited.push(e)) })
     expect(await store.get('model')).toBeUndefined()
     await store.set('model', 'claude-opus')
     await store.set('warm_idle_seconds', 90)
@@ -321,7 +320,7 @@ describe('CrudSettings and SettingsStore over the routes', () => {
 
   it('a compare-and-set sends what its check read, and reads again when another writer moved it', async () => {
     const { api, fetch } = setup()
-    const store = new SettingsStore(NO_SQL, undefined, { crud: new CrudSettings(BASE, { fetch }), use: () => true })
+    const store = new SettingsStore(new CrudSettings(BASE, { fetch }))
     api.settings.set('mcp_auth_mode', 'bearer')
     let raced = false
     api.beforeWrite = () => {
@@ -403,36 +402,21 @@ describe('CrudSettings and SettingsStore over the routes', () => {
     expect(api.seen.filter((r) => r.method === 'POST')).toHaveLength(SETTINGS_CAS_TRIES)
   })
 
-  it('stays on SQL until the API lists the area', async () => {
-    const { api, fetch } = setup()
-    let listed = false
-    const rows: string[] = []
-    const sql = ((strings: TemplateStringsArray) => {
-      rows.push(strings.join('?'))
-      return Promise.resolve([{ value: 'from-sql' }])
-    }) as unknown as Sql
-    const store = new SettingsStore(sql, undefined, { crud: new CrudSettings(BASE, { fetch }), use: () => listed })
-    expect(await store.get('model')).toBe('from-sql')
-    listed = true
-    api.settings.set('model', 'from-api')
-    expect(await store.get('model')).toBe('from-api')
-    expect(rows).toHaveLength(1)
-  })
 })
 
 describe('CrudCredentials', () => {
   it('saves, lists and reveals through the API, never needing a KEK here', async () => {
     const { api, fetch } = setup()
     const repo = new CrudCredentials(BASE, { fetch })
-    const created = await repo.create({ kind: 'gateway', base_url: 'https://gw.example.com/v1/', secret: 'gw-token-0123456789', name: '  Gateway  ' }, undefined)
+    const created = await repo.create({ kind: 'gateway', base_url: 'https://gw.example.com/v1/', secret: 'gw-token-0123456789', name: '  Gateway  ' })
     // The URL and name as this process normalises them: the AAD binds the URL as spelled.
     expect(api.seen.at(-1)?.body).toEqual({ kind: 'gateway', base_url: 'https://gw.example.com/v1', secret: 'gw-token-0123456789', name: 'Gateway' })
     expect(created).toMatchObject({ kind: 'gateway', name: 'Gateway', kekId: API_KEK_ID, legacyFormat: false, last4: '6789' })
     expect(JSON.stringify(created)).not.toContain('gw-token')
     expect(await repo.opener()).toEqual({ ok: true, kek: { id: API_KEK_ID } })
-    const [row] = await repo.revealAll(undefined)
+    const [row] = await repo.revealAll()
     expect(row?.credential).toEqual({ kind: 'gateway', baseUrl: 'https://gw.example.com/v1', secret: 'gw-token-0123456789' })
-    expect(await repo.reveal(undefined, created.id)).toEqual({ kind: 'gateway', baseUrl: 'https://gw.example.com/v1', secret: 'gw-token-0123456789' })
+    expect(await repo.reveal(created.id)).toEqual({ kind: 'gateway', baseUrl: 'https://gw.example.com/v1', secret: 'gw-token-0123456789' })
     expect(api.audited).toEqual(['reveal.turn', 'reveal.test'])
     expect((await repo.get())?.id).toBe(created.id)
     expect(await repo.get('nope')).toBeUndefined()
@@ -441,26 +425,26 @@ describe('CrudCredentials', () => {
   it("maps the API's refusals to the store's own errors", async () => {
     const { api, fetch } = setup()
     const repo = new CrudCredentials(BASE, { fetch })
-    const error = await repo.put({ kind: 'anthropic_api_key', secret: 'x' }, undefined, 'missing').catch((e: unknown) => e)
+    const error = await repo.put({ kind: 'anthropic_api_key', secret: 'x' }, 'missing').catch((e: unknown) => e)
     expect(error).toBeInstanceOf(CredentialError)
     expect((error as CredentialError).status).toBe(404)
     // A name or URL this process refuses never reaches the API.
-    await expect(repo.create({ kind: 'anthropic_api_key', secret: 's', name: 'a‮b' }, undefined)).rejects.toThrow(CredentialError)
-    await expect(repo.create({ kind: 'gateway', base_url: 'ftp://x', secret: 's' }, undefined)).rejects.toThrow(CredentialError)
-    const created = await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-zzzzzzzzzzzz' }, undefined)
+    await expect(repo.create({ kind: 'anthropic_api_key', secret: 's', name: 'a‮b' })).rejects.toThrow(CredentialError)
+    await expect(repo.create({ kind: 'gateway', base_url: 'ftp://x', secret: 's' })).rejects.toThrow(CredentialError)
+    const created = await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-zzzzzzzzzzzz' })
     ;(api.credentials[0] as Stored).kek_id = 'elsewhere'
-    await expect(repo.reveal(undefined, created.id)).rejects.toThrow(SealError)
+    await expect(repo.reveal(created.id)).rejects.toThrow(SealError)
     api.hasKek = false
-    const noKek = await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-yyyyyyyyyyyy' }, undefined).catch((e: unknown) => e)
+    const noKek = await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-yyyyyyyyyyyy' }).catch((e: unknown) => e)
     expect((noKek as CredentialError).status).toBe(503)
-    expect(((await repo.reveal(undefined).catch((e: unknown) => e)) as CredentialError).status).toBe(503)
+    expect(((await repo.reveal().catch((e: unknown) => e)) as CredentialError).status).toBe(503)
   })
 
   it('records health, reorders, renames, resets and deletes', async () => {
     const { fetch } = setup()
     const repo = new CrudCredentials(BASE, { fetch })
-    const a = await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-aaaaaaaaaaaa' }, undefined)
-    const b = await repo.create({ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-bbbbbbbbbbbb' }, undefined)
+    const a = await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-aaaaaaaaaaaa' })
+    const b = await repo.create({ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-bbbbbbbbbbbb' })
     const until = new Date('2099-01-01T00:00:00Z')
     expect(await repo.record(a.id, 0, { kind: 'cooling_down', until, reason: '429' })).toEqual({ before: 'active', after: 'cooling_down', recovered: false })
     expect(await repo.record(a.id, 9, { kind: 'disabled', reason: '401' })).toBeUndefined()
@@ -476,8 +460,8 @@ describe('the credential consumers with no KEK in this process', () => {
   it("a turn's credentials come from the API's reveal", async () => {
     const { api, fetch } = setup()
     const repo = new CrudCredentials(BASE, { fetch })
-    await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-turnturnturn' }, undefined)
-    const pool = new CredentialPool({ repo, kek: NO_KEK, log: () => {} })
+    await repo.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-turnturnturn' })
+    const pool = new CredentialPool({ repo, log: () => {} })
     const sessionId = randomUUID()
     const turnId = randomUUID()
     const [first] = await pool.candidates({ sessionId, turnId })
@@ -487,16 +471,16 @@ describe('the credential consumers with no KEK in this process', () => {
     const reveal = api.seen.filter((r) => r.path === '/credentials/reveal').at(-1)?.body as Record<string, unknown>
     expect([reveal.session_id, reveal.turn_id]).toEqual([sessionId, turnId])
     // The redaction of tool output reads them too, audited as such.
-    expect(await toolSecrets({ kek: undefined, credentials: repo }).fresh()).toContain('sk-ant-api03-turnturnturn')
+    expect(await toolSecrets({ credentials: repo }).fresh()).toContain('sk-ant-api03-turnturnturn')
     expect(api.audited).toEqual(['reveal.turn', 'reveal.redact'])
     // Every tool call's redaction shares one reveal for SAVED_SECRETS_CACHE_MS.
-    const redaction = toolSecrets({ kek: undefined, credentials: repo })
+    const redaction = toolSecrets({ credentials: repo })
     await redaction.secrets()
     expect(await redaction.secrets()).toContain('sk-ant-api03-turnturnturn')
     expect(api.audited).toEqual(['reveal.turn', 'reveal.redact', 'reveal.redact'])
     // Without a KEK on the API either, none is usable, and the pool says why.
     api.hasKek = false
-    await expect(new CredentialPool({ repo: new CrudCredentials(BASE, { fetch }), kek: NO_KEK }).candidates()).rejects.toThrow(
+    await expect(new CredentialPool({ repo: new CrudCredentials(BASE, { fetch }) }).candidates()).rejects.toThrow(
       'no key-encryption key: the API has no key-encryption key',
     )
   })
@@ -508,7 +492,7 @@ describe('the credential consumers with no KEK in this process', () => {
         return Promise.reject(new Error('the backend could not be reached'))
       }
     })(BASE, { fetch })
-    const status = await aiStatus({ database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) }, credentials: failing, kek: NO_KEK }, true)
+    const status = await aiStatus({ credentials: failing }, true)
     expect(status.ai).toBe('unavailable (the API did not answer for its key-encryption key)')
   })
 
@@ -516,7 +500,7 @@ describe('the credential consumers with no KEK in this process', () => {
     const { fetch } = setup()
     const repo = new CrudCredentials(BASE, { fetch })
     for (const base_url of ['https://gw.example/?', 'https://gw.example/#']) {
-      await expect(repo.create({ kind: 'gateway', base_url, secret: 'gw-token-0123456789' }, undefined)).rejects.toThrow('must not have a query or fragment')
+      await expect(repo.create({ kind: 'gateway', base_url, secret: 'gw-token-0123456789' })).rejects.toThrow('must not have a query or fragment')
     }
   })
 
@@ -528,7 +512,6 @@ describe('the credential consumers with no KEK in this process', () => {
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: NO_KEK,
       credentials,
       testConnection: (credential) => {
         tested.push(credential)
@@ -555,19 +538,10 @@ describe('the credential consumers with no KEK in this process', () => {
     const test = await app.request(`/api/v1/ai/credentials/entries/${entry.id}/test`, { method: 'POST', headers: UI })
     expect(test.status).toBe(200)
     expect(tested).toEqual([{ kind: 'anthropic_api_key', secret: 'sk-ant-api03-routeroute01' }])
-    const status = await aiStatus({ database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) }, credentials, kek: NO_KEK }, true)
+    const status = await aiStatus({ credentials }, true)
     expect(status.ai).toBe('enabled')
   })
 
-  it('until the API lists the area, the SQL store and this process own KEK answer', async () => {
-    const { fetch } = setup()
-    let listed = false
-    const sqlRepo = { opener: undefined, list: () => Promise.resolve([]) } as unknown as CredentialRepo
-    const gated = gatedCredentials(sqlRepo, new CrudCredentials(BASE, { fetch }), () => listed, NO_KEK)
-    expect(await gated.opener?.()).toEqual(NO_KEK)
-    listed = true
-    expect(await gated.opener?.()).toEqual({ ok: true, kek: { id: API_KEK_ID } })
-  })
 })
 
 describe('CrudPayloadKeys', () => {
@@ -613,13 +587,4 @@ describe('CrudPayloadKeys', () => {
     expect(await keys.keyFor(standing, true, { onlyForStandingSession: true })).toHaveLength(32)
   })
 
-  it('with no KEK here and no route yet, a key is unavailable, never made here', async () => {
-    const { api, fetch } = setup()
-    let listed = false
-    const keys = gatedPayloadKeys(undefined, new CrudPayloadKeys(BASE, { fetch }), () => listed)
-    await expect(keys.keyFor(session(), true)).rejects.toThrow(PayloadKeyUnavailable)
-    expect(api.seen).toEqual([])
-    listed = true
-    expect(await keys.keyFor(session(), true)).toHaveLength(32)
-  })
 })

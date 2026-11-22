@@ -106,6 +106,7 @@ def chooser(
     manual: int | None = None,
     algorithm: RackAlgorithm = "least_used",
     plate_id: int = 1,
+    chosen: dict[int, int] | None = None,
 ) -> ChooseRack:
     return rack_chooser(
         reads,
@@ -117,6 +118,7 @@ def chooser(
         manual_position=manual,
         rack=usages if usages is not None else Usages(),
         warnings=warnings,
+        chosen=chosen,
     )
 
 
@@ -128,6 +130,21 @@ async def test_the_ranked_choice_is_returned_keyed_by_group_id() -> None:
     assert choice.nozzle_rack_choice == {"0": 4}
     assert [(p.group_id, p.position, p.serial) for p in choice.picks] == [(0, 4, serial(19))]
     assert warnings == []
+
+
+async def test_a_slot_with_no_spool_is_named_in_the_runs_warnings() -> None:
+    """#6876: the run's own ranking says which slot Glow could not be checked on."""
+    warnings: list[FilamentWarning] = []
+    reads = Reads(grouped(requirement(1), requirement(2, color="#00B1B7")), status(slot(2)))
+    choice = await chooser(reads, warnings, chosen={1: 9})(77)
+    assert choice is not None
+    assert [(w.kind, w.message) for w in warnings] == [
+        (
+            "rack-glow-unchecked",
+            "Glow could not be checked for group 0, so it was ranked by its type alone: "
+            "filament 2 has no spool chosen.",
+        )
+    ]
 
 
 async def test_the_sliced_files_requirements_are_read_for_the_plate() -> None:

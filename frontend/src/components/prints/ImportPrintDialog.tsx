@@ -1,37 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
-import { ApiError, api } from '../../api/client'
-import type {
-  ArchiveOutcome,
-  AutoImport,
-  FoundSource,
-  ImportedPrint,
-  LibraryFileSuggestion,
-  PrintImportRequest,
-} from '../../api/types'
+import { api } from '../../api/client'
+import type { ArchiveOutcome, AutoImport, ImportedPrint, LibraryFileSuggestion, PrintImportRequest } from '../../api/types'
 import { modelPath } from '../../lib/deeplink'
-import { formatBytes, timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
-import { useDebounced } from '../../lib/useDebounced'
+import { LibraryFileChoice } from '../library/LibraryFileChoice'
 import { PastPrintsPicker } from '../orders/PastPrintsPicker'
+import { PrintSourceChoice, SLICED_REFUSAL, errorText, sourceChoice, sourceKey, usePrintSources } from './PrintSourceChoice'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-
-const KIND_LABEL: Record<FoundSource['kind'], string> = {
-  archive: "The archive's file",
-  archive_source: "The archive's slicer project",
-  library: 'Library file',
-  printer: "On the printer's storage",
-}
-
-/** One source as the radio group names it: its kind, and its library file or printer path. */
-function sourceKey(source: Pick<FoundSource, 'kind' | 'library_file_id' | 'path'>): string {
-  return `${source.kind}:${source.library_file_id ?? source.path ?? ''}`
-}
 
 /** The print the form imports: an archive picked from the list, or an inbox print. */
 type PickedPrint = Pick<ArchiveOutcome, 'id' | 'print_name'>
@@ -58,14 +39,6 @@ const NATIVE_ID_BASE = 1_000_000_000
 /** A library file in the library page, chosen. */
 function libraryFilePath(fileId: number): string {
   return `/library?file=${fileId}`
-}
-
-function errorText(error: unknown): string {
-  if (error instanceof ApiError) {
-    const errors = (error.problem as { errors?: { msg?: string }[] }).errors
-    return (error.status === 422 && errors?.[0]?.msg) || error.detail
-  }
-  return error instanceof Error ? error.message : String(error)
 }
 
 /**
@@ -184,9 +157,6 @@ const NEW = 'new'
 const EXISTING = 'existing'
 const FILE = 'file'
 
-/** How many library files a search shows. */
-const SEARCH_SHOWN = 8
-
 function ImportForm({
   archive,
   preferred,
@@ -199,13 +169,8 @@ function ImportForm({
   onBack?: () => void
   onImported: (imported: ImportedPrint) => void
 }) {
-  const [printer, setPrinter] = useState(false)
-  const [asks, setAsks] = useState(0)
-  const found = useAsync(() => api.getPrintSources(archive.id, { printer }), [archive.id, printer, asks])
-  // The last answer stays while the printer is read, so the list never blinks.
-  const [last, setLast] = useState(found.data)
-  if (found.data && found.data !== last) setLast(found.data)
-  const sources = found.data ?? last
+  const read = usePrintSources(archive.id)
+  const { found, sources } = read
   const models = useAsync(() => api.listModels(), [])
   // #6394: a library file is a target only on ScadBuddy's own library.
   const settings = useAsync(() => api.getSettings(), [])
@@ -251,7 +216,7 @@ function ImportForm({
           ? { library_file_id: file.id }
           : { new_model: { name: name.trim(), description: '' } }
     const body: PrintImportRequest = {
-      source: { kind: source.kind, library_file_id: source.library_file_id ?? null, path: source.path ?? null },
+      source: sourceChoice(source),
       ...target,
     }
     setBusy(true)
@@ -309,49 +274,7 @@ function ImportForm({
         </p>
       ) : (
         <>
-          <fieldset className="flex flex-col gap-2">
-            <legend className="mb-1 text-sm font-medium">Where is its 3MF?</legend>
-            <RadioGroup aria-label="Source" value={choice ?? ''} onValueChange={setPicked} className="gap-1">
-              {sources.sources.map((s) => {
-                const key = sourceKey(s)
-                const facts = [
-                  s.name ?? '',
-                  typeof s.size === 'number' ? formatBytes(s.size) : '',
-                  s.modified_at ? timeAgo(s.modified_at) : '',
-                  s.sliced ? 'sliced' : '',
-                  s.matched_by === 'hash' ? 'same file' : s.matched_by === 'name' ? 'same name' : '',
-                ].filter(Boolean)
-                return (
-                  <label key={key} className={`flex items-start gap-2 text-sm ${s.available ? '' : 'opacity-60'}`} data-testid={`source-${key}`}>
-                    <RadioGroupItem value={key} disabled={!s.available} aria-label={`${KIND_LABEL[s.kind]} ${s.name ?? ''}`.trim()} className="mt-0.5" />
-                    <span className="flex min-w-0 flex-col">
-                      <span>{KIND_LABEL[s.kind]}</span>
-                      {facts.length > 0 && <span className="break-all text-xs text-muted-foreground">{facts.join(' · ')}</span>}
-                      {!s.available && s.reason && <span className="text-xs text-warn">{s.reason}</span>}
-                    </span>
-                  </label>
-                )
-              })}
-            </RadioGroup>
-            {(!printer || (found.error && !found.loading)) && (
-              <div className="flex flex-col items-start gap-1">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => (printer ? setAsks((n) => n + 1) : setPrinter(true))}
-                  disabled={busy}
-                >
-                  {printer ? 'Ask the printer again' : 'Also look on the printer'}
-                </Button>
-                <span className="text-xs text-muted-foreground">
-                  Lists the printer's storage. Its file is copied into Bambuddy's library if you import from it.
-                </span>
-              </div>
-            )}
-            {printer && found.loading && <p className="text-xs text-muted-foreground">Asking the printer…</p>}
-            {printer && found.error && <p className="text-xs text-warn">Could not ask the printer: {errorText(found.error)}</p>}
-          </fieldset>
+          <PrintSourceChoice state={read} sources={sources} choice={choice} onChoose={setPicked} disabled={busy} />
 
           <fieldset className="flex flex-col gap-2">
             <legend className="mb-1 text-sm font-medium">What is it a print of?</legend>
@@ -402,7 +325,7 @@ function ImportForm({
                   <Input id="import-model-name" value={name} maxLength={200} onChange={(e) => setName(e.target.value)} />
                   {newBlocked && (
                     <span className="text-xs text-warn">
-                      A sliced file has no meshes to open as a model. Choose the slicer project or a library 3MF.
+                      {SLICED_REFUSAL} Choose the slicer project or a library 3MF.
                     </span>
                   )}
                 </div>
@@ -413,7 +336,19 @@ function ImportForm({
                     <RadioGroupItem value={FILE} aria-label="A file in the library" className="mt-0.5" />
                     <span>A file in the library</span>
                   </label>
-                  {mode === FILE && <LibraryFileChoice suggested={suggestedFiles} chosen={file} onChoose={setPickedFile} />}
+                  {mode === FILE && (
+                    <div className="ml-6">
+                      <LibraryFileChoice
+                        id="import-library-search"
+                        suggested={suggestedFiles}
+                        chosen={file}
+                        onChoose={setPickedFile}
+                        // A run's per-print copy is never a target: its sweep trashes it (#6394 review).
+                        keep={(hit) => hit.id >= NATIVE_ID_BASE && !hit.per_print}
+                        emptyHint="No file name matches the job. Find the file by its name."
+                      />
+                    </div>
+                  )}
                 </>
               )}
             </RadioGroup>
@@ -430,81 +365,6 @@ function ImportForm({
             </Button>
           </DialogFooter>
         </>
-      )}
-    </div>
-  )
-}
-
-/**
- * #6394 — the library file a print is imported onto: the files whose name matches the job
- * (`suggested_library_files`) first, then any file of ScadBuddy's own library found by name.
- * Bambuddy's files and a run's per-print copies are not targets, so a search keeps only native
- * ids, and not `per_print` ones.
- */
-function LibraryFileChoice({
-  suggested,
-  chosen,
-  onChoose,
-}: {
-  suggested: LibraryFileSuggestion[]
-  chosen: LibraryFileSuggestion | null
-  onChoose: (file: LibraryFileSuggestion) => void
-}) {
-  const [query, setQuery] = useState('')
-  const q = useDebounced(query.trim(), 250)
-  const found = useAsync(
-    () => (q === '' ? Promise.resolve(null) : api.searchLibrary({ q, all: true })),
-    [q],
-  )
-  const hits = (found.data?.files ?? [])
-    // A run's per-print copy is never a target: its sweep trashes it (#6394 review).
-    .filter((hit) => hit.id >= NATIVE_ID_BASE && !hit.per_print)
-    .slice(0, SEARCH_SHOWN)
-    .map((hit): LibraryFileSuggestion => ({ id: hit.id, filename: hit.filename, folder_id: hit.folder_id ?? null }))
-  const choice = (file: LibraryFileSuggestion) => (
-    <Button
-      key={file.id}
-      type="button"
-      size="sm"
-      variant={file.id === chosen?.id ? 'secondary' : 'outline'}
-      aria-pressed={file.id === chosen?.id}
-      className="max-w-full justify-start truncate"
-      title={file.filename}
-      onClick={() => onChoose(file)}
-    >
-      {file.filename}
-    </Button>
-  )
-  return (
-    <div className="ml-6 flex min-w-0 flex-col gap-2">
-      {suggested.length > 0 && (
-        <div className="flex flex-wrap gap-1" role="group" aria-label="Suggested library files">
-          {suggested.map(choice)}
-        </div>
-      )}
-      <Label htmlFor="import-library-search">Find a file by name</Label>
-      <Input
-        id="import-library-search"
-        type="search"
-        value={query}
-        maxLength={200}
-        placeholder="benchy"
-        onChange={(e) => setQuery(e.target.value)}
-      />
-      {q !== '' &&
-        (found.error ? (
-          <span className="text-xs text-warn">Could not search the library: {errorText(found.error)}</span>
-        ) : !found.data ? (
-          <span className="text-xs text-muted-foreground">Searching the library…</span>
-        ) : hits.length === 0 ? (
-          <span className="text-xs text-muted-foreground">No library file has that name.</span>
-        ) : (
-          <div className="flex flex-wrap gap-1" role="group" aria-label="Library files found">
-            {hits.map(choice)}
-          </div>
-        ))}
-      {chosen === null && suggested.length === 0 && q === '' && (
-        <span className="text-xs text-muted-foreground">No file name matches the job. Find the file by its name.</span>
       )}
     </div>
   )

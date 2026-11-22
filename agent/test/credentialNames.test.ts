@@ -5,7 +5,7 @@ import type { AuditEntry, AuditSink } from '../src/audit/log.js'
 import { credentialDisplayLabel, credentialLabel } from '../src/credentials.js'
 import { describeApiFailure } from '../src/harness/credentialErrors.js'
 import { CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
-import { kekFromBase64, type KekStatus } from '../src/secrets.js'
+import { kekFromBase64 } from '../src/secrets.js'
 import { credentialFallbackEvent, tallyTurn } from '../src/sessions/turnCore.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
@@ -13,7 +13,6 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // nowhere else. Logs and audit rows keep `credentialLabel`, and the model is never told it.
 
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
-const kekStatus: KekStatus = { ok: true, kek }
 const KEY_A = 'sk-ant-api03-named-first-GwAA'
 const KEY_B = 'sk-ant-api03-named-second-JwAA'
 
@@ -32,13 +31,13 @@ describe('credentialDisplayLabel (#3710)', () => {
 
 describe('CredentialPool names for the person, logs without the name (#3710)', () => {
   async function pool() {
-    const repo = new MemoryCredentials()
+    const repo = new MemoryCredentials(kek)
     const audited: AuditEntry[] = []
     const logged: string[] = []
     const audit = { record: (e: AuditEntry) => Promise.resolve(void audited.push(e)) } as unknown as AuditSink
-    const a = await repo.create({ kind: 'anthropic_api_key', secret: KEY_A, name: 'Personal Max' }, kek)
-    const b = await repo.create({ kind: 'anthropic_api_key', secret: KEY_B, name: 'Work' }, kek)
-    return { repo, a, b, audited, logged, pool: new CredentialPool({ repo, kek: kekStatus, audit, log: (l) => logged.push(l) }) }
+    const a = await repo.create({ kind: 'anthropic_api_key', secret: KEY_A, name: 'Personal Max' })
+    const b = await repo.create({ kind: 'anthropic_api_key', secret: KEY_B, name: 'Work' })
+    return { repo, a, b, audited, logged, pool: new CredentialPool({ repo, audit, log: (l) => logged.push(l) }) }
   }
 
   it('gives each candidate a display label with its name, and a label without', async () => {

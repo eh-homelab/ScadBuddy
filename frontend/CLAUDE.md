@@ -84,6 +84,17 @@ same way, `vite.config.ts`).
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
+  The price (#6153, #6921): `pages/CustomizePage.tsx` reads `store.variant` (the instant
+  read, `POST /listings/{id}/variant`) first on load and on each change. A cached preview
+  shows at once; with it and a `slice` price the page posts no render (the add takes the
+  variant the shop priced). Otherwise it renders and reads the estimate as before. A
+  price, once known, stays on screen: `components/Estimate.tsx` `updating` marks one that
+  is not yet the firm price of the choices on screen, and a `last` price is always marked,
+  never firm. A render that ends with no price (refused, failed, too slow, or its estimate
+  read failed) drops any other price and a `last` one, so nothing shows as updating when
+  nothing is. "Working out the price…" shows only with no price known; "We price this
+  design by hand" only when the render's estimate answers `none`. The mock holds a variant
+  once its render's estimate answered (`holdVariant` seeds one).
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
   and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
@@ -289,9 +300,14 @@ same way, `vite.config.ts`).
   products, trays from `/filament/inventory`), and every Filament tab has the quick find
   (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
-  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`). The price book is edited on Filament → Types, not in Settings; the ledger
+  `filament_spool_list` and `filament_type_list` `q` run a copy (`agent/src/tools/filamentSearch.ts`); both tests run `test-fixtures/filament/search-vectors.json`. The price book is edited on Filament → Types, not in Settings; the ledger
   tab asks `GET /filament/events` with `since` and `until`. Settings keeps a Filament section for
-  configuration (`pages/settings/sections/filament.tsx`). #6265 (plan
+  configuration (`pages/settings/sections/filament.tsx`). The Catalog tab's Colours (#6907) adds
+  `ColourSources` ("Sync from filamentcolors", "Add Bambu Lab colours", each run's progress read
+  while it runs) and a server search (`q`, at most `SHOWN_MAX` rows drawn, no re-order); mocks in
+  `mocks/features/filament/index.ts` (`MOCK_SYNC_COLOURS`). The type and spool pages'
+  `RgbaColourField` has "From the catalog" (`CatalogColourPick`, #6912, R-6912-1 to 5): the
+  same server search, and a pick sets the whole `#RRGGBBAA` and the extra colours. #6265 (plan
   `docs/superpowers/plans/2026-11-18-filament-bb-sync.md` Decisions 3, 16, 19): "Sync with
   Bambuddy" has one `ChoiceSelect` row per data type (spools and types, weights, tags,
   suppliers and prices, locations, presets and K values; `SYNC_ROWS`, `SYNC_KINDS` in

@@ -252,6 +252,12 @@ def _answer(
     return OperationAccepted(**op.model_dump(), repeated=repeated)
 
 
+def answer_recorded(op: Operation, response: Response) -> dict[str, Any] | OperationAccepted:
+    """A repeat's answer for ``op``: for a route that answers a record before its own
+    reads (#6969)."""
+    return _answer(op, response, repeated=True)
+
+
 #: The most an operation's request may carry inline: well under Temporal's 512 KB
 #: payload warning, since it is repeated in the start, check, insert and run inputs.
 MAX_REQUEST_BYTES = 128 * 1024

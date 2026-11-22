@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.filament.bb_sync_models import SyncPassResult
 from scadbuddy.filament.bb_sync_results import record_pass
@@ -180,7 +181,22 @@ def test_the_route_refuses_a_cursor_no_page_gave(client: TestClient) -> None:
     assert empty.status_code == 200 and empty.json() == {"passes": [], "next_cursor": None}
 
 
-def test_the_prune_keeps_the_settings_days(client: TestClient, pg_conninfo: str) -> None:
+@pytest.fixture
+def no_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The housekeeping workflow's activity sweep prunes these rows too, and it can run in
+    the middle of a test (#6962, #6966). Its activity calls `main._sweep_activity_logged`
+    by name at each run, so this no-op, set before `client` builds the app, keeps every
+    sweep out of the test."""
+
+    async def skip(state: AppState) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_sweep_activity_logged", skip)
+
+
+def test_the_prune_keeps_the_settings_days(
+    no_sweep: None, client: TestClient, pg_conninfo: str
+) -> None:
     filament = _filament(client)
     fresh, ten, forty = _pass(), _pass(), _pass()
     for result in (fresh, ten, forty):
@@ -195,7 +211,7 @@ def test_the_prune_keeps_the_settings_days(client: TestClient, pg_conninfo: str)
     assert [row["id"] for row in _rows(pg_conninfo)] == [fresh.pass_id]
 
 
-def test_the_prune_is_bounded(client: TestClient, pg_conninfo: str) -> None:
+def test_the_prune_is_bounded(no_sweep: None, client: TestClient, pg_conninfo: str) -> None:
     filament = _filament(client)
     old = [_pass() for _ in range(3)]
     for result in old:

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
+import { KeyNotReleasedError } from '../src/api/agentKeys.js'
 import { CHAT_FRAME_MAX, ChatConnection, type ChatConnectionOptions, MAX_QUEUED_FRAMES } from '../src/routes/chat.js'
 import { STALE_TAB_IMAGES } from '../src/sessions/clientProtocol.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
@@ -349,6 +350,23 @@ describe('ChatConnection inbound limits', () => {
     expect(out.at(-1)).toMatchObject({ type: 'error', code: 'invalid' })
     expect(out.at(-1)).not.toHaveProperty('sessionId')
     expect(out.at(-1)).not.toHaveProperty('questionId')
+    connection.close()
+  })
+
+  it('answers an answer sent before the API released the input-hash key as unavailable, to send again', async () => {
+    const fake = fakeManager()
+    const starting = {
+      ...fake.manager,
+      questions: { answer: () => Promise.reject(new KeyNotReleasedError('the API has not released the input-hash key yet')) },
+    } as unknown as SessionManager
+    const out: ServerEvent[] = []
+    const log = vi.fn()
+    const connection = new ChatConnection(starting, (e) => out.push(e), { log })
+    await connection.open()
+    const sessionId = randomUUID()
+    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId, id: 'q1', answers: ['yes'] }))
+    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'unavailable', sessionId, questionId: 'q1', message: expect.stringMatching(/again/) })
+    expect(log).not.toHaveBeenCalled()
     connection.close()
   })
 

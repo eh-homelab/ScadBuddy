@@ -7,10 +7,12 @@ from datetime import UTC, datetime
 import pytest
 
 from scadbuddy.bambuddy.filaments import SpoolOption
-from scadbuddy.bambuddy.models import NozzleRackSlot
+from scadbuddy.bambuddy.models import AmsTray, AmsUnit, NozzleRackSlot, PrinterStatus
+from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.rack import rank
 from scadbuddy.rack.rank import (
     NOZZLE_MATERIALS,
+    UncheckedSlot,
     Usage,
     abrasive_type,
     candidates_for,
@@ -422,6 +424,95 @@ def test_a_pla_group_on_a_glow_spool_is_abrasive(subtype: str) -> None:
 def test_a_filament_with_no_spool_is_judged_by_type_and_says_glow_was_unchecked() -> None:
     [found] = rack_groups([requirement(1)], {})
     assert not found.abrasive and found.glow_unchecked
+
+
+def _tray_choice(
+    ams_id: int,
+    tray_id: int,
+    *,
+    sb: int | None = None,
+    sb_material: str | None = None,
+    sb_subtype: str | None = None,
+) -> SpoolOption:
+    """A native tray choice: the tray's ``PLA``, and the SB spool ``sb`` it holds."""
+    return SpoolOption(
+        spool_id=tray_spool_id(ams_id, tray_id),
+        material="PLA",
+        tray_only=True,
+        sb_number=sb,
+        sb_material=sb_material,
+        sb_subtype=sb_subtype,
+    )
+
+
+@pytest.mark.parametrize(
+    ("material", "subtype"), [("PLA", "Glow"), ("PLA Glow", None), ("PLA-CF", None)]
+)
+def test_the_sb_spool_in_a_tray_decides_its_glow_and_abrasive_test(
+    material: str, subtype: str | None
+) -> None:
+    """#6876: the tray reports plain ``PLA``; the SB spool it holds says Glow or CF."""
+    choice = _tray_choice(0, 0, sb=7, sb_material=material, sb_subtype=subtype)
+    [found] = rack_groups([requirement(1)], {1: choice})
+    assert found.abrasive and not found.glow_unchecked
+
+
+def test_a_tray_that_holds_no_sb_spool_leaves_glow_unchecked() -> None:
+    """#6876: the tray's report alone cannot say Glow, as the dialog's check (R-6872-3)."""
+    [found] = rack_groups([requirement(1)], {1: _tray_choice(0, 0)})
+    assert not found.abrasive and found.glow_unchecked
+
+
+def _ams(*trays: AmsTray) -> PrinterStatus:
+    return PrinterStatus(id=1, name="H2C", connected=True, ams=[AmsUnit(id=0, tray=list(trays))])
+
+
+def test_each_unchecked_slot_says_why() -> None:
+    """#6876: no spool chosen, a chosen tray the report says is empty, a filled tray with
+    no SB spool, and an SB number not in the inventory."""
+    status = _ams(
+        AmsTray(id=0, tray_type="", tray_color=""),
+        AmsTray(id=1, tray_type="PLA", tray_color="FFFFFFFF"),
+    )
+    [found] = rack_groups(
+        [requirement(1), requirement(2), requirement(3), requirement(4)],
+        {3: _tray_choice(0, 1)},
+        chosen={2: tray_spool_id(0, 0), 3: tray_spool_id(0, 1), 4: 12},
+        status=status,
+    )
+    assert found.unchecked == (
+        UncheckedSlot(slot_id=1, reason="no_spool"),
+        UncheckedSlot(slot_id=2, reason="empty_tray", spool_id=tray_spool_id(0, 0)),
+        UncheckedSlot(slot_id=3, reason="not_in_inventory", spool_id=tray_spool_id(0, 1)),
+        UncheckedSlot(slot_id=4, reason="not_in_inventory", spool_id=12),
+    )
+    warnings = rack_warnings(
+        [found], [slot(2)], "least_used", rank_rack([found], [slot(2)], "least_used", {}, {}), {}
+    )
+    assert [(w.kind, w.message) for w in warnings] == [
+        (
+            "rack-glow-unchecked",
+            "Glow could not be checked for group 0, so it was ranked by its type alone: "
+            "filament 1 has no spool chosen; filament 2's tray, AMS-A slot 1, is empty; "
+            "filament 3's spool in AMS-A slot 2 is not in the inventory; filament 4's "
+            "spool is not in the inventory.",
+        )
+    ]
+
+
+def test_without_the_plans_ids_there_are_no_reasons_and_no_warning() -> None:
+    """A plan recorded before #6876 names no ids: only ``glow_unchecked`` says so."""
+    [found] = rack_groups([requirement(1)], {})
+    assert found.glow_unchecked and found.unchecked == ()
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    assert rack_warnings([found], [slot(2)], "least_used", picks, {}) == []
+
+
+def test_an_abrasive_group_says_nothing_of_glow() -> None:
+    [found] = rack_groups([requirement(1, filament_type="PLA-CF")], {}, chosen={})
+    picks = rank_rack([found], [slot(2)], "least_used", {}, {})
+    kinds = [w.kind for w in rack_warnings([found], [slot(2)], "least_used", picks, {})]
+    assert "rack-glow-unchecked" not in kinds
 
 
 def test_off_rack_and_ungrouped_filaments_are_not_rack_groups() -> None:

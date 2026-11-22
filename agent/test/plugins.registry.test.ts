@@ -21,7 +21,6 @@ import {
 import { describeTools } from '../src/plugins/testConnection.js'
 import { listedTool, toStoredTools } from '../src/access/listings.js'
 import { pluginView } from '../src/routes/plugins.js'
-import type { KekStatus } from '../src/secrets.js'
 
 // The registry's pure rules (#297): names, URLs, the endpoint egress check,
 // tool naming, tier defaults and overrides, the forwarder's tool policy, and
@@ -78,7 +77,7 @@ describe('stored plugins whose name Claude Code now reserves (#2127)', () => {
 
   it('are not handed to the harness, and say why', async () => {
     const store = { enabled: () => Promise.resolve({ plugins: [stored('remote-devices'), stored('memory')], problems: [] }) }
-    const loaded = await loadEnabledPlugins(store, undefined, () => Promise.resolve(['203.0.113.10']))
+    const loaded = await loadEnabledPlugins(store, () => Promise.resolve(['203.0.113.10']))
     expect(loaded.plugins.map((p) => p.plugin.name)).toEqual(['memory'])
     expect(loaded.problems).toEqual([
       expect.stringMatching(/plugin remote-devices was not loaded: its name "remote-devices" is reserved by Claude Code/),
@@ -97,12 +96,11 @@ describe('stored plugins whose name Claude Code now reserves (#2127)', () => {
       disabled_tools: [],
       created_at: '2026-10-01T00:00:00.000Z',
       updated_at: '2026-10-01T00:00:00.000Z',
-      kekId: null,
+      opens: true,
       oauth: null,
     })
-    const kek: KekStatus = { ok: false, reason: 'no key' }
-    expect(pluginView(summary('webagent'), kek).problem).toMatch(/"webagent" is reserved by Claude Code/)
-    expect(pluginView(summary('memory'), kek).problem).toBeNull()
+    expect(pluginView(summary('webagent')).problem).toMatch(/"webagent" is reserved by Claude Code/)
+    expect(pluginView(summary('memory')).problem).toBeNull()
   })
 })
 

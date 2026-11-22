@@ -1,13 +1,14 @@
 import type { ReactNode } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
-/** Spec §10's order: the page's sections and the anchor each one has. */
+/** Spec §10's order, with #6950's files and links: the page's sections and the anchor each one has. */
 const SECTIONS = [
   { id: 'identity', title: 'Identity' },
   { id: 'weight', title: 'Weight' },
   { id: 'colour-and-cost', title: 'Colour and cost' },
   { id: 'printers', title: 'Printers' },
   { id: 'storage', title: 'Storage' },
+  { id: 'files-and-links', title: 'Files and links' },
   { id: 'history', title: 'History' },
 ] as const
 

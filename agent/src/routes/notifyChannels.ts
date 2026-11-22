@@ -24,7 +24,7 @@ import { UUID_SEGMENT } from '../api/crudStores.js'
 export const NOTIFY_CHANNELS_PATH = '/api/v1/ai/notify/channels'
 
 export type NotifyChannelRouteDeps = {
-  /** Undefined without the database; with no KEK here, `available` only once the API serves area `notify` (it seals the tokens). */
+  /** Undefined without the API's stores. The API seals the tokens. */
   channels: ChannelStore | undefined
   notify: { publicUrl: string | undefined }
   ready: () => Promise<boolean>
@@ -34,15 +34,15 @@ export type NotifyChannelRouteDeps = {
 
 declare module '../app.js' {
   interface AppDeps {
-    /** The notification channels (#815, notify/channels.ts); left out without the database. */
+    /** The notification channels (#815, notify/channels.ts); left out when this process was not given it (tests). */
     notifyChannels?: ChannelStore | undefined
     /** SCADBUDDY_PUBLIC_URL, for the links notifications carry. */
     publicUrl?: string | undefined
   }
 }
 
-const UNAVAILABLE = 'notification channels need the database, and SCADBUDDY_SECRET_KEY_FILE or an API that seals their tokens (CRUD area notify)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const UNAVAILABLE = "notification channels need the API's stores (CRUD area notify)"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'notification channels'
 
 const Fields = {
@@ -79,7 +79,7 @@ function present<T extends object>(value: T): { [K in keyof T]?: Exclude<T[K], u
 
 export function registerNotifyChannelRoutes(app: Hono, deps: NotifyChannelRouteDeps): void {
   async function store(): Promise<ChannelStore | string> {
-    if (!deps.channels || !deps.channels.available()) return UNAVAILABLE
+    if (!deps.channels) return UNAVAILABLE
     return (await deps.ready()) ? deps.channels : NOT_READY
   }
 

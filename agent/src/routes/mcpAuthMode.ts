@@ -63,11 +63,11 @@ export type SettingsWriter = {
 }
 
 export type McpAuthModeRouteDeps = {
-  /** Undefined when there is no database (spec §9, "No database"). */
+  /** Undefined when this process was not given it (tests). */
   settings: SettingsWriter | undefined
   /** The reader /mcp uses (auth/authenticate.ts `mcpAuthSettings`). */
   authSettings: () => McpAuthSettings | Promise<McpAuthSettings>
-  /** Applies migrations; the routes answer 503 until it resolves true. */
+  /** True once the API serves the agent's CRUD areas; the routes answer 503 until then. */
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -95,8 +95,8 @@ const Setting = z.strictObject({
 
 const PutBody = Setting.extend({ expected: Setting })
 
-const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
-const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+const NOT_CONFIGURED = 'AI features are not set up in this process'
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const UNREADABLE = 'the MCP auth settings cannot be read; /mcp refuses every request until they can'
 const CHANGED =
   'the MCP auth setting changed since this page loaded it; nothing was saved. Reload it and choose again'
@@ -129,7 +129,7 @@ export function registerMcpAuthModeRoutes(app: Hono, deps: McpAuthModeRouteDeps)
   const log = deps.log ?? ((line: string) => console.log(line))
 
   async function writer(): Promise<SettingsWriter | string> {
-    if (!deps.settings) return NO_DATABASE
+    if (!deps.settings) return NOT_CONFIGURED
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
 
@@ -206,7 +206,7 @@ declare module '../app.js' {
     /**
      * Where Settings writes the /mcp auth mode and anonymous cap (credentials.ts
      * `SettingsStore`). The routes read them back through `mcp.authSettings`.
-     * Undefined (or left out) when there is no database: the routes then answer 503.
+     * Undefined (or left out) when this process was not given it (tests): the routes then answer 503.
      */
     aiSettings?: SettingsWriter | undefined
   }

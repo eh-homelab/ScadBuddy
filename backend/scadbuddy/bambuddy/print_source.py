@@ -286,6 +286,9 @@ class _Fetching(Protocol):
     @property
     def origin_id(self) -> int | None: ...
 
+    @property
+    def version(self) -> str | None: ...
+
     uploads: BambuddyUploadStore | None
     settings: StoredSettings | None
     sends: PrintLinkStore | None
@@ -464,6 +467,7 @@ class PrintPipeline:
             inbox_name=self.inbox_name,
             fetch=fetch,
             origin_id=self.origin_id,
+            version=self.version,
         )
 
     def _stores(self: _Fetching) -> tuple[BambuddyUploadStore, StoredSettings]:
@@ -694,7 +698,8 @@ class PrintPipeline:
             )
         if project_id is not None:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, NATIVE_PROJECT_REFUSAL)
-        own_id = self.file_id if isinstance(self, LibrarySource) else None
+        # A held copy (#6710) is never the library's file: its bytes always go as a copy.
+        own_id = self.file_id if isinstance(self, LibrarySource) and not self.held else None
         if own_id is not None and not is_native_id(own_id):
             raise _misuse(f"library file {own_id} is Bambuddy's: a native print has none")
         fetched = await PrintPipeline._fetch(self, client)
@@ -850,6 +855,10 @@ class OutputSource(PrintPipeline):
 
     @property
     def origin_id(self) -> int | None:
+        return None
+
+    @property
+    def version(self) -> str | None:
         return None
 
     async def _own_3mf(self) -> bytes:
@@ -1033,6 +1042,12 @@ class LibrarySource(PrintPipeline):
     #: Where the file itself is read: the native library for a native file (#3827);
     #: ``None`` reads it from Bambuddy, the client every call is given.
     files: LibraryReads | None = None
+    #: A file listing's held copy (#6710 §7.3.1): :attr:`files` reads the copy publish
+    #: pinned, never the library's file, so the file is never printed or read in place
+    #: (:attr:`origin_id` is ``None``), and its copies name :attr:`version`.
+    held: bool = False
+    #: The held copy's sha256, its ``file_hash`` as :attr:`files` states it.
+    held_sha256: str | None = None
 
     @classmethod
     async def load(
@@ -1048,6 +1063,7 @@ class LibrarySource(PrintPipeline):
         shared: SharedFilamentReader | None = None,
         files: LibraryReads | None = None,
         native: NativeCopies | None = None,
+        held: bool = False,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
         its 404; one the dialog cannot print is a 422 before anything else is read. The
@@ -1058,11 +1074,15 @@ class LibrarySource(PrintPipeline):
         as in the print worker, which mounts no volume. ``shared``, in place of
         ``filaments``, reads them from the cache, else from that download, for a caller
         that fetches the file anyway (the check, #4495), else as ``filaments`` does.
-        ``files`` is where the file itself is read, when not from Bambuddy (#3827)."""
+        ``files`` is where the file itself is read, when not from Bambuddy (#3827).
+        ``held`` says ``files`` reads a file listing's held copy (#6710): its stated
+        ``file_hash`` is the copy's sha256, which names the source's copies."""
         reads = reads_of(files, client)
         file = await reads.library_file(file_id)
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
+        if held and (files is None or file.file_hash is None):
+            raise _misuse(f"a held copy of library file {file_id} needs its reads and its hash")
         source = cls(
             file_id=file_id,
             colours=[],
@@ -1075,6 +1095,8 @@ class LibrarySource(PrintPipeline):
             stem=_file_stem(file.filename),
             files=files,
             native=native,
+            held=held,
+            held_sha256=file.file_hash if held else None,
         )
         if filaments is None and read_own:
             filaments = partial(source._own_filaments, client)
@@ -1096,9 +1118,11 @@ class LibrarySource(PrintPipeline):
         # file laid out that way still has something on the bed to print.
         source.colours = colours or [UNKNOWN_COLOUR]
         source.local = local
-        held = source.sliced_profile
+        profile = source.sliced_profile
         # A sliced file prints only the plates it holds G-code for (#2671).
-        source.plates = ([plate.index for plate in held.plates] if held else []) or plates or [1]
+        source.plates = (
+            ([plate.index for plate in profile.plates] if profile else []) or plates or [1]
+        )
         return source
 
     async def _own_filaments(
@@ -1160,8 +1184,15 @@ class LibrarySource(PrintPipeline):
 
     @property
     def origin_id(self) -> int | None:
-        """``None`` for a native file (#3827): Bambuddy has no file of that id."""
-        return None if is_native_id(self.file_id) else self.file_id
+        """``None`` for a native file (#3827): Bambuddy has no file of that id. ``None``
+        for a held copy too (#6710): the live file at that id may hold other bytes."""
+        return None if self.held or is_native_id(self.file_id) else self.file_id
+
+    @property
+    def version(self) -> str | None:
+        """A held copy's sha256 (#6710): its copies are recorded apart from the live
+        file's (``send.py`` :func:`~scadbuddy.bambuddy.send.versioned`)."""
+        return self.held_sha256 if self.held else None
 
     def _reads(self, client: BambuddyClient | None) -> LibraryReads:
         return reads_of(self.files, client)
@@ -1209,6 +1240,7 @@ class LibrarySource(PrintPipeline):
             filename=f"{stem or self.file_id} (ScadBuddy){ending}",
             media_type=media_type,
             write=write,
+            version=self.version,
         )
 
     async def plate_ids(self, client: BambuddyClient | None) -> list[int]:

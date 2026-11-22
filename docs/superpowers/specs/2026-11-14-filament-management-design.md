@@ -802,7 +802,8 @@ below are the plan's):
   worker: the spool refresh's activity, and the import route, start `FilamentBbPull` on
   the `bambuddy` queue and wait for it. Its activity (`filament/bb_pull_run.py`) reads
   Bambuddy and sends the rows to the CRUD area `filament-pull`
-  (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`), which
+  (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, and since
+  #6907 `…/pull/colours`), which
   applies them (`filament/bb_pull_apply.py`). The CRUD service makes no Bambuddy call for
   the pull. The worker never names the actor the events are booked to: a person's import
   is kept by the API under the run's id (`filament_pull_actors`), else `bambuddy`.

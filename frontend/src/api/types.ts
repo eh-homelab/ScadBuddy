@@ -635,6 +635,7 @@ export type PrintDetail = Schemas['PrintDetail']
 export type PrintSources = Schemas['PrintSources']
 export type LibraryFileSuggestion = Schemas['LibraryFileSuggestion']
 export type FoundSource = Schemas['FoundSource']
+export type SourceChoice = Schemas['SourceChoice']
 export type PrintImportRequest = Schemas['ImportRequest']
 export type ImportedPrint = Schemas['ImportedPrint']
 /** #4699 — a print the print watcher took: linked to a model, in Unsorted imports, or dismissed. */

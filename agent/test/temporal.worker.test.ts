@@ -250,6 +250,26 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
     }
   }, 120_000)
 
+  it('polls nothing until `before` settles (the input-hash key, #5299), and stops cleanly while it waits', async () => {
+    let connects = 0
+    const agent = AgentWorker.start({
+      address: '127.0.0.1:1',
+      namespace: 'default',
+      activities: {},
+      retryMs: 20,
+      connectTimeoutMs: 50,
+      before: () => new Promise<void>(() => undefined),
+      log: () => {
+        connects++
+      },
+    })
+    await sleep(500)
+    // Without `before` it would be 'unavailable' by now: it has not tried to connect.
+    expect(agent.state()).toBe('connecting')
+    expect(connects).toBe(0)
+    await agent.stop()
+  }, 30_000)
+
   it('keeps trying while Temporal cannot be reached, and stops cleanly', async () => {
     const agent = AgentWorker.start({
       address: '127.0.0.1:1',

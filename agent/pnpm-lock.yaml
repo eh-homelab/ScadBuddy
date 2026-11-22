@@ -232,9 +232,6 @@ importers:
       openapi-fetch:
         specifier: ^0.17.0
         version: 0.17.0
-      postgres:
-        specifier: ^3.4.9
-        version: 3.4.9(patch_hash=6a45711c0e240dcde8ee1036571fd604a2db454159817bd8d270323a3d68aa68)
       quickjs-emscripten:
         specifier: 0.32.0
         version: 0.32.0
@@ -284,6 +281,9 @@ importers:
       openapi-typescript:
         specifier: ^7.13.0
         version: 7.13.0(typescript@6.0.3)
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9(patch_hash=6a45711c0e240dcde8ee1036571fd604a2db454159817bd8d270323a3d68aa68)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3

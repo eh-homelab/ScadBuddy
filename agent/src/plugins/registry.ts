@@ -1,22 +1,20 @@
-import type { Sql, TransactionSql } from 'postgres'
 import type { AuditContext } from '../audit/log.js'
-import { type AccessRow, remoteSource, SOURCE_ITEM, type ToolAccess } from '../access/model.js'
+import { type AccessRow, remoteSource, type ToolAccess } from '../access/model.js'
 import { pluginOverrides, sourceEnabled } from '../access/resolve.js'
-import { forgetSource, updatedBy, writeEnabled, writeTools } from '../access/store.js'
+import { updatedBy } from '../access/store.js'
 import { isLoopbackPeer } from '../http/origins.js'
-import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { RISK_TIERS, type RiskTier, type TierResolver } from '../harness/permissions.js'
 import { CrudReadError } from '../api/crudRead.js'
 import { type CrudTarget, crudOf, segment } from '../api/crudStores.js'
-import { type Envelope, type Kek, last4, openSecret, SealError, sealSecret } from '../secrets.js'
+import { SealError } from '../secrets.js'
 import { OAuthError } from './oauth.js'
 import { GrantError, type PluginOAuth, type TokenSource } from './oauthStore.js'
 
 // The plugin registry (issue #297): "provide an endpoint and we'll add the
-// plugin/skills to the harness". Stored in Postgres, `ai_plugins`
-// (backend/scadbuddy/migrations_agent/<timestamp>_plugins.sql; spec §9, "All AI state lives in the #241
-// database"). No file is written.
+// plugin/skills to the harness". Kept by the API, in `ai_plugins`
+// (backend/scadbuddy/migrations_agent/<timestamp>_plugins.sql; spec §9), through its CRUD routes.
+// No file is written.
 //
 // WHAT A PLUGIN IS HERE. A remote MCP server: a Streamable HTTP URL plus an
 // optional auth header. The harness registers it as an Agent SDK
@@ -61,11 +59,9 @@ import { GrantError, type PluginOAuth, type TokenSource } from './oauthStore.js'
 // AAD binds it to the plugin's name, URL and header name, so a row whose URL
 // was edited in the database fails to open instead of sending the token to a
 // new host; for the same reason a route that changes the URL or the header
-// name must be given the secret again. No route returns it (spec §8.6). Once the
-// API lists area `plugins` (#5299 step 5), `CrudPluginStore` keeps the plugins
-// through its CRUD routes, and the API seals and opens the value with its KEK
-// under the same AAD (backend api/crud_agent_plugins.py), so no KEK is needed
-// here; `PluginStore` is the SQL until then. The API re-wraps both at a rotation.
+// name must be given the secret again. No route returns it (spec §8.6). The API
+// seals and opens the value with its KEK (backend api/crud_agent_plugins.py), so no
+// KEK is needed here. The API re-wraps both at a rotation.
 //
 // OAUTH (#780). Instead of a header, a plugin may be signed in from Settings (OAuth 2.1 per
 // the MCP authorization spec; plugins/oauth.ts, oauthStore.ts, table `ai_plugin_oauth`).
@@ -196,13 +192,8 @@ export type PluginSummary = {
   disabled_tools: string[]
   created_at: string
   updated_at: string
-  /** Which KEK sealed the secret; null when there is none. Never put in a route body. */
-  kekId: string | null
-  /**
-   * Whether the key that opens the secret is at hand: set by `CrudPluginStore` (the API's
-   * key); undefined from `PluginStore`, whose caller compares `kekId` with its own key.
-   */
-  opens?: boolean
+  /** Whether the API's key opens the secret; true when there is none. */
+  opens: boolean
   /** The OAuth sign-in (#780), or null when the plugin has none. */
   oauth: OAuthStatus | null
 }
@@ -265,9 +256,9 @@ export type RemotePlugin = {
 export type PluginRepo = {
   list(): Promise<PluginSummary[]>
   get(name: string): Promise<PluginSummary | undefined>
-  create(input: PluginCreate, kek: Kek | undefined): Promise<PluginSummary>
+  create(input: PluginCreate): Promise<PluginSummary>
   /** `context`: who to record on the ai_access rows the patch writes; `system` without one. */
-  update(name: string, patch: PluginPatch, kek: Kek | undefined, context?: AuditContext): Promise<PluginSummary>
+  update(name: string, patch: PluginPatch, context?: AuditContext): Promise<PluginSummary>
   /**
    * One tool's access (#2171): `off` disables it, a tier sets it, `null` drops both.
    * Recorded as `context`'s actor.
@@ -275,13 +266,13 @@ export type PluginRepo = {
   setToolAccess(name: string, tool: string, access: ToolAccess | null, context?: AuditContext): Promise<PluginSummary>
   delete(name: string): Promise<boolean>
   /** Opens one plugin's secret. Throws SealError on a wrong key or an altered row. */
-  reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined>
+  reveal(name: string): Promise<RemotePlugin | undefined>
 }
 
-/** What `PluginStore` and `CrudPluginStore` both give: the repo, the enabled plugins and the sign-ins. */
+/** What `CrudPluginStore` gives: the repo, the enabled plugins and the sign-ins. */
 export type PluginStoreLike = PluginRepo & {
   readonly oauth: PluginOAuth | undefined
-  enabled(kek: Kek | undefined): Promise<{ plugins: RemotePlugin[]; problems: string[] }>
+  enabled(): Promise<{ plugins: RemotePlugin[]; problems: string[] }>
 }
 
 // ---------------------------------------------------------------- validation
@@ -410,14 +401,6 @@ export function validateDisabledTools(tools: readonly string[]): string[] {
   return [...new Set(tools)].sort()
 }
 
-/**
- * AAD for a plugin's sealed header value: the table, the name, and the columns
- * that decide where the value is sent. JSON so no URL can forge a boundary.
- */
-export function pluginAad(name: string, url: string, header: string): string {
-  return `ai_plugins:${JSON.stringify({ name, url, auth_header: header })}`
-}
-
 // ------------------------------------------------------------------- tiers
 
 /** `mcp__<name>__`, the prefix of every tool the harness gets from a plugin. */
@@ -444,16 +427,13 @@ export function pluginTierResolver(plugins: readonly Pick<RemotePlugin, 'name' |
   }
 }
 
-// ------------------------------------------------------------------ storage
+// ------------------------------------------------------------------ rows
 
 type Row = {
   name: string
   kind: PluginKind
   url: string
   auth_header: string | null
-  secret_sealed: Buffer | null
-  dek_sealed: Buffer | null
-  kek_id: string | null
   last4: string | null
   created_at: Date
   updated_at: Date
@@ -476,23 +456,6 @@ type OAuthRow = {
   plugin_url: string
 }
 
-// The plugin's ai_access rows, read with its row. The prefix is remoteSource's.
-const ACCESS_ROWS = `(SELECT coalesce(jsonb_agg(jsonb_build_object('source', a.source, 'item', a.item, 'access', a.access,
-    'updated_by', a.updated_by)), '[]'::jsonb)
-  FROM ai_access a WHERE a.source = '${remoteSource('')}' || ai_plugins.name) AS access_rows`
-
-// The public columns of its sign-in (#780): never the sealed ones.
-const OAUTH_ROW = `(SELECT jsonb_build_object('status', o.status, 'last_error', o.last_error, 'issuer', o.issuer,
-    'scope', o.scope, 'registration', o.registration, 'has_refresh', o.has_refresh,
-    'access_expires_at', o.access_expires_at, 'connected_at', o.connected_at, 'grant_id', o.grant_id,
-    'plugin_url', o.plugin_url)
-  FROM ai_plugin_oauth o WHERE o.plugin = ai_plugins.name) AS oauth`
-
-const SUMMARY_COLUMNS = `name, kind, url, auth_header, kek_id, last4,
-  created_at, updated_at, ${ACCESS_ROWS}, ${OAUTH_ROW}`
-
-const ALL_COLUMNS = `*, ${ACCESS_ROWS}, ${OAUTH_ROW}`
-
 /** The plugin's access as ai_access gives it. */
 function access(row: Pick<Row, 'name' | 'access_rows'>): { enabled: boolean; toolTiers: Record<string, RiskTier>; disabledTools: string[] } {
   const source = remoteSource(row.name)
@@ -504,13 +467,7 @@ function toolRows(tiers: Record<string, RiskTier>, disabled: readonly string[]):
   return { ...tiers, ...Object.fromEntries(disabled.map((tool) => [tool, 'off' as const])) }
 }
 
-async function selectRow(tx: TransactionSql, name: string): Promise<Row> {
-  const [row] = await tx.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins WHERE name = $1`, [name])
-  if (!row) throw new Error(`plugin ${name} is gone inside its own transaction`)
-  return row
-}
-
-function summary(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): PluginSummary {
+function summary(row: Row): Omit<PluginSummary, 'opens'> {
   const { enabled, toolTiers, disabledTools } = access(row)
   return {
     name: row.name,
@@ -523,7 +480,6 @@ function summary(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): PluginSummary 
     disabled_tools: disabledTools,
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
-    kekId: row.kek_id,
     oauth: row.oauth
       ? {
           status: row.oauth.status,
@@ -539,34 +495,6 @@ function summary(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): PluginSummary 
   }
 }
 
-type Sealed = { header: string; envelope: Envelope; last4: string } | null
-
-function sealFor(name: string, url: string, header: string, secret: string, kek: Kek | undefined): Sealed {
-  if (!kek) {
-    throw new PluginError(
-      'a plugin secret cannot be saved: no key-encryption key is configured (SCADBUDDY_SECRET_KEY_FILE, spec §9)',
-      503,
-    )
-  }
-  const value = validateSecret(secret)
-  return { header, envelope: sealSecret(kek, value, pluginAad(name, url, header)), last4: last4(value) }
-}
-
-export function openPlugin(row: Row, kek: Kek | undefined): RemotePlugin {
-  const { toolTiers, disabledTools } = access(row)
-  const plugin: RemotePlugin = { name: row.name, url: row.url, toolTiers, disabledTools }
-  if (row.secret_sealed && row.dek_sealed && row.kek_id && row.auth_header) {
-    if (!kek) throw new SealError('no key-encryption key is configured to open the plugin secret')
-    const value = openSecret(
-      kek,
-      { secretSealed: row.secret_sealed, dekSealed: row.dek_sealed, kekId: row.kek_id },
-      pluginAad(row.name, row.url, row.auth_header),
-    )
-    plugin.header = { name: row.auth_header, value }
-  }
-  return plugin
-}
-
 /** A plugin whose endpoint passed the check, with the address that passed it. */
 export type CheckedPlugin = { plugin: RemotePlugin; address: string }
 export type LoadedPlugins = { plugins: CheckedPlugin[]; problems: string[] }
@@ -579,12 +507,8 @@ export type LoadedPlugins = { plugins: CheckedPlugin[]; problems: string[] }
  * reserves (`reservedNameProblem`), is left out and named in `problems`; the
  * run goes ahead without it.
  */
-export async function loadEnabledPlugins(
-  store: Pick<PluginStore, 'enabled'>,
-  kek: Kek | undefined,
-  resolve: Resolver = systemResolver,
-): Promise<LoadedPlugins> {
-  const { plugins, problems } = await store.enabled(kek)
+export async function loadEnabledPlugins(store: Pick<PluginStoreLike, 'enabled'>, resolve: Resolver = systemResolver): Promise<LoadedPlugins> {
+  const { plugins, problems } = await store.enabled()
   const allowed: CheckedPlugin[] = []
   for (const plugin of plugins) {
     const reserved = reservedNameProblem(plugin.name)
@@ -609,228 +533,6 @@ export type PluginStoreOptions = {
   oauth?: PluginOAuth
 }
 
-export class PluginStore implements PluginStoreLike {
-  private readonly sql: Sql
-  readonly oauth: PluginOAuth | undefined
-  constructor(sql: Sql, options: PluginStoreOptions = {}) {
-    this.sql = sql
-    this.oauth = options.oauth
-  }
-
-  async list(): Promise<PluginSummary[]> {
-    const rows = await this.sql.unsafe<Row[]>(`SELECT ${SUMMARY_COLUMNS} FROM ai_plugins ORDER BY name`)
-    return rows.map(summary)
-  }
-
-  async get(name: string): Promise<PluginSummary | undefined> {
-    const [row] = await this.sql.unsafe<Row[]>(`SELECT ${SUMMARY_COLUMNS} FROM ai_plugins WHERE name = $1`, [name])
-    return row ? summary(row) : undefined
-  }
-
-  async create(input: PluginCreate, kek: Kek | undefined): Promise<PluginSummary> {
-    const name = validatePluginName(input.name)
-    const url = normalisePluginUrl(input.url)
-    const tiers = validateToolTiers(input.tool_tiers ?? {})
-    const disabled = validateDisabledTools(input.disabled_tools ?? [])
-    if (input.enabled) {
-      throw new PluginError(
-        'a plugin is registered disabled: run its connection test, review its tools, then enable it (issue #297)',
-        400,
-      )
-    }
-    let sealed: Sealed = null
-    if (input.secret !== undefined) {
-      const header = validateHeaderName(input.auth_header ?? DEFAULT_AUTH_HEADER)
-      sealed = sealFor(name, url, header, input.secret, kek)
-    } else if (input.auth_header) {
-      throw new PluginError('auth_header needs a secret', 400)
-    }
-    return this.sql.begin(async (tx) => {
-      const rows = await tx`
-        INSERT INTO ai_plugins (name, kind, url, auth_header, secret_sealed, dek_sealed, kek_id, last4)
-        VALUES (${name}, 'remote_mcp', ${url}, ${sealed?.header ?? null},
-                ${sealed?.envelope.secretSealed ?? null}, ${sealed?.envelope.dekSealed ?? null},
-                ${sealed?.envelope.kekId ?? null}, ${sealed?.last4 ?? null})
-        ON CONFLICT (name) DO NOTHING
-        RETURNING name`
-      if (rows.length === 0) throw new PluginError(`a plugin named "${name}" already exists`, 409)
-      const source = remoteSource(name)
-      // A row an earlier plugin of this name left behind is not this one's.
-      await forgetSource(tx, source)
-      await writeEnabled(tx, source, false, updatedBy())
-      await writeTools(tx, source, toolRows(tiers, disabled), updatedBy())
-      // A warm Claude Code was spawned with the plugins of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
-      await notifyWarmEvict(tx, '*')
-      return summary(await selectRow(tx, name))
-    })
-  }
-
-  async update(name: string, patch: PluginPatch, kek: Kek | undefined, context?: AuditContext): Promise<PluginSummary> {
-    return this.sql.begin(async (tx) => {
-      const [locked] = await tx`SELECT name FROM ai_plugins WHERE name = ${name} FOR UPDATE`
-      if (!locked) throw new PluginError(`no plugin named "${name}"`, 404)
-      const current = await selectRow(tx, name)
-      const stored = access(current)
-      const url = patch.url === undefined ? current.url : normalisePluginUrl(patch.url)
-      const tiers = patch.tool_tiers === undefined ? stored.toolTiers : validateToolTiers(patch.tool_tiers)
-      const disabled =
-        patch.disabled_tools === undefined ? stored.disabledTools : validateDisabledTools(patch.disabled_tools)
-      const enabled = patch.enabled ?? stored.enabled
-
-      // The secret. Changing the URL or the header name re-binds it, which
-      // needs the value typed in again (the stored one is not sent somewhere
-      // new); `secret: null` removes it.
-      let secretColumns: {
-        auth_header: string | null
-        secret_sealed: Buffer | null
-        dek_sealed: Buffer | null
-        kek_id: string | null
-        last4: string | null
-      }
-      if (patch.secret === null) {
-        if (patch.auth_header) throw new PluginError('auth_header needs a secret', 400)
-        secretColumns = { auth_header: null, secret_sealed: null, dek_sealed: null, kek_id: null, last4: null }
-      } else if (patch.secret !== undefined) {
-        const header = validateHeaderName(patch.auth_header ?? current.auth_header ?? DEFAULT_AUTH_HEADER)
-        const sealed = sealFor(name, url, header, patch.secret, kek)
-        secretColumns = {
-          auth_header: header,
-          secret_sealed: sealed?.envelope.secretSealed ?? null,
-          dek_sealed: sealed?.envelope.dekSealed ?? null,
-          kek_id: sealed?.envelope.kekId ?? null,
-          last4: sealed?.last4 ?? null,
-        }
-      } else {
-        const header = patch.auth_header === undefined ? current.auth_header : patch.auth_header
-        if (current.auth_header === null) {
-          if (header) throw new PluginError('auth_header needs a secret', 400)
-        } else if (url !== current.url || header !== current.auth_header) {
-          throw new PluginError(
-            'changing url or auth_header needs the secret again (or secret: null to remove it): ' +
-              'the stored one is not sent to a new destination',
-            409,
-          )
-        }
-        secretColumns = {
-          auth_header: current.auth_header,
-          secret_sealed: current.secret_sealed,
-          dek_sealed: current.dek_sealed,
-          kek_id: current.kek_id,
-          last4: current.last4,
-        }
-      }
-      await tx`
-        UPDATE ai_plugins SET
-          url = ${url}, auth_header = ${secretColumns.auth_header}, secret_sealed = ${secretColumns.secret_sealed},
-          dek_sealed = ${secretColumns.dek_sealed}, kek_id = ${secretColumns.kek_id},
-          last4 = ${secretColumns.last4}, updated_at = now()
-        WHERE name = ${name}`
-      // The last listing was the old server's (#4994): the page lists none until the next test.
-      if (url !== current.url) await tx`DELETE FROM ai_tool_listings WHERE source = ${remoteSource(name)}`
-      // A sign-in was for the old resource; a header replaces it (#780): either way it goes.
-      if (url !== current.url || (patch.secret !== undefined && patch.secret !== null)) {
-        await tx`DELETE FROM ai_plugin_oauth_flows WHERE plugin = ${name}`
-        await tx`DELETE FROM ai_plugin_oauth WHERE plugin = ${name}`
-      }
-      await this.writeAccess(tx, name, { tiers, disabled, enabled }, updatedBy(context), {
-        enabled: patch.enabled !== undefined,
-        tools: patch.tool_tiers !== undefined || patch.disabled_tools !== undefined,
-      })
-      return summary(await selectRow(tx, name))
-    })
-  }
-
-  async setToolAccess(name: string, tool: string, value: ToolAccess | null, context?: AuditContext): Promise<PluginSummary> {
-    return this.sql.begin(async (tx) => {
-      const [locked] = await tx`SELECT name FROM ai_plugins WHERE name = ${name} FOR UPDATE`
-      if (!locked) throw new PluginError(`no plugin named "${name}"`, 404)
-      const stored = access(await selectRow(tx, name))
-      const source = remoteSource(name)
-      // Each tool row as it stands, so only `tool`'s is attributed to this write (below).
-      // `updated_at` as text: a Date would drop its microseconds.
-      const before = await tx<{ item: string; access: string; updated_by: string; updated_at: string }[]>`
-        SELECT item, access, updated_by, updated_at::text AS updated_at FROM ai_access WHERE source = ${source} AND item <> ${SOURCE_ITEM}`
-      // No prototype: a tool named `__proto__` is an own key.
-      const tiers = Object.assign(Object.create(null) as Record<string, string>, stored.toolTiers)
-      delete tiers[tool]
-      const disabled = stored.disabledTools.filter((t) => t !== tool)
-      if (value === 'off') disabled.push(tool)
-      else if (value !== null) tiers[tool] = value
-      // In the page's words: the validators' refusal names fields the page never shows.
-      if (disabled.length > MAX_TOOL_ENTRIES) {
-        throw new PluginError(`At most ${MAX_TOOL_ENTRIES} tools of plugin "${name}" can be off: reset one of them first`, 400)
-      }
-      if (Object.keys(tiers).length > MAX_TOOL_ENTRIES) {
-        throw new PluginError(
-          `At most ${MAX_TOOL_ENTRIES} tools of plugin "${name}" can have an access other than off or the default: reset one of them first`,
-          400,
-        )
-      }
-      await this.writeAccess(
-        tx,
-        name,
-        { tiers: validateToolTiers(tiers), disabled: validateDisabledTools(disabled), enabled: stored.enabled },
-        updatedBy(context),
-        { enabled: false, tools: true },
-      )
-      // writeTools wrote every tool row as new: the rows this write left as they were get their own author and time back.
-      const kept = before.filter((r) => r.item !== tool)
-      if (kept.length > 0) {
-        await tx`
-          UPDATE ai_access a SET updated_by = k.updated_by, updated_at = k.updated_at
-          FROM jsonb_to_recordset(${tx.json(kept as never)}) AS k(item text, access text, updated_by text, updated_at timestamptz)
-          WHERE a.source = ${source} AND a.item = k.item AND a.access = k.access`
-      }
-      return summary(await selectRow(tx, name))
-    })
-  }
-
-  /**
-   * The plugin's access, written to ai_access (`write` names which rows). The old
-   * ai_plugins columns are not written. Then the warm eviction.
-   */
-  private async writeAccess(
-    tx: TransactionSql,
-    name: string,
-    next: { tiers: Record<string, RiskTier>; disabled: string[]; enabled: boolean },
-    by: string,
-    write: { enabled: boolean; tools: boolean },
-  ): Promise<void> {
-    await tx`
-      UPDATE ai_plugins SET updated_at = now() WHERE name = ${name}`
-    const source = remoteSource(name)
-    if (write.enabled) await writeEnabled(tx, source, next.enabled, by)
-    if (write.tools) await writeTools(tx, source, toolRows(next.tiers, next.disabled), by)
-    // A warm Claude Code was spawned with the plugins of its time (spec 2026-10-13 §5.3).
-    await notifyWarmEvict(tx, '*')
-  }
-
-  async delete(name: string): Promise<boolean> {
-    return this.sql.begin(async (tx) => {
-      const rows = await tx`DELETE FROM ai_plugins WHERE name = ${name}`
-      if (rows.count === 0) return false
-      await forgetSource(tx, remoteSource(name))
-      await notifyWarmEvict(tx, '*')
-      return true
-    })
-  }
-
-  /** Throws SealError, and for a signed-in plugin GrantError or OAuthError (`signIn`). */
-  async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {
-    const [row] = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins WHERE name = $1`, [name])
-    return row ? signIn(this.oauth, row, openPlugin(row, kek), kek) : undefined
-  }
-
-  /** Every plugin ai_access turns on, opened; one that cannot be opened is reported in `problems`, not loaded. */
-  async enabled(kek: Kek | undefined): Promise<{ plugins: RemotePlugin[]; problems: string[] }> {
-    const rows = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins ORDER BY name`)
-    return openEnabled(
-      rows.filter((r) => access(r).enabled),
-      (row) => signIn(this.oauth, row, openPlugin(row, kek), kek),
-    )
-  }
-}
-
 /**
  * Gives an opened plugin its sign-in (#780): the token source, and the header as it is now.
  * Throws GrantError (sign in again) or OAuthError (the token endpoint is unreachable).
@@ -839,12 +541,11 @@ async function signIn(
   oauth: PluginOAuth | undefined,
   row: Pick<Row, 'name' | 'url' | 'oauth'>,
   plugin: RemotePlugin,
-  kek: Kek | undefined,
 ): Promise<RemotePlugin> {
   if (!row.oauth || plugin.header) return plugin
   if (row.oauth.status === 'error') throw new GrantError(row.oauth.last_error ?? 'its sign-in failed')
   if (!oauth) throw new GrantError('OAuth sign-in is not available in this process')
-  const source = oauth.source(row.name, row.url, row.oauth.grant_id, kek)
+  const source = oauth.source(row.name, row.url, row.oauth.grant_id)
   return { ...plugin, oauth: source, header: await source.header() }
 }
 
@@ -903,7 +604,7 @@ type WireRow = {
 /** `WireRow` with its header opened: `seal_error` when it cannot be, as `SealError`. */
 type WireOpened = WireRow & { header: { name: string; value: string } | null; seal_error: string | null }
 
-function rowOf(wire: WireRow): Omit<Row, 'secret_sealed' | 'dek_sealed'> {
+function rowOf(wire: WireRow): Row {
   return { ...wire, created_at: new Date(wire.created_at), updated_at: new Date(wire.updated_at) }
 }
 
@@ -911,7 +612,7 @@ function summaryOf(wire: WireRow): PluginSummary {
   return { ...summary(rowOf(wire)), opens: wire.opens }
 }
 
-/** `openPlugin` of a row the API opened: its `seal_error` is the SealError the SQL store throws. */
+/** A plugin the API opened: its `seal_error` is a SealError. */
 function openedOf(wire: WireOpened): RemotePlugin {
   if (wire.seal_error !== null) throw new SealError(wire.seal_error)
   const { toolTiers, disabledTools } = access(wire)
@@ -923,12 +624,11 @@ const PLUGIN_REFUSED = 'plugin-refused'
 const KEK_MISSING = 'kek-missing'
 
 /**
- * The registry through the API's CRUD routes, area `plugins` (#5299 step 5; backend
- * api/crud_agent_plugins.py): one route per method, each its SQL transaction on the API,
+ * The registry through the API's CRUD routes, area `plugins` (backend
+ * api/crud_agent_plugins.py): one route per method, each its transaction on the API,
  * with the warm eviction in it. The checks that need no row (the name, the URL's form,
- * the header name, the secret, the tiers) run here first, as `PluginStore` runs them; the
- * API seals the secret with its KEK, so `kek` is not used. A refusal of the API's is the
- * PluginError the SQL store throws.
+ * the header name, the secret, the tiers) run here first; the API seals the secret with
+ * its KEK. A refusal of the API's is a PluginError.
  */
 export class CrudPluginStore implements PluginStoreLike {
   readonly #call: ReturnType<typeof crudOf>
@@ -965,7 +665,7 @@ export class CrudPluginStore implements PluginStoreLike {
     return plugin ? summaryOf(plugin) : undefined
   }
 
-  async create(input: PluginCreate, _kek: Kek | undefined): Promise<PluginSummary> {
+  async create(input: PluginCreate): Promise<PluginSummary> {
     const name = validatePluginName(input.name)
     const url = normalisePluginUrl(input.url)
     const tiers = validateToolTiers(input.tool_tiers ?? {})
@@ -986,7 +686,7 @@ export class CrudPluginStore implements PluginStoreLike {
     return summaryOf(await this.#refusing(() => this.#call<WireRow>('a plugin registered', '/plugins', { body })))
   }
 
-  async update(name: string, patch: PluginPatch, _kek: Kek | undefined, context?: AuditContext): Promise<PluginSummary> {
+  async update(name: string, patch: PluginPatch, context?: AuditContext): Promise<PluginSummary> {
     if (!PLUGIN_NAME_RE.test(name)) throw new PluginError(`no plugin named "${name}"`, 404)
     const body: Record<string, unknown> = { by: updatedBy(context) }
     if (patch.url !== undefined) body.url = normalisePluginUrl(patch.url)
@@ -1002,7 +702,7 @@ export class CrudPluginStore implements PluginStoreLike {
 
   async setToolAccess(name: string, tool: string, value: ToolAccess | null, context?: AuditContext): Promise<PluginSummary> {
     if (!PLUGIN_NAME_RE.test(name)) throw new PluginError(`no plugin named "${name}"`, 404)
-    // The one entry this write adds, checked as the SQL store's validators check it.
+    // The one entry this write adds, checked by the validators.
     if (value === 'off') validateDisabledTools([tool])
     else if (value !== null) validateToolTiers({ [tool]: value })
     const body = { tool, access: value, by: updatedBy(context) }
@@ -1017,15 +717,15 @@ export class CrudPluginStore implements PluginStoreLike {
   }
 
   /** Throws SealError (the API cannot open the secret), and for a signed-in plugin GrantError or OAuthError. */
-  async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {
+  async reveal(name: string): Promise<RemotePlugin | undefined> {
     if (!PLUGIN_NAME_RE.test(name)) return undefined
     const { plugin } = await this.#call<{ plugin: WireOpened | null }>('a plugin opened', `/plugins/${segment(name, PLUGIN_NAME_RE, 'a plugin name')}/reveal`, { method: 'POST' })
-    return plugin ? signIn(this.oauth, plugin, openedOf(plugin), kek) : undefined
+    return plugin ? signIn(this.oauth, plugin, openedOf(plugin)) : undefined
   }
 
-  /** As `PluginStore.enabled`: the API opens each plugin `ai_access` turns on. */
-  async enabled(kek: Kek | undefined): Promise<{ plugins: RemotePlugin[]; problems: string[] }> {
+  /** Every plugin `ai_access` turns on, opened by the API; one that cannot be opened is reported in `problems`, not loaded. */
+  async enabled(): Promise<{ plugins: RemotePlugin[]; problems: string[] }> {
     const { plugins } = await this.#call<{ plugins: WireOpened[] }>('the enabled plugins', '/plugins/open-enabled', { method: 'POST' })
-    return openEnabled(plugins, async (row) => signIn(this.oauth, row, openedOf(row), kek))
+    return openEnabled(plugins, async (row) => signIn(this.oauth, row, openedOf(row)))
   }
 }

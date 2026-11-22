@@ -6,8 +6,8 @@ import {
   SETTING_MCP_AUTH_MODE,
 } from '../src/auth/authenticate.js'
 import { defaultOidcConfig, type OidcConfig } from '../src/auth/oidc.js'
-import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import { sqlSettings } from './support/sql/settings.js'
+import type { Database } from './support/database.js'
 import { appFetch, MCP_URL, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
@@ -118,7 +118,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the MCP auth mode in ai_settings${TEST_DATA
   })
 
   it('applies to the next /mcp request: 401 in bearer mode, served anonymously once disabled', async () => {
-    const store = new SettingsStore(db.sql)
+    const store = sqlSettings(db.sql)
     const { app } = testApp({ authSettings: mcpAuthSettings(store, () => {}) })
     const initialize = () =>
       appFetch(app)(MCP_URL, {

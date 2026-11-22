@@ -19,7 +19,7 @@ import { RESTORED_EPSILON } from '../harness/fallback.js'
 import { claudeConfigDir, scratchDir } from '../harness/options.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
-import type { AppendFence, PostgresSessionStore } from './store.js'
+import type { AppendFence, TranscriptStore } from './store.js'
 import type { AssembledTurn, FingerprintParts } from './turnRunner.js'
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -88,7 +88,7 @@ export type WarmTurn = { entry: WarmEntry; outcome: WarmOutcome; reason?: Recycl
 
 export type WarmSessionsDeps = {
   /** The transcript store: its last `cost-state` is the baseline a resume restores; its head and tail say whether to resume and whether the process is still current. */
-  store: Pick<PostgresSessionStore, 'lastOfType' | 'head' | 'moved'>
+  store: Pick<TranscriptStore, 'lastOfType' | 'head' | 'moved'>
   /** `warm_max_per_replica` (D3): past it the least recently used idle entry goes. */
   maxEntries: number
   /** `warm_idle_seconds`, in ms: an entry idle this long goes. */
@@ -189,7 +189,7 @@ class MirroredTranscript {
       const write = this.pending.then(async () => {
         if (this.fenced) return
         const fence = this.fence
-        const fenced = fence && 'appendIf' in inner ? (inner as PostgresSessionStore).appendIf.bind(inner) : undefined
+        const fenced = fence && 'appendIf' in inner ? (inner as TranscriptStore).appendIf.bind(inner) : undefined
         if (fence && fenced) {
           if (!(await fenced(key, entries, fence))) this.fenced = true
         } else await inner.append(key, entries)

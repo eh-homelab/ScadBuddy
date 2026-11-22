@@ -1,24 +1,26 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CredentialStore, SettingsStore } from '../src/credentials.js'
+import { SqlCredentials } from './support/sql/credentials.js'
 import { CredentialPool } from '../src/harness/fallback.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import { PgEventListener } from './support/pgListener.js'
 import { userMessage } from '../src/harness/inbox.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
 import { WarmSessions } from '../src/sessions/warm.js'
 import { readStartSettings, wireRuntimeSync } from '../src/sessions/runtimeSync.js'
 import { RUNTIME_DEFAULTS, RUNTIME_PAYLOAD, SETTINGS_CHANNEL } from '../src/sessions/runtimeSettings.js'
 import { WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { nextResult } from './support/warm.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 
 // How the warm cache follows the settings and evictions when a NOTIFY never
 // arrives (sessions/runtimeSync.ts): the start read, the reconnect and the resync.
@@ -28,24 +30,28 @@ const credential = { kind: 'anthropic_api_key' as const, secret: 'sk-ant-test' }
 describe('readStartSettings', () => {
   const settings = { get: <T>(key: string) => Promise.resolve((key === 'warm_max_per_replica' ? 3 : undefined) as T) }
 
-  it('reads the stored settings once the database is ready', async () => {
+  it('waits for the areas the API lists a moment after start, then reads the stored settings', async () => {
     const log = vi.fn()
-    expect(await readStartSettings({ database: { ready: () => Promise.resolve(true) }, settings }, log)).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 3 })
+    let listed!: () => void
+    const areas = new Promise<void>((resolve) => (listed = resolve))
+    setTimeout(listed, 20)
+    expect(await readStartSettings({ areas: () => areas, settings }, log, 5_000)).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 3 })
     expect(log).not.toHaveBeenCalled()
   })
 
-  it('has the defaults, silently, with no database', async () => {
+  it('has the defaults, silently, with no settings store', async () => {
     const log = vi.fn()
-    expect(await readStartSettings({ database: undefined, settings: undefined }, log)).toEqual(RUNTIME_DEFAULTS)
+    expect(await readStartSettings({ areas: undefined, settings: undefined }, log)).toEqual(RUNTIME_DEFAULTS)
     expect(log).not.toHaveBeenCalled()
   })
 
-  it('logs the defaults it falls back to when the database is not ready, or the read throws', async () => {
+  it('logs the defaults it falls back to when the API lists no areas in time, or the read throws', async () => {
     const log = vi.fn()
-    expect(await readStartSettings({ database: { ready: () => Promise.resolve(false) }, settings }, log)).toEqual(RUNTIME_DEFAULTS)
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining('not ready'))
+    expect(await readStartSettings({ areas: () => new Promise<void>(() => undefined), settings }, log, 10)).toEqual(RUNTIME_DEFAULTS)
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining('the API does not list'))
+    expect(log).not.toHaveBeenLastCalledWith(expect.stringContaining('database'))
     const broken = { get: () => Promise.reject(new Error('no table')) }
-    expect(await readStartSettings({ database: { ready: () => Promise.resolve(true) }, settings: broken }, log)).toEqual(RUNTIME_DEFAULTS)
+    expect(await readStartSettings({ areas: () => Promise.resolve(), settings: broken }, log)).toEqual(RUNTIME_DEFAULTS)
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining('no table'))
     expect(log).toHaveBeenCalledTimes(2)
   })
@@ -58,14 +64,14 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
   let url: string
   let schema: string
   let warm: WarmSessions
-  let store: PostgresSessionStore
+  let store: TranscriptStore
   let scripted: ReturnType<typeof scriptedRunner>
   let stops: (() => void | Promise<void>)[]
 
   beforeEach(async () => {
     ;({ db, drop, url, schema } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
+    store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
     warm = new WarmSessions({ store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
     stops = []
@@ -156,7 +162,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
 
   const sync = (events: ReturnType<typeof fakeEvents>['events'], extra: { revalidate?: () => Promise<void>; resyncMs?: number } = {}) => {
     const stop = wireRuntimeSync({
-      settings: new SettingsStore(db.sql),
+      settings: sqlSettings(db.sql),
       warm,
       revalidate: extra.revalidate ?? (() => Promise.resolve()),
       events,
@@ -178,7 +184,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
 
     // While the listener is down: a setting changes and a credential is revoked, and no NOTIFY is heard.
     fake.drop()
-    await new SettingsStore(db.sql).setMany({ warm_max_per_replica: 1 })
+    await sqlSettings(db.sql).setMany({ warm_max_per_replica: 1 })
     fake.notify('scadbuddy_settings', 'session-runtime')
     fake.notify(WARM_EVICT_CHANNEL, '*')
     expect(warm.size()).toBe(3)
@@ -308,9 +314,9 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
 
   it('SessionManager.revalidateWarm keeps a process whose credential is cooling down, which the pool no longer lists', async () => {
     const kek = kekFromBase64(randomBytes(32).toString('base64'))
-    const credentials = new CredentialStore(db.sql)
-    const stored = await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-cooling' }, kek)
-    const pool = new CredentialPool({ repo: credentials, kek: { ok: true, kek }, log: () => {} })
+    const credentials = new SqlCredentials(db.sql, kek)
+    const stored = await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-cooling' })
+    const pool = new CredentialPool({ repo: credentials, log: () => {} })
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, credentials: pool })
     stops.push(() => m.warm.close())
@@ -374,7 +380,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
       received.push(payload)
     })
     stops.push(() => listener.unlisten())
-    await new SettingsStore(db.sql).set('warm_idle_seconds', 120)
+    await sqlSettings(db.sql).set('warm_idle_seconds', 120)
     await expect.poll(() => received).toContain(RUNTIME_PAYLOAD)
   })
 })

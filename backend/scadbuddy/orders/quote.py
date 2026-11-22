@@ -40,7 +40,7 @@ from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, 
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -93,6 +93,9 @@ from scadbuddy.slicing.slice_info import read_sliced
 from scadbuddy.store import BlobStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
+
+if TYPE_CHECKING:
+    from scadbuddy.orders.storefront.held_file import HeldFile
 
 __all__ = ["FOLLOW_EVERY", "QUOTE_TIMEOUT", "OutputsRead", "Renders"]
 
@@ -561,6 +564,10 @@ class SlicedPlate:
 #: ``bambuddy/resolver.py`` ``resolve``'s ``slot_presets``).
 SlotPresets = Mapping[int, Sequence[EffectivePreset]]
 
+#: The colour a spool-less slot is sliced in, by slot id (#6710, ``resolve``'s
+#: ``slot_colours``); a slot it leaves out takes the file's own colour.
+SlotColours = Mapping[int, str]
+
 
 class Slicer(Protocol):
     """The print dialog's background slice, for a quote (Ruling 2)."""
@@ -584,9 +591,19 @@ class Slicer(Protocol):
     async def fetch(self, sliced: SlicedPlate) -> bytes: ...
 
     async def start_library(
-        self, file_id: int, request: SliceQuoteRequest, subject: str
+        self,
+        file_id: int,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+        slot_colours: SlotColours | None = None,
+        held: HeldFile | None = None,
     ) -> list[PreviewStarted]:
-        """Every plate of a library file (#5544), as :meth:`start` slices an output's."""
+        """Every plate of a library file (#5544), as :meth:`start` slices an output's. A
+        slot in ``slot_presets`` has no spool, and is sliced in its ``slot_colours`` entry
+        or, with none, in the file's own colour (#6710). With ``held`` (a file listing's
+        price, #6710 §7.3.1) the slice reads that held copy, never the library's file."""
         ...
 
 

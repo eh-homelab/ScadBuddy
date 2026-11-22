@@ -3,13 +3,10 @@ import { createApp } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { memoryAccess } from './support/memoryAccess.js'
-import { randomBytes } from 'node:crypto'
-import { kekFromBase64 } from '../src/secrets.js'
 
 // #4828 (spec 2026-10-18 §4.6): the old switch routes are gone. The capabilities API
 // (`/api/v1/ai/capabilities`) is the one way to change a tool's access.
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
 
 function app() {
@@ -18,7 +15,6 @@ function app() {
     access: mem.access as never,
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
     remoteAddress: () => '10.0.0.7',

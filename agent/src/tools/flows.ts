@@ -602,7 +602,7 @@ export const flowTools: Tool[] = [
           ),
         )
       }
-      if (!ctx.sessions) throw new ToolError('escalations need the database: SCADBUDDY_DATABASE_URL is not set')
+      if (!ctx.sessions) throw new ToolError('escalations are not set up in this process')
       try {
         return json(await ctx.sessions.escalations.respond({ principal: ctx.principal, session: ctx.session }, request_id, action, { reason }))
       } catch (err) {
