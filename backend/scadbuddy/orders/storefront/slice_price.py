@@ -104,6 +104,7 @@ from scadbuddy.orders.rendering import (
     Renders,
     output_for_reference,
 )
+from scadbuddy.orders.storefront.held_file import FILE_GONE as FILE_GONE
 from scadbuddy.orders.storefront.held_file import HeldFile, PricedFile
 from scadbuddy.orders.storefront.slice_profile import (
     ProfileMissingMaterialError,
@@ -143,7 +144,6 @@ GEOMETRY_DIFFERS: Final = (
     "the variant rendered to another 3MF than the one its key names, so its price would"
     " not be for the design the visitor sees"
 )
-FILE_GONE: Final = "the listing's copy of its file is missing"
 #: Every digest of a price key changes when this does. 4 (#6710 §7.4): ``model`` is the
 #: sha256 of the file the slice reads (a render's 3MF or a file listing's held copy), and
 #: the key holds the subject's kind and the remembered setup.
@@ -205,9 +205,13 @@ class PriceRow(BaseModel):
     #: The listing the variant key was made for: its preview is served only while that
     #: listing is published (#6921 review).
     listing_id: str | None = None
+    #: A file listing's row (#6710) holds one entry per slot the file uses, in the order
+    #: of its ``PricedFile.used``, not one per slot from 0: map an index through ``used``
+    #: to get the slot. The same holds for ``slot_colours``.
     slot_filaments: list[str] | None = None
     #: Each slot's colour, and the output the slice saved ("Storefront: ...", which
-    #: outlives the render prune): the instant read shows its preview (#6921).
+    #: outlives the render prune): the instant read shows its preview (#6921). A file
+    #: listing's row has no output (``output_id`` None) and its colours by ``used``.
     slot_colours: list[str] | None = None
     output_id: str | None = None
 

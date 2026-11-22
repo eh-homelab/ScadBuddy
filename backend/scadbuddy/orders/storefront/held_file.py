@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,6 +55,11 @@ class PricedFile(BaseModel):
     #: ``FileSnapshot.remembered``: the remembered choices of ``library:<id>`` when the
     #: listing was published, for a scope that holds none now (decision 4).
     remembered: ModelPrintChoices | None = None
+
+
+#: The one text for a held copy gone from the store: the price's failure
+#: (`slice_price.price_variant`) and the reads' 404 both say it.
+FILE_GONE: Final = "the listing's copy of its file is missing"
 
 
 def _not_found(file_id: int) -> ApiError:
@@ -103,7 +108,7 @@ class HeldFile:
         if stat is None:
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
-                "the listing's copy of its file is missing",
+                FILE_GONE,
                 file_id=file_id,
             )
         async with aclosing(self.content.get(stat.ref)) as chunks:
