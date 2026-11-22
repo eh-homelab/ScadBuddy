@@ -967,7 +967,7 @@ backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
 `agent/src/flows/backendReads.ts`, #5299), and never over SQL. The API takes back the
 grants of its role `scadbuddy_agent` on `events`, `workflow_runs` and
 `workflow_run_decisions` at every start (`backend/scadbuddy/auth/revoke.py`
-`RETIRED_GRANTS`), but the agent still connects as the database owner, so that revoke binds
+`RETIRED_ROLES`), but the agent still connects as the database owner, so that revoke binds
 nothing until #5299 step 12 removes the agent's database URL. Until then the guard is
 `agent/test/retiredTables.test.ts`, which fails on agent SQL that names one of those tables.
 Every flow tool call reads its run
@@ -1806,7 +1806,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `20261027T0114Z_session_files_blobs.sql`) is dropped by
   `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same holder, so they
   stay valid, and the API revokes `blob_refs` from the agent's role at every start
-  (`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`).
+  (`backend/scadbuddy/auth/revoke.py` `RETIRED_ROLES`).
   `agent/test/workspaceBlobs.backend.e2e.test.ts` runs the holds against the real API on
   moto's S3 (`backend/tests/support/workspace_backend.py`), both services migrated into one
   database, and checks the `blob_refs` rows the routes write.

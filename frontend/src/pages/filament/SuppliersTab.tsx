@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link } from 'react-router'
 import { createSupplier, getSupplierStats, listSuppliers, patchSupplier, type Supplier, type SupplierStats } from '../../api/filamentPurchasing'
 import { TD, TH } from '../../components/filament/formClasses'
 import { SafeLink } from '../../components/filament/purchasing/SafeLink'
@@ -11,6 +10,8 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { useAdvanced } from '../../lib/advanced'
 import { message } from '../../components/filament/purchasing/priceFormat'
+import { EntityLink } from '../../components/filament/EntityLink'
+import { filamentLinks } from '../../lib/filamentLinks'
 
 /** Remembered per browser: whether archived suppliers are listed. */
 export const SHOW_ARCHIVED_KEY = 'scadbuddy.filament.suppliers.showArchived'
@@ -105,9 +106,9 @@ export function SuppliersTab() {
                 return (
                   <tr key={supplier.id} data-supplier={supplier.id} className={`border-t ${supplier.archived_at ? 'text-muted-foreground' : ''}`}>
                     <td className={TD}>
-                      <Link to={`/filament/suppliers/${supplier.id}`} className="font-medium underline-offset-4 hover:underline">
+                      <EntityLink to={filamentLinks.supplier(supplier.id)} className="font-medium">
                         {supplier.name}
-                      </Link>
+                      </EntityLink>
                       {supplier.archived_at && <span className="ml-2 text-[12px]">Archived</span>}
                     </td>
                     <td className={TD}>
@@ -116,7 +117,7 @@ export function SuppliersTab() {
                     <td className={TD}>{supplier.customer_number ?? <span className="text-muted-foreground">—</span>}</td>
                     <td className={`${TD} text-right tabular-nums`}>{supplier.product_count}</td>
                     <td className={`${TD} text-right tabular-nums`}>{stat?.spool_count ?? 0}</td>
-                    <td className={`${TD} text-right tabular-nums`}>{stat ? money.format(stat.spend) : <span className="text-muted-foreground">—</span>}</td>
+                    <td className={`${TD} text-right tabular-nums`}>{stat ? <EntityLink to={filamentLinks.supplierInvoices(supplier.id)} title={`Invoices from ${supplier.name}`}>{money.format(stat.spend)}</EntityLink> : <span className="text-muted-foreground">—</span>}</td>
                     <td className={`${TD} text-right`}>
                       <Button type="button" variant="ghost" size="sm" aria-label={`${supplier.archived_at ? 'Restore' : 'Archive'} ${supplier.name}`} onClick={() => void archive(supplier)}>
                         {supplier.archived_at ? 'Restore' : 'Archive'}

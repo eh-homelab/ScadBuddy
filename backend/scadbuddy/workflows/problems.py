@@ -11,7 +11,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 from scadbuddy.bambuddy.prime_tower import object_conflict_warning
 from scadbuddy.bambuddy.process_overrides import named_key
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRunError
-from scadbuddy.workflows.print_models import FAILED, LAN_UNSURE, REFUSED, SLICE_LOST
+from scadbuddy.workflows.print_models import FAILED, LAN_REFUSED, LAN_UNSURE, REFUSED, SLICE_LOST
 
 #: An operation's unexpected failure (#1053): it names no kind, unlike a print run's.
 OPERATION_UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while doing this; see its logs."
@@ -135,12 +135,12 @@ def object_conflict(problem: PrintRunError, plate_id: int) -> PrintRunError | No
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:
     """The problem an activity reported (``REFUSED``/``FAILED``/``SLICE_LOST``/``LAN_UNSURE``
-    details), else the unexpected failure's: never the exception's own text, which may
-    say anything."""
+    /``LAN_REFUSED`` details), else the unexpected failure's: never the exception's own
+    text, which may say anything."""
     cause = error.cause if isinstance(error, ActivityError) else error
     if (
         isinstance(cause, ApplicationError)
-        and cause.type in (REFUSED, FAILED, SLICE_LOST, LAN_UNSURE)
+        and cause.type in (REFUSED, FAILED, SLICE_LOST, LAN_UNSURE, LAN_REFUSED)
         and cause.details
     ):
         detail: Any = cause.details[0]

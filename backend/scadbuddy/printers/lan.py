@@ -198,11 +198,102 @@ def project_file_command(file: ProjectFile, sequence_id: str) -> dict[str, Any]:
     }
 
 
+#: A tray's RFID keys (`spools.models.clean_tag_uid`, `clean_tray_uuid`).
+TAG_KEYS = ("tag_uid", "tray_uuid")
+
+
 def merge_report(previous: dict[str, Any] | None, delta: dict[str, Any]) -> dict[str, Any]:
-    """``delta``'s ``print`` keys over ``previous``'s, a new dict: a shallow merge, so a
-    key a delta leaves out keeps its last value, and ``ams`` (a nested object the
-    printer re-sends whole) is replaced whole when present."""
-    return {**(previous or {}), **delta}
+    """``delta``'s ``print`` keys over ``previous``'s, a new dict. A key a delta leaves
+    out keeps its last value. ``ams`` is merged by `_merge_ams`; every other key,
+    ``vt_tray`` and ``vir_slot`` (the external holders) among them, is replaced whole."""
+    merged = {**(previous or {}), **delta}
+    old, new = (previous or {}).get("ams"), delta.get("ams")
+    if isinstance(old, dict) and isinstance(new, dict):
+        merged["ams"] = _merge_ams(old, new)
+    return merged
+
+
+def _merge_ams(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """The ``ams`` block's keys over the old ones. Its units are the delta's when it
+    lists them, each merged over the old unit of its ``id``: the H2C sends every unit in
+    every report (`tests/printers/test_lan_live.py`), so a unit a list leaves out is
+    unplugged. A block with no unit list keeps the old units."""
+    merged = {**old, **new}
+    units = new.get("ams")
+    if isinstance(units, list):
+        before = _by_id(old.get("ams"))
+        merged["ams"] = [
+            _merge_unit(before[unit["id"]], unit)
+            if isinstance(unit, dict) and unit.get("id") in before
+            else unit
+            for unit in units
+        ]
+    return merged
+
+
+def _by_id(entries: Any) -> dict[Any, dict[str, Any]]:
+    if not isinstance(entries, list):
+        return {}
+    return {e["id"]: e for e in entries if isinstance(e, dict) and e.get("id") is not None}
+
+
+def _merge_unit(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """A unit's keys over the old ones, its trays merged by ``id`` (`_merge_tray`); a
+    tray the delta does not list is kept."""
+    merged = {**old, **new}
+    trays = new.get("tray")
+    if isinstance(trays, list):
+        before = _by_id(old.get("tray"))
+        listed = {t.get("id") for t in trays if isinstance(t, dict)}
+        merged["tray"] = [
+            _merge_tray(before[tray["id"]], tray)
+            if isinstance(tray, dict) and tray.get("id") in before
+            else tray
+            for tray in trays
+        ] + [tray for tray_id, tray in before.items() if tray_id not in listed]
+    return merged
+
+
+def _merge_tray(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    """A tray's keys over the old ones (#6897).
+
+    A tray with no material (no ``tray_type``, or a blank one) is taken as sent: the H2C
+    reports a pulled or not yet read spool as ``{id, state}``
+    (`tests/printers/fixtures/lan-tray-reinsert-h2c.json`), so nothing of the old spool
+    survives it.
+
+    Else a key the delta leaves out keeps its value, and the RFID keys (`TAG_KEYS`) keep
+    their last real value when the delta's are zero, empty or absent and the tray still
+    holds the same material: Bambuddy's slot configure (``ams_filament_setting``) leaves
+    the tray showing no tag while the spool stays, and Bambuddy's own merge keeps the tag
+    for that reason (``bambu_mqtt.py`` ``_handle_ams_data``, "Periodic AMS updates often
+    include empty RFID fields"). A real tag in the delta replaces the old one; a tray of
+    another material takes the delta's keys, or none."""
+    material = _material(new)
+    if not material:
+        return new
+    merged = {**old, **new}
+    if material == _material(old):
+        for key in TAG_KEYS:
+            if not _real_tag(new.get(key)) and _real_tag(old.get(key)):
+                merged[key] = old[key]
+    else:
+        for key in TAG_KEYS:
+            if key in new:
+                merged[key] = new[key]
+            else:
+                merged.pop(key, None)
+    return merged
+
+
+def _material(tray: dict[str, Any]) -> str:
+    value = tray.get("tray_type")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _real_tag(value: Any) -> bool:
+    """A tag value with a hex digit other than 0 (zeros are Bambu's "no tag")."""
+    return isinstance(value, str) and any(c not in "0" for c in value.strip())
 
 
 class ImplicitFtpTls(ftplib.FTP_TLS):

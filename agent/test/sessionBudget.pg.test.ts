@@ -229,10 +229,27 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
       expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
     })
 
+    it('still charges a request Claude Code closed after the stop when the process dies before its result', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      next = { stall, closes: true }
+      await stopMidReply(session.id, 'write a long essay')
+      // A finished request no result priced: the turn's running spend counts it (turnHost.ts).
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+
+      // The next turn resumes on a fresh process, whose total never held it.
+      next = { reply: 'OK', costUsd: 0.05 }
+      const after = await (await m.send(session.id, browser, 'reply OK')).done
+      if (after.kind !== 'result') throw new Error(`next turn: ${JSON.stringify(after)}`)
+      expect(after.costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+    })
+
     it('counts it once when the interrupt still ends in a result', async () => {
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
       await turn!.done
-      // The interrupt's `aborted_streaming` result: the resumed total, unchanged.
+      // The interrupt's `aborted_streaming` result with the request left open, as
+      // through SDK 0.3.314: the resumed total, unchanged.
       next = { stall, resultCostUsd: 0.4 }
       await stopMidReply(session.id, 'write a long essay')
       expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
@@ -240,6 +257,26 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session bud
       const results = (await m.events.read(session.id)).map((e) => e.event).filter((e) => e.type === 'session.result')
       expect(results).toHaveLength(2)
       expect((results.at(-1) as { costUsd: number }).costUsd).toBeCloseTo(0.4 + CUT, 10)
+    })
+
+    it('counts it once when Claude Code closes the request and prices it in the result (SDK 0.3.327)', async () => {
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+      await turn!.done
+      next = { stall, closes: true, resultCostUsd: 0.4 + CUT }
+      await stopMidReply(session.id, 'write a long essay')
+      expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT, 10)
+      // Claude Code priced it: nothing of it is ScadBuddy's estimate.
+      const [row] = await db.sql<{ unpriced_cost_usd: number }[]>`SELECT unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
+      expect(row?.unpriced_cost_usd).toBe(0)
+
+      // The next turn's total holds it already, and it is not added again.
+      next = { reply: 'OK', costUsd: 0.4 + CUT + 0.05 }
+      const after = await (await m.send(session.id, browser, 'reply OK')).done
+      expect(after).toMatchObject({ kind: 'result', subtype: 'success', turns: 2 })
+      if (after.kind !== 'result') throw new Error('unreachable')
+      expect(after.costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
+      expect((await m.get(session.id, browser)).costUsd).toBeCloseTo(0.4 + CUT + 0.05, 10)
     })
 
     it('counts each of two stops in a row once, whatever the float rounding of the totals', async () => {

@@ -80,6 +80,15 @@ run holds its sliced files: ``lan_run_holds`` (two copies, both printed, each sl
 held for the run), both histories. It is AUTO_UPGRADE on the print worker and may run
 for days, so a change to its commands goes behind ``workflow.patched`` as ``PrintRun``'s
 does.
+
+``BUSY_PATCH`` (#6871) reads the printer before a LAN run's first upload. Recorded on
+prod before it, by the build of a83553b30 (workflow ``print-1e3d8e87…``, run
+``e58d226b``, 2026-11-21 15:04 UTC, read from the UI's ``/history``):
+``lan_refused_busy``, a run of one print the busy H2C refused ``ERROR STATE`` at
+``lan_print``, recorded failed. Recorded by the patched one
+(``tests/test_print_native_workflow.py``): ``lan_queued_busy`` (the printer runs another
+print: the run succeeds queued, and its sequence waits the print out and for a cleared
+plate, then starts it), both histories.
 """
 
 from __future__ import annotations
@@ -145,6 +154,8 @@ SEQUENCE_HISTORIES = Path(__file__).parent / "fixtures" / "print_lan_sequence_hi
         "lan_cancelled_during_succeed",
         "lan_plate_clear",
         "lan_run_holds",
+        "lan_refused_busy",
+        "lan_queued_busy",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:
@@ -161,6 +172,7 @@ async def test_print_run_replays_its_recorded_history(name: str) -> None:
         "lan_later_start_failed",
         "lan_plate_clear",
         "lan_run_holds",
+        "lan_queued_busy",
     ],
 )
 async def test_lan_sequence_replays_its_recorded_history(name: str) -> None:

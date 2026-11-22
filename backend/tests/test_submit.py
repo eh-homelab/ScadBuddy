@@ -2233,32 +2233,42 @@ class _HeldLoad(ProjectingActivities):
         return await super().load_pipeline(req)
 
 
-def _release_and_child_start(history: WorkflowHistory) -> tuple[bool, list[str]]:
-    """Whether one workflow task both accepted the release and started a child, and
+def _release_with_load_answer(history: WorkflowHistory) -> tuple[bool, list[str]]:
+    """Whether the workflow task that took the release also took the load's answer, and
     the ids of the children the run started."""
     completed = 0  # the WorkflowTaskCompleted the events that follow it came from
+    answer_waiting = False  # an activity answered, and no workflow task took it yet
     accepted: set[int] = set()
-    started: set[int] = set()
+    load_answered: set[int] = set()
     children: list[str] = []
     for event in history.events:
         if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+            if answer_waiting:
+                load_answered.add(event.event_id)
+                answer_waiting = False
             completed = event.event_id
+        elif event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED:
+            answer_waiting = True
         elif event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED:
             accepted.add(completed)
         elif event.event_type == EventType.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED:
-            started.add(completed)
             children.append(
                 event.start_child_workflow_execution_initiated_event_attributes.workflow_id
             )
-    return bool(accepted & started), children
+    return bool(accepted & load_answered), children
 
 
-async def test_a_release_that_lands_with_the_piece_start_still_cancels(
+async def test_a_release_that_lands_with_the_load_answer_cancels_before_the_piece(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
-    """#1832: the release and the piece's child start in one workflow task. temporalio
-    drops the render task's cancel while the start is in flight, and the start then
-    resolves (ABANDON): the render must still be released, not wait on the piece.
+    """#1832: the release and `load_pipeline`'s answer in one workflow task. Before
+    temporalio 1.36 the release's handler ran first and cancelled the render task while
+    it still waited on the load, so the answer won, the task went on to start the piece
+    child, and the cancel was dropped while that start was in flight (ABANDON). Since
+    1.36 every job of the task is applied before any task runs (workflow logic flag 2,
+    https://github.com/temporalio/sdk-python/releases/tag/1.36.0), so the cancel lands
+    on the load already answered: the render is released and no piece starts. The
+    release after a start in flight is still handled (`_raise_if_released`).
 
     Made deterministic by taking the workflow worker away while `load_pipeline`
     answers and the release is sent, so the next worker's first task carries both."""
@@ -2313,7 +2323,7 @@ async def test_a_release_that_lands_with_the_piece_start_still_cancels(
                 # on the server, which hands it that task, so the task is only given to
                 # this worker once its 10 s timeout passes.
                 answer = await asyncio.wait_for(release, timeout=30)
-            raced, children = _release_and_child_start(await handle.fetch_history())
+            raced, children = _release_with_load_answer(await handle.fetch_history())
             # The ABANDONed piece and its held `render_main` would stay open on the dev
             # server after this test (#2126).
             for child in children:
@@ -2322,11 +2332,11 @@ async def test_a_release_that_lands_with_the_piece_start_still_cancels(
             gate.set()
         await service.aclose()
 
-    # Only the race leaves this behind: the release accepted, and the piece's child
-    # start sent, by one workflow task. Taken apart (a slow server), the release lands
-    # on its own and the ordinary path passes the test, which then proves nothing (#2126).
-    assert children, "the piece's child was never started"
-    assert raced, "the release and the piece's child start were not in one workflow task"
+    # Only the race leaves this behind: the release and the load's answer taken by one
+    # workflow task. Taken apart (a slow server), the release lands on its own and the
+    # ordinary path passes the test, which then proves nothing (#2126).
+    assert raced, "the release and the load's answer were not in one workflow task"
+    assert children == [], "the render task went on to start the piece after the release"
     assert answer.cancelled is not None and answer.cancelled.id == job.id
     stored = await asyncio.to_thread(projection.read, job.id)
     assert (stored.state, stored.error) == ("cancelled", SUPERSEDED_ERROR)

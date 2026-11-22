@@ -54,6 +54,7 @@ def keyed(tmp_path: Path, pg_conninfo: str) -> Settings:
         secret_key_file=key,
         auth_mode="enforce",
         lan_require_plate_clear=True,
+        lan_queue_when_busy=False,
     )
 
 
@@ -112,6 +113,8 @@ def test_the_bambuddy_key_is_opened_and_every_other_sealed_field_is_null(
     assert (current.bambuddy_url, current.store_backend) == ("http://bambuddy.test", "s3")
     # A runtime field `StoredSettings` does not hold, which a native run reads (#4939).
     assert RemoteSettingsStore(crud).plate_clear_required() is True
+    # #6871: and whether it waits for a busy printer, off here (on by default).
+    assert RemoteSettingsStore(crud).queue_when_busy() is False
 
 
 @pytest.mark.requires_postgres

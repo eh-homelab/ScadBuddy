@@ -17,7 +17,7 @@ transaction.
 
 ``grant_input`` reads the backend's ``flow_grants`` and ``flow_grant_uses`` under the grant
 row's share lock, which the agent's role no longer needs (``auth/revoke.py``
-``RETIRED_GRANTS``). ``decide_input`` runs the gate's validator (``gate_validate.py``, a copy
+``RETIRED_ROLES``). ``decide_input`` runs the gate's validator (``gate_validate.py``, a copy
 of agent-durable's, pinned by the shared vectors) on the row's ``gate`` under the row's lock.
 """
 

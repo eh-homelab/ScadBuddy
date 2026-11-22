@@ -595,6 +595,10 @@ export class TurnHost {
             ? controller.signal.reason.message
             : 'the turn was interrupted'
           : undefined
+      // Only a request no message_stop closed is in `cutUsd` (sessions/unpricedSpend.ts). One that
+      // Claude Code closed after a stop, on a process that died before its result, is a finished
+      // request: the gateway's metering (`uncounted`) and the running spend #write takes without a
+      // result (`core.runningUsd()`) still count it.
       const cut = stopped !== undefined || !result ? run.cutUsd : 0
       // What the credential gateway metered past Claude Code's own reckoning (gateway/server.ts):
       // requests made with the process's token that no result prices, a command's (Step 9.4).

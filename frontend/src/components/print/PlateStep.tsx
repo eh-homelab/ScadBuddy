@@ -1,6 +1,7 @@
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { StepCard } from './StepCard'
+import { plateSwapReminder } from './plateSwap'
 type Props = {
   bedTypes: string[]
   /** Bambu Studio's label for each plate it names (#2366); others show as they are. */
@@ -43,8 +44,7 @@ export function PlateStep({ bedTypes, labels = NO_LABELS, value, lastBedType, pr
       {lastBedType && <p className="text-xs text-muted-foreground">Last print used: {lastBedType}</p>}
       {lastBedType && lastBedType !== value && (
         <p role="status" className="text-xs text-muted-foreground">
-          The {printerName ?? 'printer'}&apos;s last print used {lastBedType}. Swap to {value}{' '}
-          before this starts.
+          {plateSwapReminder(printerName, lastBedType, value)}
         </p>
       )}
     </StepCard>
