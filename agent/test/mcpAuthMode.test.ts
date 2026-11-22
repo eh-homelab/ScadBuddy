@@ -264,11 +264,11 @@ describe('/api/v1/ai/mcp/auth', () => {
     expect((await appFetch(app, { address: LOOPBACK })('http://localhost:8081/api/v1/ai/mcp/auth')).status).toBe(200)
   })
 
-  it('answers 503 without a database, before migrations, and when the settings cannot be read', async () => {
-    const none = setup(undefined, { deps: { database: undefined, credentials: undefined } })
+  it("answers 503 without a settings store, before the API serves the agent's CRUD areas, and when the settings cannot be read", async () => {
+    const none = setup(undefined, { deps: { aiSettings: undefined } })
     const res = await none.fetch(URL_BASE)
     expect(res.status).toBe(503)
-    expect(await detail(res)).toContain('SCADBUDDY_DATABASE_URL')
+    expect(await detail(res)).toContain('not set up in this process')
 
     const notReady = setup(undefined, { deps: { database: { ping: async () => true, ready: async () => false } } })
     expect((await notReady.fetch(URL_BASE)).status).toBe(503)

@@ -43,7 +43,7 @@ import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal }
 import type { SessionRows } from './rows.js'
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
-import type { PostgresSessionStore } from './store.js'
+import type { TranscriptStore } from './store.js'
 import { readRuntimeSettings, RUNTIME_DEFAULTS } from './runtimeSettings.js'
 import { readToolLoadings } from '../harness/toolSearch.js'
 import { readTurnSettings, TURN_DEFAULTS } from './turnSettings.js'
@@ -51,10 +51,8 @@ import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-
 import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
-import { pgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
-import { BrowserOrigins } from '../browser/store.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { BUILTIN_SERVER, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
 import { sandboxShellTools, SHELL_BUILTINS } from '../builtins/sandboxShell.js'
@@ -83,7 +81,6 @@ export type TurnRunnerDeps = Pick<
   | 'memory'
   | 'httpRequest'
   | 'httpBodies'
-  | 'sql'
   | 'browserOrigins'
   | 'background'
   | 'sandbox'
@@ -92,7 +89,7 @@ export type TurnRunnerDeps = Pick<
   | 'stderr'
 > & {
   /** The transcript mirror (store.ts): the run's `sessionStore`, and whether a session has a transcript to resume. */
-  store: SessionStore & Pick<PostgresSessionStore, 'exists' | 'lastCwd'>
+  store: SessionStore & Pick<TranscriptStore, 'exists' | 'lastCwd'>
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
   files: WorkspaceFiles
@@ -628,7 +625,7 @@ export class TurnRunner {
           ? httpRequestServer(
               slotHttpContext(
                 {
-                  saved: (this.deps.httpBodies ?? pgHttpBodies(this.deps.sql))(id),
+                  saved: this.deps.httpBodies(id),
                   // save_to_workspace (#2329): the body becomes one of the session's files.
                   workspace: { files: this.deps.files, ref: { kind: 'session', sessionId: id } },
                   secrets: () => secrets,
@@ -690,7 +687,7 @@ export class TurnRunner {
         tierOf: proxies ? pluginTiers : tierOf,
         // The headless browser's lists (#982): every remote plugin's browser_* calls.
         browser: browserGuard({
-          store: this.deps.browserOrigins ?? new BrowserOrigins(this.deps.sql, this.deps.settings),
+          store: this.deps.browserOrigins,
           sessionId: id,
           plugins: remotePlugins.map((p) => p.name),
         }),

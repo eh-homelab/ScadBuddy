@@ -5,9 +5,8 @@ import { isUuid } from '../harness/stateDirs.js'
 
 // A flow run's calls at the starting session's hop through the API's CRUD routes (#5299 step 10;
 // backend api/crud_agent_escalations.py, agent_data/escalations.py), area `escalations`:
-// Escalations' SQL on `ai_pending_input` and `ai_escalation_deliveries` (flows/escalations.ts),
-// and FlowQueue's read of a run's child entries (flows/queue.ts). Each caller uses its own SQL
-// until the API lists the area (D9). Who may answer stays Escalations' check; every write of an
+// Escalations' reads and writes of `ai_pending_input` and `ai_escalation_deliveries` (flows/escalations.ts),
+// and FlowQueue's read of a run's child entries (flows/queue.ts). Who may answer stays Escalations' check; every write of an
 // answer or a delivery names the parent session again, so it moves nothing of another session's
 // (the hop's timeout sweep and the record of a run's own calls sent name none).
 //

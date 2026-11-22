@@ -54,8 +54,9 @@ The rules for adding a migration are in the root
   for `migrations_agent/` under the lock "SCADAGNT" (`:49`), with lock and statement
   timeouts, and records each file's SHA-256 in `ai_migrations`. A changed file stops the
   start with `AgentMigrationChecksumError` (`:139-149`). The API runs it right after the
-  backend's (`scadbuddy/main.py:2166`). The agent itself only waits until the ledger
-  holds every file in `agent/src/db/expected-migrations.json` (see
+  backend's (`scadbuddy/main.py:2166`). The agent waits for no ledger (#5299 step 12); the
+  agent tests' file list is `agent/test/support/expected-migrations.json`, which
+  `agent/test/schema.test.ts` checks against this runner (see
   [`agent/CLAUDE.md`](../../agent/CLAUDE.md)).
 
 ### The CRUD service

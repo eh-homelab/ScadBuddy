@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto'
 import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -13,7 +12,6 @@ import { originPolicy } from '../src/http/origins.js'
 import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import { CAPABILITIES_PATH } from '../src/routes/capabilities.js'
 import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { TOOL_TIER_ACTIVITY } from '../src/temporal/toolTier.js'
@@ -31,7 +29,6 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // run a lowered outward tool with no approval recorded") over the same store. A remote
 // tool's tier at the classic seam is capabilities.gates.pg.test.ts.
 
-const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
 const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const signal = new AbortController().signal
@@ -48,7 +45,6 @@ function rig() {
     access: access as never,
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
-    kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
     remoteAddress: () => peer.address,
@@ -180,7 +176,6 @@ describe('builtin:browser switched off, at every gate (#4757)', () => {
       access: access as never,
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
-      kek: { ok: true, kek },
       credentials: new MemoryCredentials(),
       testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
       remoteAddress: () => '127.0.0.1',

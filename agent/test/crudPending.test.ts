@@ -1,10 +1,9 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { CrudPending, IDS_MAX } from '../src/gate/crudPending.js'
 import { REQUEST_ID_MAX } from '../src/gate/crudStore.js'
 import { cancelOrphanedEntries, PendingInputSweep } from '../src/gate/sweep.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
-import { PgApprovalRecords } from '../src/temporal/toolActivities.js'
+import { RecordedApprovals } from '../src/temporal/toolActivities.js'
 
 // The gate's pending input through the API's CRUD routes (#5299 step 10, area `pending-input`),
 // against a fake API that answers as backend api/crud_agent_pending.py does (its tests,
@@ -38,14 +37,6 @@ class FakeApi {
 }
 
 /** SQL that must never be reached. */
-const noSql = new Proxy(() => undefined, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
 
 function pending(): { api: FakeApi; crud: CrudPending } {
   const api = new FakeApi()
@@ -167,10 +158,9 @@ describe('the pending input through the CRUD routes', () => {
       { removed: 1, logged: [batch] },
     )
     const sweep = new PendingInputSweep({
-      sql: noSql,
       events,
       describe: (workflowId) => Promise.resolve(workflowId === 'w-open' ? 'open' : 'closed'),
-      routes: { crud, use: () => true },
+      routes: crud,
       minAgeS: 5,
       recheckS: 9,
     })
@@ -183,19 +173,19 @@ describe('the pending input through the CRUD routes', () => {
     expect(told).toEqual([[SID, batch.events, [7]]])
   })
 
-  it("cancels a stopped session's entries with its reason, and nothing on the SQL", async () => {
+  it("cancels a stopped session's entries with its reason", async () => {
     const { api, crud } = pending()
     api.answers.push({ removed: 0, logged: [] })
     const events = { committed: () => undefined } as unknown as EventLog
-    expect(await cancelOrphanedEntries({ sql: noSql, events, routes: { crud, use: () => true } }, { sessionId: SID }, 'stopped')).toBe(0)
+    expect(await cancelOrphanedEntries({ events, routes: crud }, { sessionId: SID }, 'stopped')).toBe(0)
     expect(api.seen[0]?.body).toEqual({ session_id: SID, reason: 'stopped' })
   })
 
   it("counts an approval only from the API's answer for this call", async () => {
     const { api, crud } = pending()
     const grants = { grantInForce: (id: string) => Promise.resolve(id === 'g-live') }
-    const records = new PgApprovalRecords(noSql, grants, { crud, use: () => true })
-    const call = { inputHash: HASH } as Parameters<PgApprovalRecords['approved']>[1]
+    const records = new RecordedApprovals(grants, crud)
+    const call = { inputHash: HASH } as Parameters<RecordedApprovals['approved']>[1]
     api.answers.push(
       { responder: null },
       { responder: { kind: 'browser', id: 'browser', label: 'You' } },

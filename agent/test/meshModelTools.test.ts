@@ -4,7 +4,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { pinnedOutward } from '../src/tools/pinnedOutward.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
-import type { SessionFiles } from '../src/workspace/store.js'
+import type { SessionFiles } from './support/sql/sessionFiles.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { memoryWorkspace } from './helpers/workspace.js'
 

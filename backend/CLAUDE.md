@@ -52,7 +52,7 @@ credential, falling back to its view on a 404 while it has a database URL; other
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
 (the projects, render and print workers, #5298) takes `exchange_source` instead: the exchange
 only, with no view, and no proof refuses its start. The agent's `ExchangeCredential` reads no
-view on a 404 either (#6501); without a proof it still reads its view until the agent PR of #5299 step 12.
+view either (#6501), and the agent refuses to start without a proof (#5299 step 12).
 `ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
@@ -214,11 +214,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   start after the backend's, `main._migrate_agent_at_start`; root CLAUDE.md "Migrations
   (#491)"; a test's app skips them unless the test is marked `agent_migrations`,
   `tests/conftest.py`; a table or other object an agent migration creates belongs to the
-  role the API connects as, not the agent's. Prod's API and agent connect as one role, so
-  nothing changes there; with a role per caller, the agent could not use what a later file
-  makes (nothing grants it, and since #6501 the agent grants the API's role nothing
-  either), so such a deployment keeps the API and the agent on one role
-  until the agent's data moves behind CRUD routes (#5299)); the render worker holds no database (#5298,
+  role the API connects as; the agent has no SQL client and reaches them only through the
+  API's CRUD routes (#5299 step 12), and the API revokes its old role `scadbuddy_agent` at
+  every start (`auth/revoke.py` `RETIRED_ROLES`, PR #6906)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
   every start, `auth/revoke.py`): it reads the store settings and
   writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
@@ -359,7 +357,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
   and read. For `api/crud_agent_workspace.py` (area `workspace`, #5299 step 7): `workspace.py`
   is the agent's `workspace/store.ts` `SessionFiles` on the API, with the sealing
-  (`seal_file`, `open_file`: the agent's `workspace/sealing.ts` format) and the file keys
+  (`seal_file`, `open_file`; the agent's tests keep a copy of the format, `agent/test/support/sql/workspaceSealing.ts`) and the file keys
   wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
   audit row: the key never leaves the API) or the KEK; each write's row, its blob's
   `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one
@@ -421,13 +419,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and the running sweep's end of a lost turn only at the `event_seq` it read; a write waits at most
   `LOCK_TIMEOUT_MS` (10 s) for the row's lock, else 503 `row_busy`, and a call at most
   `POOL_WAIT_S` (10 s) for a connection, else 503 `pool_busy` (tests
-  `tests/crud/test_crud_agent_turns.py`; the agent's `test/turnRowsParity.pg.test.ts` runs one
-  scenario both ways). `edits.py` is an edit of a session, for `api/crud_agent_edits.py` (area
+  `tests/crud/test_crud_agent_turns.py`). `edits.py` is an edit of a session, for `api/crud_agent_edits.py` (area
   `session-edits`, #6449): the agent's `PgEditRows` transaction, under the row's lock and only
   while the principal owns it, with its warm eviction, an archive's `done` summaries dismissed and
   their events; a newly done session needs `told`, checked last (`untold`), so that answer means
   the edit would pass: the agent then tells its workflow and sends it again (tests
-  `tests/crud/test_crud_agent_edits.py`; the agent's `test/editRowsParity.pg.test.ts`).
+  `tests/crud/test_crud_agent_edits.py`).
 - The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
   `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
   `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
@@ -460,8 +457,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   session events as the agent did, appends them in the write's transaction, and answers them
   (`logged`), which the agent hands to its event log. A decide that must know the row's run is
   live answers `live_check` and writes nothing, and the agent asks again naming the run it found
-  running. Tests `tests/crud/test_crud_agent_gate.py`, `test_gate_vectors.py`; the agent's
-  `test/gateBackend.pg.test.ts` checks the port writes what the agent's SQL writes.
+  running. Tests `tests/crud/test_crud_agent_gate.py`, `test_gate_vectors.py`.
   `api/crud_agent_pending.py` (area `pending-input`) over `agent_data/pending_input.py` is the
   rest of the gate's SQL statement for statement: the agent's `gate/projection.ts` reads, the
   orphan sweep (`gate/sweep.ts`; each cancel one transaction with its events, the session's

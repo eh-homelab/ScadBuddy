@@ -1,7 +1,6 @@
 import type { Hono } from 'hono'
 import type { AppDeps } from '../app.js'
 import { aiStatus, type AiStatus } from '../aiStatus.js'
-import { checkData } from '../api/dataHealth.js'
 import type { WorkspaceBytesStatus } from '../workspace/store.js'
 import { uiReadProblem } from './guard.js'
 import type { RouteModule } from './module.js'
@@ -29,7 +28,7 @@ export type AiStatusView = {
   chat?: 'refused'
   /** When no credential is usable now but one is rate limited: the soonest one is usable again (#1093). */
   recovers_at?: string
-  /** Where workspace files' bytes go (#4789): the blob store, Postgres, or nowhere and why. */
+  /** Where workspace files' bytes go (#4789): the blob store, the API's database, or nowhere and why. */
   workspace_files?: WorkspaceBytesStatus
 }
 
@@ -43,7 +42,6 @@ declare module '../app.js' {
 /** The words the UI shows for an AiStatus other than `enabled`. */
 export function statusReason(ai: AiStatus, recoversAt?: string): string | undefined {
   if (ai === 'enabled') return undefined
-  if (ai === 'disabled (no database)') return 'The agent service has no database (SCADBUDDY_DATABASE_URL is not set).'
   if (ai === 'disabled (no Claude credential)') return 'No Claude credential is configured yet.'
   if (ai === 'unavailable (every Claude credential is rate limited)') {
     return `Every Claude credential is rate limited${recoversAt ? `; the first is usable again at ${recoversAt}` : ''}.`
@@ -58,7 +56,7 @@ export function statusReason(ai: AiStatus, recoversAt?: string): string | undefi
     return 'Every Claude credential was refused and is disabled; reset one, or save a new secret for it, in Settings.'
   }
   if (ai.startsWith('disabled (no key-encryption key')) {
-    return `The agent service has no key-encryption key, so it cannot store a Claude credential (${ai.slice('disabled (no key-encryption key: '.length, -1)}).`
+    return `The API has no key-encryption key, so it cannot store a Claude credential (${ai.slice('disabled (no key-encryption key: '.length, -1)}).`
   }
   const inner = ai.replace(/^unavailable \((.*)\)$/, '$1')
   return `The agent service is unavailable: ${inner}.`
@@ -66,8 +64,8 @@ export function statusReason(ai: AiStatus, recoversAt?: string): string | undefi
 
 export function registerStatusRoute(app: Hono, deps: AppDeps): void {
   app.get('/api/v1/ai/status', async (c) => {
-    const data = await checkData(deps.database)
-    const { ai, recoversAt } = await aiStatus(deps, data?.ok, data?.apiUnanswered)
+    const [dataOk, ready] = await Promise.all([deps.database.ping(), deps.database.ready()])
+    const { ai, recoversAt } = await aiStatus(deps, dataOk, ready)
     const chat = deps.sessions !== undefined && deps.upgradeWebSocket !== undefined
     const state = ai === 'enabled' ? 'enabled' : ai.startsWith('disabled') ? 'disabled' : 'unavailable'
     const refused = uiReadProblem(c, deps.origins, deps.remoteAddress, 'The assistant')

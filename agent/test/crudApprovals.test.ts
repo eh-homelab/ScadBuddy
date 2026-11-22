@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import { CrudApprovals } from '../src/approvals/crudApprovals.js'
 import { ApprovalError, ApprovalService } from '../src/approvals/service.js'
@@ -33,22 +32,14 @@ class FakeApi {
   }
 }
 
-const noSql = new Proxy(() => undefined, {
-  apply: () => {
-    throw new Error('ran SQL')
-  },
-  get: () => {
-    throw new Error('ran SQL')
-  },
-}) as unknown as Sql
 
 function service(api: FakeApi, told: unknown[][] = []): ApprovalService {
   const events = { committed: (...args: unknown[]) => told.push(args) } as unknown as EventLog
   return new ApprovalService({
-    sql: noSql,
     events,
     settings: { get: <T>() => Promise.resolve(300 as T) },
-    routes: { crud: new CrudApprovals({ baseUrl: BASE, fetch: api.fetch }), use: () => true },
+    routes: new CrudApprovals({ baseUrl: BASE, fetch: api.fetch }),
+    hashKey: () => Buffer.alloc(32, 1),
   })
 }
 

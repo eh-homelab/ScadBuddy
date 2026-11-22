@@ -254,8 +254,8 @@ document's claim and the code. These specs and docs were not changed in this PR.
   `agent/src/routes/`.
 - settings-and-tool-access `:264-274` access sources / also `builtin:claude-code`
   (`agent/src/access/model.ts:27`).
-- `docs/ai/README.md:60` `agent/src/db/migrations.ts` / no such file; the agent waits in
-  `agent/src/db/schema.ts`.
+- `docs/ai/README.md:60` `agent/src/db/migrations.ts` / no such file; the API applies the
+  agent's migrations and the agent waits for no ledger (#5299 step 12).
 - `docs/ai/README.md:50-51` tools run in-process / a `ToolCall` workflow per call when
   Temporal is set (`agent/src/tools/projections.ts:136-147`).
 - `docs/ai/operating.md:385-389` Claude Code's env is `CLAUDE_CONFIG_DIR`, `HOME`, `PATH` /
@@ -263,11 +263,6 @@ document's claim and the code. These specs and docs were not changed in this PR.
   (`agent/src/harness/options.ts:61`, `agent/src/harness/run.ts:515-521`).
 - `docs/ai/security.md:558`, `:985` the credential reaches Claude Code through `env` /
   Claude Code gets only a leased gateway token (`agent/src/gateway/server.ts:21-29`).
-- `agent/CLAUDE.md:9` "run no SQL on a backend table" / the agent still reads two backend
-  views over SQL as fallbacks: `auth_sessions_agent` until the API lists area
-  `auth-sessions`, and `service_credentials_agent` with no proof file
-  (`agent/src/auth/browserSession.ts:58`, `agent/src/api/serviceCredential.ts:71`). The
-  same file describes both fallbacks further down.
 
 **`docs/security/trust-boundaries.md`**
 

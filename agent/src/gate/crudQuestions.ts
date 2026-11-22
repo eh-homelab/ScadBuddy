@@ -9,13 +9,13 @@ import type { AwayWindow, DoneTouch } from './doneSummary.js'
 
 // The `done` summaries and the attention limits through the API's CRUD routes (#5299 step 10;
 // backend api/crud_agent_questions.py, agent_data/questions.py), area `questions`. QuestionService
-// (gate/questions.ts) calls these once the API lists the area, and its own SQL until then (D9).
+// (gate/questions.ts) calls only these.
 //
 // The summary's text stays the agent's: `doneFacts` reads what the turn touched, the service
 // redacts the turn's secrets and writes the text, and `done` posts it. The post lands only while
 // the turn's placement (`attempt`, `turnId`) holds the session, checked in the post's transaction
 // on the API, with its events and audit rows. The attention count is read only under the lease
-// `attention-rate`, which stands for the SQL path's advisory lock: the API answers `lease-lost`,
+// `attention-rate`: the API answers `lease-lost`,
 // never a count, to a caller that does not hold it.
 //
 // Ids travel in the body or the query string, never the path. An id no row can hold is not sent.

@@ -38,11 +38,11 @@ describe('InMemoryTokenStore (the /mcp tests’ stand-in; Postgres is test/token
   })
 })
 
-describe('FailClosedTokenStore (no database configured)', () => {
+describe('FailClosedTokenStore (no token store wired)', () => {
   it('verifies nothing and cannot mint', async () => {
     const store = new FailClosedTokenStore()
     expect(await store.verify()).toBeNull()
-    await expect(store.mint()).rejects.toThrow(/SCADBUDDY_DATABASE_URL/)
+    await expect(store.mint()).rejects.toThrow(/stored by the API/)
     expect(await store.list()).toEqual([])
     expect(await store.revoke()).toBe(false)
   })

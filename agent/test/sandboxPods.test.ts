@@ -215,6 +215,7 @@ describe('sandbox pods on Kubernetes', () => {
 
 describe('the sandbox configuration', () => {
   const all = {
+    SCADBUDDY_SERVICE_BOOTSTRAP_FILE: '/b',
     SCADBUDDY_SANDBOX_NAMESPACE: 'scadbuddy-sandbox',
     SCADBUDDY_SANDBOX_IMAGE: 'ghcr.io/eh-homelab/scadbuddy-sandbox:sha-1',
     SCADBUDDY_SANDBOX_EGRESS_PROXY: 'http://scadbuddy-sandbox-egress.scadbuddy-sandbox:3128',
@@ -222,7 +223,7 @@ describe('the sandbox configuration', () => {
     SCADBUDDY_SANDBOX_KUBE_CA_FILE: '/var/run/sandbox/ca.crt',
   }
   it('is all five variables or none', () => {
-    expect(loadConfig({}).sandbox).toBeUndefined()
+    expect(loadConfig({ SCADBUDDY_SERVICE_BOOTSTRAP_FILE: '/b' }).sandbox).toBeUndefined()
     expect(loadConfig(all).sandbox).toEqual({
       namespace: 'scadbuddy-sandbox',
       image: all.SCADBUDDY_SANDBOX_IMAGE,
@@ -230,7 +231,7 @@ describe('the sandbox configuration', () => {
       tokenFile: '/var/run/sandbox/token',
       caFile: '/var/run/sandbox/ca.crt',
     })
-    expect(() => loadConfig({ SCADBUDDY_SANDBOX_NAMESPACE: 'x' })).toThrow(ConfigError)
+    expect(() => loadConfig({ SCADBUDDY_SERVICE_BOOTSTRAP_FILE: '/b', SCADBUDDY_SANDBOX_NAMESPACE: 'x' })).toThrow(ConfigError)
     expect(() => loadConfig({ ...all, SCADBUDDY_SANDBOX_EGRESS_PROXY: 'https://proxy:3128' })).toThrow(/http:\/\/<host>:<port>/)
     expect(() => loadConfig({ ...all, SCADBUDDY_SANDBOX_NAMESPACE: 'Not_A_Namespace' })).toThrow(/namespace/)
     expect(() => loadConfig({ ...all, SCADBUDDY_SANDBOX_KUBE_CA_FILE: 'ca.crt' })).toThrow(/absolute/)

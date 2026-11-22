@@ -1,15 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { AuditLog } from '../src/audit/log.js'
-import type { Database } from '../src/db.js'
-import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
+import type { Database } from './support/database.js'
+import { sessionImage } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { TranscriptStore } from '../src/sessions/store.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, costStateEntry, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { PgTranscriptRows } from './support/sql/transcriptRows.js'
+import { hostStores } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // An AgentSession placement's spend (sessions/turnHost.ts) over a `cost-state` its process
 // carries in. The real SDK loads the transcript a resume restores from through the session
@@ -60,14 +63,14 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
    */
   async function place(reported: number, { carried, loads = true }: { carried: 'before' | 'between' | 'none'; loads?: boolean }) {
     let id = ''
-    const store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
+    const store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
     // One Claude Code restores (warm.ts `restoredCostUsd`): this session's, whole.
     const costState = () => store.append({ projectKey: '', sessionId: id }, [costStateEntry(id, R)])
     const scripted = scriptedRunner(() => ({ reply: 'carried on', costUsd: reported }), {
       loads,
       ...(carried === 'between' ? { beforeLoad: costState } : {}),
     })
-    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: new AuditLog({ sql: db.sql }) })
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: sqlAuditLog(db.sql) })
     const { session } = await m.start(browser, { origin: 'chat' })
     id = session.id
     await store.append({ projectKey: '', sessionId: id }, [{ type: 'user', uuid: randomUUID(), message: { role: 'user', content: 'outlast the restart' } }])
@@ -78,7 +81,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
         cost_usd = ${R}, updated_at = now()
       WHERE id = ${id}`
     const deltas: number[] = []
-    const host = new TurnHost({ core: m.turnCore, sql: recording(db.sql, deltas), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
+    const host = new TurnHost({ core: m.turnCore, ...hostStores(recording(db.sql, deltas)), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
     const result = await host.run(
       { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'outlast the restart', images: [], system_append: null } },
       { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
@@ -118,7 +121,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
   it('a PDF blob the turn names reaches the SDK user message as a document block (#6267)', async () => {
     const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.from('invoice')])
     const scripted = scriptedRunner(() => ({ reply: 'read it', costUsd: R }))
-    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: new AuditLog({ sql: db.sql }) })
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: sqlAuditLog(db.sql) })
     const { session } = await m.start(browser, { origin: 'chat' })
     const id = session.id
     const blobs = new SessionBlobs(db.sql)
@@ -128,7 +131,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
     await db.sql`
       UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${id}`
-    const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: blobs, hostQueue: 'agent-sessions.pod-a' })
+    const host = new TurnHost({ core: m.turnCore, ...hostStores(db.sql), images: blobs, hostQueue: 'agent-sessions.pod-a' })
     const result = await host.run(
       { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'import this', images: [{ name: blob.name, mediaType: 'application/pdf' }], system_append: null } },
       { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },

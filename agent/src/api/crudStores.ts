@@ -6,10 +6,9 @@ import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError } from './crudRead.js'
 // api/crud_agent_stores.py, crud_agent_notify.py, crud_agent_access.py, crud_agent_plugins.py
 // and crud_agent_packages.py): activity kinds, browser origins, session tabs, tab owners, tab
 // images, pairings, MCP tokens, Web Push and notification channels (`notify`), tool access and
-// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages. Each store keeps its interface; its `Crud…` class is that
-// interface over the routes, one route per method, and `gated` picks it per call once the API
-// lists the store's area (api/crudAreas.ts), the SQL store until then (#5299 D9). Old API pods
-// may still answer during a roll, so the SQL stays until every pod lists the areas.
+// listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages. Each
+// store keeps its interface; its `Crud…` class is that interface over the routes, one route per
+// method. The agent has no SQL path (#5299 step 12).
 
 /** The areas of the small stores (backend api/crud_areas.py `CRUD_AREAS["agent"]`). */
 export const STORE_AREAS = [
@@ -25,20 +24,6 @@ export const STORE_AREAS = [
   'plugin-packages',
 ] as const
 export type StoreArea = (typeof STORE_AREAS)[number]
-
-/**
- * `crud` while `use()` holds, `sql` otherwise, chosen at each method call: an object with
- * `sql`'s shape whose every method runs on the one picked then.
- */
-export function gated<T extends object>(sql: T, crud: T, use: () => boolean): T {
-  return new Proxy(sql, {
-    get(_target, prop) {
-      const pick = use() ? crud : sql
-      const value: unknown = Reflect.get(pick, prop, pick)
-      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(pick) : value
-    },
-  })
-}
 
 /** The `detail` and `reason` of a problem response. */
 async function problemOf(response: Response): Promise<{ detail: string; reason?: string }> {

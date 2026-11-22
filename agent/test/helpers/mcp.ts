@@ -66,7 +66,6 @@ export function baseDeps(overrides: Partial<AppDeps> = {}): AppDeps {
   return {
     database: { ping: async () => true, ready: async () => true },
     backend: async () => true,
-    kek: { ok: false, reason: 'not needed by /mcp tests' },
     credentials: new MemoryCredentials(),
     testConnection: async () => ({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }),
     origins: ORIGINS,

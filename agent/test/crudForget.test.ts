@@ -1,14 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { FORGET_AREAS } from '../src/api/crudAreas.js'
-import type { Database } from '../src/db.js'
-import { kekFromBase64, openBytes } from '../src/secrets.js'
+import { openBytes } from '../src/secrets.js'
 import { sessionImage } from '../src/sessions/blobs.js'
-import { CrudSubjectKeys, forgetSubject, gatedKeyDeletes, type KeyDeletes } from '../src/sessions/forget.js'
-import { CrudFlowBlobs, type FlowBlobStore, flowBlobContext, gatedFlowBlobs } from '../src/temporal/flowBlobs.js'
-import { type PayloadKeys, PgPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.js'
-import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { CrudSubjectKeys, type ForgetDeps, forgetSubject } from '../src/sessions/forget.js'
+import { ForksNeedKeys } from '../src/sessions/store.js'
+import { CrudFlowBlobs, flowBlobContext } from '../src/temporal/flowBlobs.js'
+import { type PayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.js'
 
 // Forgetting a subject, the key deletes no forget makes, and a flow run's images through the API's
 // CRUD routes (#5299 step 6, area `forget`), against a fake API that keeps them in memory as the
@@ -91,15 +89,14 @@ class FakeApi {
   }
 }
 
-/** A `Sql` that fails the test when anything reaches it: the route did the work. */
-const NO_SQL = new Proxy(() => undefined, {
-  apply: () => {
-    throw new Error('the SQL was used')
-  },
-  get: () => {
-    throw new Error('the SQL was used')
-  },
-}) as unknown as Sql
+/** Step 0 and step 3's routes, for a forget that should reach neither (a flow run) or record step 3. */
+function routes(rowsForgotten: string[] = []): Pick<ForgetDeps, 'tasks' | 'reads' | 'rows'> {
+  return {
+    tasks: { list: async () => [], finish: async () => true },
+    reads: { openCalls: async () => [] },
+    rows: { forget: async (id: string) => (rowsForgotten.push(id), 2) },
+  }
+}
 
 describe('area forget', () => {
   it('is the one area of step 6', () => {
@@ -165,25 +162,6 @@ describe('CrudFlowBlobs', () => {
     await expect(blobs.get(subject, sessionImage('image/png', PNG).name)).rejects.toThrow(/no CRUD route answered/)
   })
 
-  it('goes through the routes once the area is listed, and through SQL until then', async () => {
-    const calls: string[] = []
-    const pg: FlowBlobStore = {
-      put: async () => (calls.push('pg.put'), []),
-      get: async () => (calls.push('pg.get'), undefined),
-    }
-    let listed = false
-    const gated = gatedFlowBlobs(pg, blobs, () => listed)
-    const subject = `flow-${randomUUID()}`
-    const png = sessionImage('image/png', PNG)
-    await gated.put(subject, [png])
-    await gated.get(subject, png.name)
-    expect(calls).toEqual(['pg.put', 'pg.get'])
-    expect(api.seen).toEqual([])
-    listed = true
-    expect(await gated.put(subject, [png])).toEqual([png.name])
-    expect(await gated.get(subject, png.name)).toEqual({ mediaType: 'image/png', bytes: PNG })
-    expect(calls).toHaveLength(2)
-  })
 })
 
 describe('CrudSubjectKeys', () => {
@@ -213,87 +191,40 @@ describe('CrudSubjectKeys', () => {
     await expect(crud.forget(flow)).rejects.toThrow(/no CRUD route answered/)
   })
 
-  it('goes through the routes once the area is listed, and through SQL until then', async () => {
-    const api = new FakeApi()
-    const calls: string[] = []
-    const pg: KeyDeletes = {
-      dropBridgeKey: async () => void calls.push('pg.drop'),
-      sweep: async () => (calls.push('pg.sweep'), 0),
-    }
-    let listed = false
-    const deletes = gatedKeyDeletes(pg, new CrudSubjectKeys(BASE, { fetch: api.fetch }), () => listed)
-    await deletes.dropBridgeKey(`bridge-${randomUUID()}`)
-    expect(await deletes.sweep()).toBe(0)
-    listed = true
-    await deletes.dropBridgeKey(`bridge-${randomUUID()}`)
-    expect(await deletes.sweep()).toBe(3)
-    expect(calls).toEqual(['pg.drop', 'pg.sweep'])
-    expect(api.seen).toHaveLength(2)
-  })
 
-  it("is forgetSubject's step 1 for a flow run, with no SQL of its own", async () => {
+  it("is forgetSubject's step 1 for a flow run", async () => {
     const api = new FakeApi()
     const flow = `flow-${randomUUID()}`
     api.keys.add(flow)
     const dropped: string[] = []
     const done = await forgetSubject(
-      { sql: NO_SQL, crud: new CrudSubjectKeys(BASE, { fetch: api.fetch }), keys: { forget: (s) => void dropped.push(s), keyFor: () => Promise.reject(new Error('unused')) } },
+      { crud: new CrudSubjectKeys(BASE, { fetch: api.fetch }), keys: { forget: (s) => void dropped.push(s) }, ...routes() },
       flow,
     )
     expect(done).toEqual({ key: true, workflow: 'not_reached', rows: 0 })
     expect(api.forgotten.has(flow)).toBe(true)
-    // This process's cached copy goes before and after, as with the SQL.
+    // This process's cached copy goes before and after.
     expect(dropped).toEqual([flow, flow])
   })
 })
 
-describe.skipIf(!TEST_DATABASE_URL)(`forgetSubject with the route${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
-  let db: Database
-  let drop: () => Promise<void>
-  beforeEach(async () => {
-    ;({ db, drop } = await throwawayDatabase())
-    expect(await db.ready()).toBe(true)
-  })
-  afterEach(async () => {
-    await drop()
-  })
-
-  it('forgets a session with forks in its own transaction when the route refuses it', async () => {
-    const kek = kekFromBase64(randomBytes(32).toString('base64'))
-    const keys = new PgPayloadKeys(db.sql, kek)
-    const subject = `session-${randomUUID()}`
-    await keys.keyFor(subject, true)
-    const asked: string[] = []
-    const crud = { forget: async (s: string) => (asked.push(s), 'forks' as const) }
-    const done = await forgetSubject({ sql: db.sql, keys, crud }, subject)
-    expect(asked).toEqual([subject])
-    expect(done.key).toBe(true)
-    expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
-    expect(await db.sql`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`).toHaveLength(1)
+describe('forgetSubject through the routes', () => {
+  it('forgets a session: its key, then its rows', async () => {
+    const api = new FakeApi()
+    const id = randomUUID()
+    api.keys.add(`session-${id}`)
+    const rowsForgotten: string[] = []
+    const done = await forgetSubject({ crud: new CrudSubjectKeys(BASE, { fetch: api.fetch }), ...routes(rowsForgotten) }, `session-${id}`)
+    expect(done).toEqual({ key: true, workflow: 'not_reached', rows: 2 })
+    expect(rowsForgotten).toEqual([id])
   })
 
-  it('needs no KEK here for a session with forks once the route copies their ranges (#5299 step 9)', async () => {
-    const parent = randomUUID()
-    const fork = randomUUID()
-    for (const [id, parentId, cut] of [
-      [parent, null, null],
-      [fork, parent, 2],
-    ] as const) {
-      await db.sql`
-        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, fork_parent_id, fork_cut)
-        VALUES (${id}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'idle', 10, 1, ${parentId}, ${cut})`
-    }
-    const asked: string[] = []
-    // As the API does: the fork takes its range and its link goes, in the forget's transaction.
-    const crud = {
-      forget: async (s: string) => {
-        asked.push(s)
-        await db.sql`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL WHERE id = ${fork}`
-        return true
-      },
-    }
-    const done = await forgetSubject({ sql: db.sql, crud }, `session-${parent}`)
-    expect(asked).toEqual([`session-${parent}`])
-    expect(done.key).toBe(true)
+  it('throws ForksNeedKeys and deletes nothing more when the API has no KEK for its forks', async () => {
+    const api = new FakeApi()
+    const id = randomUUID()
+    api.forks.add(`session-${id}`)
+    const rowsForgotten: string[] = []
+    await expect(forgetSubject({ crud: new CrudSubjectKeys(BASE, { fetch: api.fetch }), ...routes(rowsForgotten) }, `session-${id}`)).rejects.toBeInstanceOf(ForksNeedKeys)
+    expect(rowsForgotten).toEqual([])
   })
 })

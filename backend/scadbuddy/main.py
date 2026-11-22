@@ -1263,9 +1263,9 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 def _migrate_agent_at_start(state: AppState) -> None:
     """The agent's migrations (`render/agent_migrations.py`, #5299 D6), after the
-    backend's: the agent no longer migrates, and waits until `ai_migrations` holds the
-    files it expects (`agent/src/db/schema.ts`). Neither set reads the other's tables, so
-    the order is the start's, not the schema's. A failure stops the start."""
+    backend's: the agent neither migrates nor waits for its ledger (#5299 step 12). Neither
+    set reads the other's tables, so the order is the start's, not the schema's. A failure
+    stops the start."""
     with state.settings_store.pool.connection() as conn:
         applied = migrate_agent(conn)
     if applied:

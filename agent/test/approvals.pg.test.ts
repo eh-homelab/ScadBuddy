@@ -1,9 +1,8 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  approvalHashKey,
   ApprovalService,
   canonicalJson,
   DEFAULT_APPROVAL_EXPIRY_SECONDS,
@@ -13,21 +12,20 @@ import {
   summariseInput,
   sweepErrorText,
 } from '../src/approvals/service.js'
-import { AuditLog } from '../src/audit/log.js'
-import { SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
-import { kekFromBase64 } from '../src/secrets.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
 import { ChatConnection } from '../src/routes/chat.js'
-import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 import { respond } from '../src/routes/pendingInput.js'
+import { sqlSettings } from './support/sql/settings.js'
+import { sqlAuditLog, TEST_HASH_KEY } from './support/sql/audit.js'
+import { type BeforeAppend, SqlApprovals } from './support/sql/approvals.js'
 
 // The approval store and its rules without the SDK (#258): ai_approvals in
 // Postgres, expiry, visibility, the orphan paths, and the HTTP routes. Since plan
@@ -46,13 +44,6 @@ describe('input binding', () => {
     // Not a bare hash: another key gives another value, so the table alone does not reveal an input.
     expect(inputHash(Buffer.alloc(32, 8), 't', { a: 1 })).not.toBe(inputHash(key, 't', { a: 1 }))
     expect(inputHash(key, 't', { a: 1 })).not.toBe(createHash('sha256').update(canonicalJson({ tool: 't', input: { a: 1 } })).digest('hex'))
-  })
-
-  it('derives the key from the KEK, the same across restarts and different from the KEK', () => {
-    const kek = kekFromBase64(randomBytes(32).toString('base64'))
-    expect(approvalHashKey(kek).equals(approvalHashKey(kek))).toBe(true)
-    expect(approvalHashKey(kek)).toHaveLength(32)
-    expect(approvalHashKey(kek).equals(kek.key)).toBe(false)
   })
 
   it('summarises through scrubForLog: secrets and secret-named arguments never reach the summary', () => {
@@ -117,17 +108,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
   let drop: () => Promise<void>
   let m: SessionManager
   let values: Map<string, unknown>
+  /** A fault in the approvals' routes, in a write's transaction before its events are appended. */
+  let fault: BeforeAppend | undefined
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     values = new Map()
+    fault = undefined
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     m = manager({
       sql: db.sql,
       paths: await tempPaths(),
       run: runner,
       settings: { get: <T>(key: string) => Promise.resolve(values.get(key) as T) },
+      approvalRoutes: new SqlApprovals(db.sql, { beforeAppend: (sessionId, events) => fault?.(sessionId, events) ?? Promise.resolve() }),
     })
   })
   afterEach(async () => {
@@ -151,8 +146,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('reads the expiry window from ai_settings, within bounds', async () => {
     expect(await m.approvals.expirySeconds()).toBe(DEFAULT_APPROVAL_EXPIRY_SECONDS)
-    const settings = new SettingsStore(db.sql)
-    const service = new ApprovalService({ sql: db.sql, events: m.events, settings })
+    const settings = sqlSettings(db.sql)
+    const service = new ApprovalService({ routes: new SqlApprovals(db.sql), events: m.events, settings, hashKey: () => TEST_HASH_KEY })
     await settings.set(SETTING_APPROVAL_EXPIRY_SECONDS, 120)
     expect(await service.expirySeconds()).toBe(120)
     await settings.set(SETTING_APPROVAL_EXPIRY_SECONDS, 1)
@@ -229,14 +224,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const second = await orphan(agentB)
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second'`
     const boom = new Error('invalid input syntax for type uuid: "f"')
-    const append = m.events.append.bind(m.events)
     let failed = false
-    m.events.append = async (sessionId, events, tx) => {
+    // The first one's expiry fails in its transaction, so it rolls back.
+    fault = async (sessionId) => {
       if (sessionId === first.session.id && !failed) {
         failed = true
         throw boom
       }
-      return append(sessionId, events, tx)
     }
     await expect(m.approvals.expireDue()).rejects.toBe(boom)
     const decisions = async () =>
@@ -256,10 +250,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id IN ${db.sql(stuck.map((o) => o.approval.id))}`
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${later.approval.id}`
     const failing = new Set(stuck.map((o) => o.session.id))
-    const append = m.events.append.bind(m.events)
-    m.events.append = async (sessionId, events, tx) => {
-      if (sessionId && failing.has(sessionId)) throw new Error('boom')
-      return append(sessionId, events, tx)
+    fault = async (sessionId) => {
+      if (failing.has(sessionId)) throw new Error('boom')
     }
     const thrown = await m.approvals.expireDue(2).then(
       () => undefined,
@@ -356,7 +348,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   // #1122: like an answer over the socket (questions.pg.test.ts), a decision records where it came from.
   it('a decision made over the chat socket is audited with the socket client address', async () => {
-    const audit = new AuditLog({ sql: db.sql })
+    const audit = sqlAuditLog(db.sql)
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, audit })
     const { session, approval } = await orphan(browser)
@@ -374,18 +366,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('a decision racing create cannot log approval.resolved before approval.required', async () => {
     const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    // An event log that tries to decide the approval just before
-    // `approval.required` is written: the fastest possible decision.
+    // Routes that try to decide the approval just before `approval.required` is
+    // written in the create's transaction: the fastest possible decision.
     let raced: unknown
-    const events = Object.create(m.events) as EventLog
-    events.append = async (sessionId, batch, tx) => {
-      const required = batch.find((e) => e.type === 'approval.required')
-      if (required && 'id' in required) {
-        raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
-      }
-      return m.events.append(sessionId, batch, tx)
-    }
-    const service = new ApprovalService({ sql: db.sql, events })
+    const routes = new SqlApprovals(db.sql, {
+      beforeAppend: async (_sessionId, batch) => {
+        const required = batch.find((e) => e.type === 'approval.required')
+        if (required && 'id' in required) {
+          raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
+        }
+      },
+    })
+    const service = new ApprovalService({ routes, events: m.events, hashKey: () => TEST_HASH_KEY })
     const approval = await service.create({
       sessionId: session.id,
       turnId: null,

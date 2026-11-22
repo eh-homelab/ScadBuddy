@@ -20,7 +20,7 @@ import type { WaitForTab } from '../tools/registry.js'
 import type { SessionImages, SessionImage } from './blobs.js'
 import type { EventLog } from './eventLog.js'
 import type { SessionRows } from './rows.js'
-import type { PostgresSessionStore } from './store.js'
+import type { TranscriptStore } from './store.js'
 import type { ClaimedSession, TurnOutcome, TurnPrincipal } from './manager.js'
 import { event, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
@@ -94,7 +94,7 @@ export type TurnCoreDeps = {
   /** The sessions' rows (rows.ts): a turn's claim as its placement reads it (turnHost.ts). */
   rows: Pick<SessionRows, 'get'>
   /** The transcript store (store.ts): whether a user entry landed after a placement's mark (turnHost.ts). */
-  transcripts: Pick<PostgresSessionStore, 'userLanded'>
+  transcripts: Pick<TranscriptStore, 'userLanded'>
   runner: Pick<TurnRunner, 'assemble'>
   warm: WarmSessions
   events: Pick<EventLog, 'append' | 'committed' | 'appendFenced'>

@@ -1,15 +1,15 @@
 import { readdir, readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-// #5299: the agent reads these backend tables only through the backend's CRUD routes
-// (flows/backendReads.ts; the event log's replay runs on the API, behind the change stream,
-// events/changeStream.ts), and its gate's run grant check runs on the
-// API (gate/crudStore.ts, step 10). The API takes back the grants of its role
-// `scadbuddy_agent` on them at every start (backend auth/revoke.py `RETIRED_ROLES`), but the
-// agent still connects as the database owner, so that revoke binds nothing until it loses its
-// database URL (#5299 step 12). Until then this test is the guard: no SQL of the agent names one.
+// #5299 step 12: the agent holds no database. Its data is behind the API's CRUD routes, and it
+// has no SQL client at all: no `src` file loads `postgres` (or any other Postgres driver), the
+// package is a test dependency only, and `src/db.ts` is gone. The tests may still seed and read
+// the `ai_*` tables over SQL (test/support/database.ts); `src` may not. The older guard stays:
+// no SQL in `src` names a backend table whose grants the API took back (backend auth/revoke.py
+// `RETIRED_ROLES` retires the agent's whole role now).
 const RETIRED = ['events', 'workflow_runs', 'workflow_run_decisions', 'flow_grants', 'flow_grant_uses']
 const SRC = fileURLToPath(new URL('../src', import.meta.url))
 // `\s+` spans line breaks, so a table name on the line after its keyword is found too.
@@ -87,5 +87,44 @@ describe('the backend tables whose grants the API took back', () => {
       for (const hit of naming(await readFile(file, 'utf8'))) found.push(`${relative(SRC, file)}:${hit}`)
     }
     expect(found).toEqual([])
+  })
+})
+
+/** The Postgres drivers a Node process could load. */
+const DRIVERS = ['postgres', 'pg', 'pg-native', '@neondatabase/serverless', 'slonik', 'kysely', 'knex']
+// `import … from 'x'`, `import 'x'`, `import('x')`, `require('x')`, `export … from 'x'`, a type import too.
+const LOADS = new RegExp(String.raw`(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"](${DRIVERS.map((d) => d.replace(/[/.@-]/g, '\\$&')).join('|')})['"]`, 'g')
+
+function loads(text: string): string[] {
+  return [...text.matchAll(LOADS)].map((m) => m[1]!)
+}
+
+describe('the agent has no SQL client (#5299 step 12)', () => {
+  it('finds a driver however it is loaded', () => {
+    expect(loads("import postgres, { type Sql } from 'postgres'")).toEqual(['postgres'])
+    expect(loads("import type { Sql } from 'postgres'")).toEqual(['postgres'])
+    expect(loads("const { Client } = require('pg')")).toEqual(['pg'])
+    expect(loads("const pg = await import('pg')")).toEqual(['pg'])
+    expect(loads("export { default } from 'knex'")).toEqual(['knex'])
+    expect(loads("import { x } from './postgres.js'\nimport y from 'postgresql-client-docs'")).toEqual([])
+  })
+
+  it('loads no Postgres driver anywhere in src', async () => {
+    const found: string[] = []
+    for (const file of await sources(SRC)) {
+      for (const driver of loads(await readFile(file, 'utf8'))) found.push(`${relative(SRC, file)}: ${driver}`)
+    }
+    expect(found).toEqual([])
+  })
+
+  it('ships none: a driver is at most a test dependency', async () => {
+    const pkg = JSON.parse(await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
+      dependencies?: Record<string, string>
+    }
+    expect(Object.keys(pkg.dependencies ?? {}).filter((name) => DRIVERS.includes(name))).toEqual([])
+  })
+
+  it('has no database module', () => {
+    expect(existsSync(join(SRC, 'db.ts'))).toBe(false)
   })
 })

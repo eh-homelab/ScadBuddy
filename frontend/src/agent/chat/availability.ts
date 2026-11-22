@@ -10,9 +10,10 @@ import { useEffect, useSyncExternalStore } from 'react'
  * States:
  * - `configured`: the agent is up and has a Claude credential. The assistant shows.
  * - `not_configured`: the agent answered but is switched off for a setup reason: no
- *   Claude credential yet, no key-encryption key, no database.
- * - `unavailable`: the agent answered but cannot serve, for example because its
- *   database is down, because it was started without its chat socket, or because
+ *   Claude credential yet, or the API has no key-encryption key.
+ * - `unavailable`: the agent answered but cannot serve, for example because the API
+ *   does not answer the agent's CRUD areas or timed out, because it was started
+ *   without its chat socket, or because
  *   this page would be refused by the chat socket's gate (`chat: 'refused'`: opened
  *   by LAN address or over plain HTTP rather than at the public HTTPS URL). The
  *   gate's verdict rides along with any state, `not_configured` too.

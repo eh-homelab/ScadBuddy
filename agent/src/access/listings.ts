@@ -1,5 +1,3 @@
-import type { Sql, TransactionSql } from 'postgres'
-import { type LockClient, type LockLease, TEST_LOCK_CONNECTIONS } from '../db.js'
 import { chunks, type CrudTarget, crudOf, CrudLeases, CrudPathError, type HeldLease, SOURCES_PER_CALL } from '../api/crudStores.js'
 import { CrudReadError } from '../api/crudRead.js'
 import { z } from 'zod'
@@ -198,73 +196,40 @@ function parseRow(row: Row): Listing | undefined {
   return { tools: parsed.data.map(listedTool), listed_at: row.listed_at.toISOString(), truncated: row.truncated }
 }
 
-/**
- * Where `ToolListings` keeps the listings while `use()` holds: the API's CRUD routes (area
- * `access`, #5299 step 5), with a lease row in place of the session advisory lock (#5299 D3).
- */
-export type RemoteListings = { crud: CrudToolListings; use: () => boolean }
-
 /** The lease key of a connection test of `source` (backend agent_data/leases.py). */
 export const listingLeaseKey = (source: string): string => `tool-listing:${source}`
 
+/** The connection tests one replica runs at once. */
+export const TESTS_AT_ONCE = 4
+
+/** The tool listings, kept by the API (area `access`). */
 export class ToolListings {
-  readonly #sql: Sql
-  readonly #locks: LockClient
-  readonly #remote: RemoteListings | undefined
+  readonly #crud: CrudToolListings
 
-  /** `locks`: the lock client (db.ts `Database.locks`). */
-  constructor(sql: Sql, locks: LockClient, remote?: RemoteListings) {
-    this.#sql = sql
-    this.#locks = locks
-    this.#remote = remote
-  }
-
-  #crud(): CrudToolListings | undefined {
-    return this.#remote?.use() ? this.#remote.crud : undefined
+  constructor(crud: CrudToolListings) {
+    this.#crud = crud
   }
 
   async get(source: string): Promise<Listing | undefined> {
-    const crud = this.#crud()
-    if (crud) return (await crud.read([source])).get(source)
-    const [row] = await this.#sql<Row[]>`
-      SELECT tools, listed_at, truncated FROM ai_tool_listings WHERE source = ${source}`
-    return row ? parseRow(row) : undefined
+    return (await this.#crud.read([source])).get(source)
   }
 
   async getMany(sources: readonly string[]): Promise<Map<string, Listing>> {
-    const out = new Map<string, Listing>()
-    if (sources.length === 0) return out
-    const crud = this.#crud()
-    if (crud) return crud.read(sources)
-    const rows = await this.#sql<(Row & { source: string })[]>`
-      SELECT source, tools, listed_at, truncated FROM ai_tool_listings WHERE source = ANY(${[...sources]}::text[])`
-    for (const row of rows) {
-      const listing = parseRow(row)
-      if (listing) out.set(row.source, listing)
-    }
-    return out
+    if (sources.length === 0) return new Map()
+    return this.#crud.read(sources)
   }
 
   /**
-   * Runs `fn` holding remote plugin `name`'s test lock, a session advisory lock, so one test
-   * runs at a time across replicas (#4994). `busy`: another session holds it; `full`: this
-   * replica already runs TEST_LOCK_CONNECTIONS tests; `unreachable`: the lock client could not
-   * reach Postgres, and `fn` did not run. An error of `fn`'s own is thrown as it is. The lock is held on the lock client
-   * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
-   * Through the API (`RemoteListings`), the lock is the lease `tool-listing:remote:<name>`,
-   * renewed while `fn` runs; `unreachable` then says the API did not answer the acquire (a
-   * 4xx its route answered is thrown), and `full` says this replica already runs
-   * TEST_LOCK_CONNECTIONS tests through the API.
+   * Runs `fn` holding remote plugin `name`'s test lease `tool-listing:remote:<name>` (#5299 D3),
+   * renewed while `fn` runs, so one test runs at a time across replicas (#4994). `busy`:
+   * another replica holds it; `full`: this replica already runs TESTS_AT_ONCE tests;
+   * `unreachable`: the API did not answer the acquire (a 4xx its route answered is thrown), and
+   * `fn` did not run. An error of `fn`'s own is thrown as it is.
    */
   async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
-    const crud = this.#crud()
-    if (crud) {
-      return crud.leased(listingLeaseKey(remoteSource(name)), (lease) =>
-        fn((url, tools, options) => crud.putPlugin(lease, name, url, tools, options.truncated ?? false)),
-      )
-    }
-    return this.#held(`scadbuddy:ai_tool_listings:test:${name}`, () =>
-      fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)),
+    const crud = this.#crud
+    return crud.leased(listingLeaseKey(remoteSource(name)), (lease) =>
+      fn((url, tools, options) => crud.putPlugin(lease, name, url, tools, options.truncated ?? false)),
     )
   }
 
@@ -278,83 +243,16 @@ export class ToolListings {
     server: string,
     fn: (put: PackageListingPut) => Promise<T>,
   ): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
-    const crud = this.#crud()
-    if (crud) {
-      return crud.leased(listingLeaseKey(packageServerSource(pkg, server)), (lease) =>
-        fn((contentHash, tools, options) => crud.putPackageServer(lease, pkg, server, contentHash, tools, options.truncated ?? false)),
-      )
-    }
-    // A remote plugin's name holds no `:`, so the two kinds of key never meet.
-    return this.#held(`scadbuddy:ai_tool_listings:test:${packageServerSource(pkg, server)}`, () =>
-      fn((contentHash, tools, options) => this.#putIfPinned(pkg, server, contentHash, tools, options.truncated ?? false)),
+    const crud = this.#crud
+    return crud.leased(listingLeaseKey(packageServerSource(pkg, server)), (lease) =>
+      fn((contentHash, tools, options) => crud.putPackageServer(lease, pkg, server, contentHash, tools, options.truncated ?? false)),
     )
-  }
-
-  async #held<T>(key: string, fn: () => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
-    let lease: LockLease | undefined
-    try {
-      lease = await this.#locks.take()
-    } catch (err) {
-      console.error(`plugin test lock: no lock connection: ${message(err)}`)
-      return 'unreachable'
-    }
-    if (!lease) return 'full'
-    // A 64-bit hash of the key: two keys may share one, which only costs a spurious `busy` and a retry.
-    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
-    let healthy = false
-    try {
-      let row: { held: boolean } | undefined
-      try {
-        ;[row] = await lease.sql<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
-      } catch (err) {
-        console.error(`plugin test lock: the lock query failed, retiring its connection: ${message(err)}`)
-        return 'unreachable'
-      }
-      if (!row?.held) {
-        healthy = true
-        return 'busy'
-      }
-      try {
-        return { value: await fn() }
-      } finally {
-        // A failed unlock retires the connection (lease.done) and leaves the test's own answer.
-        healthy = await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`.then(
-          () => true,
-          (err: unknown) => {
-            console.error(`plugin test lock: unlock failed, retiring its connection: ${message(err)}`)
-            return false
-          },
-        )
-      }
-    } finally {
-      lease.done(healthy)
-    }
-  }
-
-  // Under the package row's lock, as #putIfCurrent: a delete or a re-pin approved since the listing wins.
-  async #putIfPinned(pkg: string, server: string, contentHash: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
-    return this.#sql.begin(async (tx) => {
-      const [row] = await tx`SELECT 1 FROM ai_plugin_packages WHERE name = ${pkg} AND content_hash = ${contentHash} FOR UPDATE`
-      if (!row) return false
-      await upsert(tx, packageServerSource(pkg, server), tools, truncated)
-      return true
-    })
-  }
-
-  // One short transaction on the shared pool, after the test and still under its lock.
-  async #putIfCurrent(name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
-    return this.#sql.begin(async (tx) => {
-      const [plugin] = await tx`SELECT 1 FROM ai_plugins WHERE name = ${name} AND url = ${url} FOR UPDATE`
-      if (!plugin) return false
-      await upsert(tx, remoteSource(name), tools, truncated)
-      return true
-    })
   }
 }
 
 /**
  * Stores remote plugin `name`'s listing only while it still exists at `url`, the one tested
- * (#4994): under its ai_plugins row lock, so a delete or a URL change after the test wins.
+ * (#4994): the API stores it under the plugin's row lock, so a delete or a URL change after the test wins.
  * False: nothing stored. `truncated`: not every tool the source has (a `nextCursor`, or entries dropped).
  */
 export type PluginListingPut = (url: string, tools: readonly StoredTool[], options: { truncated?: boolean }) => Promise<boolean>
@@ -367,20 +265,13 @@ export type PackageListingPut = (contentHash: string, tools: readonly StoredTool
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
-async function upsert(sql: TransactionSql, source: string, tools: readonly StoredTool[], truncated: boolean): Promise<void> {
-  await sql`
-    INSERT INTO ai_tool_listings (source, tools, truncated)
-    VALUES (${source}, ${sql.json(tools as never)}, ${truncated})
-    ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
-}
-
-/** The connection tests this replica runs through the API now, capped as the lock client caps its own. */
+/** The connection tests this replica runs now. */
 let crudTests = 0
 
 type WireListing = { source: string; tools: unknown; listed_at: string; truncated: boolean }
 
 /**
- * The listings through the API's CRUD routes, area `access` (#5299 step 5; backend
+ * The listings through the API's CRUD routes, area `access` (backend
  * api/crud_agent_access.py). A connection test holds the lease `tool-listing:<source>`
  * (`CrudLeases`), and the API stores its listing only while that lease holds, under the
  * plugin's or the package's row lock (`lease-lost` otherwise, an error of the test's own).
@@ -410,12 +301,12 @@ export class CrudToolListings {
 
   /**
    * `fn` under `key`'s lease (`CrudLeases.hold`); `full` when this replica already runs
-   * TEST_LOCK_CONNECTIONS tests, as on the SQL path; `unreachable` when the acquire got no
+   * TESTS_AT_ONCE tests; `unreachable` when the acquire got no
    * answer of the route's own. In both `fn` did not run. A key refused here (`CrudPathError`)
    * or a 4xx the route answered (a key it refuses) is thrown as it is.
    */
   async leased<T>(key: string, fn: (lease: HeldLease) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
-    if (crudTests >= TEST_LOCK_CONNECTIONS) return 'full'
+    if (crudTests >= TESTS_AT_ONCE) return 'full'
     crudTests++
     try {
       let lease: HeldLease | 'busy'

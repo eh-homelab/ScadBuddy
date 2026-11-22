@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { chunks, type CrudTarget, crudOf, qs, TABS_PER_CALL } from '../api/crudStores.js'
 
 // Which replica holds each tab's bridge socket (#4780,
@@ -32,53 +31,7 @@ export interface TabOwnerStore {
   ownerOf(tabId: string, signal?: AbortSignal): Promise<TabOwner | undefined>
 }
 
-export class PostgresTabOwnerStore implements TabOwnerStore {
-  readonly #sql: Sql
-
-  constructor(sql: Sql) {
-    this.#sql = sql
-  }
-
-  async claim(tabId: string, queue: string): Promise<void> {
-    await this.#sql`
-      INSERT INTO ai_tab_owners (tab_id, queue) VALUES (${tabId}, ${queue})
-      ON CONFLICT (tab_id) DO UPDATE SET queue = EXCLUDED.queue, claimed_at = now()`
-  }
-
-  async refresh(tabIds: string[], queue: string): Promise<void> {
-    if (tabIds.length === 0) return
-    await this.#sql`
-      INSERT INTO ai_tab_owners (tab_id, queue)
-      SELECT tab_id, ${queue} FROM unnest(${tabIds}::text[]) AS t (tab_id)
-      ON CONFLICT (tab_id) DO UPDATE SET claimed_at = now() WHERE ai_tab_owners.queue = EXCLUDED.queue`
-  }
-
-  async release(tabId: string, queue: string, claimedBefore?: string): Promise<void> {
-    await (claimedBefore
-      ? this.#sql`DELETE FROM ai_tab_owners WHERE tab_id = ${tabId} AND queue = ${queue} AND claimed_at <= ${claimedBefore}::text::timestamptz`
-      : this.#sql`DELETE FROM ai_tab_owners WHERE tab_id = ${tabId} AND queue = ${queue}`)
-  }
-
-  async releaseAll(queue: string): Promise<void> {
-    await this.#sql`DELETE FROM ai_tab_owners WHERE queue = ${queue}`
-  }
-
-  async ownerOf(tabId: string, signal?: AbortSignal): Promise<TabOwner | undefined> {
-    signal?.throwIfAborted()
-    const query = this.#sql<{ queue: string; claimed_at: string }[]>`
-      SELECT queue, claimed_at::text AS claimed_at FROM ai_tab_owners WHERE tab_id = ${tabId}`
-    const onAbort = () => query.cancel()
-    signal?.addEventListener('abort', onAbort, { once: true })
-    try {
-      const [row] = await query
-      return row ? { queue: row.queue, claimedAt: row.claimed_at } : undefined
-    } finally {
-      signal?.removeEventListener('abort', onAbort)
-    }
-  }
-}
-
-/** The owners through the API's CRUD routes, area `bridge-tabs` (#5299 step 5, backend api/crud_agent_stores.py). */
+/** The owners through the API's CRUD routes, area `bridge-tabs` (backend api/crud_agent_stores.py). */
 export class CrudTabOwnerStore implements TabOwnerStore {
   readonly #call: ReturnType<typeof crudOf>
 

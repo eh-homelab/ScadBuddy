@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database } from './support/database.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { SpanStatusCode } from '@opentelemetry/api'
 import { ChatConnection } from '../src/routes/chat.js'
