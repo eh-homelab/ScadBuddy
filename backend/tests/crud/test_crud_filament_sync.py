@@ -173,6 +173,8 @@ async def test_plan_route_returns_the_plan(store: SettingsStore, crud: CrudClien
     assert plan.directions == SPOOLS
     # R-6688-11: nothing unconfirmed, so a worker from before the key takes the plan.
     assert "unconfirmed" not in response.json()
+    # The body is what the model would serialize, so the schema and the wire agree.
+    assert response.json() == plan.model_dump(mode="json", exclude={"unconfirmed"})
     # The route reads the timer's interval itself: `spool_overlay_refresh_seconds`.
     assert plan.interval_s == float(
         store.read({"spool_overlay_refresh_seconds"})["spool_overlay_refresh_seconds"]
