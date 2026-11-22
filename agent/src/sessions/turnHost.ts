@@ -190,6 +190,8 @@ export type TurnHostDeps = {
   hostQueue: string
   /** Tests only: the fence's period (FENCE_MS). */
   fenceMs?: number
+  /** Tests only: how long a placement that lost the API waits for its appends to land (LANDED_WAIT_MS). */
+  landedWaitMs?: number
   /** Hears a channel (events/changeStream.ts `listenAlso`): a held call wakes on `scadbuddy_input`. Without it, the poll alone. */
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
@@ -649,7 +651,7 @@ export class TurnHost {
       // Its process's last appends land first, for at most LANDED_WAIT_MS (the API may still be
       // away): the next placement resumes from the transcript, and its claim fences out the rest.
       if (!result && run.backendDropped) {
-        await within(LANDED_WAIT_MS, this.#deps.core.warm.landed(id))
+        await within(this.#deps.landedWaitMs ?? LANDED_WAIT_MS, this.#deps.core.warm.landed(id))
         throw unreachable(id, attempt, new Error(run.failure ?? 'the backend could not be reached'))
       }
       // A process the turn let go (it failed, or was recycled) lands its last appends before the
