@@ -3,7 +3,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import type { Tool, ToolContext } from '../src/tools/registry.js'
+import { runTool, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // Entity attachments and links (#6950, phase 1 Task 7): the generic `/entities/{ref}` routes.
@@ -113,6 +113,15 @@ describe('entity attachment and link tools', () => {
         ),
       ),
     )
-    await expect(tool('entity_link_list').execute({ entity: SPOOL }, ctx())).rejects.toThrow(`no entity ${SPOOL}`)
+    const err = await tool('entity_link_list').execute({ entity: SPOOL }, ctx()).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ToolError)
+    expect((err as ToolError).message).toContain(`no entity ${SPOOL}`)
+    expect((err as ToolError).status).toBe(404)
+    expect((err as ToolError).problem).toBe('entity_not_found')
+  })
+
+  it('parks entity_link_add as a pending action and sends nothing', async () => {
+    const result = await runTool(tool('entity_link_add'), { entity: SPOOL, url: 'https://e.test/p' }, ctx())
+    expect(firstText(result)).toMatchObject({ status: 'pending_approval' })
   })
 })
