@@ -1,6 +1,6 @@
 # Hosted plugins and marketplace feeds
 
-Date: 2026-11-21. Status: draft for the owner's review.
+Date: 2026-11-21. Status: approved by the owner on 2026-11-21. Epic: #6931.
 
 ## 1. Intent
 
@@ -156,7 +156,8 @@ token with `write` also works):
 
 Path rules, checked at write: UTF-8, relative, no `..`, no segment that starts with `.`,
 no symlinks. Allowed top-level folders are `skills/`, `agents/` and
-`commands/`. `.claude-plugin/plugin.json` is generated at publish and refused as a write.
+`commands/`. `executable: true` is allowed only under `skills/`, and a write that sets it
+under `agents/` or `commands/` is refused. `.claude-plugin/plugin.json` is generated at publish and refused as a write.
 Caps (my call, change them in review): 2 MiB per file, 500 files and 20 MiB per plugin.
 
 The assistant gets matching MCP tools: `hosted_plugin_create`, `hosted_plugin_list`,
@@ -269,8 +270,20 @@ An outside package's entry is in section 6.7.
 ### 6.5 The assistant loads hosted plugins
 
 - `ai_plugin_packages` gets a third `source_kind`, `hosted` (a new agent migration plus
-  its `expected-migrations.json` entry). The pin is (version, `content_hash`).
-  `commit_sha` is null for this kind (the CHECK changes to allow that).
+  its `expected-migrations.json` entry). The pin is (version, `content_hash`). One migration adds the
+  columns that both this section and 6.6 use. Whichever of step 3 (#6934) and step 4
+  (#6935) lands first writes it, and the other builds on it:
+  - `pin_kind` (`commit`, `bytes` or `version`), `version` integer and `bytes_sha256`, and
+    for a re-pin `pending_pin_kind`, `pending_version` and `pending_bytes_sha256`;
+  - a replacement CHECK on the pin: `commit_sha` is set exactly when `pin_kind` is
+    `commit`, `version` exactly when it is `version`, `bytes_sha256` exactly when it is
+    `bytes`;
+  - a replacement for the CHECK in `20260928T0750Z_plugin_packages.sql` that ties every
+    `pending_*` column to `pending_commit_sha IS NULL`: a re-pin is now present when
+    `pending_pin_kind` is set, and its `pending_commit_sha`, `pending_version` or
+    `pending_bytes_sha256` follows the same rule as the pin.
+
+  Existing rows get `pin_kind` `commit`.
 - The lifecycle is the `store.ts` one, unchanged. The first publish installs the package
   unapproved and disabled. The admin approves the exact (version, `content_hash`) and
   enables it. Each later publish is a re-pin into `pending_*`. The current version keeps
@@ -310,8 +323,15 @@ Pinning non-git sources:
   (`assertEndpointAllowed`), records their sha256 as the pin, and stores a copy in the
   blob store. A materialise reads that copy, not the upstream URL. If upstream deletes or
   changes the file, the approved pin still loads, and a re-pin shows the diff.
-- `ai_plugin_packages` gets `pin_kind` (`commit`, `bytes` or `version`) and
-  `bytes_sha256`.
+- The pin columns are the ones 6.5 adds (`pin_kind` `bytes`, `bytes_sha256`, and their
+  `pending_*` forms).
+- The agent reads a mirror over one CRUD route,
+  `GET /api/v1/internal/crud/agent/package-mirrors/{name}/{bytes_sha256}`, with its service
+  credential. The route answers the bytes only for a sha256 that a pin or pending pin of
+  that package names. It writes a mirror with
+  `POST /api/v1/internal/crud/agent/package-mirrors/{name}` (the bytes as the body) at
+  install and re-pin. The feed's mirror URLs (6.7) are served by the agent from the same
+  read route.
 - Unpacking: zip and tar only. Refuse symlinks, hard links, absolute paths, `..`, and
   device files. Use the caps from 6.2 for the unpacked tree, and 256 MiB for the download
   (Claude Code's limit).
@@ -361,17 +381,20 @@ like a hosted one:
 
 ## 8. Order of work (one issue and PR each)
 
-1. Hosted plugin tables, draft file routes, publish and the deterministic zip.
-2. The agent's feed and zip routes on the `/mcp` auth, and the feed section in Settings → MCP access.
-3. The assistant loads hosted plugins (`source_kind` `hosted`, the CRUD zip route,
-   publish as install or re-pin).
-4. The installer takes `marketplace-url`, `archive` and `npm` with bytes pins and
-   mirrors.
-5. Outside packages in the feed (`ai_plugin_feed_packages`).
-6. The UI editor.
-7. The MCP tools.
+Epic: #6931.
 
-Steps 4 and 5 do not depend on 1 to 3 and can run in parallel with them.
+1. #6932: hosted plugin tables, draft file routes, publish and the deterministic zip.
+2. #6933: the agent's feed and zip routes on the `/mcp` auth, and the feed section in
+   Settings → MCP access. Needs 1.
+3. #6934: the assistant loads hosted plugins (`source_kind` `hosted`, the CRUD zip route,
+   publish as install or re-pin). Needs 1.
+4. #6935: the installer takes `marketplace-url`, `archive` and `npm` with bytes pins and
+   mirrors. Needs nothing above.
+5. #6936: outside packages in the feed (`ai_plugin_feed_packages`). Needs 2 and 4.
+6. #6937: the UI editor. Needs 1 and 3.
+7. #6938: the MCP tools. Needs 1 and 3.
+
+Step 4 can run in parallel with 1 to 3.
 
 ## 9. Left to the builder
 
