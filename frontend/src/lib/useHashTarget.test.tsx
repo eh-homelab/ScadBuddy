@@ -8,13 +8,15 @@ function Rows() {
   return <div id="row-1">row</div>
 }
 
+// jsdom has no scrollIntoView; define it once so a spy can wrap it and be restored.
+if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
 
 it('scrolls to the same anchor again on a second visit to it', () => {
-  const scroll = vi.fn()
-  Element.prototype.scrollIntoView = scroll
+  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
   const router = createMemoryRouter([{ path: '/sheet', element: <Rows /> }], { initialEntries: ['/sheet#row-1'] })
   render(<RouterProvider router={router} />)
   expect(scroll).toHaveBeenCalledTimes(1)
@@ -25,8 +27,7 @@ it('scrolls to the same anchor again on a second visit to it', () => {
 })
 
 it('scrolls once per visit, not on every render', () => {
-  const scroll = vi.fn()
-  Element.prototype.scrollIntoView = scroll
+  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
   const router = createMemoryRouter([{ path: '/sheet', element: <Rows /> }], { initialEntries: ['/sheet#row-1'] })
   const { rerender } = render(<RouterProvider router={router} />)
   rerender(<RouterProvider router={router} />)
