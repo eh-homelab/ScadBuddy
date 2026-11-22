@@ -1,35 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { CrudToolListings, listingLeaseKey, ToolListings } from '../src/access/listings.js'
+import { CrudToolListings, listingLeaseKey, TESTS_AT_ONCE, ToolListings } from '../src/access/listings.js'
 import { AccessStore, CrudAccessRows } from '../src/access/store.js'
 import { CrudReadError } from '../src/api/crudRead.js'
 import { CrudPathError, SOURCES_PER_CALL } from '../src/api/crudStores.js'
 import type { AccessRow } from '../src/access/model.js'
 import type { AuditEntry } from '../src/audit/log.js'
-import { type LockClient, TEST_LOCK_CONNECTIONS } from './support/database.js'
 import { CrudPluginSessions, endOwnSessions, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
 
 // The tool access, the tool listings and the plugin sessions through the API's CRUD routes
 // (#5299 step 5), against a fake API that keeps them in memory as backend
 // api/crud_agent_access.py does (the backend's tests/api/test_crud_agent_access.py covers the
-// routes, the lease and the advisory lock on Postgres). None of these stores takes a KEK or a
-// database: the SQL handles given here throw if they are touched.
+// routes and the lease on Postgres). None of these stores takes a KEK or a database.
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
-
-const noSql = new Proxy(() => undefined, {
-  get: () => {
-    throw new Error('the SQL store was used')
-  },
-  apply: () => {
-    throw new Error('the SQL store was used')
-  },
-}) as never
-const noLocks: LockClient = {
-  take: () => {
-    throw new Error('the lock client was used')
-  },
-} as never
 
 type Seen = { method: string; path: string; body: Record<string, unknown> }
 
@@ -142,10 +126,7 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
   it('writes tool access on the API, audits it here, and skips a write that changes nothing', async () => {
     const api = new FakeApi()
     const audit: AuditEntry[] = []
-    const store = new AccessStore(noSql, { record: async (e: AuditEntry) => void audit.push(e) } as never, {
-      crud: new CrudAccessRows(target(api)),
-      use: () => true,
-    })
+    const store = new AccessStore(new CrudAccessRows(target(api)), { record: async (e: AuditEntry) => void audit.push(e) } as never)
     await store.setEnabled('remote:files', true)
     await store.replaceTools('remote:files', { search: 'read', write: 'off' })
     expect(await store.rows(['remote:files'])).toEqual([
@@ -166,11 +147,11 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
 
   it('holds a lease for a connection test, stores the listing under it, and releases it', async () => {
     const api = new FakeApi()
-    const listings = new ToolListings(noSql, noLocks, { crud: new CrudToolListings(target(api)), use: () => true })
+    const listings = new ToolListings(new CrudToolListings(target(api)))
     const held = await listings.exclusive('files', async (put) => {
       expect(api.leases.has('tool-listing:remote:files')).toBe(true)
       // Another replica's test of the same plugin is busy meanwhile.
-      const other = new ToolListings(noSql, noLocks, { crud: new CrudToolListings(target(api)), use: () => true })
+      const other = new ToolListings(new CrudToolListings(target(api)))
       expect(await other.exclusive('files', async () => 'never')).toBe('busy')
       expect(await put('https://mcp.example/', [{ raw: { name: 'search' }, omitted: [] }], { truncated: true })).toBe(true)
       expect(await put('https://moved.example/', [], {})).toBe(false)
@@ -186,7 +167,7 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
 
   it('answers unreachable when the API does not answer the acquire, and runs nothing', async () => {
     const down: typeof fetch = () => Promise.reject(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }))
-    const listings = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: down }), use: () => true })
+    const listings = new ToolListings(new CrudToolListings({ baseUrl: BASE, fetch: down }))
     let ran = false
     expect(await listings.exclusive('files', async () => (ran = true))).toBe('unreachable')
     expect(ran).toBe(false)
@@ -203,29 +184,29 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
               headers: { 'content-type': 'application/json', 'x-scadbuddy-crud': '1' },
             })
     let ran = false
-    const refused = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: answering(422) }), use: () => true })
+    const refused = new ToolListings(new CrudToolListings({ baseUrl: BASE, fetch: answering(422) }))
     const err = await refused.exclusive('files', async () => (ran = true)).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(CrudReadError)
     expect((err as CrudReadError).status).toBe(422)
-    const failing = new ToolListings(noSql, noLocks, { crud: new CrudToolListings({ baseUrl: BASE, fetch: answering(503) }), use: () => true })
+    const failing = new ToolListings(new CrudToolListings({ baseUrl: BASE, fetch: answering(503) }))
     expect(await failing.exclusive('files', async () => (ran = true))).toBe('unreachable')
     // A key refused here, before any call, is thrown too, never reported unreachable.
     const api = new FakeApi()
-    const local = new ToolListings(noSql, noLocks, { crud: new CrudToolListings(target(api)), use: () => true })
+    const local = new ToolListings(new CrudToolListings(target(api)))
     await expect(local.exclusive('../files', async () => (ran = true))).rejects.toBeInstanceOf(CrudPathError)
     expect(api.seen).toEqual([])
     expect(ran).toBe(false)
   })
 
-  it('runs at most TEST_LOCK_CONNECTIONS tests at once on this replica, as the lock client does', async () => {
+  it('runs at most TESTS_AT_ONCE tests at once on this replica', async () => {
     const api = new FakeApi()
-    const listings = new ToolListings(noSql, noLocks, { crud: new CrudToolListings(target(api)), use: () => true })
+    const listings = new ToolListings(new CrudToolListings(target(api)))
     let release!: () => void
     const gate = new Promise<void>((resolve) => (release = resolve))
-    const names = Array.from({ length: TEST_LOCK_CONNECTIONS }, (_, i) => `p${i}`)
+    const names = Array.from({ length: TESTS_AT_ONCE }, (_, i) => `p${i}`)
     let started = 0
     const running = names.map((n) => listings.exclusive(n, async () => (started++, await gate, n)))
-    await expect.poll(() => started).toBe(TEST_LOCK_CONNECTIONS)
+    await expect.poll(() => started).toBe(TESTS_AT_ONCE)
     expect(await listings.exclusive('one-more', async () => 'never')).toBe('full')
     release()
     expect(await Promise.all(running)).toEqual(names.map((n) => ({ value: n })))
@@ -245,7 +226,7 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
 
   it("refuses a test's write once its lease is lost: an error of the test's own", async () => {
     const api = new FakeApi()
-    const listings = new ToolListings(noSql, noLocks, { crud: new CrudToolListings(target(api)), use: () => true })
+    const listings = new ToolListings(new CrudToolListings(target(api)))
     const run = listings.exclusive('files', async (put) => {
       api.leases.set('tool-listing:remote:files', 'someone-else')
       return put('https://mcp.example/', [], {})
@@ -259,7 +240,7 @@ describe('the plugin stores through CRUD routes (#5299 step 5)', () => {
     await rows.seen('pkg:srv', 's1')
     await rows.seen('pkg:srv', 's2')
     api.sessions.push({ plugin_id: 'pkg:srv', upstream_session_id: 's3', replica: 'gone' })
-    const deps = { plugins: { enabled: async () => ({ plugins: [], problems: [] }) }, kek: undefined, graceMs: 0 }
+    const deps = { plugins: { enabled: async () => ({ plugins: [], problems: [] }) }, graceMs: 0 }
     const mark = await rows.mark()
     expect(mark).toBe('2026-11-15 10:20:00.123456+00')
     // A package's server is never looked up: its sessions are dropped without a DELETE.

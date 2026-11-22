@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
 import { afterEach, describe, expect, it } from 'vitest'
 import { type AgentApp, createApp } from '../src/app.js'
 import { CrudPathError } from '../src/api/crudStores.js'
@@ -15,15 +14,13 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // The remote plugins and their sign-ins through the API's CRUD routes (#5299 step 5, area
 // `plugins`), against a fake API that keeps them in memory as backend
 // api/crud_agent_plugins.py does (the backend's tests/api/test_crud_agent_plugins.py covers
-// the routes, the sealing and the lease on Postgres). Nothing here holds a KEK or SQL: the
-// app is made with no key and the stores with no database.
+// the routes, the sealing and the lease on Postgres). Nothing here holds a KEK or SQL.
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const CALLBACK = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'cross-site' }
-const NO_SQL = new Proxy({}, { get: () => { throw new Error('no SQL in this test') } }) as Sql
 
 type Plugin = {
   name: string
@@ -202,25 +199,25 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
 
   function stores(api: FakeApi, now: () => Date = () => new Date()) {
     const target = { baseUrl: BASE, fetch: api.fetch }
-    const oauth = new PluginOAuth(NO_SQL, { now, remote: { crud: new CrudOAuthRows(target), use: () => true } })
+    const oauth = new PluginOAuth(new CrudOAuthRows(target), { now })
     return { oauth, plugins: new CrudPluginStore(target, { oauth }) }
   }
 
   it('registers a plugin with a secret, reveals and loads it, with no KEK here', async () => {
     const api = new FakeApi()
     const { plugins } = stores(api)
-    const made = await plugins.create({ name: 'docs', url: 'https://mcp.example/mcp/', auth_header: 'X-Key', secret: 'sk-secret-value-1234' }, undefined)
+    const made = await plugins.create({ name: 'docs', url: 'https://mcp.example/mcp/', auth_header: 'X-Key', secret: 'sk-secret-value-1234' })
     expect(made).toMatchObject({ name: 'docs', enabled: false, auth_header: 'X-Key', secret_last4: '1234', opens: true })
     // Only checked values reach the API: the URL normalised, the tool rows built.
     expect(api.seen).toEqual(['POST /plugins'])
-    await expect(plugins.create({ name: 'Bad_Name', url: 'https://x.example/' }, undefined)).rejects.toThrow(PluginError)
-    await expect(plugins.create({ name: 'docs', url: 'https://x.example/' }, undefined)).rejects.toMatchObject({ status: 409 })
-    expect((await plugins.reveal('docs', undefined))?.header).toEqual({ name: 'X-Key', value: 'sk-secret-value-1234' })
-    expect(await plugins.enabled(undefined)).toEqual({ plugins: [], problems: [] })
-    await plugins.update('docs', { enabled: true }, undefined)
-    const loaded = await plugins.enabled(undefined)
+    await expect(plugins.create({ name: 'Bad_Name', url: 'https://x.example/' })).rejects.toThrow(PluginError)
+    await expect(plugins.create({ name: 'docs', url: 'https://x.example/' })).rejects.toMatchObject({ status: 409 })
+    expect((await plugins.reveal('docs'))?.header).toEqual({ name: 'X-Key', value: 'sk-secret-value-1234' })
+    expect(await plugins.enabled()).toEqual({ plugins: [], problems: [] })
+    await plugins.update('docs', { enabled: true })
+    const loaded = await plugins.enabled()
     expect(loaded.plugins.map((p) => p.header?.value)).toEqual(['sk-secret-value-1234'])
-    await expect(plugins.update('docs', { url: 'https://other.example/' }, undefined)).rejects.toMatchObject({ status: 409 })
+    await expect(plugins.update('docs', { url: 'https://other.example/' })).rejects.toMatchObject({ status: 409 })
     expect(await plugins.get('Not A Name')).toBeUndefined()
     expect(await plugins.delete('docs')).toBe(true)
   })
@@ -228,7 +225,7 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
   it("turns a row the API cannot open into the SealError the SQL store throws", async () => {
     const api = new FakeApi()
     const { plugins } = stores(api)
-    await plugins.create({ name: 'docs', url: 'https://mcp.example/mcp/', secret: 'sk-secret-value-1234' }, undefined)
+    await plugins.create({ name: 'docs', url: 'https://mcp.example/mcp/', secret: 'sk-secret-value-1234' })
     const opened = api.fetch
     api.fetch = async (input, init) => {
       const res = await opened(input, init)
@@ -238,7 +235,7 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
         headers: { 'content-type': 'application/json', 'x-scadbuddy-crud': '1' },
       })
     }
-    await expect(stores(api).plugins.reveal('docs', undefined)).rejects.toThrow(SealError)
+    await expect(stores(api).plugins.reveal('docs')).rejects.toThrow(SealError)
   })
 
   it('signs a plugin in, sends its token and renews it under the refresh lease, with no KEK here', async () => {
@@ -258,8 +255,8 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
       remoteAddress: () => '10.0.0.7',
       origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
     })
-    await plugins.create({ name: 'github', url: mcp.url }, undefined)
-    await plugins.update('github', { enabled: true }, undefined)
+    await plugins.create({ name: 'github', url: mcp.url })
+    await plugins.update('github', { enabled: true })
 
     const start = await app.request('/api/v1/ai/plugins/github/oauth/start', { method: 'POST', headers: { ...UI, 'content-type': 'application/json' }, body: '{}' })
     expect(start.status, await start.clone().text()).toBe(200)
@@ -279,7 +276,7 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     const view = (await (await app.request('/api/v1/ai/plugins/github', { headers: READ })).json()) as PluginView
     expect(view).toMatchObject({ usable: true, oauth: { status: 'connected', refreshes: true } })
 
-    const source = oauth.source('github', mcp.url, grant.grant_id, undefined)
+    const source = oauth.source('github', mcp.url, grant.grant_id)
     expect((await source.header()).value).toBe(`Bearer ${auth.issued[0]}`)
     // An hour on: renewed under the lease, kept, and the lease released.
     clock = new Date(clock.getTime() + 3600_000)
@@ -288,20 +285,20 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     expect(api.seen).toContain(`POST /leases/${refreshLease('github')}`)
     expect(api.leases.size).toBe(0)
     expect(api.grants.get('github')!.secret.access_token).toBe(auth.issued[1])
-    expect(await oauth.storedSecrets(undefined)).toContain(auth.issued[1])
+    expect(await oauth.storedSecrets()).toContain(auth.issued[1])
 
     // Another replica holds the lease: this one waits on the API, then refuses, sends nothing.
     clock = new Date(clock.getTime() + 3600_000)
     const other = stores(api, () => clock).oauth
     api.leases.set(refreshLease('github'), randomUUID())
-    await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/another replica is renewing/)
+    await expect(other.source('github', mcp.url, grant.grant_id).header()).rejects.toThrow(/another replica is renewing/)
     expect(auth.tokenRequests).toHaveLength(2)
     api.leases.clear()
 
     // The lease lost while the token endpoint answered: the rotated refresh token is not kept,
     // and the stored one is spent, so the answer says a new sign-in may be needed.
     api.beforeRefreshed = () => api.leases.set(refreshLease('github'), randomUUID())
-    await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/a new sign-in may be needed/)
+    await expect(other.source('github', mcp.url, grant.grant_id).header()).rejects.toThrow(/a new sign-in may be needed/)
     api.beforeRefreshed = undefined
     api.leases.clear()
 
@@ -309,13 +306,13 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     // step above spent the stored refresh token; the provider takes it again here.)
     auth.refresh.add(api.grants.get('github')!.secret.refresh_token!)
     api.beforeRefreshed = () => Object.assign(api.grants.get('github')!, { status: 'error' })
-    await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/marked for a new sign-in/)
+    await expect(other.source('github', mcp.url, grant.grant_id).header()).rejects.toThrow(/marked for a new sign-in/)
     api.beforeRefreshed = undefined
     Object.assign(api.grants.get('github')!, { status: 'connected' })
 
     // A revoked refresh marks the grant on the API: sign in again.
     auth.revokeAll()
-    await expect(other.source('github', mcp.url, grant.grant_id, undefined).header()).rejects.toThrow(/sign in again/)
+    await expect(other.source('github', mcp.url, grant.grant_id).header()).rejects.toThrow(/sign in again/)
     expect(api.grants.get('github')).toMatchObject({ status: 'error' })
     expect(await oauth.forget('github')).toBe(true)
   })
@@ -324,13 +321,13 @@ describe('the remote plugins and their sign-ins through CRUD routes (#5299 step 
     const { oauth, plugins } = stores(api)
     for (const bad of ['../x', '..', 'a/b', '%2e%2e']) {
       expect(await plugins.get(bad)).toBeUndefined()
-      expect(await plugins.reveal(bad, undefined)).toBeUndefined()
+      expect(await plugins.reveal(bad)).toBeUndefined()
       expect(await plugins.delete(bad)).toBe(false)
-      await expect(plugins.update(bad, { url: 'https://x.example/' }, undefined)).rejects.toMatchObject({ status: 404 })
+      await expect(plugins.update(bad, { url: 'https://x.example/' })).rejects.toMatchObject({ status: 404 })
       await expect(plugins.setToolAccess(bad, 't', 'read')).rejects.toMatchObject({ status: 404 })
       await expect(oauth.forget(bad)).rejects.toBeInstanceOf(CrudPathError)
       await expect(oauth.mark(bad, 'why')).rejects.toBeInstanceOf(CrudPathError)
-      await expect(oauth.source(bad, 'https://x.example/', randomUUID(), undefined).header()).rejects.toBeInstanceOf(CrudPathError)
+      await expect(oauth.source(bad, 'https://x.example/', randomUUID()).header()).rejects.toBeInstanceOf(CrudPathError)
     }
     // The sign-out route refuses it too.
     const app: AgentApp = createApp({

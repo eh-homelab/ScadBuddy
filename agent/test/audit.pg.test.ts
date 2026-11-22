@@ -7,6 +7,7 @@ import { type AuditFilter, type AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_
 import { TurnAuditor } from '../src/audit/turn.js'
 import { auditedTokenStore, UI_ACTOR } from '../src/audit/writes.js'
 import { type SettingsStore } from '../src/credentials.js'
+import { PostgresTokenStore } from './support/sql/tokens.js'
 import type { Database } from './support/database.js'
 import { MemoryEventSource } from '../src/events/bus.js'
 import type { ApprovalVerdict } from '../src/harness/permissions.js'

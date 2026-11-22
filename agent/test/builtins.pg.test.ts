@@ -4,6 +4,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BUILTIN_SOURCES } from '../src/access/model.js'
 import { AccessStore } from '../src/access/store.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
 import type { Database } from './support/database.js'
 import { BuiltInPackages, ownPluginEnabled } from '../src/plugins/packages/builtins.js'
@@ -219,7 +220,7 @@ describe.skipIf(skip !== undefined)(`ScadBuddy's own plugin in ai_access${skip ?
   })
 
   it("switching ScadBuddy's own plugin off stores builtin:own-plugin '*' off, and ownPluginEnabled answers false", async () => {
-    const access = new AccessStore(db.sql)
+    const access = new AccessStore(new SqlAccessRows(db.sql))
     const packages = new BuiltInPackages(access)
     expect(await ownPluginEnabled(access)).toBe(true)
     await access.setEnabled(BUILTIN_SOURCES.ownPlugin, false, { actor: UI_ACTOR, surface: 'http' })

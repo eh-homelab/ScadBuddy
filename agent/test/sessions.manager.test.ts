@@ -10,6 +10,7 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../s
 import { BUILTIN_SOURCES } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { AccessStore } from '../src/access/store.js'
+import { SqlAccessRows } from './support/sql/access.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME } from '../src/harness/httpRequest.js'
 import { userMessage } from '../src/harness/inbox.js'
 import { sessionWorkDir } from '../src/harness/stateDirs.js'
@@ -841,7 +842,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
 
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
       const paths = await tempPaths()
-      const access = new AccessStore(db.sql)
+      const access = new AccessStore(new SqlAccessRows(db.sql))
       const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
       const m = manager({ sql: db.sql, paths, run: runner, access: new AccessResolver(access), httpRequest: {} })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'fetch' })
