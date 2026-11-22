@@ -29,7 +29,6 @@ from scadbuddy.orders.store import ATTACHMENT_HOLDER
 
 Conn = Connection[DictRow]
 
-ENTITY_ATTACHMENT_HOLDER = ATTACHMENT_HOLDER
 #: The entities whose files the order routes write.
 ORDER_KINDS = frozenset({"order", "order_item", "order_item_fulfilment", "order_item_revision"})
 #: A print archive's files: Bambuddy's, read only here (not in `KINDS`).

@@ -109,7 +109,10 @@ class EntityLinkStore:
     def add_from_source(
         self, conn: Conn, ref: EntityRef, body: LinkInput, source: str, by: Actor
     ) -> EntityLink | None:
-        """An import's link; None when a person already kept one with the same URL."""
+        """An import's link; None, writing nothing, for a URL that is not a web page
+        (`is_web_url`) or one a person already kept."""
+        if not is_web_url(body.url):
+            return None
         with conn.transaction():
             entity_id = self.entities.ensure(conn, ref)
             kept = conn.execute(
