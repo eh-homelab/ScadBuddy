@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import ast
 import hashlib
+from typing import Any
+
+from scadbuddy.core.input_schema import schema_problems
 
 #: `pipeline.api` majors this host runs: the current one and, once there is one, the
 #: previous (§8.1).
@@ -18,6 +21,18 @@ async def run(ctx, inputs):
     part = await ctx.render("model.scad", **inputs.get("params", {}))
     await ctx.output(plates=await ctx.pack([part]), name=inputs.get("name"))
 """
+
+
+#: The keys of a pipeline's inputs that belong to the host (spec 2026-11-17 §4.1): its
+#: declared inputs schema may not name them.
+HOST_INPUTS: tuple[str, ...] = ("params", "v")
+
+
+def inputs_schema_problems(schema: Any) -> list[str]:
+    """Everything wrong with ``schema`` as a pipeline's declared inputs (``model.json``
+    ``pipeline.inputs``, #5701): the flows' subset plus one level of objects, without
+    `HOST_INPUTS`. Empty when it may be used."""
+    return schema_problems(schema, objects=True, reserved=HOST_INPUTS)
 
 
 def pipeline_version_of(source: str) -> str:

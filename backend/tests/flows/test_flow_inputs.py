@@ -7,15 +7,13 @@ from typing import Any
 
 import pytest
 
-from scadbuddy.flows.inputs import (
+from scadbuddy.core.input_schema import (
     MAX_PATTERNED_LENGTH,
     PATTERN_TIMEOUT_S,
     PATTERNS_BUDGET_S,
-    InputsError,
-    inputs_model,
-    resolve_inputs,
     schema_problems,
 )
+from scadbuddy.flows.inputs import InputsError, inputs_model, resolve_inputs
 from scadbuddy.flows.typecheck import check_script
 
 SCHEMA: dict[str, Any] = {

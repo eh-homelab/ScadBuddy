@@ -25,8 +25,10 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.input_schema import value_problems
+from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.pipelines import HOST_INPUTS, inputs_schema_problems
 from scadbuddy.render.inputs import InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.local import LocalBlobStore
@@ -152,6 +154,28 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
     return failures
 
 
+def declared_inputs_failures(template: Path, cases: list[dict[str, Any]]) -> list[str]:
+    """The template's declared inputs (``model.json`` ``pipeline.inputs``, #5701, spec
+    2026-11-17 §10.2): the schema in the pipeline subset, and every case, less the host's
+    `HOST_INPUTS`, fitting it. Empty for a template that declares none."""
+    meta = json.loads((template / MODEL_META_NAME).read_text(encoding="utf-8"))
+    declared = meta.get("pipeline") or {}
+    name = declared.get("inputs") if isinstance(declared, dict) else None
+    if not isinstance(name, str):
+        return []
+    schema = json.loads((template / name).read_text(encoding="utf-8"))
+    if problems := inputs_schema_problems(schema):
+        return [f"{name}: {problem}" for problem in problems]
+    failures: list[str] = []
+    for number, case in enumerate(cases, start=1):
+        own = {key: value for key, value in case.items() if key not in HOST_INPUTS}
+        failures += [
+            f"case {number}: {problem.path or 'inputs'}: {problem.message}"
+            for problem in value_problems(schema, own)
+        ]
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m scadbuddy.workflows.verify_pipeline")
     parser.add_argument("template", type=Path)
@@ -159,11 +183,14 @@ def main() -> int:
     args = parser.parse_args()
     cases = json.loads(args.inputs.read_text(encoding="utf-8"))
     template = args.template.resolve()
+    declared = declared_inputs_failures(template, cases)
+    for line in declared:
+        print(f"FAIL inputs schema: {line}")
     failures = asyncio.run(verify(template, cases, config=Config(data_dir=Path("/unused"))))
     for line in failures:
         print(f"FAIL {line}")
     print(f"{len(cases) - len(failures)} of {len(cases)} pipeline cases passed")
-    return 1 if failures else 0
+    return 1 if failures or declared else 0
 
 
 if __name__ == "__main__":
