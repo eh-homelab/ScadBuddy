@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import logging
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ import pytest
 from fastapi import Request
 from psycopg import errors
 
+from scadbuddy.api import disconnect
 from scadbuddy.api.disconnect import CALLER_GONE, until_disconnect
 from scadbuddy.core.cancel import CancelledError, CancelToken
 from scadbuddy.core.problems import ApiError
@@ -95,8 +97,8 @@ def _wait_for_lock_wait(pool: PgPool, holder: int) -> None:
 
     Only a backend that ``holder`` blocks counts (``pg_blocking_pids``): any other lock
     wait in the database (an earlier test's, say) could pass for the round's, and a second
-    call then takes the free sync lock and waits on the row this thread holds, for ever
-    (#6910: a CI shard that ran such a test hung for an hour)."""
+    call would then take the free sync lock and wait for ever on the row this thread
+    holds."""
     for _ in range(200):
         with pool.connection() as conn:
             row = conn.execute(
@@ -212,6 +214,17 @@ def _request(disconnect_after: threading.Event) -> Request:
 class _Settings:
     def read(self, _names: Any) -> dict[str, Any]:
         return {"bambuddy_url": None}
+
+
+class _PlanSettings:
+    """What a plan reads: every data type ``two_way``, no Bambuddy URL."""
+
+    def read(self, _names: Any) -> dict[str, Any]:
+        return {
+            "bambuddy_url": None,
+            "filament_sync": scale.TWO_WAY,
+            "spool_overlay_refresh_seconds": 300,
+        }
 
 
 def test_a_caller_that_goes_away_rolls_the_round_back(pg_pool: PgPool) -> None:
@@ -344,6 +357,26 @@ async def test_the_in_process_pass_waits_out_a_busy_sync(pg_pool: PgPool) -> Non
     assert report.updated == len(writes)
     assert waits == [InProcessFilamentSync.BUSY_BACKOFF_S]
 
+    # The plan waits out a busy sync too, with its own arguments (#6957 review).
+    waits.clear()
+    with _sync_held(pg_pool) as (release, freed):
+
+        async def frees_it_again(seconds: float) -> None:
+            waits.append(seconds)
+            release.set()
+            await asyncio.to_thread(freed.wait, 10)
+
+        sync = InProcessFilamentSync(
+            f,
+            _PlanSettings(),  # type: ignore[arg-type]
+            clock=lambda: now[0],
+            sleep=frees_it_again,
+        )
+        planned = await sync.plan(made.snap, 3)
+    assert waits == [InProcessFilamentSync.BUSY_BACKOFF_S]
+    assert len(planned.writes) == 3
+    assert planned.pass_id is not None
+
     async def passes(seconds: float) -> None:
         waits.append(seconds)
         now[0] += seconds
@@ -391,3 +424,22 @@ def test_a_shutdown_reads_the_end_of_the_work_it_leaves(
     asyncio.run(main())
     gc.collect()
     assert "never retrieved" not in caplog.text
+
+
+def test_a_failure_the_shutdown_left_is_logged_and_the_cancels_end_is_not(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#6957 review: `_read_end` reads a left-behind end. The cancel's own ends are
+    expected and stay quiet; any other error is logged, not dropped."""
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        for error in (CancelledError(), errors.QueryCanceled("cancelled"), RuntimeError("lost")):
+            future: asyncio.Future[Any] = loop.create_future()
+            future.set_exception(error)
+            disconnect._read_end(future)
+
+    with caplog.at_level(logging.WARNING, logger=disconnect.__name__):
+        asyncio.run(main())
+    failures = [r for r in caplog.records if r.name == disconnect.__name__]
+    assert [type(r.exc_info[1]) for r in failures if r.exc_info] == [RuntimeError]

@@ -850,10 +850,11 @@ def reset_links(
 
 
 class LocalFilamentSync:
-    """`FilamentSyncApi` over SB's own stores, for the API's in-process print queue. The
-    print worker's `RemoteFilamentSync` gives the same answers through the CRUD routes,
-    which call this class. It reads ``filament_sync`` and the timer's interval
-    (``spool_overlay_refresh_seconds``) on each plan, so a change applies to the next.
+    """`FilamentSyncApi` over SB's own stores, which the CRUD routes call; the print
+    worker's `RemoteFilamentSync` gives its answers through them, and the API's in-process
+    print queue runs `InProcessFilamentSync`, this class waiting out a busy sync. It reads
+    ``filament_sync`` and the timer's interval (``spool_overlay_refresh_seconds``) on each
+    plan, so a change applies to the next.
     A plan or results call for another instance than the configured Bambuddy's plans
     nothing (``instance_changed``) and records nothing: after a reset of the links
     (#6773) the state row names no instance, so a pass of the old Bambuddy's workflow
