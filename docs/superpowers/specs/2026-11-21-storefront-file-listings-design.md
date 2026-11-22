@@ -427,8 +427,9 @@ file and no picture held for the listing is 422 `listing_media_unknown`, with th
    edit or an unpublish drops the (`storefront_listing`, listing id) holds
    (`listings.py:1-17`, `release_unheld` at `:549-563`), and the pinned version must
    outlive both. The `storefront_listing_kept` hold on `listing-file-<sha256>` is dropped
-   only by the listing's delete, and by a publish that pins another sha256 (in the row's
-   transaction, as the other drops are). The kept holds on uploaded pictures
+   only by the listing's delete, by a save that changes `library_file.id` or `library`
+   (§4.1), and by a publish that pins another sha256 (each in the row's transaction, as
+   the other drops are). The kept holds on uploaded pictures
    (`listing-media-*`, §5.4) follow their own rule there; a publish drops none of them.
    With `pinned` set, this step reads nothing: the copy is held already. Two
    listings of one file share one blob and hold it twice.
@@ -988,7 +989,9 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   `listing_media_unknown` with `name`; an upload holds `listing-media-<sha256>` as
   `storefront_listing_kept` and answers `upload:<sha256>`; a save, and a `PUT …/media`,
   that does not name the id drop that hold, also for an id never saved, except within an
-  hour of the upload; `PUT …/media` republishes a published file listing.
+  hour of the upload; the same picture uploaded again after that hour refreshes the
+  hold, so a save from another tab right after it spares it; `PUT …/media` republishes a
+  published file listing.
 - **Resolver** (`tests/bambuddy/test_resolver.py`): a spool-less slot with a
   `slot_colours` entry takes it; one without takes the file's; a slot with a spool takes
   the spool's, whatever `slot_colours` says.
