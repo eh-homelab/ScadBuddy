@@ -9,7 +9,9 @@ import { describe, expect, it } from 'vitest'
 // package is a test dependency only, and `src/db.ts` is gone. The tests may still seed and read
 // the `ai_*` tables over SQL (test/support/database.ts); `src` may not. The older guard stays:
 // no SQL in `src` names a backend table whose grants the API took back (backend auth/revoke.py
-// `RETIRED_ROLES` retires the agent's whole role now).
+// `RETIRED_ROLES` retires the agent's whole role now). `evals/` is exempt on purpose: an
+// operator's live eval run (evals/credential.ts) opens the saved credential from Postgres with
+// the API's KEK, outside the service; never copy that pattern into `src`.
 const RETIRED = ['events', 'workflow_runs', 'workflow_run_decisions', 'flow_grants', 'flow_grant_uses']
 const SRC = fileURLToPath(new URL('../src', import.meta.url))
 // `\s+` spans line breaks, so a table name on the line after its keyword is found too.

@@ -72,6 +72,11 @@ export type { PendingInputEntry }
 export type PendingInputRouteDeps = {
   sessions: SessionManager | undefined
   ready: () => Promise<boolean>
+  /**
+   * Whether this process holds the input-hash key too (api/dataHealth.ts `ready`): an answer is
+   * audited with its input's hash (gate/questions.ts), so a respond waits for it. `ready` when absent.
+   */
+  keyReady?: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
   /** The pending tables' change ticks (gate/changes.ts); without them the changes stream is 503. */
@@ -98,6 +103,7 @@ declare module '../app.js' {
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
 const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
+const NO_KEY = 'AI unavailable: the API has not released the input-hash key yet; try again'
 
 /**
  * The response body. `summaries_truncated`: more undismissed `done` summaries
@@ -587,6 +593,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (problem) return c.json({ detail: problem }, 403)
     if (!deps.sessions) return c.json({ detail: NOT_CONFIGURED }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
+    if (deps.keyReady && !(await deps.keyReady())) return c.json({ detail: NO_KEY, retry: true }, 503)
     const type = c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase()
     if (type !== 'application/json') return c.json({ detail: 'request body must be application/json' }, 415)
     let body: RespondBody
@@ -626,6 +633,7 @@ export const route: RouteModule = {
     registerPendingInputRoutes(app, {
       sessions: deps.sessions,
       ready: ready(deps),
+      keyReady: deps.database.ready,
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       changes: deps.pendingChanges,
