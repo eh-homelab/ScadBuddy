@@ -2321,7 +2321,7 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 
 ### #6860: the usage rows in bodies under the gate
 
-230. R-6860-1 (#6860; corrects 182's "Bambuddy's listing is not paged"): Bambuddy's
+230. (the read's `limit`: 239) R-6860-1 (#6860; corrects 182's "Bambuddy's listing is not paged"): Bambuddy's
     `GET /inventory/usage` takes `limit` (default 100), `printer_id` and `spoolman`, and no
     offset or date; it answers newest first (`order_by(created_at.desc()).limit(limit)`,
     https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/inventory.py#L3128-L3158).
@@ -2390,6 +2390,42 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
 238. R-6768-6 (PR #7013 review): a spool whose insert type a person edited after the link
     is quiet, as `_backfill_insert_type` never sets it again; the batch reads those
     `edited` events once for every spool (`_insert_edited_since_link`'s condition).
+
+### #7002: the usage read covers any gap between two pulls
+
+239. R-7002-1 (#7002): the pull reads Bambuddy's usage listing with
+    `limit=USAGE_READ_ROWS` (5,000, `bb_pull_run.py`), not 200. Measured 2026-11-22 on
+    prod, read only, from the API pod with its own settings (one
+    `GET /inventory/usage?limit=100000`; the key never left the pod): 471 rows in all,
+    the oldest 2026-09-21T16:56Z, the newest 2026-11-21T06:46Z, 7.8 rows a day over 60.6
+    days, at most 36 in any 24 h, 90 in any 7 days and 304 in any 30 days; the whole
+    listing was 106,567 B. So 200 rows was about 6 days at the busiest rate, and 5,000 is
+    more than a year at the busiest 30 days' rate; today one read is the whole history.
+    Bambuddy puts no cap on `limit` (a plain `limit: int = 100`,
+    https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/inventory.py#L3129-L3159).
+    The per-spool route `GET /inventory/spools/{id}/usage` was not chosen: it has the
+    same shape (`limit`, default 50, newest first, no offset or date,
+    https://github.com/maziggy/bambuddy/blob/b7d894b57c0a373f66dc0de49680865b02b3aae5/backend/app/api/routes/inventory.py#L2928-L2949),
+    so it has a window too, one per spool, and it costs one call per changed spool. The
+    whole read rides in `PullBody.usage` too: at its most (every field filled, a
+    64-character job name) it is 1,265,283 B (`PullBody.model_dump_json()`), under a sixth
+    of the 8 MiB gate (`test_a_full_usage_read_is_one_body_and_a_small_part_of_the_pull_body`).
+    A gap of more than 5,000 rows still loses the older ones, as Decision 230 says of 200.
+240. R-7002-2 (PR #7005 review notes): `USAGE_READ_ROWS` is `USAGE_BODY_ROWS`, so a read
+    is always one body: two prints of one job name never land in different bodies, and
+    `_cover`'s `pending` holds every later row of the read. The rows reach `book_usage`
+    oldest first; `test_two_runs_of_one_job_in_one_read_pair_oldest_first` pins that order
+    and the pairing it gives for two runs of one job through `read_and_pull` (run 1's row
+    on another spool covers run 1's estimate; run 2's row pairs on its own spool). `_cover`
+    counts a pending row as it counts a booked one, so this pairing is the same in
+    either order; the test pins the order of the body.
+241. R-7002-3: `bambuddy_usage.book_usage` leaves out the rows a `ledger.BB_USAGE` event
+    names already, in one query, before it locks spools or opens a savepoint, since each
+    pull now sends every row it read (471 on prod today), not only the new ones. A row so
+    left out is booked and changes nothing, as before (`_book` returned `None` for it).
+    It is also no longer in `_cover`'s `pending`; it is a booked row there, which the
+    `others` query counts (bar one that covered an estimate, as for any booked row).
+    `usage_unlinked` still counts every row of an unlinked BB spool in the read.
 
 ## Self-review
 

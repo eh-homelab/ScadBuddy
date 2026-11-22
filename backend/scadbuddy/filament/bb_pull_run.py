@@ -15,7 +15,9 @@ pull needs, in the order `bambuddy_pull.read_and_pull` and `scheduled_pull` read
    `CATALOG_TIMEOUT`), sent as one body. Each read but the spools fails alone, logged.
 3. When SB answers that usage rows would book and are not booked yet, the archives from
    the date it names; then the usage rows with them, to book, oldest first in bodies of
-   at most `USAGE_BODY_ROWS` rows, each under the API's body gate (#6860).
+   at most `USAGE_BODY_ROWS` rows, each under the API's body gate (#6860). The read takes
+   the newest `USAGE_READ_ROWS` rows, so a gap of up to that many rows between two pulls
+   is booked whole (#7002).
 4. After the Schedule's pull, Bambuddy's tray assignments, to set right the untagged
    trays (#6713).
 
@@ -78,6 +80,14 @@ CATALOG_TIMEOUT = 5.0
 #: archives, every field filled, such a body is 1.6 MiB (measured), a fifth of the API's
 #: 8 MiB body gate (`api/limits.py` `MAX_TEXT_BODY_BYTES`, Decision 182).
 USAGE_BODY_ROWS = 5_000
+
+#: How many usage rows the pull reads (R-7002-1). Bambuddy answers only the newest
+#: ``limit`` rows, with no offset or date (R-6860-1), and puts no cap on ``limit``, so a
+#: row older than this read is never booked. Prod wrote 471 rows in 60 days (at most 36
+#: in a day, 304 in 30 days, measured 2026-11-22), so this is more than a year of rows at
+#: the busiest month's rate: one read covers any realistic gap between two pulls. It is one body's rows, so a read is one body and
+#: `bambuddy_usage._cover` sees every row of the read together (R-7002-2).
+USAGE_READ_ROWS = USAGE_BODY_ROWS
 
 #: The import's answer when the Bambuddy URL changed between the route and the read.
 URL_CHANGED = "the Bambuddy URL changed during the import; import again"
@@ -173,8 +183,9 @@ async def read_and_pull(
     booked yet, so the rows of a spool this pull made are matched with their archives too.
     The usage read, the archive read and the booking each fail alone: logged, and the
     spool pull's report stands. Bambuddy's usage listing takes a ``limit`` and no offset
-    or date, newest first (R-6860-1), so the read is the newest rows the client's
-    ``limit`` asks for; the booking sends them in bodies (`usage_bodies`). When the usage
+    or date, newest first (R-6860-1), so the read is the newest `USAGE_READ_ROWS` rows,
+    more than a year of prod's rows (R-7002-1); the booking sends them in bodies (`usage_bodies`),
+    and books only the rows not booked yet. When the usage
     read fails, no archived BB spool is made in this pull (``archived_deferred``,
     R-6707-16).
 
@@ -189,7 +200,7 @@ async def read_and_pull(
         rows = await client.spool_rows(include_archived=True)
         try:
             if pulls.spools or pulls.weights:
-                usage = await client.spool_usage()
+                usage = await client.spool_usage(limit=USAGE_READ_ROWS)
         except Exception as error:
             usage_failed = True
             _failed("could not read Bambuddy's usage rows", error)
