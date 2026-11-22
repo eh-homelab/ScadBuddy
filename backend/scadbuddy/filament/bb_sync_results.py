@@ -692,11 +692,6 @@ def _proof_of(
     return _proof(links, *listing)
 
 
-def _proven_same(conn: Conn, listing: tuple[Sequence[BbSpool], Sequence[int | None]]) -> bool:
-    """`same_bambuddy` for the spool links as they stand."""
-    return _proof_of(conn, listing)[0]
-
-
 #: What `parse_rows` makes of the configured Bambuddy's spools: the rows, and the ids of
 #: those that did not parse. ``None``: no Bambuddy is configured, so nothing was read.
 Listing = tuple[Sequence[BbSpool], Sequence[int | None]] | None
@@ -760,7 +755,7 @@ def reset_links(
         if confirm_instance != instance:
             raise ResetRefusedError("confirm_mismatch")
         if expect_kept:
-            if configured is None or listing is None or not _proven_same(conn, listing):
+            if configured is None or listing is None or not _proof_of(conn, listing)[0]:
                 raise ResetRefusedError("proof_changed")
             conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (configured,))
             logger.info(
