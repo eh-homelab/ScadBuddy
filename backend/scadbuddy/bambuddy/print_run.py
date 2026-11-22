@@ -2399,7 +2399,14 @@ async def rack_preview(
             volume_type=rack_volume_type(request.choices.nozzles, laid_out=laid_out),
             # Zero alpha (a Clear spool's #00000000) is no color, never black.
             color=rack_color(first) if first else None,
-            materials=tuple(dict.fromkeys(_spool_material(spool) for spool in known)),
+            # A spool with no type names no material (R-6876-6).
+            materials=tuple(
+                dict.fromkeys(
+                    _spool_material(spool)
+                    for spool in known
+                    if (spool.names.material or "").strip()
+                )
+            ),
             abrasive=any(
                 abrasive_type(f"{spool.names.material or ''} {spool.names.subtype or ''}")
                 or glow(spool.names.material or "", spool.names.subtype)
