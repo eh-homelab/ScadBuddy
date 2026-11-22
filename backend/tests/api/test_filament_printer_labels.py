@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.filament.component import FILAMENT
@@ -116,3 +117,47 @@ def test_location_page(client: TestClient) -> None:
     assert page.status_code == 200, page.text
     assert page.json()["code"] == labels[0]["code"]
     assert client.get(f"{LOCATIONS}/{uuid4()}").status_code == 404
+
+
+def _report(client: TestClient, printer: str, report: dict[str, object]) -> None:
+    with _state(client).settings_store.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printer_reports (printer_id, report, seen_at) VALUES (%s, %s, now())"
+            " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report",
+            (printer, Jsonb(report)),
+        )
+
+
+def test_printer_labels_make_every_reported_slot(client: TestClient) -> None:
+    """Spec §8: each AMS unit, each slot and the external holder, also when no spool was
+    ever loaded there."""
+    printer = _printer(client, "H2C")
+    _tray(client, printer, 0, 2)
+    _report(
+        client,
+        printer,
+        {
+            "ams": {"ams": [{"id": "0", "tray": [{"id": str(t)} for t in range(4)]}]},
+            "vt_tray": {"id": "254"},
+        },
+    )
+    body = client.post(LABELS, json={"printer_ids": [printer]}).json()
+    rows = [(label["name"], label["depth"]) for label in body["labels"]]
+    assert [d for _, d in rows] == [0, 1, 2, 2, 2, 2, 1]
+    assert rows[1][0] == "H2C AMS-A"
+    assert rows[4][0] == "t02"  # a place made earlier keeps its name
+    assert body["no_report"] == []
+    again = client.post(LABELS, json={"printer_ids": [printer]}).json()
+    assert again == body
+
+
+def test_printer_labels_name_a_printer_with_no_report(client: TestClient) -> None:
+    printer = _printer(client, "H2C")
+    _tray(client, printer, 0, 1)
+    body = client.post(LABELS, json={"printer_ids": [printer]}).json()
+    assert [label["depth"] for label in body["labels"]] == [0, 1, 2]
+    assert body["no_report"] == ["H2C"]
+    _report(client, printer, {"gcode_state": "IDLE"})
+    body = client.post(LABELS, json={"printer_ids": [printer]}).json()
+    assert [label["depth"] for label in body["labels"]] == [0, 1, 2]
+    assert body["no_report"] == ["H2C"]

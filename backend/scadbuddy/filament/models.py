@@ -451,6 +451,9 @@ class PrinterLabel(BaseModel):
 class PrinterLabels(BaseModel):
     base_url: str | None
     labels: list[PrinterLabel]
+    #: The names of the printers with no report that lists an AMS unit or an external
+    #: holder: their slots get labels only once a spool has been loaded in them.
+    no_report: list[str] = []
 
 
 Reading = Annotated[float, Field(allow_inf_nan=False)]
