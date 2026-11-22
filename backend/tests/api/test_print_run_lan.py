@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -449,7 +450,9 @@ def test_two_passes_at_once_record_a_gone_run_stopped_once(
 ) -> None:
     """#6871 (review of #6948): the run-holds reap and the native-copies sweep may check
     the same gone run at once; the row lock in `record_lan_stopped` lets only one record
-    and announce its stop."""
+    and announce its stop. A barrier just after the run's read makes both passes read
+    before either writes, unless the lock holds the second one back: without it, both
+    would record (checked by removing ``FOR UPDATE`` once)."""
     store = _state(client).print_runs.store
     gone = _run(client, workflow_reaper, printer=_printer(client))
     announced: list[str] = []
@@ -460,6 +463,35 @@ def test_two_passes_at_once_record_a_gone_run_stopped_once(
         announce(conn, run, slug, row)
 
     monkeypatch.setattr(store, "_announce", counted)
+    # With the lock, the second read waits for the first write, so the first pass's
+    # wait times out and breaks the barrier; both then go on.
+    barrier = threading.Barrier(2, timeout=5)
+    pool = store._pool
+
+    class Paused:
+        def __init__(self, conn: Any) -> None:
+            self._conn = conn
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._conn, name)
+
+        def execute(self, query: Any, *args: Any, **kwargs: Any) -> Any:
+            cursor = self._conn.execute(query, *args, **kwargs)
+            if "slug FROM print_runs WHERE id = %s" in str(query):
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    barrier.wait()
+            return cursor
+
+    class PausedPool:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(pool, name)
+
+        @contextlib.contextmanager
+        def connection(self, *args: Any, **kwargs: Any) -> Iterator[Paused]:
+            with pool.connection(*args, **kwargs) as conn:
+                yield Paused(conn)
+
+    monkeypatch.setattr(store, "_pool", PausedPool())
 
     async def both() -> None:
         runs = _state(client).print_runs
