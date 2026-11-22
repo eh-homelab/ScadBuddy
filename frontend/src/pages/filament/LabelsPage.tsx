@@ -5,7 +5,7 @@ import { Link, useSearchParams } from 'react-router'
 import { api } from '../../api/client'
 import { getLocation, getSpool, printerLabels, type SpoolDetail } from '../../api/filament'
 import { Label, LocationLabel } from '../../components/filament/Label'
-import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, labelBase, labelPayload, locationPayload, MAX_LABELS, qrSvg } from '../../components/filament/labelSheet'
+import { LABEL_HEIGHT_MM, LABEL_WIDTH_MM, httpsOrigin, labelBase, labelPayload, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, qrSvg } from '../../components/filament/labelSheet'
 import { Button } from '@/components/ui/button'
 import { Label as FieldLabel } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
@@ -65,12 +65,13 @@ interface LoadedPlaces {
   base: string
   labels: PlaceLabel[]
   failed: string[]
+  tooLong: string[]
 }
 
 /** The label base of the settings (`filament_label_base_url`, else `public_url`), or null. */
 async function settingsBase(): Promise<string | null> {
   const settings = await api.getSettings()
-  return settings.filament_label_base_url ?? settings.public_url ?? null
+  return httpsOrigin(settings.filament_label_base_url) ?? httpsOrigin(settings.public_url)
 }
 
 /**
@@ -96,22 +97,25 @@ export function LabelsPage() {
   useEffect(() => {
     if (!placesKey) return
     let live = true
-    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], failed: string[]) => {
+    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[]) => {
       const origin = labelBase(base)
-      const labels = await Promise.all(rows.map(async (row) => ({ ...row, svg: await qrSvg(locationPayload(origin, row.code)) })))
-      if (live) setPlaces({ key: placesKey, base: origin, labels, failed })
+      // A payload past 84 bytes would need a bigger QR code than the 19.8 mm box scans: no label for it.
+      const fits = (row: { code: string }) => new TextEncoder().encode(locationPayload(origin, row.code)).length <= MAX_PAYLOAD_BYTES
+      const tooLong = rows.filter((row) => !fits(row)).map((row) => row.code)
+      const labels = await Promise.all(rows.filter(fits).map(async (row) => ({ ...row, svg: await qrSvg(locationPayload(origin, row.code)) })))
+      if (live) setPlaces({ key: placesKey, base: origin, labels, failed: [], tooLong })
     }
     const fail = () => {
-      if (live) setPlaces({ key: placesKey, base: labelBase(null), labels: [], failed: [placesKey.slice(placesKey.indexOf(':') + 1)] })
+      if (live) setPlaces({ key: placesKey, base: labelBase(null), labels: [], failed: [locationParam ?? 'printers'], tooLong: [] })
     }
     if (printersParam) {
       const wanted = printersParam === 'all' ? null : [...new Set(printersParam.split(',').map((id) => id.trim()).filter(Boolean))]
       printerLabels(wanted)
-        .then((answer) => draw(answer.base_url, answer.labels.map((row) => ({ id: row.location_id, code: row.code, name: row.name })), []))
+        .then((answer) => draw(answer.base_url, answer.labels.map((row) => ({ id: row.location_id, code: row.code, name: row.name }))))
         .catch(fail)
     } else if (locationParam) {
       Promise.all([getLocation(locationParam), settingsBase().catch(() => null)])
-        .then(([place, base]) => draw(base, [{ id: place.id, code: place.code, name: place.name }], []))
+        .then(([place, base]) => draw(base, [{ id: place.id, code: place.code, name: place.name }]))
         .catch(fail)
     }
     return () => {
@@ -121,7 +125,7 @@ export function LabelsPage() {
 
   useEffect(() => {
     const wanted = key.split(',').filter(Boolean)
-    if (tooMany || wanted.length === 0) return
+    if (tooMany || wanted.length === 0 || placesKey) return
     let live = true
     // At most `READ_AT_ONCE` reads in flight: up to 100 ids must not open 100 requests together.
     const results: (Loaded['labels'][number] | string)[] = new Array(wanted.length)
@@ -149,7 +153,7 @@ export function LabelsPage() {
     return () => {
       live = false
     }
-  }, [key, tooMany])
+  }, [key, tooMany, placesKey])
 
   const choose = (next: string) => {
     const chosen: Layout = next === 'sheet' ? 'sheet' : 'roll'
@@ -172,8 +176,8 @@ export function LabelsPage() {
     <div className="h-full overflow-y-auto">
       <style>{printCss(layout)}</style>
       <div className="mx-auto max-w-4xl px-4 py-6">
-        <Link to={filamentLinks.spools} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
-          <ChevronLeftIcon className="size-3.5" /> Spools
+        <Link to={placeMode ? filamentLinks.locations : filamentLinks.spools} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+          <ChevronLeftIcon className="size-3.5" /> {placeMode ? 'Locations' : 'Spools'}
         </Link>
         <header className="mb-5 flex flex-wrap items-center gap-3">
           <div className="min-w-0 flex-1">
@@ -181,7 +185,9 @@ export function LabelsPage() {
             <p className="text-[13px] text-muted-foreground">
               {placeMode
                 ? readyPlaces
-                  ? `${placeLabels.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`
+                  ? placeLabels.length === 0 && readyPlaces.failed.length === 0 && readyPlaces.tooLong.length === 0
+                    ? 'No printers.'
+                    : `${placeLabels.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`
                   : 'Loading labels…'
                 : tooMany ? '' : ids.length === 0 ? 'No spools chosen.' : `${labels.length} of ${ids.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`}
             </p>
@@ -213,7 +219,12 @@ export function LabelsPage() {
         )}
         {readyPlaces && readyPlaces.failed.length > 0 && (
           <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
-            The labels for {readyPlaces.failed.join(', ')} could not be read
+            {locationParam ? `The label of ${locationParam} could not be read` : 'The printer labels could not be read'}
+          </p>
+        )}
+        {readyPlaces && readyPlaces.tooLong.length > 0 && (
+          <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
+            The address for {readyPlaces.tooLong.join(', ')} is too long for a QR code on this label. Shorten the label address in Settings.
           </p>
         )}
         {ready && ready.failed.length > 0 && (

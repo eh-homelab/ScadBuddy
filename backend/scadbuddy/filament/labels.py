@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from scadbuddy.bambuddy.trays import EXTERNAL
@@ -14,10 +15,26 @@ from scadbuddy.filament.locations import LocationStore
 
 
 def label_base_url(read: Mapping[str, Any]) -> str | None:
-    """The https origin a location label's QR opens: ``filament_label_base_url``, else
-    ``public_url``, else ``None``. ``read`` is what ``settings_store.read`` gives for both
-    names."""
-    return read.get("filament_label_base_url") or read.get("public_url") or None
+    """The https origin a location label's QR opens: ``filament_label_base_url`` (already
+    validated), else ``public_url`` reduced to its origin (``https`` with a host; any path
+    dropped), else ``None``. Empty strings count as unset. ``read`` is what
+    ``settings_store.read`` gives for both names."""
+    return read.get("filament_label_base_url") or _https_origin(read.get("public_url"))
+
+
+def _https_origin(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not host:
+        return None
+    shown = f"[{host}]" if ":" in host else host
+    return f"https://{shown}" + (f":{port}" if port else "")
 
 
 def printer_labels(

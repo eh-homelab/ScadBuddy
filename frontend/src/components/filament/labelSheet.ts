@@ -32,7 +32,21 @@ export function parseLabelPayload(text: string): string | null {
  */
 export const locationPayload = (base: string, code: string): string => `${base.replace(/\/+$/, '')}/x/${code}`
 
-/** The address a place label opens: the configured base, else this page's own origin; no trailing slash. */
-export const labelBase = (baseUrl: string | null): string => (baseUrl ?? window.location.origin).replace(/\/+$/, '')
+/** The longest payload of a place label: QR version 5 at level M holds 84 bytes. */
+export const MAX_PAYLOAD_BYTES = 84
+
+/** The https origin of a candidate address (no path, no trailing slash), or null for an empty, unreadable or non-https one. */
+export function httpsOrigin(candidate: string | null | undefined): string | null {
+  if (!candidate) return null
+  try {
+    const url = new URL(candidate)
+    return url.protocol === 'https:' ? url.origin : null
+  } catch {
+    return null
+  }
+}
+
+/** The address a place label opens: the https origin of the configured base, else this page's own origin. */
+export const labelBase = (baseUrl: string | null): string => httpsOrigin(baseUrl) ?? window.location.origin
 
 export const qrSvg = (payload: string): Promise<string> => QRCode.toString(payload, { type: 'svg', errorCorrectionLevel: 'M', margin: 0 })

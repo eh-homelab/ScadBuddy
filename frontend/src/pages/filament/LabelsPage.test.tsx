@@ -131,4 +131,36 @@ describe('the labels page', () => {
     renderPage(<LabelsPage />, { route: '/filament/labels?locations=nope' })
     expect(await screen.findByRole('alert')).toHaveTextContent('could not be read')
   })
+
+  it.each([
+    ['http://h.example/p/', window.location.origin],
+    ['https://h.example/p/', 'https://h.example'],
+  ])('reduces the public_url %s to an https origin for one place', async (publicUrl, shown) => {
+    server.use(http.get('*/api/v1/settings', () => HttpResponse.json({ filament_label_base_url: '', public_url: publicUrl })))
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByText(`Labels open ${shown}`)).toBeInTheDocument()
+  })
+
+  it('draws no label whose payload passes 84 bytes', async () => {
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: `https://${'a'.repeat(70)}.example`, labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }] })))
+    renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('too long')
+    expect(screen.queryAllByTestId('label')).toHaveLength(0)
+  })
+
+  it('says no printers, and names no raw id on a failure', async () => {
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: null, labels: [] })))
+    const { unmount } = renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    expect(await screen.findByText('No printers.')).toBeInTheDocument()
+    unmount()
+    server.use(http.post('*/api/v1/filament/printer-labels', () => new HttpResponse(null, { status: 500 })))
+    renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('The printer labels could not be read')
+  })
+
+  it('goes back to the Locations tab from a place label', () => {
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    expect(screen.getByRole('link', { name: /Locations/ })).toHaveAttribute('href', '/filament/locations')
+  })
 })
