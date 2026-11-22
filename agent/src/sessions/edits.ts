@@ -49,6 +49,8 @@ export type SessionEditsDeps = {
   audit?: AuditSink
   /** Ends a durable session's workflow (#1056); refuses when it cannot be told. */
   endDurable: (id: string) => Promise<void>
+  /** Tells an archived session's workflow to end (#7031), best-effort; absent with no Temporal. */
+  endArchived?: ((id: string) => Promise<void>) | undefined
   /** Ends a session's background tasks (src/background/) when it is archived or marked done. */
   endBackground?: ((id: string, why: string) => Promise<unknown>) | undefined
   /** This replica's warm processes (warm.ts): a session marked done or archived loses its own. */
@@ -188,8 +190,8 @@ export class SessionEdits {
     // An archived chat runs nothing (#7031): its workflow ends and releases its warm place, as a
     // done one's does. Best-effort, once the edit passed: a workflow that misses it keeps waiting,
     // and the archive stands. A send after an unarchive starts a new run (durable.ts).
-    if (archive) {
-      await this.deps.endDurable(id).catch(() => {
+    if (archive && this.deps.endArchived) {
+      await this.deps.endArchived(id).catch(() => {
         console.warn(`session edit: archived session ${id}'s workflow could not be told to end`)
       })
     }

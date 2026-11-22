@@ -998,6 +998,8 @@ export class SessionManager {
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      // No Temporal (this.durable unset): nothing to end, and nothing to warn about.
+      endArchived: (id) => this.durable?.end(id) ?? Promise.resolve(),
       warm: this.warm,
       endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
@@ -1375,7 +1377,7 @@ export class SessionManager {
     )
   }
 
-  /** Tells a session's workflow to end: marked done (#1056) or archived (#7031); refuses `unavailable` with no Temporal. */
+  /** Tells a session's workflow it was marked done (#1056), or refuses `unavailable`. */
   private async endDurable(id: string): Promise<void> {
     if (!this.durable) {
       throw new SessionError('unavailable', 'this agent service has no Temporal to tell the session it is done; try again once it has')

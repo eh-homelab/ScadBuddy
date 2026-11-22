@@ -563,9 +563,8 @@ export class DurableTurns {
     })
     // The turn id as the update id: a re-send of the same turn is the same Update.
     const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
-    const deadline = Date.now() + this.#sendTimeoutMs
     const send = () =>
-      this.#client.withDeadline(deadline, () =>
+      this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
         this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
           SEND_MESSAGE_UPDATE,
           { ...update, startWorkflowOperation: operation() },
@@ -580,10 +579,16 @@ export class DurableTurns {
         // The run was told to end (an archive just before an unarchive, #7031; a done whose edit
         // did not land) and is closing. The claim passed, so the row is not done: once that run
         // closes, the same Update starts a new one. The closing run refused it, so it never took it.
-        await this.#client.withDeadline(deadline, () => this.#client.workflow.getHandle(sessionWorkflowId(session.id)).result()).catch(() => undefined)
+        const workflowId = sessionWorkflowId(session.id)
+        await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () => this.#client.workflow.getHandle(workflowId).result()).catch(() => undefined)
+        const state = await this.#describe(workflowId).catch(() => 'open' as const)
+        // Still closing past the wait: nothing took the message, so the claim is given back.
+        if (state !== 'closed' && state !== 'not_found') throw new SessionError('unavailable', `session ${session.id}'s workflow is still ending; send the message again in a moment`)
         await send()
       }
     } catch (err) {
+      // A refusal made here (the run still ending), which gives the claim back.
+      if (err instanceof SessionError) throw err
       const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)

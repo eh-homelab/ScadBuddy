@@ -19,7 +19,7 @@ import { CrudSessionReads, type SessionReads } from './sessionReads.js'
 //      Step 9.2: every `tool.call` in its events with no `tool.result`) are terminated too;
 //      then the session's workflow is sent `end` (#7031), best-effort, as a done or archived
 //      session's is, and given FORGET_END_WAIT_MS to close, so it releases its warm place
-//      (step 2 terminates it if it did not);
+//      (not while a turn runs; step 2 terminates it if it did not close);
 //   1. a session's forks that read its transcript through it (store.ts, plan 2026-10-13
 //      Step 6.5) take the range each references, sealed under their own keys, with the
 //      events and images they read through it (#4212), in the
@@ -83,11 +83,17 @@ export type ForgetDeps = {
 /** How long a forget waits for the session's workflow to close after `end` (#7031). */
 export const FORGET_END_WAIT_MS = 10_000
 
-/** `end` to the session's workflow, then a bounded wait for it to close; best-effort: step 2 terminates it. */
+/**
+ * `end` to the session's workflow, then a bounded wait for it to close; best-effort: step 2
+ * terminates it. No wait while a turn runs (an activity is pending): `end` takes effect only
+ * once the turn ends, so the terminate ends it instead.
+ */
 async function endSessionWorkflow(client: Client, sessionId: string): Promise<void> {
   try {
     await new DurableGate(client).end(sessionId)
-    await client.withDeadline(Date.now() + FORGET_END_WAIT_MS, () => client.workflow.getHandle(sessionWorkflowId(sessionId)).result())
+    const handle = client.workflow.getHandle(sessionWorkflowId(sessionId))
+    if ((await handle.describe()).raw.pendingActivities?.length) return
+    await client.withDeadline(Date.now() + FORGET_END_WAIT_MS, () => handle.result())
   } catch {
     // Not reached, still closing, or gone: the terminate below ends it.
   }

@@ -15,6 +15,8 @@ import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
 import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import type { UserImage } from '../src/sessions/images.js'
 import { type SessionManager } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
@@ -1246,6 +1248,49 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await again.done).toMatchObject({ kind: 'result' })
       expect(await runIdOf(session.id)).not.toBe(endingRun)
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
+    })
+
+    it('a send that meets a run still ending past its wait is refused `unavailable`, and its claim given back (#7031)', async () => {
+      const m = await durableManager()
+      m.durable = new DurableGate(env.client)
+      m.durableTurns = new DurableTurns({ client: env.client, ...durableStores(db.sql), events: m.events, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST), sendTimeoutMs: 5_000 })
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      const closing = held()
+      releaseHold = closing.promise
+      await m.edits.update(session.id, browser, { archived: true })
+      await poll(() => released.length, 1)
+      await m.edits.update(session.id, browser, { archived: false })
+      try {
+        await expect(m.send(session.id, browser, 'too soon')).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/still ending/) })
+        const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
+        expect(row).toEqual({ status: 'idle', durable_turn_id: null })
+      } finally {
+        closing.release()
+      }
+      await handleOf(session.id).result()
+      expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result' })
+      expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
+    })
+
+    it('forget sends `end`: the run completes and releases its home before the tombstone, not by the terminate (#7031)', async () => {
+      const m = await durableManager()
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      const deps = sqlForget(db.sql, { client: env.client })
+      const tombstone = deps.crud.forget
+      let atTombstone: string | undefined
+      deps.crud = {
+        forget: async (subject) => {
+          atTombstone = (await handleOf(session.id).describe()).status.name
+          return tombstone(subject)
+        },
+      }
+      expect(await forgetSubject(deps, sessionWorkflowId(session.id))).toMatchObject({ workflow: 'deleted' })
+      expect(atTombstone).toBe('COMPLETED')
+      expect(released).toEqual([session.id])
     })
 
     it('still refuses `closed` a send to a done session, and starts no run for it', async () => {
