@@ -544,6 +544,7 @@ class LanActivities:
                 manual_position=input.rack_position,
                 usage=usage,
                 spools=input.spools,
+                chosen={slot.slot_id: slot.spool_id for slot in input.plan.slots},
             )
             # Only the picks behind a sent wire print: `choose_nozzles` names none else.
             picks = [

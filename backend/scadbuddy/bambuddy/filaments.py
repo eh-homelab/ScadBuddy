@@ -99,6 +99,9 @@ WarningKind = Literal[
     # it is kept for clients that key on it (#4600 review).
     "rack-left-to-bambuddy",
     "rack-manual-partial",
+    # #6876: a rack group ranked as not abrasive while Glow could not be checked on a
+    # slot's spool; it names each slot and why.
+    "rack-glow-unchecked",
     # A by-object print whose objects the toolhead or the gantry would hit (#956).
     "sequence-clearance",
     # #717: a filament profile left on that could not apply; the print goes ahead.
@@ -198,6 +201,12 @@ class SpoolOption(BaseModel):
     #: ``sb_number`` is its ``#N``, what its presets are read by (F1).
     sb_spool_id: UUID | None = None
     sb_number: int | None = None
+    #: That SB spool's material and subtype names, for the rack's Glow and abrasive tests
+    #: only (#6876, `rack.rank.rack_groups`). A native tray choice keeps the tray's
+    #: ``material`` and no ``subtype``, which the picker's label and the profile
+    #: resolution read; these say what the spool in it is.
+    sb_material: str | None = None
+    sb_subtype: str | None = None
     #: The colour with its alpha, ``#RRGGBBAA``: the held SB spool's own, else the tray's
     #: reported ``tray_color``. ``colour`` stays ``#RRGGBB``, which the render splits by;
     #: this is what tells a translucent spool from an opaque one (`same_opacity`), and
