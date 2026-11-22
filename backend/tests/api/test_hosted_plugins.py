@@ -205,6 +205,7 @@ def test_a_publish_makes_immutable_numbered_versions(client: TestClient, db: Any
         "added": ["skills/hello/SKILL.md"],
         "removed": [],
         "changed": [],
+        "manifest_changed": False,
     }
 
     first = client.post(f"{BASE}/greeter/publish")
@@ -228,6 +229,7 @@ def test_a_publish_makes_immutable_numbered_versions(client: TestClient, db: Any
         "added": ["commands/wave.md"],
         "removed": [],
         "changed": ["skills/hello/SKILL.md"],
+        "manifest_changed": False,
     }
     v2 = client.post(f"{BASE}/greeter/publish").json()
     assert v2["version"] == 2
@@ -362,6 +364,43 @@ def test_a_new_description_reaches_the_next_version_only(client: TestClient) -> 
     again = client.get(f"{BASE}/greeter").json()
     assert again["description"] == "Waves"
     assert again["latest_version"] == v1["version"]
+
+    # Only the generated plugin.json differs, and that is still a change to publish.
+    diff = client.get(f"{BASE}/greeter/draft-diff").json()
+    assert diff == {
+        "base_version": 1,
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "manifest_changed": True,
+    }
+    second = client.post(f"{BASE}/greeter/publish")
+    assert second.status_code == 200, second.text
+    v2 = second.json()
+    assert v2["version"] == 2
+    got = client.get(f"{CRUD}/greeter/versions/2.zip", headers=token(client))
+    with zipfile.ZipFile(io.BytesIO(got.content)) as zf:
+        manifest = zf.read(rules.MANIFEST_PATH)
+    assert manifest == bundle.plugin_json("greeter", "Waves", 2)
+    assert client.get(f"{BASE}/greeter/draft-diff").json()["manifest_changed"] is False
+    same = client.post(f"{BASE}/greeter/publish")
+    assert (same.status_code, same.json()["reason"]) == (409, "nothing-to-publish")
+
+
+def test_a_description_changed_while_it_is_published_is_refused(
+    client: TestClient, db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(client)
+    build = bundle.build_zip
+
+    def changed_midway(files: Any) -> bytes:
+        db.execute("UPDATE ai_hosted_plugins SET description = 'Waves' WHERE name = 'greeter'")
+        return build(files)
+
+    monkeypatch.setattr(bundle, "build_zip", changed_midway)
+    refused = client.post(f"{BASE}/greeter/publish")
+    assert (refused.status_code, refused.json()["reason"]) == (409, "draft-changed"), refused.text
+    assert client.get(f"{BASE}/greeter").json()["latest_version"] is None
 
 
 def test_a_put_to_a_missing_plugin_is_404(client: TestClient) -> None:

@@ -9,12 +9,12 @@ ScadBuddy as a draft of files, published as immutable numbered versions.
 - ``GET /{name}/files`` the draft; ``GET``, ``PUT`` (the raw bytes as the body,
   ``?executable=true`` for a script under ``skills/``) and ``DELETE /{name}/files/{path}``
   one file; ``POST /{name}/files/moves`` a rename; ``GET /{name}/draft-diff`` the draft
-  against the latest version;
+  against the latest version, with ``manifest_changed`` when the description differs;
 - ``POST /{name}/publish`` the next version: the draft checked (422 ``draft-invalid`` with
   ``problems``), ``plugin.json`` generated, the zip built (`hosted_plugins/bundle.py`) and
   stored, and the version row and ``latest_version`` written in one transaction. A draft
-  equal to the latest version is 409 ``nothing-to-publish``; one changed while it was
-  built, 409 ``draft-changed``.
+  equal to the latest version, with the same description, is 409 ``nothing-to-publish``;
+  one whose files or description changed while it was built, 409 ``draft-changed``.
 
 Path rules and caps are `hosted_plugins/rules.py`'s. The routes are ``api`` routes
 (`auth/routes.py`): a person, an access token with ``write`` for a write, or the agent's
@@ -139,6 +139,10 @@ class HostedPluginDraftDiff(BaseModel):
     added: list[str]
     removed: list[str]
     changed: list[str]
+    #: True when the generated ``.claude-plugin/plugin.json`` differs from the base's other
+    #: than its version number (a ``PATCH`` changed the description). A draft with only this
+    #: change still publishes. False before the first publish.
+    manifest_changed: bool
 
 
 class HostedPluginVersion(BaseModel):
@@ -238,6 +242,16 @@ def _file_list(rows: list[Any]) -> dict[str, dict[str, Any]]:
 
 def _without_manifest(files: dict[str, Any]) -> dict[str, Any]:
     return {p: v for p, v in files.items() if p != rules.MANIFEST_PATH}
+
+
+def _manifest_changed(row: Any, base: Any | None) -> bool:
+    """Whether the plugin's name or description differs from what ``base``'s plugin.json holds:
+    the manifest rebuilt at the base's own version number has other bytes."""
+    if base is None:
+        return False
+    rebuilt = bundle.plugin_json(row["name"], row["description"], base["version"])
+    held: str = base["files"][rules.MANIFEST_PATH]["sha256"]
+    return hashlib.sha256(rebuilt).hexdigest() != held
 
 
 @router.post(
@@ -466,7 +480,11 @@ async def hosted_plugin_draft_diff(name: Name, state: StateDep) -> HostedPluginD
         base = store.latest(conn, row)
         before = {} if base is None else _without_manifest(base["files"])
         diff = bundle.diff_files(before, _file_list(store.draft(conn, row["id"])))
-        return HostedPluginDraftDiff(base_version=None if base is None else base["version"], **diff)
+        return HostedPluginDraftDiff(
+            base_version=None if base is None else base["version"],
+            manifest_changed=_manifest_changed(row, base),
+            **diff,
+        )
 
     return await _in_tx(state, run)
 
@@ -498,7 +516,11 @@ async def publish_hosted_plugin(
             problems=found,
         )
     listed = bundle.file_list(tree)
-    if base is not None and _without_manifest(base["files"]) == _without_manifest(listed):
+    if (
+        base is not None
+        and _without_manifest(base["files"]) == _without_manifest(listed)
+        and not _manifest_changed(row, base)
+    ):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"the draft is the same as version {base['version']}",
@@ -515,11 +537,13 @@ async def publish_hosted_plugin(
         if (
             current["id"] != row["id"]
             or current["latest_version"] != row["latest_version"]
+            or current["description"] != row["description"]
             or _file_list(store.draft(conn, row["id"])) != read_draft
         ):
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "the draft or its versions changed while it was published; publish again",
+                "the draft, its description or its versions changed while it was published; "
+                "publish again",
                 reason=DRAFT_CHANGED,
             )
         version = store.publish(

@@ -675,6 +675,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'POST /api/v1/hosted-plugins',
       'GET /api/v1/hosted-plugins',
       'GET /api/v1/hosted-plugins/{name}',
+      'PATCH /api/v1/hosted-plugins/{name}',
       'DELETE /api/v1/hosted-plugins/{name}',
       'GET /api/v1/hosted-plugins/{name}/files',
       'GET /api/v1/hosted-plugins/{name}/files/{path}',
@@ -688,7 +689,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason:
       "A hosted plugin's draft and publish (#6932, spec 2026-11-21 §6.2). Its MCP tools (hosted_plugin_create, " +
-      '_list, _file_read, _file_write, _file_delete and _publish) follow in #6938; until then the routes are ' +
+      '_list, _update, _file_read, _file_write, _file_delete and _publish) follow in #6938; until then the routes are ' +
       "Settings' and an access token's.",
   })),
 ]

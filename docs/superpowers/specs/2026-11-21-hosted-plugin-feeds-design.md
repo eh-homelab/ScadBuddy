@@ -155,7 +155,11 @@ access token, and the agent's credential is what the MCP tools of #6938 call the
 - `GET /{name}/files` lists the draft. `GET`, `PUT` and `DELETE /{name}/files/{path}`
   read, write and delete one file. `PUT` takes the raw bytes as the body.
 - `POST /{name}/files/moves` renames a path.
-- `GET /{name}/draft-diff` shows the draft against the latest version.
+- `GET /{name}/draft-diff` shows the draft against the latest version. Its
+  `manifest_changed` is true when only the generated `plugin.json` differs (a `PATCH`
+  changed the description). Such a draft still publishes: a new description reaches the
+  next version, and `publish` answers `nothing-to-publish` (409) only when the files and
+  the description are both the same as the latest version's.
 
 Path rules, checked at write: UTF-8, relative, no `..`, no segment that starts with `.`,
 no symlinks. Allowed top-level folders are `skills/`, `agents/` and
@@ -163,7 +167,7 @@ no symlinks. Allowed top-level folders are `skills/`, `agents/` and
 Caps (my call, change them in review): 2 MiB per file, 500 files and 20 MiB per plugin.
 
 The assistant gets matching MCP tools: `hosted_plugin_create`, `hosted_plugin_list`,
-`hosted_plugin_file_read`, `hosted_plugin_file_write`, `hosted_plugin_file_delete` and
+`hosted_plugin_update` (the `PATCH`), `hosted_plugin_file_read`, `hosted_plugin_file_write`, `hosted_plugin_file_delete` and
 `hosted_plugin_publish`. A draft write is not outward: it changes nothing that loads.
 `hosted_plugin_publish` is outward, because it also installs or re-pins the package
 (6.3 step 5), and installing is an outward settings write (`agent/src/routes/pluginPackages.ts`,
