@@ -1,5 +1,5 @@
 """The colour catalog's sources (#6907, plan `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`
-Decisions 206-222): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
+Decisions 206-223): Bambuddy's colour catalog (the pull, `bb_pull_apply.LocalBbPull.colours`),
 filamentcolors.xyz and Bambu Studio's colour codes (`ColourSyncs`, run as the operation
 ``filament_colour_sync`` on the ``library`` queue, `filament/operations.py`).
 
