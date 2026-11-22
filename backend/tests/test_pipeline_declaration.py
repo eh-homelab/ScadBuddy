@@ -333,3 +333,15 @@ def test_verify_without_declared_inputs_checks_nothing_more(tmp_path: Path) -> N
     template.mkdir()
     (template / "model.json").write_text(json.dumps({"name": "Demo", **DECLARED}))
     assert declared_inputs_failures(template, [{"anything": 1}]) == []
+
+
+def test_verify_refuses_a_declaration_the_catalogue_refuses(tmp_path: Path) -> None:
+    """#6913 review: `verify.sh` reads `pipeline` as the catalogue does, so a path the
+    catalogue refuses (it makes the pipeline unreadable) fails here too."""
+    template = tmp_path / "escaping"
+    template.mkdir()
+    (template / "inputs.json").write_text(json.dumps(SMALL_SCHEMA))
+    pipeline = {"module": "pipeline/pipeline.py", "api": 1, "inputs": "../escaping/inputs.json"}
+    (template / "model.json").write_text(json.dumps({"name": "Demo", "pipeline": pipeline}))
+    failures = declared_inputs_failures(template, [{"n": 2}])
+    assert failures and all(line.startswith("model.json pipeline: ") for line in failures)

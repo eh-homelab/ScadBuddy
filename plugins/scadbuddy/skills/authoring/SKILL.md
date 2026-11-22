@@ -690,7 +690,12 @@ own inputs, and the parameters its pipeline sets, in `model.json`:
   may also be one `object` of such scalars, with its own `required` and
   `additionalProperties: false`; never an object in an object. At most 16 KiB, and a
   `pattern` needs a `maxLength` of at most 1024. `models/dollhouse-kit/pipeline/inputs.json`
-  is a worked example (its `house` object).
+  is a worked example (its `house` object). Names are refused when they are Python
+  keywords or the names of pydantic `BaseModel` attributes (`copy`, `json`, `schema` and
+  the like), as for flows. An object takes no `default`, so list it in `required` when
+  a listing must always state it. The dollhouse requires `house`, so a listing always
+  fixes the house size; its `pipeline.py` still falls back to `DEFAULT_HOUSE` when a
+  render gives no `house`.
 - `sets_params` lists the `model.scad` parameters your pipeline sets itself on each
   render (the dollhouse's `pipeline.py` `SHAPE`). The storefront listing editor hides
   them (`GET /api/v1/models/{slug}/versions/{commit}/schema` returns them as

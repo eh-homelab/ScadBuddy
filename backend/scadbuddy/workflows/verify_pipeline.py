@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
@@ -28,6 +29,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.input_schema import value_problems
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.catalogue import PipelineDeclaration
 from scadbuddy.library.pipelines import HOST_INPUTS, inputs_schema_problems
 from scadbuddy.render.inputs import InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job
@@ -159,9 +161,19 @@ def declared_inputs_failures(template: Path, cases: list[dict[str, Any]]) -> lis
     2026-11-17 §10.2): the schema in the pipeline subset, and every case, less the host's
     `HOST_INPUTS`, fitting it. Empty for a template that declares none."""
     meta = json.loads((template / MODEL_META_NAME).read_text(encoding="utf-8"))
-    declared = meta.get("pipeline") or {}
-    name = declared.get("inputs") if isinstance(declared, dict) else None
-    if not isinstance(name, str):
+    if meta.get("pipeline") is None:
+        return []
+    # Read as the catalogue reads it, so a declaration it refuses (an `inputs` path
+    # outside `pipeline/`, which makes the pipeline unreadable) fails here too.
+    try:
+        declared = PipelineDeclaration.model_validate(meta["pipeline"])
+    except ValidationError as err:
+        return [
+            f"model.json pipeline: {'.'.join(map(str, e['loc'])) or 'pipeline'}: {e['msg']}"
+            for e in err.errors()
+        ]
+    name = declared.inputs
+    if name is None:
         return []
     schema = json.loads((template / name).read_text(encoding="utf-8"))
     if problems := inputs_schema_problems(schema):
