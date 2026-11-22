@@ -73,7 +73,16 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
       beforeLoad,
       landed,
       landedWaitMs,
-    }: { carried: 'before' | 'between' | 'none'; loads?: boolean; beforeLoad?: () => Promise<void>; landed?: () => Promise<void>; landedWaitMs?: number },
+      settled,
+    }: {
+      carried: 'before' | 'between' | 'none'
+      loads?: boolean
+      beforeLoad?: () => Promise<void>
+      landed?: () => Promise<void>
+      landedWaitMs?: number
+      /** Told as `host.run` settles, before the reads that follow it. */
+      settled?: () => void
+    },
   ) {
     let id = ''
     const store = new TranscriptStore(new PgTranscriptRows(db.sql, testPayloadKeys(db.sql)))
@@ -99,7 +108,9 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
     const result = await host.run(
       { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'outlast the restart', images: [], system_append: null } },
       { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
-    ).catch((err: unknown) => err)
+    )
+      .catch((err: unknown) => err)
+      .finally(() => settled?.())
     const [row] = await db.sql<{ cost_usd: string }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}`
     const audit = await db.sql<{ cost_usd: string }[]>`SELECT cost_usd FROM ai_audit WHERE session_id = ${id} AND kind = 'turn'`
     await host.stop({ graceMs: 0, abortWaitMs: 0 })
@@ -143,10 +154,11 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
     expect(placed.audit).toHaveLength(1)
   })
 
-  it("waits for the process's appends to land before it fails the placement as BackendUnreachable, and at most landedWaitMs (#6994)", async () => {
-    const reset = () => Promise.reject(new CrudReadError('the backend could not be reached (the transcript of session s: UND_ERR_SOCKET)', undefined, false, {}, 'UND_ERR_SOCKET'))
+  const reset = () => Promise.reject(new CrudReadError('the backend could not be reached (the transcript of session s: UND_ERR_SOCKET)', undefined, false, {}, 'UND_ERR_SOCKET'))
+
+  it("waits for the process's appends to land before it fails the placement as BackendUnreachable (#6994)", async () => {
     const order: string[] = []
-    const landing = place(R, {
+    const placed = await place(R, {
       carried: 'none',
       beforeLoad: reset,
       landed: async () => {
@@ -154,13 +166,13 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
         await new Promise((resolve) => setTimeout(resolve, 200))
         order.push('landed')
       },
-    }).then((placed) => {
-      order.push('thrown')
-      return placed
+      settled: () => order.push('thrown'),
     })
-    expect(((await landing).result as ApplicationFailure).type).toBe(BACKEND_UNREACHABLE)
+    expect((placed.result as ApplicationFailure).type).toBe(BACKEND_UNREACHABLE)
     expect(order).toEqual(['landing', 'landed', 'thrown'])
-    // Appends that never land (the API still away) hold it only for landedWaitMs.
+  })
+
+  it('waits for appends that never land (the API still away) only for landedWaitMs (#6994)', async () => {
     const stuck = await place(R, { carried: 'none', beforeLoad: reset, landed: () => new Promise<void>(() => {}), landedWaitMs: 50 })
     expect((stuck.result as ApplicationFailure).type).toBe(BACKEND_UNREACHABLE)
   })
