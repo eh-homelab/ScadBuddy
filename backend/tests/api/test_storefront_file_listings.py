@@ -415,6 +415,66 @@ def test_the_plate_picture_is_read_from_the_held_copy(
     assert client.get(f"{LISTINGS}/{listing['id']}/plates/2.png").status_code == 404
 
 
+def test_a_file_past_the_download_cap_is_refused(
+    client: TestClient, keychain: NativeFile, pla_red: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§5.1 row 3: a print cannot read a file past `MAX_DOWNLOAD_BYTES`."""
+    monkeypatch.setattr(file_listings, "MAX_DOWNLOAD_BYTES", 64)
+    made = create(client, body(keychain, [pla_red]))
+    assert refused(client, made["id"], "listing_file_too_large")["name"] == "library_file"
+
+
+def test_an_upload_past_the_picture_cap_is_refused(
+    client: TestClient, keychain: NativeFile, pla_red: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(file_listings, "MAX_IMAGE_BYTES", len(PNG) - 1)
+    made = create(client, body(keychain, [pla_red]))
+    sent = client.post(
+        f"{LISTINGS}/{made['id']}/pictures", files={"file": ("p.png", PNG, "image/png")}
+    )
+    assert sent.status_code == 413
+    assert holders(client, f"listing-media-{hashlib.sha256(PNG).hexdigest()}") == []
+
+
+def test_an_upload_to_a_listing_deleted_meanwhile_keeps_no_hold(
+    client: TestClient, keychain: NativeFile, pla_red: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delete between the upload's read of the listing and its hold leaves no hold that
+    nothing would drop."""
+    made = create(client, body(keychain, [pla_red]))
+    content = _content(client)
+    put = content.put
+
+    async def put_then_delete(*args: Any, **kwargs: Any) -> Any:
+        stored = await put(*args, **kwargs)
+        with _state(client).projection.pool.connection() as conn:
+            conn.execute("DELETE FROM storefront_listings WHERE id = %s", (made["id"],))
+        return stored
+
+    monkeypatch.setattr(content, "put", put_then_delete)
+    sent = client.post(
+        f"{LISTINGS}/{made['id']}/pictures", files={"file": ("p.png", PNG, "image/png")}
+    )
+    assert sent.status_code == 404
+    assert holders(client, f"listing-media-{hashlib.sha256(PNG).hexdigest()}") == []
+
+
+def test_a_published_plate_picture_is_served_from_its_copy(
+    client: TestClient, keychain: NativeFile, pla_red: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plate picture publish copied is served from that copy, not the whole file."""
+    listing = publish(
+        client, create(client, body(keychain, [pla_red], media_ids=["plate:1"]))["id"]
+    )
+
+    def whole_file(payload: bytes, plate: int) -> bytes | None:
+        raise AssertionError("the held file was read")
+
+    monkeypatch.setattr(file_listings, "plate_image", whole_file)
+    found = client.get(f"{LISTINGS}/{listing['id']}/plates/1.png")
+    assert found.status_code == 200 and found.content.startswith(b"\x89PNG")
+
+
 def test_a_delete_drops_the_kept_copy(
     client: TestClient, keychain: NativeFile, pla_red: str
 ) -> None:
