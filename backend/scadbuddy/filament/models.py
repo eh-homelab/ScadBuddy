@@ -381,6 +381,7 @@ class LocationPatch(_Patch):
 
 
 class Location(_Catalog):
+    number: int
     kind_id: UUID
     parent_id: UUID | None
     identifier: str | None
