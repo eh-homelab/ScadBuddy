@@ -336,20 +336,23 @@ class LocationKindCreate(_In):
     sort_order: SortOrder = 0
     dry_storage: bool = False
     ams: bool = False
+    printer: bool = False
 
 
 class LocationKindPatch(_Patch):
-    not_null = frozenset({"name", "sort_order", "dry_storage", "ams"})
+    not_null = frozenset({"name", "sort_order", "dry_storage", "ams", "printer"})
     name: Name | None = None
     sort_order: SortOrder | None = None
     dry_storage: bool | None = None
     ams: bool | None = None
+    printer: bool | None = None
     archived: bool | None = None
 
 
 class LocationKind(_Catalog):
     dry_storage: bool
     ams: bool
+    printer: bool
 
 
 class LocationCreate(_In):
@@ -382,6 +385,7 @@ class LocationPatch(_Patch):
 
 class Location(_Catalog):
     number: int
+    printer_root: bool
     kind_id: UUID
     parent_id: UUID | None
     identifier: str | None

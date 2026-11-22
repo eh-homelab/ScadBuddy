@@ -207,10 +207,10 @@ function catalogs(): Catalogs {
       { ...row(72, 'Translucent Orange'), manufacturer: 'Bambu Lab', rgba: '#FF6A1380', material_id: M.PETG, extra_colours: null, effect_id: E.TRANSLUCENT },
     ],
     'location-kinds': [
-      { ...row(80, 'Room'), dry_storage: false, ams: false },
-      { ...row(81, 'Shelf', 1), dry_storage: false, ams: false },
-      { ...row(82, 'Dry box', 2), dry_storage: true, ams: false },
-      { ...row(83, 'AMS tray', 3), dry_storage: false, ams: true },
+      { ...row(80, 'Room'), dry_storage: false, ams: false, printer: false },
+      { ...row(81, 'Shelf', 1), dry_storage: false, ams: false, printer: false },
+      { ...row(82, 'Dry box', 2), dry_storage: true, ams: false, printer: false },
+      { ...row(83, 'AMS tray', 3), dry_storage: false, ams: true, printer: false },
     ],
   }
 }

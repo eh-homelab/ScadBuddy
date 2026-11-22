@@ -318,16 +318,54 @@ def test_two_threads_make_one_printer_place(pg_pool: PgPool) -> None:
 def test_unit_places_made_before_hang_under_the_printer(pg_pool: PgPool) -> None:
     store = LocationStore(pg_pool)
     printer = _printer(pg_pool)
-    with pg_pool.connection() as conn:
-        unit = LocationStore.ensure_ams_unit_on(conn, printer, 0)
-        conn.execute("UPDATE filament_locations SET parent_id = NULL WHERE id = %s", (unit,))
     tray = store.ensure_ams(printer, 0, 1, label="T1")
-    root = store.ensure_printer(printer)
     with pg_pool.connection() as conn:
-        assert LocationStore.ensure_ams_unit_on(conn, printer, 0) == unit
+        assert tray.parent_id is not None
+        conn.execute(
+            "UPDATE filament_locations SET parent_id = NULL WHERE id = %s", (tray.parent_id,)
+        )
+    unit = tray.parent_id
+    assert unit is not None
+    root = store.ensure_printer(printer)
     placed = store.get(unit)
     assert placed is not None and placed.parent_id == root
-    assert tray.parent_id == unit
+    again = store.get(tray.id)
+    assert again is not None and again.parent_id == unit
+
+
+def test_a_new_root_takes_the_units_of_an_archived_one(pg_pool: PgPool) -> None:
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    tray = store.ensure_ams(printer, 0, 1, label="T1")
+    external = store.ensure_ams(printer, EXTERNAL, 0, label="Ext")
+    old = store.ensure_printer(printer)
+    store.update(old, LocationPatch(archived=True))
+    new = store.ensure_printer(printer)
+    assert new != old
+    assert tray.parent_id is not None
+    unit = store.get(tray.parent_id)
+    moved = store.get(external.id)
+    assert unit is not None and unit.parent_id == new
+    assert moved is not None and moved.parent_id == new
+
+
+def test_a_beside_place_and_the_root_coexist_and_the_root_never_adopts_it(
+    pg_pool: PgPool,
+) -> None:
+    store = LocationStore(pg_pool)
+    printer = _printer(pg_pool)
+    beside = store.create(LocationCreate(name="Beside", kind_id=_kind(pg_pool), printer_id=printer))
+    root = store.ensure_printer(printer)
+    assert root != beside.id
+    other = store.create(
+        LocationCreate(name="Beside 2", kind_id=_kind(pg_pool), printer_id=printer)
+    )
+    assert store.ensure_printer(printer) == root
+    still = store.get(beside.id)
+    assert still is not None and not still.printer_root and still.parent_id is None
+    made = store.get(root)
+    assert made is not None and made.printer_root
+    assert other.printer_root is False
 
 
 def test_new_unit_and_external_tray_hang_under_the_printer(pg_pool: PgPool) -> None:
@@ -358,8 +396,12 @@ def test_a_missing_printer_kind_leaves_the_unit_with_no_parent(pg_pool: PgPool) 
 def test_merge_keeps_the_kept_printers_place(pg_pool: PgPool) -> None:
     store = LocationStore(pg_pool)
     merged, into = _printer(pg_pool), _printer(pg_pool)
-    merged_tray = store.ensure_ams(merged, 0, 0, label="T")
+    clashing = store.ensure_ams(merged, 0, 0, label="T")
     store.ensure_ams(into, 0, 0, label="T")
+    live = store.ensure_ams(merged, 1, 0, label="T live")
+    beside = store.create(
+        LocationCreate(name="Beside merged", kind_id=_kind(pg_pool), printer_id=merged)
+    )
     root_merged, root_into = store.ensure_printer(merged), store.ensure_printer(into)
     with pg_pool.connection() as conn, conn.transaction():
         repoint_printer_locations(conn, merged, into)
@@ -367,5 +409,11 @@ def test_merge_keeps_the_kept_printers_place(pg_pool: PgPool) -> None:
     assert old is not None and old.archived_at is not None
     kept = store.get(root_into)
     assert kept is not None and kept.archived_at is None
-    unit = store.get(merged_tray.parent_id) if merged_tray.parent_id else None
-    assert unit is not None and unit.parent_id == root_into
+    assert clashing.parent_id is not None and live.parent_id is not None
+    gone_unit = store.get(clashing.parent_id)
+    assert gone_unit is not None and gone_unit.archived_at is not None
+    live_unit = store.get(live.parent_id)
+    assert live_unit is not None and live_unit.archived_at is None
+    assert live_unit.parent_id == root_into and live_unit.printer_id == into
+    moved = store.get(beside.id)
+    assert moved is not None and moved.archived_at is None and moved.printer_id == into

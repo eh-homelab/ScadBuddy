@@ -33,6 +33,7 @@ def test_printer_kind_is_seeded(pg_pool: PgPool) -> None:
     assert len(printer) == 1
     assert printer[0].ams is False
     assert printer[0].dry_storage is False
+    assert printer[0].printer is True
 
 
 def test_numbers_are_not_reused_after_archive(pg_pool: PgPool) -> None:

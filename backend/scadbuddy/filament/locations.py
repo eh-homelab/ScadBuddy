@@ -55,10 +55,10 @@ class NoAmsKindError(ValueError):
 
 
 class NoPrinterKindError(ValueError):
-    """No unarchived location kind is named ``Printer``."""
+    """No unarchived location kind is flagged ``printer``."""
 
     def __init__(self) -> None:
-        super().__init__("no location kind is named Printer")
+        super().__init__("no location kind is marked as a printer")
 
 
 class MoveTargetError(ValueError):
@@ -184,19 +184,22 @@ class LocationStore:
         """`ensure_ams` on ``conn``, in the caller's transaction (`filament/capture.py`).
         The tray's place hangs under its unit's place (`ensure_ams_unit_on`), also when it
         was made before the unit's place existed; an external holder hangs under the printer's
-        place (`ensure_printer_on`), or under none while no kind is named ``Printer``."""
+        place (`ensure_printer_on`), or under none while no kind is flagged ``printer``."""
         select = (
             f"SELECT {_COLUMNS} FROM filament_locations WHERE printer_id = %s AND ams_id = %s"
             " AND tray_id = %s AND archived_at IS NULL"
         )
         key = (printer_id, ams_id, tray_id)
         try:
+            # The external holder's parent is the printer's place; making it first also
+            # hangs a holder whose parent is gone under the new one.
+            root = LocationStore._printer_parent(conn, printer_id) if ams_id == EXTERNAL else None
             found = conn.execute(select, key).fetchone()
             if found is not None and found["parent_id"] is not None:
                 return m.Location.model_validate(found)
             try:
                 unit = (
-                    LocationStore._printer_parent(conn, printer_id)
+                    root
                     if ams_id == EXTERNAL
                     else LocationStore.ensure_ams_unit_on(conn, printer_id, ams_id)
                 )
@@ -240,11 +243,13 @@ class LocationStore:
         """The id of the unarchived place of that printer's AMS unit (no tray), made as
         ``<printer> <unit>`` (``H2C AMS-A``, ``H2C HT-A``, as the tray places are named) of
         the first ``ams`` kind if there is none (#6268). It hangs under the printer's place
-        (`ensure_printer_on`), also when it was made before that place existed; with no
-        kind named ``Printer`` it hangs under none. Idempotent and safe when two calls
+        (`ensure_printer_on`), also when it has no parent or its parent is archived; with
+        no ``printer`` kind it hangs under none. Idempotent and safe when two calls
         race. `NoAmsKindError`, or `CatalogRefError` for an unknown printer."""
         select = (
-            "SELECT id, parent_id FROM filament_locations WHERE printer_id = %s AND ams_id = %s"
+            "SELECT id, parent_id, NOT EXISTS (SELECT 1 FROM filament_locations p"
+            " WHERE p.id = l.parent_id AND p.archived_at IS NULL) AS orphan"
+            " FROM filament_locations l WHERE printer_id = %s AND ams_id = %s"
             " AND tray_id IS NULL AND archived_at IS NULL"
         )
         key = (printer_id, ams_id)
@@ -268,7 +273,7 @@ class LocationStore:
                     " ON CONFLICT (printer_id, ams_id) WHERE tray_id IS NULL"
                     " AND printer_id IS NOT NULL AND ams_id IS NOT NULL"
                     " AND archived_at IS NULL DO NOTHING"
-                    " RETURNING id, parent_id",
+                    " RETURNING id, parent_id, false AS orphan",
                     (
                         f"{printer['name']} {unit_label(ams_id)}",
                         kind["id"],
@@ -278,12 +283,12 @@ class LocationStore:
                 ).fetchone()
             if found is None:
                 found = conn.execute(select, key).fetchone()
-            if found is not None and found["parent_id"] is None:
+            if found is not None and found["orphan"]:
                 parent = LocationStore._printer_parent(conn, printer_id)
                 if parent is not None:
                     found = conn.execute(
                         "UPDATE filament_locations SET parent_id = %s, updated_at = now()"
-                        " WHERE id = %s RETURNING id, parent_id",
+                        " WHERE id = %s RETURNING id, parent_id, false AS orphan",
                         (parent, found["id"]),
                     ).fetchone()
         except errors.ForeignKeyViolation:
@@ -299,21 +304,22 @@ class LocationStore:
 
     @staticmethod
     def ensure_printer_on(conn: Conn, printer_id: UUID) -> UUID:
-        """The id of the unarchived place of the printer itself (its ``printer_id`` and no
-        ``ams_id`` or tray), made named as the printer, of the first unarchived kind named
-        ``Printer`` if there is none (#6955). Its AMS units and the external holder hang under
-        it. Idempotent and safe when two calls race. `NoPrinterKindError`, or
-        `CatalogRefError` for an unknown printer."""
+        """The id of the printer's own place (its unarchived row with ``printer_root``),
+        made named as the printer, of the first unarchived kind flagged ``printer`` if
+        there is none (#6955). A person's place beside the printer is never the root. Every
+        AMS unit place and the external holder's tray of the printer with no parent, or an
+        archived one, is moved under it. Idempotent and safe when two calls race.
+        `NoPrinterKindError`, or `CatalogRefError` for an unknown printer."""
         select = (
-            "SELECT id FROM filament_locations WHERE printer_id = %s AND ams_id IS NULL"
-            " AND tray_id IS NULL AND archived_at IS NULL ORDER BY created_at, id LIMIT 1"
+            "SELECT id FROM filament_locations WHERE printer_id = %s AND printer_root"
+            " AND archived_at IS NULL"
         )
         try:
             found = conn.execute(select, (printer_id,)).fetchone()
             if found is None:
                 kind = conn.execute(
-                    "SELECT id FROM filament_location_kinds WHERE upper(name) = 'PRINTER'"
-                    " AND archived_at IS NULL ORDER BY sort_order, id LIMIT 1"
+                    "SELECT id FROM filament_location_kinds WHERE printer AND archived_at IS NULL"
+                    " ORDER BY sort_order, upper(name), id LIMIT 1"
                 ).fetchone()
                 if kind is None:
                     raise NoPrinterKindError()
@@ -323,25 +329,33 @@ class LocationStore:
                 if printer is None:
                     raise CatalogRefError()
                 found = conn.execute(
-                    "INSERT INTO filament_locations (name, kind_id, printer_id)"
-                    " VALUES (%s, %s, %s)"
-                    " ON CONFLICT (printer_id) WHERE ams_id IS NULL AND tray_id IS NULL"
-                    " AND printer_id IS NOT NULL AND archived_at IS NULL DO NOTHING"
-                    " RETURNING id",
+                    "INSERT INTO filament_locations (name, kind_id, printer_id, printer_root)"
+                    " VALUES (%s, %s, %s, true)"
+                    " ON CONFLICT (printer_id) WHERE printer_root AND archived_at IS NULL"
+                    " DO NOTHING RETURNING id",
                     (printer["name"], kind["id"], printer_id),
                 ).fetchone()
             if found is None:
                 found = conn.execute(select, (printer_id,)).fetchone()
+            assert found is not None
+            conn.execute(
+                "UPDATE filament_locations l SET parent_id = %s, updated_at = now()"
+                " WHERE l.printer_id = %s AND l.archived_at IS NULL AND NOT l.printer_root"
+                " AND ((l.ams_id IS NOT NULL AND l.tray_id IS NULL)"
+                " OR (l.ams_id = %s AND l.tray_id IS NOT NULL))"
+                " AND NOT EXISTS (SELECT 1 FROM filament_locations p"
+                " WHERE p.id = l.parent_id AND p.archived_at IS NULL)",
+                (found["id"], printer_id, EXTERNAL),
+            )
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
-        assert found is not None
         place: UUID = found["id"]
         return place
 
     @staticmethod
     def _printer_parent(conn: Conn, printer_id: UUID) -> UUID | None:
         """The printer's place for a unit or the external holder to hang under; ``None``
-        while no kind is named ``Printer``, so a capture never fails for it."""
+        while no kind is flagged ``printer``, so a capture never fails for it."""
         try:
             return LocationStore.ensure_printer_on(conn, printer_id)
         except NoPrinterKindError:
@@ -492,7 +506,8 @@ MERGE_ACTOR = "system:printer-merge"
 def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
     """Make printer ``merged``'s AMS tray places printer ``into``'s, on ``conn`` and in
     the printer merge's transaction (`printers/store.py` `_merge`). A tray only
-    ``merged`` has moves as it is. Where both printers have an unarchived place for one
+    ``merged`` has moves as it is, and so does its printer's own place when ``into`` has none
+    (two of them clash, as two trays do). Where both printers have an unarchived place for one
     tray, ``into``'s stands: each spool in ``merged``'s moves there with a ``moved``
     event, its places move under it, and ``merged``'s is archived (not deleted: the
     ledger's ``moved`` events name it). Archived places move as they are.
@@ -500,9 +515,9 @@ def repoint_printer_locations(conn: Conn, merged: UUID, into: UUID) -> None:
     Locks the spools before the places, as `LocationStore.move` does."""
     gone = conn.execute(
         "SELECT m.id, k.id AS kept FROM filament_locations m LEFT JOIN filament_locations k"
-        " ON k.printer_id = %s AND k.ams_id IS NOT DISTINCT FROM m.ams_id"
-        " AND k.tray_id IS NOT DISTINCT FROM m.tray_id"
-        " AND k.archived_at IS NULL"
+        " ON k.printer_id = %s AND k.archived_at IS NULL AND ((m.printer_root AND k.printer_root)"
+        " OR (NOT m.printer_root AND NOT k.printer_root AND k.ams_id = m.ams_id"
+        " AND k.tray_id IS NOT DISTINCT FROM m.tray_id))"
         " WHERE m.printer_id = %s AND m.archived_at IS NULL AND k.id IS NOT NULL",
         (into, merged),
     ).fetchall()
