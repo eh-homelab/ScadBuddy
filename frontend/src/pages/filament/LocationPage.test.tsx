@@ -25,6 +25,7 @@ describe('the location page', () => {
     expect(screen.queryByRole('link', { name: "Print this printer's labels" })).toBeNull()
     expect(screen.getByRole('link', { name: 'View spools' })).toHaveAttribute('href', `/filament/spools?place=${L.AMS_A1}`)
     expect(screen.queryByText('Archived')).toBeNull()
+    expect(screen.getByRole('region', { name: 'Files and links' })).toBeInTheDocument()
   })
 
   it('shows Archived for an archived place', async () => {

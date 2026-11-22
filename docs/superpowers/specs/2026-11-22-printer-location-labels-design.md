@@ -118,3 +118,18 @@ these labels, so a label printed now must stay valid.
   `/filament/locations/<id>` (`test-fixtures/filament/ui-paths.json`); the spools in a place
   are `filamentLinks.locationSpools` (`/filament/spools?place=<id>`).
 - Test split between the migration, the store, the resolver and the page.
+
+## Relation to other work (checked 2026-11-22 against main at the merge in this branch)
+
+- **Inventory epic #6949** (spec `2026-11-21-inventory-and-purchasing-design.md`). Its D3
+  keeps `filament_locations` as the place tree for all stock, so a printer's own place and
+  its `L-<n>` code serve lots and units too. Phase 1 (#6961) registers `location` as an
+  entity kind (`entities/registry.py`); the place page shows its files and links panels, as
+  the spool, type and supplier pages do. Phase 4 makes printers units; a printer unit links
+  to its printer, and its place stays the `printer_root` row. Items, lots and units will
+  want codes and labels of their own: each is a new prefix in `codes/resolve.py`
+  `PREFIXES`, not a second resolver.
+- **Properties #7026.** A scanned GTIN or lot number is a property search, not a code:
+  `/x/<code>` resolves only ScadBuddy's own prefixed numbers.
+- **Dry bins** stay `filament_locations` rows (kind "Dry box"); a bin gets an `L-<n>`
+  label from the labels page's `?locations=` mode today.

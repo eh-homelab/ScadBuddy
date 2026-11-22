@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { getLocation, type LocationDetail } from '../../api/filament'
+import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
+import { LinksPanel } from '../../components/entities/LinksPanel'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { SpoolLink } from '../../components/filament/SpoolLink'
 import { filamentLinks } from '../../lib/filamentLinks'
@@ -112,6 +114,11 @@ export function LocationPage() {
                 ))}
               </ul>
             )}
+          </section>
+          <section aria-label="Files and links" className="flex flex-col gap-2">
+            <h2 className="font-medium">Files and links</h2>
+            <AttachmentsPanel entity={`location:${place.id}`} />
+            <LinksPanel entity={`location:${place.id}`} />
           </section>
         </>
       )}
