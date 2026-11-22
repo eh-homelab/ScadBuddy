@@ -189,7 +189,9 @@ AWAITING_CLEAR = "Waiting for someone to say the plate of {printer} is clear."
 #: A run's first print, queued because the printer was busy with another (#6871).
 QUEUED_BUSY = "Queued: {printer} is busy with another print. Nothing was sent to it yet."
 #: A queued run's first print once the printer holds an ended print (#6871): the print it
-#: waited for ended, or it was queued for the plate alone.
+#: waited for ended, or it was queued for the plate alone. While the printer prints
+#: again, a run queued for the plate alone shows `QUEUED_BUSY` instead (``queued_for_print``
+#: follows the live state, whatever ``lan_queued.job`` says).
 QUEUED_PLATE = (
     "Queued: {printer} holds a print that has ended. Nothing is sent to it until someone"
     " says its plate is clear."
@@ -248,9 +250,10 @@ def lan_control(
     """A succeeded native run's prints still to start and its controls (#4942, #4939);
     ``None`` once it started every one or they were stopped. ``printing`` is whether the
     printer prints now, from its live state (`printing_now`): a queued run waits for a
-    print only while the printer still prints it (#6871); with no state read, the job
-    the run was queued behind says so. ``idle`` (`idle_now`) marks a queued run whose
-    printer reads idle, whose plate may still hold the print before."""
+    print while the printer prints one, whatever it was queued behind, and not once it has
+    ended (#6871); with no state read, the job the run was queued behind says so.
+    ``idle`` (`idle_now`) marks a queued run whose printer reads idle, whose plate may
+    still hold the print before."""
     result = run.result
     if run.status != "succeeded" or result is None or result.path != "native":
         return None
@@ -262,8 +265,7 @@ def lan_control(
         awaiting_clear=result.lan_awaiting_clear,
         queued=result.lan_queued is not None,
         queued_for_print=result.lan_queued is not None
-        and result.lan_queued.job is not None
-        and printing is not False,
+        and (printing is True or (printing is None and result.lan_queued.job is not None)),
         printer_idle=result.lan_queued is not None and idle,
     )
 
