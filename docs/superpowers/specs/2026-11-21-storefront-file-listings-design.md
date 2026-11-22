@@ -255,14 +255,19 @@ class ListedFileInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: int = Field(ge=1)
     library: ItemLibrary  # "bambuddy" | "native", as `LibraryFileRef.library`
-    #: The version the listing sells: the sha256 of its held copy, which publish set
-    #: (§5.1). The editor sends back what it read. None asks publish to read the
-    #: library's file now and pin that. A body built before (the agent's) sends none.
-    pinned: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    #: True asks the next publish to read the library's file now and pin that version
+    #: ("Use the library's version", §9.4). False, the default, keeps the stored pin.
+    repin: bool = False
 ```
 
-The `library_file` column stores this object, `pinned` included. Publish writes `pinned`
-in the same transaction as the snapshot.
+The pin is the server's: no body can set it. The `library_file` column stores
+`{id, library, pinned}`, where `pinned` is the sha256 of the held copy the listing sells,
+or null before the first publish. Publish writes `pinned` in the same transaction as the
+snapshot. A save keeps the stored `pinned` unless the save changes `library_file.id` or
+`library`, or sends `repin: true`; then it stores `pinned` null. So a body that says
+nothing of the pin (the agent's, a script's, an older page's) never moves the listing to
+the live file, and a body cannot name another file's held copy. `Listing.library_file` answers the stored
+object, `pinned` included, so the editor can read the file's state against it (§9.4).
 
 A `model_validator(mode="after")` keeps the two shapes apart. It answers 422 with code
 `listing_source_invalid` and the field's `name` when:
@@ -381,7 +386,7 @@ Rows 6 and 9 run unchanged. Row 7 is `printable_materials` over the offered slot
 `check_locked_colours` is for a template's colour parameters (`listings.py:850-887`).
 Each code carries `name`, so the editor shows it under the field it names.
 
-Rows 1 to 4 read the library. They run only when `library_file.pinned` is None (§4.1): a
+Rows 1 to 4 read the library. They run only when the stored `pinned` is null (§4.1): a
 first publish, a new file picked, or "Use the library's version" (§9.4). With `pinned`
 set, publish reads the held copy `listing-file-<pinned>` in place of the library, and
 rows 1 to 4 become one check: that copy is held under the listing (§5.2 step 1), else
@@ -403,9 +408,11 @@ file and no picture held for the listing is 422 `listing_media_unknown`, with th
    is held under (`storefront_listing_kept`, listing id), a holder kind of its own: an
    edit or an unpublish drops the (`storefront_listing`, listing id) holds
    (`listings.py:1-17`, `release_unheld` at `:549-563`), and the pinned version must
-   outlive both. A `storefront_listing_kept` hold is dropped only by the listing's delete,
-   and by a publish that pins another sha256 (in the row's transaction, as the other
-   drops are). With `pinned` set, this step reads nothing: the copy is held already. Two
+   outlive both. The `storefront_listing_kept` hold on `listing-file-<sha256>` is dropped
+   only by the listing's delete, and by a publish that pins another sha256 (in the row's
+   transaction, as the other drops are). The kept holds on uploaded pictures
+   (`listing-media-*`, §5.4) follow their own rule there; a publish drops none of them.
+   With `pinned` set, this step reads nothing: the copy is held already. Two
    listings of one file share one blob and hold it twice.
 2. **The slots.** Read from the held bytes with the dialog's own reader (`LibrarySource.load`
    with `read_own=True` over the held copy's reads, §7.3.1, as `start_library_quote_preview`
@@ -428,13 +435,13 @@ file and no picture held for the listing is 422 `listing_media_unknown`, with th
 5. **The snapshot.** `FileSnapshot` as in §4.2, with `remembered` set to
    `model_print_choices.get(library_options_scope(file_id))` as publish reads it.
    `mark_published` writes it with the media, as today, and writes
-   `library_file.pinned`.
+   the `library_file` column's `pinned`.
 
 A failure after the first hold drops every (`storefront_listing`, listing id) hold the
 row does not name (`release_unheld`), as today. `release_unheld` also keeps a file
 snapshot's `preview_keys` beside its `media` (today it keeps a template snapshot's
 `snapshot_key` and the media, `listings.py:560-562`). A new (`storefront_listing_kept`)
-hold that publish took and the row does not name in `library_file.pinned` is dropped
+hold that publish took and the row does not name in the `library_file` column's `pinned` is dropped
 with them.
 
 All of this runs in the CRUD service (today's API process), which already downloads and
@@ -444,7 +451,7 @@ data, with the readers the back office uses.
 
 ### 5.3 What a change of the file does
 
-A published listing never moves (decided by the owner, 2026-11-21). `library_file.pinned`
+A published listing never moves (decided by the owner, 2026-11-21). the `library_file` column's `pinned`
 names the sha256, and the held copy keeps the bytes: the held copy is the listing's
 version of the file. A file renamed or moved in the library keeps its id, so nothing
 changes. A file deleted, or one whose bytes are no longer the pinned ones, changes
@@ -792,11 +799,15 @@ The picker is `LibraryFilePicker` (fact 13), with a `types` filter:
   "Leave … out of the title" warning (`titleColours`, `listingDraft.ts:303`) runs over the
   file's colours too.
 - **Pictures**: the same `ListingPictures` as a template listing's (fact 25, decision 11).
-  The pictures to add are the file's plate pictures (`plate:<n>`, shown from the library
-  file's plate images; publish reads them from the held copy, §5.2 step 4) and the shop's uploads
+  The pictures to add are the file's plate pictures (`plate:<n>`) and the shop's uploads
   (`upload:<sha256>`, §5.4). A new file listing starts with every plate picture in
   `media_ids`. "Upload a picture" saves a new draft first. Live marks, order, remove and
-  the republish of a published listing work as for a template (`PUT …/media`).
+  the republish of a published listing work as for a template (`PUT …/media`). Before
+  the first publish, the editor shows a plate picture from the library file's plate
+  image, as the picker does. Once the listing has a pin, it shows it from the held copy:
+  `GET /storefront/listings/{id}/plates/{n}.png` streams `Metadata/plate_<n>.png` of
+  `listing-file-<pinned>`, so a file gone from the library still shows its pictures, and
+  they are the ones publish copies (§5.2 step 4).
 - **Parts** takes the place of Settings: one row per slot. "Part 1 — the customer picks
   its colour" with the file's swatch, or, for a support slot, a select of support
   filaments ("Support: locked"). An unused slot is not shown.
@@ -815,9 +826,9 @@ read finds (§5.3), so the Source block only informs:
   version you published." with no button.
 - A file with no stated hash, or the pinned one: nothing.
 
-"Use the library's version" sets `library_file.pinned` to None and marks the draft
-unsaved; the next publish reads the library and pins its version (§5.1). Picking another
-file in the picker does the same.
+"Use the library's version" sends `repin: true` with the next save and marks the draft
+unsaved; the save stores `pinned` null, and the next publish reads the library and pins
+its version (§5.1). Picking another file in the picker does the same, by its changed id.
 
 ### 9.5 Sell from the library
 
@@ -915,11 +926,15 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   order; the copy is held under `listing-file-<sha256>`; the slots of a two-colour 3MF
   fixture with `used` from `part_settings_slots`; an STL gives one used slot; a file with
   no readable mesh publishes with no preview; a failed publish drops its holds. The pin:
-  a first publish writes `library_file.pinned` and holds the copy as
+  a first publish writes `pinned` in the `library_file` column and holds the copy as
   `storefront_listing_kept`; an edit, an unpublish and a publish again keep that hold;
-  a publish again with `pinned` set reads no library (a fake that fails every library
-  read) and passes with the file deleted; `pinned` None after the file changed pins the
-  new sha256 and drops the old kept hold; a delete drops every kept hold. The snapshot's
+  a save that omits `repin`, and an agent body with no `pinned` at all, keep the stored
+  `pinned`; a body with a `pinned` field is 422 (`extra="forbid"`); a publish again with
+  `pinned` set reads no library (a fake that fails every library read) and passes with
+  the file deleted; `repin: true`, or a changed `library_file.id`, stores `pinned` null,
+  and the next publish pins the library's sha256 and drops the old `listing-file-*` kept
+  hold but no picture's; the plate picture route streams the held copy's picture with the
+  file deleted; a delete drops every kept hold. The snapshot's
   `remembered` is the `library:<id>` entry at publish, or None.
 - **Pictures** (`test_listings.py`, `tests/api/test_storefront_listings.py`): `media_ids`
   of `plate:1` and `upload:<sha256>` publish as two `ListingMedia` held under the
@@ -997,7 +1012,8 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   listing folds to "Library file …" with "Change"; switching source clears the other's
   fields; each `listing_file_*` refusal shows under its field; the "changed in the library"
   and "no longer in the library" notes say that customers still get the published
-  version, and "Use the library's version" sends `pinned: null`; Pictures lists the
+  version, and "Use the library's version" sends `repin: true`; a pinned listing's plate pictures load
+  from the listing's plate route; Pictures lists the
   file's plate pictures, a new file listing starts with all of them, an upload saves a
   new draft first and adds `upload:<sha256>`.
 - `listingDraft.test.ts`: `listingInput` and `savedKey` of a file draft; the title default
@@ -1048,9 +1064,11 @@ customer, until the step that makes it safe.
    route of §5.4); the price read and its edge route; the cart, `price_of`, `reprice` and
    submit as a `library_file` item with the sha256, the copy and its hold; the library
    search's `types`; the GLB slot extra. Until PR 6, `public_card` and `public_listing`
-   leave a file listing out, because the public page cannot show one yet. Until PR 4, a
-   storefront item whose file changed or went keeps today's `library_file_gone` print
-   refusal (no listing is public before PR 6, so no such order exists yet). After 2.
+   leave a file listing out, because the public page cannot show one yet. Until PR 4, the
+   print check of a storefront item is today's (`printing.py:588-589` checks only that
+   the file exists): a gone file is `library_file_gone`, and a changed file prints the
+   live bytes. No order can reach that case before PR 6, which comes after PR 4, because
+   no file listing is public before PR 6. The plate picture route of §9.3. After 2.
 4. **`feat(orders): print a storefront item from its held copy`** (backend). §10.2: the
    check's `restore`, the upload into "Storefront", the item moved to the new id, the
    remembered choices. No button: the print does it. After 3.
