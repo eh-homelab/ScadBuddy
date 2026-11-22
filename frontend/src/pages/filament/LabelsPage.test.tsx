@@ -113,7 +113,7 @@ describe('the labels page', () => {
   })
 
   it('uses the base address of the answer', async () => {
-    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: 'https://sb.example.com', labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }] })))
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: 'https://sb.example.com', labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }], no_report: [] })))
     renderPage(<LabelsPage />, { route: '/filament/labels?printers=p1,p2' })
     await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
     expect(screen.getByText('Labels open https://sb.example.com')).toBeInTheDocument()
@@ -143,20 +143,41 @@ describe('the labels page', () => {
   })
 
   it('draws no label whose payload passes 84 bytes', async () => {
-    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: `https://${'a'.repeat(70)}.example`, labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }] })))
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: `https://${'a'.repeat(70)}.example`, labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }], no_report: [] })))
     renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
     expect(await screen.findByRole('alert')).toHaveTextContent('too long')
     expect(screen.queryAllByTestId('label')).toHaveLength(0)
   })
 
   it('says no printers, and names no raw id on a failure', async () => {
-    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: null, labels: [] })))
+    server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: null, labels: [], no_report: [] })))
     const { unmount } = renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
     expect(await screen.findByText('No printers.')).toBeInTheDocument()
     unmount()
     server.use(http.post('*/api/v1/filament/printer-labels', () => new HttpResponse(null, { status: 500 })))
     renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
     expect(await screen.findByRole('alert')).toHaveTextContent('The printer labels could not be read')
+  })
+
+  it('refuses to draw a place label when the settings cannot be read', async () => {
+    server.use(http.get('*/api/v1/settings', () => new HttpResponse(null, { status: 500 })))
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    expect(await screen.findByRole('alert')).toHaveTextContent('The label address in Settings could not be read')
+    expect(screen.queryAllByTestId('label')).toHaveLength(0)
+    expect(screen.queryAllByTestId('print-label')).toHaveLength(0)
+    expect(screen.queryByText(/Labels open/)).toBeNull()
+    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+  })
+
+  it('names the printers with no report', async () => {
+    server.use(
+      http.post('*/api/v1/filament/printer-labels', () =>
+        HttpResponse.json({ base_url: null, labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }], no_report: ['H2C'] }),
+      ),
+    )
+    renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
+    expect(await screen.findByText(/No report found for H2C/)).toBeInTheDocument()
+    expect(screen.getAllByTestId('label')).toHaveLength(1)
   })
 
   it('goes back to the Locations tab from a place label', () => {

@@ -352,7 +352,7 @@ export const upsertCatalog = <K extends CatalogKind>(kind: K, body: CatalogInput
 export const listLocations = (options: { includeArchived?: boolean } = {}) =>
   request<LocationNode[]>(`${BASE}/locations${query({ include_archived: options.includeArchived || undefined })}`)
 
-/** Adds a place, or with `id` changes one (only the fields sent). */
+/** #6955 — one place with its code, kind, path, children and spools; an archived place still answers. */
 export const getLocation = (id: string) => request<LocationDetail>(`${BASE}/locations/${seg(id)}`)
 
 /** #6955 — what a short code (`L-12`, `S-142`) names; the route is `/api/v1/codes/{code}`, outside `BASE`. */
@@ -362,6 +362,7 @@ export const resolveCode = (code: string) => request<Resolved>(`/codes/${seg(cod
 export const printerLabels = (printerIds: string[] | null) =>
   request<PrinterLabels>(`${BASE}/printer-labels`, json('POST', { printer_ids: printerIds }))
 
+/** Adds a place, or with `id` changes one (only the fields sent). */
 export function upsertLocation(body: LocationCreate): Promise<Location>
 export function upsertLocation(body: LocationPatch, id: string): Promise<Location>
 export function upsertLocation(body: LocationCreate | LocationPatch, id?: string): Promise<Location> {

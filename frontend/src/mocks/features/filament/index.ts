@@ -2065,7 +2065,7 @@ export const handlers = [
     const unknown = ids.find((id) => !roots.some((one) => one.printer_id === id))
     if (unknown) return problem(422, `no printer ${unknown}`)
     const wanted = ids.map((id) => roots.find((one) => one.printer_id === id)!).sort((a, b) => a.name.localeCompare(b.name))
-    return HttpResponse.json({ base_url: null, labels: wanted.flatMap(printerLabelRows) } satisfies S['PrinterLabels'])
+    return HttpResponse.json({ base_url: null, labels: wanted.flatMap(printerLabelRows), no_report: [] } satisfies S['PrinterLabels'])
   }),
   http.get(`${BASE}/locations`, ({ request }) => HttpResponse.json(tree(flag(request, 'include_archived')))),
   http.post(`${BASE}/locations`, async ({ request }) => {

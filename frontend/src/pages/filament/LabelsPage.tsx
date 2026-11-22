@@ -64,8 +64,18 @@ interface LoadedPlaces {
   key: string
   base: string
   labels: PlaceLabel[]
-  failed: string[]
+  /** What could not be read, as the alert says it; no label is drawn then. */
+  error: string | null
   tooLong: string[]
+  /** The printers with no report that lists their AMS units (`no_report`): their empty slots have no label yet. */
+  noReport: string[]
+}
+
+/** The settings could not be read, so the label base is not known. */
+class SettingsReadError extends Error {
+  constructor(cause: unknown) {
+    super('settings read failed', { cause })
+  }
 }
 
 /** The label base of the settings (`filament_label_base_url`, else `public_url`), or null. */
@@ -97,26 +107,38 @@ export function LabelsPage() {
   useEffect(() => {
     if (!placesKey) return
     let live = true
-    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[]) => {
+    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], noReport: string[] = []) => {
       const origin = labelBase(base)
       // A payload past 84 bytes would need a bigger QR code than the 19.8 mm box scans: no label for it.
       const fits = (row: { code: string }) => new TextEncoder().encode(locationPayload(origin, row.code)).length <= MAX_PAYLOAD_BYTES
       const tooLong = rows.filter((row) => !fits(row)).map((row) => row.code)
       const labels = await Promise.all(rows.filter(fits).map(async (row) => ({ ...row, svg: await qrSvg(locationPayload(origin, row.code)) })))
-      if (live) setPlaces({ key: placesKey, base: origin, labels, failed: [], tooLong })
+      if (live) setPlaces({ key: placesKey, base: origin, labels, error: null, tooLong, noReport })
     }
-    const fail = () => {
-      if (live) setPlaces({ key: placesKey, base: labelBase(null), labels: [], failed: [locationParam ?? 'printers'], tooLong: [] })
+    const fail = (error: string) => () => {
+      if (live) setPlaces({ key: placesKey, base: labelBase(null), labels: [], error, tooLong: [], noReport: [] })
     }
     if (printersParam) {
       const wanted = printersParam === 'all' ? null : [...new Set(printersParam.split(',').map((id) => id.trim()).filter(Boolean))]
       printerLabels(wanted)
-        .then((answer) => draw(answer.base_url, answer.labels.map((row) => ({ id: row.location_id, code: row.code, name: row.name }))))
-        .catch(fail)
+        .then((answer) =>
+          draw(
+            answer.base_url,
+            answer.labels.map((row) => ({ id: row.location_id, code: row.code, name: row.name })),
+            answer.no_report,
+          ),
+        )
+        .catch(fail('The printer labels could not be read'))
     } else if (locationParam) {
-      Promise.all([getLocation(locationParam), settingsBase().catch(() => null)])
-        .then(([place, base]) => draw(base, [{ id: place.id, code: place.code, name: place.name }]))
-        .catch(fail)
+      // A failed settings read is an error, never "unset": the page's own origin may be the wrong host for a label.
+      const base = settingsBase().catch((cause: unknown) => {
+        throw new SettingsReadError(cause)
+      })
+      Promise.all([getLocation(locationParam), base])
+        .then(([place, origin]) => draw(origin, [{ id: place.id, code: place.code, name: place.name }]))
+        .catch((cause: unknown) =>
+          fail(cause instanceof SettingsReadError ? 'The label address in Settings could not be read, so no label is drawn. Try again.' : `The label of ${locationParam} could not be read`)(),
+        )
     }
     return () => {
       live = false
@@ -185,13 +207,13 @@ export function LabelsPage() {
             <p className="text-[13px] text-muted-foreground">
               {placeMode
                 ? readyPlaces
-                  ? placeLabels.length === 0 && readyPlaces.failed.length === 0 && readyPlaces.tooLong.length === 0
+                  ? placeLabels.length === 0 && readyPlaces.error === null && readyPlaces.tooLong.length === 0
                     ? 'No printers.'
                     : `${placeLabels.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`
                   : 'Loading labels…'
                 : tooMany ? '' : ids.length === 0 ? 'No spools chosen.' : `${labels.length} of ${ids.length} ready, ${LABEL_WIDTH_MM} x ${LABEL_HEIGHT_MM} mm each.`}
             </p>
-            {readyPlaces && <p className="text-[13px] text-muted-foreground">{`Labels open ${readyPlaces.base}`}</p>}
+            {readyPlaces && readyPlaces.error === null && <p className="text-[13px] text-muted-foreground">{`Labels open ${readyPlaces.base}`}</p>}
           </div>
           <RadioGroup value={layout} onValueChange={choose} aria-label="Layout" className="flex w-auto items-center gap-4">
             <span className="flex items-center gap-1.5">
@@ -217,9 +239,15 @@ export function LabelsPage() {
             Print at most {MAX_LABELS} labels at a time
           </p>
         )}
-        {readyPlaces && readyPlaces.failed.length > 0 && (
+        {readyPlaces?.error && (
           <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
-            {locationParam ? `The label of ${locationParam} could not be read` : 'The printer labels could not be read'}
+            {readyPlaces.error}
+          </p>
+        )}
+        {readyPlaces && readyPlaces.noReport.length > 0 && (
+          <p className="mb-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground">
+            No report found for {readyPlaces.noReport.join(', ')}: an AMS slot of {readyPlaces.noReport.length === 1 ? 'it' : 'them'} gets a label once the printer reports or a
+            spool has been loaded in it.
           </p>
         )}
         {readyPlaces && readyPlaces.tooLong.length > 0 && (
