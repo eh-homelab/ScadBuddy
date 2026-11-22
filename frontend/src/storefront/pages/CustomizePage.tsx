@@ -201,7 +201,9 @@ export function CustomizePage({
   /**
    * The choices of the latest render started. The effect below also runs when the preview on
    * screen changes: an older render can show its preview just after a newer one started, and
-   * starting those choices again cleared the refusal on screen, then showed it again.
+   * starting those choices again cleared the refusal on screen, then showed it again. It holds
+   * only while those choices stay on screen: a change away and back renders them again, even
+   * when the change away never rendered (#7000 review).
    */
   const startedKey = useRef<string | undefined>(undefined)
   const renderNow = useRef<(key: string, retry: boolean) => Promise<void>>(async () => undefined)
@@ -244,11 +246,8 @@ export function CustomizePage({
   }, [current, blocked])
 
   useEffect(() => {
-    if (blocked) {
-      startedKey.current = undefined
-      return
-    }
-    if (shown?.key === current || startedKey.current === current) return
+    if (blocked || startedKey.current !== current) startedKey.current = undefined
+    if (blocked || shown?.key === current || startedKey.current === current) return
     const timer = setTimeout(
       () => {
         started.current = true
