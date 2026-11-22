@@ -10,7 +10,9 @@ def test_parse_accepts(text: str) -> None:
     assert parse_code(text) == Code("L", 12)
 
 
-@pytest.mark.parametrize("text", ["", "L-", "-12", "L-1x", "12", "L--12", "L-0", "L-99999999999"])
+@pytest.mark.parametrize(
+    "text", ["", "L-", "-12", "L-1x", "12", "L--12", "L-0", "L-99999999999", "L-" + "1" * 5000]
+)
 def test_parse_refuses(text: str) -> None:
     assert parse_code(text) is None
 

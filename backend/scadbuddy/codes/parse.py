@@ -8,7 +8,8 @@ from typing import NamedTuple
 #: PostgreSQL's `integer` maximum: a larger number would fail the query on an overflow.
 MAX_NUMBER = 2**31 - 1
 
-_CODE = re.compile(r"^([A-Z])-?([0-9]+)$")
+#: At most 10 digits: `int` refuses a string past 4300 digits, and 10 already pass `MAX_NUMBER`.
+_CODE = re.compile(r"^([A-Z])-?([0-9]{1,10})$")
 
 
 class Code(NamedTuple):

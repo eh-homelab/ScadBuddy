@@ -47,7 +47,9 @@ def test_an_archived_location_still_resolves(client: TestClient) -> None:
     assert got.json()["archived"] is True
 
 
-@pytest.mark.parametrize("code", ["Q-1", "L-999999", "nonsense", "L-0", "L-99999999999"])
+@pytest.mark.parametrize(
+    "code", ["Q-1", "L-999999", "nonsense", "L-0", "L-99999999999", "L-" + "1" * 5000]
+)
 def test_an_unknown_code_is_404_code_unknown(client: TestClient, code: str) -> None:
     got = client.get(f"{CODES}/{code}")
     assert got.status_code == 404, got.text
