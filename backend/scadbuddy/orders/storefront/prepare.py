@@ -551,12 +551,17 @@ async def warm_default(state: AppState, listing: Listing) -> None:
     default combination and starts its storefront slice price, unless
     `storefront_warm_prices` is off. A run that does not start is logged, never the
     publish's failure, nor is one that takes past `WARM_START_TIMEOUT`: a visitor's read
-    still starts the slice."""
+    still starts the slice. A start given up on may still have reached Temporal, so its
+    log says it was given up, not that it failed."""
     if not state.settings.storefront_warm_prices or not listing.published:
         return
     try:
         # A Temporal that does not answer never holds up the publish (review of #6970).
         await asyncio.wait_for(preparer(state).start_default(listing.id), WARM_START_TIMEOUT)
+    except TimeoutError:
+        logger.warning(
+            "gave up waiting for the default price run of listing %s to start", listing.id
+        )
     except Exception:
         logger.warning(
             "could not start the default price run of listing %s", listing.id, exc_info=True
