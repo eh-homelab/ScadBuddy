@@ -55,7 +55,7 @@ const TOOL = 'filament_invoice_import'
 const Body = z.strictObject({ invoice_id: z.string().uuid() })
 const READABLE: readonly string[] = [...IMAGE_MEDIA_TYPES, ...DOCUMENT_MEDIA_TYPES]
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 /** A session that no longer takes messages: ended, or put away. */
 const ENDED = new Set(['done', 'failed'])
 /** The backend's own refusals the route forwards as they are; any other is the agent's problem. */

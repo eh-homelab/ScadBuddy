@@ -187,7 +187,7 @@ const ARCHIVED_QUERY = { true: 'only', include: 'include', false: 'exclude' } as
 const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
 /** The most sessions one list returns (manager.ts listQuery clamps to the same). */
 export const LIST_LIMIT_MAX = 500

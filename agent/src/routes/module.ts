@@ -18,9 +18,14 @@ export type RouteModule = {
   register(app: Hono, deps: AppDeps, shutdown: AbortSignal): void
 }
 
-/** Whether the API serves every CRUD area the agent wants (api/dataHealth.ts): the routes answer 503 until then. */
+/**
+ * Whether the API serves every CRUD area the agent wants (api/dataHealth.ts `areasReady`): the
+ * routes answer 503 until then. They do not wait for the input-hash key, which an API with no KEK
+ * never releases; what hashes a call's input (/mcp, the Temporal workers) waits for it.
+ */
 export function ready(deps: AppDeps): Probe {
-  return deps.database.ready
+  const { database } = deps
+  return database.areasReady ? () => database.areasReady!() : database.ready
 }
 
 /** How /mcp is authenticated, read per request; the default with no /mcp endpoint. */

@@ -42,7 +42,7 @@ declare module '../app.js' {
 }
 
 const UNAVAILABLE = "notification channels need the API's stores (CRUD area notify)"
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'notification channels'
 
 const Fields = {

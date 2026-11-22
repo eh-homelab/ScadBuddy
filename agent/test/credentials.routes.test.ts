@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { describe, expect, it } from 'vitest'
+import { dataHealthOf } from '../src/api/dataHealth.js'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { AuditEntry, AuditRepo } from '../src/audit/log.js'
 import { type Credential, CREDENTIAL_NAME_MAX, MAX_CREDENTIALS, TOO_MANY_MESSAGE } from '../src/credentials.js'
@@ -84,6 +85,15 @@ describe('/api/v1/ai/credentials reads (#989)', () => {
 })
 
 describe('/api/v1/ai/credentials/entries (#1093)', () => {
+  it('serves the list, saying why saving is not possible, when the API has no KEK and so never releases the input-hash key', async () => {
+    // The areas are listed; the key is not (GET …/agent/keys/input-hash answers 503 kek-missing).
+    const database = dataHealthOf({ complete: true, answers: () => Promise.resolve(true) }, () => undefined, () => false)
+    const { call } = setup({ database }, new MemoryCredentials())
+    const res = await call<CredentialListView>('GET', '/entries')
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ can_save: false, cannot_save_reason: 'no key-encryption key: SCADBUDDY_SECRET_KEY_FILE is not set' })
+  })
+
   it('lists nothing, then each created credential in order, never with its secret', async () => {
     const { call, create } = setup()
     expect((await call<CredentialListView>('GET', '/entries')).body).toEqual({

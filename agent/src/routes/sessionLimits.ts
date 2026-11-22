@@ -48,7 +48,7 @@ const PutBody = z.strictObject({
 })
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'assistant session limits'
 
 /** What limits() would give a new session: the stored value when it is a positive number. */

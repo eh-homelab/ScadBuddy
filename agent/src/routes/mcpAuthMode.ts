@@ -96,7 +96,7 @@ const Setting = z.strictObject({
 const PutBody = Setting.extend({ expected: Setting })
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const UNREADABLE = 'the MCP auth settings cannot be read; /mcp refuses every request until they can'
 const CHANGED =
   'the MCP auth setting changed since this page loaded it; nothing was saved. Reload it and choose again'

@@ -1,17 +1,20 @@
 import type { CrudAreas } from './crudAreas.js'
 
 // The agent's data is the API's (#5299 step 12): the agent holds no SQL client, so /healthz's
-// `database` is the API's CRUD areas, and the `ready` its data routes and /mcp wait for is those
-// areas and the input-hash key the API releases (api/agentKeys.ts): a tool call hashes its input
-// for the audit log after it ran, so a call before the key would act and then fail. Apart from
-// main.ts so a test can check the wiring.
+// `database` is the API's CRUD areas. The data routes wait for those areas only (`areasReady`), so
+// Settings still answers, and says why, on an API with no KEK. `/mcp`, readiness and the Temporal
+// workers also wait for the input-hash key the API releases (api/agentKeys.ts, `ready`): a tool
+// call hashes its input for the audit log after it ran, so a call before the key would act and
+// then fail. Apart from main.ts so a test can check the wiring.
 
 /** The agent's data, on the API: `ping` for health, `ready` for the routes. */
 export type AgentData = {
   /** Whether the API lists every wanted area and answers them within `timeoutMs`. */
   ping(timeoutMs?: number): Promise<boolean>
-  /** Whether the API lists every wanted area and has released the input-hash key. */
+  /** Whether the API lists every wanted area and has released the input-hash key: /mcp and readiness. */
   ready(): Promise<boolean>
+  /** Whether the API lists every wanted area: the data routes (routes/module.ts `ready`). `ready` when absent. */
+  areasReady?(): Promise<boolean>
 }
 
 /**
@@ -28,6 +31,7 @@ export function dataHealthOf(
   let answered = true
   return {
     ready: () => Promise.resolve(areas.complete && keyReleased()),
+    areasReady: () => Promise.resolve(areas.complete),
     async ping(timeoutMs?: number) {
       if (!areas.complete) return false
       const now = await areas.answers(timeoutMs)

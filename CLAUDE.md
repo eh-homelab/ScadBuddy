@@ -47,8 +47,9 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
   `cnpg-cluster.yaml`, delete its `onepassworditem-*-db.yaml`, and archive the 1Password
   item (#5298; how to read prod: `deploy/CLAUDE.md` "Prod checks").
 
-Today's code still breaks the rule: two processes hold a Postgres secret (the API and
-agent-durable). The agent sidecar and the agent worker have no SQL client and read no KEK
+Today's code still breaks the rule: two processes use a Postgres secret (the API and
+agent-durable); the agent containers still hold `SCADBUDDY_DATABASE_URL` in their environment,
+unused, until eh-homelab/clusters drops it. The agent sidecar and the agent worker have no SQL client and read no KEK
 (#5299 step 12): they reach the `ai_*` tables only through the API's CRUD routes, need a
 service-credential proof to start, and ignore `SCADBUDDY_DATABASE_URL` and
 `SCADBUDDY_SECRET_KEY_FILE` (and `_PREVIOUS_FILE`) with a warning. The API revokes their old role

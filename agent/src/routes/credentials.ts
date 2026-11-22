@@ -125,7 +125,7 @@ const NOT_CONFIGURED = 'AI features are not set up in this process'
  * (frontend `AiCredentialSection` `notDeployed`) instead of matching the text above.
  */
 export const NO_DATABASE_CODE = 'no_database'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 export const DEFAULT_TEST_COOLDOWN_MS = 10_000
 /** The largest credential body read: a secret and a base URL, with room to spare. */
 const BODY_MAX = 16 * 1024

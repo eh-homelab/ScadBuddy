@@ -55,7 +55,10 @@ export class InputHashKey {
     this.#started ??= this.#run()
   }
 
-  /** Resolves once the key is released (or `stop()` ended the asking). */
+  /**
+   * Resolves once the key is released, or once `stop()` ended the asking with no key: a caller
+   * that goes on must check `isReleased()` (AgentWorker races it against its own stop).
+   */
   released(): Promise<void> {
     this.start()
     return this.#started!

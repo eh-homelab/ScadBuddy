@@ -104,6 +104,20 @@ describe("a signed-in person's session through the API", () => {
 })
 
 describe("health's probe of the agent's data", () => {
+  it('reads no more after stop(), and what waits on whenComplete() does not run at shutdown', async () => {
+    const api = new FakeApi().answer('GET /areas', { areas: [] })
+    const areas = new CrudAreas(BASE, { fetch: api.fetch, wanted: ['settings'], log: () => undefined, firstMs: 1, maxMs: 2 })
+    let ran = false
+    void areas.whenComplete().then(() => (ran = true))
+    areas.start()
+    await expect.poll(() => api.seen.length).toBeGreaterThan(0)
+    areas.stop()
+    const seen = api.seen.length
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(api.seen.length).toBe(seen)
+    expect(ran).toBe(false)
+  })
+
   it('answers whether the API answers its areas', async () => {
     const api = new FakeApi().answer('GET /areas', { areas: ['migrations'] })
     const areas = new CrudAreas(BASE, { fetch: api.fetch, wanted: ['migrations'], log: () => undefined })
@@ -141,6 +155,8 @@ describe("health's probe of the agent's data", () => {
     const health = dataHealthOf({ complete: true, answers: () => Promise.resolve(true) }, () => undefined, () => released)
     // A tool call hashes its input for the audit log after it ran: before the key it must not run.
     expect(await health.ready()).toBe(false)
+    // The data routes do not wait for the key, so Settings answers on an API with no KEK.
+    expect(await health.areasReady?.()).toBe(true)
     // The API answers, so /healthz says the data is reachable.
     expect(await health.ping()).toBe(true)
     // `ai` names the wait once the API holds its KEK.

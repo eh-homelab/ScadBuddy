@@ -98,7 +98,7 @@ export function registerBackgroundTaskRoutes(
 ): void {
   async function available(c: Context): Promise<{ sessions: SessionManager; tasks: BackgroundTasks } | Response> {
     if (!deps.sessions || !deps.tasks) return c.json({ detail: 'background tasks need Temporal (SCADBUDDY_TEMPORAL_ADDRESS)' }, 503)
-    if (!(await deps.ready())) return c.json({ detail: "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key" }, 503)
+    if (!(await deps.ready())) return c.json({ detail: "AI unavailable: the API does not serve the agent's CRUD areas yet" }, 503)
     return { sessions: deps.sessions, tasks: deps.tasks }
   }
 

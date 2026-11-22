@@ -57,7 +57,7 @@ export type OidcView = {
 }
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const NO_PUBLIC_URL =
   'SCADBUDDY_PUBLIC_URL is not set: /mcp has no resource URI for tokens to name as their audience (RFC 8707)'
 

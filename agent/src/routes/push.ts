@@ -50,7 +50,7 @@ declare module '../app.js' {
 
 const UNAVAILABLE = "Web Push needs the API's stores (CRUD area notify)"
 const NOT_CONFIGURED = 'AI features are not set up in this process'
-const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet, or has not released the input-hash key"
+const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 const WHAT = 'push notification settings'
 
 const base64url = (octets: number) =>
