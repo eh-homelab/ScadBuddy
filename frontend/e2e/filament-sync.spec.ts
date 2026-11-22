@@ -40,3 +40,19 @@ test('sync now starts a pass and lists the item Bambuddy refused', async ({ page
   await expect(filament.getByText('Sync finished.')).toBeVisible({ timeout: 15_000 })
   await expect(failed.getByRole('listitem').first()).toContainText('3 attempts')
 })
+
+// #6845 — every comparable linked spool changed in Bambuddy since the last pull: no keep, and the dialog says why.
+test('the reset dialog says why there is no keep when every comparable linked spool changed since the last pull', async ({ page }) => {
+  await page.addInitScript(() => {
+    sessionStorage.setItem('scadbuddy.mock.filament-sync-link-other', JSON.stringify({ changed: true }))
+  })
+  await page.goto('/settings/printing')
+  const filament = page.getByRole('region', { name: 'Filament' })
+  await filament.getByRole('button', { name: 'Reset Bambuddy links' }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+  await expect(dialog).toContainText(
+    'Every linked spool ScadBuddy could compare (a time on both sides) changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same Bambuddy.',
+  )
+  await expect(dialog.getByRole('button', { name: 'Keep links' })).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: 'Reset links' })).toBeVisible()
+})

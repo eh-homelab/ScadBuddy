@@ -36,8 +36,9 @@ slot setup and NTAG writes write BB whatever `filament_sync` says.
   links now belong to it (plan Decisions 193-199, #6845). When it cannot prove that
   (Bambuddy could not be read, or it is another one), it answers 409 `proof_changed` and
   deletes nothing. The dry run (`GET /filament/sync/reset-links`) says `changed_since_pull:
-  true` when Bambuddy holds every linked spool but every one ScadBuddy could compare (a time on
-  both sides) was edited there since the last pull: then say that is why there is no keep, because ScadBuddy cannot prove it is
+  true` when Bambuddy holds every linked spool, at least half the links have a time on both
+  sides, and every one ScadBuddy could compare (a time on both sides) was edited there since the
+  last pull: then say that is why there is no keep, because ScadBuddy cannot prove it is
   the same Bambuddy. Only then call it with `expect_kept: false`, which reads no Bambuddy and
   deletes the links, intents and error rows of that old instance (`kept: false`). Either
   way it asks for a full pass, and it never deletes an SB spool, type, supplier or

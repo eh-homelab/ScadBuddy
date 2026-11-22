@@ -90,6 +90,22 @@ export function linkOtherBambuddy(
   unreadable = down
 }
 
+/**
+ * An e2e test puts the links on another Bambuddy before the page loads: this `sessionStorage` key holds
+ * `{ instance?, same?, unreadable?, changed? }` (`linkOtherBambuddy`'s arguments), read once at load.
+ */
+export const LINK_OTHER_SEED_KEY = 'scadbuddy.mock.filament-sync-link-other'
+
+try {
+  const raw = typeof sessionStorage === 'undefined' ? null : sessionStorage.getItem(LINK_OTHER_SEED_KEY)
+  if (raw) {
+    const { instance, ...options } = JSON.parse(raw) as { instance?: string; same?: boolean; unreadable?: boolean; changed?: boolean }
+    linkOtherBambuddy(instance, options)
+  }
+} catch {
+  // Storage blocked or a bad seed: the mock starts on the configured Bambuddy.
+}
+
 /** #6845 — the configured Bambuddy changed after the dry run: it no longer proves the links' own. */
 export function loseSameBambuddy() {
   sameBambuddy = false

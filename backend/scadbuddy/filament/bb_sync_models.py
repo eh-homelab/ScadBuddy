@@ -469,8 +469,9 @@ class LinksResetPreview(BaseModel, extra="forbid"):
     keeps every link and deletes nothing. ``bambuddy_unreadable``: the configured
     Bambuddy could not be read, so ``same_bambuddy`` is false and only the delete is
     offered (Decision 198). ``changed_since_pull``: ``same_bambuddy`` is false although
-    Bambuddy holds every linked spool and none is older than its link: every linked spool
-    with a time on both sides (untimed links are skipped) was edited in Bambuddy since the
+    Bambuddy holds every linked spool, none is older than its link, and at least half the
+    links have a time on both sides (Decision 199): every linked spool with a time on both
+    sides (untimed links are skipped) was edited in Bambuddy since the
     last pull, so none matches exactly and the proof has nothing to stand on
     (`bb_sync_results.changed_since_pull`, #6845 review)."""
 
