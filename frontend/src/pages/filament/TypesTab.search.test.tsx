@@ -76,4 +76,12 @@ describe('the Types tab search', () => {
     expect(await screen.findByText('No type matches “pink”.')).toBeInTheDocument()
     expect(screen.queryByText(/No types yet/)).toBeNull()
   })
+
+  it('with no search, says to tick Show archived types when every type is archived', async () => {
+    const all = await listTypes()
+    server.use(http.get('/api/v1/filament/types', () => HttpResponse.json(all.map((type) => ({ ...type, archived_at: '2026-01-01T00:00:00Z' })))))
+    render()
+    expect(await screen.findByText('No types shown. Tick Show archived types.')).toBeInTheDocument()
+    expect(screen.queryByText(/No types yet/)).toBeNull()
+  })
 })
