@@ -630,7 +630,10 @@ export function PrintPicker({
    * pressed while a slot is empty sends nothing and turns the picker's "Slot N has no
    * filament chosen" on; it stays on until every slot has a filament.
    */
-  const firstEmpty = (filaments?.slots ?? []).find((slot) => !plan.some((choice) => choice.slot_id === slot.slot_id))
+  // The picker's own rule (checkPlan 'no-choice'): no plan entry, or a spool it does not list.
+  const firstEmpty = filaments
+    ? checkPlan(filaments, plan, 1).find((warning) => warning.kind === 'no-choice')
+    : undefined
   const [missingShown, setMissingShown] = useState(false)
   const allFilled = firstEmpty === undefined
   useEffect(() => {
@@ -1943,7 +1946,7 @@ export function PrintPicker({
   const footerBlocking = noPlate
     ? 'No plate is chosen to print.'
     : missingShown && firstEmpty
-      ? `Slot ${firstEmpty.slot_id} has no filament chosen.`
+      ? firstEmpty.message
       : filamentError
       ? 'ScadBuddy could not read the filament inventory.'
       : runRefuses
