@@ -65,7 +65,7 @@ host. A later spec must decide otherwise, and §8 says what that spec would need
 | P4 | The host elements are `sb-param`, `sb-preview` and `sb-generate`. Each is a custom element whose content React renders through a portal. | `frontend/src/template-ui/elements.ts:1`, `:49`; `TemplateUi.tsx:164-176` |
 | P5 | A template UI module is not sandboxed. It runs in the page, under the page CSP, so it can call any `/api/v1` route as the viewer. | pipelines spec §9; `backend/scadbuddy/api/static.py:58-68` (`PAGE_CSP`: `script-src 'self'`, one inline-script hash and Plaid's `link-initialize.js`; `connect-src 'self'` and Plaid's two API hosts) |
 | P6 | `FlowHistory` is a `GitRepo` under `data/flows`: `<name>/flow.py` and `<name>/inputs.json`, one commit per version; `<name>/flow.json` holds the display name and description, each change its own commit. Writers hold a Postgres lock that carries HEAD, because every replica shares the repo over NFS. | `backend/scadbuddy/flows/repository.py:1-20`, `:221`; `core/gitrepo.py:232`, `:276`; `library/repo_lock.py:180` (`flows_coordinator`); `core/paths.py:80` |
-| P7 | The flow inputs subset: a flat object of `string`, `integer`, `number`, `boolean`, or an array of one of them, with `enum` and bounds, and `additionalProperties: false`. The API checks a schema (`schema_problems`) and checks and fills values (`resolve_inputs`). A `pattern` needs a `maxLength`, and patterns have a per-value and per-call time budget, because they run in the API process. | `backend/scadbuddy/flows/inputs.py:1-17`, `:40-48`, `:77`, `:281` |
+| P7 | The flow inputs subset: a flat object of `string`, `integer`, `number`, `boolean`, or an array of one of them, with `enum` and bounds, and `additionalProperties: false`. The API checks a schema (`schema_problems`) and checks and fills values (`resolve_inputs`). A `pattern` needs a `maxLength`, and patterns have a per-value and per-call time budget, because they run in the API process. | `backend/scadbuddy/flows/inputs.py` (`resolve_inputs`); the schema check and the pattern budget moved to `backend/scadbuddy/core/input_schema.py` (#5701) |
 | P8 | The frontend draws that subset as a form. | `frontend/src/lib/flowInputs.ts:35` (`inputFields`); `components/flows/inputsForm.tsx:10` (`useInputs`) |
 | P9 | Phase 1 (#4249, closed) extracted `DataTable`, `FilterBar` and `RecordDrawer`; the orders, customers and activity pages use them. | `frontend/src/components/records/DataTable.tsx:66`, `FilterBar.tsx:133`, `RecordDrawer.tsx:27`; `backend/CLAUDE.md` "orders phase 1" |
 | P10 | The realtime socket takes topics that match one closed pattern; frames carry the event kind and ids, never content; the client re-reads through REST. | `backend/scadbuddy/api/realtime.py:1-6`, `:161` (`MAX_TOPICS`), `:181-215` |
@@ -308,7 +308,7 @@ A record type is a JSON Schema in the flow inputs subset (P7), in
 with `_` in place of `-`, `[a-z][a-z0-9_]{0,62}`.
 
 - `POST /record-types` `{type, schema, message?}` registers a new version. The API runs
-  `flows/inputs.py` `schema_problems` on it. The subset has no nested object, so a record
+  `core/input_schema.py` `schema_problems` on it (without `objects`, #5701). The subset then has no nested object, so a record
   is flat: scalars and arrays of scalars. A link to another record is a `string` id; the
   store does not check it (§6).
 - A new version must accept every stored row of the type. The registration runs in one

@@ -14,7 +14,8 @@ import pydantic_monty
 from pydantic import BaseModel
 from temporal_agent_harness.harness import agent
 
-from scadbuddy.flows.inputs import INPUTS_FILE, schema_problems
+from scadbuddy.core.input_schema import schema_problems
+from scadbuddy.flows.inputs import INPUTS_FILE
 from scadbuddy.workflows.flow_tools import MAX_WAIT_S, MIN_WAIT_S, run_flow_tool
 
 log = logging.getLogger(__name__)
