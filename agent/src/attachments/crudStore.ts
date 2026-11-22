@@ -18,8 +18,7 @@ import {
 // and its preview are the upload's multipart parts and each read's body, never base64 (D8,
 // #2479). An attachment id is the only id placed in a route's path, and only once it is a
 // UUID; the owner travels in the query or the body. A claim stores the bytes the turn already
-// holds through the session's images (`SessionImages`), then deletes the staging rows, as the
-// SQL store does.
+// holds through the session's images (`SessionImages`), then deletes the staging rows.
 
 const UPLOAD_TIMEOUT_MS = 60_000
 

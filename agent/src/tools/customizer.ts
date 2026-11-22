@@ -656,11 +656,9 @@ export const customizerTools: Tool[] = [
               'UI; a run grant or another decider does not cover it. Nothing was sent',
           )
         }
-        if (!ctx.fetchGrant) {
-          throw new ToolError('a one-off host needs the secret key (SCADBUDDY_SECRET_KEY_FILE), which this agent lacks; nothing was sent')
-        }
-        // Minted only now, after this call's approval: the backend spends it on one fetch.
-        grant[FETCH_GRANT_HEADER] = ctx.fetchGrant(allow_host, url.trim())
+        if (!ctx.fetchGrant) throw new ToolError('a one-off host needs a grant this agent cannot ask the API for here; nothing was sent')
+        // Minted by the API only now, after this call's approval: the backend spends it on one fetch.
+        grant[FETCH_GRANT_HEADER] = await ctx.fetchGrant(allow_host, url.trim())
       }
       return json(
         await command(ctx, `fetch ${url}`, (headers) =>

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { connectDatabase, type Database } from './support/database.js'
-import { awaitMigrations, EXPECTED_MIGRATIONS, MigrationChecksumError, MigrationsPendingError, sqlLedger } from '../src/db/schema.js'
+import { connectDatabase, type Database, sqlLedger } from './support/database.js'
+import { awaitMigrations, EXPECTED_MIGRATIONS, MigrationChecksumError, MigrationsPendingError } from '../src/db/schema.js'
 import { migrate, MIGRATIONS } from './support/migrations.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 

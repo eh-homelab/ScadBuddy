@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
 import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TranscriptStore } from '../src/sessions/store.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
@@ -12,7 +13,6 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, costStateEntry, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { PgTranscriptRows } from './support/sql/transcriptRows.js'
 import { hostStores } from './support/agentSessions.js'
-import { SessionBlobs } from './support/sql/sessionBlobs.js'
 
 // An AgentSession placement's spend (sessions/turnHost.ts) over a `cost-state` its process
 // carries in. The real SDK loads the transcript a resume restores from through the session

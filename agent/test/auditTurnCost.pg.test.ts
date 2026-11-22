@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { AuditLog, type AuditRecord } from '../src/audit/log.js'
-import { SettingsStore } from '../src/credentials.js'
+import { type AuditLog, type AuditRecord } from '../src/audit/log.js'
+import { type SettingsStore } from '../src/credentials.js'
 import type { Database } from './support/database.js'
 import type { SessionManager } from '../src/sessions/manager.js'
+import { sqlSettings } from './support/sql/settings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
 
 // #1922: each turn's cost is a `turn` row in the AI audit log, against Postgres
 // with the real audit log. Cost is known per turn (the SDK result's
@@ -37,8 +39,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`turn cost i
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     failures.length = 0
-    audit = new AuditLog({ sql: db.sql, settings: () => settings, onError: (err) => failures.push(err) })
-    settings = new SettingsStore(db.sql, audit)
+    audit = sqlAuditLog(db.sql, { settings: () => settings, onError: (err) => failures.push(err) })
+    settings = sqlSettings(db.sql, audit)
     next = { reply: 'hello there', costUsd: 0.4 }
     const { runner } = scriptedRunner(() => next)
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, settings, audit })

@@ -14,18 +14,19 @@ import { AuditLog } from '../src/audit/log.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
+import { SqlBackgroundTasks } from './support/sql/backgroundTasks.js'
 import { type BuiltinContext, builtinServer, classicBuiltinServer, MONITOR_WS_ONLY } from '../src/builtins/server.js'
 import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from './support/database.js'
 import { confineGuard } from '../src/harness/confine.js'
 import { NoUsableCredentialError } from '../src/harness/fallback.js'
 import { originPolicy } from '../src/http/origins.js'
-import { SessionBlobs } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
-import { SessionFiles } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { managerAgents } from '../src/background/workflowAgents.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -76,7 +77,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     sessionDir = undefined
     cancelled.length = 0
     terminated.length = 0
-    store = new BackgroundTaskStore(db.sql)
+    store = new BackgroundTaskStore(new SqlBackgroundTasks(db.sql))
     tasks = new BackgroundTasks({ store, runner })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id

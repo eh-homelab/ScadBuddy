@@ -3,12 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
 import { sessionFinishActivities, QUEUED_DROPPED } from '../src/temporal/session/finishActivity.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { QueuedMessage } from '../src/temporal/session/models.js'
 import { SESSION_BEGIN_TURN_ACTIVITY, SESSION_FINISH_ACTIVITY, SESSION_QUEUE_CHANGED_ACTIVITY } from '../src/temporal/session/names.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { PgTurnRows } from './support/sql/turnRows.js'
-import { SessionBlobs } from './support/sql/sessionBlobs.js'
 
 // `session.finish_turn` (temporal/session/finishActivity.ts) writes a turn's end only while the
 // row still runs that turn. AgentSession takes a message once the row is idle, before it has

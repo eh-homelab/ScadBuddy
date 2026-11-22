@@ -1,12 +1,12 @@
+import type { Sql } from 'postgres'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { AuditLog } from '../src/audit/log.js'
 import type { Database } from './support/database.js'
 import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionVerdict, type UserQuestion } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { ATTENTION_RATE_LOCK, QuestionService } from '../src/gate/questions.js'
+import { QuestionService } from '../src/gate/questions.js'
 import { gateSettings } from '../src/temporal/session/gateActivities.js'
 import { respond, RespondError } from '../src/routes/pendingInput.js'
 import { ChatConnection } from '../src/routes/chat.js'
@@ -15,6 +15,8 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { sqlAuditLog } from './support/sql/audit.js'
+import { ATTENTION_RATE_LOCK, SqlQuestions } from './support/sql/questions.js'
 
 // A question a turn asks, without the SDK (#940): every session is an AgentSession (plan Step
 // 6.3), so AskUserQuestion parks as the gate's `answer` entry (ai_pending_input, its answer in
@@ -53,6 +55,14 @@ const socketAnswer = (sessionId: string, id: string, answers: unknown) =>
 
 const result = (run: HarnessRun) =>
   ({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume }) as unknown as SDKMessage
+
+
+/** ai_settings read straight from the test database, as the settings store's `get` answers. */
+function settingsOf(sql: Sql) {
+  return {
+    get: async <T>(key: string): Promise<T | undefined> => (await sql<{ value: T }[]>`SELECT value FROM ai_settings WHERE key = ${key}`)[0]?.value,
+  }
+}
 
 describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
   `questions in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`,
@@ -209,7 +219,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
     // be free text the user typed. A question nobody answered is there too, as ScadBuddy's
     // cancellation.
     it.each([ASK_USER_QUESTION, ASK_USER_TOOL])('records the answer to %s, and a cancellation, in the audit log: who, which call, a hash, never the text', async (tool) => {
-      const audit = new AuditLog({ sql: db.sql })
+      const audit = sqlAuditLog(db.sql)
       const m = manager({ sql: db.sql, paths: await tempPaths(), run: askingWith(tool), audit })
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ask me' })
       const id = await pendingQuestion(m, session.id)
@@ -246,7 +256,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
     // #1108: a subagent's call is in the feed and has its tool_call row, tagged with the Agent
     // call that spawned it.
     it("a subagent's ask_user has a tool_call row and a tool.call tagged with the Agent call that spawned it", async () => {
-      const audit = new AuditLog({ sql: db.sql })
+      const audit = sqlAuditLog(db.sql)
       const say = (parent: string | null, content: unknown[]) =>
         ({ type: 'assistant', message: { id: `msg_${parent ?? 'top'}`, content }, parent_tool_use_id: parent }) as unknown as SDKMessage
       const toolResult = (parent: string | null, id: string, text: string) =>
@@ -555,7 +565,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
         const at = async (v: unknown) => {
           await db.sql`DELETE FROM ai_settings WHERE key = 'question_expiry_seconds'`
           if (v !== undefined) await db.sql`INSERT INTO ai_settings (key, value) VALUES ('question_expiry_seconds', ${db.sql.json(v as never)})`
-          return (await gateSettings(db.sql)).questionExpiryS
+          return (await gateSettings(settingsOf(db.sql))).questionExpiryS
         }
         expect(await at(undefined)).toBe(3600)
         expect(await at(5)).toBe(10)
@@ -590,7 +600,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
       const holder = await db.sql.reserve()
       await holder`SELECT pg_advisory_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
       try {
-        const service = new QuestionService({ sql: db.sql, events: {} as EventLog, rateLockWaitMs: 200 })
+        const service = new QuestionService({ routes: new SqlQuestions(db.sql), events: {} as EventLog, rateLockWaitMs: 200 })
         let opened = 0
         const started = performance.now()
         const refused = await service.attentionLimit(

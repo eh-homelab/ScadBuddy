@@ -1,5 +1,5 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
-import { type AwaitMigrationsOptions, awaitMigrations, type LedgerReader, MigrationsPendingError, sqlLedger } from '../../src/db/schema.js'
+import { type AwaitMigrationsOptions, awaitMigrations, type ExpectedMigration, type LedgerReader, MigrationsPendingError } from '../../src/db/schema.js'
 
 // The tests' own Postgres client (#5299 step 12): the agent runs no SQL, so what was
 // `src/db.ts` lives here, for the tests that seed or read the `ai_*` tables the API owns.
@@ -296,4 +296,32 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
       await Promise.all([sql.end({ timeout: 5 }), locks.end()])
     },
   }
+}
+
+/** `LedgerReader` over the test's own SQL: what the API's ledger route reads. */
+export const sqlLedger =
+  (sql: Sql): LedgerReader =>
+  (expected) =>
+    readLedger(sql, expected)
+
+/**
+ * The expected files' rows of the ledger, id to checksum; none while the API has not made
+ * the ledger, and `positional` while it is still keyed by position (no `id` column, before
+ * #491), which the API's runner rewrites at its next start; a row main never had stops
+ * that start instead (AgentMigrationLedgerError).
+ */
+async function readLedger(
+  sql: Sql,
+  expected: readonly ExpectedMigration[],
+): Promise<Map<string, string | null> | 'positional'> {
+  const [ledger] = await sql<{ found: boolean; keyed: boolean }[]>`
+    SELECT to_regclass('ai_migrations') IS NOT NULL AS found,
+           EXISTS (SELECT 1 FROM pg_attribute
+                   WHERE attrelid = to_regclass('ai_migrations') AND attname = 'id' AND NOT attisdropped) AS keyed`
+  if (!ledger?.found) return new Map()
+  if (!ledger.keyed) return 'positional'
+  const ids = expected.map((m) => m.id)
+  const rows = await sql<{ id: string; checksum: string | null }[]>`
+    SELECT id, checksum FROM ai_migrations WHERE id = ANY(${ids}::text[])`
+  return new Map(rows.map((row) => [row.id, row.checksum]))
 }

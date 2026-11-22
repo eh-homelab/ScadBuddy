@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { CrudReadError } from '../src/api/crudRead.js'
 import { WORKSPACE_AREAS } from '../src/api/crudAreas.js'
 import { event, type ServerEvent } from '../src/sessions/protocol.js'
-import { CrudSessionFiles, gatedWorkspaceFiles } from '../src/workspace/crudStore.js'
-import { type SessionFiles, WorkspaceError, type WorkspaceRef } from '../src/workspace/store.js'
+import { CrudSessionFiles } from '../src/workspace/crudStore.js'
+import { WorkspaceError, type WorkspaceRef } from '../src/workspace/store.js'
 
 // The workspace files through the API's CRUD routes (#5299 step 7, area `workspace`), against a
 // fake API that keeps them in memory as the backend's api/crud_agent_workspace.py does (the
@@ -229,22 +229,4 @@ describe('CrudSessionFiles (#5299 step 7)', () => {
     expect((await files.bytesStatus()).store).toBe('refused')
   })
 
-  it('goes over SQL until the API lists the area, then through the routes', async () => {
-    const { api, files } = setup()
-    const calls: string[] = []
-    const pg = {
-      maxFiles: 5000,
-      stat: async () => {
-        calls.push('pg')
-        return undefined
-      },
-    } as unknown as SessionFiles
-    let listed = false
-    const gated = gatedWorkspaceFiles(pg, files, () => listed)
-    await gated.stat(ws, 'a')
-    listed = true
-    await gated.stat(ws, 'a')
-    expect(calls).toEqual(['pg'])
-    expect(api.seen.map((s) => s.path)).toEqual(['/workspace/file'])
-  })
 })

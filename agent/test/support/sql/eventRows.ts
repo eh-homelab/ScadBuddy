@@ -10,7 +10,7 @@ import {
   type TurnFence,
 } from '../../../src/sessions/eventLog.js'
 import type { ServerEvent } from '../../../src/sessions/protocol.js'
-import { payloadKeyLock } from './sessionRows.js'
+import { payloadKeyLock } from './payloadKeys.js'
 
 // `EventRows` straight on the test database, the statements the API's routes run (backend
 // agent_data/events.py), for tests with no API (#5299).

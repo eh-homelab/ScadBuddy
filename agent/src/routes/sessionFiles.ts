@@ -18,7 +18,7 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
 // The assistant panel's Files (#2329, part 3): a session's workspace
-// (workspace/store.ts `SessionFiles`, `ai_session_files` under `session:<id>`),
+// (workspace/store.ts `WorkspaceFiles`, `ai_session_files` under `session:<id>` on the API),
 // over plain HTTP for the browser user.
 //
 //   GET    /api/v1/ai/sessions/:id/files          { files, usage: {files, bytes},

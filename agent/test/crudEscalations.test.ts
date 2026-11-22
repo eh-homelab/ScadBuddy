@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import type { FlowRunReads } from '../src/flows/backendReads.js'
 import { CrudEscalations } from '../src/flows/crudEscalations.js'
@@ -46,11 +45,6 @@ class FakeApi {
   }
 }
 
-/** No SQL runs on these tables: the parent's owner and a child's reasoning come through the session rows and reads (#6501). */
-const noSql = ((strings: TemplateStringsArray) => {
-  throw new Error(`ran SQL: ${strings.join('?')}`)
-}) as unknown as Sql
-
 const reads = {
   steps: () => Promise.resolve([]),
   parentHopApprovals: () => Promise.resolve({ runs: [], next: null }),
@@ -63,9 +57,8 @@ const BROWSER = { id: 'browser', kind: 'browser' as const, tiers: ['read', 'writ
 function escalations(send?: () => Promise<void>, denied = true) {
   const api = new FakeApi()
   const responded: unknown[] = []
-  const routes = { crud: new CrudEscalations({ baseUrl: BASE, fetch: api.fetch }), use: () => true }
+  const routes = new CrudEscalations({ baseUrl: BASE, fetch: api.fetch })
   const service = new Escalations({
-    sql: noSql,
     reads,
     routes,
     // The parent's owner and a child's reasoning, from the session rows and reads (#6501).
@@ -226,7 +219,7 @@ describe('a delivery through the CRUD routes', () => {
       bodies.push(body)
       return { body: { claimed: [...body.child, ...body.own] } }
     })
-    expect(await routes.crud.claim({ session: PARENT, child: [RID], own })).toHaveLength(1002)
+    expect(await routes.claim({ session: PARENT, child: [RID], own })).toHaveLength(1002)
     expect(bodies.map((b) => [b.child.length, b.own.length])).toEqual([
       [1, 1000],
       [0, 1],
@@ -243,12 +236,12 @@ describe('a delivery through the CRUD routes', () => {
       back.push(...(seen.body as { own: string[] }).own)
       return { body: {} }
     })
-    await expect(routes.crud.claim({ session: PARENT, child: [], own })).rejects.toThrow()
+    await expect(routes.claim({ session: PARENT, child: [], own })).rejects.toThrow()
     expect(back).toEqual(own.slice(0, 1000))
     for (const route of ['unclaim', 'skip'] as const) {
       api.seen = []
       api.routes.set(`POST /escalations/${route}`, () => ({ body: {} }))
-      await routes.crud[route]({ session: PARENT, child: [], own })
+      await routes[route]({ session: PARENT, child: [], own })
       expect(api.seen.map((s) => (s.body as { own: string[] }).own.length)).toEqual([1000, 1])
     }
   })
@@ -273,7 +266,7 @@ describe("a run's queue through the CRUD routes", () => {
       expiring: false,
     }
     api.routes.set('GET /escalations/run-entries', () => ({ body: { entries: [row, { ...row, request_id: `${RID}2`, hop_until: HOP_UNTIL }] } }))
-    const queue = await new FlowQueue(noSql, reads, routes, { reasoningDeltas: () => Promise.resolve(undefined) }).forRun('flow-1')
+    const queue = await new FlowQueue(reads, routes, { reasoningDeltas: () => Promise.resolve(undefined) }).forRun('flow-1')
     const children = queue!.entries.filter((e) => e.source === 'child')
     expect(children.map((e) => (e as { hop_until: string | null }).hop_until)).toEqual([null, new Date(HOP_UNTIL).toISOString()])
     expect(api.seen[0]!.path).toBe('/escalations/run-entries?flow_run_id=flow-1')

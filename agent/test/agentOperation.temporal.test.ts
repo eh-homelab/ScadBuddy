@@ -10,6 +10,7 @@ import { AlreadyClosedError, startCommand } from '../src/operations/command.js'
 import { AgentCommands } from '../src/operations/run.js'
 import { type OperationKind, refusal } from '../src/operations/kinds.js'
 import { OperationStore } from '../src/operations/store.js'
+import { SqlOperations } from './support/sql/operations.js'
 import type { OperationInput } from '../src/temporal/names.js'
 import { operationActivities } from '../src/temporal/operationActivities.js'
 import { AgentWorker } from '../src/temporal/worker.js'
@@ -132,7 +133,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new OperationStore(db.sql)
+    store = new OperationStore(new SqlOperations(db.sql))
     runs = 0
     release = undefined
     aborted = false

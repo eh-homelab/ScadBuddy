@@ -16,7 +16,7 @@ import type { ApprovalRequest, RiskTier, ToolDecision } from '../src/harness/per
 import { type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs, linkTaskList } from '../src/harness/stateDirs.js'
 import { SessionDirectory } from '../src/workspace/directory.js'
-import { SessionFiles } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, throwawayDatabase } from './support/postgres.js'
 import { browser, manager } from './support/sessions.js'

@@ -25,14 +25,17 @@ import { callContext } from '../src/harness/callContext.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { queuesPolled } from '../src/runtime/health.js'
 import { roleParts } from '../src/runtime/role.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import { forgetSubject } from '../src/sessions/forget.js'
+import { sqlForget } from './support/sql/forget.js'
 import { resolveTabWaits, type SessionManager } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { wireRuntimeSync } from '../src/sessions/runtimeSync.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
-import { dropPayloadKey, FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { FilePayloadStore, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { dropPayloadKey, type PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
@@ -48,8 +51,6 @@ import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
 import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores, hostStores } from './support/agentSessions.js'
-import { SessionBlobs } from './support/sql/sessionBlobs.js'
-import { type PgPayloadKeys } from './support/sql/payloadKeys.js'
 import { sqlGateDb } from './support/sql/gate.js'
 import { sqlSettings } from './support/sql/settings.js'
 
@@ -389,7 +390,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
     await turn.done
     await settled(id)
     expect(worker.m.warm.size()).toBe(1)
-    await forgetSubject({ sql: api.pool.sql, client, keys }, `session-${id}`)
+    await forgetSubject(sqlForget(api.pool.sql, { client, keys }), `session-${id}`)
     await pollUntil(() => worker.m.warm.size(), 0, 10_000)
   })
 

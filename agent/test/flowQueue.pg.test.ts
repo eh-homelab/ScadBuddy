@@ -5,13 +5,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from './support/database.js'
 import { Hono } from 'hono'
 import { childReasoning, FlowQueue, REASONING_MAX } from '../src/flows/queue.js'
-import { PgSessionReads } from '../src/sessions/sessionReads.js'
 import { originPolicy } from '../src/http/origins.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
 import { pendingInput, registerPendingInputRoutes } from '../src/routes/pendingInput.js'
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { manager, tempPaths } from './support/sessions.js'
+import { SqlEscalations } from './support/sql/escalations.js'
+import { PgSessionReads } from './support/sql/sessionReads.js'
 
 // A flow run's one queue (#2482, spec 2026-10-11 §4.5): its own parked calls, its child
 // sessions' and its requested grant, in one read, each with the step, why it is outside
@@ -33,7 +34,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     for (const file of readdirSync(MIGRATIONS).sort()) await db.sql.unsafe(readFileSync(`${MIGRATIONS}${file}`, 'utf8'))
-    queue = new FlowQueue(db.sql, new SqlFlowRunReads(db.sql))
+    queue = new FlowQueue(new SqlFlowRunReads(db.sql), new SqlEscalations(db.sql), new PgSessionReads(db.sql))
     parent = await session('bearer', TOKEN)
     child = await session('flow', `flow:${RUN}`)
   })

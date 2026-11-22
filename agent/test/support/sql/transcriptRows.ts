@@ -7,7 +7,7 @@ import { blobNames } from '../../../src/sessions/forkPoint.js'
 import { type AppendFence, ForksNeedKeys, type TranscriptHead, type TranscriptRows } from '../../../src/sessions/store.js'
 import { type PayloadKeys, SubjectForgotten } from '../../../src/temporal/payloadCodec.js'
 import { copyForkEvents } from './eventRows.js'
-import { payloadKeyLock } from './sessionRows.js'
+import { payloadKeyLock } from './payloadKeys.js'
 
 // `TranscriptRows` straight on the test database, sealing and opening each entry under the
 // session's data key as the API's routes do (backend agent_data/transcripts.py), for tests with

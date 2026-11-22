@@ -19,8 +19,7 @@ import {
 // transaction on the API with its events, status and audit row, the batches it appended answered
 // as `logged`), a durable turn's response read and its parked call's span mark (sessions/
 // turnHost.ts; the mark fenced by the turn's placement on the API), and a call's recorded approval
-// (temporal/toolActivities.ts `PgApprovalRecords`). Each caller uses its own SQL until the API
-// lists the area (D9).
+// (temporal/toolActivities.ts `ApprovalRecords`).
 //
 // A request id travels in the body or the query string, never in the path. One longer than the
 // API takes (`REQUEST_ID_MAX`) is never sent: no row can hold it, so it reads as not found.

@@ -1,4 +1,4 @@
-import { AttachmentStore } from '../src/attachments/store.js'
+import { AttachmentStore } from './support/sql/attachments.js'
 import { AuditLog } from '../src/audit/log.js'
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'

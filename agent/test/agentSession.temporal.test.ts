@@ -13,6 +13,7 @@ import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
 import type { Database } from './support/database.js'
 import { sessionImage } from '../src/sessions/blobs.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import type { UserImage } from '../src/sessions/images.js'
 import { type SessionManager } from '../src/sessions/manager.js'
@@ -27,7 +28,6 @@ import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { PgTurnRows } from './support/sql/turnRows.js'
 import { durableStores } from './support/agentSessions.js'
-import { SessionBlobs } from './support/sql/sessionBlobs.js'
 
 // AgentSession (unified runtime spec 2026-10-13 §5.1, plan Task 5.1) on a Temporal dev
 // server: send, busy, end, continue-as-new after each turn and the replay of recorded

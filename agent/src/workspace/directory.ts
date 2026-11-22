@@ -10,7 +10,7 @@ import { sha256, type WorkspaceFiles, WORKSPACE_PATH_MAX, WorkspaceError, type W
 // decision Q5 as built): `<root>/<session id>/`, where root is SCADBUDDY_SESSION_DIR (a capped
 // emptyDir of the worker pod's own), else `work/sessions` under the state directory
 // (harness/stateDirs.ts `sessionsRoot`). The directory is a WORKING COPY of the session's
-// workspace: `SessionFiles` (store.ts, the blob store since #4812) stays the record, and every
+// workspace: `WorkspaceFiles` (store.ts, kept by the API) stays the record, and every
 // placement refills the copy from it, so a turn placed on another pod finds what the last turn
 // wrote back. Q5 put the copy on the NAS share; it is per pod because the share's backup cannot
 // leave a subPath out (Velero 1.18's kopia fs-backup) and these copies are plaintext.

@@ -1,4 +1,3 @@
-import type { Sql } from 'postgres'
 import { crudOf, type CrudTarget } from '../api/crudStores.js'
 import expected from './expected-migrations.json' with { type: 'json' }
 
@@ -107,14 +106,8 @@ export async function awaitMigrations(
   )
 }
 
-/** Reads the expected files' rows of the ledger (`readLedger`, below): SQL or the API's route. */
+/** Reads the expected files' rows of the ledger: the API's route (`crudLedger`); the tests read it over SQL. */
 export type LedgerReader = (expected: readonly ExpectedMigration[]) => Promise<Map<string, string | null> | 'positional'>
-
-/** `LedgerReader` over SQL (the agent's own connection). */
-export const sqlLedger =
-  (sql: Sql): LedgerReader =>
-  (expected) =>
-    readLedger(sql, expected)
 
 /** `LedgerReader` through the API's route (area `migrations`, backend api/crud_agent_start.py). */
 export function crudLedger(target: CrudTarget): LedgerReader {
@@ -129,26 +122,4 @@ export function crudLedger(target: CrudTarget): LedgerReader {
     if (!ledger.keyed) return 'positional'
     return new Map(ledger.rows.map((row) => [row.id, row.checksum]))
   }
-}
-
-/**
- * The expected files' rows of the ledger, id to checksum; none while the API has not made
- * the ledger, and `positional` while it is still keyed by position (no `id` column, before
- * #491), which the API's runner rewrites at its next start; a row main never had stops
- * that start instead (AgentMigrationLedgerError).
- */
-async function readLedger(
-  sql: Sql,
-  expected: readonly ExpectedMigration[],
-): Promise<Map<string, string | null> | 'positional'> {
-  const [ledger] = await sql<{ found: boolean; keyed: boolean }[]>`
-    SELECT to_regclass('ai_migrations') IS NOT NULL AS found,
-           EXISTS (SELECT 1 FROM pg_attribute
-                   WHERE attrelid = to_regclass('ai_migrations') AND attname = 'id' AND NOT attisdropped) AS keyed`
-  if (!ledger?.found) return new Map()
-  if (!ledger.keyed) return 'positional'
-  const ids = expected.map((m) => m.id)
-  const rows = await sql<{ id: string; checksum: string | null }[]>`
-    SELECT id, checksum FROM ai_migrations WHERE id = ANY(${ids}::text[])`
-  return new Map(rows.map((row) => [row.id, row.checksum]))
 }

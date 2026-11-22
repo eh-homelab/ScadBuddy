@@ -13,6 +13,7 @@ import { forwardForRun, PluginForwarder, type PluginsForRun } from '../src/plugi
 import type { PackagesForRun } from '../src/plugins/packages/install.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { respond } from '../src/routes/pendingInput.js'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { toolCallStarter } from '../src/tools/activityProjection.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -28,7 +29,6 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
 import { PgApprovalRecords, PgSessionOwners } from './support/sql/approvalRecords.js'
-import { SessionBlobs } from './support/sql/sessionBlobs.js'
 
 // A turn's plugin and http tools as activities (unified runtime plan 2026-10-13 Step 9.3): an
 // AgentSession turn (the real SDK and its bundled Claude Code against the fake Anthropic endpoint) is given in-process proxies of its remote plugins in place of the

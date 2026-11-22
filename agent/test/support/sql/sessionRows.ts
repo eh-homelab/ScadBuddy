@@ -1,13 +1,11 @@
 import type { Sql } from 'postgres'
 import type { InsertRefusal, ListFilter, NewSessionRow, SessionRow, SessionRows, TurnRow, Who } from '../../../src/sessions/rows.js'
 import { isUuid } from '../../../src/harness/uuid.js'
+import { payloadKeyLock } from './payloadKeys.js'
 import type { Owner } from '../../../src/sessions/protocol.js'
 
 // `SessionRows` straight on the test database, the statements the API's routes run (backend
 // agent_data/sessions.py), for tests with no API (#5299).
-
-/** The advisory lock a payload key's creation takes (the API's payload_codec.py). */
-export const payloadKeyLock = (subject: string): string => `scadbuddy:ai_payload_keys:${subject}`
 
 /** The session whose budget this one spends from: itself, or a fork's lineage root (#823). */
 const ROOT = 'coalesce(ai_sessions.budget_root_id, ai_sessions.id)'

@@ -5,12 +5,13 @@ import type { Database } from './support/database.js'
 import { DurableUnavailable } from '../src/gate/durable.js'
 import { CLAIM_LEASE_S, EscalationError, Escalations, type EscalationDurable } from '../src/flows/escalations.js'
 import { durableRequestId } from '../src/gate/ids.js'
-import { PendingProjection } from '../src/gate/projection.js'
 import type { RespondArgs } from '../src/gate/durable.js'
 import { pendingInput, respond, RespondError } from '../src/routes/pendingInput.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { SqlFlowRunReads } from './support/sqlFlowRunReads.js'
 import { manager, tempPaths } from './support/sessions.js'
+import { sqlEscalationDeps } from './support/sql/escalations.js'
+import { SqlPendingProjection } from './support/sql/pendingProjection.js'
 
 // The starter session's answer to a child's call outside the run's grant (#2482, spec
 // 2026-10-11 §4.2, §4.4, §4.6). Who the parent is, and which call it answers, come from
@@ -41,7 +42,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     sent = []
-    escalations = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => durable })
+    escalations = new Escalations({ ...sqlEscalationDeps(db.sql), reads: new SqlFlowRunReads(db.sql), durable: () => durable })
     parent = await session('bearer', TOKEN)
     child = await session('flow', `flow:${RUN}`)
   })
@@ -118,7 +119,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
         return { kind: 'approval', outcome: 'denied' }
       },
     }
-    escalations = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => racing })
+    escalations = new Escalations({ ...sqlEscalationDeps(db.sql), reads: new SqlFlowRunReads(db.sql), durable: () => racing })
     expect((await escalations.respond({ principal: OWNER, session: parent }, id, 'deny', {})).outcome).toBe('denied')
     expect(swept).toBe(0)
     expect((await row(id))?.hop).toBe('parent')
@@ -134,7 +135,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
         throw new Error('temporal is down')
       },
     }
-    escalations = new Escalations({ sql: db.sql, reads: new SqlFlowRunReads(db.sql), durable: () => down })
+    escalations = new Escalations({ ...sqlEscalationDeps(db.sql), reads: new SqlFlowRunReads(db.sql), durable: () => down })
     await expect(escalations.respond({ principal: OWNER, session: parent }, id, 'deny', {})).rejects.toThrow('temporal is down')
     const after = await row(id)
     expect(after?.hop).toBe('parent')
@@ -157,7 +158,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
   it("finds which entries are a run's in one query (#2863)", async () => {
     const a = await park()
     const b = await park({ hop: 'person' })
-    const projection = new PendingProjection(db.sql)
+    const projection = new SqlPendingProjection(db.sql)
     expect(await projection.inRunOf([a, b, 'durable:nope'])).toEqual(new Set([a, b]))
     expect(await projection.inRunOf([])).toEqual(new Set())
   })
@@ -271,7 +272,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
     const id = await park()
     const timedOut = new Escalations({
       reads: new SqlFlowRunReads(db.sql),
-      sql: db.sql,
+      ...sqlEscalationDeps(db.sql),
       durable: () => ({ respond: async () => Promise.reject(new DurableUnavailable("the session's worker is not answering")) }),
     })
     await expect(timedOut.respond({ principal: OWNER, session: parent }, id, 'deny', {})).rejects.toBeInstanceOf(DurableUnavailable)
@@ -298,7 +299,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalations${TEST_DATABASE_URL ? '' : ` (sk
     sent = []
     const failing = new Escalations({
       reads: new SqlFlowRunReads(db.sql),
-      sql: db.sql,
+      ...sqlEscalationDeps(db.sql),
       durable: () => ({ respond: async () => Promise.reject(new Error('temporal is down')) }),
     })
     await expect(failing.respond({ principal: OWNER, session: parent }, id, 'deny', {})).rejects.toThrow('temporal is down')

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { NOT_UP, transportKind } from '../api/backendUp.js'
+import { NOT_UP, transportKind } from '../../../src/api/backendUp.js'
 
 // Where a workspace file's sealed bytes are kept (#4789): a blob of the backend's content
 // store (`store_backend` s3 or bambuddy), named `workspace-<sha256 of the sealed bytes>`.

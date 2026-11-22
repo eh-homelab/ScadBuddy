@@ -15,7 +15,9 @@ import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities } from '../src/t
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { humanSize, SessionFiles, sha256, type WorkspaceRef, WorkspaceError, withWorkspaceSize } from '../src/workspace/store.js'
+import { sqlForget } from './support/sql/forget.js'
+import { humanSize, sha256, type WorkspaceRef, WorkspaceError, withWorkspaceSize } from '../src/workspace/store.js'
+import { SessionFiles } from './support/sql/sessionFiles.js'
 import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -184,7 +186,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       await files.write(ws, 'a.txt', Buffer.from('kept by the fork'))
       await files.copy(sessionId, child.id)
       await files.write(ws, 'b.txt', Buffer.from('only the parent'))
-      await forgetSubject({ sql: db.sql }, `session-${sessionId}`)
+      await forgetSubject(sqlForget(db.sql), `session-${sessionId}`)
       const left = await db.sql<{ sha256: string }[]>`SELECT sha256 FROM ai_session_file_bytes`
       expect(left.map((r) => r.sha256)).toEqual([sha256(Buffer.from('kept by the fork'))])
       expect((await files.read({ kind: 'session', sessionId: child.id }, 'a.txt'))?.bytes.toString()).toBe('kept by the fork')

@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event, type Owner, type ServerEvent } from '../src/sessions/protocol.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 import { copyForkRanges, hasForks } from './support/sql/transcriptRows.js'
-import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import { PgEventRows } from './support/sql/eventRows.js'
 
 // A fork's event log and images are copy-on-write too (#4212): the child reads its parent's

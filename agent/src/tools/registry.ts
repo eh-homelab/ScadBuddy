@@ -144,7 +144,7 @@ export type ToolServices = {
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
-  /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
+  /** Asks the API for the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts). */
   fetchGrant?: FetchGrantMinter | undefined
   /**
    * The messaging plugin a customer notice is sent through (#5660, orders/messaging.ts):

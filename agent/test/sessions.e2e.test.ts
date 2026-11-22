@@ -5,7 +5,7 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
-import { CredentialStore } from '../src/credentials.js'
+import { SqlCredentials } from './support/sql/credentials.js'
 import { connectDatabase, type Database } from './support/database.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { runHarness } from '../src/harness/run.js'
@@ -968,7 +968,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     await (await b.send(two.session.id, browser, 'two')).done
     expect([a.warm.size(), b.warm.size()]).toEqual([1, 1])
     const kek = kekFromBase64(randomBytes(32).toString('base64'))
-    await new CredentialStore(db.sql).put({ kind: 'gateway', base_url: fake.url, secret: 'gw-another-token' }, kek)
+    await new SqlCredentials(db.sql, kek).put({ kind: 'gateway', base_url: fake.url, secret: 'gw-another-token' })
     await expect.poll(() => [a.warm.size(), b.warm.size()]).toEqual([0, 0])
   }, 60_000)
 })
