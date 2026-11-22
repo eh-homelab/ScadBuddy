@@ -142,9 +142,9 @@ class PullReport(BaseModel):
     archived_ids: list[UUID] = Field(default_factory=list)
     failed_bb_ids: list[int] = Field(default_factory=list)
     invalid_bb_ids: list[int] = Field(default_factory=list)
-    #: BB's usage rows the pull booked as print ends, and the new rows of a BB spool no
-    #: SB spool is linked to, not counted by an earlier pull (`bambuddy_usage.py`,
-    #: R-7002-6).
+    #: BB's usage rows the pull booked as print ends, and the rows of a BB spool no SB
+    #: spool is linked to that are later than the last read an earlier pull booked whole
+    #: (a failed body's rows are counted again; `bambuddy_usage.py`, R-7002-6).
     usage_booked: int = 0
     usage_unlinked: int = 0
     #: BB spools made for a tag a linked SB spool holds: no SB spool is made.

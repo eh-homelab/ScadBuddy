@@ -2462,6 +2462,22 @@ rulings. Each line: the ruling, then the parts of this plan it changed.
     `test_with_no_linked_rows_a_second_pull_counts_no_unlinked_row`,
     `test_no_unlinked_row_counts_twice_across_bodies`, `test_a_failed_body_does_not_move_the_mark`,
     `test_a_reset_that_deletes_the_links_clears_the_mark`.
+245. R-7002-7 (PR #7046 review): `bambuddy_usage.usage_mark` reads the state row
+    `FOR UPDATE`, first in `LocalBbPull.book_usage`'s transaction, before `book_usage`
+    locks its spools: the state row, then the spools, the order `apply_results` takes them
+    in. So two bookings at once (the import and the Schedule's pull) take turns, and the
+    second counts against the mark the first left;
+    `test_two_concurrent_bookings_count_each_new_unlinked_row_once` starts both at a
+    `threading.Barrier` and fails without the lock. The lock lasts one body's transaction,
+    not a read: the bodies are separate requests. A read is always one body
+    (`USAGE_READ_ROWS` is `USAGE_BODY_ROWS`, Decision 240), so in practice it covers the
+    whole read. If a read ever took several bodies, two reads at once could each count the
+    rows of their earlier bodies against the same mark. `pull`'s `record_instance` takes
+    the spool and then the state row, but its update waits on the state row only while no
+    instance is recorded, which is a first pull: there the database's deadlock check
+    would end one of them, logged, and the next pull books it. `usage_unlinked` is
+    described as the rows later than the last read an earlier pull booked whole, a failed
+    body's rows counted again (`bb_pull_models.py`, `agent/src/tools/filament.ts`).
 
 ## Self-review
 

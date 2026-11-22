@@ -147,13 +147,21 @@ Mark = tuple[datetime, int]
 
 def usage_mark(conn: Conn, instance: str) -> Mark | None:
     """The newest usage row a pull of ``instance`` has read and booked whole (R-7002-6);
-    ``None`` when none is recorded, or it was read from another instance."""
+    ``None`` when none is recorded, or it was read from another instance. It locks the
+    state row ``FOR UPDATE`` until ``conn``'s transaction ends, so two bookings take turns
+    and the second counts against the mark the first left (R-7002-7). Call it first in the
+    transaction, before any spool lock: the state row, then the spools, as
+    `bb_sync_results.apply_results` locks them."""
     row = conn.execute(
-        "SELECT usage_read_at, usage_read_id FROM filament_bb_sync_state"
-        " WHERE usage_read_instance = %s",
-        (instance,),
+        "SELECT usage_read_instance, usage_read_at, usage_read_id FROM filament_bb_sync_state"
+        " FOR UPDATE"
     ).fetchone()
-    if row is None or row["usage_read_at"] is None or row["usage_read_id"] is None:
+    if (
+        row is None
+        or row["usage_read_instance"] != instance
+        or row["usage_read_at"] is None
+        or row["usage_read_id"] is None
+    ):
         return None
     return (row["usage_read_at"], row["usage_read_id"])
 

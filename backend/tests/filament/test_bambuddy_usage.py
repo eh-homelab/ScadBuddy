@@ -4,6 +4,8 @@ when one ended in the window, and counted once beside BB's reading and SB's own 
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -19,7 +21,7 @@ from scadbuddy.filament import bambuddy_usage, bb_pull_run, capture, ledger
 from scadbuddy.filament.bambuddy_pull import EVERY, pull
 from scadbuddy.filament.bambuddy_usage import book_usage
 from scadbuddy.filament.bb_pull_apply import LocalBbPull, new_pull_id
-from scadbuddy.filament.bb_pull_models import UsageBody, UsageBooked
+from scadbuddy.filament.bb_pull_models import UsageBody, UsageBooked, UsageMark
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_results import reset_links
 from scadbuddy.filament.catalog import CatalogStore
@@ -1044,7 +1046,7 @@ async def test_a_usage_history_past_one_body_is_booked_once_in_order(
         ("12", 302),
         ("13", 303),
     ]
-    # R-7002-4: row 20 is no newer than the rows booked before, so it counts once.
+    # R-7002-6: row 20 is no later than the usage mark the first pull left.
     assert (again.usage_booked, again.usage_unlinked) == (0, 0)
     assert len(_usage_events(f, spool)) == 4
 
@@ -1201,3 +1203,38 @@ async def test_a_reset_that_deletes_the_links_clears_the_mark(pg_pool: PgPool) -
         conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (instance_for(BB),))
     reset_links(f, instance_for(BB), instance_for("https://new.test"), None, expect_kept=False)
     assert _mark(f) == (None, None, None)
+
+
+def test_two_concurrent_bookings_count_each_new_unlinked_row_once(pg_pool: PgPool) -> None:
+    """#7002 R-7002-7: two bookings of one read at once (the import and the Schedule's
+    pull) take turns on the state row, so the second counts against the mark the first
+    left and each new unlinked row counts once."""
+    f = _filament(pg_pool)
+    _linked(f)
+    settings = StoredSettings(bambuddy_url=BB, bambuddy_api_key="k")
+    rows = [
+        usage(
+            id=10 + i,
+            spool_id=99,
+            print_name=f"job-{i}",
+            created_at=_naive(T1 + timedelta(minutes=i)),
+        )
+        for i in range(3)
+    ]
+    newest = rows[-1]
+    start = threading.Barrier(2)
+
+    def book() -> UsageBooked:
+        body = UsageBody(
+            instance=instance_for(BB),
+            pull_id=new_pull_id(),
+            usage=rows,
+            read_to=UsageMark(at=newest.created_at, id=newest.id),
+        )
+        start.wait()
+        return LocalBbPull(f, lambda: settings)._book_usage(body)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        answers = [future.result() for future in [pool.submit(book), pool.submit(book)]]
+    assert sorted(a.unlinked for a in answers) == [0, 3]
+    assert _mark(f) == (instance_for(BB), T1 + timedelta(minutes=2), 12)
