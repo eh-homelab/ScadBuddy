@@ -814,11 +814,17 @@ async def _tdfp_worker(runner: Tdfp) -> None:
         )
 
 
-def _tdfp_temporal(error: RPCError, what: str, *, may_have_started: bool | None) -> ApiError:
+def _tdfp_temporal(
+    error: BaseException, what: str, *, may_have_started: bool | None
+) -> ApiError | None:
     """A call to Temporal that failed, read as every route reads one (`temporal_failure`,
-    R-7025-15): unavailable or busy is 503 `temporal-unavailable` with `Retry-After`, worth
-    sending again; a refusal is 500 `temporal-refused`."""
+    R-7025-15, R-7025-16): unavailable, busy or unreached (the lazy client's first connect
+    failed, or the call timed out) is 503 `temporal-unavailable` with `Retry-After`, worth
+    sending again; a refusal is 500 `temporal-refused`. ``None`` for a failure that is not
+    Temporal's, which the caller raises again."""
     failure = temporal_failure(error, what)
+    if failure is None:
+        return None
     if isinstance(failure, TemporalUnavailableError):
         return temporal_unavailable(
             what,
@@ -847,7 +853,8 @@ def _tdfp_temporal(error: RPCError, what: str, *, may_have_started: bool | None)
         "fetch, did not take the search within a minute, 502 when the site or the browser "
         "failed (`code` is the failure's kind; the search is tried once, so send it again), "
         "504 when no outcome came within the wait, 503 `temporal-unavailable` (with "
-        "`Retry-After`) when ScadBuddy's background service did not answer."
+        "`Retry-After`) when ScadBuddy's background service did not answer, 500 "
+        "`temporal-refused` when it refused the call (sending it again will not help)."
     ),
 )
 async def search_tdfp(state: StateDep, caller: CallerDep, body: SearchAsk) -> SearchAnswer:
@@ -859,8 +866,11 @@ async def search_tdfp(state: StateDep, caller: CallerDep, body: SearchAsk) -> Se
         raise _tdfp_problem(
             status.HTTP_504_GATEWAY_TIMEOUT, "no_outcome", "the 3DFP search gave no answer in time"
         ) from None
-    except RPCError as error:
-        raise _tdfp_temporal(error, "the 3DFP search", may_have_started=None) from None
+    except (RPCError, RuntimeError) as error:
+        # A TimeoutError here is the wait's (504 above), not Temporal's.
+        if (problem := _tdfp_temporal(error, "the 3DFP search", may_have_started=None)) is None:
+            raise
+        raise problem from None
     if outcome.search is None:
         raise _tdfp_failed(outcome)
     return outcome.search
@@ -907,8 +917,9 @@ class TdfpCreated(BaseModel):
         "such type, 409 `type_has_tdfp_id` for a type that already has one. "
         "503 `no_worker`, 503 `not_started`, 502 and 504 as for the search; on 504 the "
         "create may still run, and the same request with the same key waits for it; 503 "
-        "`temporal-unavailable` as for the search (`may_have_started` says whether a create "
-        "may run). The type's `tdfp_id` is set only while it has none (R-7025-14)."
+        "`temporal-unavailable` and 500 `temporal-refused` as for the search "
+        "(`may_have_started` says whether a create may run). The type's `tdfp_id` is set "
+        "only while it has none (R-7025-14)."
     ),
 )
 async def create_tdfp_filament(
@@ -930,8 +941,11 @@ async def create_tdfp_filament(
             raise _no_type(body.type_id)
         try:
             started = kind.tdfp_id is not None and await runner.started(ask, key=key)
-        except RPCError as error:
-            raise _tdfp_temporal(error, "the 3DFP create's check", may_have_started=False) from None
+        except (RPCError, RuntimeError, TimeoutError) as error:
+            problem = _tdfp_temporal(error, "the 3DFP create's check", may_have_started=False)
+            if problem is None:
+                raise
+            raise problem from None
         if kind.tdfp_id is not None and not started:
             raise _tdfp_problem(
                 status.HTTP_409_CONFLICT,
@@ -948,21 +962,22 @@ async def create_tdfp_filament(
             "the 3DFP create gave no answer in time; it may still run: send the same request"
             " with the same Idempotency-Key to wait for it",
         ) from None
-    except RPCError as error:
-        # The start may have reached Temporal before it failed: the same key joins it.
-        raise _tdfp_temporal(error, "the 3DFP create", may_have_started=True) from None
+    except (RPCError, RuntimeError) as error:
+        # The start may have reached Temporal before it failed: the same key joins it. A
+        # TimeoutError here is the wait's (504 above), not Temporal's.
+        if (problem := _tdfp_temporal(error, "the 3DFP create", may_have_started=True)) is None:
+            raise
+        raise problem from None
     if outcome.create is None:
         raise _tdfp_failed(outcome)
     made = outcome.create
     taken = False
     if made.status == "created" and made.tdfp_id is not None and body.type_id is not None:
-        taken = await asyncio.to_thread(
-            set_type_tdfp_id, filament, body.type_id, made.tdfp_id, actor=who
-        )
+        taken = await asyncio.to_thread(set_type_tdfp_id, filament, body.type_id, made.tdfp_id)
     return TdfpCreated(create=made, type_id=body.type_id, type_tdfp_id_set=taken)
 
 
-def set_type_tdfp_id(filament: Filament, type_id: UUID, tdfp_id: int, *, actor: str) -> bool:
+def set_type_tdfp_id(filament: Filament, type_id: UUID, tdfp_id: int) -> bool:
     """Set the type's ``tdfp_id`` to the created one, unless it has another by now; whether
     the type holds it. One conditional write (`SpoolTypeStore.set_tdfp_id`, R-7025-14), so
     two creates for one type under different keys never replace each other's id."""
