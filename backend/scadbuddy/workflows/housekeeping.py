@@ -403,7 +403,8 @@ STOREFRONT_MAIL_TIMEOUT = timedelta(minutes=10)
 #: most passes take none or one. Not imported, as `GIT_TIMEOUT`'s is not.
 AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
 #: Two describes per LAN run with prints still to start (`end_gone_sequences`, each run
-#: bounded by its `SEQUENCE_CHECK_TIMEOUT`, 10 s; few run at once), then one delete.
+#: bounded by its `SEQUENCE_CHECK_TIMEOUT`, 10 s, and the pass by half of this), then one
+#: delete.
 RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)

@@ -218,6 +218,7 @@ from scadbuddy.workflows.housekeeping import (
     LOST_SLICES_SWEEP,
     MAINTENANCE_IMPORT_SWEEP,
     NATIVE_COPIES_SWEEP,
+    NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
@@ -227,6 +228,7 @@ from scadbuddy.workflows.housekeeping import (
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
     RUN_HOLDS_SWEEP,
+    RUN_HOLDS_TIMEOUT,
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
     SWEEPS,
@@ -984,7 +986,7 @@ async def _sweep_native_copies_logged(state: AppState) -> None:
         # backend, since the strip only reads. Without Temporal every LAN run with prints
         # still to start is kept as in use.
         try:
-            await end_gone_sequences(state.print_runs)
+            await end_gone_sequences(state.print_runs, NATIVE_COPIES_TIMEOUT / 2)
         except Exception:
             logger.warning(
                 "could not check the LAN runs' sequences; their files are kept", exc_info=True
@@ -1517,7 +1519,7 @@ async def _reap_run_holds_logged(state: AppState) -> None:
     holds too and lets the next queued run head its printer's card, every
     `PRUNE_INTERVAL` whatever the asset sweep's interval."""
     try:
-        await end_gone_sequences(state.print_runs)
+        await end_gone_sequences(state.print_runs, RUN_HOLDS_TIMEOUT / 2)
     except Exception:
         logger.warning("could not check the LAN runs' sequences", exc_info=True)
     try:

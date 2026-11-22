@@ -194,6 +194,12 @@ QUEUED_PLATE = (
     "Queued: {printer} holds a print that has ended. Nothing is sent to it until someone"
     " says its plate is clear."
 )
+#: A queued run's first print once its printer reads idle (#6871, a restart, say): the
+#: report no longer names the print before, but the plate may still hold it.
+QUEUED_IDLE = (
+    "Queued: {printer} reads idle, but its plate may still hold the print before. Clear"
+    " it if so: nothing is sent to it until someone says its plate is clear."
+)
 
 
 def waiting_plate(
@@ -231,12 +237,20 @@ def printing_now(state: object) -> bool | None:
     return None
 
 
-def lan_control(run: PrintRun, printing: bool | None = None) -> LanRunControl | None:
+def idle_now(state: object) -> bool:
+    """Whether a printer whose ``gcode_state`` is ``state`` reads idle (`IDLE_STATES`)."""
+    return isinstance(state, str) and state in IDLE_STATES
+
+
+def lan_control(
+    run: PrintRun, printing: bool | None = None, idle: bool = False
+) -> LanRunControl | None:
     """A succeeded native run's prints still to start and its controls (#4942, #4939);
     ``None`` once it started every one or they were stopped. ``printing`` is whether the
     printer prints now, from its live state (`printing_now`): a queued run waits for a
     print only while the printer still prints it (#6871); with no state read, the job
-    the run was queued behind says so."""
+    the run was queued behind says so. ``idle`` (`idle_now`) marks a queued run whose
+    printer reads idle, whose plate may still hold the print before."""
     result = run.result
     if run.status != "succeeded" or result is None or result.path != "native":
         return None
@@ -250,6 +264,7 @@ def lan_control(run: PrintRun, printing: bool | None = None) -> LanRunControl | 
         queued_for_print=result.lan_queued is not None
         and result.lan_queued.job is not None
         and printing is not False,
+        printer_idle=result.lan_queued is not None and idle,
     )
 
 
@@ -305,8 +320,8 @@ class LanProgress:
         # The live state, from a report fresh enough to read (#6871): a queued run's
         # print may have ended since it was queued.
         fresh = report is not None and now - report[1] <= self.max_age
-        printing = printing_now(report[0].get("gcode_state")) if fresh and report else None
-        control = lan_control(run, printing)
+        state = report[0].get("gcode_state") if fresh and report else None
+        control = lan_control(run, printing_now(state), idle_now(state))
         plates = [
             ended_plate(plate, name)
             if plate.ended is not None
@@ -318,6 +333,8 @@ class LanProgress:
             reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
         elif reasons and control is not None and control.queued_for_print:
             reasons[0] = QUEUED_BUSY.format(printer=name or "the printer")
+        elif reasons and control is not None and control.printer_idle:
+            reasons[0] = QUEUED_IDLE.format(printer=name or "the printer")
         elif reasons and result.lan_queued is not None:
             reasons[0] = QUEUED_PLATE.format(printer=name or "the printer")
         plates += [waiting_plate(name, result.lan_stopped, reason) for reason in reasons]

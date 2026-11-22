@@ -270,6 +270,7 @@ def test_the_printers_card_names_the_runs_controls(
         "awaiting_clear": True,
         "queued": False,
         "queued_for_print": False,
+        "printer_idle": False,
     }
     assert card["awaiting_plate_clear"] is True
 
@@ -384,3 +385,34 @@ def test_a_hanging_describe_never_stops_the_hold_reap(monkeypatch: pytest.Monkey
     state = SimpleNamespace(print_runs=SimpleNamespace(store=Store(), client=Client()), refs="refs")
     asyncio.run(asyncio.wait_for(app_main._reap_run_holds_logged(state), timeout=5))  # type: ignore[arg-type]
     assert reaped == ["refs"]
+
+
+def test_the_gone_checks_stop_within_their_budget_however_many_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6871 (review of #6948): many hanging describes, each within its own bound, still
+    end within the pass's budget, so the hold reap after them runs inside its timeout."""
+
+    class Hanging:
+        async def describe(self) -> None:
+            await asyncio.sleep(3600)
+
+    class Client:
+        def get_workflow_handle(self, workflow_id: str) -> Hanging:
+            return Hanging()
+
+    class Store:
+        async def lan_waiting_runs(self) -> list[tuple[str, str | None]]:
+            return [(f"r{n}", f"print-r{n}") for n in range(50)]
+
+    monkeypatch.setattr(printing_api, "SEQUENCE_CHECK_TIMEOUT", timedelta(seconds=1))
+    runs = SimpleNamespace(store=Store(), client=Client())
+
+    async def check() -> float:
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await printing_api.end_gone_sequences(runs, timedelta(milliseconds=300))  # type: ignore[arg-type]
+        return loop.time() - began
+
+    took = asyncio.run(asyncio.wait_for(check(), timeout=10))
+    assert took < 2  # 50 runs at 1 s each would take 50 s

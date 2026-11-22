@@ -82,6 +82,9 @@ class LanRunControl(BaseModel):
     #: when the printer's live state says the print it was queued behind has ended
     #: (`printers.progress.printing_now`); with no state read, it follows ``job``.
     queued_for_print: bool = False
+    #: A queued run whose printer reads ``IDLE`` now (a restart, say): the print it was
+    #: queued behind is gone from the report, but its plate may still hold it.
+    printer_idle: bool = False
 
 
 class PrintProgress(BaseModel):
