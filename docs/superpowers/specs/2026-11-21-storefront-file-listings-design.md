@@ -492,10 +492,10 @@ change.
 **Slot numbers.** The listing counts slots from 0 (`FileSlot.slot`, `PricedFile.used`,
 `RenderBody.colours`), as `ColourSlot.slot` and a sliced plate's `PlateFilament.slot` do.
 `resolve`'s `slot_presets` and `slot_colours`, and `part_settings_slots`, use slot ids,
-from 1 (`resolver.py:347-352`). The one place that converts is `plan_variant`: it builds
+from 1 (`resolver.py:347-352`). Two places convert. `plan_variant` builds
 `slot_presets` and `slot_colours` keyed `slot + 1`, as `slot_presets` does today
-(`slice_profile.py:92-98`), and publish stores `used` as each `part_settings_slots` id
-less 1. PR 2 tests that slot 0's colour reaches slot id 1.
+(`slice_profile.py:92-98`). Publish stores `used` as each `part_settings_slots` id
+less 1, so `used` compares with `PlateFilament.slot` (`quote.py:651`). PR 2 tests that slot 0's colour reaches slot id 1.
 
 `slot_colours` is new (decision 5). `resolve` takes
 `slot_colours: Mapping[int, str] | None`, by slot id, and a slot with no spool takes
@@ -724,7 +724,8 @@ changed; the shop republishes it on the restored file from the editor.
 - **The run** (`test_slice_price.py`, with the quote fakes): a file variant calls
   `start_library` once with `slot_presets` and `slot_colours`; a gone file is `FILE_GONE`;
   a file whose `file_hash` differs is `FILE_DIFFERS` and never slices; one with no stated
-  hash is hashed from its download; an unused slot at 0 g still prices.
+  hash is hashed from its download; an unused slot at 0 g still prices; slot 0's colour
+  reaches `resolve` as slot id 1, and a `part_settings_slots` id 1 is stored in `used` as 0.
 - **Parity, the owner's constraint 4** (`tests/orders/storefront/test_slice_parity.py`), a
   new test beside `test_the_storefront_slices_and_prices_as_the_back_office_quote`:
   - The back office: the dialog's `choices_for` over a `LibrarySource` of file 42, with
@@ -738,6 +739,10 @@ changed; the shop republishes it on the restored file from the editor.
     equal but `filament_plan` and `filaments`; `resolve` gives the same presets and the
     same colours per slot (`["GFSA00_22", "GFSG02_25"]`, `[RED, GREEN]`); the row's
     `total_minor`, `unit_price_minor`, `unit_cost_minor` and `lines` equal the quote's.
+  - A back-office quote on a LAN printer needs loaded trays (negative tray ids; measured
+    on prod by the pricing session, 2026-11-21). So a case with colours that no tray
+    holds gives the back office `filament_overrides` plus the nearest tray, as the
+    storefront price does.
   - The existing template test keeps passing, with the back office's request now carrying
     the same three seeded fields.
 - **The read** (`tests/api/test_storefront_slice.py`): a first read is `pending` and takes
