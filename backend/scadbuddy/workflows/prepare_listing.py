@@ -141,6 +141,9 @@ class PrepareListingStart(BaseModel):
     default_only: bool = False
     #: Set once the renders settled: the next index to price (#6922).
     warm_index: int | None = None
+    #: How many times the run has asked for ``warm_index``'s price (review of #6970), so
+    #: `WARM_TRIES` bounds an index across a continue-as-new.
+    warm_tries: int = 0
 
 
 class SubmitAsk(BaseModel):
@@ -186,7 +189,7 @@ class PrepareListing:
     async def run(self, start: PrepareListingStart) -> PrepareListingResult:
         if start.warm_index is not None:
             # Only a run past `WARM_PATCH` continues as new with it set.
-            return await self._warm(start, start.warm_index)
+            return await self._warm(start, start.warm_index, start.warm_tries)
         index = start.next_index
         failed = start.failed_to_start
         failed_indices = list(start.failed_indices)
@@ -273,13 +276,14 @@ class PrepareListing:
             await workflow.sleep(wait)
             wait = min(wait * 2, POLL_MAX)
 
-    async def _warm(self, start: PrepareListingStart, index: int) -> PrepareListingResult:
+    async def _warm(
+        self, start: PrepareListingStart, index: int, tries: int = 0
+    ) -> PrepareListingResult:
         """The price phase (#6922): each combination's price asked for from ``index`` on,
         one at a time: the next index is asked for only once this one settled, so at most
         one of the run's slices runs. ``start`` holds the render phase's counts, which the
-        result reports."""
+        result reports. ``tries`` is how many times ``index`` was asked for already."""
         wait = POLL_FIRST
-        tries = 0
         while True:
             tries += 1
             try:
@@ -308,7 +312,7 @@ class PrepareListing:
                 tries = 0
                 wait = POLL_FIRST
             if workflow.info().get_current_history_length() > HISTORY_LIMIT:
-                carried = start.model_copy(update={"warm_index": index})
+                carried = start.model_copy(update={"warm_index": index, "warm_tries": tries})
                 if start.failed_indices:
                     # The next run shows the failed indices from its start.
                     workflow.continue_as_new(carried, memo={FAILED_MEMO: start.failed_indices})

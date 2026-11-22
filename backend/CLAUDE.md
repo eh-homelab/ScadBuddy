@@ -2295,13 +2295,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   room yet (`waiting`), is asked for again after a backoff up to `WARM_POLL_MAX` (30 s), so
   a run holds at most one slice and leaves the rest of the cap to visitors (review of
   #6970); after `WARM_TRIES` (240) asks of one index it goes on. It continues as new with
-  `warm_index`. While it prices, the
+  `warm_index` and `warm_tries`, so the count holds across runs. While it prices, the
   GET still reads `running: true`. Publish (and a pictures change that republishes) starts
   a run of its own for the default combination only (`warm_default`, id
   `prepare-listing-default:<listing id>`, `default_only`, `TERMINATE_EXISTING`: the listing
   may have moved; `default_combination`, a listing with no colour parameter included), so
-  the instant read has a firm price before any visitor asks. A start that fails is logged,
-  never the publish's error. `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
+  the instant read has a firm price before any visitor asks. A start that fails, or takes
+  more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error. `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it
   on) switches both.
 - A customer's own models (#6133, spec 2026-11-13; migration
