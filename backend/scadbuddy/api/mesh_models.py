@@ -167,16 +167,32 @@ async def create_mesh_model(
     return operation_answer(result, ModelRecord)
 
 
+def print_file_origin(archive_id: int, choice: SourceChoice) -> dict[str, Any]:
+    """Which print's file a model is made from (#6984): kept in the operation's request,
+    so a resend that names another print or source is not answered the first model."""
+    return {"archive_id": archive_id, "source": choice.model_dump(mode="json")}
+
+
 async def made_before(
-    ops: OperationCommands, response: Response, name: str, idempotency_key: str
+    ops: OperationCommands,
+    response: Response,
+    idempotency_key: str,
+    *,
+    name: str,
+    description: str,
+    origin: dict[str, Any],
 ) -> ModelRecord | None:
     """The model a finished ``mesh_model_create`` sent with ``idempotency_key`` made for
     ``name``, or its problem raised (#6969). A route that reads a print's file asks this
     first: a resend after a lost answer then gets the first send's answer, the printer is
     not read again, and a file deleted since is no 404. None when no such operation
-    finished: the route reads the file, and `create_mesh_model` answers the rest."""
+    finished, or when it was sent with another name, description or ``origin``
+    (#6984): the route reads the file, and `create_mesh_model` answers the rest."""
     first = await ops.store.keyed_operation(
-        ops.kinds["mesh_model_create"].name, _slug_from_name(name), idempotency_key
+        ops.kinds["mesh_model_create"].name,
+        _slug_from_name(name),
+        idempotency_key,
+        sent={"name": name, "description": description, "source": {"origin": origin}},
     )
     if first is None or first.status == "running":
         return None
@@ -194,10 +210,12 @@ async def create_from_read(
     name: str,
     description: str,
     read: SourceFile,
+    origin: dict[str, Any],
     changed: Callable[[Operation, bool], str],
 ) -> ModelRecord | JSONResponse:
     """`create_mesh_model` from a print's file the route read (Import print's new model,
-    #4698, and a print's file here, #6916): its bytes held by claim, as an upload's are."""
+    #4698, and a print's file here, #6916): its bytes held by claim, as an upload's are.
+    ``origin`` (`print_file_origin`) names the print and source in the request."""
 
     async def claim(claims: ClaimStore) -> Held:
         return await asyncio.to_thread(claims.hold, read.data)
@@ -209,7 +227,7 @@ async def create_from_read(
         idempotency_key,
         name=name,
         description=description,
-        source={"kind": "upload", "claim": read.sha256, "name": read.name},
+        source={"kind": "upload", "claim": read.sha256, "name": read.name, "origin": origin},
         claim=claim,
         changed=changed,
     )
@@ -280,7 +298,15 @@ async def create_from_mesh(
                 KEY_REQUIRED_DETAIL,
                 type_=KEY_REQUIRED_PROBLEM,
             )
-        made = await made_before(ops, response, body.name, idempotency_key)
+        origin = print_file_origin(body.archive_id, body.archive_source)
+        made = await made_before(
+            ops,
+            response,
+            idempotency_key,
+            name=body.name,
+            description=body.description,
+            origin=origin,
+        )
         if made is not None:
             return made
         read = await _read_print_file(store, body.archive_id, body.archive_source)
@@ -293,6 +319,7 @@ async def create_from_mesh(
             name=body.name,
             description=body.description,
             read=read,
+            origin=origin,
             # A retry reads the file again: other bytes are named, never opened.
             changed=lambda first, made: _print_file_changed(read.name, slug, first, made),
         )

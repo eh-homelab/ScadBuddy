@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Self
+from typing import Annotated, Any, Self
 
 from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -37,6 +37,7 @@ from scadbuddy.api.mesh_models import (
     MAX_NAME_CHARS,
     create_from_read,
     made_before,
+    print_file_origin,
 )
 from scadbuddy.api.models import _slug_from_name, require_model_exists
 from scadbuddy.api.operations import (
@@ -612,7 +613,14 @@ async def import_print(
             # #6969: a resend after a lost answer links the model its first send made,
             # while it exists, and reads the source no more. A printer file is read again
             # all the same, to keep it, so other bytes there are named (`_source_changed`).
-            first = await made_before(ops, response, body.new_model.name, idempotency_key)
+            first = await made_before(
+                ops,
+                response,
+                idempotency_key,
+                name=body.new_model.name,
+                description=body.new_model.description,
+                origin=print_file_origin(archive_id, body.source),
+            )
             if first is not None and catalogue.exists(first.slug):
                 made = first.slug
         read: SourceFile | None = None
@@ -623,7 +631,13 @@ async def import_print(
             if made is None:
                 assert read is not None
                 new = await _new_model(
-                    ops, response, catalogue, idempotency_key, body.new_model, read
+                    ops,
+                    response,
+                    catalogue,
+                    idempotency_key,
+                    body.new_model,
+                    read,
+                    print_file_origin(archive_id, body.source),
                 )
                 if isinstance(new, JSONResponse):
                     return new
@@ -725,6 +739,7 @@ async def _new_model(
     idempotency_key: str | None,
     new_model: NewModel,
     read: SourceFile,
+    origin: dict[str, Any],
 ) -> str | JSONResponse:
     """Make the mesh model from the bytes read (`create_from_read`); its slug, or the 202
     while it is still being made."""
@@ -736,6 +751,7 @@ async def _new_model(
         name=new_model.name,
         description=new_model.description,
         read=read,
+        origin=origin,
         # A retry reads its source again, and a printer overwrites its files: a model the
         # first read made is no longer this file's, so it is named, never linked.
         changed=lambda first, made: _source_changed(

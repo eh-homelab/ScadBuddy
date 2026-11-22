@@ -88,12 +88,17 @@ class OperationStore:
         return await asyncio.to_thread(self._keyed, kind, subject, idempotency_key)
 
     async def keyed_operation(
-        self, kind: str, subject: str, idempotency_key: str
+        self,
+        kind: str,
+        subject: str,
+        idempotency_key: str,
+        *,
+        sent: dict[str, Any] | None = None,
     ) -> Operation | None:
         """The newest operation of ``kind`` on ``subject`` that the client sent with
         ``idempotency_key``, whatever its body (#5979: what a changed retry's first send
-        did)."""
-        return await asyncio.to_thread(self._keyed_operation, kind, subject, idempotency_key)
+        did), or with ``sent``, only one whose request contains it (#6984)."""
+        return await asyncio.to_thread(self._keyed_operation, kind, subject, idempotency_key, sent)
 
     async def named_by_running(self, names: list[str]) -> set[str]:
         """Those of ``names`` that the request of an operation still running contains
@@ -201,13 +206,18 @@ class OperationStore:
             ).fetchone()
         return row is not None
 
-    def _keyed_operation(self, kind: str, subject: str, idempotency_key: str) -> Operation | None:
+    def _keyed_operation(
+        self, kind: str, subject: str, idempotency_key: str, sent: dict[str, Any] | None
+    ) -> Operation | None:
+        # SQL NULL when unfiltered: Jsonb(None) would be the JSON null, which nothing holds.
+        contains = None if sent is None else Jsonb(sent)
         with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {_COLUMNS} FROM operations"
                 " WHERE idempotency_key = %s AND kind = %s AND subject = %s"
+                " AND (%s::jsonb IS NULL OR request @> %s::jsonb)"
                 " ORDER BY created_at DESC LIMIT 1",
-                (idempotency_key, kind, subject),
+                (idempotency_key, kind, subject, contains, contains),
             ).fetchone()
         return Operation.model_validate(row) if row else None
 

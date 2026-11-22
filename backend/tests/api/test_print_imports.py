@@ -1156,6 +1156,46 @@ def test_a_resend_gets_the_first_model_after_the_printer_file_is_gone(
     assert listing.call_count == listed
 
 
+@pytest.mark.requires_git
+@respx.mock
+def test_a_key_sent_again_for_another_printer_file_is_no_resend(
+    client: TestClient, model: str
+) -> None:
+    """#6984: the first model answers a resend only when it names the same print file. A
+    key used again for another file of the same bytes reads that file and gets the #5979
+    409, never the first file's model."""
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    files = [{"name": name, "path": f"/cache/{name}", "size": 10} for name in ("a.3mf", "b.3mf")]
+    bambuddy(printer_files={"path": "/cache", "files": files, "warnings": []})
+    downloads = {
+        name: respx.get(f"{API}/printers/1/files/download", params={"path": f"/cache/{name}"}).mock(
+            return_value=httpx.Response(200, content=painted_3mf())
+        )
+        for name in ("a.3mf", "b.3mf")
+    }
+    key = press()
+
+    def send(path: str) -> httpx.Response:
+        body = {
+            "name": "From the printer",
+            "archive_id": ARCHIVE,
+            "archive_source": {"kind": "printer", "path": path},
+        }
+        return from_mesh(client, body, **key)
+
+    first = send("/cache/a.3mf")
+    assert first.status_code == 201, first.text
+    _wait_finished(client, "from-the-printer", key["Idempotency-Key"])
+
+    other = send("/cache/b.3mf")
+
+    assert other.status_code == 409, other.text
+    assert downloads["b.3mf"].call_count == 1
+    assert downloads["a.3mf"].call_count == 1
+
+
 @respx.mock
 def test_a_print_s_sliced_file_does_not_open_as_a_mesh_model(
     client: TestClient, model: str
