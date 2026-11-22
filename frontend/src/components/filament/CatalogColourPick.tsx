@@ -39,11 +39,22 @@ export function CatalogColourPick({ onPick }: { onPick: (colour: CatalogColour) 
   // read is tried again at the next open.
   const [materials, setMaterials] = useState<Map<string, string> | null>(null)
   const asked = useRef(false)
+  // Apart from `asked`: StrictMode's second run of the read's effect starts no second read,
+  // and a read that ends after the page left sets nothing.
+  const live = useRef(true)
+  useEffect(() => {
+    live.current = true
+    return () => {
+      live.current = false
+    }
+  }, [])
   useEffect(() => {
     if (!open || asked.current) return
     asked.current = true
     listCatalog('materials', { includeArchived: true }).then(
-      (rows) => setMaterials(new Map(rows.map((row) => [row.id, row.name]))),
+      (rows) => {
+        if (live.current) setMaterials(new Map(rows.map((row) => [row.id, row.name])))
+      },
       () => {
         asked.current = false
       },
