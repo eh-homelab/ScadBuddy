@@ -96,6 +96,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: How long a publish waits for its default price run to start (#6922).
+WARM_START_TIMEOUT: Final = 5.0
+
 #: A job state that is not settled yet.
 OPEN_STATES: Final = ("pending", "running")
 
@@ -547,11 +550,13 @@ async def warm_default(state: AppState, listing: Listing) -> None:
     """After a publish (#6922): start the run that renders the published ``listing``'s
     default combination and starts its storefront slice price, unless
     `storefront_warm_prices` is off. A run that does not start is logged, never the
-    publish's failure: a visitor's read still starts the slice."""
+    publish's failure, nor is one that takes past `WARM_START_TIMEOUT`: a visitor's read
+    still starts the slice."""
     if not state.settings.storefront_warm_prices or not listing.published:
         return
     try:
-        await preparer(state).start_default(listing.id)
+        # A Temporal that does not answer never holds up the publish (review of #6970).
+        await asyncio.wait_for(preparer(state).start_default(listing.id), WARM_START_TIMEOUT)
     except Exception:
         logger.warning(
             "could not start the default price run of listing %s", listing.id, exc_info=True

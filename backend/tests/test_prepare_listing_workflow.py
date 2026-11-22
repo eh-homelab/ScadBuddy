@@ -23,9 +23,11 @@ from scadbuddy.workflows.prepare_listing import (
     SETTLED_ACTIVITY,
     SUBMIT_ACTIVITY,
     WARM_ACTIVITY,
+    WARM_TRIES,
     OpenJob,
     PrepareListing,
     PrepareListingResult,
+    PrepareListingStart,
     SubmitAsk,
     Submitted,
     Warmed,
@@ -267,5 +269,27 @@ async def test_a_publish_run_renders_and_prices_the_default_only(
         assert (await preparer.run_state(listing_id)).run_id is None
         assert renders.warmed[-2:] == [0, 1]
         assert set(renders.default_only) == {True}
+    finally:
+        await terminate_open_workflows(client, queue)
+
+
+async def test_a_run_continued_as_new_keeps_its_count_of_asks(client: Client, queue: str) -> None:
+    """Review of #6970: a run continued as new in the price phase carries how many times it
+    asked for the index (``warm_tries``), so `WARM_TRIES` bounds the index across runs: one
+    more ``waiting`` ask, and the run goes on."""
+    listing_id = uuid.uuid4().hex
+    renders = Renders(2, warms={0: ["waiting"] * 5})
+    try:
+        async with worker(client, queue, renders):
+            handle = await client.start_workflow(
+                PrepareListing.run,
+                PrepareListingStart(
+                    listing_id=listing_id, next_index=2, warm_index=0, warm_tries=WARM_TRIES - 1
+                ),
+                id=workflow_id(listing_id),
+                task_queue=queue,
+            )
+            await asyncio.wait_for(handle.result(), 60)
+        assert renders.warmed == [0, 1, 2]
     finally:
         await terminate_open_workflows(client, queue)

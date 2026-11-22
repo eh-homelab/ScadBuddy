@@ -8,6 +8,7 @@ holds: a variant with no room waits for one."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,10 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.storefront import prepare
 from tests.api.conftest import set_fake_env
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
+    LISTINGS,
     _state,
     client,
     create,
@@ -184,3 +187,57 @@ def test_a_variant_waits_for_room_under_the_slice_cap(
         conn.execute("DELETE FROM storefront_slice_prices WHERE price_key = %s", ("f" * 64,))
     firm(crud, listing, {})
     assert len(sliced.started) == 1
+
+
+def started_defaults(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Each listing a default price run was started for, with no run started."""
+    started: list[str] = []
+
+    async def start_default(_self: prepare.TemporalPreparer, listing_id: str) -> None:
+        started.append(listing_id)
+
+    monkeypatch.setattr(prepare.TemporalPreparer, "start_default", start_default)
+    return started
+
+
+def test_a_pictures_change_on_a_published_listing_warms_its_default_again(
+    client: TestClient,
+    template: dict[str, Any],
+    dense_red: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #6970: a pictures change republishes a published listing, a new version
+    whose variants have new keys, so it starts the default's run again; a draft's starts
+    none."""
+    started = started_defaults(monkeypatch)
+    draft = create(client, listing_body(template, dense_red))
+    body = {"media_ids": [template["media_id"]], "updated_at": draft["updated_at"]}
+    r = client.put(f"{LISTINGS}/{draft['id']}/media", json=body)
+    assert r.status_code == 200, r.text
+    assert started == []
+    listing = publish(client, draft["id"])
+    assert started == [listing["id"]]
+    body = {"media_ids": [template["media_id"]], "updated_at": listing["updated_at"]}
+    r = client.put(f"{LISTINGS}/{listing['id']}/media", json=body)
+    assert r.status_code == 200, r.text
+    assert started == [listing["id"], listing["id"]]
+
+
+def test_a_publish_answers_when_temporal_does_not(
+    client: TestClient,
+    template: dict[str, Any],
+    dense_red: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #6970: a start that stalls is given up after `WARM_START_TIMEOUT` and
+    logged, as a failed one is; the publish answers."""
+
+    async def stalls(_self: prepare.TemporalPreparer, _listing_id: str) -> None:
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(prepare.TemporalPreparer, "start_default", stalls)
+    monkeypatch.setattr(prepare, "WARM_START_TIMEOUT", 0.2)
+    began = time.monotonic()
+    listing = publish(client, create(client, listing_body(template, dense_red))["id"])
+    assert listing["published"] is True
+    assert time.monotonic() - began < 30
