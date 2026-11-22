@@ -16,6 +16,8 @@ from scadbuddy.entities.registry import EntityStore
 from scadbuddy.entities.sweep import sweep_orphan_entities
 from scadbuddy.orders.models import Actor
 from scadbuddy.orders.store import ATTACHMENT_HOLDER
+from scadbuddy.printers.models import PrinterCreate
+from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -161,3 +163,39 @@ def test_a_sweep_takes_at_most_its_limit(pg_pool: PgPool) -> None:
     assert _count(pg_pool, "SELECT count(*) AS n FROM entities") == 1
     assert sweep_orphan_entities(entities, attachments, limit=2) == 1
     assert _count(pg_pool, "SELECT count(*) AS n FROM entities") == 0
+
+
+@pytest.mark.parametrize("kept_has_files", [False, True])
+def test_a_printer_merge_keeps_the_gone_printers_files_and_links(
+    pg_pool: PgPool, kept_has_files: bool
+) -> None:
+    """Review of #6961: a merge deletes the gone printer's row, but its files and links
+    move to the kept printer, so the sweep finds no orphan."""
+    entities = EntityStore(pg_pool)
+    attachments = EntityAttachmentStore(pg_pool, entities)
+    links = EntityLinkStore(pg_pool, entities)
+    printers = PrinterStore(pg_pool, None)
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    gone = EntityRef("printer", synthetic.id)
+    manual = _attach(attachments, pg_pool, gone)
+    links.add(gone, LinkInput(url="https://example.com/support"), BY)
+    mine = printers.create(PrinterCreate(serial="0938AB000000006", name="Mine"))
+    kept = EntityRef("printer", mine.id)
+    if kept_has_files:
+        links.add(kept, LinkInput(url="https://example.com/mine"), BY)
+
+    assert printers.ensure_bambuddy(4, serial="0938AB000000006", name="H2C", model="H2C").id == (
+        mine.id
+    )
+
+    assert sweep_orphan_entities(entities, attachments) == 0
+    assert [a.id for a in attachments.list(kept)] == [manual]
+    assert sorted(link.url for link in links.list(kept)) == sorted(
+        ["https://example.com/support"] + (["https://example.com/mine"] if kept_has_files else [])
+    )
+    with pg_pool.connection() as conn:
+        assert entities.find(conn, gone) is None
+        row = conn.execute(
+            "SELECT subject FROM entity_attachments WHERE id = %s", (manual,)
+        ).fetchone()
+    assert row is not None and row["subject"] == f"printer:{mine.id}"

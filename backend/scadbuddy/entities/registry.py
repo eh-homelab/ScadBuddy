@@ -72,6 +72,44 @@ def _id_value(kind: EntityKind, ref: str) -> str | UUID | None:
     return value if str(value) == ref else None
 
 
+_UUID_TEXT = "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'"
+
+
+def _ref_as_id(kind: EntityKind) -> str:
+    """`e.ref` as the owner's id column takes it, so the owner's primary-key index serves
+    the sweep's check; a ref that is no uuid's text is null, which matches no row."""
+    if kind.id_cast != "uuid":
+        return "e.ref"
+    return f"CASE WHEN e.ref ~ {_UUID_TEXT} THEN e.ref::uuid END"
+
+
+def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
+    """Make `kind:kept` own what `kind:gone` owned: its files and links. For a merge that
+    deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
+    transaction; without it the sweep would take them as an orphan's."""
+    rows = conn.execute(
+        "SELECT ref, id FROM entities WHERE kind = %s AND ref = ANY(%s)", (kind, [gone, kept])
+    ).fetchall()
+    ids = {r["ref"]: r["id"] for r in rows}
+    if gone not in ids:
+        return
+    if kept not in ids:
+        conn.execute("UPDATE entities SET ref = %s WHERE id = %s", (kept, ids[gone]))
+        conn.execute(
+            "UPDATE entity_attachments SET subject = %s WHERE entity_id = %s",
+            (f"{kind}:{kept}", ids[gone]),
+        )
+        return
+    conn.execute(
+        "UPDATE entity_attachments SET entity_id = %s, subject = %s WHERE entity_id = %s",
+        (ids[kept], f"{kind}:{kept}", ids[gone]),
+    )
+    conn.execute(
+        "UPDATE entity_links SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
+    )
+    conn.execute("DELETE FROM entities WHERE id = %s", (ids[gone],))
+
+
 class EntityStore:
     def __init__(self, pool: Any) -> None:
         self.pool = pool
@@ -130,7 +168,7 @@ class EntityStore:
             rows = conn.execute(
                 "SELECT e.id, e.ref FROM entities e WHERE e.kind = %s AND NOT EXISTS"
                 f" (SELECT 1 FROM {kind.table} t"
-                f"  WHERE t.{kind.id_column}::text = e.ref){guard}"
+                f"  WHERE t.{kind.id_column} = {_ref_as_id(kind)}){guard}"
                 " ORDER BY e.created_at, e.id LIMIT %s".encode(),
                 (kind.name, limit - len(found)),
             ).fetchall()

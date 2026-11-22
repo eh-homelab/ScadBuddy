@@ -40,7 +40,7 @@ export const AttachmentsPanel = memo(function AttachmentsPanel({ entity, title =
   const items = list.data ?? []
   const ofOrder = ORDER_KINDS.has(kind)
   const ofPrint = kind === PRINT_ARCHIVE
-  const readOnly = ofOrder || ofPrint || (items.length > 0 && items.every((a) => a.source === 'bambuddy'))
+  const readOnly = ofOrder || ofPrint
   const limit = useUploadLimit()
   const [role, setRole] = useState<string>('photo')
   const [caption, setCaption] = useState('')

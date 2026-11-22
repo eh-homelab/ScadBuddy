@@ -48,6 +48,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
+from scadbuddy.entities.registry import repoint_entity
 from scadbuddy.printers.models import (
     BambuddyView,
     LanLink,
@@ -332,7 +333,13 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
 
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
 #: later table keyed by ``printers.id``.
+def _repoint_entity(conn: Connection[DictRow], gone: str, into: str) -> None:
+    repoint_entity(conn, "printer", gone, into)
+
+
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
+    # #6950: the printer's files and links (`entities`), or the sweep would take them.
+    _repoint_entity,
     PrinterReference("printer_reports", "printer_id", unique=True),
     # #5774: ScadBuddy's hour counter; the kept printer's row stays, the gone one's
     # moves only when the kept printer has none.
