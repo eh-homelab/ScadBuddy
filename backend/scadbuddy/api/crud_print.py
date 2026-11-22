@@ -1978,11 +1978,13 @@ async def filament_sync_results(body: ResultsRequest, sync: SyncDep) -> ResultsR
     status_code=status.HTTP_204_NO_CONTENT,
     description=(
         "Writes the sync's state row (#6265): the pass's time and counts, its error, and"
-        " the time of the last clean pass only when `error` is null."
+        " the time of the last clean pass only when `error` is null; and the pass's history"
+        " row (#6905), the history row only for an `instance_changed` pass."
     ),
 )
 async def filament_sync_pass(body: SyncPassResult, sync: SyncDep) -> None:
-    """Natural: the row is set, not added to."""
+    """Natural: the state row is set, and the history row is keyed by ``pass_id``, so a
+    second send of one pass adds nothing."""
     await sync.record_pass(body)
 
 

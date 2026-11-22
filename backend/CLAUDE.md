@@ -893,7 +893,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
   true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered. `expect_kept: false` deletes
-  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward). A new
+  without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
+  Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
+  `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a
+  resent record adds none (an `instance_changed` pass gets the history row only); `run_pass`
+  records a pass whose step raised (a CRUD `plan` or `results` timeout, the settings read) with
+  `failure_label` (`crud_unavailable:<failure>`, `crud_refused:<status>`, `internal`) and the
+  counts its rounds reached, and raises it again, so the activity's retries are unchanged; the workflow sends the pass's `trigger`
+  (`timer`, `change`, `full`, `more`) in the activity's input only, so its commands are
+  unchanged. `GET /filament/sync/passes` pages them newest first by cursor (agent
+  `filament_sync_passes`), and the housekeeping's activity sweep deletes rows older than the
+  stored setting `filament_sync_pass_ttl_days` (30 by default), at most `PRUNE_BATCH` a run
+  (`SyncPassStore.prune`). A new
   workflow type: roll `scadbuddy-print` with `Recreate` (README, "A release that needs
   `Recreate`").
   History and metrics (#6269, spec §5.7; plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`,

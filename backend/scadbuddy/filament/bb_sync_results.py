@@ -37,7 +37,7 @@ from pydantic import ValidationError
 from scadbuddy.bambuddy.models import BbLocation, BbSupplier, CatalogFilament, SpoolCatalogEntry
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync
-from scadbuddy.filament import ledger
+from scadbuddy.filament import bb_sync_passes, ledger
 from scadbuddy.filament.bambuddy_pull import REF_KIND, record_instance, snapshot
 from scadbuddy.filament.bb_sync_models import (
     BbSnapshot,
@@ -493,7 +493,10 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
     """Write the state row for one pass (Decision 19): ``last_pass_at``,
     ``last_pass_started_at`` (the pass's own start, #6836) and the counts always,
     ``last_error`` from ``result.error``, and ``last_ok_at`` only when it is ``None``, so a
-    failed pass keeps the last clean one's time."""
+    failed pass keeps the last clean one's time. #6905: and the pass's history row
+    (`bb_sync_passes.insert_on`) in the same transaction; a pass that found the links or
+    its instance another Bambuddy's (``instance_changed``) gets the history row only, so
+    the state stays the configured instance's."""
     counts = {
         "written": result.written,
         "failed": result.failed,
@@ -502,6 +505,9 @@ def record_pass(store: Filament, result: SyncPassResult) -> None:
         "unmapped_k": result.unmapped_k,
     }
     with store.spools.transaction() as conn:
+        bb_sync_passes.insert_on(conn, result)
+        if result.instance_changed:
+            return
         conn.execute(
             "UPDATE filament_bb_sync_state SET last_pass_at = now(),"
             " last_pass_started_at = COALESCE(%s, now()),"

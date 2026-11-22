@@ -1060,6 +1060,19 @@ async def _sweep_activity_logged(state: AppState) -> None:
     else:
         if pruned:
             logger.info("pruned sensor notifications", extra={"count": pruned})
+    # #6905: the filament sync's old pass rows, at most `PRUNE_BATCH` a run, by the setting
+    # read above (a failed load prunes nothing), in this activity for the same reason.
+    try:
+        pruned = await asyncio.to_thread(
+            state.components.get(FILAMENT).sync_passes.prune,
+            settings.filament_sync_pass_ttl_days,
+        )
+    except Exception:
+        logger.exception("could not prune the filament sync passes")
+        failed = True
+    else:
+        if pruned:
+            logger.info("pruned filament sync passes", extra={"count": pruned})
     if failed:
         raise RuntimeError("the activity sweep failed")
 

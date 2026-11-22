@@ -1507,9 +1507,11 @@ class RemoteFilamentSync:
 
     async def record_pass(self, result: SyncPassResult) -> None:
         body = result.model_dump(mode="json")
-        if result.started_at is None:
-            # The API's model forbids extra keys: one from before #6836 refuses the key.
-            del body["started_at"]
+        for key in ("started_at", "pass_id", "instance", "trigger"):
+            if body[key] is None:
+                # The API's model forbids extra keys: one from before #6836 (``started_at``)
+                # or #6905 (the others) refuses the key.
+                del body[key]
         await self._client.request("POST", f"{BASE}/filament/sync/pass", json=body)
 
 

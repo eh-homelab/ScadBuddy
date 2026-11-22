@@ -185,7 +185,8 @@ async def test_another_instance_calls_nothing() -> None:
 
     assert result.instance_changed is True
     assert not respx.calls
-    assert sync.plans == [] and sync.recorded == []
+    # #6905: a history row only; `record_pass` leaves the state row alone for it.
+    assert sync.plans == [] and sync.recorded == [result]
 
 
 @respx.mock
@@ -887,8 +888,9 @@ async def test_a_plan_for_another_instance_stops_the_pass() -> None:
     result = await _run(sync)
 
     assert result.instance_changed is True and len(sync.plans) == 1
-    # R-T7-7: SB's links belong to another Bambuddy; the pass records nothing.
-    assert sync.recorded == []
+    # R-T7-7: SB's links belong to another Bambuddy; the pass records its history row only
+    # (#6905: `record_pass` writes no state row for an `instance_changed` pass).
+    assert sync.recorded == [result]
 
 
 @respx.mock

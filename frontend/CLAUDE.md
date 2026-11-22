@@ -294,7 +294,11 @@ same way, `vite.config.ts`).
   (`getSyncStatus`, `GET /filament/sync/status`: the last pass, why none runs, and each
   item whose last write failed or was held back, with `syncErrorText`); and "Sync now"
   (`runSync`, `POST /filament/sync/run`), after which the status is read again until a
-  pass has started at or after the run's `requested_at` (R-T11-2, #6836). While the status says
+  pass has started at or after the run's `requested_at` (R-T11-2, #6836). Under the status,
+  "Recent passes" (#6905, `SyncPassesRow`, `listSyncPasses`, `GET /filament/sync/passes`) lists
+  the passes newest first, 10 a page with "Show older passes", read again when the status's last
+  pass moves, and "Keep sync history for (days)" is the stored `filament_sync_pass_ttl_days`
+  (empty is 30). While the status says
   `instance_changed` it offers "Reset Bambuddy links" (#6773, `ResetLinks`: a dry run's
   counts in a confirm dialog, then `resetSyncLinks` with the dry run's `instance`; the mock's
   `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the

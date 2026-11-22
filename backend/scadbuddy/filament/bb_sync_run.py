@@ -14,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 from temporalio import activity
@@ -23,6 +25,7 @@ from temporalio import activity
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import SpoolCatalogEntry
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.filament.bambuddy_pull import parse_rows
 from scadbuddy.filament.bb_sync_models import (
     DEFAULT_INTERVAL_S,
@@ -31,6 +34,7 @@ from scadbuddy.filament.bb_sync_models import (
     BbWrite,
     BbWriteResult,
     FilamentSyncApi,
+    PassTrigger,
     SyncPassInput,
     SyncPassResult,
     pushes_anything,
@@ -54,15 +58,24 @@ async def run_pass(
     heartbeat: Callable[[], None],
     max_rounds: int = 4,
     interval_s: float = DEFAULT_INTERVAL_S,
+    trigger: PassTrigger | None = None,
 ) -> SyncPassResult:
     """One pass, as the module says. With no Bambuddy URL it is ``skipped``, and so is a
     pass with no data type that pushes (``nothing_pushes``, R-T8-2: no Bambuddy read). When the URL
-    is another instance's, it calls nothing, records nothing and answers
-    ``instance_changed``: the workflow of the configured instance records its own passes.
-    So does a pass whose plan answers ``instance_changed`` (SB's links belong to another
-    Bambuddy, R-T7-7). Else it records the pass (`FilamentSyncApi.record_pass`) whether
-    it worked or not; a spool listing it could not read, or that is not JSON, is a failed
-    pass (R-T7-8).
+    is another instance's, it calls nothing and answers ``instance_changed``; so does a
+    pass whose plan answers ``instance_changed`` (SB's links belong to another Bambuddy,
+    R-T7-7). Either is recorded as a history row only (#6905): the workflow of the
+    configured instance records its own passes in the state row. Else it records the
+    pass (`FilamentSyncApi.record_pass`) whether it worked or not; a spool listing it
+    could not read, or that is not JSON, is a failed pass (R-T7-8).
+
+    #6905: a step that raises once the pass has started (a CRUD call of ``plan`` or
+    ``results`` that timed out, the settings read) is recorded too, with its
+    `failure_label` as ``error``, and then raised again, so the activity's retries and the
+    workflow go on as before. When that record fails as well (the API is down), it is
+    logged and the first error is raised. The failed record carries the counts the rounds
+    reached before the step raised (`_Counts`), so writes Bambuddy already took are not
+    under-reported.
 
     ``written`` counts the writes Bambuddy answered ok (a probe writes nothing),
     ``failed`` the writes it refused (a probe's 404 is an answer: the row is gone). The
@@ -70,8 +83,6 @@ async def run_pass(
     ``conflicts`` and ``unmapped_k`` the largest of the rounds', since every round plans
     from the one snapshot (R-T4-33). ``interval_s`` is the plans' (the stored setting),
     else the given one."""
-    started_at = datetime.now(UTC)
-    settings = await load()
     empty = SyncPassResult(
         written=0,
         failed=0,
@@ -79,30 +90,89 @@ async def run_pass(
         more=False,
         instance_changed=False,
         interval_s=interval_s,
-        started_at=started_at,
+        started_at=datetime.now(UTC),
+        pass_id=uuid4(),
+        instance=instance,
+        trigger=trigger,
     )
+    counts = _Counts()
+    try:
+        result = await _pass(api, load, instance, full, heartbeat, max_rounds, empty, counts)
+    except Exception as exc:
+        failed = empty.model_copy(
+            update={
+                "error": failure_label(exc),
+                "written": counts.written,
+                "failed": counts.failed,
+                "deferred": counts.deferred,
+                "conflicts": counts.conflicts,
+                "unmapped_k": counts.unmapped_k,
+            }
+        )
+        try:
+            await api.record_pass(failed)
+        except Exception as record_exc:
+            logger.warning(
+                "could not record a failed sync pass",
+                extra={"error": failed.error, "record_error": failure_label(record_exc)},
+            )
+        raise
+    await api.record_pass(result)
+    return result
+
+
+async def _pass(
+    api: FilamentSyncApi,
+    load: Callable[[], Awaitable[StoredSettings]],
+    instance: str,
+    full: bool,
+    heartbeat: Callable[[], None],
+    max_rounds: int,
+    empty: SyncPassResult,
+    counts: _Counts,
+) -> SyncPassResult:
+    """The pass `run_pass` records."""
+    settings = await load()
     if not settings.bambuddy_url:
-        result = empty.model_copy(update={"skipped": "no_bambuddy"})
-        await api.record_pass(result)
-        return result
+        return empty.model_copy(update={"skipped": "no_bambuddy"})
     if instance_for(settings.bambuddy_url) != instance:
         return empty.model_copy(update={"instance_changed": True})
     if not pushes_anything(await api.directions()):
         # R-T8-2: no Bambuddy read when nothing pushes; the workflow ends on it.
-        result = empty.model_copy(update={"skipped": "nothing_pushes"})
-        await api.record_pass(result)
-        return result
+        return empty.model_copy(update={"skipped": "nothing_pushes"})
     async with client_for(settings) as client:
         try:
             snap = await _read(client, instance, full, heartbeat)
         except ApiError as exc:
-            result = empty.model_copy(update={"error": error_label(exc)})
-            await api.record_pass(result)
-            return result
-        result = await _rounds(api, client, snap, heartbeat, max_rounds, empty)
-    if not result.instance_changed:
-        await api.record_pass(result)
-    return result
+            return empty.model_copy(update={"error": error_label(exc)})
+        return await _rounds(api, client, snap, heartbeat, max_rounds, empty, counts)
+
+
+@dataclass
+class _Counts:
+    """What a pass's rounds have counted so far (#6905), which `run_pass` records when a
+    later step raises."""
+
+    written: int = 0
+    failed: int = 0
+    deferred: int = 0
+    conflicts: int = 0
+    unmapped_k: int = 0
+
+
+def failure_label(exc: BaseException) -> str:
+    """What a pass that raised records as its error (#6905): a Bambuddy problem's
+    `error_label`; ``crud_refused:<status>`` when the API refused a CRUD call;
+    ``crud_unavailable:<failure>`` when it did not answer (``transport`` is a read
+    timeout or a lost answer, `crud.client.Failure`); ``internal`` for anything else.
+    Never the message."""
+    if isinstance(exc, ApiError):
+        return error_label(exc)
+    if isinstance(exc, CrudRefusedError):
+        return f"crud_refused:{exc.status}"
+    if isinstance(exc, CrudUnavailableError):
+        return f"crud_unavailable:{exc.failure}"
+    return "internal"
 
 
 async def _read(
@@ -151,8 +221,9 @@ async def _rounds(
     heartbeat: Callable[[], None],
     max_rounds: int,
     empty: SyncPassResult,
+    counts: _Counts,
 ) -> SyncPassResult:
-    calls = written = failed = conflicts = unmapped_k = deferred = 0
+    calls = 0
     interval_s = empty.interval_s
     instance_changed = False
     for _ in range(max_rounds):
@@ -161,9 +232,9 @@ async def _rounds(
         plan = await api.plan(snap, WRITE_CAP - calls)
         heartbeat()
         interval_s = plan.interval_s
-        deferred = plan.deferred
-        conflicts = max(conflicts, plan.conflicts)
-        unmapped_k = max(unmapped_k, plan.unmapped_k)
+        counts.deferred = plan.deferred
+        counts.conflicts = max(counts.conflicts, plan.conflicts)
+        counts.unmapped_k = max(counts.unmapped_k, plan.unmapped_k)
         if plan.instance_changed:
             instance_changed = True
             break
@@ -175,23 +246,26 @@ async def _rounds(
             results.append(result)
             if result.ok:
                 if write.op != "probe":
-                    written += 1
+                    counts.written += 1
             elif not (write.op == "probe" and result.status == 404):
-                failed += 1
+                counts.failed += 1
             heartbeat()
         calls += len(plan.writes)
         await api.results(snap.instance, plan.writes, results, plan.pass_id, plan.unconfirmed)
         heartbeat()
     return SyncPassResult(
-        written=written,
-        failed=failed,
-        deferred=deferred,
-        more=deferred > 0,
-        conflicts=conflicts,
-        unmapped_k=unmapped_k,
+        written=counts.written,
+        failed=counts.failed,
+        deferred=counts.deferred,
+        more=counts.deferred > 0,
+        conflicts=counts.conflicts,
+        unmapped_k=counts.unmapped_k,
         instance_changed=instance_changed,
         interval_s=interval_s,
         started_at=empty.started_at,
+        pass_id=empty.pass_id,
+        instance=empty.instance,
+        trigger=empty.trigger,
     )
 
 
@@ -376,6 +450,7 @@ class FilamentSyncActivities:
             full=start.full,
             heartbeat=heartbeat,
             interval_s=start.interval_s,
+            trigger=start.trigger,
         )
 
 
